@@ -274,6 +274,29 @@ class LockedTurns:
 
         return queue
 
+    def requester_remains_authorized(
+        self,
+        requester_id: str,
+        room_id: str,
+        *,
+        reply_entity_names: Sequence[str] = (),
+    ) -> bool:
+        """Recheck one requester under the conversation lock with resolved membership."""
+        entity_names = reply_authorization_entity_names(
+            self.deps.runtime.config,
+            self.deps.agent_name,
+            reply_entity_names,
+        )
+        return is_sender_allowed_for_entity_replies_in_room(
+            requester_id,
+            entity_names,
+            self.deps.runtime.config,
+            room_id,
+            self.deps.runtime_paths,
+            self.deps.runtime.agent_reply_memberships,
+            require_resolved_membership=True,
+        )
+
     async def request_remains_authorized(
         self,
         request: ResponseRequest,
@@ -282,21 +305,13 @@ class LockedTurns:
     ) -> bool:
         """Recheck one requester after serialized lifecycle admission."""
         requester_id = request.response_envelope.requester_id
+        if self.requester_remains_authorized(requester_id, request.room_id, reply_entity_names=reply_entity_names):
+            return True
         entity_names = reply_authorization_entity_names(
             self.deps.runtime.config,
             self.deps.agent_name,
             reply_entity_names,
         )
-        if is_sender_allowed_for_entity_replies_in_room(
-            requester_id,
-            entity_names,
-            self.deps.runtime.config,
-            request.room_id,
-            self.deps.runtime_paths,
-            self.deps.runtime.agent_reply_memberships,
-            require_resolved_membership=True,
-        ):
-            return True
         self.deps.logger.info(
             "response_suppressed_after_authorization_revocation",
             source_event_id=request.response_envelope.source_event_id,
