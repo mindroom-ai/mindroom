@@ -73,13 +73,18 @@ async def _settled(stack: WorkflowStack, *keys: str) -> None:
     await stack.until(lambda: all(stack.store.get_node(stack.run_id, key).state in done for key in keys))
 
 
-async def _over_the_limit(stack: WorkflowStack) -> asyncio.Event:
-    """Start four agents of a run with a limit of 1 USD: one spends 1.20, one still runs, two wait for a place."""
+async def _over_the_limit(stack: WorkflowStack, later: asyncio.Event | None = None) -> asyncio.Event:
+    """Start four agents of a run with a limit of 1 USD: one spends 1.20, one still runs, two wait for a place.
+
+    The two that wait spend nothing before *later* is set, when it is given.
+    """
     await stack.start(**_LIMIT)
     gate = asyncio.Event()
-    model = stack.child_script(_turn(1.2), [Await(gate.wait), *_turn()], _turn(), _turn())
+    held = [] if later is None else [Await(later.wait)]
+    model = stack.child_script(_turn(1.2), [Await(gate.wait), *_turn()], [*held, *_turn()], [*held, *_turn()])
     assert [await _agent(stack, index) for index in range(4)] == ["running", "running", "queued", "queued"]
-    await stack.until(lambda: "$budget:1" in _states(stack))
+    # The second agent asks its model when its job comes to it, which no call waits for.
+    await stack.until(lambda: "$budget:1" in _states(stack) and len(model.requests) >= 2)
     assert len(model.requests) == 2
     return gate
 
@@ -141,11 +146,15 @@ async def test_call_whose_start_was_under_way_when_the_limit_was_reached_waits_a
 @pytest.mark.asyncio
 async def test_continue_adds_the_limit_and_releases_queued_nodes(stack: WorkflowStack) -> None:
     """Continue gives the run its limit once more: the held calls start, and the next limit asks again."""
-    gate = await _over_the_limit(stack)
+    both = asyncio.Event()
+    gate = await _over_the_limit(stack, both)
     gate.set()
     await _settled(stack, "@1")
 
     assert await _answer(stack, "$budget:1", _CONTINUE)
+    # Both held calls run before either has spent anything: one that started after the other's 0.60 would be held.
+    await stack.until(lambda: len(stack.models["watcher"].requests) == 4)
+    both.set()
     await _settled(stack, "@2", "@3")
     # 1.80 before, and two more turns of 0.60: over the 2.00 the run has now.
     await stack.until(lambda: _questions(stack)[-1]["text"].endswith("of its $2.00 limit. Continue?"))
