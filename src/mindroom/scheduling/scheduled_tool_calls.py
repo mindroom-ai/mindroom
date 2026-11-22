@@ -104,14 +104,14 @@ def bind_live_tools(
     """Return ``middleware`` behind a first step that shows each call the run's functions, for scheduled calls.
 
     ``functions`` are the ones the run offers, by name; a generated function names no toolkit, so no stored call can
-    name it. A stored call runs under ``middleware`` alone, inside the call that runs it, which this step already
-    shows the same functions. A run that offers no scheduler function reading them gets ``middleware`` as it is.
+    name it. A stored call runs under ``middleware`` alone: it runs inside ``run_scheduled_call``'s own call, which
+    this step already bound. A run that offers no scheduler function reading them gets ``middleware`` as it is.
     """
-    if _LIVE_FUNCTION_READERS.isdisjoint(functions):
-        return tuple(middleware)
-    # A step holding the policy that holds it would be a reference cycle, which only a full garbage collection frees,
-    # together with all of the run's functions.
     rest = tuple(middleware)
+    if _LIVE_FUNCTION_READERS.isdisjoint(functions):
+        return rest
+    # The step binds the policy without itself: holding the policy that holds it would be a reference cycle, which
+    # keeps all of the run's functions until the cyclic garbage collector runs.
 
     async def bind_live_functions(call: ToolCall, call_next: ToolNext) -> object:
         token = _LIVE_TOOLS.set(_LiveTools(functions=functions, middleware=rest, context=call.context))

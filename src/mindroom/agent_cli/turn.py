@@ -175,8 +175,8 @@ class LiveTurnTools(TurnToolBridge):
         self.checkpoint = BatchCheckpoint(catalog)
         # Set once the response's grant exists, before any Bash call.
         self.shell_env: AgentCliShellEnv | None = None
-        # Called with this owner, so it need not hold one: an owner reachable from its own callback is a reference
-        # cycle, which only a full garbage collection frees, together with the turn's whole tool catalog.
+        # Called with this owner, so it holds no reference back to it: that would be a reference cycle, which keeps
+        # the turn's whole tool catalog until the cyclic garbage collector runs.
         self._authorize = authorize
         self._context = dict(context)
         self._output_file_policy = output_file_policy

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import gc
 import weakref
 from dataclasses import replace
 from types import SimpleNamespace
@@ -34,7 +33,13 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from tests.authorization_helpers import make_test_tool_runtime_context
-from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup, runtime_paths_for
+from tests.conftest import (
+    bind_runtime_paths,
+    gc_paused,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+    runtime_paths_for,
+)
 from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
     agent_cli_api,
     settled_receipt,
@@ -44,6 +49,8 @@ from tests.runtime_fakes import ready_runtime
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.agent_cli.lifetime import CliTurnLifetime
+    from mindroom.agent_cli.turn import LiveTurnTools
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
@@ -99,6 +106,36 @@ def _turn_context() -> ResponseTurnContext:
     )
 
 
+def _catalog(runtime: ToolRuntimeContext) -> PreparedAgentToolCatalog:
+    session = ConversationSession(session_id="session-1", kind="agent", owner_id="helper")
+    return PreparedAgentToolCatalog(
+        run=RunContext(run_id="generation-1", user_id=runtime.requester_id, session=session),
+        runtime_context=runtime,
+        store=None,
+        middleware=(),
+        max_tool_calls_per_turn=None,
+    )
+
+
+def _bound_owner(
+    catalog: PreparedAgentToolCatalog,
+    lifetime: CliTurnLifetime,
+    tmp_path: Path,
+    *,
+    reload_ends_run: bool = False,
+) -> LiveTurnTools:
+    return bind_response_owner(
+        catalog,
+        lifetime=lifetime,
+        response_context=_turn_context(),
+        context_documents={},
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
+        delegation_depth=0,
+        refresh_scheduler=None,
+        reload_ends_run=reload_ends_run,
+    )
+
+
 def test_owner_factory_binds_exact_runtime_and_turn_identity(tmp_path: Path) -> None:
     owner = cli_turn_owner(_runtime_context(tmp_path), _turn_context())
 
@@ -117,7 +154,7 @@ async def test_a_reload_that_changed_the_agents_tools_refuses_a_cli_call_before_
 ) -> None:
     """A catalog a reload invalidated builds no toolkit for a CLI call; the call fails as unavailable.
 
-    Only a minimal turn's refusal also stops its run.
+    Only a minimal turn's refusal also reports the control call that stops its run.
     """
     runtime = _runtime_context(tmp_path)
     current = runtime.config.model_copy(deep=True)
@@ -127,26 +164,10 @@ async def test_a_reload_that_changed_the_agents_tools_refuses_a_cli_call_before_
         orchestrator=ready_runtime(runtime.config, runtime.runtime_paths),
         config_provider=lambda: current,
     )
-    session = ConversationSession(session_id="session-1", kind="agent", owner_id="helper")
-    catalog = PreparedAgentToolCatalog(
-        run=RunContext(run_id="generation-1", user_id=runtime.requester_id, session=session),
-        runtime_context=runtime,
-        store=None,
-        middleware=(),
-        max_tool_calls_per_turn=None,
-    )
+    catalog = _catalog(runtime)
     catalog.bind = AsyncMock()
     async with response_cli_lifetime() as lifetime:
-        owner = bind_response_owner(
-            catalog,
-            lifetime=lifetime,
-            response_context=_turn_context(),
-            context_documents={},
-            output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
-            delegation_depth=0,
-            refresh_scheduler=None,
-            reload_ends_run=reload_ends_run,
-        )
+        owner = _bound_owner(catalog, lifetime, tmp_path, reload_ends_run=reload_ends_run)
         async with owner._window("bash"):
             receipt = await owner.operation(
                 window="bash",
@@ -161,8 +182,8 @@ async def test_a_reload_that_changed_the_agents_tools_refuses_a_cli_call_before_
 
     assert receipt["status"] == "failed"
     assert "This MindRoom call did not run: the configuration was reloaded" in receipt["outcome"]
-    # A standard turn's own tools still run: the refusal neither stops its run nor says the turn stopped.
-    assert reload_ends_run or "turn stopped" not in receipt["outcome"]
+    # No receipt says the turn stopped; only a minimal turn's refusal stops its run.
+    assert "turn stopped" not in receipt["outcome"]
     assert [call.tool_name for call in owner.control_calls] == ([CONFIG_RELOAD_CALL] if reload_ends_run else [])
     catalog.bind.assert_not_awaited()
 
@@ -172,33 +193,13 @@ async def test_a_reload_that_changed_the_agents_tools_refuses_a_cli_call_before_
 async def test_a_closed_response_owner_is_freed_without_a_garbage_collection(tmp_path: Path) -> None:
     """The owner's authorization holds no reference cycle, so once its response ends the owner and its catalog go."""
     runtime = _runtime_context(tmp_path)
-    runtime = replace(runtime, orchestrator=ready_runtime(runtime.config, runtime.runtime_paths))
-    session = ConversationSession(session_id="session-1", kind="agent", owner_id="helper")
-    catalog = PreparedAgentToolCatalog(
-        run=RunContext(run_id="generation-1", user_id=runtime.requester_id, session=session),
-        runtime_context=runtime,
-        store=None,
-        middleware=(),
-        max_tool_calls_per_turn=None,
-    )
+    catalog = _catalog(replace(runtime, orchestrator=ready_runtime(runtime.config, runtime.runtime_paths)))
     async with response_cli_lifetime() as lifetime:
-        owner = bind_response_owner(
-            catalog,
-            lifetime=lifetime,
-            response_context=_turn_context(),
-            context_documents={},
-            output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
-            delegation_depth=0,
-            refresh_scheduler=None,
-            reload_ends_run=False,
-        )
-    released = weakref.ref(owner)
-    gc.disable()
-    try:
-        del owner
-        assert released() is None
-    finally:
-        gc.enable()
+        owner = _bound_owner(catalog, lifetime, tmp_path)
+    released = [weakref.ref(owner), weakref.ref(catalog)]
+    with gc_paused():
+        del owner, catalog
+        assert [reference() for reference in released] == [None, None]
 
 
 @pytest.mark.parametrize(

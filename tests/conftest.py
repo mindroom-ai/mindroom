@@ -541,6 +541,7 @@ __all__ = [
     "delivered_matrix_side_effect",
     "drain_coalescing",
     "enforce_turn_authorization",
+    "gc_paused",
     "handle_card_response_for_test",
     "initialize_approval_store_for_test",
     "install_edit_message_mock",
@@ -664,6 +665,18 @@ def bound_worker_launch_config(config: Config) -> Iterator[None]:
         yield
 
 
+@contextmanager
+def gc_paused() -> Iterator[None]:
+    """Pause automatic garbage collection, so only refcounting frees what the body drops; restore it afterwards."""
+    collecting = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if collecting:
+            gc.enable()
+
+
 def live_turn_tools_for_test(
     owner: "CliTurnOwner",
     *,
@@ -673,8 +686,7 @@ def live_turn_tools_for_test(
 ) -> LiveTurnTools:
     """Build one CLI turn's live tools with the options a test names, which include its output-file policy.
 
-    The others take a top-level turn's values: no context documents or knowledge refresh. ``authorize`` is not handed
-    the live tools that call it.
+    The others take a top-level turn's values: no context documents or knowledge refresh.
     """
     turn_options: dict[str, Any] = {
         "context": {},

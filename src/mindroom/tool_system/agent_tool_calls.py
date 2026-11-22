@@ -319,10 +319,10 @@ class PreparedAgentToolCatalog:
         """Refuse new work, wait for the operation that currently holds the catalog, then close what it connected."""
         self._closed = True
         async with self._lock:
-            await close_toolkits(self._closes)
-            # Each binding refers back to the catalog, so a closed catalog lets go of them: refcounting then frees
-            # the turn's functions as soon as it is dropped, instead of the next full garbage collection.
+            # Each binding refers back to the catalog, so a closed catalog lets go of them, before a toolkit's close can
+            # fail: refcounting then frees the turn's functions once the catalog is dropped.
             self._bindings.clear()
+            await close_toolkits(self._closes)
 
 
 def _failure(

@@ -82,10 +82,9 @@ def bind_response_owner(
     """
     runtime = catalog.runtime_context
     assert runtime.orchestrator is not None
-    owner = lifetime.owner
-    if owner is not None:
-        owner.bind_catalog(catalog, context=context_documents)
-        return owner
+    if (existing := lifetime.owner) is not None:
+        existing.bind_catalog(catalog, context=context_documents)
+        return existing
     # Check that Bash can reach MindRoom before any grant exists.
     if problems := minimal_shell_problems(runtime.config, runtime.runtime_paths, runtime.agent_name):
         raise RuntimeError(" ".join(problems))
