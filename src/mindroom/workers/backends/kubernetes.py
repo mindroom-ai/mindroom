@@ -101,6 +101,8 @@ _ORPHANED_STATE_GRACE_SECONDS = 300.0
 _STATE_IDENTITY_PATH = (".runtime", "startup_manifest.json")
 _STATE_IDENTITY_FIELD_PATH = ("runtime_paths", "process_env", SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"])
 _PULL_POLICY_DOCS_URL = "https://docs.mindroom.chat/deployment/kubernetes/#worker-settings"
+_SETUP_POLL_INTERVAL_SECONDS = 1.0
+_SETUP_HEALTH_TIMEOUT_SECONDS = 5.0
 _CACHED_IMAGE_HINT = (
     "A replacement pod reported the same protocol, so with a mutable tag such as ':latest' its node may still "
     f"hold an older copy: use this release's tag or set the worker image pull policy to Always ({_PULL_POLICY_DOCS_URL})."
@@ -409,6 +411,7 @@ class KubernetesWorkerBackend:
             raise WorkerBackendError(failure_reason) from exc
 
         if reporter is not None:
+            self._wait_for_worker_setup(worker_id, reporter)
             reporter.finish(None)
         final_deployment_annotations = {
             **dict(deployment.metadata.annotations or {}),
@@ -433,6 +436,27 @@ class KubernetesWorkerBackend:
             ),
         )
         return handle
+
+    def _wait_for_worker_setup(self, worker_id: str, reporter: WorkerStartReporter) -> None:
+        """Wait while a worker that just started reports it is still preparing itself, reporting that as progress.
+
+        The worker is ready already and prepares on its first call whatever is still missing, so the call goes on when
+        the setup ends, fails, outlasts ``setup_timeout_seconds``, or the worker reports no setup at all.
+        """
+        reporter.preparing()
+        deadline = time.monotonic() + self.config.setup_timeout_seconds
+        while True:
+            try:
+                health = self._resources.read_worker_health(worker_id, timeout_seconds=_SETUP_HEALTH_TIMEOUT_SECONDS)
+                payload = health.json()
+            except (WorkerBackendError, ValueError):
+                payload = None
+            setup = payload.get("setup") if isinstance(payload, dict) else None
+            if setup != "preparing" or time.monotonic() >= deadline:
+                break
+            time.sleep(_SETUP_POLL_INTERVAL_SECONDS)
+        if setup not in {None, "ready"}:
+            logger.warning("Worker %s did not finish its setup (%s); its first call prepares it", worker_id, setup)
 
     def _ready_worker_needs_replacement(self, worker_id: str, *, is_replacement: bool) -> bool:
         """Return whether the ready worker speaks another protocol, refusing a replacement that still does."""
@@ -576,7 +600,7 @@ class KubernetesWorkerBackend:
             self._resources.write_startup_manifest(
                 worker_key=worker_key,
                 state_subpath=state_subpath,
-                tool_validation_snapshot=launch.tool_validation_snapshot,
+                launch=launch,
             )
 
     def _require_retirement_deployment(self, worker_id: str, worker_key: str, state_subpath: str) -> None:

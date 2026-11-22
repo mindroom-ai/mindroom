@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from mindroom.workers.backend import WorkerBackend
 
 WorkerStatus = Literal["starting", "ready", "idle", "failed"]
-WorkerReadyPhase = Literal["cold_start", "waiting", "ready", "failed"]
+WorkerReadyPhase = Literal["cold_start", "waiting", "preparing", "ready", "failed"]
 ScriptResourceProfileName = Literal["small", "standard", "large"]
 SCRIPT_RESOURCE_PROFILE_NAMES: frozenset[ScriptResourceProfileName] = frozenset(get_args(ScriptResourceProfileName))
 

@@ -608,6 +608,8 @@ def _format_worker_progress(progress: WorkerReadyProgress, *, worker_name: str |
         return f"starting {target}..."
     if progress.phase == "waiting":
         return f"starting {target}... ({max(1, int(progress.elapsed_seconds))}s)"
+    if progress.phase == "preparing":
+        return f"{target}: preparing ({max(1, int(progress.elapsed_seconds))}s)"
     if progress.phase == "ready":
         return f"{target} ready ({max(1, int(progress.elapsed_seconds))}s)"
     return None

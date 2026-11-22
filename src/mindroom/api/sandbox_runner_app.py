@@ -21,13 +21,12 @@ from mindroom.api.sandbox_runner import (
     app_runtime_paths,
     initialize_sandbox_runner_app,
     load_config_from_startup_runtime,
-    prepare_dedicated_worker_before_serving,
+    start_eager_worker_setup,
     startup_runner_token_from_env,
     validate_runner_token,
 )
 from mindroom.api.sandbox_runner import router as sandbox_runner_router
 from mindroom.api.sandbox_runner_scripts import (
-    is_script_worker_key,
     prepare_script_worker_before_serving,
 )
 from mindroom.api.sandbox_runner_scripts import router as sandbox_runner_scripts_router
@@ -83,12 +82,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         WorkerBrowserRuntime() if computer is None and dedicated_scope in {"shared", "user", "user_agent"} else None
     )
     app.state.worker_browser = browser
+    eager_setup = start_eager_worker_setup(app)
     try:
         await prepare_script_worker_before_serving(app)
-        if dedicated_key is not None and not is_script_worker_key(dedicated_key):
-            await prepare_dedicated_worker_before_serving(app)
         yield
     finally:
+        if eager_setup is not None:
+            eager_setup.cancel()
         await close_worker_terminals(app)
         await close_worker_services(app)
         if computer is not None:
@@ -130,13 +130,15 @@ app.include_router(worker_services_router)
 
 
 @app.get("/healthz")
-async def healthz() -> dict[str, str | int]:
-    """Return readiness plus the worker compatibility contract."""
+async def healthz(request: Request) -> dict[str, str | int]:
+    """Return readiness plus the worker compatibility contract, and the state of an eager setup when one started."""
     payload = worker_health_payload(mindroom_version=__version__)
+    setup = getattr(request.app.state, "worker_setup", None)
     return {
         "status": payload.status,
         "mindroom_version": payload.mindroom_version,
         "worker_protocol": payload.worker_protocol,
+        **({} if setup is None else {"setup": setup}),
     }
 
 

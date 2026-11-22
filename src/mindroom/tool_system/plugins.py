@@ -9,6 +9,7 @@ generations.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
 import itertools
 import json
@@ -169,6 +170,8 @@ class _ConfiguredPlugin:
 
 
 _PUBLISHED = PluginGeneration()
+# The fingerprint of the plugins a forkserver template preloaded, which the processes forked from it inherit.
+_PRELOADED: str | None = None
 
 # Each plugin's ``PluginLifecycle.process_state`` by plugin name, kept for the process, so it outlives reloads.
 _PROCESS_STATE: dict[str, dict[str, Any]] = {}
@@ -597,6 +600,62 @@ def refresh_plugins(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugin
             held = {id(module) for module in published.modules.values()}
             _cancel_module_tasks(module for module in replaced.values() if id(module) not in held)
     return config_plugins(config, runtime_paths)
+
+
+def _worker_preload_plugins(config: Config, runtime_paths: RuntimePaths) -> tuple[list[PluginEntryConfig], str]:
+    """Return ``config``'s enabled plugins that opt in to a worker preload, and a fingerprint of all their files."""
+    entries: list[PluginEntryConfig] = []
+    stamps: list[tuple[str, int, int]] = []
+    for entry in config.plugins:
+        try:
+            root = plugin_imports._resolve_plugin_root(entry.path, runtime_paths)
+            if not entry.enabled or not plugin_imports._load_plugin_base(root).worker_preload:
+                continue
+        except Exception:  # noqa: S112 - the load that follows reports a plugin that does not resolve.
+            continue
+        entries.append(entry)
+        # Importing writes bytecode caches, so they are no change to the plugin.
+        for directory, subdirectories, filenames in root.walk():
+            subdirectories[:] = sorted(name for name in subdirectories if name != "__pycache__")
+            for filename in sorted(filenames):
+                with suppress(OSError):
+                    stat = (directory / filename).stat()
+                    stamps.append((str(directory / filename), stat.st_size, stat.st_mtime_ns))
+    return entries, hashlib.sha256(json.dumps(stamps).encode()).hexdigest()
+
+
+def preload_plugins(config: Config, runtime_paths: RuntimePaths) -> bool:
+    """Import ``config``'s plugins whose manifests set ``worker_preload``, for the processes forked from this one.
+
+    Returns False when one of them did not load, which leaves this process unfit to fork from.
+    """
+    global _PRELOADED
+    entries, fingerprint = _worker_preload_plugins(config, runtime_paths)
+    if entries:
+        preloaded = config.model_copy(update={"plugins": entries})
+        with _PLUGIN_LOCK:
+            plugins, skipped, _ = _load_plugins(preloaded, runtime_paths, previous=None, primary_modules=False)
+            if skipped:
+                return False
+            publish_plugins(_installed_generation(plugins))
+        _PRELOADED = fingerprint
+    return True
+
+
+def keep_preloaded_plugins(config: Config, runtime_paths: RuntimePaths) -> bool:
+    """Return whether this process keeps the plugins its template preloaded, dropping them unless they suit ``config``.
+
+    They suit while they are exactly ``config``'s plugins that opt in and no file under their roots changed since.
+    Otherwise ``refresh_plugins`` loads every plugin in this process, as it does without a preload.
+    """
+    global _PRELOADED
+    if _PRELOADED is None:
+        return False
+    if _worker_preload_plugins(config, runtime_paths)[1] == _PRELOADED:
+        return True
+    publish_plugins(PluginGeneration())
+    _PRELOADED = None
+    return False
 
 
 def candidate_tool_registry(

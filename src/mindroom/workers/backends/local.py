@@ -53,6 +53,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _WORKER_INITIALIZATION_LOCKS = WorkerLocks()
+# A venv takes seconds to create, so one that takes this long is stuck; failing it lets the next request retry.
+_VENV_CREATE_TIMEOUT_SECONDS = 120.0
 
 
 @dataclass(frozen=True)
@@ -216,6 +218,7 @@ def _create_uv_worker_venv(
         ],
         check=True,
         env=env,
+        timeout=_VENV_CREATE_TIMEOUT_SECONDS,
     )
 
 

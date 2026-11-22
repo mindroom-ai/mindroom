@@ -2,6 +2,7 @@
 
 A start that becomes ready within the grace period reports nothing.
 A longer one reports ``cold_start``, then ``waiting`` at each interval, then ``ready``; a failed start reports ``failed``.
+Once the worker answers and is finishing its own setup, each interval reports ``preparing`` instead of ``waiting``.
 Every start, however short, logs one ``worker_cold_start`` event when it ends.
 """
 
@@ -46,6 +47,7 @@ class _ReporterState:
     backend_name: str
     started_at: float
     cold_start_emitted: bool = False
+    waiting_phase: WorkerReadyPhase = "waiting"
     next_waiting_elapsed: float = _WAITING_PROGRESS_INTERVAL_SECONDS
     done: bool = False
 
@@ -72,7 +74,7 @@ class _ReporterState:
             events.append(self.event("cold_start", elapsed_seconds))
             self.cold_start_emitted = True
         while self.cold_start_emitted and elapsed_seconds >= self.next_waiting_elapsed:
-            events.append(self.event("waiting", elapsed_seconds))
+            events.append(self.event(self.waiting_phase, elapsed_seconds))
             self.next_waiting_elapsed += _WAITING_PROGRESS_INTERVAL_SECONDS
         return events
 
@@ -185,6 +187,11 @@ class WorkerStartReporter:
     def mark(self, milestone: str) -> None:
         """Record how long the start took to reach ``milestone``, logged as ``<milestone>_ms``; a repeat replaces it."""
         self._milestones_ms[f"{milestone}_ms"] = elapsed_ms_between(self._state.started_at, time.monotonic())
+
+    def preparing(self) -> None:
+        """Report the rest of the wait as ``preparing``: the worker answers and is finishing its own setup."""
+        with self._condition:
+            self._state.waiting_phase = "preparing"
 
     def finish(self, error: BaseException | None) -> None:
         """Report the start as ``ready``, or as ``failed`` with ``error``, and log how long its callers waited."""

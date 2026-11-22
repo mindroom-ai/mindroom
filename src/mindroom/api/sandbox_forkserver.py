@@ -48,7 +48,10 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 TEMPLATE_ARG = "--sandbox-forkserver-template"
-PRELOAD_FILE_ENV = "MINDROOM_SANDBOX_FORKSERVER_PRELOAD_FILE"
+# What a template imports before it serves, as JSON; the template removes it from its environment at startup.
+PRELOAD_ENV = "MINDROOM_SANDBOX_FORKSERVER_PRELOAD"
+# Written beside a template's socket when it gave up preloading and started again without it.
+PRELOAD_FAILED_NOTE = "preload-failed"
 
 _TEMPLATE_LISTEN_BACKLOG = 64
 _TEMPLATE_ACCEPT_POLL_SECONDS = 1.0
@@ -79,13 +82,8 @@ def forkserver_supported() -> bool:
     return hasattr(os, "fork") and hasattr(socket, "AF_UNIX")
 
 
-def _template_fingerprint(
-    python_executable: str,
-    template_env: Mapping[str, str] | None,
-    *,
-    preload_fingerprint: str | None = None,
-) -> str:
-    """Fingerprint the interpreter, base env, and preloaded plugins that bake the template's import graph.
+def _template_fingerprint(python_executable: str, template_env: Mapping[str, str] | None) -> str:
+    """Fingerprint the interpreter and base env that bake the template's import graph.
 
     The interpreter stat stamp changes when a worker venv is rebuilt in place,
     so a stale template is recycled even when the env values are unchanged.
@@ -96,7 +94,7 @@ def _template_fingerprint(
     except OSError:
         interpreter_stamp = "missing"
     env_items = sorted(template_env.items()) if template_env is not None else None
-    payload = json.dumps([python_executable, interpreter_stamp, env_items, preload_fingerprint])
+    payload = json.dumps([python_executable, interpreter_stamp, env_items])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -104,20 +102,13 @@ def _default_template_command(python_executable: str, socket_path: str) -> list[
     return [python_executable, "-P", "-s", "-m", "mindroom.api.sandbox_runner", TEMPLATE_ARG, socket_path]
 
 
-def _control_socket_path(socket_path: str) -> str:
-    return str(Path(socket_path).with_suffix(".ctl.sock"))
-
-
 @dataclass
 class _Template:
     fingerprint: str
-    base_fingerprint: str
     process: subprocess.Popen[bytes]
     socket_path: str
     stderr_path: Path
     runtime_dir: Path
-    preload_fingerprint: str | None = None
-    spawned_at: float = field(default_factory=time.monotonic)
     # Set once the socket accepts connections; mutated only under the key lock.
     ready: bool = False
 
@@ -225,7 +216,8 @@ class _SandboxForkserver:
         self._key_locks: dict[str, threading.Lock] = {}
         self._templates: dict[str, _Template] = {}
         self._failed_fingerprints: dict[str, tuple[str, float]] = {}
-        self._failed_preload_fingerprints: dict[str, float] = {}
+        # Set once at runner startup, before any template starts, so every template of this runner preloads the same.
+        self.template_preload: str | None = None
 
     def warm(
         self,
@@ -233,18 +225,10 @@ class _SandboxForkserver:
         python_executable: str | None,
         template_env: dict[str, str] | None,
         startup_timeout_seconds: float,
-        preload_spec: Mapping[str, object] | None = None,
-        preload_fingerprint: str | None = None,
     ) -> None:
-        """Start and wait for one warm template ahead of the first request."""
-        now = time.monotonic()
-        self._ensure_ready_template(
-            key=python_executable or sys.executable,
-            template_env=template_env,
-            preload_spec=preload_spec,
-            preload_fingerprint=preload_fingerprint,
-            startup_deadline=now + startup_timeout_seconds,
-        )
+        """Start one template ahead of the first request and wait until it serves."""
+        key = python_executable or sys.executable
+        self._warm_template(key, template_env, time.monotonic() + startup_timeout_seconds)
 
     def execute(
         self,
@@ -258,8 +242,6 @@ class _SandboxForkserver:
         startup_timeout_seconds: float,
         bind_stop: Callable[[Callable[[], None]], None],
         on_progress: Callable[[str], None],
-        preload_spec: Mapping[str, object] | None = None,
-        preload_fingerprint: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Execute one prepared envelope in a fresh fork of the warm template.
 
@@ -271,17 +253,9 @@ class _SandboxForkserver:
         deadline = None if timeout_seconds is None else now + timeout_seconds
         startup_deadline = deadline if deadline is not None else now + startup_timeout_seconds
         key = python_executable or sys.executable
-        template = self._ensure_ready_template(
-            key=key,
-            template_env=template_env,
-            preload_spec=preload_spec,
-            preload_fingerprint=preload_fingerprint,
-            startup_deadline=startup_deadline,
-        )
-        template_ready_at = time.monotonic()
-        completed = self._request(
+        return self._request(
             key,
-            template,
+            self._warm_template(key, template_env, startup_deadline),
             request_env=request_env,
             request_cwd=request_cwd,
             envelope=envelope,
@@ -289,59 +263,6 @@ class _SandboxForkserver:
             bind_stop=bind_stop,
             on_progress=on_progress,
         )
-        finished_at = time.monotonic()
-        logger.debug(
-            "sandbox_forkserver_request_timing",
-            python_executable=key,
-            template_wait_ms=round((template_ready_at - now) * 1000, 1),
-            request_ms=round((finished_at - template_ready_at) * 1000, 1),
-            total_ms=round((finished_at - now) * 1000, 1),
-        )
-        return completed
-
-    def _ensure_ready_template(
-        self,
-        *,
-        key: str,
-        template_env: dict[str, str] | None,
-        preload_spec: Mapping[str, object] | None,
-        preload_fingerprint: str | None,
-        startup_deadline: float,
-    ) -> _Template:
-        key_lock = self._key_lock(key)
-        remaining = startup_deadline - time.monotonic()
-        if remaining <= 0 or not key_lock.acquire(timeout=remaining):
-            msg = "Timed out waiting for the sandbox forkserver template."
-            raise ForkserverTimeoutError(msg)
-        try:
-            effective_spec, effective_preload_fp = self._resolve_preload(preload_spec, preload_fingerprint)
-            base_fingerprint = _template_fingerprint(key, template_env)
-            fingerprint = _template_fingerprint(key, template_env, preload_fingerprint=effective_preload_fp)
-            return self._ready_template(
-                key=key,
-                fingerprint=fingerprint,
-                base_fingerprint=base_fingerprint,
-                template_env=template_env,
-                preload_spec=effective_spec,
-                preload_fingerprint=effective_preload_fp,
-                deadline=startup_deadline,
-            )
-        finally:
-            key_lock.release()
-
-    def _resolve_preload(
-        self,
-        preload_spec: Mapping[str, object] | None,
-        preload_fingerprint: str | None,
-    ) -> tuple[Mapping[str, object] | None, str | None]:
-        if preload_spec is None or preload_fingerprint is None:
-            return None, None
-        failed_at = self._failed_preload_fingerprints.get(preload_fingerprint)
-        if failed_at is not None:
-            if time.monotonic() - failed_at < self._startup_failure_cooldown_seconds:
-                return None, None
-            self._failed_preload_fingerprints.pop(preload_fingerprint, None)
-        return preload_spec, preload_fingerprint
 
     def shutdown(self) -> None:
         """Terminate all template processes and clear cached state."""
@@ -349,7 +270,6 @@ class _SandboxForkserver:
             templates = list(self._templates.values())
             self._templates.clear()
             self._failed_fingerprints.clear()
-            self._failed_preload_fingerprints.clear()
         for template in templates:
             _terminate_template(template)
 
@@ -357,15 +277,28 @@ class _SandboxForkserver:
         with self._lock:
             return self._key_locks.setdefault(key, threading.Lock())
 
+    def _warm_template(self, key: str, template_env: dict[str, str] | None, deadline: float) -> _Template:
+        key_lock = self._key_lock(key)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not key_lock.acquire(timeout=remaining):
+            msg = "Timed out waiting for the sandbox forkserver template."
+            raise ForkserverTimeoutError(msg)
+        try:
+            return self._ready_template(
+                key=key,
+                fingerprint=_template_fingerprint(key, template_env),
+                template_env=template_env,
+                deadline=deadline,
+            )
+        finally:
+            key_lock.release()
+
     def _ready_template(
         self,
         *,
         key: str,
         fingerprint: str,
-        base_fingerprint: str,
         template_env: dict[str, str] | None,
-        preload_spec: Mapping[str, object] | None,
-        preload_fingerprint: str | None,
         deadline: float,
     ) -> _Template:
         template = self._templates.get(key)
@@ -381,36 +314,12 @@ class _SandboxForkserver:
             if time.monotonic() - failed_at < self._startup_failure_cooldown_seconds:
                 raise ForkserverStartupError(message)
             self._failed_fingerprints.pop(fingerprint, None)
-        if (
-            template is not None
-            and template.ready
-            and template.preload_fingerprint is None
-            and preload_spec is not None
-            and preload_fingerprint is not None
-            and template.base_fingerprint == base_fingerprint
-        ):
-            self._preload_template_in_place(
-                key=key,
-                template=template,
-                preload_spec=preload_spec,
-                preload_fingerprint=preload_fingerprint,
-                fingerprint=fingerprint,
-                deadline=deadline,
-            )
-            return template
         if template is not None and template.fingerprint != fingerprint:
             logger.info("sandbox_forkserver_template_recycled", python_executable=key)
             self._discard(key, template)
             template = None
         if template is None:
-            template = self._spawn_template(
-                key=key,
-                fingerprint=fingerprint,
-                base_fingerprint=base_fingerprint,
-                template_env=template_env,
-                preload_spec=preload_spec,
-                preload_fingerprint=preload_fingerprint,
-            )
+            template = self._spawn_template(key=key, fingerprint=fingerprint, template_env=template_env)
             with self._lock:
                 self._templates[key] = template
         try:
@@ -420,12 +329,8 @@ class _SandboxForkserver:
                 if self._templates.get(key) is template:
                     self._templates.pop(key)
             shutil.rmtree(template.runtime_dir, ignore_errors=True)
-            if preload_fingerprint is not None:
-                self._failed_preload_fingerprints[preload_fingerprint] = time.monotonic()
-                logger.warning("sandbox_forkserver_plugin_preload_failed", error=str(exc))
-            else:
-                self._failed_fingerprints[fingerprint] = (str(exc), time.monotonic())
-                logger.warning("sandbox_forkserver_template_startup_failed", error=str(exc))
+            self._failed_fingerprints[fingerprint] = (str(exc), time.monotonic())
+            logger.warning("sandbox_forkserver_template_startup_failed", error=str(exc))
             raise
         return template
 
@@ -435,64 +340,21 @@ class _SandboxForkserver:
                 self._templates.pop(key)
         _terminate_template(template)
 
-    def _preload_template_in_place(
-        self,
-        *,
-        key: str,
-        template: _Template,
-        preload_spec: Mapping[str, object],
-        preload_fingerprint: str,
-        fingerprint: str,
-        deadline: float,
-    ) -> None:
-        """Load the first snapshot's plugins into an already-warm no-plugin template without respawning it."""
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise ForkserverTimeoutError
-        control_path = _control_socket_path(template.socket_path)
-        payload = json.dumps(dict(preload_spec), sort_keys=True).encode("utf-8") + b"\n"
-        try:
-            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
-                conn.settimeout(remaining)
-                conn.connect(control_path)
-                conn.sendall(payload)
-                response = json.loads(_SocketLineReader(conn, deadline).read_line())
-        except TimeoutError as exc:
-            raise ForkserverTimeoutError from exc
-        except (_ConnectionClosedError, OSError, ValueError, TypeError) as exc:
-            self._discard(key, template)
-            self._failed_preload_fingerprints[preload_fingerprint] = time.monotonic()
-            msg = f"Sandbox forkserver in-place plugin preload failed: {exc}"
-            logger.warning("sandbox_forkserver_plugin_preload_failed", error=msg)
-            raise ForkserverStartupError(msg) from exc
-        if not response.get("ok"):
-            self._discard(key, template)
-            self._failed_preload_fingerprints[preload_fingerprint] = time.monotonic()
-            msg = str(response.get("error") or "Sandbox forkserver in-place plugin preload failed.")
-            logger.warning("sandbox_forkserver_plugin_preload_failed", error=msg)
-            raise ForkserverStartupError(msg)
-        template.preload_fingerprint = preload_fingerprint
-        template.fingerprint = fingerprint
-
     def _spawn_template(
         self,
         *,
         key: str,
         fingerprint: str,
-        base_fingerprint: str,
         template_env: dict[str, str] | None,
-        preload_spec: Mapping[str, object] | None,
-        preload_fingerprint: str | None,
     ) -> _Template:
         runtime_dir = Path(tempfile.mkdtemp(prefix="mindroom-fs-"))
         socket_path = str(runtime_dir / "template.sock")
         stderr_path = runtime_dir / "template.err"
-        spawn_env = template_env
-        if preload_spec is not None:
-            preload_path = runtime_dir / "preload.json"
-            preload_path.write_text(json.dumps(dict(preload_spec), sort_keys=True), encoding="utf-8")
-            spawn_env = dict(os.environ if template_env is None else template_env)
-            spawn_env[PRELOAD_FILE_ENV] = str(preload_path)
+        if self.template_preload is not None:
+            template_env = {
+                **(os.environ if template_env is None else template_env),
+                PRELOAD_ENV: self.template_preload,
+            }
         logger.info("sandbox_forkserver_template_spawning", python_executable=key)
         try:
             with stderr_path.open("wb") as stderr_file:
@@ -501,7 +363,7 @@ class _SandboxForkserver:
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=stderr_file,
-                    env=spawn_env,
+                    env=template_env,
                 )
         except OSError as exc:
             shutil.rmtree(runtime_dir, ignore_errors=True)
@@ -510,12 +372,10 @@ class _SandboxForkserver:
             raise ForkserverStartupError(msg) from exc
         return _Template(
             fingerprint=fingerprint,
-            base_fingerprint=base_fingerprint,
             process=process,
             socket_path=socket_path,
             stderr_path=stderr_path,
             runtime_dir=runtime_dir,
-            preload_fingerprint=preload_fingerprint,
         )
 
     def _wait_template_ready(self, *, key: str, template: _Template, deadline: float) -> None:
@@ -543,20 +403,13 @@ class _SandboxForkserver:
                 time.sleep(_READY_PROBE_INTERVAL_SECONDS)
             else:
                 template.ready = True
-                timing_path = Path(template.socket_path).with_suffix(".timing.json")
-                with suppress(OSError, ValueError):
-                    preload_timing = json.loads(timing_path.read_text(encoding="utf-8"))
-                    if isinstance(preload_timing, dict):
-                        logger.debug(
-                            "sandbox_forkserver_template_preload_timing",
-                            python_executable=key,
-                            **preload_timing,
-                        )
+                with suppress(OSError):
+                    error = (template.runtime_dir / PRELOAD_FAILED_NOTE).read_text(encoding="utf-8")
+                    logger.warning("sandbox_forkserver_plugin_preload_failed", python_executable=key, error=error)
                 logger.info(
                     "sandbox_forkserver_template_ready",
                     python_executable=key,
                     template_pid=template.process.pid,
-                    startup_ms=round((time.monotonic() - template.spawned_at) * 1000, 1),
                 )
                 return
 
@@ -678,60 +531,20 @@ def get_sandbox_forkserver() -> _SandboxForkserver:
         return _forkserver
 
 
-def _handle_control_preload(
-    ctl_conn: socket.socket,
-    preload_plugins: Callable[[Mapping[str, object]], None],
-) -> bool:
-    """Run one in-place plugin preload in the template parent; return False if template must exit."""
-    try:
-        reader = _SocketLineReader(ctl_conn, time.monotonic() + _CHILD_REQUEST_READ_TIMEOUT_SECONDS)
-        spec = json.loads(reader.read_line())
-        if not isinstance(spec, dict):
-            _send_json(ctl_conn, {"ok": False, "error": "Invalid preload spec."})
-            return True
-        preload_plugins(spec)
-        if (thread_count := threading.active_count()) > 1:
-            msg = (
-                f"Sandbox forkserver template must be single-threaded before forking; "
-                f"found {thread_count} threads after plugin preload."
-            )
-            _send_json(ctl_conn, {"ok": False, "error": msg})
-            return False
-        _send_json(ctl_conn, {"ok": True})
-    except BaseException as exc:
-        with suppress(Exception):
-            _send_json(ctl_conn, {"ok": False, "error": str(exc)})
-        return False
-    else:
-        return True
+def threads_and_open_files() -> tuple[int, int]:
+    """Return how many threads and open files this process has, which every process forked from it would share.
 
-
-def _accept_and_fork(
-    server: socket.socket,
-    control_server: socket.socket | None,
-    run_payload: Callable[[str, Callable[[str], None]], tuple[int, str, str]],
-) -> None:
-    conn, _addr = server.accept()
+    Where the system does not tell, only the threads Python started count.
+    """
     try:
-        child_pid = os.fork()
+        return len(list(Path("/proc/self/task").iterdir())), len(list(Path("/proc/self/fd").iterdir()))
     except OSError:
-        # Fork pressure (e.g. EAGAIN) fails this one request via EOF on
-        # the connection; the template keeps serving.
-        conn.close()
-        return
-    if child_pid == 0:
-        server.close()
-        if control_server is not None:
-            control_server.close()
-        _child_main(conn, run_payload)
-    conn.close()
+        return threading.active_count(), 0
 
 
 def serve_template(
     socket_path: str,
     run_payload: Callable[[str, Callable[[str], None]], tuple[int, str, str]],
-    *,
-    preload_plugins: Callable[[Mapping[str, object]], None] | None = None,
 ) -> int:
     """Template process main loop: accept one connection per request and fork.
 
@@ -752,38 +565,33 @@ def serve_template(
     # own tool subprocesses immediately after fork.
     signal.signal(signal.SIGCHLD, signal.SIG_IGN)
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    control_server: socket.socket | None = None
     try:
-        if preload_plugins is not None:
-            control_server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            control_server.bind(_control_socket_path(socket_path))
-            control_server.listen(4)
         server.bind(socket_path)
         server.listen(_TEMPLATE_LISTEN_BACKLOG)
-        watch = [server] if control_server is None else [server, control_server]
+        server.settimeout(_TEMPLATE_ACCEPT_POLL_SECONDS)
         while True:
-            readable, _, _ = select.select(watch, [], [], _TEMPLATE_ACCEPT_POLL_SECONDS)
-            if not readable:
+            try:
+                conn, _addr = server.accept()
+            except TimeoutError:
                 if os.getppid() != parent_pid:
                     # Orphaned: the runner died without running its cleanup
                     # (e.g. SIGKILL), so remove our runtime dir ourselves.
                     shutil.rmtree(Path(socket_path).parent, ignore_errors=True)
                     return 0
                 continue
-            if control_server is not None and control_server in readable:
-                ctl_conn, _addr = control_server.accept()
-                try:
-                    keep_serving = _handle_control_preload(ctl_conn, preload_plugins)
-                finally:
-                    ctl_conn.close()
-                if not keep_serving:
-                    return 1
-            if server in readable:
-                _accept_and_fork(server, control_server, run_payload)
+            try:
+                child_pid = os.fork()
+            except OSError:
+                # Fork pressure (e.g. EAGAIN) fails this one request via EOF on
+                # the connection; the template keeps serving.
+                conn.close()
+                continue
+            if child_pid == 0:
+                server.close()
+                _child_main(conn, run_payload)
+            conn.close()
     finally:
         server.close()
-        if control_server is not None:
-            control_server.close()
 
 
 def _child_main(

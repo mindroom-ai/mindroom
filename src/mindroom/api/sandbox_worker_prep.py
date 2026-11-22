@@ -208,21 +208,6 @@ def prepare_script_worker(
     )
 
 
-def prepare_dedicated_worker(
-    worker_key: str,
-    runtime_paths: RuntimePaths,
-    *,
-    runner_token: str | None = None,
-) -> WorkerHandle:
-    """Prepare one dedicated worker's local state and Python venv."""
-    return _prepare_worker(
-        worker_key,
-        runtime_paths,
-        runner_token=runner_token,
-        run_scoped_script=False,
-    )
-
-
 def normalize_request_worker_key(
     worker_key: str | None,
     runtime_paths: RuntimePaths,
