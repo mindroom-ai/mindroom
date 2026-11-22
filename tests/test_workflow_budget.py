@@ -210,6 +210,17 @@ async def test_open_budget_question_still_holds_the_run_after_a_restart(stack: W
 
 
 @pytest.mark.asyncio
+async def test_script_cannot_submit_the_cost_questions_key(stack: WorkflowStack) -> None:
+    """The key of the run's own cost question is no key a script's call can have, so no script answers it for itself."""
+    await stack.start(**_LIMIT)
+
+    with pytest.raises(ValueError, match="invalid literal"):
+        await stack.submit("$budget:1", "value", {"op": "now"})
+
+    assert _states(stack) == {}
+
+
+@pytest.mark.asyncio
 async def test_without_a_limit_nothing_pauses(stack: WorkflowStack) -> None:
     """A run that names no limit spends what its agents cost, and asks nothing."""
     await stack.start(max_concurrent=2)
