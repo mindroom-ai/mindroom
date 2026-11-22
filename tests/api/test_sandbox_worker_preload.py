@@ -144,22 +144,26 @@ def _preload_spec(runtime_paths: RuntimePaths, plugins: list[PluginEntryConfig],
 
 @pytest.fixture
 def manager(monkeypatch: pytest.MonkeyPatch) -> Iterator[_SandboxForkserver]:
-    """Return this test's forkserver, with every template it spawns recorded on ``spawned``."""
-    forkserver = _SandboxForkserver()
-    forkserver.spawned = []
-    spawn = forkserver._spawn_template
+    """Return this test's plain forkserver, with every template any forkserver spawns recorded on ``spawned``."""
+    spawned: list[sandbox_forkserver_module._Template] = []
+    spawn = _SandboxForkserver._spawn_template
 
-    def recording_spawn(**kwargs: object) -> sandbox_forkserver_module._Template:
-        template = spawn(**kwargs)
-        forkserver.spawned.append(template)
+    def recording_spawn(self: _SandboxForkserver, **kwargs: object) -> sandbox_forkserver_module._Template:
+        template = spawn(self, **kwargs)
+        spawned.append(template)
         return template
 
-    monkeypatch.setattr(forkserver, "_spawn_template", recording_spawn)
+    forkserver = _SandboxForkserver()
+    forkserver.spawned = spawned
+    monkeypatch.setattr(_SandboxForkserver, "_spawn_template", recording_spawn)
     monkeypatch.setattr(sandbox_forkserver_module, "get_sandbox_forkserver", lambda: forkserver)
     try:
         yield forkserver
     finally:
         forkserver.shutdown()
+        if (preloading := sandbox_forkserver_module.preloading_forkserver()) is not None:
+            preloading.shutdown()
+        sandbox_forkserver_module._preloading_forkserver = None
 
 
 def _call(
@@ -189,6 +193,12 @@ def _report(runtime_paths: RuntimePaths, plugins: list[PluginEntryConfig], name:
     return str(_call(runtime_paths, plugins, f"{name}_tool", "report")).split("|")
 
 
+def _write_hanging_plugin(root: Path) -> PluginEntryConfig:
+    """Write an opt-in plugin whose import notes each try in ``tried.log`` and then never returns."""
+    notes_try = f"Path({str(root / 'tried.log')!r}).open('a').write('tried\\n')"
+    return _write_plugin(root, "hangs", worker_preload=True, at_import=f"{notes_try}\nimport time\ntime.sleep(600)")
+
+
 def _replace_keeping_size_and_mtime(path: Path, *, in_place: bool) -> None:
     """Change a file's content the way a timestamp-preserving copy or sync does."""
     before = path.stat()
@@ -214,7 +224,7 @@ def test_only_opt_in_plugins_import_once_and_the_others_import_in_every_call(
     runtime_paths = _runtime(tmp_path)
     opted = _write_plugin(tmp_path, "opted", worker_preload=True)
     plain = _write_plugin(tmp_path, "plain")
-    manager.template_preload = _preload_spec(runtime_paths, [opted, plain])
+    sandbox_forkserver_module.start_preloading_forkserver(_preload_spec(runtime_paths, [opted, plain]))
 
     for _ in range(3):
         assert _report(runtime_paths, [opted, plain], "opted")[0] == "v1"
@@ -249,7 +259,7 @@ def test_a_changed_file_of_a_preloaded_plugin_loads_it_in_each_call_and_keeps_th
     """Any changed file under an opt-in plugin's root, not only Python source, ends the use of its preload."""
     runtime_paths = _runtime(tmp_path)
     opted = _write_plugin(tmp_path, "opted", worker_preload=True)
-    manager.template_preload = _preload_spec(runtime_paths, [opted])
+    sandbox_forkserver_module.start_preloading_forkserver(_preload_spec(runtime_paths, [opted]))
 
     assert _report(runtime_paths, [opted], "opted")[0] == "v1"
     assert _report(runtime_paths, [opted], "opted")[0] == "v1"
@@ -268,7 +278,9 @@ def test_a_changed_file_of_a_preloaded_plugin_loads_it_in_each_call_and_keeps_th
         (False, "v2"),
         (False, "v2"),
     ]
-    assert len(manager.spawned) == 1
+    # The calls after the change fork from the plain template; the preloading one stays for requests it suits.
+    assert len(manager.spawned) == 2
+    assert template_pid not in _import_parents(tmp_path, "opted")
     assert manager.spawned[0].process.poll() is None
 
 
@@ -276,11 +288,11 @@ def test_a_request_for_other_plugins_never_sees_the_preloaded_ones_and_keeps_the
     manager: _SandboxForkserver,
     tmp_path: Path,
 ) -> None:
-    """Requests whose configs differ share one template: none recycles it, and none sees another's plugins."""
+    """Requests whose configs differ never replace a template: the ones the preload does not suit use the plain one."""
     runtime_paths = _runtime(tmp_path)
     opted = _write_plugin(tmp_path, "opted", worker_preload=True)
     plain = _write_plugin(tmp_path, "plain")
-    manager.template_preload = _preload_spec(runtime_paths, [opted])
+    sandbox_forkserver_module.start_preloading_forkserver(_preload_spec(runtime_paths, [opted]))
 
     with_opted = _report(runtime_paths, [opted, plain], "plain")[1]
     without_opted = _report(runtime_paths, [plain], "plain")[1]
@@ -289,7 +301,7 @@ def test_a_request_for_other_plugins_never_sees_the_preloaded_ones_and_keeps_the
     assert "opted" in with_opted
     assert "opted" not in without_opted
     assert "plain" in without_opted
-    assert len(manager.spawned) == 1
+    assert len(manager.spawned) == 2
     assert [pid for pid, _cwd, _data in _imports(tmp_path, "opted")] == [manager.spawned[0].process.pid]
 
 
@@ -310,21 +322,22 @@ def test_a_plugin_that_breaks_its_promise_is_never_preloaded(
     """A template never forks with a thread or an open file a plugin left behind, and tries the preload once."""
     runtime_paths = _runtime(tmp_path)
     opted = _write_plugin(tmp_path, "opted", worker_preload=True, at_import=at_import)
-    manager.template_preload = _preload_spec(runtime_paths, [opted])
+    sandbox_forkserver_module.start_preloading_forkserver(_preload_spec(runtime_paths, [opted]))
     warnings: list[str] = []
     monkeypatch.setattr(sandbox_forkserver_module.logger, "warning", lambda event, **_fields: warnings.append(event))
 
     for _ in range(3):
         assert _report(runtime_paths, [opted], "opted")[0] == "v1"
 
-    assert len(manager.spawned) == 1
-    template = manager.spawned[0]
-    assert template.process.poll() is None
+    # The template that tried the preload ended, and one that never tried it serves.
+    tried, serving = manager.spawned
+    assert tried.process.poll() is not None
+    assert serving.process.poll() is None
     pids = [pid for pid, _cwd, _data in _imports(tmp_path, "opted")]
-    # The template's one attempt, then each call's own import.
-    assert pids[0] == template.process.pid
+    # The one attempt, then each call's own import.
+    assert pids[0] == tried.process.pid
     assert len(set(pids)) == 4
-    assert warnings == ["sandbox_forkserver_plugin_preload_failed"]
+    assert warnings.count("sandbox_forkserver_plugin_preload_failed") == 1
 
 
 def test_a_template_has_no_control_channel_and_hides_its_preload_from_tools(
@@ -334,7 +347,7 @@ def test_a_template_has_no_control_channel_and_hides_its_preload_from_tools(
     """Nothing a tool can reach changes what later calls inherit: the template listens for requests only."""
     runtime_paths = _runtime(tmp_path)
     opted = _write_plugin(tmp_path, "opted", worker_preload=True)
-    manager.template_preload = _preload_spec(runtime_paths, [opted])
+    sandbox_forkserver_module.start_preloading_forkserver(_preload_spec(runtime_paths, [opted]))
 
     preload_env = _report(runtime_paths, [opted], "opted")[2]
 
@@ -352,11 +365,11 @@ def test_a_request_the_preload_does_not_match_runs_where_those_plugins_were_neve
     registers = "yaml.SafeLoader.add_constructor('!left-by-import', lambda loader, node: None)"
     opted = _write_plugin(tmp_path, "opted", worker_preload=True, at_import=registers)
     plain = _write_plugin(tmp_path, "plain")
-    manager.template_preload = _preload_spec(runtime_paths, [opted])
+    sandbox_forkserver_module.start_preloading_forkserver(_preload_spec(runtime_paths, [opted]))
 
     assert _report(runtime_paths, [opted, plain], "plain")[3] == "True"
     preloading_template = manager.spawned[0].process.pid
-    assert _import_parents(tmp_path, "opted") == []
+    assert _import_parents(tmp_path, "opted") == [os.getpid()]
 
     # Another set of opt-in plugins: this call has no use for the preload.
     assert _report(runtime_paths, [plain], "plain")[3] == "False"
@@ -399,8 +412,8 @@ def test_a_plugin_whose_import_hangs_is_given_up_and_other_calls_run(
 ) -> None:
     """A preload has its own time limit, after which calls run in a template that never tried it."""
     runtime_paths = _runtime(tmp_path)
-    hangs = _write_plugin(tmp_path, "hangs", worker_preload=True, at_import="import time\ntime.sleep(600)")
-    manager.template_preload = _preload_spec(runtime_paths, [hangs], budget_seconds=1)
+    hangs = _write_hanging_plugin(tmp_path)
+    sandbox_forkserver_module.start_preloading_forkserver(_preload_spec(runtime_paths, [hangs], budget_seconds=1))
     started_at = time.monotonic()
 
     assert _call(runtime_paths, [], "calculator", "add", 1, 2) is not None
@@ -409,13 +422,13 @@ def test_a_plugin_whose_import_hangs_is_given_up_and_other_calls_run(
 
     assert time.monotonic() - started_at < 20
     # Only the first template tried the preload; the one that serves never does.
-    assert len(_imports(tmp_path, "hangs")) == 1
+    assert (tmp_path / "tried.log").read_text(encoding="utf-8") == "tried\n"
     assert manager.spawned[0].process.poll() is not None
 
 
+@pytest.mark.usefixtures("manager")
 @pytest.mark.parametrize("execution_mode", ["forkserver", "subprocess"])
 def test_each_call_logs_its_stage_timing_once(
-    manager: _SandboxForkserver,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     execution_mode: str,
@@ -427,7 +440,7 @@ def test_each_call_logs_its_stage_timing_once(
         process_env={"MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": execution_mode},
     )
     opted = _write_plugin(tmp_path, "opted", worker_preload=True)
-    manager.template_preload = _preload_spec(runtime_paths, [opted])
+    sandbox_forkserver_module.start_preloading_forkserver(_preload_spec(runtime_paths, [opted]))
     records: list[tuple[str, dict[str, object]]] = []
     monkeypatch.setattr(sandbox_runner_module.logger, "debug", lambda event, **fields: records.append((event, fields)))
     monkeypatch.setattr(
@@ -539,10 +552,10 @@ def test_eager_setup_runs_behind_the_health_check_and_preloads_only_opt_in_plugi
     venv_may_start = threading.Event()
     ensure_state = local_worker_module._ensure_local_worker_state
 
-    def slow_ensure_state(paths: object) -> None:
+    def slow_ensure_state(*args: object) -> None:
         # A burst of starting workers shares its nodes and storage, so one venv can take longer than the ready timeout.
         venv_may_start.wait(timeout=10)
-        ensure_state(paths)
+        ensure_state(*args)
 
     monkeypatch.setattr(local_worker_module, "_ensure_local_worker_state", slow_ensure_state)
 
@@ -578,7 +591,7 @@ def test_a_setup_that_outlasts_its_budget_ends_the_preload_and_calls_run(
     tmp_path: Path,
 ) -> None:
     """A preload still running when the setup budget ends is killed, and calls run in a template without it."""
-    hangs = _write_plugin(tmp_path, "hangs", worker_preload=True, at_import="import time\ntime.sleep(600)")
+    hangs = _write_hanging_plugin(tmp_path)
     app, _worker_root = _dedicated_worker_app(monkeypatch, tmp_path, eager_setup_plugins=[hangs.path])
     monkeypatch.setattr(sandbox_runner_module, "_EAGER_SETUP_BUDGET_SECONDS", 6.0)
 
@@ -593,7 +606,7 @@ def test_a_setup_that_outlasts_its_budget_ends_the_preload_and_calls_run(
 
         assert time.monotonic() - started_at < 25
         assert manager.spawned[0].process.poll() is not None
-    assert len(_imports(tmp_path, "hangs")) == 1
+    assert (tmp_path / "tried.log").read_text(encoding="utf-8") == "tried\n"
 
 
 def test_a_failed_eager_setup_leaves_the_worker_healthy_and_its_first_call_reports_the_real_error(
@@ -608,11 +621,11 @@ def test_a_failed_eager_setup_leaves_the_worker_healthy_and_its_first_call_repor
     disk_full.set()
     ensure_state = local_worker_module._ensure_local_worker_state
 
-    def ensure_state_on_a_full_disk(paths: object) -> None:
+    def ensure_state_on_a_full_disk(*args: object) -> None:
         if disk_full.is_set():
             msg = "No space left on device"
             raise OSError(msg)
-        ensure_state(paths)
+        ensure_state(*args)
 
     monkeypatch.setattr(local_worker_module, "_ensure_local_worker_state", ensure_state_on_a_full_disk)
 
@@ -648,4 +661,4 @@ def test_a_worker_whose_manifest_asks_for_no_eager_setup_starts_as_before(
         time.sleep(0.5)
         assert not (worker_root / "venv").exists()
         assert manager.spawned == []
-        assert manager.template_preload is None
+        assert sandbox_forkserver_module.preloading_forkserver() is None

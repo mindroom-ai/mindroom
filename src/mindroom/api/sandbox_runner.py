@@ -95,7 +95,7 @@ from mindroom.tool_system.output_files import (
     validate_output_path_syntax,
     write_bytes_to_output_path,
 )
-from mindroom.tool_system.plugins import keep_preloaded_plugins, preload_plugins, refresh_plugins
+from mindroom.tool_system.plugins import preload_plugins, preloaded_plugins_suit, refresh_plugins
 from mindroom.tool_system.progress import report_tool_progress, tool_progress_reporter
 from mindroom.tool_system.registry import ToolRegistry, builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import decode_attachment_save_bytes, sandbox_proxy_config, to_json_compatible
@@ -145,6 +145,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.worker_computer.protocol import BrowserSession
+    from mindroom.workers.backends.local import LocalWorkerStatePaths
 
 logger = get_logger(__name__)
 
@@ -153,6 +154,9 @@ _SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
 _PROGRESS_FD_ARG = "--progress-fd"
 # How long a worker's eager setup may run before it counts as failed and the first command prepares what is missing.
 _EAGER_SETUP_BUDGET_SECONDS = 180.0
+# How long a template may spend importing the worker's opt-in plugins, and an eager setup creating the venv.
+_PRELOAD_BUDGET_SECONDS = 60.0
+_EAGER_VENV_TIMEOUT_SECONDS = 120.0
 # How often a spawn-per-call wait looks up from its child to notice a stop or its deadline.
 _SPAWN_POLL_SECONDS = 1.0
 
@@ -403,13 +407,15 @@ def start_eager_worker_setup(app: FastAPI) -> asyncio.Task[None] | None:
     if not isinstance(plugin_paths, list):
         return None
     if plugin_paths:
-        # Every template of this runner imports the worker's opt-in plugins once, whichever path starts it.
-        sandbox_forkserver.get_sandbox_forkserver().template_preload = json.dumps(
-            {
-                "config_path": str(runtime_paths.config_path),
-                "storage_root": str(runtime_paths.storage_root),
-                "plugins": plugin_paths,
-            },
+        sandbox_forkserver.start_preloading_forkserver(
+            json.dumps(
+                {
+                    "config_path": str(runtime_paths.config_path),
+                    "storage_root": str(runtime_paths.storage_root),
+                    "plugins": plugin_paths,
+                    "budget_seconds": _PRELOAD_BUDGET_SECONDS,
+                },
+            ),
         )
     app.state.worker_setup = "preparing"
     return asyncio.create_task(_eager_worker_setup(app, runtime_paths))
@@ -421,18 +427,15 @@ async def _eager_worker_setup(app: FastAPI, runtime_paths: RuntimePaths) -> None
     try:
         async with asyncio.timeout(_EAGER_SETUP_BUDGET_SECONDS):
             paths = local_worker_state_paths_for_root(sandbox_exec.runner_dedicated_worker_root(runtime_paths))
-            await asyncio.to_thread(ensure_local_worker_state_locked, paths)
+            await asyncio.to_thread(
+                ensure_local_worker_state_locked,
+                paths,
+                venv_timeout_seconds=_EAGER_VENV_TIMEOUT_SECONDS,
+            )
             steps = [asyncio.to_thread(shell_supervisor.ensure_shell_supervisor)]
             if sandbox_exec.runner_uses_forkserver(runtime_paths) and sandbox_forkserver.forkserver_supported():
-                python_executable, template_env, _ = sandbox_exec.resolve_subprocess_worker_context(paths)
-                steps.append(
-                    asyncio.to_thread(
-                        sandbox_forkserver.get_sandbox_forkserver().warm,
-                        python_executable=python_executable,
-                        template_env=template_env,
-                        startup_timeout_seconds=_EAGER_SETUP_BUDGET_SECONDS,
-                    ),
-                )
+                budget_seconds = _EAGER_SETUP_BUDGET_SECONDS - (time.monotonic() - started_at)
+                steps.append(asyncio.to_thread(_warm_forkserver_template, paths, budget_seconds))
             await asyncio.gather(*steps)
     except Exception as exc:  # Whatever failed, the first request prepares it and reports its error.
         app.state.worker_setup = "failed"
@@ -440,6 +443,32 @@ async def _eager_worker_setup(app: FastAPI, runtime_paths: RuntimePaths) -> None
     else:
         app.state.worker_setup = "ready"
         logger.info("sandbox_worker_eager_setup_ready", setup_ms=round((time.monotonic() - started_at) * 1000, 1))
+
+
+def _warm_forkserver_template(paths: LocalWorkerStatePaths, budget_seconds: float) -> None:
+    """Start the template this worker's calls fork from, giving a preload up that fails or outlasts the budget.
+
+    The plain template then starts at once, and keeps importing for the first request when the budget is used up.
+    """
+    python_executable, template_env, _ = sandbox_exec.resolve_subprocess_worker_context(paths)
+    deadline = time.monotonic() + budget_seconds
+    preloading = sandbox_forkserver.preloading_forkserver()
+    if preloading is not None:
+        try:
+            preloading.warm(
+                python_executable=python_executable,
+                template_env=template_env,
+                startup_timeout_seconds=budget_seconds,
+            )
+        except sandbox_forkserver.ForkserverError as exc:
+            sandbox_forkserver.abandon_preload(str(exc) or "The preload outlasted the worker's setup budget.")
+        else:
+            return
+    sandbox_forkserver.get_sandbox_forkserver().warm(
+        python_executable=python_executable,
+        template_env=template_env,
+        startup_timeout_seconds=max(deadline - time.monotonic(), 1.0),
+    )
 
 
 def _freeze_private_agent_names(private_agent_names: list[str] | None) -> frozenset[str] | None:
@@ -1272,9 +1301,14 @@ def _execute_request_forkserver(
     envelope: str,
     timeout_seconds: float | None,
 ) -> ExecuteResponse | None:
-    """Dispatch one prepared request via the warm template; None means fall back to spawn-per-call."""
-    try:
-        completed = sandbox_forkserver.get_sandbox_forkserver().execute(
+    """Dispatch one prepared request via the warm template; None means fall back to spawn-per-call.
+
+    A worker that preloads plugins tries its preloading template first. The request runs there only when the preload
+    suits it exactly; otherwise, and once the preload is given up, it runs in the plain template, as without a preload.
+    """
+
+    def execute(forkserver: sandbox_forkserver._SandboxForkserver) -> subprocess.CompletedProcess[str]:
+        return forkserver.execute(
             python_executable=subprocess_context.python_executable,
             template_env=subprocess_context.template_env,
             request_env=subprocess_context.subprocess_env,
@@ -1285,6 +1319,16 @@ def _execute_request_forkserver(
             bind_stop=sandbox_request_cancellation.bind_request_stop,
             on_progress=report_tool_progress,
         )
+
+    try:
+        completed = None
+        if (preloading := sandbox_forkserver.preloading_forkserver()) is not None:
+            try:
+                completed = execute(preloading)
+            except sandbox_forkserver.ForkserverStartupError as exc:
+                sandbox_forkserver.abandon_preload(str(exc))
+        if completed is None or completed.returncode == sandbox_protocol.PRELOAD_UNSUITED_RETURNCODE:
+            completed = execute(sandbox_forkserver.get_sandbox_forkserver())
     except sandbox_forkserver.ForkserverTimeoutError:
         return _subprocess_failure_response(worker_key, "Sandbox subprocess timed out.", runtime_paths)
     except sandbox_forkserver.ForkserverStartupError as exc:
@@ -1567,6 +1611,10 @@ def _run_subprocess_worker_payload(payload: str, report_progress: Callable[[str]
         return 1, "", sandbox_protocol.response_marker_payload(response.model_dump_json())
     if sandbox_exec.runner_uses_dedicated_worker(runtime_paths):
         config = _config_with_available_plugins(config, runtime_paths, log_skipped_plugins=True)
+    preloaded = preloaded_plugins_suit(config, runtime_paths)
+    if preloaded is False:
+        # Only a process that never imported those plugins may run this request, so the runner sends it to one.
+        return sandbox_protocol.PRELOAD_UNSUITED_RETURNCODE, "", ""
     stage_done("config")
 
     # Redirect stdout/stderr during tool execution so tool output doesn't
@@ -1579,7 +1627,7 @@ def _run_subprocess_worker_payload(payload: str, report_progress: Callable[[str]
     job = job_control_context(JobControl()) if request.run_as_job else nullcontext()
     with redirect_stdout(captured_out), redirect_stderr(captured_err), tool_progress_reporter(report_progress), job:
         # A fresh child loads the request's plugins itself, except the ones its template preloaded for this config.
-        timing["preloaded"] = keep_preloaded_plugins(config, runtime_paths)
+        timing["preloaded"] = preloaded is True
         tools = refresh_plugins(config, runtime_paths).tools
         stage_done("plugins")
         response = asyncio.run(_execute_prepared_request_inprocess(request, runtime_paths, config, tools))
@@ -1636,15 +1684,20 @@ def _run_forkserver_template() -> int:
 
     preload = os.environ.pop(sandbox_forkserver.PRELOAD_ENV, None)
     if preload is not None and (error := _preload_template_plugins(json.loads(preload))) is not None:
-        # An import cannot be undone, so the template starts again, now without the preload in its environment.
-        Path(socket_path).with_name(sandbox_forkserver.PRELOAD_FAILED_NOTE).write_text(error, encoding="utf-8")
-        os.execv(sys.orig_argv[0], sys.orig_argv)  # noqa: S606
+        # An import cannot be undone, so this template ends, and the runner serves from one that never tried it.
+        sys.stderr.write(error)
+        sys.stderr.flush()
+        os._exit(1)
     return sandbox_forkserver.serve_template(socket_path, _run_subprocess_worker_payload)
 
 
 def _preload_template_plugins(spec: dict[str, Any]) -> str | None:
-    """Import the worker's opt-in plugins for every request child, and return why the template cannot keep them."""
+    """Import the worker's opt-in plugins for every request child, and return why the template cannot keep them.
+
+    The kernel ends the template when the import outlasts its budget, also one that never returns to Python.
+    """
     threads_and_files = sandbox_forkserver.threads_and_open_files()
+    signal.setitimer(signal.ITIMER_REAL, spec["budget_seconds"])
     try:
         runtime_paths = constants.resolve_primary_runtime_paths(
             config_path=Path(spec["config_path"]),
@@ -1654,8 +1707,10 @@ def _preload_template_plugins(spec: dict[str, Any]) -> str | None:
         config = Config(plugins=[PluginEntryConfig(path=path) for path in spec["plugins"]])
         if not preload_plugins(config, runtime_paths):
             return "A plugin that sets worker_preload failed to import."
-    except Exception as exc:  # Whatever a plugin's import raises, the template serves without the preload.
+    except Exception as exc:  # Whatever a plugin's import raises, the runner gives the preload up.
         return f"Preloading plugins failed: {exc}"
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
     if sandbox_forkserver.threads_and_open_files() != threads_and_files:
         return "A plugin that sets worker_preload left a thread running or a file open when it was imported."
     return None

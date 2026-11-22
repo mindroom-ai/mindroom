@@ -50,8 +50,6 @@ logger = get_logger(__name__)
 TEMPLATE_ARG = "--sandbox-forkserver-template"
 # What a template imports before it serves, as JSON; the template removes it from its environment at startup.
 PRELOAD_ENV = "MINDROOM_SANDBOX_FORKSERVER_PRELOAD"
-# Written beside a template's socket when it gave up preloading and started again without it.
-PRELOAD_FAILED_NOTE = "preload-failed"
 
 _TEMPLATE_LISTEN_BACKLOG = 64
 _TEMPLATE_ACCEPT_POLL_SECONDS = 1.0
@@ -209,6 +207,7 @@ class _SandboxForkserver:
         template_command: Callable[[str, str], list[str]] | None = None,
         *,
         startup_failure_cooldown_seconds: float = _STARTUP_FAILURE_COOLDOWN_SECONDS,
+        template_preload: str | None = None,
     ) -> None:
         self._template_command = template_command or _default_template_command
         self._startup_failure_cooldown_seconds = startup_failure_cooldown_seconds
@@ -216,8 +215,7 @@ class _SandboxForkserver:
         self._key_locks: dict[str, threading.Lock] = {}
         self._templates: dict[str, _Template] = {}
         self._failed_fingerprints: dict[str, tuple[str, float]] = {}
-        # Set once at runner startup, before any template starts, so every template of this runner preloads the same.
-        self.template_preload: str | None = None
+        self._template_preload = template_preload
 
     def warm(
         self,
@@ -350,10 +348,10 @@ class _SandboxForkserver:
         runtime_dir = Path(tempfile.mkdtemp(prefix="mindroom-fs-"))
         socket_path = str(runtime_dir / "template.sock")
         stderr_path = runtime_dir / "template.err"
-        if self.template_preload is not None:
+        if self._template_preload is not None:
             template_env = {
                 **(os.environ if template_env is None else template_env),
-                PRELOAD_ENV: self.template_preload,
+                PRELOAD_ENV: self._template_preload,
             }
         logger.info("sandbox_forkserver_template_spawning", python_executable=key)
         try:
@@ -403,9 +401,6 @@ class _SandboxForkserver:
                 time.sleep(_READY_PROBE_INTERVAL_SECONDS)
             else:
                 template.ready = True
-                with suppress(OSError):
-                    error = (template.runtime_dir / PRELOAD_FAILED_NOTE).read_text(encoding="utf-8")
-                    logger.warning("sandbox_forkserver_plugin_preload_failed", python_executable=key, error=error)
                 logger.info(
                     "sandbox_forkserver_template_ready",
                     python_executable=key,
@@ -529,6 +524,37 @@ def get_sandbox_forkserver() -> _SandboxForkserver:
             _forkserver = _SandboxForkserver()
             atexit.register(_forkserver.shutdown)
         return _forkserver
+
+
+# The manager whose templates import the worker's opt-in plugins first, until that preload is given up.
+_preloading_forkserver: _SandboxForkserver | None = None
+
+
+def start_preloading_forkserver(template_preload: str) -> None:
+    """Add this process's manager of templates that import ``template_preload`` before they serve.
+
+    It stays apart from the plain manager, so a request the preload does not suit, and every request once the preload
+    is given up, forks from a template that never imported those plugins.
+    """
+    global _preloading_forkserver
+    with _forkserver_lock:
+        _preloading_forkserver = _SandboxForkserver(template_preload=template_preload)
+        atexit.register(_preloading_forkserver.shutdown)
+
+
+def preloading_forkserver() -> _SandboxForkserver | None:
+    """Return the manager of preloading templates, or None when there is no preload or it was given up."""
+    return _preloading_forkserver
+
+
+def abandon_preload(error: str) -> None:
+    """Give the preload up for this process's lifetime, killing the templates that tried or hold it."""
+    global _preloading_forkserver
+    with _forkserver_lock:
+        forkserver, _preloading_forkserver = _preloading_forkserver, None
+    if forkserver is not None:
+        logger.warning("sandbox_forkserver_plugin_preload_failed", error=error)
+        forkserver.shutdown()
 
 
 def threads_and_open_files() -> tuple[int, int]:

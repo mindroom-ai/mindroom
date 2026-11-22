@@ -602,26 +602,53 @@ def refresh_plugins(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugin
     return config_plugins(config, runtime_paths)
 
 
-def _worker_preload_plugins(config: Config, runtime_paths: RuntimePaths) -> tuple[list[PluginEntryConfig], str]:
-    """Return ``config``'s enabled plugins that opt in to a worker preload, and a fingerprint of all their files."""
-    entries: list[PluginEntryConfig] = []
-    stamps: list[tuple[str, int, int]] = []
+def _worker_preload_roots(config: Config, runtime_paths: RuntimePaths) -> list[tuple[PluginEntryConfig, Path]]:
+    """Return ``config``'s enabled plugins whose manifests set ``worker_preload``, each with its root."""
+    opted: list[tuple[PluginEntryConfig, Path]] = []
     for entry in config.plugins:
         try:
             root = plugin_imports._resolve_plugin_root(entry.path, runtime_paths)
-            if not entry.enabled or not plugin_imports._load_plugin_base(root).worker_preload:
-                continue
+            if entry.enabled and plugin_imports._load_plugin_base(root).worker_preload:
+                opted.append((entry, root))
         except Exception:  # noqa: S112 - the load that follows reports a plugin that does not resolve.
             continue
-        entries.append(entry)
-        # Importing writes bytecode caches and reading a checkout's status rewrites its index: neither changes the plugin.
-        for directory, subdirectories, filenames in root.walk():
-            subdirectories[:] = sorted(name for name in subdirectories if name not in {"__pycache__", ".git"})
-            for filename in sorted(filenames):
+    return opted
+
+
+def worker_preload_plugin_paths(config: Config, runtime_paths: RuntimePaths) -> tuple[str, ...]:
+    """Return the configured paths of ``config``'s enabled plugins whose manifests set ``worker_preload``."""
+    return tuple(entry.path for entry, _root in _worker_preload_roots(config, runtime_paths))
+
+
+def _worker_preload_plugins(config: Config, runtime_paths: RuntimePaths) -> tuple[list[PluginEntryConfig], str]:
+    """Return ``config``'s plugins that opt in to a worker preload, and a fingerprint of them and all their files.
+
+    The fingerprint reads no file: each one's size, times, inode, and device change whenever it is rewritten or
+    replaced, also by a copy that keeps its size and modification time. Linked directories count as the plugin's own.
+    """
+    opted = _worker_preload_roots(config, runtime_paths)
+    stamps: list[tuple[str, int, int, int, int, int]] = []
+    for _entry, root in opted:
+        # A directory reached a second time is a link back into the tree.
+        visited = {(root.stat().st_dev, root.stat().st_ino)}
+        for directory, subdirectories, filenames in root.walk(follow_symlinks=True):
+            for path in sorted(directory / name for name in filenames):
                 with suppress(OSError):
-                    stat = (directory / filename).stat()
-                    stamps.append((str(directory / filename), stat.st_size, stat.st_mtime_ns))
-    return entries, hashlib.sha256(json.dumps(stamps).encode()).hexdigest()
+                    stat = path.stat()
+                    stamps.append(
+                        (str(path), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino, stat.st_dev),
+                    )
+            followed: list[str] = []
+            # Importing writes bytecode caches and reading a checkout's status rewrites its index: neither changes it.
+            for name in sorted(set(subdirectories) - {"__pycache__", ".git"}):
+                with suppress(OSError):
+                    stat = (directory / name).stat()
+                    if (stat.st_dev, stat.st_ino) not in visited:
+                        visited.add((stat.st_dev, stat.st_ino))
+                        followed.append(name)
+            subdirectories[:] = followed
+    payload = json.dumps([[str(root) for _entry, root in opted], stamps])
+    return [entry for entry, _root in opted], hashlib.sha256(payload.encode()).hexdigest()
 
 
 def preload_plugins(config: Config, runtime_paths: RuntimePaths) -> bool:
@@ -642,20 +669,15 @@ def preload_plugins(config: Config, runtime_paths: RuntimePaths) -> bool:
     return True
 
 
-def keep_preloaded_plugins(config: Config, runtime_paths: RuntimePaths) -> bool:
-    """Return whether this process keeps the plugins its template preloaded, dropping them unless they suit ``config``.
+def preloaded_plugins_suit(config: Config, runtime_paths: RuntimePaths) -> bool | None:
+    """Return whether the plugins this process inherited from its template suit ``config``; None when it has none.
 
-    They suit while they are exactly ``config``'s plugins that opt in and no file under their roots changed since.
-    Otherwise ``refresh_plugins`` loads every plugin in this process, as it does without a preload.
+    They suit only while they are exactly ``config``'s plugins that opt in and no file of theirs changed since.
+    A process they do not suit must not run the request: what their import left behind cannot be undone.
     """
-    global _PRELOADED
     if _PRELOADED is None:
-        return False
-    if _worker_preload_plugins(config, runtime_paths)[1] == _PRELOADED:
-        return True
-    publish_plugins(PluginGeneration())
-    _PRELOADED = None
-    return False
+        return None
+    return _worker_preload_plugins(config, runtime_paths)[1] == _PRELOADED
 
 
 def candidate_tool_registry(
