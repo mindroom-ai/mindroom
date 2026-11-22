@@ -47,6 +47,7 @@ from mindroom.thread_summary import automatic
 from mindroom.thread_summary.automatic import maybe_generate_thread_summary
 from mindroom.thread_summary.generation import (
     _CLIP_SEPARATOR,
+    _CLIP_TAIL_CHARS,
     _MAX_MESSAGE_CHARS,
     _MAX_MESSAGES_BEFORE_TRUNCATION,
     _TRUNCATION_EDGE_COUNT,
@@ -2622,7 +2623,11 @@ class TestConversationText:
     async def test_long_thread_clips_head_and_tail_with_whitespace_only(self) -> None:
         """Long-thread sampling keeps head and tail of overlong bodies and renders whitespace-only bodies empty."""
         exact = "a" * _MAX_MESSAGE_CHARS
-        overlong = f"  HEAD_START {'b' * (_MAX_MESSAGE_CHARS + 200)} REAL_TAIL_QUESTION?  "
+        head_chars = _MAX_MESSAGE_CHARS - _CLIP_TAIL_CHARS - len(_CLIP_SEPARATOR)
+        head_part = "H" * head_chars
+        middle_part = "M" * 200
+        tail_part = "T" * _CLIP_TAIL_CHARS
+        overlong = f"  {head_part}{middle_part}{tail_part}  "
         history = [
             ResolvedVisibleMessage.synthetic(sender="@alice:localhost", body=exact, event_id="$m0"),
             ResolvedVisibleMessage.synthetic(sender="@bob:localhost", body=overlong, event_id="$m1"),
@@ -2635,10 +2640,8 @@ class TestConversationText:
         lines = text.splitlines()
         assert lines[0] == f"@alice:localhost: {exact}"
         clipped_body = lines[1].removeprefix("@bob:localhost: ")
-        assert _CLIP_SEPARATOR in clipped_body
-        assert clipped_body.startswith("HEAD_START")
-        assert clipped_body.endswith("REAL_TAIL_QUESTION?")
-        assert len(clipped_body) <= _MAX_MESSAGE_CHARS
+        assert clipped_body == f"{head_part}{_CLIP_SEPARATOR}{tail_part}"
+        assert len(clipped_body) == _MAX_MESSAGE_CHARS
         assert lines[2] == "@blank:localhost: "
 
     async def test_long_thread_at_51_with_whitespace_only_stays_sampled_and_clipped(self) -> None:
