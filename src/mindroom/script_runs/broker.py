@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
-import sys
 from contextlib import nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -95,7 +94,8 @@ _CALL_UNAVAILABLE = "Background script call is unavailable."
 # What a workflow's call tells when it starts and stops waiting for a person; a plain script's call tells nobody.
 _APPROVAL_WAIT: ContextVar[Callable[[str | None], Awaitable[object]] | None] = ContextVar("approval_wait", default=None)
 # Whether the call being accepted stops where its tool would run: its caller starts the work the call stands for.
-_GATE_ONLY: ContextVar[bool] = ContextVar("gate_only", default=False)
+# Only a workflow attempt's call says either; a plain script's call says nothing.
+_GATE_ONLY: ContextVar[bool | None] = ContextVar("gate_only", default=None)
 _OWNER_RUNTIME_UNAVAILABLE = "Background script owner runtime is temporarily unavailable."
 _INDETERMINATE_ERROR = {
     "kind": "indeterminate",
@@ -461,7 +461,6 @@ class ScriptToolBroker:
         which of them wait for a person and so hold no place.
         """
         request = ScriptToolCallRequest(run.run_id, call_id, grant, arguments)
-        self._run_locks.setdefault(run.run_id, asyncio.Semaphore(sys.maxsize))
         # The call's task is created in here and keeps the context it is created in.
         token, gate = _APPROVAL_WAIT.set(waits), _GATE_ONLY.set(gate_only)
         try:
@@ -514,8 +513,10 @@ class ScriptToolBroker:
             await self.cancel_run(run_id)
 
     async def _execute_claimed_call(self, call: ScriptCallRecord, arguments: dict[str, object]) -> ScriptCallRecord:
-        run_lock = self._run_locks.setdefault(call.run_id, asyncio.Semaphore(1))
-        async with run_lock:
+        # A plain script's calls run one at a time. A workflow attempt's, which alone set whether they are a gate,
+        # take no lock here at all: the engine of their run is the one limit they have.
+        plain = _GATE_ONLY.get() is None
+        async with self._run_locks.setdefault(call.run_id, asyncio.Semaphore(1)) if plain else nullcontext():
             try:
                 durable_run = await asyncio.to_thread(self.store.require_call_dispatch_allowed, call.run_id)
             except ScriptCapabilityError:

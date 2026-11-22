@@ -65,14 +65,15 @@ async def recover_runs(
 
     One run's error stops no other.
     """
-    resumed = []
+    resumed, ending = [], []
     for listed in await asyncio.to_thread(engine.store.list_runs, include_finished=False):
         try:
             run = engine.store.get_run(listed.run_id)
             standing = "ended" if run.job_id is None else job_standing(run.job_id)
             if standing == "stopped":
-                # Only while the run is still that job's: a resume may have given it to another one.
-                await engine.cancel(run.run_id, owner=run.owner, **engine.job_stop(run, _JOB_STOPPED))
+                # Only while the run is still that job's: a resume may have given it to another one. The end waits
+                # for the run's agents, so it is the engine's own task and holds up no other run of this pass.
+                ending.append(engine.cancel_as_task(run.run_id, owner=run.owner, **engine.job_stop(run, _JOB_STOPPED)))
             elif standing == "absent" and run.attempt == 0:
                 # Taken with no wait since the job was asked about, so no delivery of its call is in between.
                 if not (lock := admission(str(run.job_id))).locked():
@@ -88,4 +89,6 @@ async def recover_runs(
             continue
         except Exception:
             logger.exception("workflow_run_recovery_failed", run_id=listed.run_id)
+    # Waited for last, and kept from a pass that runs out of time: each end goes on to its own deadline.
+    await asyncio.shield(asyncio.gather(*ending, return_exceptions=True))
     return resumed

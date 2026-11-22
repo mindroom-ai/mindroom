@@ -158,6 +158,41 @@ async def test_stop_without_a_job_runtime_does_not_make_a_started_agent_safe_to_
 
 
 @pytest.mark.asyncio
+async def test_report_of_an_attempt_is_taken_while_a_call_it_did_not_reach_waits_for_a_person(
+    stack: WorkflowStack,
+) -> None:
+    """An earlier attempt left an agent waiting, and this one's script takes another path and returns.
+
+    The run shows `waiting` for that agent, and the report of the attempt that serves it is still its report.
+    The reproducer of the second full review (Astra M1): the report was refused, and the script exited without it.
+    """
+    left = WorkflowNode(
+        run_id=stack.run_id,
+        key="/0:p0@0",
+        kind="agent",
+        lane="/0:p0",
+        idx=0,
+        digest="old",
+        request={"prompt": "first"},
+        attempt=1,
+        state=WorkflowNodeState.WAITING,
+        handle=DispatchHandle("job", "a-job-that-waits", dispatched=True),
+    )
+    stack.store.put_node(left, stack.store.get_run(stack.run_id).epoch)
+    await stack.scripts.end(stack.attempt.run_id, ScriptRunState.INTERRUPTED, reason=RUNTIME_RESTARTED)
+    await stack.engine.settle(stack.store.get_run(stack.run_id), replay=True)
+    await stack.engine.launch(stack.run_id)
+    assert await stack.result("@1", "tool", _COUNT) == 1
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.WAITING)
+
+    async with stack.http() as client:
+        finish = await client.post("finish", json={"result": "done"})
+
+    run = stack.store.get_run(stack.run_id)
+    assert (finish.status_code, run.result, run.finished_at is not None) == (200, "done", True)
+
+
+@pytest.mark.asyncio
 async def test_indeterminate_call_is_not_issued_again_until_rerun_names_it(stack: WorkflowStack) -> None:
     """A call that may have run blocks its key on every attempt, until a resume names it."""
     node = await stack.leave_indeterminate("@0", _A)

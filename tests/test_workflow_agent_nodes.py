@@ -11,6 +11,7 @@ import sqlite3
 from contextlib import suppress
 from datetime import timedelta
 from functools import partial
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -20,7 +21,9 @@ from mindroom.approval import manager as approval_manager
 from mindroom.delegation.background import delegation_child
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.llm.errors import ProviderError
+from mindroom.orchestration import workflow_runtime
 from mindroom.orchestration.tool_job_runtime import _follow_up_candidates
+from mindroom.orchestration.workflow_runtime import WorkflowRuntimeLifecycle
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.script_runs.reasons import PLUGIN_TOOLS_CHANGED
@@ -36,7 +39,7 @@ from tests.delegation_helpers import offered_tools
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.scripted_agent_helpers import raising
 from tests.tool_job_helpers import JobApprovalCards, wait_for_status
-from tests.workflow_helpers import NodeFailed, WorkflowStack, tool_args, workflow_stack
+from tests.workflow_helpers import NodeFailed, WorkflowStack, set_run, tool_args, workflow_stack
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -559,6 +562,48 @@ async def test_a_run_that_ends_starts_no_agent_in_the_place_its_stopped_agent_le
         0,
         WorkflowRunState.FAILED,
     )
+
+
+@pytest.mark.asyncio
+async def test_the_pass_that_ends_a_stopped_jobs_run_neither_cuts_that_end_short_nor_holds_up_the_next_run(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The maintenance pass has less time than the end of a run may take, so that end is the engine's own task.
+
+    The reproducer of the second full review (Sol Major 2, Opus Minor 1), through the real wrapper: the run the
+    pass comes to first has a stopped job and an agent that does not end, and the other run only waits for its
+    next attempt.
+    """
+    monkeypatch.setattr(engine_module, "_STOP_SECONDS", 0.6)
+    second = stack.run_id
+    await stack.scripts.end(stack.attempt.run_id, ScriptRunState.INTERRUPTED, reason=PLUGIN_TOOLS_CHANGED)
+    first = (await stack.start()).run_id
+    _hanging(stack)
+    await stack.submit("@0", "agent", _PROMPT)
+    set_run(stack.store, first, job_id="a-stopped-job")
+    assert [run.run_id for run in stack.store.list_runs(include_finished=False)] == [first, second]
+
+    async def ignored(_job_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(stack.jobs, "request_cancel", ignored)
+    standing = lambda _paths, job_id: "stopped" if job_id == "a-stopped-job" else "ended"  # noqa: E731
+    monkeypatch.setattr(workflow_runtime, "workflow_job_standing", standing)
+    script_runtime = SimpleNamespace(
+        pass_timeout_seconds=0.4,
+        runtime_paths=stack.context.runtime_paths,
+        retention_seconds=3600,
+    )
+    lifecycle = WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime)  # type: ignore[arg-type]
+
+    await asyncio.wait_for(lifecycle._maintain(), 5)
+
+    # The pass gave up after its half of 0.4 seconds, and the second run has its attempt by then.
+    assert [stack.store.get_run(run_id).attempt for run_id in (first, second)] == [1, 2]
+    await stack.until(lambda: stack.store.get_run(first).state is WorkflowRunState.CANCELLED)
+    stack.run_id = first
+    assert _node(stack).state is WorkflowNodeState.INDETERMINATE
 
 
 @pytest.mark.asyncio

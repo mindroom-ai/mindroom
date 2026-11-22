@@ -9,7 +9,7 @@ import secrets
 import time
 from collections import Counter, deque
 from contextlib import suppress
-from contextvars import ContextVar
+from contextvars import ContextVar, copy_context
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
@@ -436,6 +436,18 @@ class WorkflowEngine:
                     outcome = _run_outcome(self.store.get_run(run_id), attempt, stopped=state)
             run = await self._end_run(run, *outcome)
         return run
+
+    def cancel_as_task(self, run_id: str, **how: Any) -> asyncio.Task[WorkflowRun]:  # noqa: ANN401 - as `cancel`
+        """Stop a run as the engine's own task, for a caller with less time than the end of a run may take."""
+
+        def failed(ended: asyncio.Task[WorkflowRun]) -> None:
+            error = None if ended.cancelled() else ended.exception()
+            if error is not None and not isinstance(error, WorkflowRunNotFoundError):
+                logger.error("workflow_run_stop_failed", run_id=run_id, exc_info=error)
+
+        task = self._spawn(run_id, self.cancel(run_id, **how))
+        task.add_done_callback(failed)
+        return task
 
     def job_stop(self, run: WorkflowRun, reason: str) -> dict[str, Any]:
         """Return how the run of a stopped job ends: with *reason*, or interrupted for the access its owner lost."""
@@ -1293,9 +1305,13 @@ class WorkflowEngine:
         await asyncio.to_thread(self.store.append_log, run.run_id, run.epoch, text)
 
     async def finish(self, attempt: ScriptRunRecord, *, result: object, error: str | None) -> None:
-        """Store what the script's `main` returned or raised; the run ends when the attempt's process has."""
+        """Store what the script's `main` returned or raised; the run ends when the attempt's process has.
+
+        Also for a run that shows `waiting`: a call an earlier attempt left with a person, which this attempt's
+        script did not reach, takes nothing from the report of the attempt the run serves.
+        """
         run = await self._current_run(attempt)
-        report = partial(self.store.update_run, run.run_id, run.epoch, when={WorkflowRunState.RUNNING})
+        report = partial(self.store.update_run, run.run_id, run.epoch, when=_SERVED_RUN_STATES)
         await asyncio.to_thread(partial(report, result=result, error=error, finished_at=utc_timestamp()))
         self._spawn(run.run_id, self._observe_exit(attempt.run_id))
 
@@ -1338,7 +1354,10 @@ class WorkflowEngine:
     def _spawn[T](self, owner: str, work: Coroutine[None, None, T]) -> asyncio.Task[T]:
         """Start *work* as the engine's own task, stopped when the run *owner* ends or the engine closes."""
         tasks = self._tasks.setdefault(owner, set())
-        task = asyncio.create_task(work, name=f"workflow:{owner}")
+        # In no script's tool call, whatever starts it: a task started as a tool call ends is not inside that call.
+        context = copy_context()
+        context.run(_CALLING_NODE.set, None)
+        task = asyncio.create_task(work, name=f"workflow:{owner}", context=context)
         tasks.add(task)
         task.add_done_callback(tasks.discard)
         return task

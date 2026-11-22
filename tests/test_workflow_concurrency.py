@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
 from contextlib import closing
 from typing import TYPE_CHECKING
 
@@ -121,6 +122,85 @@ async def test_waiting_node_frees_its_slot_and_takes_one_again(gated: WorkflowSt
     written.set()
 
     assert ((await _settled(stack, first)).result, (await _settled(stack, third)).result) == ("appended", 3)
+
+
+@pytest.mark.asyncio
+async def test_tool_calls_of_an_attempt_work_side_by_side_whenever_they_were_claimed(stack: WorkflowStack) -> None:
+    """The broker holds no call of a workflow attempt back: one that was claimed while another ended waits for none.
+
+    The reproducer of the second full review (Opus B1): the attempt's lock was dropped while a call's claim was on
+    its thread, and that call then made the lock of a plain script, which runs one call at a time.
+    """
+    await stack.start(max_concurrent=4)
+    gates = {str(n): asyncio.Event() for n in range(4)}
+    working: set[str] = set()
+    peak: list[int] = []
+
+    async def effect() -> None:
+        line = stack.counting_tool.lines[-1]
+        working.add(line)
+        peak.append(len(working))
+        await gates[line].wait()
+        working.discard(line)
+
+    stack.counting_tool.after_effect = effect
+    receipts = [await stack.submit("@0", "tool", _append("0"))]
+    await stack.until(lambda: "0" in working)
+    # The claim of call 1 is held on its thread while call 0 ends, which leaves the attempt without a call in flight.
+    claiming, claim = threading.Event(), threading.Event()
+    original = stack.script_store.claim_call
+
+    def held(**call: object) -> object:
+        claiming.set()
+        claim.wait(10)
+        return original(**call)
+
+    stack.script_store.claim_call = held  # type: ignore[method-assign]
+    receipts.append(await stack.submit("@1", "tool", _append("1")))
+    await stack.until(claiming.is_set)
+    stack.script_store.claim_call = original  # type: ignore[method-assign]
+    gates["0"].set()
+    await stack.until(lambda: not any(key[0] == stack.attempt.run_id for key in stack.broker._tasks))
+    claim.set()
+    await stack.until(lambda: "1" in working)
+
+    receipts += [await stack.submit(f"@{n}", "tool", _append(str(n))) for n in (2, 3)]
+    await stack.until(lambda: working == {"1", "2", "3"})
+    for gate in gates.values():
+        gate.set()
+
+    assert [(await _settled(stack, receipt)).state for receipt in receipts] == ["completed"] * 4
+    assert max(peak) == 3
+
+
+@pytest.mark.asyncio
+async def test_agent_that_starts_in_the_place_a_tool_call_leaves_is_not_inside_that_call(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The queued agent's job starts from the ending tool call's task, and must not take that call for its own.
+
+    The reproducer of the second full review (Opus M1): a subagent of such an agent nested its run under the tool.
+    """
+    seen: list[object] = []
+
+    async def launch(*_args: object, **_kwargs: object) -> object:
+        seen.append(engine_module.calling_node())
+        msg = "Seen."
+        raise engine_module.AgentNodeError(msg)
+
+    monkeypatch.setattr(engine_module, "launch_child", launch)
+    await stack.start(max_concurrent=1)
+    gate = asyncio.Event()
+    stack.counting_tool.after_effect = gate.wait
+    await stack.submit("@0", "tool", _append("x"))
+    await stack.until(lambda: stack.counting_tool.calls == 1)
+    assert (await stack.submit("@1", "agent", {"prompt": "hi"})).state == "queued"
+
+    gate.set()
+    await stack.until(lambda: seen)
+
+    assert seen == [None]
 
 
 @pytest.mark.asyncio
