@@ -1637,6 +1637,72 @@ def test_cli_signal_handlers_are_removed_before_the_result_is_printed(
     assert all(handlers == restored for handlers in handlers_while_printing)
 
 
+def test_real_sigterm_during_a_blocked_final_write_stops_the_cli() -> None:
+    """SIGTERM stops a CLI that is blocked writing its result to a full stdout pipe, as it does on main."""
+    import fcntl  # noqa: PLC0415
+    import os  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+    import sys  # noqa: PLC0415
+    import termios  # noqa: PLC0415
+    import threading  # noqa: PLC0415
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: PLC0415
+
+    if not hasattr(fcntl, "F_SETPIPE_SZ"):
+        pytest.skip("needs a pipe whose size can be set")
+    pipe_bytes = 4096
+    submitted = threading.Event()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            receipt = {"status": "completed", "outcome": "[worker: w]\n" + "x" * (8 * pipe_bytes)}
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps(receipt).encode())
+            submitted.set()
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+            del format, args
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    env = {
+        **os.environ,
+        "MINDROOM_AGENT_CLI_URL": f"http://127.0.0.1:{server.server_port}",
+        "MINDROOM_AGENT_CLI_TOKEN": "private-capability",
+    }
+    read_fd, write_fd = os.pipe()
+    fcntl.fcntl(write_fd, fcntl.F_SETPIPE_SZ, pipe_bytes)
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from mindroom.agent_cli.main import main; raise SystemExit(main(['workers', 'run', 'w', '--', 'true']))",
+        ],
+        stdout=write_fd,
+        stderr=subprocess.DEVNULL,
+        env=env,
+    )
+    os.close(write_fd)
+    try:
+        assert submitted.wait(timeout=SETTLE_TIMEOUT_SECONDS)
+        # Nothing reads the pipe, so once it is full the CLI is blocked in its final write.
+        deadline = time.monotonic() + SETTLE_TIMEOUT_SECONDS
+        while int.from_bytes(fcntl.ioctl(read_fd, termios.FIONREAD, bytes(4)), sys.byteorder) < pipe_bytes:
+            assert time.monotonic() < deadline, "the CLI never filled its stdout pipe"
+            time.sleep(0.01)
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=SETTLE_TIMEOUT_SECONDS) == -signal.SIGTERM
+    finally:
+        proc.kill()
+        proc.wait()
+        os.close(read_fd)
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
 @pytest.mark.asyncio
 async def test_cancel_of_an_unknown_call_leaves_no_trace_for_a_later_submit(tmp_path: Path) -> None:
     """A cancel for an ID the owner does not hold is refused, and a later submit of that ID runs normally."""
