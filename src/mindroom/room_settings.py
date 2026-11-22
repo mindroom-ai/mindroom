@@ -46,6 +46,7 @@ ROOM_THREAD_MODES: tuple[RoomThreadMode, ...] = get_args(RoomThreadMode)
 # A change made while no bot's sync timeline showed it, such as during a sync gap, applies after this long.
 _REREAD_AFTER_SECONDS = 600.0
 # A turn waits for the read and a command for the write, so a stalled homeserver costs them a few seconds at most.
+# It bounds each request: a read that also moves an older runtime's override into the room can take twice as long.
 _REQUEST_TIMEOUT_SECONDS = 5.0
 _UNCONFIRMED = float("-inf")
 _order = itertools.count(1)
@@ -372,14 +373,20 @@ async def refresh_room_settings(
     when the runtime has no copy, and not by a copy no read confirmed recently. Each read gives up after a few
     seconds, and the event then goes on by what the runtime knew. Its turn does not wait for such a room again.
     """
-    reply_mode, _model, _thread_mode = await asyncio.gather(
-        refresh_room_setting(REPLY_MODE, client, runtime_paths, room_id, put_state=put_state),
+
+    async def reply_mode() -> SettingRead[RoomReplyMode]:
+        read = await refresh_room_setting(REPLY_MODE, client, runtime_paths, room_id, put_state=put_state)
+        if not read.ok:
+            # Numbered as it fails, not when the other settings are read, so what arrives meanwhile counts as newer.
+            _event_reads_failed[runtime_paths.storage_root, room_id] = next(_order)
+        return read
+
+    found, _model, _thread_mode = await asyncio.gather(
+        reply_mode(),
         refresh_room_setting(MODEL, client, runtime_paths, room_id, put_state=put_state),
         refresh_room_setting(THREAD_MODE, client, runtime_paths, room_id, put_state=put_state),
     )
-    if not reply_mode.ok:
-        _event_reads_failed[runtime_paths.storage_root, room_id] = next(_order)
-    return reply_mode
+    return found
 
 
 def event_read_failed(runtime_paths: RuntimePaths, room_id: str) -> bool:

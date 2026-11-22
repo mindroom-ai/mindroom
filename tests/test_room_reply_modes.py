@@ -36,7 +36,7 @@ from mindroom.dispatch_source import (
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
 )
 from mindroom.entity_resolution import current_entity_id
-from mindroom.event_journal import EventClass, EventKind
+from mindroom.event_journal import EventClass, EventKind, RoomMembershipPosition
 from mindroom.llm.media import Audio
 from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 from mindroom.matrix.state import MatrixState
@@ -49,6 +49,7 @@ from mindroom.room_settings import (
     REPLY_MODE,
     SettingRead,
     _drop_legacy_override,
+    event_read_failed,
     observe_room_settings_event,
     refresh_room_setting,
     refresh_room_settings,
@@ -489,6 +490,70 @@ async def test_a_bots_read_that_ends_last_does_not_decide_another_bots_turn(tmp_
 
     assert plan.kind == "ignore"
     assert client.room_get_state_event.await_count == reads
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_is_older_than_what_arrives_while_the_other_settings_are_read(tmp_path: Path) -> None:
+    """A reply mode that arrives after its read failed, while the room's model is still read, has the turn read again."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    client, model_read = _Homeserver().client(), asyncio.Event()
+
+    async def fails_with_the_model_held(room_id: str, _event_type: str, state_key: str = "") -> object:
+        if state_key == "model":
+            await model_read.wait()
+        return nio.RoomGetStateEventError("unavailable", "M_UNKNOWN", room_id=room_id)
+
+    client.room_get_state_event.side_effect = fails_with_the_model_held
+    read = await _started(refresh_room_settings(client, runtime_paths, ROOM_ID, put_state=None))
+    assert event_read_failed(runtime_paths, ROOM_ID)
+
+    observe_room_settings_event(runtime_paths, ROOM_ID, _setting_event({"value": "mentions"}))
+    model_read.set()
+
+    assert not (await read).ok
+    assert not event_read_failed(runtime_paths, ROOM_ID)
+
+
+@pytest.mark.asyncio
+async def test_a_bot_that_left_the_room_does_not_read_it_for_its_turn(tmp_path: Path) -> None:
+    """A turn of a bot whose client no longer lists the room decides by the copy: it reads and moves nothing."""
+    config = _config(tmp_path)
+    _write_legacy_overrides(runtime_paths_for(config), {ROOM_ID: "mentions"})
+    policy = _policy_for(config, "general")
+    client = policy.deps.runtime.client = _Homeserver().client()
+    client.rooms.__contains__.return_value = False
+
+    plan = await policy.plan_turn(
+        _room_with_members(SENDER, _entity_id(config, "general").full_id, room_id=ROOM_ID),
+        _dispatch(_context(), agent_name="general", room_id=ROOM_ID),
+        has_active_response_for_target=lambda _target: False,
+    )
+
+    assert plan.kind == "ignore"
+    client.room_get_state_event.assert_not_awaited()
+    client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_bot_is_in_a_room_its_client_lists_and_its_journal_has_no_leave_of() -> None:
+    """The client drops the room first and the journal knows after a restart; an unreadable journal says not in it."""
+    position = AsyncMock(return_value=RoomMembershipPosition("join", 0))
+    bot = SimpleNamespace(
+        client=SimpleNamespace(rooms={ROOM_ID: object()}),
+        journal_principal=lambda: SimpleNamespace(ingestion_membership_position=position),
+        logger=MagicMock(),
+    )
+
+    assert await AgentBot._in_room(bot, ROOM_ID)
+    position.return_value = RoomMembershipPosition("leave", 1)
+    assert not await AgentBot._in_room(bot, ROOM_ID)
+    position.side_effect = OSError("unreadable")
+    assert not await AgentBot._in_room(bot, ROOM_ID)
+    bot.logger.exception.assert_called_once()
+    position.reset_mock(side_effect=True)
+    bot.client.rooms.clear()
+    assert not await AgentBot._in_room(bot, ROOM_ID)
+    position.assert_not_awaited()
 
 
 @pytest.mark.asyncio

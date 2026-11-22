@@ -662,10 +662,11 @@ class TurnPolicy:
         wrote follow the room's ordinary rules.
         """
         context = dispatch.context
-        read = None
-        # A room whose read before this turn's event failed is not waited for again: the runtime's copy decides.
+        read, client = None, self.deps.runtime.client
+        # A room whose read before this turn's event failed is not waited for again: the runtime's copy decides. It
+        # does for a bot that left the room too, which would read the room as it left it.
         failed = event_read_failed(self.deps.runtime_paths, dispatch.target.room_id)
-        if not failed and (client := self.deps.runtime.client) is not None:
+        if not failed and client is not None and dispatch.target.room_id in client.rooms:
             read = await refresh_room_setting(
                 REPLY_MODE,
                 client,
