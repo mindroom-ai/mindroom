@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import errno
 import hashlib
@@ -13,6 +14,7 @@ import tempfile
 import threading
 import time
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import asdict, replace
@@ -40,6 +42,8 @@ from mindroom.private_storage.private_instance_identity_store import ensure_priv
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
 from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
+from mindroom.tool_system import sandbox_proxy as sandbox_proxy_module
+from mindroom.tool_system.runtime_context import CallOutputStream, call_progress_sink_scope
 from mindroom.tool_system.worker_proxy_client import record_proxy_response_failure_for_worker
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -47,6 +51,7 @@ from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_unscoped_worker_key,
     resolve_worker_key,
+    resolve_worker_target,
     subagent_worker_key,
     worker_dir_name,
     worker_id_for_key,
@@ -6671,6 +6676,96 @@ def test_kubernetes_backend_does_not_wait_for_the_setup_when_the_caller_only_sho
     assert handle.status == "ready"
     assert clock.monotonic() == 0.0
     assert "preparing" not in [event.phase for event in events]
+
+
+@pytest.mark.parametrize("streamed", [True, False])
+def test_kubernetes_backend_starts_a_streamed_command_once_its_cold_worker_answers(
+    monkeypatch: pytest.MonkeyPatch,
+    streamed: bool,
+) -> None:
+    """The runner launches a streamed command itself, so ``workers run`` does not wait for the setup other calls use."""
+    backend, _apps_api, _core_api = _backend()
+    clock = _run_on_one_clock(monkeypatch)
+    _answer_worker_setup(backend, lambda: "preparing")
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-1",
+    )
+    target = resolve_worker_target("user", "code", execution_identity=identity, tenant_id=None, account_id=None)
+    loop = asyncio.new_event_loop()
+
+    try:
+        with call_progress_sink_scope(None, stream=CallOutputStream(loop) if streamed else None):
+            _route, handle = sandbox_proxy_module.worker_route(
+                runtime_paths=backend.runtime_paths,
+                runtime_config=None,
+                tool_name="shell",
+                function_name="run_shell_command",
+                worker_target=target,
+                worker_manager=backend,
+                base_dir=None,
+            )
+    finally:
+        loop.close()
+
+    assert handle is not None
+    assert handle.status == "ready"
+    assert clock.monotonic() == pytest.approx(0.0 if streamed else 180.0)
+
+
+def test_kubernetes_backend_lets_a_caller_that_only_shows_a_worker_pass_a_tool_caller_waiting_for_its_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The setup wait holds no lock: a viewer goes on once the worker answers, and every tool caller still waits."""
+    backend, _apps_api, _core_api = _backend()
+    monkeypatch.setattr(kubernetes_backend_module, "_SETUP_POLL_INTERVAL_SECONDS", 0.01)
+    waiting, finished = threading.Event(), threading.Event()
+    reads: list[str] = []
+
+    def setup() -> str:
+        reads.append("ready" if finished.is_set() else "preparing")
+        if len(reads) > 1:  # The first read is the ready check; each later one is a tool caller's setup wait.
+            waiting.set()
+        return reads[-1]
+
+    _answer_worker_setup(backend, setup)
+    spec = _spec(_TEST_SCOPED_WORKER_KEY_A)
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        try:
+            tool_call = pool.submit(backend.ensure_worker, spec, now=10.0)
+            assert waiting.wait(10)
+            viewer = pool.submit(backend.ensure_worker, replace(spec, wait_for_setup=False), now=11.0)
+            assert viewer.result(timeout=3).status == "ready"
+            later_tool_call = pool.submit(backend.ensure_worker, spec, now=12.0)
+            time.sleep(0.2)
+            assert not tool_call.done()
+            assert not later_tool_call.done()
+        finally:
+            finished.set()
+        assert tool_call.result(timeout=10).status == "ready"
+        assert later_tool_call.result(timeout=10).status == "ready"
+    # The later tool caller waited behind the first one's wait, without reading the worker's health once more.
+    assert reads.count("ready") == 1
+
+
+def test_kubernetes_backend_reuses_a_ready_worker_whether_or_not_its_caller_waits_for_the_setup() -> None:
+    """Whether a caller waits for the setup says nothing about the worker, so it never makes a ready worker stale."""
+    backend, apps_api, _core_api = _backend()
+    spec = _spec(_TEST_SCOPED_WORKER_KEY_A)
+    backend.ensure_worker(spec, now=10.0)
+    reads_after_ensure = len(apps_api.read_names)
+
+    handle = backend.ensure_worker(replace(spec, wait_for_setup=False), now=11.0)
+
+    assert handle.status == "ready"
+    assert replace(spec, wait_for_setup=False) == spec
+    assert len(apps_api.read_names) == reads_after_ensure
 
 
 def test_kubernetes_backend_marks_a_worker_healthy_when_it_answers(monkeypatch: pytest.MonkeyPatch) -> None:
