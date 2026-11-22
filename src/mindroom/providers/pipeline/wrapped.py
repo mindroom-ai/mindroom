@@ -196,7 +196,8 @@ async def attempts(
             error.replay_stripped = stripped = error.replay_stripped or request.strip_encrypted_replay
             if committed or (reissue := retry(error)) is None:
                 raise
-            budget = error.retry_budget
+            # A failure raised above the retry stage, such as a download, carries no budget; the request's stays.
+            budget = error.retry_budget or request.retry_budget
         if (report := usage.settle()) is not None:
             yield _with_carried_usage(report, carried)
         if reissue.delay_seconds:

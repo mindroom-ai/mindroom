@@ -2490,13 +2490,13 @@ async def test_openrouter_responses_only_an_effective_authored_input_skips_429_s
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("routing", "recovers"),
+    "routing",
     [
         # With fallbacks off both listed upstreams stay eligible.
-        ({"order": ["openai", "azure"], "allow_fallbacks": False}, True),
-        ({"only": ["openai", "azure"]}, True),
-        # The one upstream the request may reach created the encrypted items, and would be sent the whole history.
-        ({"only": ["openai"]}, False),
+        {"order": ["openai", "azure"], "allow_fallbacks": False},
+        {"only": ["openai", "azure"]},
+        # One slug can cover several endpoints, so a single entry does not prove one endpoint created the items.
+        {"only": ["openai"]},
     ],
     ids=["order-without-fallbacks", "only-two", "only-one"],
 )
@@ -2504,10 +2504,8 @@ async def test_openrouter_responses_429_sticky_recovery_keeps_the_routing_prefer
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     routing: dict[str, Any],
-    *,
-    recovers: bool,
 ) -> None:
-    """The stripped resend goes with the same preferences, so it goes only when they admit another upstream."""
+    """Whatever the routing preferences, the one stripped resend goes, and goes with them unchanged."""
     monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
     transient_attempts = 1 + retry_stage._MAX_TRANSIENT_RETRIES
     config = {
@@ -2523,20 +2521,14 @@ async def test_openrouter_responses_429_sticky_recovery_keeps_the_routing_prefer
         _responses_reply(*_text_events("Other upstream ok"), _completed()),
         config=config,
     )
-    request = ModelRequest(messages=_encrypted_history(native), native_compaction=native)
 
-    if recovers:
-        assert (await complete(provider, request)).content == "Other upstream ok"
-    else:
-        with pytest.raises(RateLimited):
-            await complete(provider, request)
+    turn = await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
 
-    assert len(sent) == transient_attempts + recovers
+    assert (turn.content, len(sent)) == ("Other upstream ok", transient_attempts + 1)
     bodies = [json.loads(request.content) for request in sent]
     assert [body["provider"] for body in bodies] == [routing] * len(sent)
-    assert all("encrypted_content" in json.dumps(body["input"]) for body in bodies[:transient_attempts])
-    if recovers:
-        assert "encrypted_content" not in json.dumps(bodies[-1]["input"])
+    assert all("encrypted_content" in json.dumps(body["input"]) for body in bodies[:-1])
+    assert "encrypted_content" not in json.dumps(bodies[-1]["input"])
 
 
 @pytest.mark.asyncio

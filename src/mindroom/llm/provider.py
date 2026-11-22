@@ -199,6 +199,7 @@ class ModelRequest:
     portable_replay: bool = False
     native_compaction: NativeCompactionReplay | None = None
     strip_encrypted_replay: bool = False
+    # The retry stage's internal budget, typed ``object`` to keep ``providers.pipeline`` out of this module.
     retry_budget: object | None = None
     on_send: Callable[[Mapping[str, Any]], Awaitable[None]] = _unobserved
     prompt_hold: Path | None = None

@@ -577,7 +577,6 @@ After such a 400, or a 429 that outlasts the transient retries, MindRoom drops t
 A transient failure of that resend is retried only as often as the request has transient retries left.
 On a very long thread whose full stored history exceeds the context window, you may need `/compact` after an upstream switch.
 To pin threads strictly to one upstream at the cost of failover, set `provider: {only: [openai]}` under `extra_kwargs.request_params.extra_body` (`order` with `allow_fallbacks: false` can still admit other endpoints).
-With a single-entry `only`, a 429 is not resent, because the same upstream would be sent the whole history; a 400 for encrypted items that another upstream created is still resent without them.
 Model-rerouting fields (`models`, `model`, `route`, `preset`, or `@preset/` model IDs) turn native compaction off.
 The `provider: openrouter` route uses Chat Completions and keeps text compaction.
 

@@ -69,6 +69,7 @@ class ProviderError(Exception):
         self.retry_after_seconds = retry_after_seconds
         self.rejected_media = rejected_media
         self.replay_stripped = False
+        # The retry stage's internal budget, typed ``object`` to keep ``providers.pipeline`` out of this module.
         self.retry_budget: object | None = None
 
 
