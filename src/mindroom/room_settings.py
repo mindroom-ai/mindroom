@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypeGuard, cast, get_args
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, get_args
 from weakref import WeakValueDictionary
 
 from mindroom.config.agent import RoomReplyMode
@@ -152,14 +153,27 @@ def _drop_legacy_override(setting: RoomSetting[Any], runtime_paths: RuntimePaths
         logger.warning("room_setting_legacy_override_kept", room_id=room_id, setting=setting.key, exc_info=True)
 
 
-def state_event_was_read(response: object) -> TypeGuard[nio.RoomGetStateEventResponse]:
-    """Return whether a read of one state event found it; nio decodes every failure but a 404 as the event's response."""
-    import nio  # noqa: PLC0415 - config reads the copy below without loading the Matrix client
+async def state_event_content(response: object) -> dict[str, Any] | None:
+    """Return the content of the state event a read found, None unless the homeserver answered with the event.
 
-    return (
-        isinstance(response, nio.RoomGetStateEventResponse)
-        and getattr(response.transport_response, "status", 200) == 200
-    )
+    nio decodes every failure but a 404 as the event's own response, and a body that is no JSON, such as a proxy's
+    page, as `{}`, which a cleared setting is too. So the HTTP status decides, and for no content the body itself.
+    """
+    import aiohttp  # noqa: PLC0415 - config reads the copy below without loading the Matrix client
+    import nio  # noqa: PLC0415
+
+    if not isinstance(response, nio.RoomGetStateEventResponse):
+        return None
+    content, transport = response.content, response.transport_response
+    if isinstance(transport, aiohttp.ClientResponse):
+        if transport.status != 200:
+            return None
+        if not content:
+            try:
+                content = json.loads(await transport.text())
+            except ValueError:
+                return None
+    return content if isinstance(content, dict) else None
 
 
 def resolve_room_setting[T: str](setting: RoomSetting[T], runtime_paths: RuntimePaths, room_id: str | None) -> T | None:
@@ -254,9 +268,10 @@ async def refresh_room_setting[T: str](
     except Exception:
         logger.warning("room_setting_read_failed", room_id=room_id, setting=setting.key, exc_info=True)
         return SettingRead(ok=False, value=resolve_room_setting(setting, runtime_paths, room_id))
-    if state_event_was_read(response):
-        # Only a read the homeserver answered with the event counts: a failed one keeps the copy and the override.
-        value = _value_from_content(setting, response.content)
+    # Only a read the homeserver answered with the event counts: a failed one keeps the copy and the override.
+    content = await state_event_content(response)
+    if content is not None:
+        value = _value_from_content(setting, content)
     elif isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
         # A room without the setting takes the override an older runtime stored on disk, which then leaves the file.
         # While the room refuses the write, the stored override still applies and the next read tries again.
@@ -272,7 +287,7 @@ async def refresh_room_setting[T: str](
         logger.warning("room_setting_read_failed", room_id=room_id, setting=setting.key, error=str(response))
         return SettingRead(ok=False, value=resolve_room_setting(setting, runtime_paths, room_id))
     _take(key, value, started, confirmed=True)
-    if state_event_was_read(response):
+    if content is not None:
         # The room's own event, even an empty one, decides over the override an older runtime stored.
         _drop_legacy_override(setting, runtime_paths, room_id)
     return SettingRead(ok=True, value=value)

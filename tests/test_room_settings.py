@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 ROOM_ID = "!room:localhost"
 OTHER_ROOM = "!other:localhost"
 _SETTINGS = pytest.mark.parametrize("setting", [REPLY_MODE, MODEL, THREAD_MODE], ids=lambda setting: setting.key)
+_STATE_URL = re.compile(r"http://localhost:8008/_matrix/client/v3/rooms/.*/state/.*")
 # A value of each setting.
 _VALUES = {"reply_mode": "mentions", "model": "large@high", "thread_mode": "room"}
 
@@ -188,8 +189,12 @@ async def test_an_unreadable_room_keeps_an_older_runtimes_override(tmp_path: Pat
         (503, {"payload": {"errcode": "M_UNKNOWN", "error": "Service unavailable"}}),
         (403, {"payload": {"errcode": "M_FORBIDDEN", "error": "Not in the room"}}),
         (502, {"body": "<html>Bad Gateway</html>", "content_type": "text/html"}),
+        (200, {"body": "<html>Back soon</html>", "content_type": "text/html"}),
+        (200, {"body": '{"value": ', "content_type": "application/json"}),
+        (200, {"body": "", "content_type": "application/json"}),
+        (200, {"body": "[]", "content_type": "application/json"}),
     ],
-    ids=["unavailable", "forbidden", "not-json"],
+    ids=["unavailable", "forbidden", "not-json", "proxy-page", "malformed", "empty", "not-an-object"],
 )
 async def test_a_failed_read_nio_decodes_as_an_event_keeps_the_copy_and_the_override(
     tmp_path: Path,
@@ -198,13 +203,15 @@ async def test_a_failed_read_nio_decodes_as_an_event_keeps_the_copy_and_the_over
     status: int,
     answer: dict[str, Any],
 ) -> None:
-    """Nio decodes every failed read but a 404 as the event's own response, so the HTTP status decides what was read."""
+    """Nio decodes every failed read but a 404 as the event's own response, and a body that is no JSON as `{}`.
+
+    So the HTTP status and the body decide what was read: only a JSON object the homeserver answered with is the event.
+    """
     runtime_paths = test_runtime_paths(tmp_path)
     value = _VALUES[setting.key]
     legacy = _write_legacy_overrides(runtime_paths, setting, (ROOM_ID,))
     seed_room_settings(runtime_paths, OTHER_ROOM, [_event(setting.key, {"value": value})])
-    state_url = re.compile(r"http://localhost:8008/_matrix/client/v3/rooms/.*/state/.*")
-    aioresponse.get(state_url, status=status, repeat=True, **answer)
+    aioresponse.get(_STATE_URL, status=status, repeat=True, **answer)
     client = nio.AsyncClient("http://localhost:8008", "@bot:localhost")
     client.access_token = "token"  # noqa: S105
     put_state = AsyncMock()
@@ -221,6 +228,28 @@ async def test_a_failed_read_nio_decodes_as_an_event_keeps_the_copy_and_the_over
     assert unread == known == SettingRead(ok=False, value=value)
     assert set(json.loads(legacy.read_text())) == {ROOM_ID}
     put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@_SETTINGS
+async def test_an_empty_event_the_homeserver_answers_with_supersedes_the_override(
+    tmp_path: Path,
+    aioresponse: aioresponses,
+    setting: RoomSetting[Any],
+) -> None:
+    """A cleared setting, the JSON object `{}`, is the room's own event, unlike a page nio also decodes as `{}`."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    legacy = _write_legacy_overrides(runtime_paths, setting, (ROOM_ID,))
+    aioresponse.get(_STATE_URL, payload={})
+    client = nio.AsyncClient("http://localhost:8008", "@bot:localhost")
+    client.access_token = "token"  # noqa: S105
+    try:
+        read = await refresh_room_setting(setting, client, runtime_paths, ROOM_ID, put_state=AsyncMock())
+    finally:
+        await client.close()
+
+    assert read == SettingRead(ok=True, value=None)
+    assert json.loads(legacy.read_text()) == {}
 
 
 def test_a_full_state_read_seeds_every_setting(tmp_path: Path) -> None:
