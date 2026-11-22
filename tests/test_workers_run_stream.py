@@ -25,13 +25,14 @@ from fastapi import FastAPI
 
 from mindroom.agent_cli import turn
 from mindroom.agent_cli.lifetime import response_cli_lifetime
-from mindroom.agent_cli.session import TurnToolRegistry
+from mindroom.agent_cli.session import CliCallConflictError, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import (
     AGENT_CLI_TOKEN_ENV,
     AGENT_CLI_URL_ENV,
     AGENT_CLI_WINDOW_ENV,
     AGENT_CLI_WINDOW_HEADER,
 )
+from mindroom.api import sandbox_runner
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -51,8 +52,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.agent_cli.turn import LiveTurnTools
-
-pytestmark = pytest.mark.asyncio
 
 _WINDOW = "outer-1"
 _CLI = "import sys; from mindroom.agent_cli.main import main; raise SystemExit(main(sys.argv[1:]))"
@@ -685,3 +684,118 @@ async def test_malformed_stdin_requests_are_refused_like_the_other_routes(tmp_pa
         assert (await http.post("/api/agent-cli/operations", headers=stack.headers, json=operation)).status_code == 200
         route = f"/api/agent-cli/calls/{operation['call_id']}/stdin"
         assert (await http.post(route, headers=stack.headers, json={**chunk, "seq": False})).status_code == 422
+        # Nobody reads this call's output or ends its stdin: left alone it would hold the reply open for a minute.
+        cancelled = await http.post(route.replace("/stdin", "/cancel"), headers=stack.headers)
+        assert cancelled.json()["status"] == "cancelled"
+
+
+async def test_output_written_before_the_time_limit_reaches_a_reader_that_was_paused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop at the time limit drops nothing the command had written, however long its reader takes to read it."""
+    resume = asyncio.Event()
+    stream_command = sandbox_runner.stream_command
+
+    async def paused(*args: Any, on_output: Any, **kwargs: Any) -> None:  # noqa: ANN401
+        async def held(kind: str, chunk: bytes) -> None:
+            await resume.wait()
+            await on_output(kind, chunk)
+
+        await stream_command(*args, on_output=held, **kwargs)
+
+    monkeypatch.setattr(sandbox_runner, "stream_command", paused)
+    async with _stack(tmp_path) as stack:
+        command = "head -c 100000 /dev/zero; head -c 50000 /dev/zero >&2; sleep 300"
+        process = await stack.spawn("--timeout", "1", "--", command)
+        # The reader takes nothing until well after the time limit stopped the command.
+        await asyncio.sleep(3)
+        resume.set()
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            stdout, stderr = await process.communicate()
+        assert process.returncode == 124
+        assert (len(stdout), stdout.strip(b"\0")) == (100000, b"")
+        assert stderr == bytes(50000) + b"mindroom-agent: stopped after 1s\n"
+
+
+async def test_a_stdin_chunk_whose_connection_broke_is_sent_again_and_written_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A chunk that may not have reached the worker is not the end of stdin: it is sent again, and written once."""
+    post = httpx.Client.post
+    posts = 0
+
+    def breaking(self: httpx.Client, url: Any, **kwargs: Any) -> httpx.Response:  # noqa: ANN401
+        nonlocal posts
+        if not str(url).endswith("/stdin"):
+            return post(self, url, **kwargs)
+        posts += 1
+        if posts == 2:
+            msg = "the connection was reset before the chunk left"
+            raise httpx.ConnectError(msg)
+        response = post(self, url, **kwargs)
+        if posts == 5:
+            msg = "the connection was reset before the answer arrived"
+            raise httpx.ReadError(msg)
+        return response
+
+    monkeypatch.setattr(httpx.Client, "post", breaking)
+    sent = os.urandom(300_000)
+    async with _stack(tmp_path) as stack:
+        code, stdout, stderr = await stack.run("--", "cat; echo end >&2", stdin=sent)
+    assert posts > 6
+    assert (code, hashlib.sha256(stdout).hexdigest(), stderr) == (0, hashlib.sha256(sent).hexdigest(), b"end\n")
+
+
+async def test_a_cancel_after_the_command_ended_on_its_own_does_not_say_it_stopped_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the runner's word that the process group is gone says "stopped": a command's own exit leaves it unsaid."""
+    child = tmp_path / "child"
+    stream_command = sandbox_runner.stream_command
+
+    async def slow_to_answer(*args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+        await stream_command(*args, **kwargs)
+        await asyncio.sleep(300)
+
+    monkeypatch.setattr(sandbox_runner, "stream_command", slow_to_answer)
+    async with _stack(tmp_path) as stack, httpx.AsyncClient(base_url=stack.url, timeout=60) as http:
+        # The command ends and leaves a server behind whose output goes elsewhere.
+        operation = stack.submit(f"sleep 300 > /dev/null 2>&1 & echo $! > {child}; echo done", stream=True)
+        assert (await http.post("/api/agent-cli/operations", headers=stack.headers, json=operation)).status_code == 200
+        route = f"/api/agent-cli/calls/{operation['call_id']}"
+        pid = await _pid(child)
+        try:
+            async with http.stream("GET", f"{route}/stream", headers=stack.headers) as response:
+                frames = _frames(response)
+                async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                    while (frame := await anext(frames)).get("t") != "exit":
+                        pass
+                    assert frame == {"t": "exit", "code": 0, "timed_out": False}
+                    cancelled = (await http.post(f"{route}/cancel", headers=stack.headers)).json()
+                assert (cancelled["status"], cancelled["cancel_outcome"]) == ("cancelled", None)
+                assert _alive(pid)
+        finally:
+            os.kill(pid, signal.SIGKILL)
+
+
+async def test_a_stream_that_was_asked_for_is_the_calls_one_reader_and_must_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Asking for the stream claims it, before any of it is sent; a reader that then never reads is none."""
+    monkeypatch.setattr(turn, "_STREAM_ATTACH_SECONDS", 1.0)
+    leader = tmp_path / "leader"
+    async with _stack(tmp_path) as stack, httpx.AsyncClient(base_url=stack.url, timeout=60) as http:
+        operation = stack.submit(f"echo $$ > {leader}; sleep 300", stream=True)
+        assert (await http.post("/api/agent-cli/operations", headers=stack.headers, json=operation)).status_code == 200
+        never_read = stack.owner.stream_call(operation["call_id"])
+        with pytest.raises(CliCallConflictError):
+            stack.owner.stream_call(operation["call_id"])
+        route = f"/api/agent-cli/calls/{operation['call_id']}/stream"
+        assert (await http.get(route, headers=stack.headers)).status_code == 409
+        pid = await _pid(leader)
+        await _until(lambda: not _alive(pid), what="the command of a stream that never started kept running")
+        await never_read.aclose()
