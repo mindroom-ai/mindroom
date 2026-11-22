@@ -21,6 +21,7 @@ from mindroom.agent_loop.prompt import PromptSpec
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai import TurnResult
+from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
 from mindroom.config.calls import CallsConfig, LiveCallProfile, RealtimeCallProfile
 from mindroom.config.main import Config
@@ -736,6 +737,7 @@ def _make_call_manager(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_voice_call_reads_instructions_from_validated_origin_room_while_keeping_call_room_anchor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -744,7 +746,16 @@ async def test_voice_call_reads_instructions_from_validated_origin_room_while_ke
     call_room, origin_room = "!call:localhost", "!origin:localhost"
     runtime_paths = test_runtime_paths(tmp_path)
     config = _runtime_bound_config(
-        Config(agents={"general": AgentConfig(display_name="General", rooms=[call_room, origin_room], tools=[])}),
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    rooms=[call_room, origin_room],
+                    tools=[],
+                    access=ResponderAccessConfig(users=["@caller:localhost"]),
+                ),
+            },
+        ),
         tmp_path,
     )
     by_room = {
@@ -752,6 +763,13 @@ async def test_voice_call_reads_instructions_from_validated_origin_room_while_ke
         (call_room, ROOM_SETTINGS_EVENT_TYPE, "agent_instructions"): {"value": "CALL_ROOM_RULE_222"},
     }
     client = _make_matrix_client_mock()
+    client.joined_members = AsyncMock(
+        return_value=nio.JoinedMembersResponse(
+            members=[nio.RoomMember(user_id="@caller:localhost", display_name="Caller", avatar_url=None)],
+            room_id=origin_room,
+        ),
+    )
+    memberships = AgentReplyMembershipIndex()
 
     async def get_state(room_id: str, event_type: str, state_key: str = "") -> object:
         entry = by_room.get((room_id, event_type, state_key))
@@ -776,6 +794,7 @@ async def test_voice_call_reads_instructions_from_validated_origin_room_while_ke
                 plugins=config_plugins(config, runtime_paths),
                 conversation_reader=make_conversation_reader_mock(),
                 relations=make_relation_lookup(),
+                agent_reply_memberships=memberships,
                 orchestrator=orchestrator,  # type: ignore[arg-type]
             )
 
@@ -867,3 +886,122 @@ async def test_voice_call_reads_instructions_from_validated_origin_room_while_ke
 
     # Tool context remained anchored to the call room on every build.
     assert anchored_rooms == [call_room, call_room, call_room]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_voice_call_drops_origin_room_instructions_when_access_is_revoked_or_unverifiable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cross-room origin reads re-check ``room_access_allowed`` per spoken turn and omit instructions on revoke/error."""
+    call_room, origin_room = "!call:localhost", "!origin:localhost"
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    rooms=[call_room, origin_room],
+                    tools=[],
+                    access=ResponderAccessConfig(users=["@caller:localhost"]),
+                ),
+            },
+        ),
+        tmp_path,
+    )
+    client = _make_matrix_client_mock()
+    caller_in_origin = True
+
+    async def joined_members(room_id: str) -> nio.JoinedMembersResponse:
+        members = (
+            [nio.RoomMember(user_id="@caller:localhost", display_name="Caller", avatar_url=None)]
+            if room_id == origin_room and caller_in_origin
+            else []
+        )
+        return nio.JoinedMembersResponse(members=members, room_id=room_id)
+
+    client.joined_members = AsyncMock(side_effect=joined_members)
+    origin_reads: list[str] = []
+
+    async def get_state(room_id: str, event_type: str, state_key: str = "") -> object:
+        if room_id == origin_room and event_type == ROOM_SETTINGS_EVENT_TYPE and state_key == "agent_instructions":
+            origin_reads.append(room_id)
+            return nio.RoomGetStateEventResponse({"value": "ORIGIN_SECRET_RULE"}, event_type, state_key, room_id)
+        return nio.RoomGetStateEventError("not found", "M_NOT_FOUND", room_id=room_id)
+
+    client.room_get_state_event = AsyncMock(side_effect=get_state)
+    orchestrator = SimpleNamespace(knowledge_refresh_scheduler=None, budgets=None)
+    memberships = AgentReplyMembershipIndex()
+
+    class ToolSupport:
+        def build_context(self, target: MessageTarget, **_kwargs: object) -> ToolRuntimeContext:
+            return ToolRuntimeContext(
+                agent_name="general",
+                target=target,
+                requester_id="@caller:localhost",
+                client=client,
+                config=config,
+                runtime_paths=runtime_paths,
+                plugins=config_plugins(config, runtime_paths),
+                conversation_reader=make_conversation_reader_mock(),
+                relations=make_relation_lookup(),
+                agent_reply_memberships=memberships,
+                orchestrator=orchestrator,  # type: ignore[arg-type]
+            )
+
+    ai_calls: list[ResponseTurnContext] = []
+
+    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
+        ai_calls.append(turn)
+        return TurnResult("Spoken reply")
+
+    async def fake_resolve_knowledge(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(knowledge=None, unavailable={})
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async", fake_resolve_knowledge)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=_fake_voice_build()))
+    monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
+
+    tooling = await build_call_tools(
+        agent_name="general",
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=ToolSupport(),  # type: ignore[arg-type]
+        room_id=call_room,
+        instructions_room_id=origin_room,
+        requester_id="@caller:localhost",
+        authorize_operation=_authorized_call_operation,
+        enable_responder=True,
+        voice_instructions="Speak briefly.",
+    )
+    assert tooling.responder is not None
+    assert tooling.finalize_spoken_response is not None
+
+    # Turn 1: caller still has access to origin room -> receives origin instructions.
+    first = await tooling.responder("First spoken turn", None)
+    tooling.finalize_spoken_response(first.turn_id, first.text, False)
+    assert [item.key for item in ai_calls[0].system_enrichment_items] == ["voice_call", "room_instructions"]
+    assert "ORIGIN_SECRET_RULE" in ai_calls[0].system_enrichment_items[1].text
+    assert len(origin_reads) == 1
+
+    # Turn 2: caller access to origin room is revoked -> item omitted, origin room not read, call continues.
+    caller_in_origin = False
+    second = await tooling.responder("Second spoken turn", None)
+    tooling.finalize_spoken_response(second.turn_id, second.text, False)
+    assert [item.key for item in ai_calls[1].system_enrichment_items] == ["voice_call"]
+    assert len(origin_reads) == 1
+
+    # Turn 3: access check raises -> warning logged, item omitted, call continues.
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.room_access_allowed",
+        AsyncMock(side_effect=RuntimeError("membership check failed")),
+    )
+    with capture_logs() as logs:
+        third = await tooling.responder("Third spoken turn", None)
+        tooling.finalize_spoken_response(third.turn_id, third.text, False)
+    assert [item.key for item in ai_calls[2].system_enrichment_items] == ["voice_call"]
+    assert any(log.get("event") == "call_room_instructions_access_check_failed" for log in logs)
+    assert len(origin_reads) == 1
+    assert tooling.close is not None
+    await tooling.close()

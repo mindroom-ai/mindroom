@@ -101,7 +101,7 @@ Each is an `io.mindroom.room_settings` state event with the state key below and 
 | `agent_instructions` | Text (up to 2,000 characters) | Extra instructions passed to every agent and team answering in the room (rendered through `ROOM_INSTRUCTIONS_TEMPLATE`; grants no permissions) | None |
 
 MindRoom Chat sets them from the room settings dialog, and any client may send the events.
-They fall under the room's `state_default` power level (normally 50, i.e., moderators and admins by default), and agent tools cannot write them.
+They fall under the room's `state_default` power level (normally 50, i.e., moderators and admins by default) unless the room sets a power level for `io.mindroom.room_settings`, and agent tools cannot write them.
 The chat commands set the same events through a MindRoom account in the room, for Matrix room admins only.
 A `model` or `thread_summary_model` that names no model in `models:` is ignored until the config defines that model, and `!room_model` reports it as unavailable.
 Agents take a changed `reply_mode`, `thread_mode`, or `model` as soon as their sync shows it, and read them again before handling a room's next event when the last read is more than ten minutes old; the two thread title settings are read each time a title is written.

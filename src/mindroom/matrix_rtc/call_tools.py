@@ -32,6 +32,7 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.background_tasks import drain_tasks, run_blocking_until_complete, wait_for_future_until_complete
+from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context, record_helper_usage
 from mindroom.history.interrupted_replay import (
     build_interrupted_replay_snapshot,
@@ -388,10 +389,11 @@ class _CallAgentCache:
                 refresh_scheduler=scheduler,
                 execution_identity=self.context.execution_identity,
             ),
-            room_instructions_item(
-                self.context.client,
-                self.instructions_room_id or self.context.room_id,
-                self.config,
+            _call_room_instructions_item(
+                self.context,
+                room_id=self.context.room_id,
+                instructions_room_id=self.instructions_room_id,
+                config=self.config,
             ),
         )
         room_enrichment = render_system_enrichment_block((instructions_item,)) if instructions_item is not None else ""
@@ -597,7 +599,12 @@ async def build_call_tools(
             refresh_scheduler=refresh_scheduler,
             execution_identity=execution_identity,
         ),
-        room_instructions_item(context.client, resolved_instructions_room_id, config),
+        _call_room_instructions_item(
+            context,
+            room_id=room_id,
+            instructions_room_id=resolved_instructions_room_id,
+            config=config,
+        ),
     )
     build = _spoken(
         # Finished before a cancellation goes on, as the live agent cache does, so no build outlives the call.
@@ -782,7 +789,12 @@ async def _run_authorized_call_agent(
                 refresh_scheduler=refresh_scheduler,
                 execution_identity=context.execution_identity,
             ),
-            room_instructions_item(context.client, instructions_room_id or room_id, config),
+            _call_room_instructions_item(
+                context,
+                room_id=room_id,
+                instructions_room_id=instructions_room_id,
+                config=config,
+            ),
         )
         transient_enrichment_items = append_knowledge_availability_enrichment(
             (),
@@ -887,6 +899,31 @@ def _call_agent_run_state(
 def _spoken(build: AgentBuild) -> AgentBuild:
     """Return ``build`` without the chat's Markdown output format: a call speaks its replies."""
     return replace(build, prompt=replace(build.prompt, markdown=False))
+
+
+async def _call_room_instructions_item(
+    context: ToolRuntimeContext,
+    *,
+    room_id: str,
+    instructions_room_id: str | None,
+    config: Config,
+) -> EnrichmentItem | None:
+    """Read ``agent_instructions`` for a call, re-checking origin-room access on cross-room reads."""
+    target_room_id = instructions_room_id or room_id
+    if target_room_id != room_id:
+        try:
+            allowed = await room_access_allowed(context, target_room_id)
+        except Exception:
+            logger.warning(
+                "call_room_instructions_access_check_failed",
+                room_id=target_room_id,
+                call_room_id=room_id,
+                exc_info=True,
+            )
+            return None
+        if not allowed:
+            return None
+    return await room_instructions_item(context.client, target_room_id, config)
 
 
 def _call_instructions(build: AgentBuild, system_enrichment: str = "") -> str:
