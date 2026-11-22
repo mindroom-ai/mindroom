@@ -2681,6 +2681,28 @@ def test_worker_subprocess_env_preserves_parent_path(
     assert "GOOGLE_APPLICATION_CREDENTIALS" not in env
 
 
+def test_worker_subprocess_env_forwards_worker_resource_limit_vars(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Worker subprocesses inherit the container CPU and memory limit hint vars."""
+    paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker")
+    expected = {
+        "MINDROOM_WORKER_CPUS": "4",
+        "MINDROOM_WORKER_MEMORY_BYTES": "8589934592",
+        "OMP_NUM_THREADS": "4",
+        "PYTHON_CPU_COUNT": "4",
+        "PYTEST_XDIST_AUTO_NUM_WORKERS": "4",
+    }
+    for name, value in expected.items():
+        monkeypatch.setenv(name, value)
+
+    env = sandbox_exec_module.worker_subprocess_env(paths)
+
+    for name, value in expected.items():
+        assert env[name] == value
+
+
 def test_worker_subprocess_env_tmpdir_holds_unix_sockets_for_a_long_worker_root(tmp_path: Path) -> None:
     """Chromium binds its SingletonSocket under TMPDIR, which a long worker root would push past 107 bytes."""
     paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / ("worker" * 20))
@@ -5621,6 +5643,58 @@ def test_sandbox_runner_worker_shell_uses_workspace_home_and_worker_venv(
     workspace = worker_root / "workspace"
     expected_result = f"{workspace}|{worker_root / 'venv'}|{workspace}"
     assert _shell_command_output(data["result"]) == expected_result
+
+
+def test_sandbox_runner_worker_shell_receives_resource_limit_env_and_allows_hook_override(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Shell commands in a worker inherit container CPU/memory limit vars, and .mindroom/worker-env.sh wins."""
+    _set_sandbox_token(monkeypatch)
+    storage_root = tmp_path / "storage"
+    monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
+    for name, value in (
+        ("MINDROOM_WORKER_CPUS", "4"),
+        ("MINDROOM_WORKER_MEMORY_BYTES", "8589934592"),
+        ("OMP_NUM_THREADS", "4"),
+        ("PYTHON_CPU_COUNT", "4"),
+        ("PYTEST_XDIST_AUTO_NUM_WORKERS", "4"),
+    ):
+        monkeypatch.setenv(name, value)
+    _refresh_runner_app_from_env()
+
+    command = [
+        "bash",
+        "-c",
+        'printf "%s|%s|%s|%s|%s" "$MINDROOM_WORKER_CPUS" "$MINDROOM_WORKER_MEMORY_BYTES" '
+        '"$OMP_NUM_THREADS" "$PYTHON_CPU_COUNT" "$PYTEST_XDIST_AUTO_NUM_WORKERS"',
+    ]
+    payload = {
+        "protocol": WORKER_PROTOCOL_VERSION,
+        "tool_name": "shell",
+        "function_name": "run_shell_command",
+        "args": [command],
+        "kwargs": {},
+        "worker_key": "worker-a",
+        "execution_env": {"PATH": os.environ["PATH"]},
+    }
+
+    with patch("mindroom.workers.backends.local._create_local_worker_venv", new=fake_local_worker_venv_create):
+        response = runner_client.post("/api/sandbox-runner/execute", headers=SANDBOX_HEADERS, json=payload)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True, data
+        assert _shell_command_output(data["result"]) == "4|8589934592|4|4|4"
+
+        workspace = storage_root / "workers" / worker_dir_name("worker-a") / "workspace"
+        _write_workspace_env_hook(workspace, "export OMP_NUM_THREADS=2\n")
+
+        override_response = runner_client.post("/api/sandbox-runner/execute", headers=SANDBOX_HEADERS, json=payload)
+        assert override_response.status_code == 200
+        override_data = override_response.json()
+        assert override_data["ok"] is True, override_data
+        assert _shell_command_output(override_data["result"]) == "4|8589934592|2|4|4"
 
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)

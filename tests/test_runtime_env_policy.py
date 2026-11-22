@@ -499,6 +499,23 @@ def test_sandbox_subprocess_system_env_uses_policy_allowlist() -> None:
     }
 
 
+def test_worker_resource_limit_env_reaches_subprocesses_without_primary_bleed() -> None:
+    """Worker CPU/memory limit vars reach subprocesses and extra-env overrides without leaking from the primary."""
+    limit_env = {
+        "MINDROOM_WORKER_CPUS": "4",
+        "MINDROOM_WORKER_MEMORY_BYTES": "8589934592",
+        "OMP_NUM_THREADS": "4",
+        "PYTHON_CPU_COUNT": "4",
+        "PYTEST_XDIST_AUTO_NUM_WORKERS": "4",
+    }
+
+    assert runtime_env_policy.sandbox_subprocess_system_env(limit_env) == limit_env
+    assert runtime_env_policy.sandbox_shell_system_env(limit_env) == {}
+    assert runtime_env_policy.isolated_worker_runtime_env(limit_env) == {}
+    assert runtime_env_policy.public_worker_startup_env(limit_env) == {}
+    assert runtime_env_policy.worker_extra_env(limit_env) == limit_env
+
+
 def test_worker_runtime_state_can_reintroduce_storage_subpath_after_backend_filtering() -> None:
     """Storage subpath is backend config when inherited, but explicit worker runtime state when re-added."""
     env = {
