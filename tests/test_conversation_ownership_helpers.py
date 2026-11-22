@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
+from mindroom import response_turn as response_turn_module
 from mindroom import turn_store as turn_store_module
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.bot_runtime_view import BotRuntimeState
@@ -27,6 +28,7 @@ from mindroom.event_journal import (
     approval_signals,
 )
 from mindroom.event_journal.approval_signals import PausedReply
+from mindroom.history import session_context as session_context_module
 from mindroom.history.session_context import (
     ScopeSessionContext,
     load_scope_session_from_storage,
@@ -42,6 +44,7 @@ from mindroom.reply_turn.request import requester_remains_authorized
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator
 from mindroom.response_sources import Owned
+from mindroom.response_turn import ResponseTurnContext, TurnRunState
 from mindroom.session_storage.agent_storage import create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.conversation import ConversationKey
@@ -51,7 +54,7 @@ from tests.access_schema_support import refresh_memberships
 from tests.conftest import request_envelope, unwrap_extracted_collaborator
 from tests.matrix_state_helpers import save_matrix_state
 from tests.response_runner_helpers import _bot, _plain_request, _target
-from tests.test_turn_store import _store_with_storage
+from tests.test_turn_store import _redact_through, _store_with_storage
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
@@ -206,10 +209,11 @@ async def test_load_scrubbed_scope_session_drains_load_on_cancel_and_scrubs_reda
     async def redactions(event_ids: tuple[str, ...]) -> dict[str, str | None]:
         return {"$gone": None} if "$gone" in event_ids else {}
 
-    scope_context = await load_scrubbed_scope_session(
+    scope_context, removed = await load_scrubbed_scope_session(
         partial(load_scope_session_from_storage, scope, "sess-1", lambda: storage),
         redactions,
     )
+    assert removed == ["$gone"]
     assert scope_context.session is not None
     assert scope_context.session.runs == []
 
@@ -219,11 +223,21 @@ async def test_edit_cut_scrubs_redacted_history_through_load_scrubbed_scope_sess
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """TurnStore.remove_stale_runs_for_edit delegates load+scrub to load_scrubbed_scope_session."""
+    """TurnStore.remove_stale_runs_for_edit scrubs separate redacted runs silently through the shared helper."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$edited")
     scope = HistoryScope(kind="agent", scope_id="agent")
     storage = create_state_storage("agent", tmp_path, scope)
     session = ConversationSession(kind="agent", session_id=target.session_id, owner_id="agent")
+    storage.save_run(
+        session,
+        RunRecord(
+            run_id="run-redacted",
+            agent_id="agent",
+            session_id=target.session_id,
+            metadata={"matrix_event_id": "$earlier-redacted"},
+        ),
+        record_usage=False,
+    )
     storage.save_run(
         session,
         RunRecord(
@@ -237,7 +251,15 @@ async def test_edit_cut_scrubs_redacted_history_through_load_scrubbed_scope_sess
     journal_store = EventJournalStore.open_sqlite(tmp_path / "journal.db")
     try:
         store = await _store_with_storage(journal_store, storage)
-        record = TurnRecord.create(
+        redacted_record = TurnRecord.create(
+            ["$earlier-redacted"],
+            response_event_id="$earlier-reply",
+            response_owner="agent",
+            requester_id="@user:example.org",
+            history_scope=scope,
+            conversation_target=target,
+        )
+        edited_record = TurnRecord.create(
             ["$edited"],
             response_event_id="$reply",
             response_owner="agent",
@@ -245,20 +267,23 @@ async def test_edit_cut_scrubs_redacted_history_through_load_scrubbed_scope_sess
             history_scope=scope,
             conversation_target=target,
         )
-        await store.record_turn(record)
+        await store.record_turn(redacted_record)
+        await store.record_turn(edited_record)
+        await _redact_through(store, "$earlier-redacted", target.room_id)
 
         calls = 0
 
         async def spy(
             load_scope: Callable[[], ScopeSessionContext],
             redactions: Callable[[tuple[str, ...]], Awaitable[Mapping[str, str | None]]] | None,
-        ) -> ScopeSessionContext:
+        ) -> tuple[ScopeSessionContext, list[str]]:
             nonlocal calls
             calls += 1
             return await load_scrubbed_scope_session(load_scope, redactions)
 
         monkeypatch.setattr(turn_store_module, "load_scrubbed_scope_session", spy)
-        await store.remove_stale_runs_for_edit(turn_record=record, requester_user_id="@user:example.org")
+        assert not hasattr(session_context_module, "logger")
+        await store.remove_stale_runs_for_edit(turn_record=edited_record, requester_user_id="@user:example.org")
 
         assert calls == 1
         persisted = storage.load_session(target.session_id)
@@ -266,6 +291,58 @@ async def test_edit_cut_scrubs_redacted_history_through_load_scrubbed_scope_sess
         assert persisted.runs == []
     finally:
         await journal_store.close()
+
+
+@pytest.mark.asyncio
+async def test_reply_scope_load_emits_redaction_log_on_response_turn_logger(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reply scope loading keeps logging redaction removals under mindroom.response_turn."""
+    scope = HistoryScope(kind="agent", scope_id="general")
+    storage = create_state_storage("general", tmp_path, scope)
+    session = ConversationSession(kind="agent", session_id="sess-log", owner_id="general")
+    storage.save_run(
+        session,
+        RunRecord(
+            run_id="run-gone",
+            agent_id="general",
+            session_id="sess-log",
+            metadata={"matrix_event_id": "$gone"},
+        ),
+        record_usage=False,
+    )
+
+    async def redactions(event_ids: tuple[str, ...]) -> dict[str, str | None]:
+        return {"$gone": None} if "$gone" in event_ids else {}
+
+    logger_spy = MagicMock()
+    monkeypatch.setattr(response_turn_module, "logger", logger_spy)
+    ctx = ResponseTurnContext(
+        entity_label="general",
+        session_id="sess-log",
+        run_id=None,
+        correlation_id="corr-1",
+        reply_to_event_id="$src",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id="@user:localhost",
+        matrix_run_metadata=None,
+        redacted_history_events=redactions,
+    )
+    adapter = MagicMock()
+    adapter.load_scope = partial(load_scope_session_from_storage, scope, "sess-log", lambda: storage)
+    run = TurnRunState(record=None)
+
+    loaded = await response_turn_module._load_scope_session(ctx, adapter, run)
+    assert loaded.session is not None
+    assert loaded.session.runs == []
+    logger_spy.info.assert_called_once_with(
+        "Removed history derived from redacted events",
+        session_id="sess-log",
+        history_scope=scope.key,
+        redacted_event_ids=["$gone"],
+    )
 
 
 @pytest.mark.asyncio

@@ -960,7 +960,17 @@ async def _load_scope_session(
     run: TurnRunState,
 ) -> ScopeSessionContext:
     """Load the turn's scope session off the event loop, without the history of events since redacted."""
-    scope_context = await load_scrubbed_scope_session(adapter.load_scope, ctx.redacted_history_events)
+    scope_context, removed_event_ids = await load_scrubbed_scope_session(
+        adapter.load_scope,
+        ctx.redacted_history_events,
+    )
+    if removed_event_ids and scope_context.session is not None:
+        logger.info(
+            "Removed history derived from redacted events",
+            session_id=scope_context.session.session_id,
+            history_scope=scope_context.scope.key,
+            redacted_event_ids=removed_event_ids,
+        )
     run.scope_context = scope_context
     set_consumption_storage(scope_context.storage_factory)
     return scope_context

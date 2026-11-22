@@ -11,7 +11,6 @@ from mindroom.constants import resolve_session_state_root
 from mindroom.history.storage import new_scope_session, remove_history_of_redacted_events
 from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope
-from mindroom.logging_config import get_logger
 from mindroom.session_storage.agent_storage import (
     agent_session_database_path,
     create_session_storage,
@@ -31,7 +30,6 @@ if TYPE_CHECKING:
 
 
 _TEAM_STATE_ROOT_DIRNAME = "teams"
-logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -123,23 +121,17 @@ def load_scope_session(
 async def load_scrubbed_scope_session(
     load_scope: Callable[[], ScopeSessionContext],
     redacted_history_events: Callable[[tuple[str, ...]], Awaitable[Mapping[str, str | None]]] | None,
-) -> ScopeSessionContext:
-    """Load one scope session off the event loop, drained of cancellation, without redacted history."""
+) -> tuple[ScopeSessionContext, list[str]]:
+    """Load one scope session off the event loop, drained of cancellation, and scrub redacted history."""
     scope_context = await run_blocking_until_complete(load_scope)
-    if redacted_history_events is not None and scope_context.session is not None:
-        removed_event_ids = await remove_history_of_redacted_events(
-            scope_context.storage,
-            scope_context.session,
-            redacted_history_events,
-        )
-        if removed_event_ids:
-            logger.info(
-                "Removed history derived from redacted events",
-                session_id=scope_context.session.session_id,
-                history_scope=scope_context.scope.key,
-                redacted_event_ids=removed_event_ids,
-            )
-    return scope_context
+    if redacted_history_events is None or scope_context.session is None:
+        return scope_context, []
+    removed_event_ids = await remove_history_of_redacted_events(
+        scope_context.storage,
+        scope_context.session,
+        redacted_history_events,
+    )
+    return scope_context, removed_event_ids
 
 
 def load_bound_scope_session(
