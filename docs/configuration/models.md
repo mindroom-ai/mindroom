@@ -567,6 +567,33 @@ models:
       api_key: ${OPENROUTER_API_KEY}
 ```
 
+## GPT Through OpenRouter Responses
+
+Use `provider: openai` with `api: responses`, OpenRouter's `https://openrouter.ai/api/v1` endpoint, an `openai/` GPT model ID (GPT-5.3 Codex, GPT-5.4, or GPT-6), and `context_window` to enable OpenAI Responses [native compaction](history.md#native-compaction) through OpenRouter.
+Always set a model-specific OpenRouter `api_key`; without it, MindRoom can send your shared OpenAI key to OpenRouter.
+OpenRouter binds encrypted compaction checkpoints and encrypted reasoning to the upstream provider that created them (for example OpenAI, Azure, or Amazon Bedrock).
+If a pinned upstream rejects earlier encrypted items with HTTP 400 or a rate-limited creator returns HTTP 429 after transient retries, MindRoom retries the request once from the full stored history without encrypted state, which costs one re-compaction on the new upstream.
+To keep threads pinned to one upstream at the cost of failover, optionally set `provider` routing under `extra_kwargs.request_params.extra_body` (model-rerouting fields such as `models`, `model`, or `route` turn native compaction off).
+The `provider: openrouter` route uses Chat Completions and keeps text compaction.
+
+```yaml
+models:
+  sol_native:
+    provider: openai
+    api: responses
+    id: openai/gpt-6.2-sol
+    api_key: ${OPENROUTER_API_KEY}
+    context_window: 1050000
+    extra_kwargs:
+      base_url: https://openrouter.ai/api/v1
+      # Optional: pin one upstream instead of allowing failover
+      # request_params:
+      #   extra_body:
+      #     provider:
+      #       order: [openai]
+      #       allow_fallbacks: false
+```
+
 ## Extra Kwargs
 
 `extra_kwargs` sets provider-specific options for the model's requests and API client.
