@@ -466,8 +466,6 @@ def _run_in_worker(args: argparse.Namespace) -> int:
                 signals.held = True
             except _WorkerSignal as exc:
                 signum, error, result = exc.signum, None, None
-                # A second signal ends the CLI during the cancel, so the progress line is closed before it.
-                stderr.finish_progress()
                 if client is not None:
                     result = {}
                     with suppress(AgentCliUnavailableError, ValueError):

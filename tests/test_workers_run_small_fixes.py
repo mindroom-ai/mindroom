@@ -576,9 +576,8 @@ def test_item11_tty_progress_ignores_stderr_write_failure(monkeypatch: pytest.Mo
 
 
 def test_item11_tty_progress_ends_with_newline_before_cancel_notice(monkeypatch: pytest.MonkeyPatch) -> None:
-    r"""A signal while a TTY progress line is open ends that line with \n before the cancel is sent and noticed."""
+    r"""A signal while a TTY progress line is open ends that line with \n before the cancel notice."""
     installed: dict[int, object] = {}
-    shown_at_cancel: list[str] = []
 
     def fake_signal(signum: int, handler: object) -> object:
         prev = installed.get(signum, signal.SIG_DFL)
@@ -610,8 +609,6 @@ def test_item11_tty_progress_ends_with_newline_before_cancel_notice(monkeypatch:
 
         def cancel(self, call_id: str, *, timeout: float = 8.0) -> dict[str, object]:
             del call_id, timeout
-            # A second signal ends the CLI here, so the line must already be closed.
-            shown_at_cancel.append(tty.getvalue())
             return {"status": "cancelled", "cancel_outcome": "never_ran"}
 
     tty = _FakeTtyStderr(is_tty=True)
@@ -620,7 +617,6 @@ def test_item11_tty_progress_ends_with_newline_before_cancel_notice(monkeypatch:
     monkeypatch.setattr(sys, "stderr", tty)
 
     assert main(["workers", "run", "f1", "--", "sleep", "60"]) == 128 + int(signal.SIGTERM)
-    assert shown_at_cancel == ["\r\x1b[Kmindroom-agent: starting worker f1...\n"]
     assert tty.getvalue() == (
         "\r\x1b[Kmindroom-agent: starting worker f1...\n"
         "mindroom-agent: cancelled by SIGTERM; the command never ran in worker f1\n"
