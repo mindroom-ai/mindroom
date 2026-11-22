@@ -372,7 +372,18 @@ _NON_SANDBOX_RUNTIME_CONTROL_ENV_NAMES = frozenset(
         MATRIX_USER_APPSERVICE_TOKEN_FILE_ENV,
     },
 )
-_SANDBOX_SUBPROCESS_SYSTEM_ENV_NAMES = frozenset(
+# Worker-container CPU/memory limit hints (non-secret): forwarded to tool subprocesses,
+# never copied from the primary into worker requests or startup manifests.
+_WORKER_RESOURCE_LIMIT_ENV_NAMES = frozenset(
+    {
+        "MINDROOM_WORKER_CPUS",
+        "MINDROOM_WORKER_MEMORY_BYTES",
+        "OMP_NUM_THREADS",
+        "PYTEST_XDIST_AUTO_NUM_WORKERS",
+        "PYTHON_CPU_COUNT",
+    },
+)
+_SANDBOX_SUBPROCESS_SYSTEM_ENV_NAMES = _WORKER_RESOURCE_LIMIT_ENV_NAMES | frozenset(
     {
         "CURL_CA_BUNDLE",
         "GIT_SSL_CAINFO",
@@ -399,7 +410,7 @@ _SANDBOX_SUBPROCESS_SYSTEM_ENV_NAMES = frozenset(
         "no_proxy",
     },
 )
-_SANDBOX_SHELL_SYSTEM_ENV_NAMES = _SANDBOX_SUBPROCESS_SYSTEM_ENV_NAMES | frozenset(
+_SANDBOX_SHELL_SYSTEM_ENV_NAMES = (_SANDBOX_SUBPROCESS_SYSTEM_ENV_NAMES - _WORKER_RESOURCE_LIMIT_ENV_NAMES) | frozenset(
     {
         "PIP_CACHE_DIR",
         "PYTHONPYCACHEPREFIX",
@@ -443,7 +454,7 @@ def is_runtime_database_url_env_name(name: str) -> bool:
 
 def is_public_worker_startup_env_name(name: str) -> bool:
     """Return whether an env var may be serialized into public worker startup manifests."""
-    if name in _RUNTIME_STARTUP_EXCLUDED_NAMES:
+    if name in _RUNTIME_STARTUP_EXCLUDED_NAMES or name in _WORKER_RESOURCE_LIMIT_ENV_NAMES:
         return False
     if is_worker_backend_config_env_name(name) and name not in _WORKER_RUNTIME_STATE_ENV_NAMES:
         return False
@@ -458,7 +469,7 @@ def is_public_worker_startup_env_name(name: str) -> bool:
 
 def is_isolated_worker_runtime_env_name(name: str) -> bool:
     """Return whether inherited env may remain visible inside isolated workers."""
-    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES:
+    if name in _EXECUTION_RUNTIME_EXCLUDED_NAMES or name in _WORKER_RESOURCE_LIMIT_ENV_NAMES:
         return False
     if is_worker_backend_config_env_name(name) and name not in _WORKER_RUNTIME_STATE_ENV_NAMES:
         return False
