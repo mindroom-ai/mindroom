@@ -760,6 +760,7 @@ def _backend(
     named_worker_max_age_seconds: float = 14400.0,
     extra_containers: tuple[dict[str, object], ...] = (),
     extra_volumes: tuple[dict[str, object], ...] = (),
+    tailnet_ssh_release_id: str | None = None,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi]:
     profile_config: dict[str, object] = {}
     if script_resource_profiles is not None:
@@ -800,6 +801,7 @@ def _backend(
         named_worker_max_age_seconds=named_worker_max_age_seconds,
         extra_containers=extra_containers,
         extra_volumes=extra_volumes,
+        tailnet_ssh_release_id=tailnet_ssh_release_id,
     )
     resolved_runtime_paths = runtime_paths or resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
@@ -7264,6 +7266,7 @@ def _ssh_backend(
     tmp_path: Path,
     *,
     include_alias: bool = False,
+    tailnet_ssh_release_id: str | None = None,
 ) -> tuple[KubernetesWorkerBackend, _FakeAppsApi, _FakeCoreApi, RuntimePaths]:
     alias = _SSH_AGENT.replace("tailnet_ssh: true", "tailnet_ssh: false")
     config_path = tmp_path / "config.yaml"
@@ -7289,7 +7292,7 @@ router:
         encoding="utf-8",
     )
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=tmp_path / "storage")
-    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths)
+    backend, apps_api, core_api = _backend(runtime_paths=runtime_paths, tailnet_ssh_release_id=tailnet_ssh_release_id)
     return backend, apps_api, core_api, runtime_paths
 
 
@@ -7342,6 +7345,20 @@ def test_unmarked_scopes_have_no_ssh_port_or_label(
     assert _container_ports(body) == [{"containerPort": 8766, "name": "api"}]
     assert core_api.created_bodies[0]["spec"]["ports"] == [_API_PORT]
     assert handle.ssh_endpoint is None
+
+
+def test_kubernetes_stamps_the_release_identity_only_on_marked_pods(tmp_path: Path) -> None:
+    """The release identity does not affect unmarked pods or immutable selectors."""
+    release_id = "a" * 32
+    release_label = "mindroom.ai/tailnet-ssh-release"
+    backend, apps_api, _core_api, _runtime_paths = _ssh_backend(tmp_path, tailnet_ssh_release_id=release_id)
+    backend.ensure_worker(_spec(_SSH_WORKER_KEY, private_agent_names=frozenset()), now=10.0)
+    backend.ensure_worker(_spec("v1:tenant-123:shared:code", private_agent_names=frozenset()), now=10.0)
+
+    marked, plain = apps_api.created_bodies
+    assert marked["spec"]["template"]["metadata"]["labels"][release_label] == release_id
+    assert release_label not in marked["spec"]["selector"]["matchLabels"]
+    assert release_label not in plain["spec"]["template"]["metadata"]["labels"]
 
 
 def test_kubernetes_handle_endpoint_follows_the_deployment_label(tmp_path: Path) -> None:

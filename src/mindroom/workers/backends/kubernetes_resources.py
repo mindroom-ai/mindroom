@@ -71,7 +71,7 @@ from mindroom.workers.backends.kubernetes_pod_names import (
     WORKER_STORAGE_VOLUME_NAME,
     WORKER_TMP_VOLUME_NAME,
 )
-from mindroom.workers.models import LABEL_TAILNET_SSH, WORKER_SSH_PORT
+from mindroom.workers.models import LABEL_TAILNET_SSH, LABEL_TAILNET_SSH_RELEASE, WORKER_SSH_PORT
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -1251,6 +1251,8 @@ class KubernetesResourceManager:
         container_ports: list[dict[str, object]] = [{"containerPort": self.config.worker_port, "name": "api"}]
         if tailnet_ssh_marked(worker_key, launch, state_scope_worker_key):
             worker_labels[LABEL_TAILNET_SSH] = "true"
+            if self.config.tailnet_ssh_release_id is not None:
+                worker_labels[LABEL_TAILNET_SSH_RELEASE] = self.config.tailnet_ssh_release_id
             container_ports.append({"containerPort": WORKER_SSH_PORT, "name": "ssh"})
         template_spec: dict[str, object] = {
             "serviceAccountName": self.config.service_account_name,

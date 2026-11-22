@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -39,7 +40,11 @@ WORKER_SELECTOR = {
     "app.kubernetes.io/name": "mindroom-worker",
     "mindroom.ai/instance": "demo",
 }
-SSH_WORKER_SELECTOR = {**WORKER_SELECTOR, "mindroom.ai/tailnet-ssh": "true"}
+RELEASE_ID = hashlib.sha256(f"{RELEASE_NAMESPACE}/{RELEASE}".encode()).hexdigest()[:32]
+RELEASE_ID_LABEL = "mindroom.ai/tailnet-ssh-release"
+RELEASE_ID_ENV = "MINDROOM_KUBERNETES_WORKER_TAILNET_SSH_RELEASE_ID"
+WORKER_POLICY = f"mindroom-tailnet-ssh-workers-{RELEASE_ID}"
+SSH_WORKER_SELECTOR = {**WORKER_SELECTOR, "mindroom.ai/tailnet-ssh": "true", RELEASE_ID_LABEL: RELEASE_ID}
 PRIVATE_RANGES = ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16"]
 # The gateway's egress before extraEgress and the public 443 rule: DNS, the primary's listener, and marked workers.
 BASE_GATEWAY_EGRESS = [
@@ -254,7 +259,7 @@ def test_worker_policy_admits_gateway_only_to_labelled_pods_on_2222() -> None:
     The rule is additive to the chart's worker policy; alone it would cut the primary off from marked workers.
     """
     docs = _render(*ENABLED)
-    policy = _resource(docs, "NetworkPolicy", f"{NAME}-workers")
+    policy = _resource(docs, "NetworkPolicy", WORKER_POLICY)
 
     assert policy["metadata"]["namespace"] == WORKER_NAMESPACE
     assert policy["spec"]["podSelector"] == {"matchLabels": SSH_WORKER_SELECTOR}
@@ -271,7 +276,37 @@ def test_worker_policy_admits_gateway_only_to_labelled_pods_on_2222() -> None:
         },
     ]
     without_worker_policy = _render(*ENABLED, "workers.kubernetes.networkPolicy.create=false")
-    assert f"{NAME}-workers" not in [doc["metadata"]["name"] for doc in without_worker_policy]
+    assert WORKER_POLICY not in [doc["metadata"]["name"] for doc in without_worker_policy]
+
+
+@pytest.mark.parametrize(("release", "namespace"), [("another", RELEASE_NAMESPACE), (RELEASE, "another")])
+def test_ssh_policies_isolate_releases_in_a_shared_worker_namespace(release: str, namespace: str) -> None:
+    """Even with the same extra labels, only each release's gateway can reach its marked workers."""
+    first = _render(*ENABLED)
+    second = _render_chart(RUNTIME_CHART, *BASE_VALUES, *ENABLED, release_name=release, namespace=namespace)
+    identities = set()
+    ingress_names = set()
+    for docs in (first, second):
+        [primary] = [
+            doc for doc in docs if doc["kind"] == "Deployment" and not doc["metadata"]["name"].endswith("-tailnet-ssh")
+        ]
+        release_id = _env_by_name(_container(primary, "mindroom"))[RELEASE_ID_ENV]["value"]
+        [ingress] = [
+            doc
+            for doc in docs
+            if doc["kind"] == "NetworkPolicy" and doc["metadata"]["name"].startswith("mindroom-tailnet-ssh-workers-")
+        ]
+        [gateway] = [
+            doc for doc in docs if doc["kind"] == "NetworkPolicy" and doc["metadata"]["name"].endswith("-tailnet-ssh")
+        ]
+        [egress] = [rule for rule in gateway["spec"]["egress"] if (2222, "TCP") in _rule_ports([rule])]
+        assert ingress["metadata"]["namespace"] == WORKER_NAMESPACE
+        worker_selector = {"matchLabels": {**SSH_WORKER_SELECTOR, RELEASE_ID_LABEL: release_id}}
+        assert ingress["spec"]["podSelector"] == worker_selector
+        assert egress["to"][0]["podSelector"] == worker_selector
+        identities.add(release_id)
+        ingress_names.add(ingress["metadata"]["name"])
+    assert len(identities) == len(ingress_names) == 2
 
 
 def test_primary_policy_admits_gateway_on_the_listener_port() -> None:

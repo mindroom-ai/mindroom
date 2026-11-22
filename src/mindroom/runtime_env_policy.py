@@ -159,6 +159,7 @@ KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY: Mapping[str, str] = MappingProxyTyp
         "reconcile_pod_templates": "MINDROOM_KUBERNETES_WORKER_RECONCILE_POD_TEMPLATES",
         "extra_env_json": "MINDROOM_KUBERNETES_WORKER_ENV_JSON",
         "extra_labels_json": "MINDROOM_KUBERNETES_WORKER_LABELS_JSON",
+        "tailnet_ssh_release_id": "MINDROOM_KUBERNETES_WORKER_TAILNET_SSH_RELEASE_ID",
         "extra_annotations_json": "MINDROOM_KUBERNETES_WORKER_ANNOTATIONS_JSON",
         "extra_containers_json": "MINDROOM_KUBERNETES_WORKER_EXTRA_CONTAINERS_JSON",
         "extra_volumes_json": "MINDROOM_KUBERNETES_WORKER_EXTRA_VOLUMES_JSON",

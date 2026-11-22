@@ -22,6 +22,7 @@ SCRIPT_RESOURCE_PROFILE_NAMES: frozenset[ScriptResourceProfileName] = frozenset(
 # The port a worker's sshd listens on, and the label on a container whose launch passed the tailnet SSH rule.
 WORKER_SSH_PORT = 2222
 LABEL_TAILNET_SSH = "mindroom.ai/tailnet-ssh"
+LABEL_TAILNET_SSH_RELEASE = "mindroom.ai/tailnet-ssh-release"
 
 
 @dataclass(frozen=True, slots=True)

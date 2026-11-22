@@ -5,7 +5,8 @@
 {{- $workerNamespace := include "mindroom-runtime.workerNamespace" . -}}
 {{- $existing := lookup "v1" "Secret" .Release.Namespace $name -}}
 {{- $gatewayLabels := merge (dict "app.kubernetes.io/component" "tailnet-ssh") (pick (include "mindroom-runtime.labels" . | fromYaml) "app.kubernetes.io/name" "app.kubernetes.io/instance") -}}
-{{- $workerLabels := merge (dict "mindroom.ai/tailnet-ssh" "true") (include "mindroom-runtime.workerPodLabels" . | fromYaml) -}}
+{{- $releaseId := include "mindroom-runtime.tailnetSshReleaseId" . -}}
+{{- $workerLabels := merge (dict "mindroom.ai/tailnet-ssh" "true" "mindroom.ai/tailnet-ssh-release" $releaseId) (include "mindroom-runtime.workerPodLabels" . | fromYaml) -}}
 {{- $primaryLabels := include "mindroom-runtime.selectorLabels" . | fromYaml -}}
 {{- $gateway := dict "podSelector" (dict "matchLabels" $gatewayLabels) -}}
 {{- $primary := dict "podSelector" (dict "matchLabels" $primaryLabels) -}}
@@ -98,7 +99,8 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ $name }}-workers
+  {{- /* A shared namespace may host this policy for releases with the same Helm name. */}}
+  name: {{ if eq $workerNamespace .Release.Namespace }}{{ $name }}-workers{{ else }}mindroom-tailnet-ssh-workers-{{ $releaseId }}{{ end }}
   namespace: {{ $workerNamespace }}
   labels: {{ include "mindroom-runtime.labels" . | fromYaml | toJson }}
 spec:

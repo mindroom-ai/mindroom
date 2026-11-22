@@ -648,6 +648,10 @@ matchLabels:
 {{- end -}}
 {{- end -}}
 
+{{- define "mindroom-runtime.tailnetSshReleaseId" -}}
+{{- printf "%s/%s" .Release.Namespace .Release.Name | sha256sum | trunc 32 -}}
+{{- end -}}
+
 {{- define "mindroom-runtime.workerPodLabels" -}}
 mindroom.ai/component: worker
 app.kubernetes.io/managed-by: mindroom
