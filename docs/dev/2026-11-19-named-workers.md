@@ -109,6 +109,7 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
   A path relative to the config file is listed, because the template and every call resolve it against the same config directory, whatever their HOME and working directory.
   A caller that only shows a worker, such as the Computer viewer, does not wait for the worker's setup, because it needs the worker to answer and not to run tools.
   Neither does a streamed command (`workers run`), which the runner launches itself, without the forkserver or the shell supervisor that the setup prepares.
+  Neither does a tailnet SSH link, whose sshd uses none of what the setup prepares.
   The setup wait runs outside the worker's provisioning lock, so such a caller goes on once the worker answers while a tool caller waits; a later tool caller waits behind the first one's wait and reads no health of its own.
   Whether a caller waits is left out of what a worker spec compares, so it never makes a cached ready worker stale.
   A pending setup wait counts as use: idle cleanup leaves the worker alone while a tool caller waits, and a wait of at least one poll records the worker as used when it hands the worker to its caller, so a setup longer than the idle timeout never ends in a stopped worker.
