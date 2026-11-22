@@ -6327,6 +6327,29 @@ async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_
 
 
 @pytest.mark.asyncio
+async def test_a_cancelled_unreserved_response_frees_its_lock_before_it_returns() -> None:
+    """A reply that reserved no early place gives its lock back where it is cancelled, not in a later task."""
+    coordinator = ResponseLifecycleCoordinator()
+    envelope = _queued_envelope("$direct")
+    conversation = coordinator._get_or_create_queued_signal(envelope.target)
+    response = coordinator.run_locked_response(
+        target=envelope.target,
+        response_envelope=envelope,
+        pipeline_timing=None,
+        locked_operation=lambda _target: asyncio.Event().wait(),
+    )
+    # Stepped by hand, so nothing but the response itself runs between its cancellation and its return.
+    response.send(None)
+    assert conversation.lock.locked()
+
+    with pytest.raises(asyncio.CancelledError):
+        response.throw(asyncio.CancelledError())
+
+    assert not conversation.lock.locked()
+    assert not conversation.has_active_response_turn()
+
+
+@pytest.mark.asyncio
 async def test_response_lifecycle_reservation_surfaces_lock_acquire_failure() -> None:
     """A failed acquire task must wake reservation startup and remain observable."""
     coordinator = ResponseLifecycleCoordinator()

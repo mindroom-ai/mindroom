@@ -1189,15 +1189,15 @@ async def test_replay_of_a_message_a_restart_cut_short_is_not_a_newer_message(tm
         await selection.release()
         # Turn start: the replay waits for the lock unannounced.
         waiting_for_lock = asyncio.Event()
-        acquire_lock = lifecycle._acquire_response_turn_lock
+        acquire_lock = lifecycle_lock.acquire
 
-        async def acquire_after_notice_decision(lock: asyncio.Lock, reservation: object) -> None:
+        async def acquire_after_notice_decision() -> bool:
             waiting_for_lock.set()
-            await acquire_lock(lock, reservation)
+            return await acquire_lock()
 
         with (
             patch.object(ResponseRunner, "_run_locked_turn", new=AsyncMock(return_value=Owned())),
-            patch.object(lifecycle, "_acquire_response_turn_lock", new=acquire_after_notice_decision),
+            patch.object(lifecycle_lock, "acquire", new=acquire_after_notice_decision),
         ):
             task = asyncio.create_task(bot._response_runner.generate_response(_request(replayed)))
             await asyncio.wait_for(waiting_for_lock.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
