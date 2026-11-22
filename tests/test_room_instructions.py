@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import nio
 import pytest
 from pydantic import ValidationError
@@ -188,6 +189,23 @@ async def test_read_room_text_setting_times_out_cleanly(monkeypatch: pytest.Monk
         return None
 
     client.room_get_state_event = AsyncMock(side_effect=stall)
+
+    with capture_logs() as logs:
+        assert await read_room_text_setting(client, _ROOM, "agent_instructions") is None
+
+    assert any(log.get("event") == "room_setting_read_failed" for log in logs)
+
+
+@pytest.mark.asyncio
+async def test_read_room_text_setting_catches_transport_body_read_error() -> None:
+    """An exception raised by ``transport.text()`` inside ``state_event_content`` logs and returns None."""
+    transport = MagicMock(spec=aiohttp.ClientResponse)
+    transport.status = 200
+    transport.text = AsyncMock(side_effect=aiohttp.ClientError("body stream failed"))
+    response = nio.RoomGetStateEventResponse({}, ROOM_SETTINGS_EVENT_TYPE, "agent_instructions", _ROOM)
+    response.transport_response = transport
+    client = _make_matrix_client_mock()
+    client.room_get_state_event = AsyncMock(return_value=response)
 
     with capture_logs() as logs:
         assert await read_room_text_setting(client, _ROOM, "agent_instructions") is None

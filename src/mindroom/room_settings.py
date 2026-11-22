@@ -212,10 +212,11 @@ async def read_room_text_setting(
     try:
         async with asyncio.timeout(_REQUEST_TIMEOUT_SECONDS):
             response = await client.room_get_state_event(room_id, ROOM_SETTINGS_EVENT_TYPE, key)
+            content = await state_event_content(response)
     except Exception:
         logger.warning("room_setting_read_failed", room_id=room_id, setting=key, exc_info=True)
         return None
-    if (content := await state_event_content(response)) is not None:
+    if content is not None:
         value = content.get("value")
         if not isinstance(value, str):
             return None
