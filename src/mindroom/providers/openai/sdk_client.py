@@ -1,4 +1,4 @@
-"""The OpenAI SDK client of the OpenAI-family routes, which encodes each JSON request body off the event loop."""
+"""The OpenAI SDK client of the OpenAI-family routes, which encodes its requests' JSON bodies off the event loop."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ def encoded_body(body: dict[Any, Any]) -> bytes:
 
 
 class AsyncOpenAI(openai.AsyncOpenAI):
-    """An SDK client that encodes each JSON request body in a worker thread, which the SDK then sends as given.
+    """An SDK client that encodes a request's body mapping to JSON in a worker thread, for the SDK to send as given.
 
     The SDK encodes the body on the event loop as it builds the request, and a long history or inline media make it
     megabytes. It keeps the SDK class's name, which the SDK sends in the User-Agent header. Azure's client stays the
@@ -44,14 +44,16 @@ class AsyncOpenAI(openai.AsyncOpenAI):
     @override
     async def _prepare_options(self, options: FinalRequestOptions) -> FinalRequestOptions:
         options = await super()._prepare_options(options)
-        # The SDK builds the multipart form of a request with files or a multipart content type from the mapping.
+        body = options.json_data
+        # The SDK builds the multipart form of a request with files or a multipart content type from the mapping, and
+        # refuses a request that also has content.
         if (
-            not isinstance(options.json_data, dict)
+            not isinstance(body, dict)
             or options.files is not None
+            or options.content is not None
             or (self._build_headers(options).get("Content-Type") or "").startswith("multipart/form-data")
         ):
             return options
-        body = options.json_data
         if options.extra_json is not None:
             body = _merge_mappings(body, options.extra_json)
         options.content = await asyncio.to_thread(encoded_body, body)
