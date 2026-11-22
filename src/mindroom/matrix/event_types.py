@@ -13,9 +13,9 @@ AUTO_APPROVE_WINDOWS_EVENT_TYPE = "io.mindroom.auto_approve"
 # The steward triggers reconciliation, and the bound account publishes the roster under its own user ID when eligible.
 # Otherwise the steward publishes under its own user ID; Chat trusts only a sender and state key matching the binding.
 MINDROOM_ACCOUNTS_EVENT_TYPE = "io.mindroom.accounts"
-# The room's steward names itself under the name today's clients read, state key "", content `{"user_id": ...}`. It
-# keeps the default state level, so MindRoom Chat trusts a binding only ordinary members cannot write, and folds only
-# that account's voice echoes.
+# The room's steward names itself under the name today's clients read, state key "", content `{"user_id": ...}`.
+# It keeps the default state level, so MindRoom Chat trusts a binding only ordinary members cannot write.
+# Chat folds voice echoes from that bound account and from accounts listed in its trusted roster.
 ROUTER_BINDING_EVENT_TYPE = "io.mindroom.router"
 # Room admins set per-room MindRoom settings, one state event per setting keyed by its name, content `{"value": ...}`.
 ROOM_SETTINGS_EVENT_TYPE = "io.mindroom.room_settings"

@@ -7,6 +7,7 @@ import logging
 from typing import TYPE_CHECKING
 from weakref import WeakValueDictionary
 
+import aiohttp
 import nio
 
 from mindroom.entity_resolution import prepared_entity_names_by_user_id
@@ -25,6 +26,22 @@ logger = get_logger(__name__)
 _LOCKS: WeakValueDictionary[tuple[Path, str], asyncio.Lock] = WeakValueDictionary()
 
 
+async def _read_state(
+    client: nio.AsyncClient,
+    room_id: str,
+    event_type: str,
+    state_key: str,
+) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
+    response = await client.room_get_state_event(room_id, event_type, state_key=state_key)
+    transport = response.transport_response if isinstance(response, nio.RoomGetStateEventResponse) else None
+    if isinstance(transport, aiohttp.ClientResponse) and transport.status != 200:
+        body = response.content if isinstance(response, nio.RoomGetStateEventResponse) else None
+        raw = body if isinstance(body, dict) else {}
+        err = nio.RoomGetStateEventError.from_dict({"error": f"HTTP {transport.status}", **raw}, room_id)
+        return err if err.status_code else nio.RoomGetStateEventError(f"HTTP {transport.status}", room_id=room_id)
+    return response
+
+
 async def reconcile_room_accounts(
     client: nio.AsyncClient,
     config: Config,
@@ -36,8 +53,7 @@ async def reconcile_room_accounts(
 ) -> bool:
     """Refresh the room roster using its bound account when eligible, otherwise the steward.
 
-    The state key is the writer's own user ID.
-    A forbidden read or write needs no retry until the room changes.
+    The state key is the writer's own user ID; a forbidden read or write needs no retry until the room changes.
     """
     phase = "room_lock"
     event_type = MINDROOM_ACCOUNTS_EVENT_TYPE
@@ -46,17 +62,14 @@ async def reconcile_room_accounts(
         async with asyncio.timeout(10), lock:
             lookup = bool(get_alternate_clients())
             phase = "binding_get" if lookup else phase
-            reply = (
-                await client.room_get_state_event(room_id, ROUTER_BINDING_EVENT_TYPE, state_key="") if lookup else None
-            )
+            reply = await _read_state(client, room_id, ROUTER_BINDING_EVENT_TYPE, "") if lookup else None
             skip = isinstance(reply, nio.RoomGetStateEventError) and reply.status_code in {"M_NOT_FOUND", "M_FORBIDDEN"}
             if lookup and not isinstance(reply, nio.RoomGetStateEventResponse) and not skip:
                 logger.log(failure_level(False), "room_accounts_publish_failed", room_id=room_id, error=str(reply))
                 return False
             binding = reply.content if isinstance(reply, nio.RoomGetStateEventResponse) else None
             bound = binding.get("user_id") if isinstance(binding, dict) else None
-            alternate = get_alternate_clients().get(bound) if isinstance(bound, str) else None
-            writer = alternate if alternate is not None else client
+            writer = (get_alternate_clients().get(bound) if isinstance(bound, str) else None) or client
             phase = "joined_members"
             try:
                 response = await read_joined_members(writer, room_id)
@@ -66,21 +79,22 @@ async def reconcile_room_accounts(
                 members = {member.user_id for member in response.members}
                 content = {"accounts": sorted(members & prepared_entity_names_by_user_id(config, runtime_paths).keys())}
                 phase = "state_get"
-                current = await writer.room_get_state_event(room_id, event_type, writer.user_id)
-                if writer is not client and get_alternate_clients().get(writer.user_id) is not writer:
-                    logger.debug("room_accounts_writer_no_longer_eligible", room_id=room_id, user_id=writer.user_id)
-                    return False
-                if isinstance(current, nio.RoomGetStateEventResponse) and current.content == content:
-                    return True
-                phase = "state_put"
-                response = await writer.room_put_state(room_id, event_type, content, state_key=writer.user_id)
-                if isinstance(response, nio.RoomPutStateResponse):
-                    return True
+                response = await _read_state(writer, room_id, event_type, writer.user_id)
+                not_found = isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND"
+                if isinstance(response, nio.RoomGetStateEventResponse) or not_found:
+                    if writer is not client and get_alternate_clients().get(writer.user_id) is not writer:
+                        logger.debug("room_accounts_writer_no_longer_eligible", room_id=room_id, user_id=writer.user_id)
+                        return False
+                    if isinstance(response, nio.RoomGetStateEventResponse) and response.content == content:
+                        return True
+                    phase = "state_put"
+                    response = await writer.room_put_state(room_id, event_type, content, state_key=writer.user_id)
+                    if isinstance(response, nio.RoomPutStateResponse):
+                        return True
             forbidden = isinstance(response, nio.ErrorResponse) and response.status_code == "M_FORBIDDEN"
-            members_read = phase == "joined_members"
             level = logging.DEBUG if forbidden else failure_level(False)
-            diagnostic = "matrix_room_members_fetch_failed" if members_read else "room_accounts_publish_failed"
-            logger.log(level, diagnostic, room_id=room_id, error=str(response))
+            event = "matrix_room_members_fetch_failed" if phase == "joined_members" else "room_accounts_publish_failed"
+            logger.log(level, event, room_id=room_id, error=str(response))
             return forbidden
     except Exception as exc:
         timed_out = isinstance(exc, TimeoutError)
@@ -106,7 +120,7 @@ async def reconcile_room_router_binding(
     phase = "state_get"
     try:
         async with asyncio.timeout(10):
-            current = await client.room_get_state_event(room_id, ROUTER_BINDING_EVENT_TYPE, state_key="")
+            current = await _read_state(client, room_id, ROUTER_BINDING_EVENT_TYPE, "")
             if isinstance(current, nio.RoomGetStateEventResponse):
                 bound = current.content.get("user_id")
                 localpart, _, server = bound[1:].partition(":") if isinstance(bound, str) else ("", "", "")
