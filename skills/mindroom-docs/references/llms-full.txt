@@ -19701,10 +19701,13 @@ Setting it promises that importing the plugin's tools, hooks, and OAuth modules:
 - Reads nothing a call sets: the import runs before any call, in the worker's own working directory and environment, without the call's `.mindroom/worker-env.sh` values or per-call environment.
 - Leaves no thread running and no file, socket, or database connection open, because every later call would share it.
 - Keeps no state that must differ between calls, such as a cache, a counter, or a seeded random generator other than Python's `random`.
-- Does not need a package installed or upgraded in the worker afterwards, because the packages it imported stay as imported until the worker restarts.
+- Does not need a package installed or upgraded in the worker afterwards: MindRoom does not watch the plugin's dependencies, and the packages it imported stay as imported until the worker restarts.
+- Finishes within 60 seconds, for all the worker's plugins that set it together.
+- Writes nothing under the plugin's own directory, at import or later, such as a cache or a state file.
 
-MindRoom checks the second promise after the import: when the plugin left a thread or an open file behind, or failed to import, the worker logs a warning and its calls import the plugin themselves, as without the setting.
-The calls also import the plugin themselves once any file under its directory changes, other than under `.git` and `__pycache__`, or when a config change enables or disables a plugin that sets `worker_preload`; workers started after the change import once again.
+A worker whose plugins break the second or fifth promise, or fail to import, logs a warning that names the reason, and all its calls import their plugins themselves, as without the setting.
+The same holds for each call once any file under the plugin's directory changed since the worker started, other than under `.git` and `__pycache__`, and for a call whose config enables another set of plugins that set `worker_preload`; workers started after the change import once again.
+MindRoom notices a change from each file's size, times, and identity without reading it, which it checks on every call, so a directory with many thousands of files, including those behind linked directories, slows each call down.
 Every other plugin, and every plugin in a Docker worker or the shared sandbox runner, is imported by each call.
 
 ## OAuth providers
@@ -26024,11 +26027,12 @@ A call to a ready worker logs nothing, and calls that wait for the same start sh
 | `scope` | The worker's [scope](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes): `shared`, `user`, `user_agent`, or `unscoped` for an agent without `worker_scope` |
 | `agent_name` | Agent the worker serves, as its worker key spells it, or `null` for a `user` worker, which serves every agent on that scope |
 | `outcome` | `ready`, `timeout` for a worker that did not become ready within the backend's ready timeout, or `error` |
-| `wait_ms` | Milliseconds from finding the worker not ready until it answered its health check, or until its start failed |
-| `pod_ready_ms` | Kubernetes only: milliseconds from the same point until Kubernetes reported the worker's pod ready, which covers applying or scaling up its Deployment, scheduling, image pull, and container start; the rest of `wait_ms` is the first health check through the worker's Service |
+| `wait_ms` | Milliseconds from finding the worker not ready until the call could run in it, or until its start failed |
+| `pod_ready_ms` | Kubernetes only: milliseconds from the same point until Kubernetes reported the worker's pod ready, which covers applying or scaling up its Deployment, scheduling, image pull, and container start |
+| `healthy_ms` | Kubernetes only: milliseconds from the same point until the worker answered its health check through its Service; the rest of `wait_ms` is the wait for the worker to [prepare itself](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings), at most the setup timeout |
 
 ```json
-{"worker": "3f9c2a7b1d4e8f60", "backend": "kubernetes", "kind": "tool", "scope": "user_agent", "agent_name": "code", "outcome": "ready", "wait_ms": 14211.6, "pod_ready_ms": 13190.2, "event": "worker_cold_start", "logger": "mindroom.workers.progress", "level": "info", "timestamp": "2026-01-01T12:00:14.211Z"}
+{"worker": "3f9c2a7b1d4e8f60", "backend": "kubernetes", "kind": "tool", "scope": "user_agent", "agent_name": "code", "outcome": "ready", "wait_ms": 31870.4, "pod_ready_ms": 13190.2, "healthy_ms": 14211.6, "event": "worker_cold_start", "logger": "mindroom.workers.progress", "level": "info", "timestamp": "2026-01-01T12:00:31.870Z"}
 ```
 
 ```text
@@ -26037,7 +26041,8 @@ alert on  count of logs where event = "worker_cold_start" and outcome != "ready"
 ```
 
 A high `pod_ready_ms` points at scheduling or image pulls: check for pending worker pods, node scale-up, and the worker image pull policy.
-A large gap between `pod_ready_ms` and `wait_ms` points at the worker's Service or a network policy between the primary and its workers.
+A large gap between `pod_ready_ms` and `healthy_ms` points at the worker's Service or a network policy between the primary and its workers.
+A large gap between `healthy_ms` and `wait_ms` is the worker creating its Python environment and starting its tool runtime: check the worker's CPU limit, its storage, and how many workers started at once; a gap as long as the setup timeout means the setup did not finish, and the worker's [`sandbox_worker_eager_setup_failed`](#sandbox_worker_eager_setup_failed) record names the reason.
 Many `tool` records for the same `worker` mean it is used less often than its idle timeout, such as [`workers.kubernetes.idleTimeoutSeconds`](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings), so it scales down between uses.
 A `timeout` means the worker did not become ready within [`workers.kubernetes.readyTimeoutSeconds`](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings) or `MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS`; the call that waited fails, and for a tool call a [`tool_call_failed`](#tool_call_failed) record carries the error.
 
@@ -26072,6 +26077,39 @@ Each retry delays the reply, and a reply whose request fails every retry logs [`
 |-------|---------|
 | `model_id` | Model ID the request was sent to |
 | `reason` | `transient_error` for a failure the provider or the network reported, `stream_stalled` for a stream that went silent past its idle limit |
+### `sandbox_worker_eager_setup_failed`
+
+Logged by a Kubernetes worker, in its own pod's log, when the setup it runs at startup fails or does not finish within 180 seconds.
+The worker stays up: its first call prepares what is missing and reports its own error, so that call is as slow as it was before workers prepared themselves.
+
+| Field | Meaning |
+|-------|---------|
+| `error` | The failure's message, or its exception type when it has none, such as `TimeoutError` for a setup that outlasted its limit |
+
+```json
+{"error": "No space left on device", "event": "sandbox_worker_eager_setup_failed", "logger": "mindroom.api.sandbox_runner", "level": "warning", "timestamp": "2026-01-01T12:00:00.000Z"}
+```
+
+Alert on any record.
+Check the worker's storage and its CPU limit, and how many workers started at once.
+
+### `sandbox_forkserver_plugin_preload_failed`
+
+Logged by a Kubernetes worker, in its own pod's log, once, when it gives up importing the plugins that set [`worker_preload`](https://docs.mindroom.chat/plugins/#importing-once-per-worker) ahead of its calls.
+The import raised, took longer than 60 seconds, left a thread or an open file behind, or outlasted the worker's setup.
+Calls still work, and each imports its plugins itself until the worker restarts.
+
+| Field | Meaning |
+|-------|---------|
+| `error` | Why the worker gave the preload up, which for an import that raised is the exception |
+
+```json
+{"error": "ImportError: No module named 'missing'", "event": "sandbox_forkserver_plugin_preload_failed", "logger": "mindroom.api.sandbox_forkserver", "level": "warning", "timestamp": "2026-01-01T12:00:00.000Z"}
+```
+
+Alert on any record, since every tool call in that worker pays the plugin's import time again.
+Fix the plugin, or remove `worker_preload` from its manifest.
+
 | `error_type` | `RateLimited` for a throttled request, otherwise `ProviderUnavailable` |
 | `status_code` | HTTP status of the failure, `504` for a stalled stream, or `null` when there is none, as for a dropped connection |
 | `error` | The failure's message, redacted and truncated |

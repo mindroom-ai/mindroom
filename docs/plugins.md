@@ -820,10 +820,13 @@ Setting it promises that importing the plugin's tools, hooks, and OAuth modules:
 - Reads nothing a call sets: the import runs before any call, in the worker's own working directory and environment, without the call's `.mindroom/worker-env.sh` values or per-call environment.
 - Leaves no thread running and no file, socket, or database connection open, because every later call would share it.
 - Keeps no state that must differ between calls, such as a cache, a counter, or a seeded random generator other than Python's `random`.
-- Does not need a package installed or upgraded in the worker afterwards, because the packages it imported stay as imported until the worker restarts.
+- Does not need a package installed or upgraded in the worker afterwards: MindRoom does not watch the plugin's dependencies, and the packages it imported stay as imported until the worker restarts.
+- Finishes within 60 seconds, for all the worker's plugins that set it together.
+- Writes nothing under the plugin's own directory, at import or later, such as a cache or a state file.
 
-MindRoom checks the second promise after the import: when the plugin left a thread or an open file behind, or failed to import, the worker logs a warning and its calls import the plugin themselves, as without the setting.
-The calls also import the plugin themselves once any file under its directory changes, other than under `.git` and `__pycache__`, or when a config change enables or disables a plugin that sets `worker_preload`; workers started after the change import once again.
+A worker whose plugins break the second or fifth promise, or fail to import, logs a warning that names the reason, and all its calls import their plugins themselves, as without the setting.
+The same holds for each call once any file under the plugin's directory changed since the worker started, other than under `.git` and `__pycache__`, and for a call whose config enables another set of plugins that set `worker_preload`; workers started after the change import once again.
+MindRoom notices a change from each file's size, times, and identity without reading it, which it checks on every call, so a directory with many thousands of files, including those behind linked directories, slows each call down.
 Every other plugin, and every plugin in a Docker worker or the shared sandbox runner, is imported by each call.
 
 ## OAuth providers
