@@ -96,6 +96,7 @@ _TEXT_CHAT_REQUIRED_MESSAGE = (
 
 _MAX_TOOL_RESULT_CHARS = 8000
 _CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS = frozenset({"run_workflow"})
+_ROOM_INSTRUCTIONS_TIMEOUT_SECONDS = 5.0
 
 
 async def _save_call_usage(
@@ -910,20 +911,30 @@ async def _call_room_instructions_item(
 ) -> EnrichmentItem | None:
     """Read ``agent_instructions`` for a call, re-checking origin-room access on cross-room reads."""
     target_room_id = instructions_room_id or room_id
-    if target_room_id != room_id:
-        try:
-            allowed = await room_access_allowed(context, target_room_id)
-        except Exception:
-            logger.warning(
-                "call_room_instructions_access_check_failed",
-                room_id=target_room_id,
-                call_room_id=room_id,
-                exc_info=True,
-            )
-            return None
-        if not allowed:
-            return None
-    return await room_instructions_item(context.client, target_room_id, config)
+    try:
+        async with asyncio.timeout(_ROOM_INSTRUCTIONS_TIMEOUT_SECONDS):
+            if target_room_id != room_id:
+                try:
+                    allowed = await room_access_allowed(context, target_room_id)
+                except Exception:
+                    logger.warning(
+                        "call_room_instructions_access_check_failed",
+                        room_id=target_room_id,
+                        call_room_id=room_id,
+                        exc_info=True,
+                    )
+                    return None
+                if not allowed:
+                    return None
+            return await room_instructions_item(context.client, target_room_id, config)
+    except TimeoutError:
+        logger.warning(
+            "call_room_instructions_timed_out",
+            room_id=target_room_id,
+            call_room_id=room_id,
+            timeout_seconds=_ROOM_INSTRUCTIONS_TIMEOUT_SECONDS,
+        )
+        return None
 
 
 def _call_instructions(build: AgentBuild, system_enrichment: str = "") -> str:

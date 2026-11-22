@@ -29,9 +29,11 @@ from mindroom.config.models import ModelConfig
 from mindroom.hooks import EnrichmentItem
 from mindroom.llm.provider import ModelRequest
 from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
+from mindroom.matrix_rtc import call_tools
 from mindroom.matrix_rtc.call_manager import CallManager
 from mindroom.matrix_rtc.call_origin import CallOrigin, CallOriginContext
-from mindroom.matrix_rtc.call_tools import build_call_tools
+from mindroom.matrix_rtc.call_tools import _call_room_instructions_item, build_call_tools
+from mindroom.message_target import MessageTarget
 from mindroom.prompts import ROOM_INSTRUCTIONS_TEMPLATE
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionGate
@@ -78,7 +80,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.llm.messages import Message
-    from mindroom.message_target import MessageTarget
     from mindroom.response_turn import ResponseTurnContext
 
 _ROOM = "!test:localhost"
@@ -1005,3 +1006,86 @@ async def test_voice_call_drops_origin_room_instructions_when_access_is_revoked_
     assert len(origin_reads) == 1
     assert tooling.close is not None
     await tooling.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_call_room_instructions_stalled_access_check_and_shared_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cross-room access check and setting read share one deadline and omit instructions on timeout."""
+    call_room, origin_room = "!call-timeout:localhost", "!origin-timeout:localhost"
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    rooms=[call_room, origin_room],
+                    tools=[],
+                    access=ResponderAccessConfig(users=["@caller:localhost"]),
+                ),
+            },
+        ),
+        tmp_path,
+    )
+    client = _make_matrix_client_mock()
+
+    async def never_returns(*_args: object, **_kwargs: object) -> object:
+        await asyncio.Event().wait()
+        return None
+
+    client.joined_members = AsyncMock(side_effect=never_returns)
+    client.room_get_state_event = AsyncMock(side_effect=never_returns)
+    context = ToolRuntimeContext(
+        agent_name="general",
+        target=MessageTarget.resolve(call_room, None, None),
+        requester_id="@caller:localhost",
+        client=client,
+        config=config,
+        runtime_paths=runtime_paths,
+        plugins=config_plugins(config, runtime_paths),
+        conversation_reader=make_conversation_reader_mock(),
+        relations=make_relation_lookup(),
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+    )
+
+    monkeypatch.setattr(call_tools, "_ROOM_INSTRUCTIONS_TIMEOUT_SECONDS", 0.02)
+    with capture_logs() as access_timeout_logs:
+        item = await asyncio.wait_for(
+            _call_room_instructions_item(
+                context,
+                room_id=call_room,
+                instructions_room_id=origin_room,
+                config=config,
+            ),
+            timeout=1.0,
+        )
+    assert item is None
+    client.room_get_state_event.assert_not_awaited()
+    assert any(log.get("event") == "call_room_instructions_timed_out" for log in access_timeout_logs)
+
+    # Access check completes, then setting read stalls: the single outer deadline still bounds the read
+    # even while room_settings._REQUEST_TIMEOUT_SECONDS remains at its default 5 s.
+    async def allowed_joined_members(room_id: str) -> nio.JoinedMembersResponse:
+        return nio.JoinedMembersResponse(
+            members=[nio.RoomMember(user_id="@caller:localhost", display_name="Caller", avatar_url=None)],
+            room_id=room_id,
+        )
+
+    client.joined_members = AsyncMock(side_effect=allowed_joined_members)
+    monkeypatch.setattr(call_tools, "_ROOM_INSTRUCTIONS_TIMEOUT_SECONDS", 0.05)
+    with capture_logs() as read_timeout_logs:
+        item = await asyncio.wait_for(
+            _call_room_instructions_item(
+                context,
+                room_id=call_room,
+                instructions_room_id=origin_room,
+                config=config,
+            ),
+            timeout=1.0,
+        )
+    assert item is None
+    client.room_get_state_event.assert_awaited_once_with(origin_room, ROOM_SETTINGS_EVENT_TYPE, "agent_instructions")
+    assert any(log.get("event") == "call_room_instructions_timed_out" for log in read_timeout_logs)
