@@ -467,11 +467,6 @@ def parse_resource_profile_annotation(annotations: dict[str, str]) -> str | None
     return value or None
 
 
-def _eager_setup_plugins(launch: WorkerLaunchConfig) -> list[str]:
-    """Return the enabled plugin paths a worker's startup manifest lists, which also asks it to prepare eagerly."""
-    return [plugin.path for plugin in launch.config.plugins if plugin.enabled]
-
-
 def _labels(*, extra_labels: dict[str, str], worker_id: str) -> dict[str, str]:
     labels = {
         _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
@@ -1044,6 +1039,9 @@ class KubernetesResourceManager:
         connect_timeout = _HEALTHZ_FIRST_CONNECT_TIMEOUT_SECONDS
         with httpx.Client(timeout=answer_timeout) as client:
             while True:
+                # A try that leaves no time for another one may take as long as the single try it replaces.
+                if deadline - time.time() <= connect_timeout + _HEALTHZ_RETRY_INTERVAL_SECONDS:
+                    connect_timeout = answer_timeout
                 try:
                     response = client.get(
                         healthz_url,
@@ -1487,7 +1485,7 @@ class KubernetesResourceManager:
         return dedicated_worker_startup_manifest_hash(
             self._worker_runtime_paths(worker_key=worker_key, state_subpath=state_subpath),
             tool_validation_snapshot=launch.tool_validation_snapshot,
-            eager_setup_plugins=_eager_setup_plugins(launch),
+            eager_setup_plugins=launch.worker_preload_plugins,
         )
 
     def write_startup_manifest(
@@ -1502,7 +1500,7 @@ class KubernetesResourceManager:
             (self.storage_root / state_subpath).resolve(),
             self._worker_runtime_paths(worker_key=worker_key, state_subpath=state_subpath),
             tool_validation_snapshot=launch.tool_validation_snapshot,
-            eager_setup_plugins=_eager_setup_plugins(launch),
+            eager_setup_plugins=launch.worker_preload_plugins,
         )
 
     def _worker_layout(self, state_subpath: str) -> DedicatedWorkerLayout:

@@ -50,6 +50,8 @@ class WorkerLaunchConfig:
     tool_validation_snapshot: Mapping[str, Mapping[str, object]] = field(compare=False, repr=False)
     grantable_credentials: frozenset[str] = field(compare=False)
     digest: str
+    # The configured paths of the enabled plugins whose manifests set ``worker_preload``.
+    worker_preload_plugins: tuple[str, ...] = field(default=(), compare=False)
 
 
 @dataclass(frozen=True, slots=True)

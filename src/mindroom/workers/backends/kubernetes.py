@@ -247,6 +247,8 @@ class KubernetesWorkerBackend:
         config.pop("named_worker_idle_timeout_seconds")
         config.pop("named_worker_max_age_seconds")
         config.pop("named_workers_max")
+        # The primary's own wait, which no worker depends on.
+        config.pop("setup_timeout_seconds")
         return {
             "config": config,
             "owner": self.cleanup_locator,
@@ -423,6 +425,7 @@ class KubernetesWorkerBackend:
             raise WorkerBackendError(failure_reason) from exc
 
         if reporter is not None:
+            reporter.mark("healthy")
             self._wait_for_worker_setup(worker_id, reporter, health)
             reporter.finish(None)
         final_deployment_annotations = {
