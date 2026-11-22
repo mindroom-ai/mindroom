@@ -254,9 +254,11 @@ class CollectedStreamPresentation:
 
     def _replace_text(self, content: str) -> None:
         """Replace the collected text; a paragraph break stays pending only where the new text ends at its tool call."""
-        last_line = content.rstrip("\r\n").rsplit("\n", maxsplit=1)[-1]
+        ending = content.rstrip("\r\n")
+        last_line = ending.rsplit("\n", maxsplit=1)[-1]
         at_marker = self.show_tool_calls and last_line in _trace_marker_lines(self.tool_trace)
-        self.separate_next_text = at_marker or (self.separate_next_text and content == self.response_text)
+        unchanged = ending == self.response_text.rstrip("\r\n")
+        self.separate_next_text = at_marker or (self.separate_next_text and unchanged)
         self.response_text = content
 
     def append_text(self, content: object | None) -> None:

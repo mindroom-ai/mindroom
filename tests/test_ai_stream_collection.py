@@ -143,6 +143,30 @@ _READ_PENDING = "🔧 `read` [1] ⏳"
             id="document-repeats-the-text-before-a-hidden-call",
         ),
         pytest.param(
+            False,
+            [
+                TextDelta("Before"),
+                ToolStarted(_READ),
+                StructuredStreamChunk("Before\n"),
+                ToolCompleted(_READ),
+                TextDelta("After"),
+            ],
+            "Before\n\nAfter",
+            id="document-adds-a-newline-to-the-text-before-a-hidden-call",
+        ),
+        pytest.param(
+            False,
+            [
+                TextDelta("Before\n"),
+                ToolStarted(_READ),
+                StructuredStreamChunk("Before"),
+                ToolCompleted(_READ),
+                TextDelta("After"),
+            ],
+            "Before\n\nAfter",
+            id="document-drops-a-newline-from-the-text-before-a-hidden-call",
+        ),
+        pytest.param(
             True,
             [ToolStarted(_READ), StructuredStreamChunk(f"{_READ_PENDING}\n\nHel"), TextDelta("lo")],
             f"{_READ_PENDING}\n\nHello",
