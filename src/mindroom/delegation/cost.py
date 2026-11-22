@@ -99,6 +99,14 @@ def stored_receipts(metadata: Mapping[str, Any] | None) -> dict[str, float]:
     return receipts
 
 
+def carried_receipts(ran: Mapping[str, Mapping[str, Any] | None], jobs: Mapping[str, str | None]) -> dict[str, float]:
+    """Return what a turn's cut-short runs received, from each one's stored metadata by run id, for the turn after them."""
+    # A sum stored without ids may cover them, and a job is the turn's whose run acknowledged it (``job_acknowledgers``).
+    left_out = {LEGACY_COST_ID, *(key for key, by in jobs.items() if by not in ran)}
+    received = merge_by_key(map(stored_receipts, ran.values()), float)
+    return {key: usd for key, usd in received.items() if key not in left_out}
+
+
 def receipts_metadata(*views: Mapping[str, float]) -> dict[str, Any]:
     """Return the entries that store ``views`` of a turn's receipts merged, with the sum earlier releases read."""
     receipts = merge_by_key(views, float)

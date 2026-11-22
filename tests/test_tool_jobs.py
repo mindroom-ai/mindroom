@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Literal
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.delegation.background import ACKNOWLEDGED_BY, job_acknowledgers
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.mid_turn import MidTurnGate, MidTurnMode
 from mindroom.response_lifecycle import _QueuedMessageState
@@ -552,7 +553,7 @@ async def test_finalize_acknowledges_only_claims_whose_call_the_parent_run_saved
             waited = await runtime.wait(job_id, owner=job_owner(), depth=0)
             owner.register(
                 runtime,
-                job_id,
+                waited.job,
                 waited.claim,
                 run_id="parent-run",
                 team=False,
@@ -565,6 +566,8 @@ async def test_finalize_acknowledges_only_claims_whose_call_the_parent_run_saved
         saved = await lookup(runtime, "saved", owner=job_owner(), depth=0)
         unsaved = await lookup(runtime, "unsaved", owner=job_owner(), depth=0)
         assert (saved.consumed, unsaved.consumed) == (True, False)
+        # A tool's job keeps the adapter it was admitted with, which a call that reattaches to it must match.
+        assert saved.adapter == {}
     finally:
         await runtime.shutdown()
 
@@ -593,16 +596,18 @@ async def test_a_subagent_job_keeps_the_run_that_first_acknowledged_its_outcome(
             operation=operation,
         )
         waited = await runtime.wait(job_id, owner=job_owner(), depth=0)
-        assert waited.job.acknowledged_by is None
-        await runtime.acknowledge_wait(job_id, waited.claim, run_id="first-run")
+        assert not any(job_acknowledgers([waited.job]).values())
+        acknowledged = {ACKNOWLEDGED_BY: "first-run"} if kind == "delegation" else None
+        await runtime.acknowledge_wait(job_id, waited.claim, adapter=acknowledged)
     await runtime.shutdown()
     restored = await tool_job_runtime(tmp_path)
     try:
         await restored.recover()
         reread = await restored.wait("subagent", owner=job_owner(), depth=0)
-        await restored.acknowledge_wait("subagent", reread.claim, run_id="a-later-reader")
+        await restored.acknowledge_wait("subagent", reread.claim, adapter={ACKNOWLEDGED_BY: "a-later-reader"})
         jobs = {job.job_id: job for job in restored.retained_jobs()}
-        assert (jobs["subagent"].consumed, jobs["subagent"].acknowledged_by) == (True, "first-run")
+        assert jobs["subagent"].consumed
+        assert job_acknowledgers(jobs.values()) == {child["child"]["delegation_id"]: "first-run"}
         assert jobs["subagent"].adapter["child"] == child["child"]
         assert (jobs["tool"].consumed, jobs["tool"].adapter) == (True, {"own": 1})
     finally:
@@ -633,8 +638,8 @@ async def test_an_instance_that_runs_no_jobs_reads_the_saved_ones_that_parse_and
         await runtime._store.accept("unparsable", "{}")
         assert [(job.job_id, job.consumed) for job in await runtime_module.saved_jobs(journal)] == [("kept", False)]
         # The runtime still owns the jobs, so its acknowledgement lands, and the next read finds it.
-        await runtime.acknowledge_wait("kept", waited.claim, run_id="first-run")
-        assert [job.acknowledged_by for job in await runtime_module.saved_jobs(journal)] == ["first-run"]
+        await runtime.acknowledge_wait("kept", waited.claim, adapter={ACKNOWLEDGED_BY: "first-run"})
+        assert list(job_acknowledgers(await runtime_module.saved_jobs(journal)).values()) == ["first-run"]
     finally:
         await journal.close()
         await runtime.shutdown()
@@ -1660,6 +1665,7 @@ async def test_failed_receipt_save_preserves_the_previous_saved_job(
     """A receipt save that fails changes nothing saved or current, and the claim can still acknowledge."""
     runtime = await tool_job_runtime(tmp_path)
     adapter = {"child": asdict(job_child())} if kind == "delegation" else {}
+    acknowledged = {ACKNOWLEDGED_BY: "a-run"} if kind == "delegation" else None
 
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "saved")
@@ -1685,10 +1691,10 @@ async def test_failed_receipt_save_preserves_the_previous_saved_job(
         with monkeypatch.context() as patch:
             intercept_job_saves(patch, before=fail_receipt)
             with pytest.raises(OSError, match="receipt save failed"):
-                await runtime.acknowledge_wait("atomic", waited.claim, run_id="a-run")
+                await runtime.acknowledge_wait("atomic", waited.claim, adapter=acknowledged)
             assert await saved_jobs(tmp_path) == before
             assert [job.adapter for job in runtime.retained_jobs()] == [adapter]
-        await runtime.acknowledge_wait("atomic", waited.claim, run_id="a-run")
+        await runtime.acknowledge_wait("atomic", waited.claim, adapter=acknowledged)
         assert (await saved_jobs(tmp_path))["atomic"].consumed
     finally:
         await runtime.shutdown()

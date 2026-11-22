@@ -14,7 +14,7 @@ from mindroom import reply_lifecycle as rl
 from mindroom.agent_modes import resolve_agent_mode
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import stream_agent_response
-from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
+from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata, with_prior_usage
 from mindroom.ai_runtime import reply_ended_for_follow_up
 from mindroom.approval.response import continuation_response_kind, continuation_target
 from mindroom.authorization import ReplyMembershipPendingError
@@ -23,6 +23,7 @@ from mindroom.config.resolution import cheap_model as agent_cheap_model
 from mindroom.config.resolution import entity_timezone, show_reasoning, show_tool_calls
 from mindroom.constants import (
     COMPACTIONS_CONTENT_KEY,
+    CONTINUED_RUNS_METADATA_KEY,
     HOOK_SOURCE_RUN_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     STREAM_STATUS_KEY,
@@ -32,6 +33,7 @@ from mindroom.constants import (
 from mindroom.contacts.turns import contact_room, contact_turn_instructions, contact_turn_tools
 from mindroom.conversation_state_writer import ReplySession
 from mindroom.delegation.background import job_acknowledgers
+from mindroom.delegation.cost import carried_receipts, receipts_metadata
 from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.final_delivery import (
@@ -1157,23 +1159,23 @@ class ResponseRunner:
             return request
         recorded = await handle.runtime.interrupted_tool_calls(handle)
         restarts = await handle.runtime.restart_interruptions(handle)
-        recovered: dict[str, Any] = {}
         if restarts and history_scope is not None:
-            runtime = get_background_runtime(self.deps.runtime_paths)
-            # An instance that runs no jobs, or has yet to recover them, still tells whose each saved one is.
-            journal = self.deps.runtime.orchestrator.event_journal_store()
-            jobs = runtime.retained_jobs() if runtime is not None else await saved_jobs(journal)
-            recovered = await self.deps.state_writer.recover_interrupted_turn(
+            turn = await self.deps.state_writer.recover_interrupted_turn(
                 execution_identity=execution_identity,
                 scope=history_scope,
                 session_id=session_id,
                 event_ids={*request.sources.pending_event_ids, *request.sources.logical_source_event_ids},
                 natively=restarts <= _NATIVE_RECOVERY_LIMIT,
-                jobs=job_acknowledgers(jobs),
             )
-        if recovered:
-            # The turn's runs name the recovered runs they continue, which its answer links and whose cost it reports.
-            request = replace(request, matrix_run_metadata={**(request.matrix_run_metadata or {}), **recovered})
+            if turn.attempts:
+                runtime = get_background_runtime(self.deps.runtime_paths)
+                # An instance that runs no jobs, or has yet to recover them, still tells whose each saved one is.
+                journal = self.deps.runtime.orchestrator.event_journal_store()
+                jobs = runtime.retained_jobs() if runtime is not None else await saved_jobs(journal)
+                # The turn's runs name the recovered runs they continue, which its answer links and whose cost it reports.
+                received = receipts_metadata(carried_receipts(turn.ran, job_acknowledgers(jobs)))
+                carried = with_prior_usage({CONTINUED_RUNS_METADATA_KEY: turn.attempts, **received}, turn.usage) or {}
+                request = replace(request, matrix_run_metadata={**(request.matrix_run_metadata or {}), **carried})
         return self._with_recorded_interrupted_attempt(request, handle, recorded)
 
     def _with_recorded_interrupted_attempt(

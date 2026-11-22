@@ -31,7 +31,7 @@ from mindroom.constants import (
     SUBAGENT_RECEIPTS_RUN_METADATA_KEY,
 )
 from mindroom.delegation import hooks as delegation_hooks
-from mindroom.delegation.background import delegation_child, job_acknowledgers
+from mindroom.delegation.background import ACKNOWLEDGED_BY, delegation_child, job_acknowledgers
 from mindroom.delegation.cost import (
     SubagentCost,
     merge_by_key,
@@ -78,7 +78,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
-from tests.delegation_helpers import CostProbeTools
+from tests.delegation_helpers import CostProbeTools, replay_run_metadata
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.response_runner_helpers import _envelope, _noop_typing, _target
@@ -1400,7 +1400,7 @@ async def test_a_continuation_starts_from_the_nested_jobs_its_cut_short_turn_s_r
         before_switch, _cut_short = worker_storage.list_runs(child.session_id)
         await _completed_research_job(runtime, nested_owner, "acknowledged")
         waited = await runtime.wait("acknowledged", owner=nested_owner, depth=0)
-        await runtime.acknowledge_wait("acknowledged", waited.claim, run_id=before_switch.run_id)
+        await runtime.acknowledge_wait("acknowledged", waited.claim, adapter={ACKNOWLEDGED_BY: before_switch.run_id})
         await _completed_research_job(runtime, nested_owner, "unacknowledged")
 
     switch = tool_call("switch_thread_model", "sw", model_name="worker_model", when="after-toolcall")
@@ -1479,7 +1479,8 @@ def _recovered(bot: AgentBot, *attempts: RunRecord, jobs: dict[str, str | None] 
     session = new_scope_session(session_id=_SESSION, scope=_SCOPE)
     for attempt in attempts:
         store.save_run(session, attempt, record_usage=False)
-    return recover_interrupted_turn(store, _SESSION, _SCOPE, {_TURN}, natively=False, jobs=jobs or {})
+    turn = recover_interrupted_turn(store, _SESSION, _SCOPE, {_TURN}, natively=False)
+    return replay_run_metadata(turn, jobs or {})
 
 
 def _input_tokens(recovered: dict[str, Any]) -> dict[str, int]:

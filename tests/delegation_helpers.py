@@ -23,11 +23,17 @@ from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.ai import ai_response
+from mindroom.ai_run_metadata import with_prior_usage
 from mindroom.approval.execution import AgentApprovalExecution
 from mindroom.approval.resume import ResumeRunner
 from mindroom.config.main import Config
-from mindroom.constants import resolve_runtime_paths
-from mindroom.delegation.cost import receive_subagent_cost, received_subagent_cost_usd
+from mindroom.constants import CONTINUED_RUNS_METADATA_KEY, resolve_runtime_paths
+from mindroom.delegation.cost import (
+    carried_receipts,
+    receipts_metadata,
+    receive_subagent_cost,
+    received_subagent_cost_usd,
+)
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.storage import new_scope_session
@@ -69,6 +75,7 @@ if TYPE_CHECKING:
     from mindroom.config.agent import AgentConfig
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationState
+    from mindroom.history.run_checkpoint import InterruptedTurn
     from mindroom.hooks import HookRegistry
     from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import AnyRunRecord
@@ -87,6 +94,17 @@ def _runtime_paths(storage_path: Path) -> RuntimePaths:
         storage_path=storage_path,
         process_env={},
     )
+
+
+def replay_run_metadata(turn: InterruptedTurn, jobs: Mapping[str, str | None]) -> dict[str, object]:
+    """Return the run metadata a replay's runs carry of ``turn``, as the response runner builds it from ``jobs``.
+
+    ``jobs`` names the run that acknowledged each subagent job, by its child's delegation id (``job_acknowledgers``).
+    """
+    if not turn.attempts:
+        return {}
+    received = receipts_metadata(carried_receipts(turn.ran, jobs))
+    return with_prior_usage({CONTINUED_RUNS_METADATA_KEY: turn.attempts, **received}, turn.usage) or {}
 
 
 def native_delegation_config(agents: Mapping[str, AgentConfig], **fields: object) -> Config:

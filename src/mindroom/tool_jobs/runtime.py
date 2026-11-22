@@ -145,12 +145,6 @@ class BackgroundJob:
     # The latest progress its running tool reported, as of this snapshot; live state that is never saved.
     progress: str | None = None
 
-    @property
-    def acknowledged_by(self) -> str | None:
-        """The run whose saved result first acknowledged a subagent job; an adapter entry, which older releases ignore."""
-        by = self.adapter.get("acknowledged_by_run") if self.consumed else None
-        return by if isinstance(by, str) else None
-
 
 @dataclass(frozen=True)
 class JobClaim:
@@ -960,13 +954,13 @@ class ToolJobRuntime:
         job_id: str,
         claim: JobClaim | None,
         *,
-        run_id: str | None = None,
         returned_inline: bool = False,
+        adapter: Mapping[str, Any] | None = None,
     ) -> None:
         """Mark the claimed outcome consumed, only after the exact parent tool result has been durably saved.
 
-        ``run_id`` names the parent run that saved it, which a subagent job keeps from its first acknowledgement
-        (``acknowledged_by``), and ``returned_inline`` says that tool result belongs to the call that started the job.
+        ``returned_inline`` says that tool result belongs to the call that started the job, and ``adapter`` holds
+        what the job's kind keeps of its first acknowledgement, which is added to the job's adapter.
         """
         async with self._lock:
             self._ensure_open()
@@ -976,9 +970,9 @@ class ToolJobRuntime:
                 raise ValueError(msg)
             # A later reread of an inline call's result does not make it a job.
             job = _updated(entry.job, consumed=True, returned_inline=entry.job.returned_inline or returned_inline)
-            if entry.job.kind == "delegation" and not entry.job.consumed:
-                # A tool's job keeps the adapter it was admitted with, which a call that reattaches to it must match.
-                job = replace(job, adapter={**job.adapter, "acknowledged_by_run": run_id})
+            if adapter and not entry.job.consumed:
+                # A copy: a save that fails leaves the job as it was, and a job given nothing keeps its admitted adapter.
+                job = replace(job, adapter={**job.adapter, **adapter})
             await self._publish(entry, job)
             entry.claim = None
 

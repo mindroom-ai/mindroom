@@ -15,9 +15,8 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.agent_loop.tools import tool_result_message
-from mindroom.ai_run_metadata import merge_usage, prior_usage_by_run, with_prior_usage
+from mindroom.ai_run_metadata import merge_usage, prior_usage_by_run
 from mindroom.constants import CONTINUED_RUNS_METADATA_KEY, LEGACY_COST_ID, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
-from mindroom.delegation.cost import merge_by_key, receipts_metadata, stored_receipts
 from mindroom.history.run_visibility import is_model_history_visible_run, run_in_scope
 from mindroom.llm.messages import CUT_OFF_TEXT_KEY, Message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
@@ -217,6 +216,14 @@ def recover_stopped_run(
     return True
 
 
+class InterruptedTurn(NamedTuple):
+    """A turn's attempts that no answer links yet: their run ids, their usage by run id, their runs' stored metadata."""
+
+    attempts: list[str]
+    usage: dict[str, RunMetrics]
+    ran: dict[str, dict[str, Any] | None]
+
+
 def recover_interrupted_turn(
     store: ConversationStore,
     session_id: str,
@@ -224,30 +231,26 @@ def recover_interrupted_turn(
     event_ids: Collection[str],
     *,
     natively: bool,
-    jobs: Mapping[str, str | None],
-) -> dict[str, Any]:
-    """Recover the runs of ``scope`` cut short while they answered ``event_ids``; return what their replay's runs carry.
+) -> InterruptedTurn:
+    """Recover the runs of ``scope`` cut short while they answered ``event_ids``; return the attempts their replay continues.
 
     A turn a restart interrupted is replayed, and its replay calls this before it loads history, so its request
     continues from the interrupted attempt's own messages. Without ``natively``, for a turn that keeps being
     interrupted, nothing is recovered and the runs recovered for it earlier leave history as failed runs, so its next
     attempt starts from the conversation before the turn. Either way, every attempt at the turn no answer links yet is
-    named in the returned run metadata, whatever recovery did with it, so the turn's answer links it
-    (``link_response_event``): a summary can hold its work, from its own mid-turn fold or a later compaction, and
-    redacting the answer removes that too.
+    returned, whatever recovery did with it, so the turn's answer links it (``link_response_event``): a summary can
+    hold its work, from its own mid-turn fold or a later compaction, and redacting the answer removes that too.
 
-    The metadata also holds what those attempts spent, which the replay's reply reports with its own: their usage by
-    run id and their subagent receipts by delegation id, each merged by id over the attempts' rows, a team run's
-    member rows, and the earlier attempts the rows name. A sum stored without ids is left out, and so is the receipt
-    of a subagent job none of those rows' runs acknowledged (``jobs``, as ``job_acknowledgers`` returns them).
+    The replay's reply reports what those attempts spent with its own: their usage is merged by run id over the
+    attempts' rows, a team run's member rows, and the earlier attempts the rows name, without a sum stored without ids.
     """
     session = store.load_session(session_id)
     if session is None:
-        return {}
+        return InterruptedTurn([], {}, {})
     loaded = {run.run_id for run in session.runs}
     attempts: list[str] = []
     usage: list[Mapping[str, RunMetrics]] = []
-    receipts: list[Mapping[str, float]] = []
+    ran: dict[str, dict[str, Any] | None] = {}
     # The loaded session leaves out the runs a summary covers, so the turn's attempts are read from every stored run.
     runs = store.list_runs(session_id)
     for run in runs:
@@ -265,15 +268,9 @@ def recover_interrupted_turn(
             members = [member for member in runs if member.parent_run_id == run.run_id]
             own = team_run_usage(run.metrics, (member.metrics for member in members))
             usage += [prior_usage_by_run(run.metadata), {} if own is None else {run.run_id: own}]
-            receipts += [stored_receipts(record.metadata) for record in (run, *members)]
-    if not attempts:
-        return {}
-    ran = {*attempts, *(run.run_id for run in runs if run.parent_run_id in attempts)}
-    spent, left_out = merge_usage(*usage), {LEGACY_COST_ID, *(key for key, by in jobs.items() if by not in ran)}
-    spent.pop(LEGACY_COST_ID, None)
-    received = {key: usd for key, usd in merge_by_key(receipts, float).items() if key not in left_out}
-    carried = {CONTINUED_RUNS_METADATA_KEY: attempts, **receipts_metadata(received)}
-    return with_prior_usage(carried, spent) or carried
+            ran.update({record.run_id: record.metadata for record in (run, *members)})
+    spent = {run_id: used for run_id, used in merge_usage(*usage).items() if run_id != LEGACY_COST_ID}
+    return InterruptedTurn(attempts, spent, ran)
 
 
 def link_response_event(store: ConversationStore, session_id: str, run_id: str, response_event_id: str) -> None:

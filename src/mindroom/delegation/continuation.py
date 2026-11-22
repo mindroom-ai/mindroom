@@ -7,9 +7,8 @@ from typing import TYPE_CHECKING
 
 from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import prior_usage_by_run
-from mindroom.constants import LEGACY_COST_ID
 from mindroom.delegation.background import delegation_child, job_acknowledgers
-from mindroom.delegation.cost import SubagentCost, merge_by_key, stored_receipts
+from mindroom.delegation.cost import SubagentCost, carried_receipts, merge_by_key
 from mindroom.delegation.execution import delegation_call_job
 from mindroom.delegation.lifecycle import authorize_delegation, child_own_usage, delegation_grant, prepare_child_turn
 from mindroom.delegation.personas import follow_up_refusal
@@ -99,14 +98,12 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
         parent_tool_call_id=child.parent_tool_call_id,
     )
     # The continuation starts from what the turns restarts cut short before it cost, by delegation id: what the job's
-    # earlier continuation started from, that turn's own cost, and what its runs received, without a sum stored
-    # without ids and without a nested job none of them acknowledged, as a restart's replay leaves both out.
+    # earlier continuation started from, that turn's own cost, and what its runs received, as a restart's replay carries it.
     receipts = job.adapter.get(_RECEIPTS_KEY) or {}
     if run is not None:
-        own_usd, ran = child_own_usage(run, config)[1], {run.run_id, *prior_usage_by_run(run.metadata)}
-        jobs = job_acknowledgers(runtime.retained_jobs())
-        left_out = {LEGACY_COST_ID, *(key for key, by in jobs.items() if by not in ran)}
-        received = {key: usd for key, usd in stored_receipts(run.metadata).items() if key not in left_out}
+        own_usd = child_own_usage(run, config)[1]
+        ran = {**dict.fromkeys(prior_usage_by_run(run.metadata)), run.run_id: run.metadata}
+        received = carried_receipts(ran, job_acknowledgers(runtime.retained_jobs()))
         receipts = merge_by_key((receipts, received, {} if own_usd is None else {child.delegation_id: own_usd}), float)
     follow_up.cost_usd = follow_up.subagents_cost_usd = SubagentCost(receipts).usd
     arguments = {"subagent_id": child.subagent_id, "message": child.task}

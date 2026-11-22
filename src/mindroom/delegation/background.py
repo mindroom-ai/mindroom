@@ -17,6 +17,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationTerminalStatus
 
+ACKNOWLEDGED_BY = "acknowledged_by_run"
+
 
 def child_snapshot(child: DelegationChild) -> dict[str, Any]:
     """Keep execution identity in metadata; the job outcome owns retained result text."""
@@ -34,15 +36,14 @@ def delegation_child(job: BackgroundJob) -> DelegationChild:
 def job_acknowledgers(jobs: Iterable[BackgroundJob]) -> dict[str, str | None]:
     """Return the run that acknowledged each subagent job, by the delegation id its saved child names.
 
-    None stands for a job no run acknowledged yet, and for one a release that kept no such record acknowledged. The
-    turn whose run acknowledges a job reports its cost, though a crash can store its result on another turn's run.
-    Nothing else of a child is read, so one no reader decodes stops no turn's replay; a job whose adapter or child is
-    no mapping, or names no id, is no receipt's.
+    Its adapter keeps the parent run whose saved result first acknowledged it (``ACKNOWLEDGED_BY``); None stands for a
+    job none acknowledged yet, or one a release that kept no such record acknowledged. Nothing else of a child is read,
+    so one no reader decodes stops no replay; a job whose adapter or child is no mapping, or names no id, is no receipt's.
     """
     owned = (job for job in jobs if job.kind == "delegation" and isinstance(job.adapter, dict))
-    children = ((job, job.adapter.get("child")) for job in owned)
-    ids = ((job, child.get("delegation_id")) for job, child in children if isinstance(child, dict))
-    return {key: job.acknowledged_by for job, key in ids if isinstance(key, str)}
+    read = ((job.adapter.get("child"), job.adapter.get(ACKNOWLEDGED_BY) if job.consumed else None) for job in owned)
+    named = ((child.get("delegation_id"), by) for child, by in read if isinstance(child, dict))
+    return {key: by if isinstance(by, str) else None for key, by in named if isinstance(key, str)}
 
 
 def delegation_outcome(status: DelegationTerminalStatus, text: str) -> BackgroundOutcome:

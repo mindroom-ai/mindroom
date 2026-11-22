@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from mindroom.history.run_checkpoint import link_response_event, recover_interrupted_turn
 from mindroom.history.session_context import create_scope_session_storage, resolve_bound_team_scope
@@ -17,11 +17,12 @@ from mindroom.session_storage.store import watch_session_row
 from mindroom.tool_system.runtime_context import scope_hook_context_kwargs
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Collection, Mapping, Sequence
+    from collections.abc import AsyncIterator, Collection, Sequence
 
     import structlog
 
     from mindroom.constants import RuntimePaths
+    from mindroom.history.run_checkpoint import InterruptedTurn
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -144,13 +145,12 @@ class ConversationStateWriter:
         session_id: str,
         event_ids: Collection[str],
         natively: bool,
-        jobs: Mapping[str, str | None],
-    ) -> dict[str, Any]:
+    ) -> InterruptedTurn:
         """Recover the runs a restart cut short while they answered ``event_ids`` (``recover_interrupted_turn``).
 
-        Returns the run metadata their replay's runs carry, off-loop in the session target's FIFO lane.
+        Returns the attempts their replay continues, off-loop in the session target's FIFO lane.
         """
         return await run_session_storage_operation(
             partial(self.create_storage, execution_identity, scope=scope),
-            lambda store: recover_interrupted_turn(store, session_id, scope, event_ids, natively=natively, jobs=jobs),
+            lambda storage: recover_interrupted_turn(storage, session_id, scope, event_ids, natively=natively),
         )

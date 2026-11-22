@@ -33,8 +33,9 @@ Success: a reply's `cost.usd` and `cost.subagents_usd` count every attempt at it
 4. **The maps are stored under new keys, beside the sums an earlier release reads.**
    `mindroom_subagent_receipts` sits beside `mindroom_subagent_cost_usd`, and `mindroom_prior_usage_by_run` beside `mindroom_prior_usage`; each sum is the total of its map.
    An older backend after a rollback, and scripts outside the repo, read the sums as before.
-5. **Restart recovery returns the replay's run metadata.**
-   It names the continued runs and holds the merge of the unlinked attempts' usage by run id and of their receipts by delegation id.
+5. **Restart recovery returns the turn's unlinked attempts, and the response runner turns them into the replay's run metadata.**
+   Recovery (`history/run_checkpoint.py`) returns a typed result: the attempts' run ids, their usage merged by run id, and the stored metadata of each of their runs by run id.
+   It reads no receipts, so `history` does not depend on `delegation`: the response runner has the cost module merge and filter the receipts those rows hold (`carried_receipts`), and names the continued runs, the usage, and the receipts in the replay's run metadata.
    A team attempt contributes one usage under its leader's run id, its leader's plus its stored member rows' (`team_run_usage`, which `teams/runtime.py` shares), and the receipts of the leader's and the members' rows, since a member's row can hold a receipt the leader's last checkpoint predates.
    The stored member rows of a team run that ended are exactly the runs its usage counts (`team_usage_runs`); a cut-short one's also include its running members' last checkpoints.
 6. **A job's receipt is carried only by the turn whose run acknowledged the job.**
@@ -42,6 +43,7 @@ Success: a reply's `cost.usd` and `cost.subagents_usd` count every attempt at it
    A subagent job therefore keeps the parent run whose saved tool result first acknowledged it, and recovery carries the job's receipt only when that run is one of the turn's unlinked attempts or a member run of one.
    A job no run acknowledged is left to the turn that collects it again, the replay included, which receives it then.
    The acknowledging run is kept in the job's adapter, not in a new job field, because an older backend rejects a job with a field it does not know; a tool's job keeps its adapter as admitted, which a reattaching call must match.
+   The job runtime knows nothing of this: an acknowledgement may carry entries that the first one adds to a copy of the job's adapter, the consumption of a subagent job passes the acknowledging run that way, and `delegation/background.py` reads it back (`job_acknowledgers`).
    A job acknowledged with no run recorded is left out too: a keyed receipt beside such a job can only come from an older backend that acknowledged it after a rollback, whose own reply reported it if it collected it, so carrying it could count it twice and leaving it out cannot.
    Of a saved job, recovery reads its consumed flag, its acknowledging run, and the delegation id its saved child names, and decodes no child, so a snapshot no reader decodes stops no replay.
    The read checks each shape itself, because a job record parses whatever its adapter holds: a job whose adapter or child is no mapping, or names no id, is no receipt's job, and an acknowledging run that is no text reads as none recorded.
@@ -56,7 +58,7 @@ Success: a reply's `cost.usd` and `cost.subagents_usd` count every attempt at it
    An attempt that resumes a child's stored run adds that row's receipts to its holder, and pricing a child takes the larger of the handle's sum and its row's (`price_child`), so a settlement that finds a stale handle beside a newer completed row counts the row.
 9. **A restart-continued subagent job receives its cut-short turn.**
    The continuation starts from what the job's earlier continuation started from, what the cut-short turn's row received, and that turn's own priced usage under its `delegation_id`.
-   What the row received is carried under decision 6's rule, for the runs of its cut-short turn.
+   What the row received is carried under decision 6's rule, for the runs of its cut-short turn, by the function a replay uses (`carried_receipts`).
    The delegation records of a continued chain therefore overlap: each continuation's record includes the turns before it, so a total over a chain sums replies, not `run.json` records.
    The job adapter keeps that map (`continuation_receipts`) for a continuation whose process is killed before it stores a run, and the continuation's handle starts with its sum as `cost_usd`, so one refused before its first run still reports it.
    The continuation's rows and delegation record keep only its own usage, and the continuation cap is still checked first.
@@ -170,4 +172,5 @@ Each is at parity with the behaviour before this change or better, except 5.
 
 Net `src/` lines against the base are +204, against +199 for the first implementation; no lock is added.
 The change was sized for 160 and stood at +165 before the third review round, whose fixes, net of its simplifications, added 22; the fourth round's added 13 and the fifth's 4.
-The largest pieces are the keyed holder and its stored forms (`delegation/cost.py`, +50), recovery (`history/run_checkpoint.py`, +26), the job's acknowledging run and the read of the saved jobs (`tool_jobs/runtime.py`, +26, seven of them a signature that no longer fits one line), and the continuation's receipts (`delegation/continuation.py`, +17).
+The cleanup before the merge kept it at +204 while it moved the job's acknowledging run out of the job runtime and the receipts out of `history`.
+The largest pieces are the keyed holder and its stored forms (`delegation/cost.py`, +58), recovery (`history/run_checkpoint.py`, +23), the read of the saved jobs and the acknowledgement's adapter entries (`tool_jobs/runtime.py`, +20, seven of them a signature that no longer fits one line), and the continuation's receipts (`delegation/continuation.py`, +14).

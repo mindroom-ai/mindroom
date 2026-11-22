@@ -42,6 +42,7 @@ from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApprov
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 from tests.conftest import seed_session
+from tests.delegation_helpers import replay_run_metadata
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
 from tests.history_helpers import _completed_team_run, _team_session
 from tests.scripted_agent_helpers import ProcessCrash, crash_after_first_terminal_store
@@ -342,7 +343,10 @@ async def test_a_team_turn_a_restart_cut_short_carries_its_members_usage_and_rec
     assert team.storage.patch_run_metadata(SESSION_ID, leader.run_id, cleared)
     spent = [run.metrics.tokens.input_tokens for run in (leader, *members) if run.metrics is not None]
 
-    recovered = recover_interrupted_turn(team.storage, SESSION_ID, team.scope, {EVENT_ID}, natively=True, jobs={})
+    recovered = replay_run_metadata(
+        recover_interrupted_turn(team.storage, SESSION_ID, team.scope, {EVENT_ID}, natively=True),
+        {},
+    )
 
     assert recovered[CONTINUED_RUNS_METADATA_KEY] == [leader.run_id]
     assert stored_receipts(recovered) == {"member-job": 0.6}
@@ -387,7 +391,7 @@ async def test_a_leader_cut_short_mid_delegation_recovers_as_a_turn_of_its_own_c
     with suppress(asyncio.CancelledError):
         await turn
 
-    assert recover_interrupted_turn(team.storage, SESSION_ID, team.scope, {EVENT_ID}, natively=True, jobs={})
+    assert recover_interrupted_turn(team.storage, SESSION_ID, team.scope, {EVENT_ID}, natively=True).attempts
     text = await team.respond(message="Next question", ctx=team.ctx(run_id="run-2"))
 
     assert text.endswith("Next answer.")
