@@ -229,3 +229,44 @@ async def test_edit_cut_scrubs_redacted_history_through_load_scrubbed_scope_sess
         assert persisted.runs == []
     finally:
         await journal_store.close()
+
+
+@pytest.mark.asyncio
+async def test_read_fresh_thread_history_handles_room_mode_normal_and_strict_degraded(tmp_path: Path) -> None:
+    """Post-lock thread history read returns None in room mode and rejects degraded reads only when strict."""
+    from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
+    from mindroom.message_target import MessageTarget
+    from mindroom.reply_turn.locked_turn import DegradedThreadHistoryError
+    from mindroom.matrix.thread_history_result import thread_history_result
+
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+
+    room_target = MessageTarget.resolve("!room:localhost", None, "$src", room_mode=True)
+    fetch = AsyncMock()
+    runner.deps.resolver.fetch_thread_history = fetch
+    assert await runner.locked.read_fresh_thread_history(room_target, strict=True) is None
+    fetch.assert_not_awaited()
+
+    thread_target = MessageTarget.resolve("!room:localhost", "$thread", "$src")
+    healthy = thread_history_result([], is_full_history=True)
+    degraded = thread_history_result([], is_full_history=False, diagnostics={THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True})
+
+    runner.deps.resolver.fetch_thread_history = AsyncMock(return_value=healthy)
+    assert await runner.locked.read_fresh_thread_history(thread_target, strict=True) is healthy
+
+    runner.deps.resolver.fetch_thread_history = AsyncMock(return_value=degraded)
+    assert await runner.locked.read_fresh_thread_history(thread_target, strict=False) is degraded
+    with pytest.raises(DegradedThreadHistoryError) as exc_info:
+        await runner.locked.read_fresh_thread_history(thread_target, strict=True)
+    assert exc_info.value.target == thread_target
+    assert exc_info.value.history is degraded
+
+    # Reply fallback keeps degraded history when not strict and falls back on fetch failure.
+    refreshed = await runner.locked.refresh_model_history(_plain_request(thread_target))
+    assert refreshed.thread_history is degraded
+    assert refreshed.requires_model_history_refresh is False
+
+    runner.deps.resolver.fetch_thread_history = AsyncMock(side_effect=RuntimeError("boom"))
+    fallback = await runner.locked.refresh_model_history(_plain_request(thread_target))
+    assert fallback.requires_model_history_refresh is True

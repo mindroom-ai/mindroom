@@ -36,6 +36,7 @@ from mindroom.final_delivery import (
     TurnProgress,
 )
 from mindroom.judgment.conversation import conversation_context_before_sources
+from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.memory import store_conversation_memory
 from mindroom.orchestration.runtime import classify_cancel_source, current_task_is_process_shutdown
 from mindroom.reply_scope import current_span, release_decision, suppress_decision
@@ -69,6 +70,7 @@ if TYPE_CHECKING:
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.utils import KnowledgeAccessSupport
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.matrix.conversation_reads import ThreadHistoryResult
     from mindroom.message_target import MessageTarget
     from mindroom.participation import ParticipationGate
     from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport, ResponseOutcome
@@ -78,6 +80,17 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeSupport
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.turn_origin import TurnOrigin
+
+
+class DegradedThreadHistoryError(RuntimeError):
+    """Raised when a strict post-lock thread-history read returned degraded history."""
+
+    def __init__(self, target: MessageTarget, history: ThreadHistoryResult) -> None:
+        self.target = target
+        self.history = history
+        super().__init__(
+            f"Thread history read degraded for room={target.room_id} thread={target.resolved_thread_id}",
+        )
 
 
 def existing_event(request: ResponseRequest) -> tuple[str | None, bool]:
@@ -341,6 +354,21 @@ class LockedTurns:
 
         return persist_response_event_id
 
+    async def read_fresh_thread_history(
+        self,
+        target: MessageTarget,
+        *,
+        strict: bool = False,
+    ) -> ThreadHistoryResult | None:
+        """Read fresh, fork-aware thread history for one locked target; None for a room-mode target."""
+        thread_id = target.resolved_thread_id
+        if thread_id is None:
+            return None
+        history = await self.deps.resolver.fetch_thread_history(target.room_id, thread_id)
+        if strict and is_thread_history_degraded(history):
+            raise DegradedThreadHistoryError(target, history)
+        return history
+
     async def refresh_model_history(
         self,
         request: ResponseRequest,
@@ -348,14 +376,8 @@ class LockedTurns:
         exclude_event_id: str | None = None,
     ) -> ResponseRequest:
         """Refresh model-facing thread history once this turn owns the lifecycle lock."""
-        if request.thread_id is None:
-            return request
-
         try:
-            refreshed_history = await self.deps.resolver.fetch_thread_history(
-                request.room_id,
-                request.thread_id,
-            )
+            refreshed_history = await self.read_fresh_thread_history(request.response_envelope.target)
         except Exception as exc:
             if request.requires_model_history_refresh:
                 raise
@@ -366,6 +388,8 @@ class LockedTurns:
                 error=str(exc),
             )
             return replace(request, requires_model_history_refresh=True)
+        if refreshed_history is None:
+            return request
         if exclude_event_id is not None:
             filtered_history = [message for message in refreshed_history if message.event_id != exclude_event_id]
             if len(filtered_history) != len(refreshed_history):
