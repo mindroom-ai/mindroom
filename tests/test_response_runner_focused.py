@@ -6273,7 +6273,8 @@ async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_
     await lifecycle_lock.acquire()
     reservation = await coordinator.reserve_response_lifecycle(envelope)
     assert {message.event_id for message in queued_signal.pending_message_snapshot()} == {envelope.source_event_id}
-    assert queued_signal.has_active_response_turn()
+    # The reservation holds a turn of its own next to the running reply's.
+    assert queued_signal._active_response_turns == 2
 
     if consumed:
         with response_lifecycle_reservation_context(reservation):
@@ -6294,9 +6295,10 @@ async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_
     await reservation.release()
     await reservation.release()
     assert {message.event_id for message in queued_signal.pending_message_snapshot()} == set()
+    assert queued_signal._active_response_turns == 1
     lifecycle_lock.release()
     queued_signal.finish_response_turn()
-    assert not queued_signal.has_active_response_turn()
+    assert queued_signal._active_response_turns == 0
 
     assert (
         await asyncio.wait_for(
