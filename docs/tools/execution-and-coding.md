@@ -220,7 +220,7 @@ run_shell_command("bash e2e/shard.sh 1 2", worker="e2e-1", resource_profile="lar
   Another reply's calls with the same name get a worker of their own.
 - `resource_profile` is `small`, `standard`, or `large`, the [background script profiles](../deployment/kubernetes.md#worker-settings), and sizes the worker when its name is first used; omitting it gives the worker the normal worker resources.
   A later call that asks for another size fails.
-  Commands in Kubernetes workers get their pod CPU limit in `MINDROOM_WORKER_CPUS`, `OMP_NUM_THREADS`, `PYTHON_CPU_COUNT`, and `PYTEST_XDIST_AUTO_NUM_WORKERS` so `nproc` and parallel tools match the worker limit; `free` still reports the host node, so read `MINDROOM_WORKER_MEMORY_BYTES` or `/sys/fs/cgroup/memory.max` for the pod memory limit.
+  Commands in Kubernetes workers (not Docker workers) get the `sandbox-runner` container's CPU limit in `MINDROOM_WORKER_CPUS` and derived `OMP_NUM_THREADS`, `PYTHON_CPU_COUNT`, and `PYTEST_XDIST_AUTO_NUM_WORKERS` so GNU `nproc` (BusyBox `nproc` ignores `OMP_NUM_THREADS`) and parallel tools match the worker container; `free` still reports the host node, so read `MINDROOM_WORKER_MEMORY_BYTES` or cgroup v2 `/sys/fs/cgroup/memory.max` for the container memory limit.
 - The result starts with `[worker: <name>]`, or `[worker: <name>, started]` on the first call to a Deployment or a start MindRoom recorded.
   Kubernetes may replace a pod or restart its container without changing the Deployment. The marker does not report those restarts.
 - A named worker has its own processes, network ports, and `/tmp`.
