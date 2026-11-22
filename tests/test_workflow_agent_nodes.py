@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 from datetime import timedelta
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -692,6 +693,37 @@ async def test_agent_whose_answer_may_not_be_read_is_not_run_again_once_it_may(s
     with pytest.raises(NodeFailed) as blocked:
         await stack.result("@0", "agent", _PROMPT)
     assert (blocked.value.kind, _node(stack).generation, stack.counting_tool.lines) == ("indeterminate", 1, ["a"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "args", "result"),
+    [("agent", _PROMPT, "done"), ("tool", tool_args("counter", "append", line="a"), "appended")],
+)
+async def test_call_is_waited_for_also_when_the_look_at_its_run_failed_as_it_started(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    args: dict[str, object],
+    result: str,
+) -> None:
+    """The call is the engine's from its insert: what fails after that fails the request, and the call still ends."""
+    stack.child_script(answer("done"))
+    states, failed = stack.store.node_states, []
+
+    def fails_once(run_id: str) -> object:
+        if not failed:
+            failed.append(run_id)
+            msg = "database is locked"
+            raise sqlite3.OperationalError(msg)
+        return states(run_id)
+
+    monkeypatch.setattr(stack.store, "node_states", fails_once)
+
+    with pytest.raises(sqlite3.OperationalError):
+        await stack.submit("@0", kind, args)
+
+    assert await asyncio.wait_for(stack.result("@0", kind, args), 10) == result
 
 
 async def _ended_between_attempts(stack: WorkflowStack) -> None:

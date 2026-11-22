@@ -644,8 +644,6 @@ class WorkflowEngine:
         handle = DispatchHandle("broker", f"{attempt.run_id}:{call_id}", dispatched=False, same_as=same_as)
         node = replace(node, state=WorkflowNodeState.RUNNING, handle=handle)
         node = await asyncio.to_thread(partial(self.store.put_node, node, run.epoch, dirty_after=same_as is None))
-        # A run that waited for a person works again from here.
-        await self._restate(run.run_id)
         kept = cast("list[str] | None", (run.persona or {}).get("tools"))
         call = partial(
             self.broker.execute_for_workflow,
@@ -655,7 +653,10 @@ class WorkflowEngine:
             arguments=arguments,
             waits=partial(self._node_waits, node, run.epoch),
         )
+        # The call has its task before anything else may fail: a saved call nobody runs would never end.
         self._spawn(run.run_id, self._run_tool_node(node, run.epoch, grant, call, kept, lanes))
+        # A run that waited for a person works again from here.
+        await self._restate(run.run_id)
         return _receipt(node)
 
     async def _dispatch_agent(self, run: WorkflowRun, node: WorkflowNode, timeout: float | None) -> NodeReceipt:  # noqa: ASYNC109
@@ -693,8 +694,8 @@ class WorkflowEngine:
             if saved is not None and saved.generation == node.generation and saved.handle is not None:
                 self._spawn(run.run_id, self._run_agent_node(run, saved, run.epoch))
             raise
-        await self._restate(run.run_id)
         self._spawn(run.run_id, self._run_agent_node(run, node, run.epoch))
+        await self._restate(run.run_id)
         return _receipt(node)
 
     async def _run_agent_node(self, run: WorkflowRun, node: WorkflowNode, epoch: int) -> None:
