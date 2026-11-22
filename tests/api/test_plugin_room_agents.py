@@ -68,6 +68,7 @@ WRITING_FUNCTIONS = {
         "uv_pip_install_package",
     ),
     "script": ("start_script",),
+    "workflow": ("start_workflow",),
     "claude_agent": ("claude_start_session", "claude_send"),
     "docker": ("build_image", "run_container", "start_container", "exec_in_container"),
 }
@@ -511,7 +512,7 @@ def _writing_toolkit_cases() -> list[tuple[object, str]]:
     cases: list[tuple[object, str]] = []
     for name, functions in WRITING_FUNCTIONS.items():
         cases.append((name, "write"))
-        if name == "script":  # It takes no function filters.
+        if name in ("script", "workflow"):  # They take no function filters.
             continue
         cases.extend(({name: {"include_tools": [function]}}, "write") for function in functions)
         cases.append(({name: {"exclude_tools": list(functions)}}, "read"))

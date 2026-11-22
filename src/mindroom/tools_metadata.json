@@ -7091,6 +7091,110 @@
       "config_fields": [
         {
           "authored_override": true,
+          "default": 8,
+          "description": null,
+          "env": [],
+          "label": "Maximum Concurrent Runs",
+          "name": "max_concurrent_runs",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": {
+            "min": 1
+          }
+        },
+        {
+          "authored_override": true,
+          "default": 72,
+          "description": null,
+          "env": [],
+          "label": "Maximum Runtime Hours",
+          "name": "max_runtime_hours",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": {
+            "min": 0
+          }
+        },
+        {
+          "authored_override": true,
+          "default": 600,
+          "description": null,
+          "env": [],
+          "label": "Maximum Tool Calls Per Minute",
+          "name": "max_tool_calls_per_minute",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": {
+            "min": 1
+          }
+        },
+        {
+          "authored_override": true,
+          "default": null,
+          "description": null,
+          "env": [],
+          "label": "Maximum Concurrent Agents Per Run",
+          "name": "max_concurrent_agents",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": {
+            "min": 1
+          }
+        },
+        {
+          "authored_override": true,
+          "default": 10,
+          "description": null,
+          "env": [],
+          "label": "Large Run Notice (USD)",
+          "name": "large_run_notice_usd",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "number",
+          "validation": {
+            "min": 0
+          }
+        }
+      ],
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "Run a Python script that calls your tools in the background, and read or cancel the run",
+      "display_name": "Workflows",
+      "docs_url": "https://docs.mindroom.chat/tools/workflows/",
+      "executes_code": true,
+      "file_access": "none",
+      "function_names": [
+        "start_workflow",
+        "get_workflow",
+        "cancel_workflow"
+      ],
+      "helper_text": null,
+      "icon": "Workflow",
+      "icon_color": "text-emerald-500",
+      "name": "workflow",
+      "requires_conversation": false,
+      "requires_primary_runtime": true,
+      "requires_room_context": true,
+      "setup_type": "none",
+      "status": "available"
+    },
+    {
+      "agent_override_fields": null,
+      "auth_provider": null,
+      "category": "development",
+      "config_fields": [
+        {
+          "authored_override": true,
           "default": null,
           "description": null,
           "env": [

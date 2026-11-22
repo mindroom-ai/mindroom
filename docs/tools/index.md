@@ -134,6 +134,7 @@ The built-in usage instructions that `daytona`, `gmail`, `google_calendar`, `rea
 
 - [Execution & Coding](execution-and-coding.md) - Local files, shell, Python, coding helpers, and worker-routed execution tools.
 - [Background Python Scripts](background-scripts.md) - Long-running Python scripts that call the agent's tools and wake it when something changes.
+- [Workflows](workflows.md) - Python scripts that run in the background, call the agent's tools, and return one report.
 - [Worker Computer](worker-computer.md) - A visible browser in the agent's worker that the user can watch and control.
 - [Desktop Bridge](desktop.md) - Operate allowlisted apps, read selected folders, and run approved commands on a local computer.
 - [Minimal Agent Mode](agent-cli.md) - One Bash tool instead of full tool schemas, to cut tokens per request.

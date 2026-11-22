@@ -69,6 +69,7 @@ nav = [
     { "Dynamic Tools" = "tools/dynamic-tools.md" },
     { "Minimal Agent Mode" = "tools/agent-cli.md" },
     { "Background Python Scripts" = "tools/background-scripts.md" },
+    { "Workflows" = "tools/workflows.md" },
     { "Worker Computer" = "tools/worker-computer.md" },
     { "Desktop Bridge" = "tools/desktop.md" },
     { "Tool Catalog" = [

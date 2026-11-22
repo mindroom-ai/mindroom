@@ -26,7 +26,7 @@ from mindroom.script_runs.manager import (
     workflow_placement,
 )
 from mindroom.script_runs.models import ScriptCallState, ScriptToolGrant
-from mindroom.script_runs.policy import live_workflow_grant, resolve_script_launch_grants
+from mindroom.script_runs.policy import resolve_current_script_tool, resolve_script_launch_grants
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from tests.conftest import bound_worker_launch_config
 from tests.test_script_run_manager import _config, _context, _fake_local_supervisor, _manager, _runtime_paths, _started
@@ -269,6 +269,15 @@ async def _call_add(
         grant=ScriptToolGrant("calculator", "add"),
         arguments={"a": 1, "b": 2},
     )
+    if workflow:
+        # A workflow attempt's calls enter through its engine, which the workflow routes authenticated.
+        call = await broker.execute_for_workflow(
+            run,
+            call_id=request.call_id,
+            grant=request.grant,
+            arguments=request.arguments,
+        )
+        return call, asks
     token = worker_client.launch_paths[run.run_id][1].read_text(encoding="utf-8")
     return await _call_through_gateway(broker, request, token), asks
 
@@ -339,18 +348,22 @@ def test_grants_include_memory_and_delegate_but_not_compact_context(tmp_path: Pa
 
 
 def test_tool_removed_after_launch_is_refused_at_the_call(tmp_path: Path) -> None:
-    """The grant is resolved from the owner's live tools at every call, in both directions."""
+    """A workflow's call is resolved from the owner's live tools at every call, in both directions."""
+
+    def offered(context: ToolRuntimeContext, toolkit: str, function: str) -> bool:
+        return resolve_current_script_tool(context, ScriptToolGrant(toolkit, function), workflow=True) is not None
+
     context = _owner_context(tmp_path, ["calculator"])
-    assert live_workflow_grant(context, "calculator", "add") == ScriptToolGrant("calculator", "add")
-    assert live_workflow_grant(context, "memory", "add_memory") is None
-    assert live_workflow_grant(context, "calculator", "no_such_function") is None
+    assert offered(context, "calculator", "add")
+    assert not offered(context, "memory", "add_memory")
+    assert not offered(context, "calculator", "no_such_function")
 
     live = _owner_context(tmp_path, ["memory"])
     reloaded = replace(context, config_provider=lambda: live.config)
 
-    assert live_workflow_grant(reloaded, "calculator", "add") is None
-    assert live_workflow_grant(reloaded, "memory", "add_memory") == ScriptToolGrant("memory", "add_memory")
-    assert live_workflow_grant(reloaded, "compact_context", "compact_context") is None
+    assert not offered(reloaded, "calculator", "add")
+    assert offered(reloaded, "memory", "add_memory")
+    assert not offered(reloaded, "compact_context", "compact_context")
 
 
 @pytest.mark.asyncio
@@ -390,21 +403,24 @@ async def test_validated_shim_hands_a_workflow_to_the_sdk_and_removes_the_token(
 
 
 @pytest.mark.asyncio
-async def test_workflow_attempts_and_plain_scripts_are_admitted_from_separate_counts(tmp_path: Path) -> None:
-    """A full set of workflow attempts leaves the owner's plain scripts their slots, and the other way round."""
+async def test_workflow_attempts_take_no_script_slot_and_the_script_limit_refuses_none(tmp_path: Path) -> None:
+    """The workflow store limits top-level runs; here the attempt of a nested run starts beside its parent's.
+
+    Plain scripts keep their own limit, which counts plain scripts only.
+    """
     manager, _backend, _client = _manager(tmp_path)
     manager.grant_resolver = lambda _context, **_options: (ScriptToolGrant("calculator", "add"),)
     context = _context(tmp_path)
     one = ScriptRunLimits(max_concurrent_runs=1)
 
-    attempt = await manager.run(context, source="print('ok')\n", workflow_run_id=RUN, limits=one)
+    parent = await manager.run(context, source="print('ok')\n", workflow_run_id=RUN, limits=one)
     script = await manager.run(context, source="print('ok')\n", limits=one)
+    nested = await manager.run(context, source="print('ok')\n", workflow_run_id="wf-" + "d" * 32, limits=one)
 
     with pytest.raises(ScriptRunManagerError, match="concurrent-run limit"):
-        await manager.run(context, source="print('ok')\n", workflow_run_id="wf-" + "d" * 32, limits=one)
-    with pytest.raises(ScriptRunManagerError, match="concurrent-run limit"):
         await manager.run(context, source="print('ok')\n", limits=one)
-    assert [run.run_id for run in manager.store.list_runs(include_finished=False)] == [script.run_id, attempt.run_id]
+    active = [run.run_id for run in manager.store.list_runs(include_finished=False)]
+    assert sorted(active) == sorted([parent.run_id, script.run_id, nested.run_id])
 
 
 @pytest.mark.asyncio

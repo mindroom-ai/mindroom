@@ -196,7 +196,7 @@ class ScriptRunStore:
                     raise ScriptCallConflictError(msg)
                 return ScriptCallClaim(call=existing_call, created=False)
 
-            if grant not in run.grants:
+            if not run.launch_allows(grant):
                 raise ScriptCapabilityError(_GRANT_NOT_GRANTED)
             now = utc_timestamp()
             window_start = utc_timestamp(datetime.now(UTC) - timedelta(minutes=1))
@@ -252,6 +252,16 @@ class ScriptRunStore:
             ).fetchall()
         return [_call_from_row(row) for row in rows]
 
+    def mark_call_effect_started(self, run_id: str, call_id: str) -> None:
+        """Record that a pending call is about to invoke its tool; a call that already ended is refused."""
+        with self._write_transaction() as connection:
+            marked = connection.execute(
+                "UPDATE script_calls SET effect_started_at = ? WHERE run_id = ? AND call_id = ? AND state = ?",
+                (utc_timestamp(), run_id, call_id, ScriptCallState.PENDING.value),
+            )
+            if marked.rowcount != 1:
+                raise ScriptCapabilityError(_REVOKED_CAPABILITY)
+
     def settle_orphaned_call(
         self,
         *,
@@ -294,12 +304,16 @@ class ScriptRunStore:
         state: ScriptCallState,
         result: object | None = None,
         error: object | None = None,
+        metadata: dict[str, object] | None = None,
     ) -> ScriptCallRecord:
         """Atomically publish one bounded terminal receipt for a claimed call."""
         if state not in _TERMINAL_CALL_STATES:
             msg = "A script call result must use a terminal state."
             raise ScriptRunStoreError(msg)
-        receipt_json = _serialize_receipt(result=result, error=error)
+        # A workflow node's result is recovered from this receipt after a crash, so the receipt keeps all of it.
+        bounded = self.get_run(run_id).workflow_run_id is None
+        receipt_json = _serialize_receipt(result=result, error=error, bounded=bounded)
+        metadata_json = None if metadata is None else json.dumps(metadata, allow_nan=False)
         with self._write_transaction() as connection:
             row = connection.execute(
                 "SELECT * FROM script_calls WHERE run_id = ? AND call_id = ?",
@@ -316,13 +330,13 @@ class ScriptRunStore:
             connection.execute(
                 """
                 UPDATE script_calls
-                SET state = ?, receipt_json = ?
+                SET state = ?, receipt_json = ?, metadata_json = ?
                 WHERE run_id = ? AND call_id = ?
                 """,
-                (state.value, receipt_json, run_id, call_id),
+                (state.value, receipt_json, metadata_json, run_id, call_id),
             )
         stored_result, stored_error = _receipt_values(receipt_json)
-        return replace(existing, state=state, result=stored_result, error=stored_error)
+        return replace(existing, state=state, result=stored_result, error=stored_error, metadata=metadata)
 
     def request_cancel(self, run_id: str, *, reason: str | None = None) -> ScriptRunRecord:
         """Durably revoke a run before any cancellation signal is sent."""
@@ -593,6 +607,8 @@ _SCHEMA_STATEMENTS = (
                     state TEXT NOT NULL,
                     receipt_json TEXT,
                     created_at TEXT NOT NULL,
+                    effect_started_at TEXT,
+                    metadata_json TEXT,
                     PRIMARY KEY (run_id, call_id)
                 )
                 """,
@@ -731,10 +747,12 @@ def _call_from_row(row: sqlite3.Row) -> ScriptCallRecord:
         created_at=str(row["created_at"]),
         result=result,
         error=error,
+        effect_started_at=_nullable_string(row["effect_started_at"]),
+        metadata=None if row["metadata_json"] is None else json.loads(row["metadata_json"]),
     )
 
 
-def _serialize_receipt(*, result: object | None, error: object | None) -> str:
+def _serialize_receipt(*, result: object | None, error: object | None, bounded: bool = True) -> str:
     try:
         wire_value = json.loads(
             json.dumps(
@@ -754,7 +772,7 @@ def _serialize_receipt(*, result: object | None, error: object | None) -> str:
         serialized_bytes = serialized.encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise ScriptRunStoreError(_RECEIPT_NOT_SERIALIZABLE) from exc
-    if len(serialized_bytes) > _MAX_RECEIPT_BYTES:
+    if bounded and len(serialized_bytes) > _MAX_RECEIPT_BYTES:
         msg = f"Script call receipt exceeds the {_MAX_RECEIPT_BYTES}-byte limit."
         raise ScriptReceiptTooLargeError(msg)
     return serialized

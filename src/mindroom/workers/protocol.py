@@ -8,9 +8,9 @@ of them added.
 from __future__ import annotations
 
 from dataclasses import fields
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, field_validator, model_serializer
 
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
@@ -22,7 +22,8 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerSco
 #    protocol, so mixed releases fail instead of dropping fields; a request names its workspace in `base_dir`.
 # 7: a call's arguments arrive as the model sent them, and the worker validates and coerces them.
 # 8: a worker pinned to one subagent (`subagent=<id>` in its key) serves its normal worker's workspaces and credentials.
-# A wire model change bumps this; `tests/test_worker_protocol_schema.py` pins each version's schema.
+# A wire model change bumps this, except an opt-in field (see ``_WireModel.opt_in_fields``);
+# `tests/test_worker_protocol_schema.py` pins each version's schema.
 WORKER_PROTOCOL_VERSION = 8
 
 FailureKind = Literal["tool", "worker"]
@@ -30,6 +31,17 @@ FailureKind = Literal["tool", "worker"]
 
 class _WireModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    # The fields a body carries only when set, each added without a protocol bump: every other body is byte for byte
+    # what it was, so a peer that predates such a field refuses only the calls that ask for what it adds.
+    opt_in_fields: ClassVar[frozenset[str]] = frozenset()
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_opt_in_fields(self, dump: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        body = dump(self)
+        for name in self.opt_in_fields:
+            if not body.get(name):
+                body.pop(name, None)
+        return body
 
 
 _EXECUTION_IDENTITY_FIELDS = frozenset(field.name for field in fields(ToolExecutionIdentity))
@@ -95,6 +107,9 @@ class ExecuteRequest(WorkerRoute):
     request_id: str | None = Field(default=None, max_length=64)
     # A background job's call runs as long as its tool does, and its tools know they run as part of a job.
     run_as_job: bool = False
+    # The caller stores the result itself: no size moves it to a workspace file, and the answer carries `metadata`.
+    structured_result: bool = False
+    opt_in_fields = frozenset({"structured_result"})
 
 
 class SaveAttachmentRequest(WorkerRoute):
@@ -146,6 +161,9 @@ class ExecuteResponse(_WireModel):
     result: Any | None = None
     error: str | None = None
     failure_kind: FailureKind | None = None
+    # What the tool reported about a structured result, such as a command's exit status.
+    metadata: dict[str, Any] | None = None
+    opt_in_fields = frozenset({"metadata"})
 
 
 class SaveAttachmentResponse(_WireModel):

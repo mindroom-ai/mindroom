@@ -64,7 +64,7 @@ from mindroom.workers.backend_kinds import worker_backend_kind
 from .runtime import cancel_task, create_logged_task
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
@@ -364,6 +364,8 @@ class ScriptRuntimeLifecycle:
     pass_timeout_seconds: float = 30.0
     pass_concurrency: int = 4
     reconcile_interval_seconds: float = 30.0
+    # Runs after each pass has recorded which runs ended; the workflow engine ends its runs from it.
+    after_reconcile: Callable[[], Awaitable[None]] | None = None
     _api_ready: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _started: bool = field(default=False, init=False, repr=False)
     _start_requested: bool = field(default=False, init=False, repr=False)
@@ -859,6 +861,8 @@ class ScriptRuntimeLifecycle:
                     )
 
         await asyncio.gather(*(reconcile_run(run) for run in runs))
+        if self.after_reconcile is not None:
+            await self.after_reconcile()
 
     async def _startup_cleanup_pass(self) -> None:
         """Adopt compatible surviving workers and retire other inherited ownership."""

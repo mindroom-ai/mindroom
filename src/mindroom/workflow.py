@@ -217,6 +217,7 @@ def shell(command: str, *, timeout: int = 3600, tail: int = 2000, cached: bool =
     """Run a command with the owner's shell tool; returns ShellResult(ok, exit_code, output) and never raises on a non-zero exit.
 
     `output` is the last `tail` lines. With cached=False the command runs again on every resume.
+    shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.
     """
     result = cast(
         "dict[str, object]",

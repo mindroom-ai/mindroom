@@ -21,6 +21,7 @@ from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES, DEFAULT_TOOL_OUTPUT_MAX_BYTES
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root
+from mindroom.tool_system.progress import structured_result_requested
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
 
 if TYPE_CHECKING:
@@ -522,6 +523,8 @@ def _auto_save_large_result(
     policy: ToolOutputFilePolicy,
     tool_name: str,
 ) -> object:
+    if structured_result_requested():
+        return result
     try:
         serialized = _serialize_tool_output(result)
     except Exception as exc:
