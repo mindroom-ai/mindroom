@@ -245,7 +245,7 @@ Matrix sync callback
 | `orchestration/script_runtime.py` | Background script lifecycle: startup recovery of preserved runs, reload revocation, maintenance passes, the published worker lease, and when script tools are served |
 | `orchestration/workflow_runtime.py` | Builds the workflow store and engine on the script runtime, ties the engine's life to the orchestrator's, and follows each script-runtime pass by settling runs whose attempts ended, resuming interrupted ones with their owner's live context, and pruning runs past the script retention |
 | `custom_tools/script.py` | `script` agent tool: start, inspect, cancel, and list the requester's background scripts |
-| `custom_tools/workflow.py` | `workflow` agent tool: reserve a workflow run and start it as its background job or wait for it inline, read, cancel or resume the requester's runs, and continue a run's job after a restart |
+| `custom_tools/workflow.py` | `workflow` agent tool: reserve a workflow run and start it as its background job or wait for it inline, read, cancel or resume the requester's runs, continue a run's job after a restart, and resume a run for its requester's control event |
 | `script_runs/manager.py` | Starts, polls, and cancels script runs in a worker or unsafe-local, and finalizes their cleanup |
 | `script_runs/store.py` | The primary-only SQLite store of script runs and their tool-call receipts, with atomic state transitions |
 | `script_runs/legacy_schema.py` | Script-run columns that older releases' databases lack |
@@ -266,6 +266,8 @@ Matrix sync callback
 | `workflow_runs/agent_nodes.py` | The agents of a workflow run: an `agent()` call started as a subagent job under the rules of `run_subagent`, the wait for that job with the turn's working time, and how its turn ended as read from the child's own runs |
 | `workflow_runs/recovery.py` | Which interruptions of an attempt resume its run on its own, and the pass that deletes intents no job holds, records how ended attempts left their runs, and replays the runs that no unfinished job owns |
 | `workflow_runs/faults.py` | Named barriers at which a tool call of a workflow waits while a crash test holds them |
+| `workflow_runs/graph.py` | Pure graph model of a run for people: the `meta`, node, group and edge rows, the snapshot fitted to one event by priority, and the delta between two graphs |
+| `workflow_runs/view.py` | What people see of a run: follows the store's writes, builds the run's view from what is saved, queues its graph frames, and posts and edits its card |
 | `api/sandbox_runner_scripts.py` | Worker routes that launch, poll, and signal a run under the worker's supervisor |
 | `api/script_gateway.py` | Capability-authenticated HTTP gateway scripts call tools through, and the listener helper the second listeners beside the API share |
 | `api/workflow_gateway.py` | Capability-authenticated routes a workflow attempt's script calls for its run, nodes, results, log, and report, served on both listeners |
@@ -564,6 +566,7 @@ Matrix sync callback
 | `live_frames/publisher.py` | One streaming reply's frame loop: a frame per tick when its documents changed, periodic snapshots, and the watermark its durable writes carry |
 | `live_frames/transport.py` | Whether the homeserver relays live frames, whether a frame fits the size limit as it goes out, and sending one frame, Megolm-encrypted in encrypted rooms, over the MSC2477 ephemeral route |
 | `live_frames/subagents.py` | The `io.mindroom.subagents` frame format of a sub-agent run's transcript and status, and the publisher that sends the runs one account shows in a room within one budget |
+| `live_frames/workflow.py` | The `io.mindroom.workflow` frames of a workflow run's graph: a fitted snapshot, deltas between, sent through the sub-agent publisher of the run's account and room |
 | `prompts.py` | Built-in prompt defaults and prompt override registry |
 | `attachments/storage.py` | Attachment persistence, registration, and context-scoped resolution |
 | `attachments/ids.py` | Leaf attachment-ID helpers kept free of matrix-client imports |

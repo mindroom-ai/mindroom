@@ -21,7 +21,11 @@ from mindroom.event_journal import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.matrix.agent_authored import carries_agent_authored_marker
-from mindroom.matrix.event_types import CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TYPE
+from mindroom.matrix.event_types import (
+    CALL_MEMBER_EVENT_TYPE,
+    RTC_NOTIFICATION_EVENT_TYPE,
+    WORKFLOW_CONTROL_EVENT_TYPE,
+)
 from mindroom.matrix.media import (
     MATRIX_MEDIA_EVENT_TYPES,
     is_encrypted_media_event_source,
@@ -49,6 +53,7 @@ _UNKNOWN_EVENT_KINDS = {
     RTC_NOTIFICATION_EVENT_TYPE: EventKind.RTC,
     _TOOL_APPROVAL_RESPONSE_EVENT_TYPE: EventKind.APPROVAL,
     _BACKGROUND_JOB_CANCEL_EVENT_TYPE: EventKind.JOB_CANCEL,
+    WORKFLOW_CONTROL_EVENT_TYPE: EventKind.WORKFLOW_CONTROL,
 }
 # Kinds only an account MindRoom manages may send; anyone else's is settled without work.
 _MANAGED_SENDER_KINDS = frozenset({EventKind.SCHEDULE_TRIGGER, EventKind.ROUTE})
@@ -56,7 +61,14 @@ _MANAGED_SENDER_KINDS = frozenset({EventKind.SCHEDULE_TRIGGER, EventKind.ROUTE})
 _PROJECTED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.REDACTION})
 # Kinds a person sends to ask for something, the only ones the agent-authored marker demotes to context.
 _AGENT_AUTHORED_MARKER_KINDS = frozenset(
-    {EventKind.MESSAGE, EventKind.MEDIA, EventKind.REACTION, EventKind.APPROVAL, EventKind.JOB_CANCEL},
+    {
+        EventKind.MESSAGE,
+        EventKind.MEDIA,
+        EventKind.REACTION,
+        EventKind.APPROVAL,
+        EventKind.JOB_CANCEL,
+        EventKind.WORKFLOW_CONTROL,
+    },
 )
 
 # What an `m.room.message` must have parsed to before MindRoom can treat it as

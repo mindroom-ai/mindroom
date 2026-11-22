@@ -5418,6 +5418,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.conversation_resolver",
     "mindroom.conversation_state_writer",
+    "mindroom.custom_tools.workflow",
     "mindroom.delivery_gateway",
     "mindroom.desktop.pairing_receiver",
     "mindroom.edit_regenerator",

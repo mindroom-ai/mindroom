@@ -30,7 +30,7 @@ from mindroom.tool_jobs.runtime import (
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import current_tool_call
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
+from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_hooks import dispatch_external_tool_hooks
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
@@ -47,6 +47,8 @@ from mindroom.workflow_runs.store import WorkflowRunNotFoundError, WorkflowRunSt
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
+
+    import nio
 
     from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -288,7 +290,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         engine, context = _waiting_runtime()
         arguments = {"run_id": run_id, "source": source, "path": path, "rerun": rerun}
         origin = _inline_origin(context)
-        run, request = await self._resumption(engine, context, arguments, owner=origin)
+        run, request = await _resumption(engine, context, arguments, self.limits, owner=origin)
         if run.owner != origin and (report := run.claims.get(origin)) is not None:
             # This call took the run before and another has it now: it gets the report of its own attempt.
             return report
@@ -334,45 +336,11 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
                 # A call delivered again names the job that already holds what was accepted, and is checked no more.
                 known = next((job.adapter for job in runtime.retained_jobs() if job.job_id == job_id), None)
                 accepted = known and known.get("resume")
-                run, request = await self._resumption(engine, context, arguments, accepted, owner=job_id)
+                run, request = await _resumption(engine, context, arguments, self.limits, accepted, owner=job_id)
         except ValueError as exc:
             return str(exc)
         after = partial(hooks, before=False)
         return _run_job(engine, run, job_id, context, self.limits, after=after, refused=refused, resume=request)
-
-    async def _resumption(
-        self,
-        engine: WorkflowEngine,
-        context: ToolRuntimeContext,
-        arguments: Mapping[str, Any],
-        accepted: dict[str, Any] | None = None,
-        *,
-        owner: str,
-    ) -> tuple[WorkflowRun, dict[str, Any]]:
-        """Check one resume and return its run and the request its job is admitted with; a refusal raises.
-
-        The request names the epoch the run has now, so it takes the run only if nothing else did since.
-        *accepted* is the request this same call was admitted with before, which is returned unchecked, and so is
-        the call that finds the run its own already, or among those that took it: *owner*, the job or the waiting
-        call, took it before, and the write that takes a run refuses it a second time.
-        """
-        source, path, rerun = arguments.get("source"), arguments.get("path"), arguments.get("rerun") or ()
-        if source is not None and path is not None:
-            raise WorkflowRunStoreError(_AT_MOST_ONE_SOURCE)
-        run = _owned(engine, context, str(arguments.get("run_id")))
-        if accepted is not None or owner in (run.owner, *run.claims):
-            return run, accepted or {}
-        engine.resumable(run.run_id, context, rerun, self.limits)
-        delivered = ("absent", "stopped", "ended")
-        if run.job_id is not None and workflow_job_standing(context.runtime_paths, run.job_id) not in delivered:
-            msg = f"Run {run.run_id} is still delivering its report. Try again in a moment."
-            raise WorkflowRunStoreError(msg)
-        edited = source is not None or path is not None
-        text = (await engine.scripts.resolve_source(context, source=source, path=path)).decode() if edited else None
-        # What the resume may hand on: the turn's persona, and no more than the run its call is made in keeps.
-        outer = _outer_call()
-        persona = ceiling(context, engine.store.get_run(outer[0]).persona if outer else None)
-        return run, {"source": text, "rerun": list(rerun), "epoch": run.epoch, "persona": persona}
 
     async def _reserve(
         self,
@@ -451,6 +419,92 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         if outer is not None and reserved[1]:
             await engine.nest(reserved[0])
         return reserved
+
+
+async def _resumption(
+    engine: WorkflowEngine,
+    context: ToolRuntimeContext,
+    arguments: Mapping[str, Any],
+    limits: WorkflowLimits,
+    accepted: dict[str, Any] | None = None,
+    *,
+    owner: str,
+) -> tuple[WorkflowRun, dict[str, Any]]:
+    """Check one resume and return its run and the request its job is admitted with; a refusal raises.
+
+    The request names the epoch the run has now, so it takes the run only if nothing else did since.
+    *accepted* is the request this same call was admitted with before, which is returned unchecked, and so is
+    the call that finds the run its own already, or among those that took it: *owner*, the job or the waiting
+    call, took it before, and the write that takes a run refuses it a second time.
+    """
+    source, path, rerun = arguments.get("source"), arguments.get("path"), arguments.get("rerun") or ()
+    if source is not None and path is not None:
+        raise WorkflowRunStoreError(_AT_MOST_ONE_SOURCE)
+    run = _owned(engine, context, str(arguments.get("run_id")))
+    if accepted is not None or owner in (run.owner, *run.claims):
+        return run, accepted or {}
+    engine.resumable(run.run_id, context, rerun, limits)
+    delivered = ("absent", "stopped", "ended")
+    if run.job_id is not None and workflow_job_standing(context.runtime_paths, run.job_id) not in delivered:
+        msg = f"Run {run.run_id} is still delivering its report. Try again in a moment."
+        raise WorkflowRunStoreError(msg)
+    edited = source is not None or path is not None
+    text = (await engine.scripts.resolve_source(context, source=source, path=path)).decode() if edited else None
+    # What the resume may hand on: the turn's persona, and no more than the run its call is made in keeps.
+    outer = _outer_call()
+    persona = ceiling(context, engine.store.get_run(outer[0]).persona if outer else None)
+    return run, {"source": text, "rerun": list(rerun), "epoch": run.epoch, "persona": persona}
+
+
+async def handle_workflow_control(
+    room: nio.MatrixRoom,
+    event: nio.UnknownEvent,
+    *,
+    agent_name: str,
+    engine: Callable[[], WorkflowEngine],
+) -> bool:
+    """Resume the run a person's control event names, as `resume_workflow` does, and return whether it did.
+
+    Every bot in the room gets the event. Only `{run, action: "resume"}` from the run's requester, in the run's room
+    and thread, to the run's agent does anything: the run is checked as the tool's resume is and gets a new job, named
+    after the event so that the event delivered again starts nothing. Anything else changes and sends nothing.
+    """
+    content, sender = event.source.get("content"), event.source.get("sender")
+    if not isinstance(content, dict) or content.get("action") != "resume":
+        return False
+    relation = content.get("m.relates_to")
+    threaded = isinstance(relation, dict) and relation.get("rel_type") == "m.thread"
+    where = (agent_name, sender, room.room_id, relation.get("event_id") if threaded else None)
+    workflows = engine()
+    try:
+        run = workflows.store.get_run(str(content.get("run")))
+        if (run.agent_name, run.owner_user_id, run.room_id, run.thread_root_event_id) != where:
+            return False
+        access = workflows.owner_access(run)
+        if not isinstance(access, tuple) or (jobs := get_background_runtime(access[0].runtime_paths)) is None:
+            return False
+        context, limits = access
+        job_id = hashlib.sha256(f"workflow_control:{event.event_id}".encode()).hexdigest()
+        async with jobs.admission(job_id):
+            run, request = await _resumption(workflows, context, {"run_id": run.run_id}, limits, owner=job_id)
+            job = _run_job(workflows, run, job_id, context, limits, resume=request)
+            # In the owner's context, which the job's task keeps, as the job of a call's resume has it.
+            with tool_runtime_context(context):
+                await jobs.start(
+                    job_id,
+                    tool_name=job.tool_name,
+                    depth=run.depth,
+                    kind=job.kind,
+                    toolkit_name=job.toolkit_name,
+                    adapter=job.adapter,
+                    owner=context.execution_identity,
+                    operation=job.operation,
+                    cancel=job.cancel,
+                )
+    except ValueError:
+        # No such run, a run that cannot be resumed now, or a job the runtime does not admit: nothing was started.
+        return False
+    return True
 
 
 def _run_job(

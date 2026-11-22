@@ -216,6 +216,34 @@ A script can start agents and runs through `tool()` as well.
 - An agent whose turn had ended before a restart is counted for the attempt that started it, not for the one that read its answer.
 - Each call that asked a model shows its own `usage` in `nodes`.
 
+## The Run In The Room
+
+A run that started shows one card in its thread: a notice from the run's agent that MindRoom edits as the run goes on.
+A run inside a run has no card; it is a group in the graph of the run around it.
+
+- The card's text is `Workflow "<title>" <status>: <n> done, <n> running, <n> waiting. Stop it with !cancel_job <job id>.`, and the last sentence is left out once the run has ended.
+- Its content carries `io.mindroom.workflow_run` with `run`, `job_id`, `requester`, `title`, `status`, `counts`, `usage`, `phases`, `attempt`, `started_at`, `ended_at`, `error` and `large`.
+  `counts` has `queued`, `running`, `waiting`, `completed`, `failed`, `indeterminate` and `cached`; a cancelled call counts as failed, and `cached` counts the completed calls whose saved result this attempt reused.
+  `usage` is that of [Cost](#cost) plus `projected_cost_usd`: what the run will have cost if every agent still to end costs what a finished turn cost on average.
+  `error` is the last line of what a run that did not complete ended with.
+- The card is edited at once when the run's status, its list of phases, or whether a call waits for a person changes, and when the run is marked large.
+  While only numbers change it is edited every ten minutes at most.
+- The last edit of an ended run adds `graph`: the run's calls, groups, phases and last log lines, cut down to what one event holds, with the counts of what was left out in `omitted`.
+- The card is posted once: a restart of MindRoom finds it again and edits it.
+
+While the run works, clients that show live updates get its graph as `io.mindroom.workflow` frames, see [Live Updates](../streaming.md#live-updates).
+A frame is `{v, run, sid, seq, meta, snapshot}` or `{v, run, sid, seq, meta, delta}`.
+`meta` holds the run's agent, thread, title, status, attempt, times, `max_concurrent`, `max_cost_usd`, `large`, `counts` and `usage`.
+A snapshot holds `phases`, `groups`, `nodes`, `edges`, `omitted` and `log`, and a delta the rows that changed since the frame before it.
+A snapshot is sent first, every ten seconds, at the run's end, and whenever a row left the graph.
+A graph too large for one event keeps the calls that wait for a person first, then failed, running and queued ones, then the newest completed ones, and counts the rest in `omitted`.
+Room state lists the run as one job, with its IDs only: no title, label or phase is written there, and the jobs of the run's agents are not listed.
+
+MindRoom Chat's Resume button sends `io.mindroom.workflow_control` with `{"run": "<run id>", "action": "resume"}` in the run's thread.
+It resumes the run as `resume_workflow(run_id)` does, with a new job, when the run's requester sent it in the run's room and thread.
+Anything else, such as another person's event, another action, or a run that has not ended, changes nothing.
+A Stop that names the job of one agent of a run cancels that agent only; the script gets `AgentError` with kind `cancelled` for it.
+
 ## Fan-Out
 
 ```python

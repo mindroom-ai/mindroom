@@ -464,6 +464,4 @@ _._reject_bare_yaml_off  # Pydantic field validator (src/mindroom/config/models.
 _.reasoning_levels  # ModelCatalogEntry key the model picker reads (src/mindroom/model_catalog.py)
 _.reasoning_default  # ModelCatalogEntry key the model picker reads (src/mindroom/model_catalog.py)
 _.FAILSAFE  # PyAutoGUI setting, turned off so no screen corner stops input (src/mindroom/desktop/provider.py)
-_.max_cost_usd  # WorkflowRun field the workflow engine reads from B7 on (src/mindroom/workflow_runs/models.py)
-_.group_key  # WorkflowNode field the engine sets on a nested run's group and the run's card reads from B6 on (src/mindroom/workflow_runs/models.py)
 _.result_ref  # NodeReceipt field the workflow SDK reads from the receipt's JSON (src/mindroom/workflow_runs/models.py)

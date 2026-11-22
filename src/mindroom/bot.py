@@ -78,6 +78,7 @@ from .commands import config_confirmation
 from .constants import ROUTER_AGENT_NAME, RuntimePaths
 from .conversation_resolver import ConversationResolver, ConversationResolverDeps
 from .conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
+from .custom_tools.workflow import handle_workflow_control
 from .delivery_gateway import (
     DeliveryGateway,
     DeliveryGatewayDeps,
@@ -527,6 +528,11 @@ class AgentBot:
                     runtime=self._runtime_view,
                     runtime_paths=self.runtime_paths,
                     may_talk=self._turn_policy.can_reply_to_sender_in_room,
+                ),
+                on_workflow_event=partial(
+                    handle_workflow_control,
+                    agent_name=self.agent_name,
+                    engine=lambda: self.orchestrator.workflow_engine,
                 ),
                 on_room_lifecycle=self._on_room_member,
                 on_rtc=self._on_rtc_event,

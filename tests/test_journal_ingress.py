@@ -786,6 +786,11 @@ class TestAgentAuthoredMarker:
                 EventKind.JOB_CANCEL,
             ),
             (
+                "io.mindroom.workflow_control",
+                {"run": "wf-1", "action": "resume", AGENT_AUTHORED_KEY: MARKING_AGENT},
+                EventKind.WORKFLOW_CONTROL,
+            ),
+            (
                 "m.room.message",
                 {
                     "msgtype": "m.text",
@@ -813,6 +818,7 @@ class TestAgentAuthoredMarker:
             "audio",
             "approval-response",
             "job-cancel",
+            "workflow-control",
             "edit-marked-in-new-content",
             "edit-marked-at-top-level",
         ],
@@ -831,6 +837,14 @@ class TestAgentAuthoredMarker:
         assert inbound.kind is kind
         assert inbound.event_class is EventClass.CONTEXT_ONLY
         self._assert_history_as_if_unmarked(source, projected)
+
+    async def test_an_unmarked_workflow_control_from_a_person_is_work(self) -> None:
+        """A person's Resume of a workflow run is admitted as its own kind, to be acted on."""
+        inbound, _projected = self._views(
+            timeline_source("io.mindroom.workflow_control", {"run": "wf-1", "action": "resume"}),
+        )
+
+        assert (inbound.kind, inbound.event_class) == (EventKind.WORKFLOW_CONTROL, EventClass.ACTIONABLE)
 
     async def test_an_unmarked_message_from_a_person_is_work(self) -> None:
         """The marker, not the sender, takes the authority away."""
