@@ -663,7 +663,12 @@ async def test_a_cancel_wakes_the_call_that_waits_for_its_reader(tmp_path: Path)
             frames = _frames(response)
             assert (await anext(frames))["t"] == "started"
             pid = await _pid(leader)
-            await _until(lambda: _stream_frames(stack.owner).full(), what="the unread output never filled the queue")
+            # Wait until the unread output fills every buffer on the way and the queue stays full.
+            full = 0
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                while full < 20:
+                    await asyncio.sleep(0.05)
+                    full = full + 1 if _stream_frames(stack.owner).full() else 0
             async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
                 cancelled = (await http.post(f"{route}/cancel", headers=stack.headers)).json()
             assert (cancelled["status"], cancelled["cancel_outcome"]) == ("cancelled", "stopped")
