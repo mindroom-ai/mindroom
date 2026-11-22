@@ -218,10 +218,7 @@ async def test_shell_output_over_the_auto_save_size_is_never_swapped_for_a_works
 
     result = await stack.result("@0", "tool", tool_args("shell", "run_shell_command", args=command, timeout=30))
 
-    assert isinstance(result, dict)
-    output = str(result["output"])
-    assert (result["exit_code"], output.count("Z"), "mindroom_tool_output" in output) == (0, 51200, False)
-    assert len(output) > 51200
+    assert result == {"output": "Z" * 51200, "exit_code": 0}
     assert not list(stack.context.runtime_paths.storage_root.rglob("mindroom_tool_outputs/*"))
 
 

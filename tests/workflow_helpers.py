@@ -51,6 +51,7 @@ from mindroom.script_runs.reasons import (
     RUNTIME_SHUTDOWN,
 )
 from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
+from mindroom.session_storage import store as session_store
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import read_result_payload
@@ -953,6 +954,8 @@ class WorkflowStack:
             shutil.rmtree(path)
             (saved / path.name).rename(path)
         saved.rmdir()
+        # The dead primary's memory of the rows its saves left is gone with it: the next one writes every row.
+        session_store._WRITTEN.clear()
         self._open()
         if self.has_jobs:
             await (await self.open_jobs()).recover()
