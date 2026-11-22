@@ -21,7 +21,7 @@ import httpx
 import pytest
 import uvicorn
 import uvloop
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 from mindroom.agent_cli import turn
 from mindroom.agent_cli.lifetime import response_cli_lifetime
@@ -805,3 +805,117 @@ async def test_a_stream_that_was_asked_for_is_the_calls_one_reader_and_must_star
         pid = await _pid(leader)
         await _until(lambda: not _alive(pid), what="the command of a stream that never started kept running")
         await never_read.aclose()
+
+
+async def test_the_time_limit_does_not_wait_for_a_process_that_left_the_group_and_keeps_writing(tmp_path: Path) -> None:
+    """After the stop, only what the pipes still held is read: a writer the stop cannot reach is not waited for."""
+    ticker = tmp_path / "ticker"
+    ticks = f"echo \\$\\$ > {ticker}; for i in \\$(seq 100); do echo tick; sleep .1; done"
+    async with _stack(tmp_path) as stack:
+        started = time.monotonic()
+        try:
+            code, stdout, stderr = await stack.run(
+                "--timeout",
+                "1",
+                "--",
+                "bash",
+                "-c",
+                f'setsid bash -c "{ticks}" & wait',
+            )
+            elapsed = time.monotonic() - started
+        finally:
+            with suppress(ProcessLookupError):
+                os.kill(await _pid(ticker), signal.SIGKILL)
+        # The ticks go on for ten seconds; the stop at one second is reported well before they end.
+        assert (code, stderr) == (124, b"mindroom-agent: stopped after 1s\n")
+        assert elapsed < 6
+        assert stdout.startswith(b"tick\n")
+        assert not stdout.replace(b"tick\n", b"")
+
+
+async def test_a_cancel_while_the_exit_waits_to_be_delivered_does_not_stop_what_the_command_left(
+    tmp_path: Path,
+) -> None:
+    """A command that ended is not stopped by a cancel that comes while nobody takes its exit."""
+    child = tmp_path / "child"
+    exiting = asyncio.Event()
+    stopped: list[bool] = []
+
+    async def taken(*_: object) -> None:
+        return
+
+    async def on_exit(*_: object) -> None:
+        # The frames ahead of the exit are unread, so it waits for room.
+        exiting.set()
+        await asyncio.Event().wait()
+
+    command = asyncio.create_task(
+        execution.stream_command(
+            ["bash", "-c", f"sleep 300 > /dev/null 2>&1 & echo $! > {child}"],
+            dict(os.environ),
+            None,
+            timeout=60,
+            stdin=execution.CommandStdin(),
+            on_start=taken,
+            on_output=taken,
+            on_exit=on_exit,
+            on_stopped=lambda: stopped.append(True),
+        ),
+    )
+    pid = await _pid(child)
+    try:
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            await exiting.wait()
+        command.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await command
+        assert (stopped, _alive(pid)) == ([], True)
+    finally:
+        with suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+
+
+@pytest.mark.parametrize("status", [429, 403])
+async def test_a_refused_stdin_chunk_is_sent_again_or_ends_the_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+) -> None:
+    """A refusal that passes gets the chunk again; one that stays is reported and cancels the command."""
+    write_stdin = turn.LiveTurnTools.write_stdin
+    writes = 0
+
+    async def refusing(self: LiveTurnTools, call_id: str, seq: int, data: str, *, eof: bool) -> bool:
+        nonlocal writes
+        writes += 1
+        if writes == 3:
+            raise HTTPException(status_code=status, detail="refused")
+        return await write_stdin(self, call_id, seq, data, eof=eof)
+
+    monkeypatch.setattr(turn.LiveTurnTools, "write_stdin", refusing)
+    sent = os.urandom(300_000)
+    leader = tmp_path / "leader"
+    async with _stack(tmp_path) as stack:
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            code, stdout, stderr = await stack.run("--", f"echo $$ > {leader}; cat", stdin=sent)
+        if status == 429:
+            assert (code, hashlib.sha256(stdout).hexdigest(), stderr) == (0, hashlib.sha256(sent).hexdigest(), b"")
+        else:
+            # The command would wait for a chunk that never comes, so it is cancelled, and the CLI says why.
+            assert code == 255
+            assert stderr.startswith(b"mindroom-agent: the command's stdin was refused")
+            assert sent.startswith(stdout)
+            assert not _alive(await _pid(leader))
+
+
+async def test_a_stdout_that_fails_its_writes_is_reported_and_stops_the_command(tmp_path: Path) -> None:
+    """Only a stdout that is closed ends like SIGPIPE: one that is full is an error the CLI names."""
+    leader = tmp_path / "leader"
+    async with _stack(tmp_path) as stack:
+        with open("/dev/full", "wb") as full:  # noqa: PTH123, ASYNC230
+            process = await stack.spawn("--", f"echo $$ > {leader}; echo data; sleep 300", stdout=full)
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                _, stderr = await process.communicate()
+        assert process.returncode == 1
+        assert stderr.startswith(b"mindroom-agent: cannot write the command's output: No space left on device")
+        await _until(lambda: not _alive(int(leader.read_text())), what="the command outlived its writer")
