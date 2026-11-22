@@ -21,11 +21,13 @@ from mindroom.api.sandbox_runner import (
     app_runtime_paths,
     initialize_sandbox_runner_app,
     load_config_from_startup_runtime,
+    prepare_dedicated_worker_before_serving,
     startup_runner_token_from_env,
     validate_runner_token,
 )
 from mindroom.api.sandbox_runner import router as sandbox_runner_router
 from mindroom.api.sandbox_runner_scripts import (
+    is_script_worker_key,
     prepare_script_worker_before_serving,
 )
 from mindroom.api.sandbox_runner_scripts import router as sandbox_runner_scripts_router
@@ -83,6 +85,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.worker_browser = browser
     try:
         await prepare_script_worker_before_serving(app)
+        if dedicated_key is not None and not is_script_worker_key(dedicated_key):
+            await prepare_dedicated_worker_before_serving(app)
         yield
     finally:
         await close_worker_terminals(app)

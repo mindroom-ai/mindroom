@@ -104,13 +104,19 @@ def _default_template_command(python_executable: str, socket_path: str) -> list[
     return [python_executable, "-P", "-s", "-m", "mindroom.api.sandbox_runner", TEMPLATE_ARG, socket_path]
 
 
+def _control_socket_path(socket_path: str) -> str:
+    return str(Path(socket_path).with_suffix(".ctl.sock"))
+
+
 @dataclass
 class _Template:
     fingerprint: str
+    base_fingerprint: str
     process: subprocess.Popen[bytes]
     socket_path: str
     stderr_path: Path
     runtime_dir: Path
+    preload_fingerprint: str | None = None
     spawned_at: float = field(default_factory=time.monotonic)
     # Set once the socket accepts connections; mutated only under the key lock.
     ready: bool = False
@@ -309,10 +315,12 @@ class _SandboxForkserver:
             raise ForkserverTimeoutError(msg)
         try:
             effective_spec, effective_preload_fp = self._resolve_preload(preload_spec, preload_fingerprint)
+            base_fingerprint = _template_fingerprint(key, template_env)
             fingerprint = _template_fingerprint(key, template_env, preload_fingerprint=effective_preload_fp)
             return self._ready_template(
                 key=key,
                 fingerprint=fingerprint,
+                base_fingerprint=base_fingerprint,
                 template_env=template_env,
                 preload_spec=effective_spec,
                 preload_fingerprint=effective_preload_fp,
@@ -354,6 +362,7 @@ class _SandboxForkserver:
         *,
         key: str,
         fingerprint: str,
+        base_fingerprint: str,
         template_env: dict[str, str] | None,
         preload_spec: Mapping[str, object] | None,
         preload_fingerprint: str | None,
@@ -372,6 +381,23 @@ class _SandboxForkserver:
             if time.monotonic() - failed_at < self._startup_failure_cooldown_seconds:
                 raise ForkserverStartupError(message)
             self._failed_fingerprints.pop(fingerprint, None)
+        if (
+            template is not None
+            and template.ready
+            and template.preload_fingerprint is None
+            and preload_spec is not None
+            and preload_fingerprint is not None
+            and template.base_fingerprint == base_fingerprint
+        ):
+            self._preload_template_in_place(
+                key=key,
+                template=template,
+                preload_spec=preload_spec,
+                preload_fingerprint=preload_fingerprint,
+                fingerprint=fingerprint,
+                deadline=deadline,
+            )
+            return template
         if template is not None and template.fingerprint != fingerprint:
             logger.info("sandbox_forkserver_template_recycled", python_executable=key)
             self._discard(key, template)
@@ -380,8 +406,10 @@ class _SandboxForkserver:
             template = self._spawn_template(
                 key=key,
                 fingerprint=fingerprint,
+                base_fingerprint=base_fingerprint,
                 template_env=template_env,
                 preload_spec=preload_spec,
+                preload_fingerprint=preload_fingerprint,
             )
             with self._lock:
                 self._templates[key] = template
@@ -407,13 +435,54 @@ class _SandboxForkserver:
                 self._templates.pop(key)
         _terminate_template(template)
 
+    def _preload_template_in_place(
+        self,
+        *,
+        key: str,
+        template: _Template,
+        preload_spec: Mapping[str, object],
+        preload_fingerprint: str,
+        fingerprint: str,
+        deadline: float,
+    ) -> None:
+        """Load the first snapshot's plugins into an already-warm no-plugin template without respawning it."""
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ForkserverTimeoutError
+        control_path = _control_socket_path(template.socket_path)
+        payload = json.dumps(dict(preload_spec), sort_keys=True).encode("utf-8") + b"\n"
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+                conn.settimeout(remaining)
+                conn.connect(control_path)
+                conn.sendall(payload)
+                response = json.loads(_SocketLineReader(conn, deadline).read_line())
+        except TimeoutError as exc:
+            raise ForkserverTimeoutError from exc
+        except (_ConnectionClosedError, OSError, ValueError, TypeError) as exc:
+            self._discard(key, template)
+            self._failed_preload_fingerprints[preload_fingerprint] = time.monotonic()
+            msg = f"Sandbox forkserver in-place plugin preload failed: {exc}"
+            logger.warning("sandbox_forkserver_plugin_preload_failed", error=msg)
+            raise ForkserverStartupError(msg) from exc
+        if not response.get("ok"):
+            self._discard(key, template)
+            self._failed_preload_fingerprints[preload_fingerprint] = time.monotonic()
+            msg = str(response.get("error") or "Sandbox forkserver in-place plugin preload failed.")
+            logger.warning("sandbox_forkserver_plugin_preload_failed", error=msg)
+            raise ForkserverStartupError(msg)
+        template.preload_fingerprint = preload_fingerprint
+        template.fingerprint = fingerprint
+
     def _spawn_template(
         self,
         *,
         key: str,
         fingerprint: str,
+        base_fingerprint: str,
         template_env: dict[str, str] | None,
         preload_spec: Mapping[str, object] | None,
+        preload_fingerprint: str | None,
     ) -> _Template:
         runtime_dir = Path(tempfile.mkdtemp(prefix="mindroom-fs-"))
         socket_path = str(runtime_dir / "template.sock")
@@ -441,10 +510,12 @@ class _SandboxForkserver:
             raise ForkserverStartupError(msg) from exc
         return _Template(
             fingerprint=fingerprint,
+            base_fingerprint=base_fingerprint,
             process=process,
             socket_path=socket_path,
             stderr_path=stderr_path,
             runtime_dir=runtime_dir,
+            preload_fingerprint=preload_fingerprint,
         )
 
     def _wait_template_ready(self, *, key: str, template: _Template, deadline: float) -> None:
@@ -607,9 +678,60 @@ def get_sandbox_forkserver() -> _SandboxForkserver:
         return _forkserver
 
 
+def _handle_control_preload(
+    ctl_conn: socket.socket,
+    preload_plugins: Callable[[Mapping[str, object]], None],
+) -> bool:
+    """Run one in-place plugin preload in the template parent; return False if template must exit."""
+    try:
+        reader = _SocketLineReader(ctl_conn, time.monotonic() + _CHILD_REQUEST_READ_TIMEOUT_SECONDS)
+        spec = json.loads(reader.read_line())
+        if not isinstance(spec, dict):
+            _send_json(ctl_conn, {"ok": False, "error": "Invalid preload spec."})
+            return True
+        preload_plugins(spec)
+        if (thread_count := threading.active_count()) > 1:
+            msg = (
+                f"Sandbox forkserver template must be single-threaded before forking; "
+                f"found {thread_count} threads after plugin preload."
+            )
+            _send_json(ctl_conn, {"ok": False, "error": msg})
+            return False
+        _send_json(ctl_conn, {"ok": True})
+    except BaseException as exc:
+        with suppress(Exception):
+            _send_json(ctl_conn, {"ok": False, "error": str(exc)})
+        return False
+    else:
+        return True
+
+
+def _accept_and_fork(
+    server: socket.socket,
+    control_server: socket.socket | None,
+    run_payload: Callable[[str, Callable[[str], None]], tuple[int, str, str]],
+) -> None:
+    conn, _addr = server.accept()
+    try:
+        child_pid = os.fork()
+    except OSError:
+        # Fork pressure (e.g. EAGAIN) fails this one request via EOF on
+        # the connection; the template keeps serving.
+        conn.close()
+        return
+    if child_pid == 0:
+        server.close()
+        if control_server is not None:
+            control_server.close()
+        _child_main(conn, run_payload)
+    conn.close()
+
+
 def serve_template(
     socket_path: str,
     run_payload: Callable[[str, Callable[[str], None]], tuple[int, str, str]],
+    *,
+    preload_plugins: Callable[[Mapping[str, object]], None] | None = None,
 ) -> int:
     """Template process main loop: accept one connection per request and fork.
 
@@ -630,33 +752,38 @@ def serve_template(
     # own tool subprocesses immediately after fork.
     signal.signal(signal.SIGCHLD, signal.SIG_IGN)
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    control_server: socket.socket | None = None
     try:
+        if preload_plugins is not None:
+            control_server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            control_server.bind(_control_socket_path(socket_path))
+            control_server.listen(4)
         server.bind(socket_path)
         server.listen(_TEMPLATE_LISTEN_BACKLOG)
-        server.settimeout(_TEMPLATE_ACCEPT_POLL_SECONDS)
+        watch = [server] if control_server is None else [server, control_server]
         while True:
-            try:
-                conn, _addr = server.accept()
-            except TimeoutError:
+            readable, _, _ = select.select(watch, [], [], _TEMPLATE_ACCEPT_POLL_SECONDS)
+            if not readable:
                 if os.getppid() != parent_pid:
                     # Orphaned: the runner died without running its cleanup
                     # (e.g. SIGKILL), so remove our runtime dir ourselves.
                     shutil.rmtree(Path(socket_path).parent, ignore_errors=True)
                     return 0
                 continue
-            try:
-                child_pid = os.fork()
-            except OSError:
-                # Fork pressure (e.g. EAGAIN) fails this one request via EOF on
-                # the connection; the template keeps serving.
-                conn.close()
-                continue
-            if child_pid == 0:
-                server.close()
-                _child_main(conn, run_payload)
-            conn.close()
+            if control_server is not None and control_server in readable:
+                ctl_conn, _addr = control_server.accept()
+                try:
+                    keep_serving = _handle_control_preload(ctl_conn, preload_plugins)
+                finally:
+                    ctl_conn.close()
+                if not keep_serving:
+                    return 1
+            if server in readable:
+                _accept_and_fork(server, control_server, run_payload)
     finally:
         server.close()
+        if control_server is not None:
+            control_server.close()
 
 
 def _child_main(

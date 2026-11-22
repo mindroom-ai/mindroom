@@ -115,7 +115,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.trafilatura_call_limit import trafilatura_request_budget_seconds
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
 from mindroom.worker_computer.worker_browser import WorkerBrowserRuntime
-from mindroom.workers.backends.local import get_local_worker_manager
+from mindroom.workers.backends.local import get_local_worker_manager, local_worker_state_paths_from_handle
 from mindroom.workers.protocol import (
     WORKER_PROTOCOL_VERSION,
     CancelRequest,
@@ -374,6 +374,59 @@ def initialize_sandbox_runner_app(
     # Requests load their own config's plugins; loading the startup config's now reports a broken one at startup.
     refresh_plugins(committed_config, runtime_paths)
     api_app.state.sandbox_runner_context = context
+
+
+def _warm_dedicated_worker_forkserver(
+    worker_handle: sandbox_worker_prep.WorkerHandle,
+    runtime_paths: RuntimePaths,
+    config: Config,
+) -> None:
+    """Warm the dedicated worker's forkserver template before readiness; fall back cleanly on startup failure."""
+    python_executable, template_env, _ = sandbox_exec.resolve_subprocess_worker_context(
+        local_worker_state_paths_from_handle(worker_handle),
+    )
+    preload_spec, preload_fingerprint = _forkserver_plugin_preload(config, runtime_paths)
+    startup_timeout = sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths)
+    forkserver = sandbox_forkserver.get_sandbox_forkserver()
+    try:
+        forkserver.warm(
+            python_executable=python_executable,
+            template_env=template_env,
+            startup_timeout_seconds=startup_timeout,
+            preload_spec=preload_spec,
+            preload_fingerprint=preload_fingerprint,
+        )
+    except sandbox_forkserver.ForkserverStartupError as exc:
+        if preload_spec is not None:
+            with suppress(sandbox_forkserver.ForkserverError):
+                forkserver.warm(
+                    python_executable=python_executable,
+                    template_env=template_env,
+                    startup_timeout_seconds=startup_timeout,
+                )
+                return
+        logger.warning("sandbox_forkserver_eager_warmup_failed", error=str(exc))
+    except sandbox_forkserver.ForkserverError as exc:
+        logger.warning("sandbox_forkserver_eager_warmup_failed", error=str(exc))
+
+
+async def prepare_dedicated_worker_before_serving(app: FastAPI) -> None:
+    """Finish cold dedicated-worker setup (venv, shell supervisor, forkserver) before advertising readiness."""
+    runtime_paths = app_runtime_paths(app)
+    worker_key = sandbox_exec.runner_dedicated_worker_key(runtime_paths)
+    if worker_key is None or not sandbox_exec.runner_uses_subprocess(runtime_paths):
+        return
+    config = app_runtime_config(app)
+    worker_handle = await asyncio.to_thread(
+        sandbox_worker_prep.prepare_dedicated_worker,
+        worker_key,
+        runtime_paths,
+        runner_token=app_runner_token(app),
+    )
+    tasks: list[Coroutine[Any, Any, object]] = [asyncio.to_thread(shell_supervisor.ensure_shell_supervisor)]
+    if sandbox_exec.runner_uses_forkserver(runtime_paths) and sandbox_forkserver.forkserver_supported():
+        tasks.append(asyncio.to_thread(_warm_dedicated_worker_forkserver, worker_handle, runtime_paths, config))
+    await asyncio.gather(*tasks)
 
 
 def _freeze_private_agent_names(private_agent_names: list[str] | None) -> frozenset[str] | None:
@@ -1623,23 +1676,29 @@ def _run_subprocess_worker() -> int:
     return exit_code
 
 
+def _preload_forkserver_plugins_from_spec(raw: Mapping[str, object]) -> None:
+    """Preload one serialized plugin spec into the forkserver template."""
+    from mindroom.config.plugin import PluginEntryConfig  # noqa: PLC0415
+
+    raw_plugins = raw.get("plugins")
+    if not isinstance(raw_plugins, list) or not raw_plugins:
+        return
+    preload_runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=Path(str(raw["config_path"])),
+        storage_path=Path(str(raw["storage_root"])),
+        process_env={},
+    )
+    preload_config = Config(plugins=[PluginEntryConfig(path=str(path), enabled=True) for path in raw_plugins])
+    refresh_plugins(preload_config, preload_runtime_paths)
+
+
 def _preload_forkserver_plugins(preload_file: str | None) -> None:
     """Preload the template's configured plugins before forking request children."""
     if not preload_file:
         return
-    from mindroom.config.plugin import PluginEntryConfig  # noqa: PLC0415
-
     raw = json.loads(Path(preload_file).read_text(encoding="utf-8"))
-    plugin_paths = [str(entry) for entry in raw.get("plugins", [])]
-    if not plugin_paths:
-        return
-    preload_runtime_paths = constants.resolve_primary_runtime_paths(
-        config_path=Path(raw["config_path"]),
-        storage_path=Path(raw["storage_root"]),
-        process_env={},
-    )
-    preload_config = Config(plugins=[PluginEntryConfig(path=path, enabled=True) for path in plugin_paths])
-    refresh_plugins(preload_config, preload_runtime_paths)
+    if isinstance(raw, dict):
+        _preload_forkserver_plugins_from_spec(raw)
 
 
 def _run_forkserver_template() -> int:
@@ -1676,7 +1735,11 @@ def _run_forkserver_template() -> int:
                 json.dumps(timing_payload, sort_keys=True),
                 encoding="utf-8",
             )
-    return sandbox_forkserver.serve_template(socket_path, _run_subprocess_worker_payload)
+    return sandbox_forkserver.serve_template(
+        socket_path,
+        _run_subprocess_worker_payload,
+        preload_plugins=_preload_forkserver_plugins_from_spec,
+    )
 
 
 @router.post("/leases")

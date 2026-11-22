@@ -61,11 +61,17 @@ _MAX_REQUEST_BYTES = 8 * 1024 * 1024
 
 __all__ = [
     "cancel_script_in_worker",
+    "is_script_worker_key",
     "prepare_script_worker_before_serving",
     "router",
     "run_script_in_worker",
     "status_script_in_worker",
 ]
+
+
+def is_script_worker_key(worker_key: str) -> bool:
+    """Return whether ``worker_key`` identifies a run-scoped script worker."""
+    return script_run_id_from_worker_key(worker_key) is not None
 
 
 async def prepare_script_worker_before_serving(app: FastAPI) -> None:

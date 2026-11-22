@@ -15,11 +15,15 @@ from contextlib import suppress
 from typing import TYPE_CHECKING
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 import mindroom.api.sandbox_exec as sandbox_exec_module
 import mindroom.api.sandbox_forkserver as sandbox_forkserver_module
 import mindroom.api.sandbox_protocol as sandbox_protocol_module
 import mindroom.api.sandbox_runner as sandbox_runner_module
+import mindroom.shell.supervisor as shell_supervisor_module
+from mindroom.api import sandbox_runner_app
 from mindroom.api.sandbox_forkserver import (
     ForkserverError,
     ForkserverStartupError,
@@ -1040,5 +1044,144 @@ def test_forkserver_thread_spawning_plugin_falls_back_safely(
         assert len(manager._templates) == 1
         template = next(iter(manager._templates.values()))
         assert template.process.poll() is None
+    finally:
+        manager.shutdown()
+
+
+def test_dedicated_worker_lifespan_warms_runtime_and_preloads_snapshot_plugins_in_place(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated worker startup warms venv, shell supervisor, and forkserver before serving, then preloads snapshot plugins in place."""
+    worker_root = tmp_path / "worker"
+    worker_root.mkdir()
+    config_path = tmp_path / "config.yaml"
+    plugin_dir = tmp_path / "snapshot_plugin"
+    import_log = tmp_path / "snapshot_imports.log"
+    _write_counting_plugin(plugin_dir, name="snapshot-plugin", import_log=import_log, version="snap-v1")
+
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=worker_root,
+        process_env={
+            "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+            "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "forkserver",
+            "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "60",
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": "v1:default:user_agent:~@alice:example.org:code:named-test",
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": str(worker_root),
+        },
+    )
+    manager = _SandboxForkserver()
+    monkeypatch.setattr(sandbox_forkserver_module, "get_sandbox_forkserver", lambda: manager)
+    # Track template spawns so we verify snapshot plugins preload in place without respawning.
+    spawned_pids: list[int] = []
+    orig_spawn = manager._spawn_template
+
+    def _recording_spawn(*args: object, **kwargs: object) -> sandbox_forkserver_module._Template:
+        template = orig_spawn(*args, **kwargs)
+        spawned_pids.append(template.process.pid)
+        return template
+
+    monkeypatch.setattr(manager, "_spawn_template", _recording_spawn)
+
+    app = FastAPI(lifespan=sandbox_runner_app._lifespan)
+    app.include_router(sandbox_runner_module.router)
+    sandbox_runner_module.initialize_sandbox_runner_app(
+        app,
+        runtime_paths,
+        config=Config(),
+        runner_token="test-token",  # noqa: S106
+    )
+    runner_pid = os.getpid()
+    try:
+        with TestClient(app) as client:
+            assert (worker_root / "venv" / "bin" / "python").exists()
+            assert shell_supervisor_module._manager is not None
+            assert shell_supervisor_module._manager._supervisor is not None
+            assert len(spawned_pids) == 1
+            assert len(manager._templates) == 1
+            warmed_template = next(iter(manager._templates.values()))
+            assert warmed_template.ready is True
+
+            snapshot = {"plugins": [{"path": str(plugin_dir), "enabled": True}]}
+            for _ in range(2):
+                resp = client.post(
+                    "/api/sandbox-runner/execute",
+                    headers={"X-Mindroom-Sandbox-Token": "test-token"},
+                    json={
+                        "protocol": sandbox_runner_module.WORKER_PROTOCOL_VERSION,
+                        "tool_name": "snapshot-plugin_tool",
+                        "function_name": "get_version",
+                        "private_agent_names": [],
+                        "config_snapshot": snapshot,
+                    },
+                )
+                assert resp.status_code == 200, resp.text
+                body = resp.json()
+                assert body["ok"] is True, body
+                assert body["result"] == "snap-v1"
+
+            # Same template process stayed alive and loaded the snapshot plugin once in place.
+            assert len(spawned_pids) == 1
+            non_runner = [
+                line
+                for line in import_log.read_text(encoding="utf-8").splitlines()
+                if not line.startswith(f"{runner_pid}:")
+            ]
+            assert len(non_runner) == 1, non_runner
+    finally:
+        manager.shutdown()
+
+
+def test_in_place_preload_thread_spawning_plugin_falls_back_safely(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """In-place preload into an already-warm template must reject thread-spawning plugins safely."""
+    runtime_paths, empty_config = _forkserver_runtime(tmp_path)
+    plugin_dir = tmp_path / "late_threaded_plugin"
+    import_log = tmp_path / "late_threaded_imports.log"
+    _write_counting_plugin(
+        plugin_dir,
+        name="late-threaded-plugin",
+        import_log=import_log,
+        version="late-v1",
+        spawn_thread=True,
+    )
+    plugin_config = Config(plugins=[PluginEntryConfig(path=str(plugin_dir), enabled=True)])
+
+    manager = _SandboxForkserver()
+    monkeypatch.setattr(sandbox_forkserver_module, "get_sandbox_forkserver", lambda: manager)
+    try:
+        # Warm template first with no plugins (like Kubernetes startup).
+        first = sandbox_runner_module._execute_request_subprocess_sync(
+            execute_call(
+                runtime_paths,
+                empty_config,
+                tool_name="calculator",
+                function_name="add",
+                args=[1, 2],
+                kwargs={},
+            ),
+        )
+        assert first.ok is True, first.error
+        assert len(manager._templates) == 1
+
+        # Now send requests requiring the thread-spawning plugin.
+        for _ in range(2):
+            resp = sandbox_runner_module._execute_request_subprocess_sync(
+                execute_call(
+                    runtime_paths,
+                    plugin_config,
+                    tool_name="late-threaded-plugin_tool",
+                    function_name="get_version",
+                    args=[],
+                    kwargs={},
+                ),
+            )
+            assert resp.ok is True, resp.error
+            assert resp.result == "late-v1"
+        assert len(manager._templates) == 1
+        assert next(iter(manager._templates.values())).process.poll() is None
     finally:
         manager.shutdown()

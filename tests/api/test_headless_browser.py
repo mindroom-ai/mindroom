@@ -98,6 +98,11 @@ async def headless_client(
         paths=local_worker_state_paths_for_root(root),
         base_dir=root / "workspace",
     )
+
+    async def _skip_prepare(_app: FastAPI) -> None:
+        return None
+
+    monkeypatch.setattr(sandbox_runner_app, "prepare_dedicated_worker_before_serving", _skip_prepare)
     monkeypatch.setattr(sandbox_worker_prep, "prepare_worker_request", lambda **_kwargs: prepared)
 
     async def subprocess(*_args: object, **_kwargs: object) -> ExecuteResponse:
@@ -429,6 +434,11 @@ async def test_generic_and_unscoped_runners_keep_subprocess_isolation(
         paths=local_worker_state_paths_for_root(tmp_path),
         base_dir=tmp_path / "workspace",
     )
+
+    async def _skip_prepare(_app: FastAPI) -> None:
+        return None
+
+    monkeypatch.setattr(sandbox_runner_app, "prepare_dedicated_worker_before_serving", _skip_prepare)
     monkeypatch.setattr(sandbox_worker_prep, "prepare_worker_request", lambda **_kwargs: prepared)
 
     async def subprocess(*_args: object, **_kwargs: object) -> ExecuteResponse:
