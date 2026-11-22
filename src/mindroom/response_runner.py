@@ -930,7 +930,12 @@ class ResponseRunner:
         one session row, without its runs, on a thread.
         """
         try:
-            return await asyncio.to_thread(self._read_queued_forced_compaction, session_id, scope, execution_identity)
+            return await asyncio.to_thread(
+                self._read_queued_forced_compaction,
+                session_id=session_id,
+                scope=scope,
+                execution_identity=execution_identity,
+            )
         except Exception as error:
             self.deps.logger.warning(
                 "forced_compaction_placeholder_check_failed",
