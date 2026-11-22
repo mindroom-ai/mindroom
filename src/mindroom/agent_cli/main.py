@@ -13,7 +13,7 @@ import signal
 import sys
 import threading
 import time
-from contextlib import contextmanager, suppress
+from contextlib import closing, contextmanager, suppress
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from uuid import UUID, uuid4
@@ -354,12 +354,12 @@ def _discard_stdout() -> None:
         os.close(nowhere)
 
 
-def _forward_stdin(client: AgentCliClient, call_id: str, done: threading.Event, stderr: _WorkerStderr) -> None:
+def _forward_stdin(client: AgentCliClient, call_id: str, done: threading.Event, refused: list[str]) -> None:
     """Send the CLI's stdin to the command in order as it arrives, then its end; a terminal sends its end at once.
 
     Each chunk is answered once the command took it, so a command that reads slowly slows this down. It runs in a
     daemon thread until ``done``: a command that ends without reading its stdin does not wait for it. A chunk that
-    is refused for good is reported, and the command, which would wait for it, is cancelled.
+    is refused for good is noted in ``refused``, which ends the relay, and the command that would wait is cancelled.
     """
     seq = 0
     while True:
@@ -375,7 +375,7 @@ def _forward_stdin(client: AgentCliClient, call_id: str, done: threading.Event, 
             try:
                 taking_more = bool(client.stdin(call_id, seq, data, eof=not data).get("open"))
             except ValueError as exc:
-                stderr.note(f"mindroom-agent: the command's stdin was refused ({exc}); cancelling the command")
+                refused.append(str(exc))
                 with suppress(AgentCliUnavailableError, ValueError):
                     client.cancel(call_id, timeout=_CANCEL_TIMEOUT_SECONDS)
                 return
@@ -424,27 +424,36 @@ def _relay(
     the relay loses nothing. A stream that ends before the exit or the receipt leaves the command's outcome unknown.
     """
     done = threading.Event()
-    try:
-        return _relay_frames(client, call_id, worker, ended, done, stderr)
-    except _StdoutClosedError:
-        with suppress(AgentCliUnavailableError, ValueError):
-            client.cancel(call_id, timeout=_CANCEL_TIMEOUT_SECONDS)
-        _discard_stdout()
-        raise
-    finally:
-        done.set()
+    refused: list[str] = []
+    forwarding = threading.Thread(target=_forward_stdin, args=(client, call_id, done, refused), daemon=True)
+    # Leaving closes the stream at once, which cancels the call of a reader that left, whatever became of a cancel.
+    with closing(_frames(client, call_id)) as frames:
+        try:
+            return _relay_frames(frames, forwarding, refused, worker, ended, stderr)
+        except _StdoutClosedError:
+            with suppress(AgentCliUnavailableError, ValueError):
+                client.cancel(call_id, timeout=_CANCEL_TIMEOUT_SECONDS)
+            _discard_stdout()
+            raise
+        finally:
+            done.set()
 
 
-def _relay_frames(
-    client: AgentCliClient,
-    call_id: str,
+def _relay_frames(  # noqa: C901 - One branch for each kind of frame.
+    frames: Iterator[dict[str, object]],
+    forwarding: threading.Thread,
+    refused: list[str],
     worker: str,
     ended: dict[str, object],
-    done: threading.Event,
     stderr: _WorkerStderr,
 ) -> dict[str, object]:
-    for frame in _frames(client, call_id):
+    for frame in frames:
         kind = frame.get("t")
+        if refused:
+            # The cancel for the refused chunk goes out before the CLI writes anything more.
+            forwarding.join(_CANCEL_TIMEOUT_SECONDS + 1)
+            msg = f"the command's stdin was refused ({refused[0]})"
+            raise AgentCliUnavailableError(msg)
         if kind is None:
             return frame
         if kind == "out":
@@ -457,7 +466,7 @@ def _relay_frames(
         elif kind == "started":
             if frame.get("header") == f"[worker: {worker}, started]":
                 stderr.note(f"mindroom-agent: started worker {worker}")
-            threading.Thread(target=_forward_stdin, args=(client, call_id, done, stderr), daemon=True).start()
+            forwarding.start()
         elif kind == "exit":
             ended.update(frame)
     if ended:
