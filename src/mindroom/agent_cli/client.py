@@ -26,10 +26,6 @@ _CANCEL_TIMEOUT_SECONDS = 8
 class AgentCliUnavailableError(RuntimeError):
     """Authority or transport could not yield a known response."""
 
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
-        super().__init__(message)
-        self.status_code = status_code
-
 
 def _rejection(error: HTTPError) -> ValueError:
     """Relay the server's bounded ``detail`` so the caller learns why it was refused."""
@@ -132,7 +128,7 @@ class AgentCliClient:
             if exc.code in {400, 409, 413, 422}:
                 raise _rejection(exc) from None
             msg = "Agent CLI authority or transport is unavailable"
-            raise AgentCliUnavailableError(msg, status_code=exc.code) from None
+            raise AgentCliUnavailableError(msg) from None
         except (OSError, HTTPException, URLError, ValueError) as exc:
             # Name the address so a blocked route back to MindRoom is diagnosable from the shell.
             msg = f"Agent CLI transport outcome is unknown; check that this shell can reach {self._url}"

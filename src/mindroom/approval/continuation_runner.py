@@ -66,7 +66,6 @@ from mindroom.event_journal import (
     ApprovalContinuation,
     ApprovalFailure,
     ApprovalMemoryTurn,
-    CallKey,
     MatrixDelivery,
 )
 from mindroom.final_delivery import (
@@ -244,7 +243,6 @@ class ApprovalContinuationRunner:
             advance=self._advance_in_place_approval,
             exit=self._cli_exit,
             waiters=self.cli_waiters,
-            expire=self._expire_in_place_approval,
         )
         self._approval_execution = AgentApprovalExecution(
             config=lambda: self.deps.runtime.config,
@@ -558,22 +556,6 @@ class ApprovalContinuationRunner:
     ) -> None:
         """Record the next pause of a run that waits in place, with its reply's pause row."""
         await self._advance_pause(current, paused, target=target, in_place=True)
-
-    async def _expire_in_place_approval(self, current: ApprovalContinuation) -> None:
-        """Expire one route-cancelled CLI call's pending approval so `CliApprovalWaits.wait` can claim and exit."""
-        reason = "CLI call cancelled"
-        manager = approval_manager.get_approval_store()
-        if manager is not None:
-            await manager.expire_continuation_cards(current.approval_id, reason)
-        refreshed = await self.deps.approval_store.approval_continuation(current.approval_id)
-        if refreshed is not None and refreshed.state == "waiting":
-            for call in refreshed.calls:
-                if call.decision is None:
-                    await self.deps.approval_store.resolve_approval_call(
-                        CallKey(refreshed.approval_id, refreshed.generation, call.tool_call_id),
-                        requested_status="expired",
-                        reason=reason,
-                    )
 
     async def _end_expired_in_place_wait(self) -> None:
         """End the span of a response-local wait that expired; the reply waits for the decision."""

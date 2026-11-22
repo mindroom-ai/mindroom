@@ -26,8 +26,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
     from mindroom.agent_cli.protocol import AgentCliOperation
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -199,7 +197,6 @@ class CliOperationOwner(Protocol):
         *,
         wait: float = 0.0,
         after_progress: int | None = None,
-        is_disconnected: Callable[[], Awaitable[bool]] | None = None,
     ) -> dict[str, object]:
         """Read one exact-owner receipt, optionally long-polling for settlement or progress."""
         ...
