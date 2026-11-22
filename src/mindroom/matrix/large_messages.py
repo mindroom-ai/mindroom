@@ -43,6 +43,8 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
 from mindroom.matrix.media import durable_session_closed, prepare_media_upload, upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import markdown_to_html
+from mindroom.matrix_identifiers import has_agent_username
+from mindroom.tool_system.events import tool_markers_out_of_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -865,6 +867,22 @@ def _fit_large_message_preview(
     )
 
 
+def _preview_source_for_large_message(
+    client: nio.AsyncClient,
+    content: dict[str, Any],
+    *,
+    is_edit: bool,
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    """Return ``(preview_envelope, preview_source, preview_text)`` with raw tool markers stripped for agent senders."""
+    preview_envelope = (
+        tool_markers_out_of_text(content) if has_agent_username(getattr(client, "user_id", None)) else content
+    )
+    preview_source = (
+        preview_envelope["m.new_content"] if is_edit and "m.new_content" in preview_envelope else preview_envelope
+    )
+    return preview_envelope, preview_source, preview_source.get("body", "")
+
+
 async def prepare_large_message(
     client: nio.AsyncClient,
     room_id: str,
@@ -914,10 +932,16 @@ async def prepare_large_message(
     if (textless or current_size <= size_limit) and calculate_delivery_event_size(content) <= _MATRIX_EVENT_HARD_LIMIT:
         return content
 
-    preview_text = source_content.get("body", "")
-    _ensure_minimum_preview_can_fit(
+    # Keep the uploaded sidecar on the original v2 payload for full reader compatibility,
+    # while stripping raw tool markers from every preview and text fallback on the wire.
+    preview_envelope, preview_source, preview_text = _preview_source_for_large_message(
+        client,
         content,
-        source_content,
+        is_edit=is_edit,
+    )
+    _ensure_minimum_preview_can_fit(
+        preview_envelope,
+        preview_source,
         is_edit=is_edit,
         room_id=room_id,
         calculate_event_size=calculate_delivery_event_size,
@@ -951,8 +975,8 @@ async def prepare_large_message(
             mxc_uri = None
             file_info = None
         modified_content = _build_nonterminal_streaming_edit_preview(
-            content,
-            source_content,
+            preview_envelope,
+            preview_source,
             preview_text,
             room_encrypted=encrypted_delivery_safe,
             mxc_uri=mxc_uri,
@@ -995,10 +1019,10 @@ async def prepare_large_message(
         room_encrypted=encrypted_delivery_safe,
     )
     if sidecar_usable:
-        if source_content.get("msgtype") == "m.notice":
+        if preview_source.get("msgtype") == "m.notice":
             # A notice's preview stays a notice, so the push rule that keeps notices quiet still matches it.
             modified_content["msgtype"] = "m.notice"
-        _copy_preview_metadata(source_content, modified_content)
+        _copy_preview_metadata(preview_source, modified_content)
         _add_sidecar_metadata(
             modified_content,
             room_encrypted=encrypted_delivery_safe,
@@ -1006,14 +1030,14 @@ async def prepare_large_message(
             file_info=file_info,
             original_size=current_size,
         )
-        if isinstance(source_content.get("formatted_body"), str):
+        if isinstance(preview_source.get("formatted_body"), str):
             # Clients render the preview until the sidecar loads, so it carries
             # the HTML of the text it shows; fitting re-renders it if truncated.
             modified_content["format"] = "org.matrix.custom.html"
-            modified_content["formatted_body"] = source_content["formatted_body"]
+            modified_content["formatted_body"] = preview_source["formatted_body"]
     else:
         modified_content = _build_text_fallback_content(
-            source_content,
+            preview_source,
             preview_text,
             size_limit,
             sidecar_required=sidecar_required,
@@ -1029,8 +1053,8 @@ async def prepare_large_message(
 
     try:
         modified_content = _fit_large_message_preview(
-            content,
-            source_content,
+            preview_envelope,
+            preview_source,
             modified_content,
             preview_text,
             is_edit=is_edit,
@@ -1045,7 +1069,7 @@ async def prepare_large_message(
         # above; fall back to it instead of failing and uploading again on the
         # next delivery attempt.
         text_fallback = _build_text_fallback_content(
-            source_content,
+            preview_source,
             preview_text,
             size_limit,
             sidecar_required=sidecar_required,
@@ -1057,8 +1081,8 @@ async def prepare_large_message(
             is_edit=is_edit,
         )
         modified_content = _fit_large_message_preview(
-            content,
-            source_content,
+            preview_envelope,
+            preview_source,
             text_fallback,
             preview_text,
             is_edit=is_edit,

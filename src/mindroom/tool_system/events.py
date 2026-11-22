@@ -8,7 +8,12 @@ from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from mindroom.constants import STREAM_VISIBLE_BODY_KEY
+from mindroom.constants import (
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
+    STREAM_STATUS_STREAMING,
+    STREAM_VISIBLE_BODY_KEY,
+)
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
 
 if TYPE_CHECKING:
@@ -22,6 +27,7 @@ _TOOL_TRACE_KEY = "io.mindroom.tool_trace"
 _TOOL_TRACE_VERSION = 3
 # Version 2 has its markers in the text, as the pipeline builds a reply before sending it.
 _MARKED_TEXT_VERSION = 2
+_NONTERMINAL_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
 
 _MAX_TOOL_ARGS_PREVIEW_CHARS = 1200
 _MAX_TOOL_ARG_VALUE_PREVIEW_CHARS = 250
@@ -709,6 +715,12 @@ def _layer_with_markers(layer: Mapping[str, Any], fallback: str | None) -> tuple
     placed = [(index, event) for index, event in (calls or {}).items() if "body_line" in event or "at" in event]
     if not placed or not isinstance(body, str) or not isinstance(html, str):
         return None
+    payload = layer[_TOOL_TRACE_KEY]
+    placeholder_body = payload.get("placeholder_body") is True
+    if placeholder_body:
+        body = ""
+        fallback = "" if fallback is not None else None
+        html = ""
     marked_body = _body_with_markers(body, placed)
     marked_fallback = "" if fallback is None else _body_with_markers(fallback, placed)
     if marked_body is None or marked_fallback is None:
@@ -722,15 +734,17 @@ def _layer_with_markers(layer: Mapping[str, Any], fallback: str | None) -> tuple
             return None
         marked_html += f"{html[offset : starts[next_block]]}{_marker_texts(index, event)[1]}\n"
         block, offset = next_block, starts[next_block]
-    payload = layer[_TOOL_TRACE_KEY]
     events = [
         {key: value for key, value in event.items() if key not in ("at", "body_line")} for event in payload["events"]
     ]
+    restored_payload = {**payload, "version": _MARKED_TEXT_VERSION, "events": events}
+    if placeholder_body:
+        restored_payload.pop("placeholder_body", None)
     return {
         **layer,
         "body": marked_body,
         "formatted_body": marked_html + html[offset:],
-        _TOOL_TRACE_KEY: {**payload, "version": _MARKED_TEXT_VERSION, "events": events},
+        _TOOL_TRACE_KEY: restored_payload,
     }, marked_fallback
 
 
@@ -766,9 +780,6 @@ def _layer_without_markers(layer: Mapping[str, Any], fallback: str | None) -> tu
     index_of_line = {marker_line: index for index, (marker_line, _block) in zip(calls, markers, strict=True)}
     marker_blocks = {marker_block for _line, marker_block in markers}
     kept, body_lines = _body_without_markers(body, index_of_line)
-    if not any(line.strip() for line in kept):
-        # A reply of calls alone keeps its lines: a reader that cannot put them back would see no message.
-        return None
     other = [] if fallback is None else _body_without_markers(fallback, index_of_line)[0]
     pieces: list[str] = []
     blocks: list[int] = []
@@ -786,10 +797,29 @@ def _layer_without_markers(layer: Mapping[str, Any], fallback: str | None) -> tu
     places = {index: {"body_line": line, "at": block} for (index, line), block in zip(body_lines, blocks)}
     payload = layer[_TOOL_TRACE_KEY]
     events = [{**event, **places.get(index, {})} for index, event in enumerate(payload["events"], start=1)]
+    remaining_html = "".join(pieces) + html[cursor:]
+    if not any(line.strip() for line in kept):
+        if kept or other or not body_lines or len(body_lines) != len(blocks) or remaining_html:
+            return None
+        if layer.get(STREAM_STATUS_KEY) in _NONTERMINAL_STREAM_STATUSES:
+            placeholder = "Thinking..."
+        else:
+            placeholder = "1 tool call" if len(body_lines) == 1 else f"{len(body_lines)} tool calls"
+        return {
+            **layer,
+            "body": placeholder,
+            "formatted_body": f"<p>{placeholder}</p>\n",
+            _TOOL_TRACE_KEY: {
+                **payload,
+                "version": _TOOL_TRACE_VERSION,
+                "placeholder_body": True,
+                "events": events,
+            },
+        }, placeholder
     return {
         **layer,
         "body": "\n".join(kept),
-        "formatted_body": "".join(pieces) + html[cursor:],
+        "formatted_body": remaining_html,
         _TOOL_TRACE_KEY: {**payload, "version": _TOOL_TRACE_VERSION, "events": events},
     }, "\n".join(other)
 

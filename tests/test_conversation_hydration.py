@@ -3398,6 +3398,35 @@ class TestRepliesWithToolCalls:
         for ts, case in enumerate(_SENT_CASES, start=2):
             assert held[f"$reply{ts}"] == {**_sent(case), **thread}
 
+    @pytest.mark.parametrize("sender", [AGENT, ALICE])
+    async def test_a_refreshed_v3_sidecar_restores_markers_only_for_an_agent_sender(
+        self,
+        alice: PrincipalStore,
+        sender: str,
+    ) -> None:
+        """Sidecar refresh passes the revision sender so any v3 attachment restores markers for agent senders alone."""
+        thread = {"m.relates_to": {"rel_type": "m.thread", "event_id": "$root"}}
+        built, held = reply_with_calls("Before.\n\n🔧 `shell` [1]\n\nAfter.", 1)
+        preview = {
+            "msgtype": "m.file",
+            "body": "Before. [Message continues in attached file]",
+            "url": "mxc://s/v3sidecar",
+            "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+            **thread,
+        }
+        event = {**raw("$m", "", sender=sender, ts=2_000), "content": preview}
+        client = FakeClient(
+            events={"$root": raw("$root", "root"), "$m": event},
+            relations={"$root": [event]},
+            sidecars={"mxc://s/v3sidecar": json.dumps({**held, **thread})},
+        )
+        reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
+
+        page = await reader.read_strict(room_id=ROOM, thread_id="$root", limit=10)
+
+        expected = {**(built if sender == AGENT else held), **thread}
+        assert page.messages[-1].content == expected
+
     async def test_a_hydrated_thread_fills_its_pages_as_a_synced_one_does(
         self,
         journal_store: EventJournalStore,

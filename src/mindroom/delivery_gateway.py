@@ -363,7 +363,7 @@ def _reply_row_wire_content(claimed: MatrixDelivery) -> dict[str, Any]:
     payload = dict(claimed.payload)
     if claimed.reply_id is None or claimed.edits_event_id is None or "m.new_content" in payload:
         return payload
-    new_text = None if claimed.reply_row is None else claimed.reply_row.new_text
+    new_text = None if claimed.reply_row is None or "io.mindroom.long_text" in payload else claimed.reply_row.new_text
     envelope = build_edit_event_content(
         event_id=claimed.edits_event_id,
         new_content=payload,
