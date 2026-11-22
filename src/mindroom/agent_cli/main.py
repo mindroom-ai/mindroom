@@ -511,6 +511,17 @@ def _print_worker_result(
         return _EXIT_UNKNOWN
     if header == started_header:
         stderr.note(f"mindroom-agent: started worker {args.name}")
+    return _print_worker_body(args, body, saved_path=saved_path, stderr=stderr)
+
+
+def _print_worker_body(
+    args: argparse.Namespace,
+    body: str,
+    *,
+    saved_path: object,
+    stderr: _WorkerStderr,
+) -> int:
+    """Print a completed worker command's body and return its exit code."""
     if (launch_failed := _LAUNCH_FAILED.fullmatch(body)) is not None:
         stderr.note(f"mindroom-agent: {launch_failed[2]}")
         return int(launch_failed[1])

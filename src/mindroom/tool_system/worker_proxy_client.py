@@ -359,8 +359,8 @@ class WorkerCallCancellation:
         if stop is not None:
             threading.Thread(target=stop, name="mindroom-worker-cancel", daemon=True).start()
 
-    async def cancel_and_confirm(self, *, timeout: float) -> bool:
-        """Ask the runner to stop the call and wait up to *timeout* seconds for confirmation."""
+    async def cancel_and_confirm(self, *, wait_seconds: float) -> bool:
+        """Ask the runner to stop the call and wait up to *wait_seconds* for confirmation."""
         with self._lock:
             self._cancelled = True
             armed, stop, self._stop = self._armed, self._stop, None
@@ -376,7 +376,7 @@ class WorkerCallCancellation:
                 done.set()
 
         threading.Thread(target=_run, name="mindroom-worker-cancel", daemon=True).start()
-        await asyncio.to_thread(done.wait, timeout)
+        await asyncio.to_thread(done.wait, wait_seconds)
         return done.is_set() and confirmed
 
 

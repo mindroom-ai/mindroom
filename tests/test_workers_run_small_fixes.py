@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
 import signal
 import sys
@@ -10,7 +11,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import asdict
 from io import StringIO
-from typing import TYPE_CHECKING, Any, Self
+from typing import TYPE_CHECKING, Self
 from uuid import uuid4
 
 import httpx
@@ -20,14 +21,14 @@ from mindroom.agent_cli.client import AgentCliUnavailableError
 from mindroom.agent_cli.main import main
 from mindroom.agent_cli.shell_contract import AGENT_CLI_WINDOW_HEADER
 from mindroom.agent_cli.turn import ToolKey
-from mindroom.shell.execution import ProcessRecord, run_command
 from mindroom.constants import resolve_primary_runtime_paths
+from mindroom.shell.execution import ProcessRecord, run_command
 from mindroom.shell.output_capture import format_shell_completion
 from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, _parse_supervisor_response
 from mindroom.tool_system.catalog import builtin_tool_registry, get_tool_by_name
 from mindroom.tool_system.sandbox_proxy import WorkerStandIns
 from mindroom.workers.models import WorkerHandle
-from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION
+from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteRequest
 from tests.test_workers_run_control import (
     SETTLE_TIMEOUT_SECONDS,
     _make_app,
@@ -37,11 +38,18 @@ from tests.test_workers_run_control import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Coroutine, Iterator
     from pathlib import Path
 
+_TEST_WORKER_TOKEN = "test-worker-token"  # noqa: S105
 
-def _shell_entrypoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, base_dir: Path | None = None):
+
+def _shell_entrypoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    base_dir: Path | None = None,
+) -> Callable[..., Coroutine[object, object, object]]:
     monkeypatch.delenv(SHELL_SUPERVISOR_SOCKET_ENV, raising=False)
     runtime_paths = resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -120,8 +128,7 @@ async def test_item7_missing_bare_command_completes_as_127_on_stderr(
     assert exit_code == 127
     assert output.out == ""
     assert output.err == (
-        "mindroom-agent: started worker w1\n"
-        "mindroom-agent: __missing_bare_cmd_xyz__: command not found\n"
+        "mindroom-agent: started worker w1\nmindroom-agent: __missing_bare_cmd_xyz__: command not found\n"
     )
     assert submitted[0] not in output.err
 
@@ -207,7 +214,14 @@ def _run_signalled_cli(
             submitted.append(call_id)
             return {"status": "running", "call_id": call_id}
 
-        def receipt(self, call_id: str, *, timeout: float = 30, wait: float | None = None, after_progress: int | None = None):
+        def receipt(
+            self,
+            call_id: str,
+            *,
+            timeout: float = 30,
+            wait: float | None = None,
+            after_progress: int | None = None,
+        ) -> dict[str, object]:
             del call_id, timeout, wait, after_progress
             handler = installed[int(sig)]
             assert callable(handler)
@@ -269,50 +283,41 @@ def test_item10_unconfirmed_cancel_keeps_may_still_be_running(
     )
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("runner_cancel_response", "expected_confirmed"),
-    [
-        (httpx.Response(200, json={"cancelled": True}), True),
-        (httpx.Response(200, json={"cancelled": False}), False),
-        (httpx.Response(500, json={"detail": "boom"}), False),
-    ],
-)
-async def test_item10_server_cancel_sets_cancel_confirmed_from_runner_response(
+class _FakeWorkerManager:
+    def __init__(self, handle: WorkerHandle) -> None:
+        self._handle = handle
+
+    def ensure_worker(self, _spec: object, **_kwargs: object) -> WorkerHandle:
+        return self._handle
+
+    def touch_worker(self, _key: str) -> WorkerHandle:
+        return self._handle
+
+    def record_failure(self, *_args: object, **_kwargs: object) -> None:
+        return
+
+    def cleanup_locator(self, _handle: object) -> None:
+        return None
+
+
+def _install_fake_worker_proxy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
     runner_cancel_response: httpx.Response,
-    expected_confirmed: bool,
-) -> None:
-    """Server cancel route sets cancel_confirmed only when the worker runner confirms the cancel."""
-    outer_entered = asyncio.Event()
-    release_outer = asyncio.Event()
-    in_flight = threading.Event()
-    release_stream = threading.Event()
-
+    in_flight: threading.Event,
+    release_stream: threading.Event,
+) -> Callable[..., Coroutine[object, object, object]]:
     handle = WorkerHandle(
         worker_id="worker-f2",
         worker_key="agent:test:named=f2",
         endpoint="http://worker/api/sandbox-runner/execute",
-        auth_token="test-token",
+        auth_token=_TEST_WORKER_TOKEN,
         status="ready",
         backend_name="kubernetes",
         last_used_at=0.0,
         created_at=0.0,
     )
-
-    class _FakeWorkerManager:
-        def ensure_worker(self, _spec: object, **_kwargs: object) -> WorkerHandle:
-            return handle
-
-        def touch_worker(self, _key: str) -> WorkerHandle:
-            return handle
-
-        def record_failure(self, *_args: object, **_kwargs: object) -> None:
-            return
-
-        def cleanup_locator(self, _handle: object) -> None:
-            return None
 
     class _FakeHttpClient:
         def __init__(self, *, timeout: float) -> None:
@@ -325,13 +330,13 @@ async def test_item10_server_cancel_sets_cancel_confirmed_from_runner_response(
             return
 
         @contextmanager
-        def stream(self, method: str, url: str, **_kwargs: Any) -> Iterator[httpx.Response]:
+        def stream(self, method: str, url: str, **_kwargs: object) -> Iterator[httpx.Response]:
             in_flight.set()
             release_stream.wait(timeout=5.0)
             body = json.dumps({"ok": False, "error": "Tool call was cancelled.", "failure_kind": "tool"}).encode()
             yield httpx.Response(200, content=body, request=httpx.Request(method, url))
 
-        def post(self, url: str, **_kwargs: Any) -> httpx.Response:
+        def post(self, url: str, **_kwargs: object) -> httpx.Response:
             release_stream.set()
             return httpx.Response(
                 runner_cancel_response.status_code,
@@ -348,13 +353,13 @@ async def test_item10_server_cancel_sets_cancel_confirmed_from_runner_response(
 
     @contextmanager
     def fake_lease(_rp: object, _pc: object) -> Iterator[_FakeWorkerManager]:
-        yield _FakeWorkerManager()
+        yield _FakeWorkerManager(handle)
 
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.lease_worker_manager", fake_lease)
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy._build_execute_request",
         lambda *_args, **_kwargs: (
-            __import__("mindroom.workers.protocol", fromlist=["ExecuteRequest"]).ExecuteRequest(
+            ExecuteRequest(
                 protocol=WORKER_PROTOCOL_VERSION,
                 tool_name="shell",
                 function_name="run_shell_command",
@@ -375,7 +380,36 @@ async def test_item10_server_cancel_sets_cancel_confirmed_from_runner_response(
         credentials_manager=None,
         tools=builtin_tool_registry(),
     )
-    proxied_shell = stand_ins("run_shell_command", local_placeholder)
+    return stand_ins("run_shell_command", local_placeholder)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("runner_cancel_response", "expected_confirmed"),
+    [
+        (httpx.Response(200, json={"cancelled": True}), True),
+        (httpx.Response(200, json={"cancelled": False}), False),
+        (httpx.Response(500, json={"detail": "boom"}), False),
+    ],
+)
+async def test_item10_server_cancel_sets_cancel_confirmed_from_runner_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runner_cancel_response: httpx.Response,
+    expected_confirmed: bool,
+) -> None:
+    """Server cancel route sets cancel_confirmed only when the worker runner confirms the cancel."""
+    outer_entered = asyncio.Event()
+    release_outer = asyncio.Event()
+    in_flight = threading.Event()
+    release_stream = threading.Event()
+    proxied_shell = _install_fake_worker_proxy(
+        tmp_path,
+        monkeypatch,
+        runner_cancel_response=runner_cancel_response,
+        in_flight=in_flight,
+        release_stream=release_stream,
+    )
 
     async def run_shell_command(args: str) -> str:
         if args == "outer":
@@ -410,7 +444,7 @@ async def test_item10_server_cancel_sets_cancel_confirmed_from_runner_response(
                         },
                     )
                     assert resp.status_code == 200
-                    assert await asyncio.to_thread(in_flight.wait, 2.0), repr((await owner.get_call(call_id))["outcome"])
+                    assert await asyncio.to_thread(in_flight.wait, 5.0)
 
                     cancel_resp = await http.post(
                         f"/api/agent-cli/calls/{call_id}/cancel",
@@ -445,7 +479,7 @@ class _FakeTtyStderr(StringIO):
     def write(self, s: str) -> int:
         self._writes += 1
         if self._fail_after is not None and self._writes > self._fail_after:
-            raise OSError("broken pipe")
+            raise OSError(errno.EPIPE, "broken pipe")
         return super().write(s)
 
 
@@ -469,7 +503,14 @@ def _run_progress_cli(
         def operation(self, payload: dict[str, object]) -> dict[str, object]:
             return {"status": "queued", "call_id": payload["call_id"]}
 
-        def receipt(self, call_id: str, *, timeout: float = 30, wait: float | None = None, after_progress: int | None = None):
+        def receipt(
+            self,
+            call_id: str,
+            *,
+            timeout: float = 30,
+            wait: float | None = None,
+            after_progress: int | None = None,
+        ) -> dict[str, object]:
             del call_id, timeout, wait, after_progress
             return next(receipts)
 
@@ -485,7 +526,7 @@ def _run_progress_cli(
 def test_item11_tty_progress_rewrites_in_place_and_ends_with_newline_before_cli_line(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """On a TTY, progress rewrites in place with \\r + clear-to-EOL and ends with \\n before other CLI lines."""
+    r"""On a TTY, progress rewrites in place with \r + clear-to-EOL and ends with \n before other CLI lines."""
     tty = _FakeTtyStderr(is_tty=True)
     code, out, err = _run_progress_cli(monkeypatch, stderr_stream=tty, header="[worker: f1, started]", body="done")
 
@@ -502,7 +543,7 @@ def test_item11_tty_progress_rewrites_in_place_and_ends_with_newline_before_cli_
 def test_item11_tty_progress_ends_with_newline_before_command_output_without_other_cli_lines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When there are no further CLI lines after progress, the progress line still ends with \\n before stdout."""
+    r"""When there are no further CLI lines after progress, the progress line still ends with \n before stdout."""
     events: list[tuple[str, str]] = []
 
     class _RecordingStream(StringIO):
@@ -529,7 +570,14 @@ def test_item11_tty_progress_ends_with_newline_before_command_output_without_oth
         def operation(self, payload: dict[str, object]) -> dict[str, object]:
             return {"status": "queued", "call_id": payload["call_id"]}
 
-        def receipt(self, call_id: str, *, timeout: float = 30, wait: float | None = None, after_progress: int | None = None):
+        def receipt(
+            self,
+            call_id: str,
+            *,
+            timeout: float = 30,
+            wait: float | None = None,
+            after_progress: int | None = None,
+        ) -> dict[str, object]:
             del call_id, timeout, wait, after_progress
             return next(receipts)
 
@@ -576,7 +624,7 @@ def test_item11_tty_progress_ignores_stderr_write_failure(monkeypatch: pytest.Mo
 
 
 def test_item11_tty_progress_ends_with_newline_before_cancel_notice(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A signal while a TTY progress line is open ends that line with \n before the cancel notice."""
+    r"""A signal while a TTY progress line is open ends that line with \n before the cancel notice."""
     installed: dict[int, object] = {}
 
     def fake_signal(signum: int, handler: object) -> object:
@@ -584,16 +632,24 @@ def test_item11_tty_progress_ends_with_newline_before_cancel_notice(monkeypatch:
         installed[signum] = handler
         return prev
 
-    step = 0
-
     class Client:
         def operation(self, payload: dict[str, object]) -> dict[str, object]:
-            return {"status": "running", "call_id": payload["call_id"], "progress": "starting worker f1...", "progress_revision": 1}
+            return {
+                "status": "running",
+                "call_id": payload["call_id"],
+                "progress": "starting worker f1...",
+                "progress_revision": 1,
+            }
 
-        def receipt(self, call_id: str, *, timeout: float = 30, wait: float | None = None, after_progress: int | None = None):
-            nonlocal step
+        def receipt(
+            self,
+            call_id: str,
+            *,
+            timeout: float = 30,
+            wait: float | None = None,
+            after_progress: int | None = None,
+        ) -> dict[str, object]:
             del call_id, timeout, wait, after_progress
-            step += 1
             handler = installed[int(signal.SIGTERM)]
             assert callable(handler)
             handler(int(signal.SIGTERM), None)

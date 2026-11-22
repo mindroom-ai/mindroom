@@ -485,7 +485,10 @@ def _parse_supervisor_response(line: bytes) -> ShellRunResult:
         or (handle is not None and not isinstance(handle, str))
         or not isinstance(output_file_handled, bool)
         or not isinstance(execution_error, bool)
-        or (launch_exit_code is not None and (isinstance(launch_exit_code, bool) or not isinstance(launch_exit_code, int)))
+        or (
+            launch_exit_code is not None
+            and (isinstance(launch_exit_code, bool) or not isinstance(launch_exit_code, int))
+        )
         or (launch_error is not None and not isinstance(launch_error, str))
     ):
         return ShellRunResult(

@@ -1072,7 +1072,7 @@ class WorkerStandIns:
             except asyncio.CancelledError:
                 # The blocking request keeps running after this await is cancelled; stop it at the worker too.
                 if (confirm := get_call_cancel_confirmed_hook()) is not None:
-                    if await cancellation.cancel_and_confirm(timeout=4.0):
+                    if await cancellation.cancel_and_confirm(wait_seconds=4.0):
                         confirm()
                 else:
                     cancellation.cancel()
