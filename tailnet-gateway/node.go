@@ -159,7 +159,8 @@ func (l *nodeLogger) observe(n ipn.Notify) {
 				text = warning.Title
 			}
 			msg := l.redact(text)
-			if msg == "" || l.warnings[code] == msg {
+			// Log a warning once while it lasts: some texts carry a changing duration.
+			if _, seen := l.warnings[code]; seen || msg == "" {
 				continue
 			}
 			l.warnings[code] = msg
