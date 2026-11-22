@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import re
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
@@ -33,6 +34,8 @@ from tests.room_settings_helpers import RoomStateHomeserver
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from aioresponses import aioresponses
 
     from mindroom.constants import RuntimePaths
 
@@ -128,6 +131,49 @@ async def test_an_unreadable_room_keeps_an_older_runtimes_override(tmp_path: Pat
     assert read == SettingRead(ok=False, value=_VALUES[setting.key])
     assert set(json.loads(legacy.read_text())) == {ROOM_ID}
     client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@_SETTINGS
+@pytest.mark.parametrize(
+    ("status", "answer"),
+    [
+        (503, {"payload": {"errcode": "M_UNKNOWN", "error": "Service unavailable"}}),
+        (403, {"payload": {"errcode": "M_FORBIDDEN", "error": "Not in the room"}}),
+        (502, {"body": "<html>Bad Gateway</html>", "content_type": "text/html"}),
+    ],
+    ids=["unavailable", "forbidden", "not-json"],
+)
+async def test_a_failed_read_nio_decodes_as_an_event_keeps_the_copy_and_the_override(
+    tmp_path: Path,
+    aioresponse: aioresponses,
+    setting: RoomSetting[Any],
+    status: int,
+    answer: dict[str, Any],
+) -> None:
+    """Nio decodes every failed read but a 404 as the event's own response, so the HTTP status decides what was read."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    value = _VALUES[setting.key]
+    legacy = _write_legacy_overrides(runtime_paths, setting, (ROOM_ID, OTHER_ROOM))
+    seed_room_settings(runtime_paths, OTHER_ROOM, [_event(setting.key, {"value": value})])
+    state_url = re.compile(r"http://localhost:8008/_matrix/client/v3/rooms/.*/state/.*")
+    aioresponse.get(state_url, status=status, repeat=True, **answer)
+    client = nio.AsyncClient("http://localhost:8008", "@bot:localhost")
+    client.access_token = "token"
+    put_state = AsyncMock()
+    try:
+        assert isinstance(
+            await client.room_get_state_event(ROOM_ID, ROOM_SETTINGS_EVENT_TYPE, setting.key),
+            nio.RoomGetStateEventResponse,
+        )
+        unread = await refresh_room_setting(setting, client, runtime_paths, ROOM_ID, put_state=put_state)
+        known = await refresh_room_setting(setting, client, runtime_paths, OTHER_ROOM, force=True, put_state=put_state)
+    finally:
+        await client.close()
+
+    assert unread == known == SettingRead(ok=False, value=value)
+    assert set(json.loads(legacy.read_text())) == {ROOM_ID, OTHER_ROOM}
+    put_state.assert_not_awaited()
 
 
 def test_a_full_state_read_seeds_every_setting(tmp_path: Path) -> None:

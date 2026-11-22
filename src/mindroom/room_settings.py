@@ -21,7 +21,7 @@ import asyncio
 import itertools
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, get_args
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypeGuard, cast, get_args
 from weakref import WeakValueDictionary
 
 from mindroom.config.agent import RoomReplyMode
@@ -148,6 +148,16 @@ def _drop_legacy_override(setting: RoomSetting[Any], runtime_paths: RuntimePaths
     drop_legacy_room_override(runtime_paths, room_id, setting.legacy_filename, setting.legacy_field)
 
 
+def state_event_was_read(response: object) -> TypeGuard[nio.RoomGetStateEventResponse]:
+    """Return whether a read of one state event found it; nio decodes every failure but a 404 as the event's response."""
+    import nio  # noqa: PLC0415 - config reads the copy below without loading the Matrix client
+
+    return (
+        isinstance(response, nio.RoomGetStateEventResponse)
+        and getattr(response.transport_response, "status", 200) == 200
+    )
+
+
 def resolve_room_setting[T: str](setting: RoomSetting[T], runtime_paths: RuntimePaths, room_id: str | None) -> T | None:
     """Return a room's setting as the runtime last knew it, None while unset.
 
@@ -237,9 +247,10 @@ async def refresh_room_setting[T: str](
     except Exception:
         logger.warning("room_setting_read_failed", room_id=room_id, setting=setting.key, exc_info=True)
         return SettingRead(ok=False, value=resolve_room_setting(setting, runtime_paths, room_id))
-    if isinstance(response, nio.RoomGetStateEventResponse):
+    if state_event_was_read(response):
         value = _value_from_content(setting, response.content)
         # The room's own event, even an empty one, decides over the override an older runtime stored.
+        # Only a read the homeserver answered with the event counts: a failed one keeps the copy and the override.
         _drop_legacy_override(setting, runtime_paths, room_id)
     elif isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
         # A room without the setting takes the override an older runtime stored on disk, which then leaves the file.

@@ -17,6 +17,7 @@ from mindroom.llm.provider import RequestOverrides
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 from mindroom.providers import registry as provider_registry
+from mindroom.room_settings import state_event_was_read
 from mindroom.thread_summary.notices import normalize_thread_summary_text
 from mindroom.thread_tags import AUTOMATIC_THREAD_TAG_EXCLUSIONS, coerce_tag_name
 from mindroom.timing import timed
@@ -154,7 +155,7 @@ async def _room_title_setting(client: nio.AsyncClient, room_id: str, key: str) -
     except Exception:
         logger.warning("Room thread summary setting read failed", room_id=room_id, setting=key, exc_info=True)
         return None
-    if isinstance(response, nio.RoomGetStateEventResponse):
+    if state_event_was_read(response):
         value = response.content.get("value")
         return (value.strip() or None) if isinstance(value, str) else None
     if not isinstance(response, nio.RoomGetStateEventError) or response.status_code != "M_NOT_FOUND":
