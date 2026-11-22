@@ -18,6 +18,7 @@ from mindroom.approval.tool_approval import ToolApprovalDecision
 from mindroom.config.models import ModelPricing
 from mindroom.custom_tools.attachment_helpers import resolve_context_thread_id
 from mindroom.delegation.state import SubagentPersona
+from mindroom.script_runs.broker import ScriptRuntimeUnavailableError, ScriptToolBroker
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.workflow_runs import agent_nodes
@@ -769,6 +770,62 @@ async def test_a_run_started_by_the_script_of_a_narrowed_run_has_no_more_tools_t
     with pytest.raises(NodeFailed, match="not a tool of the agent"):
         await stack.result("@0", "tool", tool_args("counter", "append", line="widened"))
     assert stack.counting_tool.lines == []
+
+
+@pytest.mark.asyncio
+async def test_a_resume_made_by_the_script_of_a_narrowed_run_narrows_the_run_it_takes(stack: WorkflowStack) -> None:
+    """The broker's context has no persona: the resumed run gets what the run the resume is made in keeps.
+
+    The reproducer of the second full review (Sol R2-A, Astra B2).
+    """
+    full = await stack.start()
+    await stack.finish_attempt(result="first")
+    persona = SubagentPersona("inline", "counter", "Count.", tools=("workflow", "counter.text"))
+    limited = await stack.start(persona=asdict(persona))
+
+    resume = tool_args("workflow", "resume_workflow", run_id=full.run_id, source=_SOURCE)
+    await stack.submit("@0", "tool", resume)
+    await stack.until(lambda: stack.store.get_run(full.run_id).state is WorkflowRunState.RUNNING)
+
+    assert (full.persona, stack.store.get_run(full.run_id).persona) == (None, limited.persona)
+    stack.run_id = full.run_id
+    with pytest.raises(NodeFailed, match="not a tool of the agent"):
+        await stack.result("@0", "tool", tool_args("counter", "append", line="widened"))
+    assert stack.counting_tool.lines == []
+    await stack.engine.cancel(limited.run_id, reason="Done.")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("call", ["delegate", "append"])
+async def test_every_tool_call_of_a_run_passes_the_one_check_before_it_is_saved_or_sent(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+    call: str,
+) -> None:
+    """A tool's call and an agent's behind a gate take the same step: the run's ceiling, then its owner's access now.
+
+    The delegated call is the reproducer of the second full review (Sol B1): its gate was asked without the ceiling.
+    """
+    persona = SubagentPersona("inline", "counter", "Count.", tools=("workflow", "counter.text"))
+    await stack.start(persona=asdict(persona))
+    request = _delegate(system_prompt="You help.") if call == "delegate" else tool_args("counter", "append", line="a")
+    asked: list[object] = []
+    gate = ScriptToolBroker.execute_for_workflow
+    monkeypatch.setattr(ScriptToolBroker, "execute_for_workflow", lambda *a, **kw: asked.append(a) or gate(*a, **kw))
+
+    with pytest.raises(NodeFailed, match="is not a tool of the agent that started this run") as refused:
+        await stack.result("@0", "tool", request)
+    assert (refused.value.kind, asked, _agent_jobs(stack), stack.counting_tool.calls) == ("failed", [], 0, 0)
+
+    # Inside the ceiling the owner's live access still decides, and a call waits while nobody can answer for it.
+    inside = tool_args("counter", "text", size=1)
+    monkeypatch.setattr(stack.engine, "owner_access", lambda _run: "pending")
+    with pytest.raises(ScriptRuntimeUnavailableError):
+        await stack.submit("@1", "tool", inside)
+    monkeypatch.setattr(stack.engine, "owner_access", lambda _run: "revoked")
+    with pytest.raises(NodeFailed, match="no longer has access") as revoked:
+        await stack.result("@1", "tool", inside)
+    assert (revoked.value.kind, asked, stack.counting_tool.calls) == ("failed", [], 0)
 
 
 @pytest.mark.asyncio

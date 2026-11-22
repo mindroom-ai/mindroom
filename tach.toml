@@ -2591,7 +2591,6 @@ expose = [
 path = "mindroom.orchestration.workflow_runtime"
 depends_on = [
     "mindroom.custom_tools.workflow",
-    "mindroom.delegation.lifecycle",
     "mindroom.tool_jobs.runtime",
     "mindroom.workflow_runs.agent_nodes",
     "mindroom.workflow_runs.engine",
@@ -3523,6 +3522,7 @@ depends_on = ["mindroom.cancellation", "mindroom.matrix.client_session", "mindro
 path = "mindroom.orchestration.script_runtime"
 depends_on = [
     "mindroom.approval.manager",
+    "mindroom.delegation.lifecycle",
     "mindroom.orchestration.runtime",
     "mindroom.origins",
     "mindroom.response_activity",
@@ -8702,7 +8702,7 @@ visibility = [
     "mindroom.delegation.recovery",
     "mindroom.tool_system.agent_tools",
     "mindroom.orchestration.tool_job_runtime",
-    "mindroom.orchestration.workflow_runtime",
+    "mindroom.orchestration.script_runtime",
     "mindroom.delegation.targets",
     "mindroom.delegation.continuation",
     "mindroom.loop_hooks",

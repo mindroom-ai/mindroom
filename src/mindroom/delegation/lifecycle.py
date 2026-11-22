@@ -593,6 +593,18 @@ class DelegationPendingError(Exception):
     """Whether a workflow run may run an agent cannot be told yet: the question is to be asked again."""
 
 
+def accessed_entities(config: Config, recipient: str, actor: str) -> set[str]:
+    """Return the entities the requester must still reach: a configured team's access grants its exact members.
+
+    *recipient* is the bot that answers, and *actor* the agent that acts through it. An ordinary agent's bot is
+    no grant for another agent, so both are asked for.
+    """
+    team = config.teams.get(recipient)
+    if team is not None and actor in team.agents:
+        return {recipient}
+    return {recipient, actor}
+
+
 def bot_in_room(bot: AgentBot | None, room_id: str | None) -> bool | None:
     """Return whether *bot* is in the room, None while it does not know its rooms.
 

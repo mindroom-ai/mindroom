@@ -262,6 +262,22 @@ class WorkflowEngine:
         self._inline_runs: dict[str, str] = {}
         self._closed = False
 
+    def authorize(self, run: WorkflowRun, grant: ScriptToolGrant | None = None) -> _Admission | str | None:
+        """Say whether *run* may act now: its owner's live context, why not, or None while that cannot be said yet.
+
+        The one check before an attempt starts and before any call of the run is made, a tool's, an agent's or
+        one that starts or resumes a run inside. The run's saved ceiling must keep the tool *grant* names, so a run
+        never has more than the turn that started or resumed it. Its owner must have its access as the live runtime
+        answers it now (`owner_access`): the agent the run is named for still has the toolkit and may still answer
+        the requester, and the bot that serves the run is still in the run's room.
+        """
+        kept = cast("list[str] | None", (run.persona or {}).get("tools"))
+        tool = (grant.toolkit_name, grant.function_name) if grant is not None and kept is not None else None
+        if tool is not None and not persona_allows(tuple(kept or ()), *tool):
+            return f"{tool[0]}.{tool[1]} is not a tool of the agent that started this run."
+        access = self.owner_access(run)
+        return access if isinstance(access, tuple) else NO_ACCESS if access == "revoked" else None
+
     def admit(
         self,
         run: WorkflowRun,
@@ -279,9 +295,9 @@ class WorkflowEngine:
         """
         replay = run.state is WorkflowRunState.STARTING and run.script_run_id is not None
         place = (run.room_id, run.thread_root_event_id)
-        access = self.owner_access(run)
+        access = self.authorize(run)
         if not isinstance(access, tuple):
-            return NO_ACCESS if access == "revoked" else None
+            return access
         if caller is not None and not replay and place == (caller.room_id, caller.resolved_thread_id):
             access = (caller, limits or WorkflowLimits())
         if run.state is WorkflowRunState.STARTING and run.runtime_seconds_left == 0:
@@ -736,18 +752,25 @@ class WorkflowEngine:
             cached=cached,
             started_at=utc_timestamp(),
         )
-        if shown == "agent":
+        # Before a tool call is saved or sent anywhere, whether it is a tool's or an agent's behind a gate.
+        access = self.authorize(run, _tool_grant(request.args)[0]) if kind == "tool" else ()
+        if access is None:
+            raise ScriptRuntimeUnavailableError(_OWNER_NOT_READY)
+        if isinstance(access, str):
+            # Refused: nothing ran, and the node ends as it is submitted, below.
+            node = replace(node, state=WorkflowNodeState.FAILED, error={"kind": "failed", "message": access})
+        elif shown == "agent":
             lanes.mark(key)
             start = partial(self._enter, run, node, partial(self._dispatch_agent, run, timeout=_timeout(meta)))
             return await (self._ask_gate(run, attempt, node, *_tool_grant(request.args)) if delegated else start())
-        if kind == "tool":
+        elif kind == "tool":
             same_as = None
             if previous is not None and not cached:
                 # A check that runs on every resume, also one whose arguments were edited, in a lane that was clean.
                 same_as = result_digest(await asyncio.to_thread(self.store.whole_result, previous))
             start = partial(self._dispatch_tool, run, attempt, lanes=lanes, same_as=same_as)
             return await self._enter(run, node, start, dirty_after=same_as is None)
-        if kind == "value":
+        elif kind == "value":
             node = replace(node, result=_value(request.args))
         elif kind == "error":
             # What the script's own code raised in a lane of a fan-out: nothing ran, and the run shows where.
@@ -1006,7 +1029,6 @@ class WorkflowEngine:
                 raise SupersededAttemptError(_RUN_ENDED)
         else:
             node = await asyncio.to_thread(partial(self.store.put_node, node, run.epoch, dirty_after=same_as is None))
-        kept = cast("list[str] | None", (run.persona or {}).get("tools"))
         call = partial(
             self.broker.execute_for_workflow,
             attempt,
@@ -1016,7 +1038,7 @@ class WorkflowEngine:
             waits=partial(self._node_waits, node, run.epoch),
         )
         # The call has its task before anything else may fail: a saved call nobody runs would never end.
-        self._spawn(run.run_id, self._run_tool_node(node, run.epoch, grant, call, kept, lanes))
+        self._spawn(run.run_id, self._run_tool_node(node, run.epoch, call, lanes))
         # A run that waited for a person works again from here.
         await self._restate(run.run_id)
         return _receipt(node)
@@ -1035,12 +1057,12 @@ class WorkflowEngine:
         the request fails as a transport error does, which the script's SDK repeats, and a *queued* node, which is
         saved already, is tried again.
         """
-        access = self.owner_access(run)
-        if access == "pending":
+        access = self.authorize(run)
+        if access is None:
             raise ScriptRuntimeUnavailableError(_OWNER_NOT_READY)
         try:
             if not isinstance(access, tuple) or (runtime := self.agents()) is None:
-                raise AgentNodeError(NO_ACCESS if access == "revoked" else _NO_AGENTS)  # noqa: TRY301
+                raise AgentNodeError(access if isinstance(access, str) else _NO_AGENTS)  # noqa: TRY301
             if node.name in access[0].current_config.agents and not node.request.get("agent"):
                 notice = _NAME_LABELS.format(name=node.name)
                 await asyncio.to_thread(self.store.append_log, run.run_id, run.epoch, notice)
@@ -1346,17 +1368,14 @@ class WorkflowEngine:
         self,
         node: WorkflowNode,
         epoch: int,
-        grant: ScriptToolGrant,
         call: Callable[[], Awaitable[ScriptCallRecord]],
-        kept: list[str] | None,
         lanes: DirtyLanes,
     ) -> None:
-        """Run one tool call and settle its node; *kept* is the tool list of the narrowed agent that started the run."""
+        """Run one tool call and settle its node."""
         outcome: _Outcome
         # A `start_workflow` this call makes starts a run inside this one, under this node.
         _CALLING_NODE.set((node.run_id, node.key, node.generation))
         try:
-            _require_kept(kept, grant)
             outcome = _call_outcome(node, await _within_rate(call))
         except (ScriptRunStoreError, ScriptRuntimeUnavailableError) as exc:
             # Refused before any claim: a revoked attempt, a broker that takes no calls now.
@@ -1564,13 +1583,6 @@ def _works(runtime: AgentRuntime | None, job_id: str) -> bool:
     """Return whether the job still works, as far as anyone can say: without a job runtime nobody can."""
     jobs = runtime.jobs.retained_jobs() if runtime is not None else ()
     return runtime is None or any(job.job_id == job_id and job.status not in TERMINAL_STATUSES for job in jobs)
-
-
-def _require_kept(kept: list[str] | None, grant: ScriptToolGrant) -> None:
-    """Refuse a tool outside *kept*; checked at every call beside the owner's live tools, so a run never has more."""
-    if kept is not None and not persona_allows(tuple(kept), grant.toolkit_name, grant.function_name):
-        msg = f"{grant.toolkit_name}.{grant.function_name} is not a tool of the agent that started this run."
-        raise ScriptRunStoreError(msg)
 
 
 def _default_label(kind: str, args: dict[str, object]) -> object:

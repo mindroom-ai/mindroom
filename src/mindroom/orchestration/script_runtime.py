@@ -21,6 +21,7 @@ from mindroom.approval.tool_approval import (
 )
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.delegation.lifecycle import accessed_entities, bot_in_room
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.origins import configured_public_url
@@ -216,14 +217,25 @@ class _LiveScriptRuntimeResolver:
         if bot is None:
             return None
         current_config = bot.config if config is None else config
-        return is_sender_allowed_for_agent_reply_in_room(
-            run.owner_user_id,
-            _serving_entity(run, current_config),
-            current_config,
-            run.room_id,
-            self.runtime_paths,
-            bot.orchestrator.agent_reply_memberships,
-            require_resolved_membership=require_resolved_membership,
+        entities = {run.agent_name}
+        if _of_workflow(run):
+            # A run acts through the bot that serves it, which must still be in the run's room, and its requester
+            # must still reach the run's agent as well as that bot's: an agent's bot is no grant for another agent.
+            joined = bot_in_room(bot, run.room_id)
+            if not joined:
+                return joined
+            entities = accessed_entities(current_config, _serving_entity(run, current_config), run.agent_name)
+        return all(
+            is_sender_allowed_for_agent_reply_in_room(
+                run.owner_user_id,
+                entity,
+                current_config,
+                run.room_id,
+                self.runtime_paths,
+                bot.orchestrator.agent_reply_memberships,
+                require_resolved_membership=require_resolved_membership,
+            )
+            for entity in sorted(entities)
         )
 
     def serving_bot(self, run: ScriptRunRecord, config: Config | None = None) -> AgentBot | None:

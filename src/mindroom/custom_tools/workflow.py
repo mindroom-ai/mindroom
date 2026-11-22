@@ -361,7 +361,10 @@ class WorkflowTools(Toolkit):
             raise WorkflowRunStoreError(msg)
         edited = source is not None or path is not None
         text = (await engine.scripts.resolve_source(context, source=source, path=path)).decode() if edited else None
-        return run, {"source": text, "rerun": list(rerun), "epoch": run.epoch, "persona": ceiling(context)}
+        # What the resume may hand on: the turn's persona, and no more than the run its call is made in keeps.
+        outer = _outer_call()
+        persona = ceiling(context, engine.store.get_run(outer[0]).persona if outer else None)
+        return run, {"source": text, "rerun": list(rerun), "epoch": run.epoch, "persona": persona}
 
     async def _reserve(
         self,

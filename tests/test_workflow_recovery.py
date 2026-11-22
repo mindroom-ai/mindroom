@@ -1410,6 +1410,50 @@ async def test_run_that_a_named_child_started_is_served_by_the_bot_its_turn_ran_
             await stack.engine.close()
 
 
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+@pytest.mark.parametrize("lost", ["the requester's access to the child", "the serving bot's place in the room"])
+async def test_run_of_a_named_child_answers_to_the_childs_access_and_to_the_room_of_the_bot_that_serves_it(
+    tmp_path: Path,
+    lost: str,
+) -> None:
+    """Agent A's bot carries the calls of a run that is agent B's: it grants nothing that B's own access does not.
+
+    One answer serves every call: the gateway's and the broker's (`is_authorized`) and an attempt's or an agent's
+    (`_access`). The reproducers of the second full review (Sol R2-B and B2, Astra B4).
+    """
+    with workflow_stack(tmp_path, extra_tools=("workflow",), other_agents=("helper",)) as stack:
+        context, config = stack.context, stack.context.config
+        config.agents["helper"].tools = ["counter", "workflow"]
+        for agent in ("watcher", "helper"):
+            with_responder_access(config, agent, users=[context.requester_id])
+        stack.context = replace(context, agent_name="helper", transport_agent_name="watcher")
+        rooms = {context.room_id: None}
+        bot = SimpleNamespace(
+            running=True,
+            first_sync_complete=True,
+            client=SimpleNamespace(rooms=rooms),
+            config=config,
+            orchestrator=SimpleNamespace(agent_reply_memberships=AgentReplyMembershipIndex()),
+            tool_runtime_support=SimpleNamespace(build_context=lambda _target, **_owner: stack.context),
+        )
+        resolver = _LiveScriptRuntimeResolver(context.runtime_paths, lambda _name: bot, lambda _run: None)  # type: ignore[arg-type]
+        script_runtime = SimpleNamespace(resolver=resolver, config_provider=lambda: config)
+        lifecycle = WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime)  # type: ignore[arg-type]
+        run = await stack.start()
+        try:
+            assert (isinstance(lifecycle._access(run), tuple), resolver.is_authorized(stack.attempt)) == (True, True)
+
+            if lost == "the serving bot's place in the room":
+                rooms.clear()
+            else:
+                with_responder_access(config, "helper", users=["@somebody-else:example.test"])
+
+            assert (lifecycle._access(run), resolver.is_authorized(stack.attempt)) == ("revoked", False)
+        finally:
+            await stack.engine.close()
+
+
 _NOT_READY = "The run's agent is not ready in the run's room yet. Try again in a moment."
 _NO_TOOLKIT = {"watcher": AgentConfig(display_name="watcher", tools=["counter", "shell"])}
 

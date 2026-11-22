@@ -102,7 +102,7 @@ def main(args):
 
 The script calls the tools the agent has at the time of each call, with the same hooks, approval rules, worker routing, and audit trail as a call from a reply.
 A run that a subagent with a narrowed tool list started has only the tools on that list, checked at every call, and never the rest of its agent's tools.
-A run that such a run's script starts has no more than that run, and a resume by a subagent with a shorter list leaves the run only what both lists hold; a later resume never gives tools back.
+A run that such a run's script starts or resumes has no more than that run, and a resume by a subagent with a shorter list leaves the run only what both lists hold; a later resume never gives tools back.
 A turn that is limited to some of its agent's tools in another way, such as a listening turn, starts and resumes no run: `A turn that is limited to some of its agent's tools cannot start or resume a workflow.`
 A plain script of the `script` tool cannot call the `workflow` tool.
 `compact_context`, `dynamic_tools`, `slack`, and functions that stop the agent's current model step are never available to a script.
@@ -141,6 +141,10 @@ That list is read from the configuration alone; whether a listed agent's bot is 
 While the bot of a room's agent has not finished starting, for example right after a restart, or the requester's access to that agent is still loading, the call is not refused: it waits and starts once both are known.
 An agent whose bot failed to start for good is waited for in the same way, until the run is stopped or its working time ends.
 A run that a member of a configured team started while it answered in that team is the team's: the team's bot must be in the room, and the requester's access to the team is what counts.
+A run that an agent started while another agent ran it as its child is served by the calling agent's bot, and the requester must still reach both agents: the calling agent's bot grants nothing the child's own access does not.
+Every call of a run takes the same check before it is saved or sent: the run's saved tool list, then the access of the run's agent as it is now, and the serving bot's place in the run's room.
+That holds for `tool()`, for an agent behind `tool("delegate", ...)`, for `agent()`, and for each attempt.
+A call made while that access cannot be answered yet, for example while the bot is restarting, waits and is asked again.
 
 A turn that fails raises `AgentError`, whose `kind` says how: `failed`, `cancelled`, `timeout`, `refused`, `interrupted`, or `indeterminate`.
 A turn that may not start, for example because the model name is unknown or the agent may not reply to the requester, is `refused` with the sentence `run_subagent` gives.

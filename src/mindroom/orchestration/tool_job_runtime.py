@@ -18,6 +18,7 @@ from mindroom.delegation.background import delegation_child, reconcile_delegatio
 from mindroom.delegation.continuation import continued_subagent_job
 from mindroom.delegation.lifecycle import (
     DelegationPendingError,
+    accessed_entities,
     active_delegation_edges,
     bot_in_room,
     caller_grants_child,
@@ -142,14 +143,6 @@ def _key_order(key: ConversationKey) -> tuple[str, str, str, str]:
     return (key.recipient, key.room_id, key.thread_id or "", key.requester_id)
 
 
-def _accessed_entities(config: Config, recipient: str, actor: str) -> set[str]:
-    """Return the entities the requester must still reach: a configured team's access grants its exact members."""
-    team = config.teams.get(recipient)
-    if team is not None and actor in team.agents:
-        return {recipient}
-    return {recipient, actor}
-
-
 @dataclass
 class ToolJobRuntimeCoordinator:
     """Own the background job runtime; replies deliver outcomes."""
@@ -248,7 +241,7 @@ class ToolJobRuntimeCoordinator:
             return "denied"
         if owner.agent_name not in config.agents:
             return "denied"
-        entities = _accessed_entities(config, owner.recipient, owner.agent_name)
+        entities = accessed_entities(config, owner.recipient, owner.agent_name)
         tools = config_plugins(config, self.runtime_paths).tools
         runs: bool | None = True
         if job.kind == "delegation":
@@ -346,7 +339,7 @@ class ToolJobRuntimeCoordinator:
         recipient = owner.transport_agent_name or root
         valid_transport = _transport_allows_actor(config, recipient, root)
         # Delegated children and their callers need their own grants; the root actor may hold its team's.
-        callers = ({owner.agent_name, *(caller for caller, _, _ in edges)} - {root}) | _accessed_entities(
+        callers = ({owner.agent_name, *(caller for caller, _, _ in edges)} - {root}) | accessed_entities(
             config,
             recipient,
             root,
