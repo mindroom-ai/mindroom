@@ -100,7 +100,7 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
   Doing that work before the health check answers would put it inside `readyTimeoutSeconds`, which already covers scheduling, the image pull, and the pod start: 32 to 49 s in a burst of 32 workers, where the preparation itself takes about three times as long, so workers would be marked failed on a busy node.
   The worker therefore answers as on a lazy start and reports the setup's state in the same answer, and the primary waits for it with its own budget and reports `preparing`, so "ready" still means a command runs at once.
   Every failure of the eager setup falls back to the lazy path a first request always had, which also reports the real error.
-  The health answer gained an optional field and the startup manifest an optional key, both ignored by the other release, so the worker protocol stays at 9.
+  The health answer gained an optional field and the startup manifest an optional key, both ignored by the other release, so they do not move the worker protocol.
 - **A forkserver template imports only plugins that opt in, once, and is never changed afterwards.**
   Importing in the template runs a plugin before the call's working directory and environment apply, and shares its threads, open files, and state with every call, which is only correct for a plugin that promises it, so `worker_preload` in the plugin manifest defaults to off.
   The primary lists the plugins that opt in in the worker's startup manifest, because a worker pod has no config file and would otherwise learn its plugins only from the first request; listing every enabled plugin would recreate all workers whenever any plugin is added or disabled.
