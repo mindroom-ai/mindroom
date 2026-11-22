@@ -1036,24 +1036,21 @@ class KubernetesResourceManager:
         # A Service drops connections until its Endpoints propagate, so the first try gives up on connecting fast,
         # and each later one allows a slower handshake, up to the time a whole answer may take.
         connect_timeout = _HEALTHZ_FIRST_CONNECT_TIMEOUT_SECONDS
-        with httpx.Client(timeout=min(_HEALTHZ_TIMEOUT_SECONDS, timeout_seconds)) as client:
-            while True:
-                remaining = deadline - time.time()
-                # No try outlasts the time that is left, and one that leaves no time for another may use all of it.
+        with httpx.Client(timeout=_HEALTHZ_TIMEOUT_SECONDS) as client:
+            # The clock decides after each try whether there is another, and no try gets more than the time left.
+            while (remaining := deadline - time.time()) > 0:
                 answer_timeout = min(_HEALTHZ_TIMEOUT_SECONDS, remaining)
-                last = remaining <= connect_timeout + _HEALTHZ_RETRY_INTERVAL_SECONDS
-                timeout = httpx.Timeout(answer_timeout, connect=answer_timeout if last else connect_timeout)
+                timeout = httpx.Timeout(answer_timeout, connect=min(connect_timeout, answer_timeout))
                 try:
                     response = client.get(healthz_url, timeout=timeout)
                 except httpx.HTTPError:
                     response = None
                 if response is not None and response.is_success:
                     return response
-                if last or deadline - time.time() <= _HEALTHZ_RETRY_INTERVAL_SECONDS:
-                    msg = f"Kubernetes worker '{worker_id}' did not answer its health check within {timeout_seconds:.0f}s."
-                    raise WorkerStartTimeoutError(msg)
                 connect_timeout = min(connect_timeout * 2, _HEALTHZ_TIMEOUT_SECONDS)
-                time.sleep(_HEALTHZ_RETRY_INTERVAL_SECONDS)
+                time.sleep(max(min(_HEALTHZ_RETRY_INTERVAL_SECONDS, deadline - time.time()), 0.0))
+        msg = f"Kubernetes worker '{worker_id}' did not answer its health check within {timeout_seconds:.0f}s."
+        raise WorkerStartTimeoutError(msg)
 
     def _apply_object(
         self,
