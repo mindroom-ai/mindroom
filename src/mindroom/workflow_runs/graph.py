@@ -214,12 +214,11 @@ def fit_snapshot(graph: Graph, *, fits: Callable[[dict[str, Any]], bool]) -> dic
     """Return the largest snapshot of *graph* that *fits*, with a count of everything it leaves out.
 
     Calls are added in the order a person can act on them, then edges, the busiest first. When the groups alone do
-    not fit, the innermost ones are left out, and the group around them still counts their calls. When that does not
-    fit either, the log, then the groups, then the phase names are left out. What remains then, the counts, has a
-    fixed size, so a frame can always be sent.
+    not fit, the innermost ones are left out and no call is shown; the group around them still counts their calls.
+    When that does not fit either, the log, then the groups, then the phase names are left out. What remains then,
+    the counts, has a fixed size, so a frame can always be sent.
     """
     calls, edges = sorted(graph.nodes, key=_order), sorted(graph.edges, key=lambda edge: -edge["count"])
-    parents = {group["id"]: group["parent"] for group in graph.groups}
     depths: dict[str, int] = {}
     for group in graph.groups:
         # A group comes after the group around it, and the call a nested run is under is in no group that counts here.
@@ -228,14 +227,6 @@ def fit_snapshot(graph: Graph, *, fits: Callable[[dict[str, Any]], bool]) -> dic
 
     def built(shown: int, depth: int, *, log: bool = True, phases: bool = True) -> dict[str, Any]:
         groups = [group for group in graph.groups if depths[group["id"]] <= depth]
-        kept = {group["id"] for group in groups}
-
-        def within(group: str | None) -> str | None:
-            while group is not None and group not in kept:
-                group = parents.get(group)
-            return group
-
-        nodes = [{**row, "group": within(row["group"])} for row in calls[:shown]]
         omitted = dict.fromkeys(_COUNTED, 0) | Counter(
             _bucket(WorkflowNodeState(row["status"])) for row in calls[shown:]
         )
@@ -248,7 +239,8 @@ def fit_snapshot(graph: Graph, *, fits: Callable[[dict[str, Any]], bool]) -> dic
         return {
             "phases": graph.phases if phases else [],
             "groups": groups,
-            "nodes": nodes,
+            # Calls are shown only with every group: each names its own.
+            "nodes": calls[:shown],
             "edges": edges[: max(0, shown - len(calls))],
             "omitted": omitted,
             "log": graph.log if log else [],

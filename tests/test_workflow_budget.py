@@ -122,6 +122,23 @@ async def test_budget_holds_queued_nodes_and_asks_and_the_run_waits_once_nothing
 
 
 @pytest.mark.asyncio
+async def test_call_whose_start_was_under_way_when_the_limit_was_reached_waits_again_first(
+    stack: WorkflowStack,
+) -> None:
+    """A queued call that had got its place just before the run reached its limit starts nothing and keeps its turn."""
+    gate = await _over_the_limit(stack)
+    places = stack.engine._places[stack.run_id]
+    (third, start), fourth = places.queued.popleft(), places.queued[0][0]
+    places.working.add(third)
+
+    await stack.engine._start_queued(stack.run_id, third, start)
+
+    assert ([key for key, _ in places.queued], third in places.working) == ([third, fourth], False)
+    assert (_states(stack)[third], len(stack.models["watcher"].requests)) == ("queued", 2)
+    gate.set()
+
+
+@pytest.mark.asyncio
 async def test_continue_adds_the_limit_and_releases_queued_nodes(stack: WorkflowStack) -> None:
     """Continue gives the run its limit once more: the held calls start, and the next limit asks again."""
     gate = await _over_the_limit(stack)
@@ -148,6 +165,9 @@ async def test_stop_cancels_the_run_and_a_resume_asks_again_at_the_same_limit(st
     assert await _answer(stack, "$budget:1", _STOP)
     await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.CANCELLED)
     assert (_states(stack)["@2"], _states(stack)["@3"]) == ("cancelled", "cancelled")
+    # A run that ended is asked nothing more, and holds nothing.
+    assert await stack.engine._over_budget(stack.store.get_run(stack.run_id)) is False
+    assert stack.run_id not in stack.engine._places
 
     await stack.resume(stack.run_id)
     assert await _agent(stack, 2) == "queued"
@@ -227,7 +247,9 @@ async def test_large_notice_fires_when_the_projection_passes_ten_dollars(
     await stack.start(title="Audit", job_id="job-1", max_concurrent=1)
     stack.child_script(_turn(6.0), [Await(asyncio.Event().wait), *_turn()])
     assert await stack.result("@0", "agent", {"prompt": "Look into part 0."}) == "done"
-    assert await _agent(stack, 1) == "running"
+    # The first agent's place may still be its own for a moment: the second starts then or right after.
+    assert await _agent(stack, 1) in ("running", "queued")
+    await stack.until(lambda: _states(stack)["@1"] == "running")
 
     # One turn of 6 USD ended and one agent is still to end: 6 spent, and 6 more projected.
     await stack.views.show(stack.run_id)

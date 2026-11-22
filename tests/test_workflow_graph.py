@@ -228,10 +228,12 @@ def test_rows_come_in_the_order_a_person_can_act_on() -> None:
         _node(4, state=WorkflowNodeState.RUNNING),
         _node(5, state=WorkflowNodeState.INDETERMINATE),
         _node(6, state=WorkflowNodeState.WAITING, waiting_on="user"),
+        # A call that waits for another agent's message is no call a person acts on: it comes as a working one.
+        _node(7, state=WorkflowNodeState.WAITING, waiting_on="peer"),
     ]
     _, snapshot = _fitted(nodes)
 
-    assert [node["id"] for node in snapshot["nodes"]] == ["n6", "n5", "n4", "n3", "n2", "n1"]
+    assert [node["id"] for node in snapshot["nodes"]] == ["n6", "n5", "n4", "n7", "n3", "n2", "n1"]
     assert snapshot["omitted"] == {
         "queued": 0,
         "running": 0,
@@ -266,15 +268,38 @@ def test_groups_that_do_not_fit_fold_into_their_parent() -> None:
         lane = f"{lane}/0:p0"
     nodes.append(_node(2001, f"{lane}@0", state=WorkflowNodeState.COMPLETED))
     whole = graph_rows(_RUN, nodes, {}, [], [])
-    _, snapshot = _fitted(nodes)
+    meta, snapshot = _fitted(nodes)
+    kept = len(snapshot["groups"])
 
     assert len(whole.groups) == 2000
-    assert 0 < len(snapshot["groups"]) < 2000
-    assert snapshot["groups"][0] == whole.groups[0]
+    assert 1 < kept < 2000
+    assert snapshot["groups"] == whole.groups[:kept]
     assert snapshot["groups"][0]["total"] == 1
-    assert snapshot["omitted"]["groups"] + len(snapshot["groups"]) == 2000
-    kept = {group["id"] for group in snapshot["groups"]}
-    assert {node["group"] for node in snapshot["nodes"]} <= kept
+    assert snapshot["omitted"]["groups"] + kept == 2000
+    # As many as fit: one group more would not. The calls come only once every group is there.
+    assert not _fits(meta)({**snapshot, "groups": whole.groups[: kept + 1]})
+    assert (snapshot["nodes"], snapshot["omitted"]["completed"]) == ([], 1)
+
+
+def test_groups_that_fit_are_all_kept_with_their_calls() -> None:
+    """A graph that fits keeps every group, also the innermost, and each call names its own."""
+    nodes = [_group(1, "@0"), _group(2, "/0:p0@0"), _node(3, "/0:p0/0:p0@0", state=WorkflowNodeState.RUNNING)]
+    whole = graph_rows(_RUN, nodes, {}, [], [])
+    _, snapshot = _fitted(nodes)
+
+    assert (len(whole.groups), snapshot["groups"], snapshot["omitted"]["groups"]) == (2, whole.groups, 0)
+    assert [(node["id"], node["group"]) for node in snapshot["nodes"]] == [("n3", "n2")]
+
+
+def test_log_is_left_out_before_the_groups_are() -> None:
+    """Groups that fit only without the log lines stay whole, and the log is counted as left out."""
+    log, count, snapshot = ["行" * 200] * 20, 0, {"log": ["a line"]}
+    while snapshot["log"] and count < 5000:
+        count += 25
+        _, snapshot = _fitted([_group(seq + 1, f"@{seq}") for seq in range(count)], log=log)
+
+    assert (len(snapshot["groups"]), snapshot["omitted"]["groups"]) == (count, 0)
+    assert (snapshot["log"], snapshot["omitted"]["log"]) == ([], 20)
 
 
 def test_delta_has_only_changed_rows_and_new_log_lines() -> None:
