@@ -54,6 +54,7 @@ from mindroom.thread_summary.generation import (
     _TRUNCATION_MIDDLE_COUNT,
     GENERATED_TITLE_MAX_LENGTH,
     GeneratedSummary,
+    _conversation_text,
     _ThreadEnrichment,
     _ThreadSummary,
     generate_summary,
@@ -2674,16 +2675,15 @@ class TestConversationText:
             assert len(body) <= _MAX_MESSAGE_CHARS
 
     async def test_short_thread_long_body_not_clipped(self) -> None:
-        """Threads at or below the truncation threshold render long bodies verbatim, unclipped."""
-        overlong = f"  HEAD_START {'b' * (_MAX_MESSAGE_CHARS + 400)} REAL_TAIL_QUESTION?  "
+        """Threads at or below the truncation threshold render bodies byte-for-byte verbatim, unclipped."""
+        overlong = f"  HEAD_START\r\n{'b' * (_MAX_MESSAGE_CHARS + 400)}\r\nREAL_TAIL_QUESTION?  "
         history = [
             ResolvedVisibleMessage.synthetic(sender="@alice:localhost", body=overlong, event_id="$m0"),
-            ResolvedVisibleMessage.synthetic(sender="@bob:localhost", body="Short reply", event_id="$m1"),
+            ResolvedVisibleMessage.synthetic(sender="@bob:localhost", body="  line 1\r\nline 2  ", event_id="$m1"),
         ]
 
-        text = await self._conversation(history)
-
-        assert text == f"@alice:localhost: {overlong}\n@bob:localhost: Short reply"
+        expected = "\n".join(f"{message.sender}: {message.body}" for message in history)
+        assert _conversation_text(history) == expected
 
     async def test_exactly_at_threshold_not_truncated(self) -> None:
         """Exactly at the threshold boundary, no truncation occurs."""
