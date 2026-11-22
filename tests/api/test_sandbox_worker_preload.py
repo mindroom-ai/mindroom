@@ -26,6 +26,7 @@ from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.tool_system import plugin_imports
+from mindroom.tool_system.plugins import worker_preload_plugin_paths
 from tests.api.sandbox_runner_support import execute_call
 
 if TYPE_CHECKING:
@@ -617,6 +618,26 @@ def test_each_call_logs_its_stage_timing_once(
     assert isinstance(timing, dict)
     assert set(timing) == {"config_ms", "plugins_ms", "tool_ms"}
     assert all(isinstance(stage_ms, float) for stage_ms in timing.values())
+
+
+def test_only_the_opt_in_plugins_that_lead_the_plugin_list_are_preloaded(tmp_path: Path) -> None:
+    """Plugins import in config order, so a worker preloads the opt-in plugins that no other enabled plugin precedes."""
+    runtime_paths = _runtime(tmp_path)
+    first = _write_plugin(tmp_path, "first", worker_preload=True)
+    second = _write_plugin(tmp_path, "second", worker_preload=True)
+    late = _write_plugin(tmp_path, "late", worker_preload=True)
+    plain = _write_plugin(tmp_path, "plain")
+    disabled = PluginEntryConfig(path=_write_plugin(tmp_path, "disabled").path, enabled=False)
+    missing = PluginEntryConfig(path=str(tmp_path / "missing"))
+
+    def preloaded(*plugins: PluginEntryConfig) -> tuple[str, ...]:
+        return worker_preload_plugin_paths(Config(plugins=list(plugins)), runtime_paths)
+
+    assert preloaded(first, second, plain, late) == (first.path, second.path)
+    assert preloaded(plain, first) == ()
+    assert preloaded(disabled, first, plain) == (first.path,)
+    assert preloaded(first, missing, second) == (first.path,)
+    assert preloaded(missing, first) == ()
 
 
 def test_worker_preload_in_a_manifest_must_be_a_boolean(tmp_path: Path) -> None:
