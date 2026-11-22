@@ -85,8 +85,8 @@ class LiveFunction:
 class _LiveTools:
     """The functions one agent's run offers and how the run calls them.
 
-    ``middleware`` is the run's tool-call policy, and ``context`` is the run's context for the call that is
-    running, so a stored call runs exactly as the model's own call of it would.
+    ``middleware`` is the run's tool-call policy without the step that binds these, and ``context`` is the run's
+    context for the call that is running, so a stored call runs exactly as the model's own call of it would.
     """
 
     functions: Mapping[str, ToolFunction]
@@ -109,17 +109,18 @@ def bind_live_tools(
     """
     if _LIVE_FUNCTION_READERS.isdisjoint(functions):
         return tuple(middleware)
-    policy: tuple[ToolMiddleware, ...]
+    # The bound tools keep the policy without this step, which a stored call adds again: a step holding the policy that
+    # holds it would be a reference cycle, which only a full garbage collection frees, with all of the run's functions.
+    rest = tuple(middleware)
 
     async def bind_live_functions(call: ToolCall, call_next: ToolNext) -> object:
-        token = _LIVE_TOOLS.set(_LiveTools(functions=functions, middleware=policy, context=call.context))
+        token = _LIVE_TOOLS.set(_LiveTools(functions=functions, middleware=rest, context=call.context))
         try:
             return await call_next(call.arguments)
         finally:
             _LIVE_TOOLS.reset(token)
 
-    policy = (bind_live_functions, *middleware)
-    return policy
+    return (bind_live_functions, *rest)
 
 
 def _parse_arguments(text: str) -> dict[str, object] | str:
@@ -219,7 +220,7 @@ async def run_scheduled_call(  # noqa: PLR0911 - one refusal per broken conditio
                 function,
                 json.loads(arguments_text),
                 replace(live.context, call_id=f"scheduled-{task_id}"),
-                middleware=live.middleware,
+                middleware=bind_live_tools(live.functions, live.middleware),
             )
     await manager.record_scheduled_call_outcome(task_id, "completed" if result.succeeded else "failed")
     if result.error is not None:

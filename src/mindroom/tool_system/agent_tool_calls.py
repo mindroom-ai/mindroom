@@ -320,6 +320,9 @@ class PreparedAgentToolCatalog:
         self._closed = True
         async with self._lock:
             await close_toolkits(self._closes)
+            # Each binding refers back to the catalog, so a closed catalog lets go of them: refcounting then frees
+            # the turn's functions as soon as it is dropped, instead of the next full garbage collection.
+            self._bindings.clear()
 
 
 def _failure(

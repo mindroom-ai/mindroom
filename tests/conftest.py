@@ -673,14 +673,19 @@ def live_turn_tools_for_test(
 ) -> LiveTurnTools:
     """Build one CLI turn's live tools with the options a test names, which include its output-file policy.
 
-    The others take a top-level turn's values: no context documents or knowledge refresh.
+    The others take a top-level turn's values: no context documents or knowledge refresh. ``authorize`` is not handed
+    the live tools that call it.
     """
     turn_options: dict[str, Any] = {
         "context": {},
         "delegation_depth": 0,
         "refresh_scheduler": None,
     }
-    return LiveTurnTools(owner, catalog=catalog, authorize=authorize, **(turn_options | options))
+
+    async def authorize_call(_owner: LiveTurnTools, key: "ToolKey", arguments: dict[str, object]) -> None:
+        await authorize(key, arguments)
+
+    return LiveTurnTools(owner, catalog=catalog, authorize=authorize_call, **(turn_options | options))
 
 
 async def _no_approval_event(
