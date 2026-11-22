@@ -572,7 +572,8 @@ models:
 Use `provider: openai` with `api: responses`, OpenRouter's `https://openrouter.ai/api/v1` endpoint, an `openai/` GPT model ID (GPT-5.3 Codex, GPT-5.4, or GPT-6), and `context_window` to enable OpenAI Responses [native compaction](history.md#native-compaction) through OpenRouter.
 Always set a model-specific OpenRouter `api_key`; without it, MindRoom can send your shared OpenAI key to OpenRouter.
 OpenRouter binds encrypted compaction checkpoints and encrypted reasoning to the upstream provider that created them (for example OpenAI, Azure, or Amazon Bedrock).
-If a pinned upstream rejects earlier encrypted items with HTTP 400 or a rate-limited creator returns HTTP 429 after transient retries, MindRoom resends the full history once without encrypted state and may re-compact it on the new upstream.
+OpenRouter's routing answers HTTP 400 when the request's `provider` preferences exclude the upstream that created earlier encrypted items, and HTTP 429 while that upstream is rate-limited.
+After such a 400, or a 429 that outlasts the transient retries, MindRoom resends the full history once without encrypted state and with the same `provider` preferences, and the upstream that answers may compact it again.
 On a very long thread whose full stored history exceeds the context window, you may need `/compact` after an upstream switch.
 To pin threads strictly to one upstream at the cost of failover, set `provider: {only: [openai]}` under `extra_kwargs.request_params.extra_body` (`order` with `allow_fallbacks: false` can still admit other endpoints); model-rerouting fields (`models`, `model`, `route`, `preset`, or `@preset/` model IDs) turn native compaction off.
 The `provider: openrouter` route uses Chat Completions and keeps text compaction.
