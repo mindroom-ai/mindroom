@@ -177,6 +177,10 @@ Each worker's `/tmp` is disk-backed, and exceeding its size limit evicts that wo
 `MINDROOM_KUBERNETES_WORKER_TMP_SIZE_LIMIT` (for example `4Gi`) also requests and limits the same amount of container `ephemeral-storage`, which clusters such as GKE Autopilot otherwise cap at 1 GiB.
 Tool subprocesses already get a `TMPDIR` on persistent storage, so only explicit `/tmp` paths use this space.
 
+Each worker container exposes its limits to tool subprocesses via the Kubernetes downward API: `MINDROOM_WORKER_CPUS`, `OMP_NUM_THREADS`, `PYTHON_CPU_COUNT`, and `PYTEST_XDIST_AUTO_NUM_WORKERS` receive the container CPU limit rounded up to whole CPUs (so `nproc`, OpenMP/BLAS, Python 3.13+ `os.cpu_count()`/`os.process_cpu_count()`, and `pytest -n auto` size to the pod instead of the node), and `MINDROOM_WORKER_MEMORY_BYTES` receives the container memory limit in bytes.
+Because `free` cannot be constrained through environment variables and still reports node memory, tools that need the pod memory limit should read `MINDROOM_WORKER_MEMORY_BYTES` or `/sys/fs/cgroup/memory.max`.
+Any value set in `workers.kubernetes.extraEnv` (`MINDROOM_KUBERNETES_WORKER_ENV_JSON`) or `.mindroom/worker-env.sh` overrides the downward API default.
+
 `MINDROOM_KUBERNETES_WORKER_USER_RESOURCES_JSON` maps a Matrix user ID to `requests` and/or `limits` with `cpu` and/or `memory`, for example `{"@alice:example.org": {"limits": {"memory": "4Gi"}}}`.
 Listed quantities replace the global values for that requester's `user` and `user_agent` workers; shared and unscoped workers, other requesters, and background-script profiles are unchanged.
 
