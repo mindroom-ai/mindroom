@@ -157,6 +157,7 @@ from mindroom.turns.interactive_selection import (
     InteractiveSelections,
     InteractiveSelectionsDeps,
 )
+from mindroom.turns.queued_notice import mark_waiting_for_approval
 from mindroom.visible_response_reconciliation import VisibleResponseReconciler, VisibleResponseReconcilerDeps
 from mindroom.voice.ingress import VoiceIngress, VoiceIngressDeps
 from mindroom.voice.readiness import VoiceReadiness
@@ -3102,6 +3103,17 @@ async def test_a_message_waiting_for_a_pending_approval_gets_an_hourglass(
     assert [batch.event.for_another_participant for batch in harness.gate_batches] == [
         {None: None, "general": False}.get(mention, True),
     ]
+
+
+def test_a_message_no_human_sent_never_looks_up_the_approvals_holding_its_conversation() -> None:
+    """Only a human's message can wait for an approval, so the reaction asks who sent it before it scans the holds."""
+    envelope = request_envelope(source_kind=SCHEDULED_SOURCE_KIND)
+    conversations = MagicMock()
+    support = SimpleNamespace(response_runner=SimpleNamespace(lifecycle_coordinator=conversations))
+
+    mark_waiting_for_approval(support, envelope.target, envelope)
+
+    conversations.approval_holds.assert_not_called()
 
 
 @pytest.mark.asyncio

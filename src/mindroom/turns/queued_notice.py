@@ -39,8 +39,9 @@ def mark_waiting_for_approval(
 
     Ingress calls it only for a message this agent may answer (`TurnPolicy.not_for_this_agent`).
     """
-    holds = support.response_runner.lifecycle_coordinator.approval_holds(target.room_id, target.resolved_thread_id)
-    if not envelope.origin.may_answer_interactive_prompt or not holds:
+    if not envelope.origin.may_answer_interactive_prompt:
+        return
+    if not support.response_runner.lifecycle_coordinator.approval_holds(target.room_id, target.resolved_thread_id):
         return
     create_background_task(
         support.delivery_gateway.send_judgment_reaction(
