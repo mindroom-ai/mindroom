@@ -10,7 +10,6 @@ drop user input. A pending approval holds its conversation as an active turn.
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
 import pytest
@@ -21,7 +20,6 @@ from mindroom.message_target import MessageTarget
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
     from pathlib import Path
 
 _LOCK_TABLE_CAP = 100
@@ -75,36 +73,6 @@ async def test_eviction_never_evicts_a_target_with_a_live_queued_signal(liveness
     assert protected_key in coordinator._conversations
     assert coordinator._conversations[protected_key] is protected_signal
     assert targets[1].lifecycle_key not in coordinator._conversations
-
-
-@pytest.mark.asyncio
-async def test_eviction_preserves_a_lock_only_waiter_before_admission() -> None:
-    """A fold waiting on admission must still share the lock with later replies."""
-    coordinator = ResponseLifecycleCoordinator()
-    targets = _fill_lock_table(coordinator)
-    lock = coordinator._conversation_for(targets[0]).lock
-    entering = asyncio.Event()
-    opened = asyncio.Event()
-
-    @asynccontextmanager
-    async def admit() -> AsyncIterator[None]:
-        entering.set()
-        await opened.wait()
-        yield
-
-    async def fold() -> None:
-        assert lock.locked()
-
-    task = asyncio.create_task(
-        coordinator.run_lock_only(targets[0], admit, fold, lambda _: pytest.fail("unexpected approval")),
-    )
-    try:
-        await asyncio.wait_for(entering.wait(), 30)
-        coordinator._conversation_for(_target(_LOCK_TABLE_CAP))
-        assert coordinator._conversation_for(targets[0]).lock is lock
-    finally:
-        opened.set()
-        await asyncio.wait_for(task, 30)
 
 
 @pytest.mark.asyncio

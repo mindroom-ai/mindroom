@@ -776,15 +776,9 @@ class ResponseRunner:
             await self.deps.settle_ignored_sources((event.event_id,))
             return
         target = MessageTarget.resolve(event.room_id, event.thread_id, origin)
-        runtime = self.deps.runtime
         try:
             fold = partial(self._fold_compaction, target, requester, origin, event.event_id)
-            notice = await self.lifecycle_coordinator.run_lock_only(
-                target,
-                runtime.admission_fence,
-                fold,
-                runtime.wait_for_admission_or_shutdown,
-            )
+            notice = await self.lifecycle_coordinator.run_locked(target, self.deps.runtime, fold)
         except ResponseAdmissionRefusedError:
             raise  # Replacement must replay the pending source.
         except Exception as error:

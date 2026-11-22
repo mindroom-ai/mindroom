@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from mindroom import constants
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.background_tasks import create_background_task
+from mindroom.bot_runtime_view import RunPhase
 from mindroom.cancellation import current_task_is_process_shutdown
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.final_delivery import (
@@ -59,10 +60,10 @@ from mindroom.tool_jobs.control import ReplyToolCalls, pending_human_messages_co
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Sequence
-    from contextlib import AbstractAsyncContextManager
 
     from structlog.stdlib import BoundLogger
 
+    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import ResponseIdentity
@@ -97,6 +98,8 @@ class _ResponseLifecycleReservation:
     _release_task: asyncio.Task[None] | None = None
     _owns_lock: bool = False
     _consumed: bool = False
+    # False for work that is no reply: it takes this place with a pin on the conversation instead of a begun turn.
+    _turn: bool = True
 
     async def _acquire(self) -> None:
         try:
@@ -151,7 +154,10 @@ class _ResponseLifecycleReservation:
             self._owns_lock = False
             self._conversation.lock.release()
         self._consume_notice()
-        self._conversation.finish_response_turn()
+        if self._turn:
+            self._conversation.finish_response_turn()
+        else:
+            self._conversation.pins -= 1
 
     async def release(self) -> None:
         """Release or cancel this place exactly once.
@@ -217,7 +223,7 @@ class _Conversation:
     # The person the reply holding the lock answers, and the waiting messages that person chose to Steer it with.
     active_requester_id: str | None = None
     requester_steer_event_ids: set[str] = field(default_factory=set)
-    # Lock-only work that waits here with the lock unlocked; the record stays while any does.
+    # Work that is no reply and waits here without a begun turn; the record, and so its one lock, stays while any does.
     pins: int = 0
     calls: ReplyToolCalls = field(init=False)
 
@@ -656,27 +662,34 @@ class ResponseLifecycleCoordinator:
             return None
         return response_envelope.source_event_id
 
-    async def run_lock_only[T](
-        self,
-        target: MessageTarget,
-        admit: Callable[[], AbstractAsyncContextManager[None]],
-        op: Callable[[], Awaitable[T]],
-        wait_until_ready: Callable[[Coroutine[None, None, object]], Awaitable[bool]],
-    ) -> T:
-        """Serialize non-reply work without occupying admission while an approval is paused."""
-        key, conversation = target.lifecycle_key, self._conversation_for(target)
-        conversation.pins += 1
-        try:
-            while True:
+    async def run_locked[T](self, target: MessageTarget, runtime: BotRuntimeView, op: Callable[[], Awaitable[T]]) -> T:
+        """Run work that is no reply under one conversation's lock, in turn with its replies, through a reply's claim.
+
+        It begins no turn, so the conversation is not busy and the running reply hears of no message, and it waits out
+        a pending approval without holding admission. ``op`` starts only while ``runtime`` accepts work, checked under
+        the lock; only an approval that appears while this waits for the lock makes it wait and admit again.
+        """
+        key = target.lifecycle_key
+        while True:
+            conversation = self._conversation_for(target)
+            conversation.pins += 1
+            claim = _ResponseLifecycleReservation(self, key, conversation, None, _turn=False)
+            paused = False
+            try:
                 while key in self._approval_holds.values():
-                    if not await wait_until_ready(self._approval_released.wait()):
+                    if not await runtime.wait_for_admission_or_shutdown(self._approval_released.wait()):
                         raise ResponseAdmissionRefusedError
-                async with admit(), conversation.lock:
-                    if key in self._approval_holds.values():
-                        continue  # The preceding reply paused; release admission and the lock before waiting.
-                    return await op()
-        finally:
-            conversation.pins -= 1
+                async with runtime.admission_fence():
+                    await claim.wait_until_acquired()
+                    paused = key in self._approval_holds.values()
+                    if not paused and runtime.phase is RunPhase.ACCEPTING:
+                        return await op()
+            finally:
+                await claim.release()
+            if (
+                not paused
+            ):  # The runtime stopped accepting, or an admission swallowed what ended this: never admit twice.
+                raise ResponseAdmissionRefusedError
 
     async def run_locked_response(
         self,

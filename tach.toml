@@ -3646,6 +3646,7 @@ visibility = [
 [[modules]]
 path = "mindroom.response_lifecycle"
 depends_on = [
+    "mindroom.bot_runtime_view",
     "mindroom.response_admission",
     "mindroom.cancellation",
     "mindroom.constants",
@@ -4143,6 +4144,7 @@ depends_on = ["mindroom.response_admission"]
 visibility = [
     "mindroom.bot",
     "mindroom.reply_turn.inbox",
+    "mindroom.response_lifecycle",
     "mindroom.response_runner",
     "mindroom.turns.dispatch",
 ]
