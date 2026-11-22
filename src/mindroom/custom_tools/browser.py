@@ -392,7 +392,7 @@ def _persistent_launch_kwargs(
     launch_kwargs: dict[str, Any] = {
         "args": [PROXIED_WEBRTC_ONLY_ARG],
         "headless": headless,
-        # Block service workers because stale Cinny SW state after redeploy is a sharper risk than offline support.
+        # Block service workers because stale MindRoom Chat SW state after redeploy is a sharper risk than offline support.
         # Revisit if PWA targets matter.
         "service_workers": "block",
         "user_data_dir": str(user_data_dir),

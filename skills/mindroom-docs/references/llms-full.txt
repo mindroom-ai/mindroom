@@ -6642,9 +6642,7 @@ Use a canvas when seeing or clicking beats reading or typing; for a quick choice
 
 ## Turn canvases on
 
-Canvases need two switches, and both are off by default.
-
-First, give the agent the [`chat_ui`](https://docs.mindroom.chat/tools/chat-ui/) toolkit with `enable_show_canvas: true`:
+MindRoom Chat ships with canvases on, so an agent needs only the [`chat_ui`](https://docs.mindroom.chat/tools/chat-ui/) toolkit with `enable_show_canvas: true`:
 
 ```yaml
 agents:
@@ -6659,21 +6657,19 @@ agents:
 
 `enable_show_canvas` (boolean, default `false`) adds the `show_canvas` function; the rest of `chat_ui` works without it.
 It can also be set in the `chat_ui` tool's saved settings for every agent that uses `chat_ui`; an agent's own entry wins, as described in [How Settings Combine](https://docs.mindroom.chat/tools/#how-settings-combine).
-`mindroom config init` and newly provisioned hosted instances already turn it on for the starter Mind agent, so Mind needs only the Chat switch.
+`mindroom config init` and newly provisioned hosted instances already turn it on for the starter Mind agent, so Mind can show canvases without any setup.
 
-Second, enable canvases in the MindRoom Chat deployment's runtime `config.json`:
+A MindRoom Chat deployment can turn canvases off in its runtime `config.json`:
 
 ```json
 {
   "mindroom": {
     "canvas": {
-      "enabled": true
+      "enabled": false
     }
   }
 }
 ```
-
-The shipped MindRoom Chat configuration sets `enabled` to `false`, so only whoever deploys Chat can turn canvases on.
 
 ### Let pages load libraries
 
@@ -6772,8 +6768,7 @@ When the panel cannot open, the **Open canvas** button is disabled and a message
 
 | Message | Cause |
 |---|---|
-| Interactive panels are turned off in this app. | The Chat deployment has not enabled canvases. |
-| Interactive panels are not available in the app yet. Open this conversation in a browser. | The native mobile app does not show canvases; Chat in a browser does. |
+| Interactive panels are turned off in this app. | The Chat deployment has turned canvases off. |
 | End the call to open interactive panels. | Chat does not run canvases during a call. |
 
 Other people in the room who use MindRoom Chat on the agent's homeserver see the title and **Open canvas**, not the inline page, and can answer in the panel; everyone else sees only the notice text, `Interactive panel: <title>. Open it in MindRoom Chat to respond.`
@@ -13224,7 +13219,7 @@ Use `matrix_message` or `matrix_api` for writes.
 | `room-info` | Room name, topic, encryption, member count, join rule, canonical alias, room version, guest access, creator, power-level summary, and the current `thread_id`, `reply_to_event_id`, `requester_id`, and `agent_name` (the thread is omitted when inspecting another room) |
 | `members` | Joined users with display names, avatar URLs, and power levels |
 | `agents` | Agents that can currently answer this requester in the room, each with `name`, `matrix_user_id`, `description`, and `thread_mode` (`thread` or `room`) |
-| `threads` | Thread-root previews with sender, timestamp, reply count, and latest activity; `limit` defaults to 20 (range 1-50), and `next_token` plus `has_more` support paging through `page_token`; `include_summaries=True` adds each thread's current `summary` (or `null`) and `summary_pinned`, at the cost of reading every listed thread; `workflow` (`needs_you`, `working`, `later` or `all`) labels each row with its `workflow` group as MindRoom Chat computes it (`done` for resolved threads), adds `why` (`approval`, `question` or `your_turn`) to `needs_you` rows and `back_at` (ms) to `later` rows when known, and keeps only the named group, so a filtered page can hold fewer rows than `limit`; `room_id="all"` lists one page of threads from every room the requester is a member of and shares with the agent, each row with its `room_id`, waiting rows first, without `page_token` |
+| `threads` | Thread-root previews with sender, timestamp, reply count, and latest activity; `limit` defaults to 20 (range 1-50), and `next_token` plus `has_more` support paging through `page_token`; `include_summaries=True` adds each thread's current `summary` (or `null`) and `summary_pinned`, at the cost of reading every listed thread; `workflow` (`needs_you`, `working`, `later` or `all`) labels each row with its `workflow` group as MindRoom Chat computes it (`done` for resolved threads, unless a foreground approval asked after the resolve still waits), adds `why` (`approval`, `question` or `your_turn`) to `needs_you` rows and `back_at` (ms) to `later` rows when known, and keeps only the named group, so a filtered page can hold fewer rows than `limit`; `room_id="all"` lists one page of threads from every room the requester is a member of and shares with the agent, each row with its `room_id`, waiting rows first, without `page_token` |
 | `state` | With `event_type`, one state event (`state_key` defaults to empty); without it, a summary of up to 100 non-member state events |
 
 Pass an `agents` result's `name` as `recipient` in [`matrix_message`](https://docs.mindroom.chat/tools/matrix-message/#agent-conversations) to address that agent.
