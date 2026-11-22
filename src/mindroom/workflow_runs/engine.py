@@ -592,7 +592,11 @@ class WorkflowEngine:
             generation=generation,
             state=WorkflowNodeState.COMPLETED,
             attempt=run.attempt,
-            label=str(meta.get("label") or _default_label(kind, request.args))[:_MAX_LABEL_CHARS],
+            # The label goes into the job, the room and the run's view: redacted whole, then cut.
+            label=redact_sensitive_text(
+                str(meta.get("label") or _default_label(kind, request.args)),
+                max_length=_MAX_LABEL_CHARS,
+            ),
             name=cast("str | None", meta.get("name")),
             phase=cast("str | None", meta.get("phase")),
             members=members,
@@ -1092,9 +1096,8 @@ def _require_kept(kept: list[str] | None, grant: ScriptToolGrant) -> None:
 def _default_label(kind: str, args: dict[str, object]) -> object:
     """Return what a node is called when its script gave no label: its function, name, prompt or operation."""
     if kind == "agent":
-        # The label goes into the job, the room and the run's view, where the prompt does not: one redacted line.
-        line = str(args.get("prompt") or kind).strip().partition("\n")[0]
-        return args.get("name") or redact_sensitive_text(line[:_MAX_LABEL_CHARS])
+        # Where the label goes the prompt does not: its first line stands for it.
+        return args.get("name") or str(args.get("prompt") or kind).strip().partition("\n")[0]
     return f"{args.get('toolkit')}.{args.get('function')}" if kind == "tool" else args.get("op") or kind
 
 

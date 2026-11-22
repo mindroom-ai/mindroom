@@ -556,13 +556,14 @@ async def test_large_answer_is_saved_whole_before_the_job_is_acknowledged(stack:
 @pytest.mark.asyncio
 async def test_the_job_snapshot_holds_the_label_not_the_prompt(stack: WorkflowStack) -> None:
     """The child's task, which every snapshot of its job repeats, is the node's label; the model is sent the prompt."""
-    prompt = "Summarize this. " + "x" * 200_000
+    prompt = "Summarize this. " + "word " * 40_000
     model = stack.child_script(answer("short"))
 
     assert await stack.result("@0", "agent", {"prompt": prompt}) == "short"
 
     child = delegation_child(stack.node_job("@0"))
-    assert (child.task, len(child.task)) == (prompt[:80], 80)
+    # Cut by the redactor, which says so in the label's last characters.
+    assert (child.task, len(child.task)) == (f"{prompt[:65]}... [truncated]", 80)
     sent = [str(message.content) for message in model.requests[0].messages if message.role == "user"]
     assert prompt in sent[-1]
 
@@ -578,6 +579,19 @@ async def test_label_of_a_call_without_a_name_is_the_first_line_of_its_prompt_wi
 
     label = "Deploy with password=***redacted***"
     assert (_node(stack).label, delegation_child(stack.node_job("@0")).task) == (label, label)
+    # A credential that the label's end would cut in two is masked whole, in a label the script gave as well.
+    url = "https://user:placeholder-pass"
+    cut = f"Fetch {'x' * (74 - len(url))}{url}@host.example/path"
+    assert cut.index("@") == 80
+    stack.child_script(answer("done"), answer("done"))
+    await stack.result("@1", "agent", {"prompt": cut})
+    await stack.result("@2", "agent", {"prompt": "Go"}, {"label": cut})
+    assert [
+        ("placeholder-pass" in node.label, len(node.label) <= 80) for node in (_node(stack, "@1"), _node(stack, "@2"))
+    ] == [
+        (False, True),
+        (False, True),
+    ]
 
 
 @pytest.mark.asyncio
