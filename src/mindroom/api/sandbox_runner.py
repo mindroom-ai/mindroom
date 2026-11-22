@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ctypes
+import hashlib
 import inspect
 import io
 import json
@@ -1202,6 +1203,62 @@ def _parse_subprocess_response(
     return _subprocess_failure_response(worker_key, "Sandbox subprocess returned an invalid response.", runtime_paths)
 
 
+def _plugin_tree_stamps(root: Path) -> list[list[object]]:
+    """Return sorted file stat stamps for a plugin's manifest and Python sources."""
+    if not root.is_dir():
+        return [["missing"]]
+    stamps: list[list[object]] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(name for name in dirnames if name != "__pycache__" and not name.startswith("."))
+        base = Path(dirpath)
+        for filename in sorted(filenames):
+            if filename != "mindroom.plugin.json" and not filename.endswith(".py"):
+                continue
+            file_path = base / filename
+            rel_path = str(file_path.relative_to(root))
+            try:
+                stat_result = file_path.stat()
+            except OSError:
+                stamps.append([rel_path, "missing"])
+            else:
+                stamps.append([rel_path, stat_result.st_ino, stat_result.st_mtime_ns, stat_result.st_size])
+    return stamps
+
+
+def _forkserver_plugin_preload(
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> tuple[dict[str, object] | None, str | None]:
+    """Return the plugin preload spec and content fingerprint for the forkserver template."""
+    effective_config = (
+        _config_with_available_plugins(config, runtime_paths, log_skipped_plugins=False)
+        if sandbox_exec.runner_uses_dedicated_worker(runtime_paths)
+        else config
+    )
+    enabled_paths = [entry.path for entry in effective_config.plugins if entry.enabled]
+    if not enabled_paths:
+        return None, None
+    from mindroom.tool_system import plugin_imports  # noqa: PLC0415
+
+    fingerprint_entries: list[object] = []
+    for entry_path in enabled_paths:
+        try:
+            root = plugin_imports._resolve_plugin_root(entry_path, runtime_paths)
+        except Exception:
+            fingerprint_entries.append([entry_path, "unresolved"])
+        else:
+            fingerprint_entries.append([entry_path, str(root), _plugin_tree_stamps(root)])
+    preload_fingerprint = hashlib.sha256(
+        json.dumps(fingerprint_entries, sort_keys=True).encode("utf-8"),
+    ).hexdigest()
+    preload_spec: dict[str, object] = {
+        "config_path": str(runtime_paths.config_path),
+        "storage_root": str(runtime_paths.storage_root),
+        "plugins": enabled_paths,
+    }
+    return preload_spec, preload_fingerprint
+
+
 def _execute_request_forkserver(
     worker_key: str | None,
     runtime_paths: RuntimePaths,
@@ -1209,6 +1266,8 @@ def _execute_request_forkserver(
     subprocess_context: _PreparedSandboxSubprocessContext,
     envelope: str,
     timeout_seconds: float | None,
+    preload_spec: Mapping[str, object] | None,
+    preload_fingerprint: str | None,
 ) -> ExecuteResponse | None:
     """Dispatch one prepared request via the warm template; None means fall back to spawn-per-call."""
     try:
@@ -1222,6 +1281,8 @@ def _execute_request_forkserver(
             startup_timeout_seconds=sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths),
             bind_stop=sandbox_request_cancellation.bind_request_stop,
             on_progress=report_tool_progress,
+            preload_spec=preload_spec,
+            preload_fingerprint=preload_fingerprint,
         )
     except sandbox_forkserver.ForkserverTimeoutError:
         return _subprocess_failure_response(worker_key, "Sandbox subprocess timed out.", runtime_paths)
@@ -1313,12 +1374,15 @@ def _execute_request_subprocess_sync(call: _ExecuteCall) -> ExecuteResponse:
         # Cancelled while the worker was being prepared; never start the tool.
         return _cancelled_response()
     if sandbox_exec.runner_uses_forkserver(runtime_paths) and sandbox_forkserver.forkserver_supported():
+        preload_spec, preload_fingerprint = _forkserver_plugin_preload(call.route.config, runtime_paths)
         forkserver_response = _execute_request_forkserver(
             worker_key,
             runtime_paths,
             subprocess_context=subprocess_context,
             envelope=envelope,
             timeout_seconds=timeout_seconds,
+            preload_spec=preload_spec,
+            preload_fingerprint=preload_fingerprint,
         )
         if forkserver_response is not None:
             return forkserver_response
@@ -1559,9 +1623,29 @@ def _run_subprocess_worker() -> int:
     return exit_code
 
 
+def _preload_forkserver_plugins(preload_file: str | None) -> None:
+    """Preload the template's configured plugins before forking request children."""
+    if not preload_file:
+        return
+    from mindroom.config.plugin import PluginEntryConfig  # noqa: PLC0415
+
+    raw = json.loads(Path(preload_file).read_text(encoding="utf-8"))
+    plugin_paths = [str(entry) for entry in raw.get("plugins", [])]
+    if not plugin_paths:
+        return
+    preload_runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=Path(raw["config_path"]),
+        storage_path=Path(raw["storage_root"]),
+        process_env={},
+    )
+    preload_config = Config(plugins=[PluginEntryConfig(path=path, enabled=True) for path in plugin_paths])
+    refresh_plugins(preload_config, preload_runtime_paths)
+
+
 def _run_forkserver_template() -> int:
     """Serve warm forkserver requests from an already-imported runtime template."""
     socket_path = sys.argv[sys.argv.index(sandbox_forkserver.TEMPLATE_ARG) + 1]
+    preload_file = os.environ.pop(sandbox_forkserver.PRELOAD_FILE_ENV, None)
     # Pre-warm the full tool import graph once so fork children skip it; this
     # belongs to template startup, not to importing this module.
     # Agno resolves its agent and team types while building tool schemas. Import them in the
@@ -1577,12 +1661,21 @@ def _run_forkserver_template() -> int:
     import mindroom.tools  # noqa: F401, PLC0415
 
     tools_done_at = time.monotonic()
-    logger.debug(
-        "sandbox_forkserver_template_preload_timing",
-        agno_ms=round((agno_done_at - started_at) * 1000, 1),
-        tools_ms=round((tools_done_at - agno_done_at) * 1000, 1),
-        total_ms=round((tools_done_at - started_at) * 1000, 1),
-    )
+    _preload_forkserver_plugins(preload_file)
+    plugins_done_at = time.monotonic()
+    socket_file = Path(socket_path)
+    if socket_file.suffix == ".sock" and socket_file.parent.is_dir():
+        timing_payload = {
+            "agno_ms": round((agno_done_at - started_at) * 1000, 1),
+            "tools_ms": round((tools_done_at - agno_done_at) * 1000, 1),
+            "plugins_ms": round((plugins_done_at - tools_done_at) * 1000, 1),
+            "total_ms": round((plugins_done_at - started_at) * 1000, 1),
+        }
+        with suppress(OSError):
+            socket_file.with_suffix(".timing.json").write_text(
+                json.dumps(timing_payload, sort_keys=True),
+                encoding="utf-8",
+            )
     return sandbox_forkserver.serve_template(socket_path, _run_subprocess_worker_payload)
 
 

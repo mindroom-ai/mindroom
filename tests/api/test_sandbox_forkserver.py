@@ -26,6 +26,8 @@ from mindroom.api.sandbox_forkserver import (
     ForkserverTimeoutError,
     _SandboxForkserver,
 )
+from mindroom.config.main import Config
+from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.workers.protocol import ExecuteResponse
 from tests.api.sandbox_runner_support import execute_call
@@ -34,7 +36,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from pathlib import Path
 
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 pytestmark = pytest.mark.skipif(
@@ -875,3 +876,169 @@ def test_child_and_forkserver_emit_stage_timing(
         assert all(
             isinstance(fs_request_events[0].get(k), float) for k in ("template_wait_ms", "request_ms", "total_ms")
         )
+
+
+def _write_counting_plugin(
+    plugin_dir: Path,
+    *,
+    name: str,
+    import_log: Path,
+    version: str,
+    spawn_thread: bool = False,
+) -> None:
+    plugin_dir.mkdir(parents=True, exist_ok=True)
+    (plugin_dir / "mindroom.plugin.json").write_text(
+        json.dumps({"name": name, "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_dir / "helper.py").write_text(f'VERSION = "{version}"\n', encoding="utf-8")
+    thread_code = (
+        "import threading\nthreading.Thread(target=threading.Event().wait, daemon=True).start()\n"
+        if spawn_thread
+        else ""
+    )
+    (plugin_dir / "tools.py").write_text(
+        f"""
+import os
+from pathlib import Path
+{thread_code}
+from mindroom.plugin_api import ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata, tool
+from . import helper
+
+with Path({str(import_log)!r}).open("a", encoding="utf-8") as _fh:
+    _fh.write(f"{{os.getpid()}}:{{helper.VERSION}}\\n")
+
+
+class _VersionTool(Toolkit):
+    def __init__(self) -> None:
+        super().__init__(name="{name}_tool")
+
+    @tool
+    def get_version(self) -> str:
+        return helper.VERSION
+
+
+@register_tool_with_metadata(
+    name="{name}_tool",
+    file_access=ToolFileAccess.NONE,
+    display_name="{name} Tool",
+    description="Counting test plugin tool",
+    category=ToolCategory.DEVELOPMENT,
+)
+def factory():
+    return _VersionTool
+""",
+        encoding="utf-8",
+    )
+
+
+def test_forkserver_preloads_plugins_once_and_reloads_on_change(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """N forkserver calls load each plugin once in the template and pick up plugin edits."""
+    runtime_paths, _ = _forkserver_runtime(tmp_path)
+    plugin_dir = tmp_path / "counting_plugin"
+    import_log = tmp_path / "imports.log"
+    _write_counting_plugin(plugin_dir, name="counting-plugin", import_log=import_log, version="v1")
+    config = Config(plugins=[PluginEntryConfig(path=str(plugin_dir), enabled=True)])
+
+    manager = _SandboxForkserver()
+    monkeypatch.setattr(sandbox_forkserver_module, "get_sandbox_forkserver", lambda: manager)
+    runner_pid = os.getpid()
+    try:
+        for _ in range(3):
+            response = sandbox_runner_module._execute_request_subprocess_sync(
+                execute_call(
+                    runtime_paths,
+                    config,
+                    tool_name="counting-plugin_tool",
+                    function_name="get_version",
+                    args=[],
+                    kwargs={},
+                ),
+            )
+            assert response.ok is True, response.error
+            assert response.result == "v1"
+
+        non_runner_v1 = [
+            line
+            for line in import_log.read_text(encoding="utf-8").splitlines()
+            if not line.startswith(f"{runner_pid}:")
+        ]
+        assert len(non_runner_v1) == 1, non_runner_v1
+
+        # Edit only the helper module imported by tools.py to verify full plugin-tree invalidation.
+        (plugin_dir / "helper.py").write_text('VERSION = "v2"\n', encoding="utf-8")
+
+        for _ in range(2):
+            response = sandbox_runner_module._execute_request_subprocess_sync(
+                execute_call(
+                    runtime_paths,
+                    config,
+                    tool_name="counting-plugin_tool",
+                    function_name="get_version",
+                    args=[],
+                    kwargs={},
+                ),
+            )
+            assert response.ok is True, response.error
+            assert response.result == "v2"
+
+        non_runner_all = [
+            line
+            for line in import_log.read_text(encoding="utf-8").splitlines()
+            if not line.startswith(f"{runner_pid}:")
+        ]
+        assert len(non_runner_all) == 2, non_runner_all
+        assert non_runner_all[0].endswith(":v1")
+        assert non_runner_all[1].endswith(":v2")
+    finally:
+        manager.shutdown()
+
+
+def test_forkserver_thread_spawning_plugin_falls_back_safely(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A plugin that starts a thread at import must not fork a multi-threaded template."""
+    runtime_paths, _ = _forkserver_runtime(tmp_path)
+    plugin_dir = tmp_path / "threaded_plugin"
+    import_log = tmp_path / "threaded_imports.log"
+    _write_counting_plugin(
+        plugin_dir,
+        name="threaded-plugin",
+        import_log=import_log,
+        version="threaded-v1",
+        spawn_thread=True,
+    )
+    config = Config(plugins=[PluginEntryConfig(path=str(plugin_dir), enabled=True)])
+
+    preload_failures = _capture_log_events(
+        monkeypatch,
+        sandbox_forkserver_module.logger,
+        "warning",
+        "sandbox_forkserver_plugin_preload_failed",
+    )
+    manager = _SandboxForkserver()
+    monkeypatch.setattr(sandbox_forkserver_module, "get_sandbox_forkserver", lambda: manager)
+    try:
+        for _ in range(2):
+            response = sandbox_runner_module._execute_request_subprocess_sync(
+                execute_call(
+                    runtime_paths,
+                    config,
+                    tool_name="threaded-plugin_tool",
+                    function_name="get_version",
+                    args=[],
+                    kwargs={},
+                ),
+            )
+            assert response.ok is True, response.error
+            assert response.result == "threaded-v1"
+        assert len(preload_failures) == 1
+        assert len(manager._templates) == 1
+        template = next(iter(manager._templates.values()))
+        assert template.process.poll() is None
+    finally:
+        manager.shutdown()

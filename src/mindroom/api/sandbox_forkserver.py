@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 TEMPLATE_ARG = "--sandbox-forkserver-template"
+PRELOAD_FILE_ENV = "MINDROOM_SANDBOX_FORKSERVER_PRELOAD_FILE"
 
 _TEMPLATE_LISTEN_BACKLOG = 64
 _TEMPLATE_ACCEPT_POLL_SECONDS = 1.0
@@ -78,8 +79,13 @@ def forkserver_supported() -> bool:
     return hasattr(os, "fork") and hasattr(socket, "AF_UNIX")
 
 
-def _template_fingerprint(python_executable: str, template_env: Mapping[str, str] | None) -> str:
-    """Fingerprint the interpreter and base env that bake the template's import graph.
+def _template_fingerprint(
+    python_executable: str,
+    template_env: Mapping[str, str] | None,
+    *,
+    preload_fingerprint: str | None = None,
+) -> str:
+    """Fingerprint the interpreter, base env, and preloaded plugins that bake the template's import graph.
 
     The interpreter stat stamp changes when a worker venv is rebuilt in place,
     so a stale template is recycled even when the env values are unchanged.
@@ -90,7 +96,7 @@ def _template_fingerprint(python_executable: str, template_env: Mapping[str, str
     except OSError:
         interpreter_stamp = "missing"
     env_items = sorted(template_env.items()) if template_env is not None else None
-    payload = json.dumps([python_executable, interpreter_stamp, env_items])
+    payload = json.dumps([python_executable, interpreter_stamp, env_items, preload_fingerprint])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -213,6 +219,26 @@ class _SandboxForkserver:
         self._key_locks: dict[str, threading.Lock] = {}
         self._templates: dict[str, _Template] = {}
         self._failed_fingerprints: dict[str, tuple[str, float]] = {}
+        self._failed_preload_fingerprints: dict[str, float] = {}
+
+    def warm(
+        self,
+        *,
+        python_executable: str | None,
+        template_env: dict[str, str] | None,
+        startup_timeout_seconds: float,
+        preload_spec: Mapping[str, object] | None = None,
+        preload_fingerprint: str | None = None,
+    ) -> None:
+        """Start and wait for one warm template ahead of the first request."""
+        now = time.monotonic()
+        self._ensure_ready_template(
+            key=python_executable or sys.executable,
+            template_env=template_env,
+            preload_spec=preload_spec,
+            preload_fingerprint=preload_fingerprint,
+            startup_deadline=now + startup_timeout_seconds,
+        )
 
     def execute(
         self,
@@ -226,6 +252,8 @@ class _SandboxForkserver:
         startup_timeout_seconds: float,
         bind_stop: Callable[[Callable[[], None]], None],
         on_progress: Callable[[str], None],
+        preload_spec: Mapping[str, object] | None = None,
+        preload_fingerprint: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Execute one prepared envelope in a fresh fork of the warm template.
 
@@ -237,21 +265,13 @@ class _SandboxForkserver:
         deadline = None if timeout_seconds is None else now + timeout_seconds
         startup_deadline = deadline if deadline is not None else now + startup_timeout_seconds
         key = python_executable or sys.executable
-        fingerprint = _template_fingerprint(key, template_env)
-        key_lock = self._key_lock(key)
-        remaining = startup_deadline - time.monotonic()
-        if remaining <= 0 or not key_lock.acquire(timeout=remaining):
-            msg = "Timed out waiting for the sandbox forkserver template."
-            raise ForkserverTimeoutError(msg)
-        try:
-            template = self._ready_template(
-                key=key,
-                fingerprint=fingerprint,
-                template_env=template_env,
-                deadline=startup_deadline,
-            )
-        finally:
-            key_lock.release()
+        template = self._ensure_ready_template(
+            key=key,
+            template_env=template_env,
+            preload_spec=preload_spec,
+            preload_fingerprint=preload_fingerprint,
+            startup_deadline=startup_deadline,
+        )
         template_ready_at = time.monotonic()
         completed = self._request(
             key,
@@ -273,12 +293,55 @@ class _SandboxForkserver:
         )
         return completed
 
+    def _ensure_ready_template(
+        self,
+        *,
+        key: str,
+        template_env: dict[str, str] | None,
+        preload_spec: Mapping[str, object] | None,
+        preload_fingerprint: str | None,
+        startup_deadline: float,
+    ) -> _Template:
+        key_lock = self._key_lock(key)
+        remaining = startup_deadline - time.monotonic()
+        if remaining <= 0 or not key_lock.acquire(timeout=remaining):
+            msg = "Timed out waiting for the sandbox forkserver template."
+            raise ForkserverTimeoutError(msg)
+        try:
+            effective_spec, effective_preload_fp = self._resolve_preload(preload_spec, preload_fingerprint)
+            fingerprint = _template_fingerprint(key, template_env, preload_fingerprint=effective_preload_fp)
+            return self._ready_template(
+                key=key,
+                fingerprint=fingerprint,
+                template_env=template_env,
+                preload_spec=effective_spec,
+                preload_fingerprint=effective_preload_fp,
+                deadline=startup_deadline,
+            )
+        finally:
+            key_lock.release()
+
+    def _resolve_preload(
+        self,
+        preload_spec: Mapping[str, object] | None,
+        preload_fingerprint: str | None,
+    ) -> tuple[Mapping[str, object] | None, str | None]:
+        if preload_spec is None or preload_fingerprint is None:
+            return None, None
+        failed_at = self._failed_preload_fingerprints.get(preload_fingerprint)
+        if failed_at is not None:
+            if time.monotonic() - failed_at < self._startup_failure_cooldown_seconds:
+                return None, None
+            self._failed_preload_fingerprints.pop(preload_fingerprint, None)
+        return preload_spec, preload_fingerprint
+
     def shutdown(self) -> None:
         """Terminate all template processes and clear cached state."""
         with self._lock:
             templates = list(self._templates.values())
             self._templates.clear()
             self._failed_fingerprints.clear()
+            self._failed_preload_fingerprints.clear()
         for template in templates:
             _terminate_template(template)
 
@@ -292,6 +355,8 @@ class _SandboxForkserver:
         key: str,
         fingerprint: str,
         template_env: dict[str, str] | None,
+        preload_spec: Mapping[str, object] | None,
+        preload_fingerprint: str | None,
         deadline: float,
     ) -> _Template:
         template = self._templates.get(key)
@@ -312,7 +377,12 @@ class _SandboxForkserver:
             self._discard(key, template)
             template = None
         if template is None:
-            template = self._spawn_template(key=key, fingerprint=fingerprint, template_env=template_env)
+            template = self._spawn_template(
+                key=key,
+                fingerprint=fingerprint,
+                template_env=template_env,
+                preload_spec=preload_spec,
+            )
             with self._lock:
                 self._templates[key] = template
         try:
@@ -322,8 +392,12 @@ class _SandboxForkserver:
                 if self._templates.get(key) is template:
                     self._templates.pop(key)
             shutil.rmtree(template.runtime_dir, ignore_errors=True)
-            self._failed_fingerprints[fingerprint] = (str(exc), time.monotonic())
-            logger.warning("sandbox_forkserver_template_startup_failed", error=str(exc))
+            if preload_fingerprint is not None:
+                self._failed_preload_fingerprints[preload_fingerprint] = time.monotonic()
+                logger.warning("sandbox_forkserver_plugin_preload_failed", error=str(exc))
+            else:
+                self._failed_fingerprints[fingerprint] = (str(exc), time.monotonic())
+                logger.warning("sandbox_forkserver_template_startup_failed", error=str(exc))
             raise
         return template
 
@@ -339,10 +413,17 @@ class _SandboxForkserver:
         key: str,
         fingerprint: str,
         template_env: dict[str, str] | None,
+        preload_spec: Mapping[str, object] | None,
     ) -> _Template:
         runtime_dir = Path(tempfile.mkdtemp(prefix="mindroom-fs-"))
         socket_path = str(runtime_dir / "template.sock")
         stderr_path = runtime_dir / "template.err"
+        spawn_env = template_env
+        if preload_spec is not None:
+            preload_path = runtime_dir / "preload.json"
+            preload_path.write_text(json.dumps(dict(preload_spec), sort_keys=True), encoding="utf-8")
+            spawn_env = dict(os.environ if template_env is None else template_env)
+            spawn_env[PRELOAD_FILE_ENV] = str(preload_path)
         logger.info("sandbox_forkserver_template_spawning", python_executable=key)
         try:
             with stderr_path.open("wb") as stderr_file:
@@ -351,7 +432,7 @@ class _SandboxForkserver:
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.DEVNULL,
                     stderr=stderr_file,
-                    env=template_env,
+                    env=spawn_env,
                 )
         except OSError as exc:
             shutil.rmtree(runtime_dir, ignore_errors=True)
@@ -391,6 +472,15 @@ class _SandboxForkserver:
                 time.sleep(_READY_PROBE_INTERVAL_SECONDS)
             else:
                 template.ready = True
+                timing_path = Path(template.socket_path).with_suffix(".timing.json")
+                with suppress(OSError, ValueError):
+                    preload_timing = json.loads(timing_path.read_text(encoding="utf-8"))
+                    if isinstance(preload_timing, dict):
+                        logger.debug(
+                            "sandbox_forkserver_template_preload_timing",
+                            python_executable=key,
+                            **preload_timing,
+                        )
                 logger.info(
                     "sandbox_forkserver_template_ready",
                     python_executable=key,
