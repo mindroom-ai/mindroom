@@ -680,13 +680,14 @@ class ScriptRunManager:
         *,
         include_finished: bool = True,
     ) -> builtins.list[ScriptRunRecord]:
-        """List only runs owned by the current requester and agent."""
-        return await asyncio.to_thread(
+        """List only the plain scripts owned by the current requester and agent; a workflow's attempts are its run's."""
+        runs = await asyncio.to_thread(
             self.store.list_runs,
             agent_name=context.agent_name,
             owner_user_id=context.requester_id,
             include_finished=include_finished,
         )
+        return [run for run in runs if run.workflow_run_id is None]
 
     async def reconcile_durable(
         self,
@@ -868,7 +869,9 @@ class ScriptRunManager:
             run = await asyncio.to_thread(self.store.get_run, run_id)
         except ScriptRunNotFoundError:
             raise ScriptRunManagerError(not_found) from None
-        if run.agent_name != context.agent_name or run.owner_user_id != context.requester_id:
+        mine = run.agent_name == context.agent_name and run.owner_user_id == context.requester_id
+        # A workflow's attempt is no script of its owner's: only its run starts and stops it.
+        if not mine or run.workflow_run_id is not None:
             raise ScriptRunManagerError(not_found)
         return run
 

@@ -21,7 +21,7 @@ from mindroom.api.script_gateway import serve_listener
 from mindroom.api.workflow_gateway import bind_workflow_engine
 from mindroom.orchestration import tool_job_runtime as coordinator_module
 from mindroom.script_runs import manager as manager_module
-from mindroom.script_runs.manager import ScriptRunManager
+from mindroom.script_runs.manager import ScriptRunManager, ScriptRunManagerError
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.script_runs.reasons import MAX_RUNTIME_EXCEEDED, RUNTIME_RESTARTED
 from mindroom.script_runs.worker_client import ScriptWorkerClient
@@ -315,6 +315,27 @@ def main(args):
         time.sleep(600)
     return "done"
 """
+
+
+@pytest.mark.asyncio
+async def test_the_plain_script_controls_neither_list_nor_stop_a_workflow_attempt(
+    local_stack: LocalWorkflowStack,
+    tmp_path: Path,
+) -> None:
+    """`list_scripts`, `get_script` and `cancel_script` are for plain scripts: an attempt answers to its run alone."""
+    marker = tmp_path / "slept"
+    run = await local_stack.start(_SLEEP_ONCE, args={"marker": str(marker)})
+    await local_stack.until(marker.exists)
+    attempt, context = local_stack.attempt.run_id, local_stack.context
+    not_found = f"Background script '{attempt}' was not found."
+
+    assert await local_stack.scripts.list(context) == []
+    with pytest.raises(ScriptRunManagerError, match=not_found):
+        await local_stack.scripts.status(context, run_id=attempt)
+    with pytest.raises(ScriptRunManagerError, match=not_found):
+        await local_stack.scripts.cancel(context, run_id=attempt)
+    assert local_stack.attempt.cancel_requested_at is None
+    assert local_stack.store.get_run(run.run_id).state is WorkflowRunState.RUNNING
 
 
 @pytest.mark.asyncio
