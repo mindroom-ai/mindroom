@@ -43,7 +43,6 @@ async def test_eviction_never_evicts_a_target_holding_an_active_lock() -> None:
     coordinator = ResponseLifecycleCoordinator()
     targets = _fill_lock_table(coordinator)
     protected_lock = coordinator._get_or_create_queued_signal(targets[0]).lock
-    coordinator._get_or_create_queued_signal(targets[0]).begin_response_turn()
     await protected_lock.acquire()
     try:
         coordinator._get_or_create_queued_signal(_target(_LOCK_TABLE_CAP))
@@ -53,7 +52,6 @@ async def test_eviction_never_evicts_a_target_holding_an_active_lock() -> None:
         assert targets[1].lifecycle_key not in coordinator._thread_queued_signals
     finally:
         protected_lock.release()
-        coordinator._get_or_create_queued_signal(targets[0]).finish_response_turn()
 
 
 @pytest.mark.asyncio
