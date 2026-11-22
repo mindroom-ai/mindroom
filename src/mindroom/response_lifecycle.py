@@ -695,6 +695,10 @@ class ResponseLifecycleCoordinator:
         )
         return lifecycle_lock, queued_signal, notice
 
+    @staticmethod
+    async def _acquire_response_turn_lock(lock: asyncio.Lock, reservation: ResponseLifecycleReservation | None) -> None:
+        await (reservation.wait_until_acquired() if reservation is not None else lock.acquire())
+
     def _consume_response_turn_notice(
         self,
         *,
@@ -745,11 +749,10 @@ class ResponseLifecycleCoordinator:
                         await stack.enter_async_context(admit())
                     if pipeline_timing is not None:
                         pipeline_timing.mark("lock_wait_start")
+                    await self._acquire_response_turn_lock(lock, reservation)
                     if reservation is not None:
-                        await reservation.wait_until_acquired()
                         stack.push_async_callback(reservation.release)
                     else:
-                        await lock.acquire()
                         stack.callback(lock.release)
                     if wait_for_approval_release is not None and key in self._approval_holds.values():
                         continue
