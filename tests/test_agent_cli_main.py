@@ -339,12 +339,13 @@ def test_workers_run_sends_one_shell_call_that_names_the_worker(capsys, monkeypa
 
     [call] = sent
     assert (call["operation"], call["toolkit"], call["function"]) == ("tools.call", "shell", "run_shell_command")
-    # `--tail` is accepted and sent nowhere: the whole output is streamed.
+    # `--tail` stays an argument of the call, so approval, hooks and audit see the call they saw before streaming.
     assert call["arguments"] == {
         "args": ["bash", "e2e/shard.sh", "--timeout", "3"],
         "worker": "e2e-3",
         "resource_profile": "large",
         "timeout": 900,
+        "tail": 20,
     }
     assert call["stream"] is True
     output = capsys.readouterr()

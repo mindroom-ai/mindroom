@@ -62,6 +62,54 @@ def test_real_http_client_and_redirect_fence(monkeypatch: pytest.MonkeyPatch, re
     assert seen == [("/api/agent-cli/operations", "Bearer private-capability", payload)]
 
 
+def test_stdin_chunks_share_one_connection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A command's stdin is many small requests, so they go over one connection, also after the server closed it."""
+    seen: list[tuple[tuple[str, int], str, str | None, dict[str, object]]] = []
+    close_after = [2]
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self) -> None:
+            chunk = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            seen.append((self.client_address, self.path, self.headers.get("Authorization"), chunk))
+            body = json.dumps({"open": not chunk["eof"]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            # As a server does with a connection that stayed idle: the next chunk finds it closed.
+            self.close_connection = len(seen) == close_after[0]
+
+        def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - stdlib override
+            del format, args
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_URL", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("MINDROOM_AGENT_CLI_TOKEN", "private-capability")
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9")
+    call_id = str(uuid4())
+    client = AgentCliClient()
+    try:
+        answers = [client.stdin(call_id, seq, b"hi", eof=False) for seq in range(2)]
+        # The connection the server closed is replaced once the chunk that found it closed is sent again.
+        with pytest.raises(AgentCliUnavailableError):
+            client.stdin(call_id, 2, b"", eof=True)
+        answers.append(client.stdin(call_id, 2, b"", eof=True))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert answers == [{"open": True}, {"open": True}, {"open": False}]
+    assert {(path, grant) for _, path, grant, _ in seen} == {
+        (f"/api/agent-cli/calls/{call_id}/stdin", "Bearer private-capability"),
+    }
+    assert [chunk["seq"] for *_, chunk in seen] == [0, 1, 2]
+    assert seen[0][0] == seen[1][0] != seen[2][0]
+
+
 @pytest.mark.parametrize("status", [200, 409])
 def test_workers_run_handles_a_truncated_chunked_stream_without_resubmitting(
     monkeypatch: pytest.MonkeyPatch,

@@ -250,6 +250,77 @@ async def test_a_cancel_after_the_reader_left_still_waits_for_the_call_to_end(tm
 
 
 @pytest.mark.asyncio
+async def test_a_stream_that_was_asked_for_but_never_read_does_not_keep_its_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a relay that started counts as the call's reader; until then the call is cancelled as one nobody reads."""
+    monkeypatch.setattr("mindroom.agent_cli.turn._STREAM_ATTACH_SECONDS", 0.3)
+    outer_entered = asyncio.Event()
+    release_outer = asyncio.Event()
+
+    async def run_shell_command(args: str) -> str:
+        if args == "outer":
+            outer_entered.set()
+            await release_outer.wait()
+            return "outer done"
+        await asyncio.Event().wait()
+        return args
+
+    owner, token = await _make_owner(tmp_path, run_shell_command)
+    headers = {"Authorization": f"Bearer {token}", AGENT_CLI_WINDOW_HEADER: "outer-1"}
+    try:
+        async with response_cli_lifetime():
+            await capture_bash_batch(owner, ("outer-1", {"command": "outer"}))
+            bash_task = asyncio.create_task(
+                owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "outer"}, "outer-1"),
+            )
+            async with (
+                asyncio.timeout(SETTLE_TIMEOUT_SECONDS),
+                httpx.AsyncClient(transport=httpx.ASGITransport(app=_make_app(owner)), base_url="http://test") as http,
+            ):
+                await outer_entered.wait()
+                call_id = str(uuid4())
+                operation = {
+                    "operation": "tools.call",
+                    "call_id": call_id,
+                    "toolkit": "shell",
+                    "function": "run_shell_command",
+                    "arguments": {"args": "long"},
+                    "stream": True,
+                }
+                assert (
+                    await http.post("/api/agent-cli/operations", headers=headers, json=operation)
+                ).status_code == 200
+                unread = owner.stream_call(call_id)
+                receipt = (await http.get(f"/api/agent-cli/calls/{call_id}?wait=10", headers=headers)).json()
+                assert receipt["status"] == "cancelled"
+                await unread.aclose()
+            release_outer.set()
+            await bash_task
+    finally:
+        await owner.close()
+
+
+def test_a_frame_for_a_loop_that_stopped_is_dropped() -> None:
+    """The worker call's thread does not wait for ever to hand a frame to an event loop that no longer runs."""
+    loop = asyncio.new_event_loop()
+    serving = threading.Thread(target=loop.run_forever, daemon=True)
+    serving.start()
+    stream = runtime_context.CallOutputStream(loop, queued_frames=1)
+    stream.put({"t": "out"})
+    blocked = threading.Thread(target=stream.put, args=({"t": "out"},), daemon=True)
+    blocked.start()
+    blocked.join(0.2)
+    assert blocked.is_alive()
+    loop.call_soon_threadsafe(loop.stop)
+    serving.join(SETTLE_TIMEOUT_SECONDS)
+    blocked.join(5)
+    assert not blocked.is_alive()
+    loop.close()
+
+
+@pytest.mark.asyncio
 async def test_cancel_before_dispatch_marks_call_terminal_cancelled_without_running(tmp_path: Path) -> None:
     """A cancel arriving while the call is still queued stops it before dispatch and settles it."""
     outer_entered = asyncio.Event()

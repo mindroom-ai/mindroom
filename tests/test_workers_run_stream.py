@@ -13,13 +13,14 @@ import socket
 import sys
 import time
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import httpx
 import pytest
 import uvicorn
+import uvloop
 from fastapi import FastAPI
 
 from mindroom.agent_cli import turn
@@ -35,6 +36,8 @@ from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.script_runs.launch_contract import RUN_ID_ENV
+from mindroom.shell import execution
+from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.agno_toolkits import toolkit_function
 from mindroom.tool_system.tool_access import ToolKey
 from mindroom.workers.runtime import reset_primary_worker_manager
@@ -55,6 +58,14 @@ _WINDOW = "outer-1"
 _CLI = "import sys; from mindroom.agent_cli.main import main; raise SystemExit(main(sys.argv[1:]))"
 _RUNNER_MODES = pytest.mark.parametrize("mode", ["forkserver", "subprocess"])
 # What the shell tool answers a model today for `echo OUT; echo ERR >&2; exit 7`.
+_CANNOT_START = pytest.mark.parametrize(
+    ("program", "exit_code", "said"),
+    [
+        ("/missing-program-xyz", 127, "/missing-program-xyz: No such file or directory\n"),
+        ("missing-program-xyz", 127, "missing-program-xyz: command not found\n"),
+        ("/etc/passwd", 126, "/etc/passwd: Permission denied\n"),
+    ],
+)
 _MODEL_RESULT = "Exit code 7\nOutput:\nOUT\nStderr:\nERR"
 
 
@@ -392,14 +403,7 @@ async def test_sigterm_to_the_cli_stops_the_command_and_says_so(tmp_path: Path, 
         await _until(lambda: _running_calls(stack.owner) == 0, what="the call kept its slot")
 
 
-@pytest.mark.parametrize(
-    ("program", "exit_code", "said"),
-    [
-        ("/missing-program-xyz", 127, "/missing-program-xyz: No such file or directory\n"),
-        ("missing-program-xyz", 127, "missing-program-xyz: command not found\n"),
-        ("/etc/passwd", 126, "/etc/passwd: Permission denied\n"),
-    ],
-)
+@_CANNOT_START
 async def test_a_program_that_cannot_start_exits_as_a_shell_reports_it_on_stderr(
     tmp_path: Path,
     program: str,
@@ -504,3 +508,171 @@ async def test_a_call_that_does_not_stream_answers_as_it_did(tmp_path: Path, mod
         ] == "[Showing the last 10 of 150 lines. Pass a larger tail, or narrow the command.]\n" + "".join(
             f"{number}\n" for number in range(141, 151)
         ).rstrip("\n")
+
+
+@_CANNOT_START
+def test_a_program_that_cannot_start_exits_as_a_shell_reports_it_on_the_runners_event_loop(
+    tmp_path: Path,
+    program: str,
+    exit_code: int,
+    said: str,
+) -> None:
+    """Sandbox runners serve on uvloop, whose spawn errors do not name the program that could not start."""
+
+    async def run() -> tuple[int | None, bytes, bytes]:
+        async with _stack(tmp_path) as stack:
+            return await stack.run("--", program)
+
+    with asyncio.Runner(loop_factory=uvloop.new_event_loop) as runner:
+        assert runner.run(run()) == (exit_code, b"", said.encode())
+
+
+def _background_ticks(child: Path) -> tuple[str, ...]:
+    """Return a command that ends at once and leaves a process behind that writes to its stdout for a minute."""
+    return ("bash", "-c", f"(echo $BASHPID > {child}; for i in $(seq 600); do echo tick; sleep .1; done) &")
+
+
+async def test_the_time_limit_covers_what_the_command_left_running(tmp_path: Path) -> None:
+    """A command whose leader ended still runs while a process it started writes: its time limit stops that too."""
+    child = tmp_path / "child"
+    async with _stack(tmp_path) as stack:
+        started = time.monotonic()
+        code, stdout, stderr = await stack.run("--timeout", "1", "--", *_background_ticks(child))
+        assert code == 124
+        assert time.monotonic() - started < 10
+        assert stdout.startswith(b"tick\n")
+        assert stderr == b"mindroom-agent: stopped after 1s\n"
+        assert not _alive(await _pid(child))
+
+
+async def test_a_cancel_stops_what_the_command_left_running_before_it_says_so(tmp_path: Path) -> None:
+    """The stop a cancel reports covers the whole process group, also once its leader has ended."""
+    child = tmp_path / "child"
+    async with _stack(tmp_path) as stack:
+        process = await stack.spawn("--", *_background_ticks(child))
+        assert process.stdout is not None
+        assert process.stderr is not None
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            assert await process.stdout.readline() == b"tick\n"
+            pid = await _pid(child)
+            process.send_signal(signal.SIGTERM)
+            assert await process.wait() == 128 + signal.SIGTERM
+            assert (
+                await process.stderr.read()
+                == b"mindroom-agent: cancelled by SIGTERM; stopped the command in worker w\n"
+            )
+        assert not _alive(pid)
+
+
+async def test_a_reader_paused_past_the_calls_time_budget_still_gets_its_output_and_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Time the primary waits for a slow reader is not time it waited for the runner, so the call is not given up."""
+    budgeted = sandbox_proxy.worker_proxy_client_config
+    monkeypatch.setattr(
+        sandbox_proxy,
+        "worker_proxy_client_config",
+        lambda *args, **kwargs: replace(budgeted(*args, **kwargs), proxy_timeout_seconds=1.0),
+    )
+    async with _stack(tmp_path) as stack:
+        process = await stack.spawn("--timeout", "2", "--", "yes")
+        assert process.stdout is not None
+        assert process.stderr is not None
+        await _until(lambda: _stream_frames(stack.owner) is not None, what="the call never streamed")
+        # Nothing reads the CLI's stdout until the call's budget and the command's time limit have both passed.
+        await asyncio.sleep(3)
+        async with asyncio.timeout(4 * SETTLE_TIMEOUT_SECONDS):
+            stdout, stderr = await process.communicate()
+        assert process.returncode == 124
+        assert stdout
+        assert not stdout.replace(b"y\n", b"")
+        assert stderr == b"mindroom-agent: stopped after 2s\n"
+
+
+async def test_a_command_that_never_reads_stdin_holds_one_pending_chunk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chunks a command does not read are not piled up: one waits, a short time, and repeats of it wait for nothing."""
+    monkeypatch.setattr(execution, "_STDIN_WRITE_SECONDS", 1.0, raising=False)
+    chunk = base64.b64encode(bytes(32 * 1024)).decode()
+    async with _stack(tmp_path) as stack, httpx.AsyncClient(base_url=stack.url, timeout=60) as http:
+        operation = stack.submit("sleep 300", stream=True)
+        assert (await http.post("/api/agent-cli/operations", headers=stack.headers, json=operation)).status_code == 200
+        route = f"/api/agent-cli/calls/{operation['call_id']}"
+
+        async def send(seq: int) -> httpx.Response:
+            return await http.post(f"{route}/stdin", headers=stack.headers, json={"seq": seq, "b": chunk, "eof": False})
+
+        async with http.stream("GET", f"{route}/stream", headers=stack.headers) as response:
+            assert (await anext(_frames(response)))["t"] == "started"
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                seq = 0
+                while (answer := await send(seq)).status_code == 200:
+                    assert answer.json() == {"open": True}
+                    seq += 1
+                assert answer.status_code == 504
+                # The pipe and one buffer filled, and then one chunk waits: nothing more is taken.
+                assert seq <= 8
+                started = time.monotonic()
+                repeats = await asyncio.gather(*(send(seq) for _ in range(4)), send(seq + 1))
+                assert {repeat.status_code for repeat in repeats} == {504}
+                assert time.monotonic() - started < 4
+
+
+@pytest.mark.parametrize("ending", ["expired", "revoked"])
+async def test_a_stream_whose_grant_ended_sends_nothing_more(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    """A grant that expires or is revoked while its stream is open ends the stream, which stops the command."""
+    leader = tmp_path / "leader"
+    async with _stack(tmp_path) as stack, httpx.AsyncClient(base_url=stack.url, timeout=60) as http:
+        operation = stack.submit(f"echo $$ > {leader}; echo one; sleep 1; echo two; sleep 300", stream=True)
+        assert (await http.post("/api/agent-cli/operations", headers=stack.headers, json=operation)).status_code == 200
+        route = f"/api/agent-cli/calls/{operation['call_id']}"
+        async with http.stream("GET", f"{route}/stream", headers=stack.headers) as response:
+            frames = _frames(response)
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                while (await anext(frames)).get("t") != "out":
+                    pass
+                pid = await _pid(leader)
+                if ending == "revoked":
+                    stack.owner.revoke()
+                else:
+                    now_ns = time.time_ns
+                    monkeypatch.setattr(time, "time_ns", lambda: now_ns() + 10**15)
+                rest = [frame async for frame in frames]
+            assert [frame for frame in rest if frame.get("t") not in ("keepalive", "progress")] == []
+        await _until(lambda: not _alive(pid), what="the command outlived its stream")
+
+
+async def test_a_cancel_wakes_the_call_that_waits_for_its_reader(tmp_path: Path) -> None:
+    """A cancel from elsewhere reaches a command whose reader has stopped reading, and learns that it stopped."""
+    leader = tmp_path / "leader"
+    async with _stack(tmp_path) as stack, httpx.AsyncClient(base_url=stack.url, timeout=60) as http:
+        operation = stack.submit(f"echo $$ > {leader}; yes", stream=True)
+        assert (await http.post("/api/agent-cli/operations", headers=stack.headers, json=operation)).status_code == 200
+        route = f"/api/agent-cli/calls/{operation['call_id']}"
+        async with http.stream("GET", f"{route}/stream", headers=stack.headers) as response:
+            assert (await anext(_frames(response)))["t"] == "started"
+            pid = await _pid(leader)
+            await _until(lambda: _stream_frames(stack.owner).full(), what="the unread output never filled the queue")
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                cancelled = (await http.post(f"{route}/cancel", headers=stack.headers)).json()
+            assert (cancelled["status"], cancelled["cancel_outcome"]) == ("cancelled", "stopped")
+            assert not _alive(pid)
+
+
+async def test_malformed_stdin_requests_are_refused_like_the_other_routes(tmp_path: Path) -> None:
+    """A call ID that is none answers as an unknown one does, and a chunk's number is a number."""
+    async with _stack(tmp_path) as stack, httpx.AsyncClient(base_url=stack.url, timeout=60) as http:
+        chunk = {"seq": 0, "b": "", "eof": True}
+        unknown = await http.post("/api/agent-cli/calls/not-a-call/stdin", headers=stack.headers, json=chunk)
+        assert unknown.status_code == 401
+        operation = stack.submit("cat", stream=True)
+        assert (await http.post("/api/agent-cli/operations", headers=stack.headers, json=operation)).status_code == 200
+        route = f"/api/agent-cli/calls/{operation['call_id']}/stdin"
+        assert (await http.post(route, headers=stack.headers, json={**chunk, "seq": False})).status_code == 422
