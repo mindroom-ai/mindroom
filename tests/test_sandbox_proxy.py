@@ -4188,10 +4188,10 @@ def test_proxy_holds_manager_lease_through_success_bookkeeping(
     assert events == ["enter", "build", "touch", "exit"]
 
 
-def test_a_worker_call_that_succeeded_stays_unanswered_when_its_bookkeeping_fails(
+def test_a_worker_call_that_succeeded_is_not_known_to_be_unstarted_when_its_bookkeeping_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The tool ran on the worker: a failure to note the worker's use must not read as a tool that failed."""
+    """The tool ran on the worker: a failure to note the worker's use must not read as a call that never started."""
     runtime_paths = _configure_proxy_runtime(
         monkeypatch,
         proxy_url="http://sandbox-runner:8765",
@@ -4240,7 +4240,7 @@ def test_a_worker_call_that_succeeded_stays_unanswered_when_its_bookkeeping_fail
             kwargs={},
             credentials_manager=None,
         )
-    assert facts == {"unanswered": True}
+    assert facts == {"not_started": False}
 
 
 def test_proxy_holds_manager_lease_through_failure_bookkeeping(

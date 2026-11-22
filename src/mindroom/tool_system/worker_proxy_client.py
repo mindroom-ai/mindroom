@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import AbstractContextManager, nullcontext, suppress
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
@@ -481,8 +481,8 @@ def execute_worker_proxy_request(
                 if worker_handle is not None
                 else nullcontext()
             )
-            # Once sent, only the worker's own well-formed word says the call never started or how it ended.
-            report_tool_metadata(unanswered=True)
+            # Once sent, only the tool's own well-formed word says the call never started.
+            report_tool_metadata(not_started=False)
             with (
                 in_flight,
                 client.stream("POST", execute_url, json=payload, headers=headers, timeout=timeout) as response,
@@ -492,9 +492,9 @@ def execute_worker_proxy_request(
                 except httpx.HTTPStatusError as exc:
                     response.read()
                     refusal = _WorkerHttpError(exc.response)
-                    # Whatever sits between the primary and the worker may answer an error for a call that ran.
-                    if refusal.failure is not None and refusal.failure.failure_kind == "tool":
-                        report_tool_metadata(unanswered=False)
+                    # The worker's own refusal of the request; any other error may hide a call that ran.
+                    refused = refusal.failure is not None and refusal.failure.failure_kind == "tool"
+                    report_tool_metadata(not_started=refused)
                     raise refusal from exc
                 data = _read_execute_stream(response, deadline=deadline, cancellation=cancellation)
     except Exception as exc:
@@ -505,11 +505,6 @@ def execute_worker_proxy_request(
         )
         raise
 
-    with suppress(ValidationError):
-        final = ExecuteResponse.model_validate(data)
-        if not final.ok and final.failure_kind == "tool":
-            # The worker's word that the tool ended, unless it says the tool ran and only its result was lost.
-            report_tool_metadata(unanswered=bool((final.metadata or {}).get("unanswered")))
     answer = _checked_worker_answer(
         data,
         ExecuteResponse,
@@ -520,8 +515,7 @@ def execute_worker_proxy_request(
     )
     if worker_handle is not None:
         worker_manager.touch_worker(worker_handle.worker_key)
-    # Answered only once nothing after the tool's success can fail the call: a failure there is no failed tool.
-    report_tool_metadata(**(answer.metadata or {}), unanswered=False)
+    report_tool_metadata(**(answer.metadata or {}))
     return answer.result
 
 

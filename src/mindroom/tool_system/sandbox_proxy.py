@@ -30,6 +30,7 @@ from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
 from mindroom.tool_system.dedicated_threads import WORKER_PROXY_CALL_EXECUTOR
 from mindroom.tool_system.media_transport import decode_media_result, is_media_result_envelope
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
+from mindroom.tool_system.progress import report_tool_metadata
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
     WorkerProgressPump,
@@ -831,6 +832,8 @@ def _call_proxy_sync(
     runtime_paths = stand_ins.runtime_paths
     tool_name = stand_ins.tool_name
     metadata = stand_ins.tools.get(tool_name)
+    # A call for a worker that fails before it is sent never started, which a caller that stores results reads.
+    report_tool_metadata(not_started=True)
     wire_args, wire_kwargs = _worker_call_arguments(
         args,
         kwargs,

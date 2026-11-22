@@ -15,19 +15,21 @@ from typing import TYPE_CHECKING
 import pytest
 import pytest_asyncio
 
+from mindroom.approval.tool_approval import ToolApprovalDecision
 from mindroom.script_runs.models import ScriptRunState, utc_timestamp
 from mindroom.script_runs.reasons import PLUGIN_TOOLS_CHANGED, RUNTIME_RESTARTED
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.engine import SupersededAttemptError, WorkflowLimits
-from mindroom.workflow_runs.models import NodeRequest, WorkflowNodeState, WorkflowRunState
+from mindroom.workflow_runs.models import DispatchHandle, NodeRequest, WorkflowNode, WorkflowNodeState, WorkflowRunState
 from mindroom.workflow_runs.store import WorkflowRunStoreError
+from tests.test_tool_result_transform import _broken, _registry
 from tests.workflow_helpers import HeldWrite, NodeFailed, WorkflowStack, set_run, tool_args, workflow_stack
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from mindroom.workflow_runs.models import NodeReceipt, WorkflowNode
+    from mindroom.workflow_runs.models import NodeReceipt
 
 _A = tool_args("counter", "append", line="a")
 _B = tool_args("counter", "append", line="b")
@@ -66,20 +68,93 @@ async def _group(stack: WorkflowStack, key: str, members: list[str]) -> NodeRece
 
 @pytest.mark.asyncio
 async def test_resume_reuses_saved_results_and_runs_only_what_failed(stack: WorkflowStack) -> None:
-    """A finished write is not made again; the call that failed runs as its next generation."""
+    """A finished write is not made again; the call that was refused before its tool runs as its next generation."""
     assert await stack.result("@0", "tool", _A) == "appended"
-    with pytest.raises(NodeFailed):
-        await stack.result("@1", "tool", tool_args("counter", "fail_once"))
+    approved = stack.resolver.decision
+    stack.resolver.decision = ToolApprovalDecision(approved=False, reason="Not now.")
+    with pytest.raises(NodeFailed) as denied:
+        await stack.result("@1", "tool", _B)
+    assert denied.value.kind == "denied"
 
+    stack.resolver.decision = approved
     await _resume(stack)
 
     first = await stack.submit("@0", "tool", _A)
     assert (first.cached, first.state, first.result) == (True, "completed", "appended")
     assert stack.counting_tool.lines == ["a"]
-    assert await stack.result("@1", "tool", tool_args("counter", "fail_once")) == "ok"
+    assert (await stack.result("@1", "tool", _B), stack.counting_tool.lines) == ("appended", ["a", "b"])
     assert (_node(stack, "@0").generation, _node(stack, "@1").generation) == (1, 2)
     run = stack.store.get_run(stack.run_id)
     assert (run.state, run.attempt, run.error, run.finished_at) == (WorkflowRunState.RUNNING, 2, None, None)
+
+
+@pytest.mark.asyncio
+async def test_tool_that_failed_after_it_was_invoked_is_not_run_again_until_rerun_names_it(
+    stack: WorkflowStack,
+) -> None:
+    """A tool that raised may have had its effect before it did: its own failure does not make its call safe to repeat."""
+    with pytest.raises(NodeFailed) as failed:
+        await stack.result("@0", "tool", tool_args("counter", "fail_once"))
+    # The script still reads why the tool failed.
+    assert (failed.value.kind, str(failed.value).startswith("The counter failed once.")) == ("indeterminate", True)
+
+    await _resume(stack)
+    with pytest.raises(NodeFailed) as refused:
+        await stack.result("@0", "tool", tool_args("counter", "fail_once"))
+    assert (refused.value.kind, stack.counting_tool.calls) == ("indeterminate", 1)
+
+    await _resume(stack, rerun=[f"n{_node(stack, '@0').seq}"])
+    assert (await stack.result("@0", "tool", tool_args("counter", "fail_once")), stack.counting_tool.calls) == ("ok", 2)
+
+
+@pytest.mark.asyncio
+async def test_write_whose_result_a_check_withheld_is_not_made_again(stack: WorkflowStack) -> None:
+    """The tool wrote and answered, and a result-transform hook withheld the answer: the write is not repeated.
+
+    The reproducer of the second full review (Astra B1, Sol B3).
+    """
+    hooks = stack.resolver.context.hooks
+    stack.resolver.context = replace(stack.resolver.context, hooks=replace(hooks, registry=_registry(_broken)))
+    with pytest.raises(NodeFailed, match="withheld") as withheld:
+        await stack.result("@0", "tool", _A)
+    assert (withheld.value.kind, stack.counting_tool.lines) == ("indeterminate", ["a"])
+
+    stack.resolver.context = replace(stack.resolver.context, hooks=hooks)
+    await _resume(stack)
+    with pytest.raises(NodeFailed):
+        await stack.result("@0", "tool", _A)
+    assert stack.counting_tool.lines == ["a"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("dispatched", "state"), [(True, "indeterminate"), (False, "cancelled")])
+async def test_stop_without_a_job_runtime_does_not_make_a_started_agent_safe_to_run_again(
+    stack: WorkflowStack,
+    dispatched: bool,
+    state: str,
+) -> None:
+    """Nobody can read the agent's job while background jobs are off: only a job never handed over ran nothing.
+
+    The reproducer of the second full review (Astra B3).
+    """
+    left = WorkflowNode(
+        run_id=stack.run_id,
+        key="@0",
+        kind="agent",
+        lane="",
+        idx=0,
+        digest="old",
+        request={"prompt": "first"},
+        attempt=1,
+        state=WorkflowNodeState.WAITING,
+        handle=DispatchHandle("job", "a-job-nobody-can-read", dispatched),
+    )
+    stack.store.put_node(left, stack.store.get_run(stack.run_id).epoch)
+    assert stack.engine.agents() is None
+
+    await stack.engine.cancel(stack.run_id, reason="Stopped while jobs were off.")
+
+    assert _node(stack, "@0").state.value == state
 
 
 @pytest.mark.asyncio

@@ -173,8 +173,8 @@ async def test_redelivered_request_in_the_same_attempt_returns_the_same_node_and
     failed = await stack.engine.node_receipt(stack.attempt, first.id, wait=SETTLE_TIMEOUT_SECONDS)
     again = await stack.submit("@0", "tool", tool_args("counter", "fail"))
 
-    assert (failed.state, failed.error) == ("failed", {"kind": "failed", "message": "The counter failed."})
-    assert (again.id, again.state, stack.counting_tool.calls) == (first.id, "failed", 1)
+    assert (failed.state, failed.error and failed.error["kind"]) == ("indeterminate", "indeterminate")
+    assert (again.id, again.state, stack.counting_tool.calls) == (first.id, "indeterminate", 1)
 
 
 @pytest.mark.asyncio
@@ -455,7 +455,7 @@ async def test_settle_from_handle_unclaimed_call_is_safe_to_run_again(stack: Wor
         (True, ScriptCallState.INDETERMINATE, "indeterminate", WorkflowNodeState.INDETERMINATE, "indeterminate"),
         (True, ScriptCallState.FAILED, "result_too_large", WorkflowNodeState.INDETERMINATE, "indeterminate"),
         (True, ScriptCallState.FAILED, "invalid_tool_result", WorkflowNodeState.INDETERMINATE, "indeterminate"),
-        (True, ScriptCallState.FAILED, "tool_failure", WorkflowNodeState.FAILED, "failed"),
+        (True, ScriptCallState.FAILED, "tool_failure", WorkflowNodeState.INDETERMINATE, "indeterminate"),
     ],
 )
 async def test_settle_from_handle_reads_an_ended_receipt_by_whether_the_tool_was_invoked(
@@ -466,7 +466,7 @@ async def test_settle_from_handle_reads_an_ended_receipt_by_whether_the_tool_was
     node_state: WorkflowNodeState,
     node_error_kind: str,
 ) -> None:
-    """A refusal before the tool is a failure; an end the receipt cannot state after the tool ran is indeterminate."""
+    """A refusal before the tool is a failure; whatever ended the call after the tool was invoked is indeterminate."""
     node = _dispatched_node(stack)
     _claim(stack)
     if effect_started:

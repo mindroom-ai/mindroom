@@ -41,6 +41,17 @@ def parent_group(lane: str) -> str | None:
     return f"{parent_lane}@{segment.partition(':')[0]}"
 
 
+def may_have_written(started: bool | None) -> bool:
+    """Return whether work that was handed over and ended without a result may have had an effect.
+
+    The one rule of what may run again, asked by every path that ends a node: a stop, a timeout, a failure, a
+    restart. *started* says whether the node's tool was invoked, or whether its agent started a tool call, and is
+    None when no record can say. Only a record that proves the work did not start makes it safe to run again;
+    anything else ends `indeterminate` and runs again only when a resume names it in `rerun`.
+    """
+    return started is not False
+
+
 def decide(
     saved: WorkflowNode | None,
     digest: str,

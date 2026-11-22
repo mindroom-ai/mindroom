@@ -2501,9 +2501,9 @@ depends_on = ["mindroom.workflow_runs.models"]
 [[interfaces]]
 from = ["mindroom.workflow_runs.replay"]
 expose = [
-    "Decision",
     "DirtyLanes",
     "decide",
+    "may_have_written",
     "node_digest",
     "parent_group",
     "result_digest",
@@ -2545,6 +2545,7 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
     "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.replay",
 ]
 
 [[interfaces]]
@@ -6205,6 +6206,7 @@ path = "mindroom.tool_system.sandbox_proxy"
 depends_on = [
     "mindroom.tool_system.media_transport",
     "mindroom.tool_system.output_files",
+    "mindroom.tool_system.progress",
     "mindroom.tool_system.media_attachments",
     "mindroom.constants",
     "mindroom.tool_system.declarations",

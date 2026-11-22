@@ -1533,14 +1533,15 @@ async def test_get_workflow_reports_the_state_counts_failed_calls_and_nodes(stac
 
     assert status.keys() == {"run_id", "title", "status", "attempt", "counts", "usage", "waiting", "failed", "nodes"}
     assert (status["title"], status["status"], status["attempt"]) == ("Count things", "running", 1)
-    assert status["counts"] == {"completed": 1, "failed": 1}
+    assert status["counts"] == {"completed": 1, "indeterminate": 1}
     assert status["waiting"] == []
     assert status["nodes"] == []
     [failure] = status["failed"]
-    assert (failure["id"], failure["label"], failure["error"]["kind"]) == ("n2", "counter.fail", "failed")
+    # A tool that raised after it was invoked may have had its effect: its call is not one to run again unasked.
+    assert (failure["id"], failure["label"], failure["error"]["kind"]) == ("n2", "counter.fail", "indeterminate")
     assert [(node["id"], node["kind"], node["status"]) for node in everything["nodes"]] == [
         ("n1", "tool", "completed"),
-        ("n2", "tool", "failed"),
+        ("n2", "tool", "indeterminate"),
     ]
     assert [node["id"] for node in failed["nodes"]] == ["n2"]
 

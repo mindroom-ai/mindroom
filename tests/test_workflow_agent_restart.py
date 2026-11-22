@@ -263,13 +263,16 @@ async def test_agent_that_cannot_be_continued_before_any_tool_call_runs_again(st
 
 @pytest.mark.asyncio
 async def test_agent_of_a_run_that_was_cancelled_while_jobs_were_off_is_not_continued(stack: WorkflowStack) -> None:
-    """A run that ended could not stop a job it could not reach: the job ends when it would go on, and runs nothing."""
+    """A run that ended could not stop a job it could not reach: the job ends when it would go on, and runs nothing.
+
+    Nobody could read what the job's turn had done either, so its call is not one to run again unasked.
+    """
     await _working(stack, after_append=False)
     job_id = stack.node_job("@0").job_id
     stack.has_jobs = False
     await stack.engine.cancel(stack.run_id, reason="Stopped.")
     stack.has_jobs = True
-    assert (_node(stack).state, stack.node_job("@0").status) == (WorkflowNodeState.CANCELLED, "running")
+    assert (_node(stack).state, stack.node_job("@0").status) == (WorkflowNodeState.INDETERMINATE, "running")
 
     await stack.restart()
     model = stack.child_script(answer("must not be asked"))

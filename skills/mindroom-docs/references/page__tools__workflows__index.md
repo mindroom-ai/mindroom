@@ -107,7 +107,10 @@ A turn that is limited to some of its agent's tools in another way, such as a li
 A plain script of the `script` tool cannot call the `workflow` tool.
 `compact_context`, `dynamic_tools`, `slack`, and functions that stop the agent's current model step are never available to a script.
 Do writes (files, git, HTTP) through `shell()`, `tool()` or an agent, never with plain Python: those calls are saved with their results, and the Python between them is not.
-A call whose tool was started and whose end is unknown, for example because MindRoom stopped in between, ends `indeterminate` and is never run again on its own.
+A call whose tool was started and that did not return its result ends `indeterminate` and is never run again on its own.
+That holds whatever came between: the tool raised, a plugin's check withheld its result, the answer was lost on the way from a worker, or MindRoom stopped.
+The error still starts with what the tool said.
+Only a call that provably never reached its tool fails as safe to run again: a hook or an approval refused it, the shell tool refused the command before running it, a worker refused the request in its own words, or the call was never sent to its worker.
 
 ## Agents
 
@@ -143,7 +146,10 @@ A turn that fails raises `AgentError`, whose `kind` says how: `failed`, `cancell
 A turn that may not start, for example because the model name is unknown or the agent may not reply to the requester, is `refused` with the sentence `run_subagent` gives.
 `tools`, `skills` or `knowledge` without `system` is refused with `tools, skills and knowledge narrow a copy only together with system=.`
 Stopping one agent from the Sub-agents panel fails only that call with kind `cancelled`; the run goes on.
-An agent that had called a tool when it was stopped, alone or with its run, ends `indeterminate` instead, so no resume runs it again without `rerun`.
+An agent that had started a tool call ends `indeterminate` instead, however its turn ended: it failed, it ran out of its `timeout`, or it was stopped, alone or with its run.
+No resume runs it again without `rerun`.
+A turn whose record shows that it started no tool call keeps its kind and runs again on resume.
+A Stop while background jobs are off cannot read an agent's turn, so an agent whose job had started ends `indeterminate` then too.
 A Stop of the run asks all its agents to end at once and waits up to 30 seconds for them together, then reads what each agent did.
 
 While an agent's tool call waits for an approval, the agent's call shows `waiting`, and so does the run when no other call of it is working.
@@ -241,7 +247,7 @@ On a resume each item is matched by its value, not by its position, so adding, r
 Of two equal items the first and the second are told apart by their order.
 An item that is not a JSON value, such as an object of the script's own class, is matched by its position.
 The functions of `parallel` are matched by position.
-An item whose calls all completed is not run again, and one that failed is: a failed agent in a fan-out of 500 reruns that one agent.
+An item whose calls all completed is not run again, and one whose call failed before it started any tool is: such an agent in a fan-out of 500 reruns that one agent.
 What follows the fan-out in the script then runs again too, because it may depend on the item that ran again.
 
 ### Agents That Edit The Same Repository
@@ -270,7 +276,8 @@ A run that has not ended is refused with `Run <id> is still running. Cancel it f
 The next attempt runs the script from the top, and each call gets its saved result instead of running again.
 
 - A call that completed with the same arguments returns its saved result at once.
-- A call that failed or was cancelled runs again; a stopped agent that had called a tool is `indeterminate`, not cancelled.
+- A call that failed or was cancelled before its tool was started, or an agent before it started a tool call, runs again.
+  Any other call that did not complete is `indeterminate`: no write is made twice unless `rerun` names its call.
 - In each sequence of calls, the first call that runs again makes every call after it run again too, because it may have changed what they see.
   Each item of a `foreach` and each function of a `parallel` is a sequence of its own, so one item that runs again leaves the other items alone; the calls after that fan-out run again.
 - A `cached=False` call always runs again; the calls after it are reused when it returns the same result as before, compared whole and as JSON, so `1` and `1.0` differ.

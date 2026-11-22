@@ -417,6 +417,52 @@ async def test_a_stopped_agent_that_made_a_call_is_not_run_again_without_rerun(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("wrote", "lines"), [(True, ["sent"]), (False, ["sent"])])
+async def test_agent_that_failed_after_it_called_a_tool_is_not_run_again_without_rerun(
+    stack: WorkflowStack,
+    wrote: bool,
+    lines: list[str],
+) -> None:
+    """A provider error after the agent's write leaves the write made: only an agent that had called no tool reruns.
+
+    The reproducer of the second full review (Astra B5).
+    """
+    lost = [raising(ProviderError("The request failed.", provider="Synthetic"))]
+    stack.child_script(*([calls(tool_call("append", "c1", line="sent"))] if wrote else []), lost)
+    with pytest.raises(NodeFailed) as failed:
+        await stack.result("@0", "agent", _PROMPT)
+    assert failed.value.kind == ("indeterminate" if wrote else "failed")
+
+    await stack.end_attempt(ScriptRunState.FAILED)
+    await stack.resume(stack.run_id)
+    stack.child_script(calls(tool_call("append", "c2", line="sent")), answer("Recorded."))
+    with suppress(NodeFailed):
+        await stack.result("@0", "agent", _PROMPT)
+
+    assert (stack.counting_tool.lines, _node(stack).generation) == (lines, 1 if wrote else 2)
+
+
+@pytest.mark.asyncio
+async def test_agent_that_timed_out_after_it_called_a_tool_is_not_run_again_without_rerun(stack: WorkflowStack) -> None:
+    """Its time ran out after its write: the node is not `timeout`, which a resume would run again.
+
+    The reproducer of the second full review (Opus M1b).
+    """
+    stack.child_script(calls(tool_call("append", "c1", line="a")), [Await(asyncio.Event().wait), *answer("done")])
+    with pytest.raises(NodeFailed) as failed:
+        await stack.result("@0", "agent", _PROMPT, {"timeout": 1.0})
+    assert (failed.value.kind, stack.counting_tool.lines) == ("indeterminate", ["a"])
+
+    await stack.engine.cancel(stack.run_id, reason="Stopped.")
+    await stack.resume(stack.run_id)
+    stack.child_script(calls(tool_call("append", "c2", line="a")), answer("again"))
+    with pytest.raises(NodeFailed):
+        await stack.result("@0", "agent", _PROMPT, {"timeout": 30.0})
+
+    assert stack.counting_tool.lines == ["a"]
+
+
+@pytest.mark.asyncio
 async def test_a_stop_does_not_wait_forever_for_an_agent_that_does_not_end(
     stack: WorkflowStack,
     monkeypatch: pytest.MonkeyPatch,
@@ -602,13 +648,16 @@ async def test_timeout_cancels_the_child_and_waits_for_it_to_end(stack: Workflow
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("work", "kind"), [(0.2, "completed"), (2.6, "timeout")])
+@pytest.mark.parametrize(("work", "kind"), [(0.2, "completed"), (2.6, "indeterminate")])
 async def test_timeout_counts_the_work_before_and_after_an_approval_and_not_the_wait(
     gated: WorkflowStack,
     work: float,
     kind: str,
 ) -> None:
-    """The seconds are the turn's working time as a whole: a card does not hand out the full time again."""
+    """The seconds are the turn's working time as a whole: a card does not hand out the full time again.
+
+    The turn that runs out of time had made its approved call by then, so its node is not one to run again.
+    """
     cards: JobApprovalCards = gated.cards  # type: ignore[attr-defined]
     busy = Await(partial(asyncio.sleep, work))
     gated.child_script([busy, *calls(tool_call("append", "c1", line="a"))], [busy, *answer("sent")])

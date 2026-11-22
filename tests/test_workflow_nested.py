@@ -144,14 +144,14 @@ async def test_a_run_s_own_call_cannot_cancel_it_or_a_run_around_it(stack: Workf
     parent = stack.run_id
     with pytest.raises(NodeFailed) as refused:
         await asyncio.wait_for(stack.result("@0", "tool", tool_args("workflow", "cancel_workflow", run_id=parent)), 5)
-    assert (refused.value.kind, str(refused.value)) == ("failed", _OWN_RUN)
+    assert (refused.value.kind, str(refused.value).startswith(_OWN_RUN)) == ("indeterminate", True)
 
     await stack.submit("@1", "tool", tool_args("workflow", "start_workflow", source=_SOURCE))
     child = await _nested(stack, parent)
     stack.run_id = child.run_id
     with pytest.raises(NodeFailed) as refused:
         await asyncio.wait_for(stack.result("@0", "tool", tool_args("workflow", "cancel_workflow", run_id=parent)), 5)
-    assert str(refused.value) == _OWN_RUN
+    assert str(refused.value).startswith(_OWN_RUN)
 
     stack.run_id = parent
     model = stack.child_script(calls(tool_call("cancel_workflow", "c1", run_id=parent)), answer("done"))

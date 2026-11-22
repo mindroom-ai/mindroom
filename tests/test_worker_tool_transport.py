@@ -183,7 +183,7 @@ def test_worker_shell_reports_its_exit_status_to_a_caller_that_asks_for_a_struct
     with structured_tool_result() as facts:
         result = _worker_shell(tmp_path, f"echo 'Exit code 7'; exit {exit_code}")
 
-    assert facts == {"exit_code": exit_code, "unanswered": False}
+    assert facts == {"exit_code": exit_code, "not_started": False}
     assert "Exit code 7" in str(result)
     assert worker_requests[0]["structured_result"] is True
 
@@ -277,7 +277,7 @@ def _between_primary_and_worker(
     ("reply", "kind"),
     [
         (_lost, "indeterminate"),
-        (_answered(200, {"ok": False, "error": "The tool gave up.", "failure_kind": "tool"}), "failed"),
+        (_answered(200, {"ok": False, "error": "The tool gave up.", "failure_kind": "tool"}), "indeterminate"),
         (_answered(200, {"ok": False, "error": "The worker gave up.", "failure_kind": "worker"}), "indeterminate"),
         (_answered(200, {"ok": True, "result": "done", "served_by": "cache"}), "indeterminate"),
         (_answered(200, {"ok": False, "failure_kind": "tool", "error": ["not", "text"]}), "indeterminate"),
@@ -296,14 +296,14 @@ def _between_primary_and_worker(
         "intermediary-504",
     ],
 )
-async def test_workflow_call_on_a_worker_fails_as_safe_to_rerun_only_when_the_tool_said_it_ended(
+async def test_workflow_call_that_reached_its_worker_and_did_not_succeed_is_never_safe_to_rerun(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     worker_requests: list[dict[str, object]],
     reply: Callable[[httpx.Response], httpx.Response],
     kind: str,
 ) -> None:
-    """The worker ran the command; only its own well-formed answer that the tool ended lets the call run again."""
+    """The worker ran the command: no answer but its result, not even the tool's own failure, lets the call run again."""
     _between_primary_and_worker(monkeypatch, reply)
     effect = tmp_path / "effect.txt"
     with workflow_stack(tmp_path, process_env=_PROXY_ENV) as stack:
@@ -315,6 +315,56 @@ async def test_workflow_call_on_a_worker_fails_as_safe_to_rerun_only_when_the_to
 
         await stack.engine.close()
     assert (ended.value.kind, effect.read_text(), len(worker_requests)) == (kind, "ran\n", 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fails", "kind", "sent"),
+    [("before it is sent", "failed", 0), ("at its close", "indeterminate", 1)],
+)
+async def test_workflow_call_for_a_worker_is_safe_to_rerun_only_while_it_never_left(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_requests: list[dict[str, object]],
+    fails: str,
+    kind: str,
+    sent: int,
+) -> None:
+    """A call that failed before it was sent never started; one whose toolkit failed to close after the tool ran did.
+
+    The second is the reproducer of the second full review (Astra, verification of B2).
+    """
+    ran: list[str] = []
+
+    async def body(*_args: object, **_kwargs: object) -> str:
+        ran.append("the tool returned")
+        return "ok"
+
+    async def connect() -> None:
+        return None
+
+    async def close() -> None:
+        msg = "The connection did not close."
+        raise OSError(msg)
+
+    def unsent(*_args: object, **_kwargs: object) -> object:
+        msg = "No worker could be reached."
+        raise RuntimeError(msg)
+
+    toolkit = SimpleNamespace(connect=connect, close=close)
+    if fails == "at its close":
+        monkeypatch.setattr(sandbox_runner, "_resolve_entrypoint", lambda **_kwargs: (toolkit, body))
+        monkeypatch.setattr(sandbox_runner, "requires_connect", lambda offered: offered is toolkit)
+    else:
+        monkeypatch.setattr(sandbox_proxy, "_build_execute_request", unsent)
+    with workflow_stack(tmp_path, process_env=_PROXY_ENV) as stack:
+        await stack.start()
+
+        with pytest.raises(NodeFailed) as ended:
+            await stack.result("@0", "tool", tool_args("shell", "run_shell_command", args="true", timeout=30))
+
+        await stack.engine.close()
+    assert (ended.value.kind, len(ran), len(worker_requests)) == (kind, sent, sent)
 
 
 def _unsendable(_result: object) -> object:

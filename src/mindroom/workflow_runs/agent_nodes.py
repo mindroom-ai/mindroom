@@ -37,6 +37,7 @@ from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 from mindroom.workflow_runs.models import DispatchHandle, WorkflowNodeState
+from mindroom.workflow_runs.replay import may_have_written
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -260,7 +261,7 @@ async def await_child(  # noqa: C901
     wait = partial(jobs.wait, job_id, owner=owner, depth=run.depth)
     if all(job.job_id != job_id for job in jobs.retained_jobs()):
         # A job the runtime never admitted did nothing. One it has since deleted may have done anything.
-        kind = "indeterminate" if node.handle.dispatched else "interrupted"
+        kind = "indeterminate" if may_have_written(None if node.handle.dispatched else False) else "interrupted"
         return (kind, _INTERRUPTED), {}, None
     # What the turn has left of its working time, as the node's handle says: an earlier wait may have used some.
     handle, loop, timed_out, claim = node.handle, asyncio.get_running_loop(), False, None
@@ -274,7 +275,8 @@ async def await_child(  # noqa: C901
             waited = await wait(**times) if on_waiting is not None else await wait(timeout=0)
         except JobAccessError as exc:
             # A read that is denied says nothing of what the turn did, so its call is not one to run again.
-            return ("indeterminate" if handle.dispatched else "denied", str(exc)), {}, None
+            unread = may_have_written(None if handle.dispatched else False)
+            return ("indeterminate" if unread else "denied", str(exc)), {}, None
         job, claim = waited.job, waited.claim
         if left is not None and not waiting:
             left -= loop.time() - since
@@ -300,7 +302,8 @@ async def await_child(  # noqa: C901
         # Nothing was read, so nothing is this wait's to save: the outcome is the next reader's.
         await jobs.release_wait(job_id, claim)
         raise
-    if timed_out and job.status == "cancelled":
+    if timed_out and outcome[0] == "cancelled":
+        # Only a turn that had started no tool call: one that had is not run again because its time ran out.
         outcome = ("timeout", "The agent did not finish in time and was stopped.")
     return outcome, usage, claim
 
@@ -311,8 +314,8 @@ async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[Child
     The answer is the run's, whole and as the child wrote it: not the job's text, which adds a receipt. The usage is
     that of every run of the job: the ones restarts cut short, and the one it ended with. What the subagents the
     turn itself ran cost is an entry of its own, and no part of the turn's, so no sum holds it twice. A turn that
-    a restart, a configuration reload or a Stop ended is no answer: it is safe to run again while none of its runs
-    called a tool.
+    did not complete, whatever ended it, is no answer: it is safe to run again only while none of its runs started
+    a tool call (`may_have_written`).
     """
     child = delegation_child(job)
     spent = [replace(child, run_id=run_id) for run_id in job.adapter.get(SPENT_RUNS_KEY, ())]
@@ -338,19 +341,18 @@ async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[Child
         if theirs is not None or ran:
             usage[f"sub:{child.delegation_id}"] = {"cost_usd": theirs}
     stopped = record is not None and reload_stopped_child_result(child, record) is not None
-    if job.status in ("interrupted", "cancelled") or stopped:
-        # A run is saved before its first tool call starts, so a turn none of whose runs holds a call made none. A
-        # call that waited for a person's decision when the restart came had not started, and its run says so. A
-        # run that cannot be found may have made some. Only the last run of a turn that a Stop ended is none: the
-        # process lived on, so a run it never saved never reached a call.
-        made = [tool for run in records for tool in run.tools or () if tool.confirmed or not _never_started(tool)]
-        called = None in cut_short or (record is None and job.status != "cancelled") or bool(made)
-        unused = ("cancelled", text) if job.status == "cancelled" else ("interrupted", _INTERRUPTED)
-        return ("indeterminate", text) if called else unused, usage
-    if job.status == "completed":
+    if job.status == "completed" and not stopped:
         # A turn that completed without a record to read its answer from did what nobody can say.
         return ("indeterminate", _NO_ANSWER) if record is None else ("completed", record.handover_content or ""), usage
-    return (job.status, text), usage
+    # A run is saved before its first tool call starts, so a turn none of whose runs holds a call made none. A call
+    # that waited for a person's decision when the restart came had not started, and its run says so. A run that
+    # cannot be found may have made some. Only the last run of a turn whose process lived on is none: a run it
+    # never saved never reached a call.
+    made = [tool for run in records for tool in run.tools or () if tool.confirmed or not _never_started(tool)]
+    unread = None in cut_short or (record is None and job.status == "interrupted")
+    if may_have_written(None if unread else bool(made)):
+        return ("indeterminate", text), usage
+    return ((job.status, text) if job.status in ("cancelled", "failed") else ("interrupted", _INTERRUPTED)), usage
 
 
 def _spent(run: RunRecord, cost: float | None) -> dict[str, object]:

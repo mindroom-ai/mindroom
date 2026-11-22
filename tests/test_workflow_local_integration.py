@@ -146,10 +146,10 @@ async def test_real_local_script_returns_its_report(local_stack: LocalWorkflowSt
 
 
 @pytest.mark.asyncio
-async def test_real_script_fans_out_in_parallel_and_a_resume_runs_only_what_failed_and_what_follows(
+async def test_real_script_fans_out_in_parallel_and_a_resume_runs_only_what_it_names_and_what_follows(
     local_stack: LocalWorkflowStack,
 ) -> None:
-    """A real `foreach` and `parallel`: every item's call is saved in its own lane, and the failed one alone runs again."""
+    """A real `foreach` and `parallel`: every item's call is saved in its own lane, and the named one alone runs again."""
     lines = ["a", "bad", "b", "c"]
     run = await local_stack.start(_FAN_OUT, args={"lines": lines})
 
@@ -160,21 +160,30 @@ async def test_real_script_fans_out_in_parallel_and_a_resume_runs_only_what_fail
         "written": {
             "ok": ["appended"] * 3,
             "failed": [1],
-            "said": "1 of 4 calls failed: [1] ToolError(failed): The counter failed.",
+            "said": done.result["written"]["said"],
         },
         "both": ["appended", "appended"],
     }
+    # The tool raised after it was invoked, so its call may have had its effect.
+    said = "1 of 4 calls failed: [1] ToolError(indeterminate): The counter failed."
+    assert done.result["written"]["said"].startswith(said)
     assert sorted(local_stack.counting_tool.lines) == ["a", "b", "c", "x", "y"]
     _, nodes = local_stack.status(run.run_id)
     foreach_group, parallel_group = [node for node in nodes if node.kind == "group"]
     assert (foreach_group.key, len(foreach_group.members or ()), parallel_group.key) == ("@0", 4, "@1")
     assert parallel_group.members == ("/1:p0", "/1:p1")
 
+    # A bare resume runs nothing again: the finished calls are reused, and the one that may have run is not repeated.
     await local_stack.resume(run.run_id)
+    assert (await local_stack.engine.wait(run.run_id)).result == done.result
+    assert sorted(local_stack.counting_tool.lines) == ["a", "b", "c", "x", "y"]
+    [failed] = [node for node in local_stack.status(run.run_id)[1] if node.state is WorkflowNodeState.INDETERMINATE]
+
+    await local_stack.resume(run.run_id, rerun=[f"n{failed.seq}"])
     again = await local_stack.engine.wait(run.run_id)
 
-    # The three finished items are reused. The failed one ran again, so what follows the fan-out did too.
-    assert again.result == done.result
+    # The three finished items are reused. The named one ran again, so what follows the fan-out did too.
+    assert again.result["written"]["failed"] == [1]
     assert sorted(local_stack.counting_tool.lines) == ["a", "b", "c", "x", "x", "y", "y"]
     _, nodes = local_stack.status(run.run_id)
     assert sorted(node.generation for node in nodes if node.kind == "tool") == [1, 1, 1, 2, 2, 2]

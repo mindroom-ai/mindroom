@@ -60,7 +60,15 @@ from mindroom.workflow_runs.models import (
     WorkflowRunState,
 )
 from mindroom.workflow_runs.recovery import AUTO_RESUME_REASONS, NO_ACCESS
-from mindroom.workflow_runs.replay import DirtyLanes, decide, node_digest, result_digest, split_key, stale_keys
+from mindroom.workflow_runs.replay import (
+    DirtyLanes,
+    decide,
+    may_have_written,
+    node_digest,
+    result_digest,
+    split_key,
+    stale_keys,
+)
 from mindroom.workflow_runs.store import SupersededAttemptError, WorkflowRunNotFoundError, WorkflowRunStoreError
 
 if TYPE_CHECKING:
@@ -1097,7 +1105,9 @@ class WorkflowEngine:
         for a caller that holds the run's lock, a job that cannot be read now raises `AgentNotReadyError`.
         """
         assert node.handle is not None
-        runtime = cast("AgentRuntime", self.agents())
+        if (runtime := self.agents()) is None:
+            # Without a job runtime nobody can read the job, now.
+            raise AgentNotReadyError(_NO_AGENTS)
         try:
             waits = partial(self._node_waits, node, epoch) if block else None
             (kind, text), usage, claim = await await_child(run, node, runtime, on_waiting=waits)
@@ -1182,19 +1192,18 @@ class WorkflowEngine:
         if _works(runtime, job_id):
             if not stop:
                 return True
-            if runtime is None:
-                cancelled = {"kind": "cancelled", "message": _RUN_ENDED}
-                await asyncio.to_thread(partial(settle, state=WorkflowNodeState.CANCELLED, error=cancelled))
-                return False
-            await runtime.jobs.request_cancel(job_id)
+            if runtime is not None:
+                await runtime.jobs.request_cancel(job_id)
         try:
             await self._settle_agent(run, node, epoch, block=False)
         except AgentNotReadyError as exc:
             if not stop:
                 # The lock is not held while access resolves: the script's SDK asks again, and a Stop gets in.
                 raise ScriptRuntimeUnavailableError(str(exc)) from exc
-            # A Stop waits for nobody's access: the turn it may not read may have done anything.
-            state, _, error = _indeterminate(node)
+            # A Stop waits for nobody's access and for no job runtime: the turn it may not read may have done
+            # anything, unless its job was never handed over.
+            cancelled: _Outcome = WorkflowNodeState.CANCELLED, None, {"kind": "cancelled", "message": _RUN_ENDED}
+            state, _, error = _unless_proven(node, None if node.handle.dispatched else False, cancelled)
             await asyncio.to_thread(partial(settle, state=state, error=error))
         return False
 
@@ -1283,9 +1292,10 @@ class WorkflowEngine:
             # No claim proves the call never started only while the attempt's records are still there to hold one.
             try:
                 self.scripts.store.get_run(script_run_id)
-                outcome = (WorkflowNodeState.FAILED, None, _INTERRUPTED)
+                started = False
             except ScriptRunNotFoundError:
-                outcome = _indeterminate(node)
+                started = None
+            outcome = _unless_proven(node, started, (WorkflowNodeState.FAILED, None, _INTERRUPTED))
         state, result, error = outcome
         settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
         settle(state=state, result=result, error=error, dirty_after=_changed(node, outcome))
@@ -1614,12 +1624,19 @@ def _receipt(node: WorkflowNode) -> NodeReceipt:
     )
 
 
-def _indeterminate(node: WorkflowNode) -> _Outcome:
+def _indeterminate(node: WorkflowNode, said: object = None) -> _Outcome:
+    """Return the end of a call that may have run, with what its tool *said* when it failed after it was invoked."""
     message = (
         f"This call may already have run (attempt {node.attempt}). Check its effect; "
         f'to run it again call resume_workflow(run_id, rerun=["n{node.seq}"]).'
     )
+    message = f"{said}\n\n{message}" if said else message
     return WorkflowNodeState.INDETERMINATE, None, {"kind": "indeterminate", "message": message}
+
+
+def _unless_proven(node: WorkflowNode, started: bool | None, safe: _Outcome, said: object = None) -> _Outcome:
+    """Return how a node that ended without a result ends: as *safe* to run again only if its record proves that."""
+    return _indeterminate(node, said) if may_have_written(started) else safe
 
 
 def _completed_outcome(node: WorkflowNode, call: ScriptCallRecord) -> _Outcome:
@@ -1641,15 +1658,16 @@ def _call_outcome(node: WorkflowNode, call: ScriptCallRecord) -> _Outcome:
     if call.state is ScriptCallState.COMPLETED:
         return _completed_outcome(node, call)
     details = cast("dict[str, object]", call.error if isinstance(call.error, dict) else {})
-    kind = details.get("kind")
-    if call.effect_started_at is None and call.state is not ScriptCallState.FAILED:
-        # Claimed, and still waiting for hooks or approval when its attempt ended: the tool was never invoked.
-        return WorkflowNodeState.FAILED, None, _INTERRUPTED
-    if call.state is ScriptCallState.FAILED and (call.effect_started_at is None or kind == "tool_failure"):
-        refusal = "denied" if kind == "approval_denied" else "failed"
-        return WorkflowNodeState.FAILED, None, {"kind": refusal, "message": details.get("message")}
-    # The tool was invoked and the receipt holds no end it can state: orphaned, or a result it could not keep.
-    return _indeterminate(node)
+    refusal = "denied" if details.get("kind") == "approval_denied" else "failed"
+    # A failed receipt without the stamp is a refusal. Without either, the call was claimed and still waited for
+    # hooks or approval when its attempt ended.
+    failed = call.state is ScriptCallState.FAILED
+    safe = {"kind": refusal, "message": details.get("message")} if failed else _INTERRUPTED
+    # With the stamp the tool was invoked: whatever failed then, the tool, a check of its result or the way back,
+    # the call may have had its effect, unless the call's own word says it never left for its tool.
+    started = call.effect_started_at is not None and not details.get("not_started")
+    said = details.get("message") if failed else None
+    return _unless_proven(node, started, (WorkflowNodeState.FAILED, None, safe), said)
 
 
 def _run_outcome(
