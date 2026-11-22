@@ -67,6 +67,8 @@ from mindroom.api.usage_export import close_usage_export_runner
 from mindroom.api.validation_errors import validation_error_response
 from mindroom.api.workers import maintain_leased_workers
 from mindroom.api.workers import router as workers_router
+from mindroom.api.workflow_gateway import bind_workflow_engine
+from mindroom.api.workflow_gateway import router as workflow_gateway_router
 from mindroom.api.workspace_files import router as workspace_files_router
 from mindroom.call_transcripts.routes import router as call_transcripts_router
 from mindroom.config.commit import ConfigCommit
@@ -358,10 +360,12 @@ def bind_embedded_runtime(api_app: FastAPI, runtime: EmbeddedRuntime) -> None:
     ensure_app_state(api_app).embedded = runtime
     bind_agent_cli_registry(api_app, runtime.agent_cli_registry)
     bind_script_tool_broker(api_app, runtime.script_broker)
+    bind_workflow_engine(api_app, runtime.workflow_engine)
 
 
 def unbind_embedded_runtime(api_app: FastAPI) -> None:
     """Withdraw what the runtime lent, once its embedded server stopped serving."""
+    bind_workflow_engine(api_app, None)
     bind_script_tool_broker(api_app, None)
     bind_agent_cli_registry(api_app, None)
     ensure_app_state(api_app).embedded = None
@@ -534,6 +538,7 @@ app.include_router(workspace_files_router)  # Authenticates client sessions.
 app.include_router(secret_requests_router)  # Authenticates client sessions.
 app.include_router(github_requests_router)  # Authenticates client sessions.
 app.include_router(script_gateway_router)
+app.include_router(workflow_gateway_router)
 app.include_router(agent_cli_router)
 # Each report admits the user who requested its run, administrator or not.
 app.include_router(dynamic_workflows_router, dependencies=[Depends(authenticate_user)])

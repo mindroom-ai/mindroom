@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 from urllib.parse import quote
 
 import httpx
@@ -26,6 +27,7 @@ from mindroom.workers.models import WorkerHandle, worker_api_endpoint
 
 _TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
 _REQUEST_TIMEOUT_SECONDS = 15.0
+_WORKER_TOO_OLD = "This worker image is too old to run workflows. Update it."
 
 __all__ = ["ScriptWorkerClient"]
 
@@ -44,6 +46,7 @@ class ScriptWorkerClient:
         source_digest: str,
         gateway_url: str,
         max_runtime_seconds: int,
+        entry: Literal["script", "workflow"] = "script",
         state_scope_worker_key: str | None = None,
         private_agent_names: tuple[str, ...] | None = None,
         config_snapshot: dict[str, object] | None = None,
@@ -52,6 +55,7 @@ class ScriptWorkerClient:
 
         ``config_snapshot`` holds the live config fields runners resolve; workers mount no config and resolve agents only from it.
         """
+        fields: dict[str, object] = {"entry": entry} if entry == "workflow" else {}
         request = _parsed(
             SandboxScriptRunRequest,
             {
@@ -64,9 +68,19 @@ class ScriptWorkerClient:
                 "max_runtime_seconds": max_runtime_seconds,
                 "private_agent_names": private_agent_names,
                 "config_snapshot": config_snapshot,
+                # Only a workflow attempt names its entry: a worker from before workflows refuses the field it does
+                # not know, and a plain script's request stays the one that worker accepts.
+                **fields,
             },
         )
-        await self._post(worker, worker_api_endpoint(worker, "script-run"), request, SandboxScriptRunResponse)
+        await self._post(
+            worker,
+            worker_api_endpoint(worker, "script-run"),
+            request,
+            SandboxScriptRunResponse,
+            # A worker from before workflows refuses the entry field.
+            unprocessable=_WORKER_TOO_OLD if entry == "workflow" else None,
+        )
 
     async def status(
         self,
@@ -109,6 +123,8 @@ class ScriptWorkerClient:
         url: str,
         request: BaseModel,
         receipt_model: type[ReceiptT],
+        *,
+        unprocessable: str | None = None,
     ) -> ReceiptT:
         token = worker.auth_token
         if token is None:
@@ -117,10 +133,14 @@ class ScriptWorkerClient:
         try:
             async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_SECONDS, transport=self.transport) as client:
                 # The body carries the worker key, which names the requester, because access logs record URLs.
-                response = await client.post(url, headers={_TOKEN_HEADER: token}, json=request.model_dump(mode="json"))
+                # Fields the caller did not set stay off the wire.
+                body = request.model_dump(mode="json", exclude_unset=True)
+                response = await client.post(url, headers={_TOKEN_HEADER: token}, json=body)
         except httpx.HTTPError as exc:
             message = f"Worker script request failed: {exc}"
             raise ScriptWorkerError(message) from exc
+        if unprocessable is not None and response.status_code == httpx.codes.UNPROCESSABLE_ENTITY:
+            raise ScriptWorkerError(unprocessable)
         if response.status_code >= 400:
             detail = error_detail_from_response(
                 response,

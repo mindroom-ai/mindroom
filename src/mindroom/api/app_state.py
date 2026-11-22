@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from mindroom.thread_export.workspace_sync import WorkspaceThreadExportRunner
     from mindroom.worker_computer.sessions import ComputerSessionStore
     from mindroom.workers.backend import WorkerBackend
+    from mindroom.workflow_runs.engine import WorkflowEngine
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,7 @@ class EmbeddedRuntime:
     config_reload_status: Callable[[], ConfigReloadStatus]
     agent_cli_registry: TurnToolRegistry
     script_broker: ScriptToolBroker
+    workflow_engine: WorkflowEngine
     script_worker_keepalive: Callable[[WorkerBackend], None]
     # The call transcript service while `calls.transcripts.enabled` is on, the same one each time; None while off.
     call_transcripts: Callable[[], CallTranscriptService | None]

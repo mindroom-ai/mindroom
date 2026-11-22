@@ -48,6 +48,7 @@ from mindroom.orchestration.script_runtime import (
     build_script_runtime,
     optional_script_gateway_url,
 )
+from mindroom.orchestration.workflow_runtime import WorkflowRuntimeLifecycle
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError, ScriptToolBroker
 from mindroom.script_runs.manager import ScriptRunManager, ScriptRunManagerError
 from mindroom.script_runs.models import (
@@ -377,11 +378,12 @@ class _LaunchingWorkerClient(_TerminatingWorkerClient):
         source_digest: str,
         gateway_url: str,
         max_runtime_seconds: int,
+        entry: str = "script",
         state_scope_worker_key: str | None = None,
         private_agent_names: tuple[str, ...] | None = None,
         config_snapshot: dict[str, object] | None = None,
     ) -> None:
-        del run_id, source_digest, gateway_url, state_scope_worker_key, private_agent_names, config_snapshot
+        del run_id, source_digest, gateway_url, entry, state_scope_worker_key, private_agent_names, config_snapshot
         assert max_runtime_seconds > 0
 
 
@@ -1738,6 +1740,53 @@ async def test_removing_script_tool_revokes_and_cancels_running_scripts(tmp_path
         reason="Background script tool was removed by configuration reload.",
     )
     manager.reconcile_durable.assert_awaited_once_with(run_id=run.run_id, broker_revoked=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kept_tool", "revoked_run_id", "reason"),
+    [
+        ("script", "attempt-1", "Workflow tool was removed by configuration reload."),
+        ("workflow", "run-1", "Background script tool was removed by configuration reload."),
+    ],
+)
+async def test_removing_the_workflow_tool_revokes_its_attempts(
+    tmp_path: Path,
+    kept_tool: str,
+    revoked_run_id: str,
+    reason: str,
+) -> None:
+    """Each of an agent's two launch tools owns its own runs: losing one revokes those and leaves the others."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    script_run = _stored_run(store, runtime_paths)
+    attempt = store.create_run(
+        replace(
+            _run(runtime_paths, run_id="attempt-1", state=ScriptRunState.STARTING),
+            workflow_run_id="wf-" + "a" * 32,
+        ),
+    )
+    attempt = store.transition_run(attempt.run_id, state=ScriptRunState.RUNNING, worker_id="worker-1")
+    manager = _manager_stub(
+        request_revocation=MagicMock(side_effect=store.request_cancel),
+        revoke=AsyncMock(return_value=attempt),
+        reconcile_revoked_process=AsyncMock(return_value=attempt),
+        reconcile_durable=_interrupting_reconcile(store),
+    )
+
+    def config_with(*tools: str) -> Config:
+        return Config(agents={"watcher": {"display_name": "Watcher", "tools": [*tools]}}, defaults={"tools": []})
+
+    old_config = config_with("script", "workflow", "calculator")
+    runtime = _lifecycle(runtime_paths, store=store, manager=manager, config_provider=lambda: old_config)
+
+    await runtime.apply_update_plan(_plan(old_config, config_with(kept_tool, "calculator")))
+
+    manager.request_revocation.assert_called_once_with(run_id=revoked_run_id, reason=reason)
+    kept_run_id = ({script_run.run_id, attempt.run_id} - {revoked_run_id}).pop()
+    assert store.get_run(revoked_run_id).state is ScriptRunState.INTERRUPTED
+    assert store.get_run(kept_run_id).state is ScriptRunState.RUNNING
+    assert store.get_run(kept_run_id).cancel_requested_at is None
 
 
 @pytest.mark.asyncio
@@ -3612,6 +3661,39 @@ async def test_terminal_run_is_pruned_only_after_retention_and_approval_cleanup(
     assert store.get_run(run_id).state is ScriptRunState.EXITED
 
     await _prune_once(runtime, now=finished_at + timedelta(seconds=61))
+    with pytest.raises(ScriptRunNotFoundError):
+        store.get_run(run_id)
+
+
+@pytest.mark.asyncio
+async def test_stalled_workflow_maintenance_never_skips_script_pruning(tmp_path: Path) -> None:
+    """The workflow pass gets its own share of a pass, so a workflow store that hangs leaves time to prune scripts."""
+    runtime_paths = _runtime_paths(tmp_path)
+    store = ScriptRunStore(runtime_paths)
+    run_id = f"script-{'e' * 32}"
+    running = _stored_run_pinned_to_worker(store, runtime_paths, run_id=run_id)
+    store.record_process_exit(running.run_id, exit_code=0, error=None, output="", cancellation_reason="Exited.")
+    store.finalize_cleaned_run(running.run_id, state=ScriptRunState.EXITED)
+    runtime = _lifecycle(
+        runtime_paths,
+        store=store,
+        manager=_manager_stub(gateway_url="", reconcile_durable=AsyncMock()),
+        retention_seconds=0.001,
+        pass_timeout_seconds=_LOADED_HOST_PASS_TIMEOUT_SECONDS,
+    )
+    runtime.bind_api("http://primary.test/api/script-gateway")
+    stalled = asyncio.Event()
+
+    async def stall() -> None:
+        stalled.set()
+        await asyncio.Event().wait()
+
+    workflows = WorkflowRuntimeLifecycle(engine=SimpleNamespace(reconcile=stall), script_runtime=runtime)  # type: ignore[arg-type]
+    await workflows.start()
+
+    await asyncio.wait_for(runtime._run_complete_pass(), timeout=SETTLE_TIMEOUT_SECONDS)
+
+    assert stalled.is_set()
     with pytest.raises(ScriptRunNotFoundError):
         store.get_run(run_id)
 

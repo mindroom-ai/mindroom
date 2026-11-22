@@ -32,7 +32,7 @@ def script_process_authority(config: Config, agent_name: str) -> dict[str, objec
     if agent is None:
         return None
     resolved = config.resolve_agent(agent_name)
-    if "script" not in resolved.tools.tool_names:
+    if not {"script", "workflow"}.intersection(resolved.tools.tool_names):
         return None
     knowledge_paths = sorted(config.get_knowledge_base_config(base_id).path for base_id in resolved.knowledge_base_ids)
     return {

@@ -143,6 +143,7 @@ from .orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoordinator
 from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from .orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from .orchestration.turn_recovery import TurnJournalRecovery
+from .orchestration.workflow_runtime import WorkflowRuntimeLifecycle, build_workflow_runtime
 from .thread_export.workspace_sync import WorkspaceThreadExportDeps, WorkspaceThreadExportRunner
 
 if TYPE_CHECKING:
@@ -163,6 +164,7 @@ if TYPE_CHECKING:
     from .event_journal import EventJournalStore
     from .orchestration.config_updates import ConfigUpdatePlan
     from .orchestration.services import RuntimeService
+    from .workflow_runs.engine import WorkflowEngine
 logger = get_logger(__name__)
 
 
@@ -325,6 +327,7 @@ class _MultiAgentOrchestrator:
     _startup_maintenance: StartupMaintenanceController = field(init=False, repr=False)
     _rooms: RoomSetup = field(init=False, repr=False)
     _script_runtime: ScriptRuntimeLifecycle = field(init=False, repr=False)
+    _workflow_runtime: WorkflowRuntimeLifecycle = field(init=False, repr=False)
     agent_reply_memberships: AgentReplyMembershipIndex = field(
         default_factory=AgentReplyMembershipIndex,
         init=False,
@@ -452,6 +455,7 @@ class _MultiAgentOrchestrator:
             ),
             api_enabled=self.api_enabled,
         )
+        self._workflow_runtime = build_workflow_runtime(self._script_runtime)
         self._rooms = RoomSetup(
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
@@ -509,6 +513,11 @@ class _MultiAgentOrchestrator:
     def script_runtime(self) -> ScriptRuntimeLifecycle:
         """Return the process-local background-script lifecycle collaborator."""
         return self._script_runtime
+
+    @property
+    def workflow_engine(self) -> WorkflowEngine:
+        """Return the process-local workflow engine."""
+        return self._workflow_runtime.engine
 
     def active_call_identities(self) -> list[ActiveResponseIdentity]:
         """Return one identity per voice call that any bot has joined or is joining."""
@@ -646,6 +655,7 @@ class _MultiAgentOrchestrator:
         self._bind_started_runtime_support_services()
         await self._tool_job_runtime.sync()
         await self._script_runtime.start()
+        await self._workflow_runtime.start()
 
     async def _setup_startup_rooms_and_memberships(self, bots: list[AgentBot]) -> None:
         """Run startup room setup, then publish trigger delivery runtime."""
@@ -1486,6 +1496,7 @@ class _MultiAgentOrchestrator:
             config_reload_status=lambda: self.config_reload.status,
             agent_cli_registry=self.agent_cli_registry,
             script_broker=self._script_runtime.broker,
+            workflow_engine=self._workflow_runtime.engine,
             script_worker_keepalive=self._script_runtime.touch_live_workers,
             call_transcripts=self._call_transcripts_runtime.service,
             agent_call_room=self._call_transcripts_runtime.agent_call_room,
@@ -1525,6 +1536,7 @@ class _MultiAgentOrchestrator:
         # Runners borrow bots' clients, so they end before any bot stops.
         await run_shutdown_step("scheduled_tasks", self.scheduled_tasks.stop())
         await run_shutdown_step("call_transcripts", self._call_transcripts_runtime.stop())
+        await run_shutdown_step("workflow_runtime", self._workflow_runtime.shutdown())
         try:
             await run_shutdown_step("script_runtime", self._script_runtime.shutdown())
         except Exception:
@@ -1639,7 +1651,8 @@ async def _run_api_server(
     runtime_paths = orchestrator.runtime_paths
     script_runtime = orchestrator.script_runtime
     api_server = _EmbeddedApiServerContext(host=host, port=port)
-    api_main.bind_embedded_runtime(api_main.app, orchestrator.embedded_runtime())
+    embedded_runtime = orchestrator.embedded_runtime()
+    api_main.bind_embedded_runtime(api_main.app, embedded_runtime)
     # The reader picks a running bot at each lookup, so restarts and reloads never need to withdraw it.
     bind_room_members(api_main.app, orchestrator.agent_bots)
     config = uvicorn.Config(
@@ -1672,6 +1685,7 @@ async def _run_api_server(
                     broker=script_runtime.broker,
                     log_level=log_level,
                     agent_cli_registry=orchestrator.agent_cli_registry,
+                    workflow_engine=embedded_runtime.workflow_engine,
                 ),
                 serve_plugin_origins(
                     runtime_paths,
