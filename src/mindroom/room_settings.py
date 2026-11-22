@@ -284,13 +284,21 @@ async def refresh_room_settings(
     room_id: str,
     *,
     put_state: _PutState | None,
+    thread_mode_changed: Callable[[], object],
 ) -> SettingRead[RoomReplyMode]:
-    """Refresh every setting a turn uses, at once, and return what the reply mode's read found."""
-    reply_mode, _model, _thread_mode = await asyncio.gather(
+    """Refresh every setting a turn uses, at once, and return what the reply mode's read found.
+
+    ``thread_mode_changed`` is called when the read finds a thread mode the runtime did not know, a change no bot's
+    sync showed, so the caller has the room's steward republish the mode clients see.
+    """
+    known_thread_mode = resolve_room_setting(THREAD_MODE, runtime_paths, room_id)
+    reply_mode, _model, thread_mode = await asyncio.gather(
         refresh_room_setting(REPLY_MODE, client, runtime_paths, room_id, put_state=put_state),
         refresh_room_setting(MODEL, client, runtime_paths, room_id, put_state=put_state),
         refresh_room_setting(THREAD_MODE, client, runtime_paths, room_id, put_state=put_state),
     )
+    if thread_mode.ok and thread_mode.value != known_thread_mode:
+        thread_mode_changed()
     return reply_mode
 
 

@@ -521,6 +521,27 @@ async def test_an_older_override_moves_into_the_room_through_its_steward(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_a_turn_that_finds_a_changed_thread_mode_has_the_steward_republish_it(tmp_path: Path) -> None:
+    """A `thread_mode` change no sync showed is republished for clients once, when a turn's read finds it."""
+    config = _config(tmp_path)
+    homeserver = _Homeserver()
+    homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "thread_mode"] = {"value": "room"}
+    policy = _policy_for(config, "general", steward="research")
+    policy.deps.runtime.client = homeserver.client()
+    steward = SimpleNamespace(agent_name="research", client=homeserver.client(), steward_duties=Mock())
+    policy.deps.runtime.orchestrator.room_steward = lambda _room_id: steward
+
+    for _ in range(2):
+        await policy.plan_turn(
+            _room_with_members(SENDER, _entity_id(config, "general").full_id, room_id=ROOM_ID),
+            _dispatch(_context(), agent_name="general", room_id=ROOM_ID),
+            has_active_response_for_target=lambda _target: False,
+        )
+
+    steward.steward_duties.thread_mode_setting_changed.assert_called_once_with(ROOM_ID)
+
+
+@pytest.mark.asyncio
 async def test_a_sync_reread_moves_an_older_override_through_the_steward(tmp_path: Path) -> None:
     """The reread a live setting event starts also leaves the write of an older override to the room's steward."""
     runtime_paths = test_runtime_paths(tmp_path)

@@ -1354,18 +1354,42 @@ def _router_duties(state: RoomState) -> StewardDuties:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("steward", [ROUTER_AGENT_NAME, "agent1"])
 async def test_only_the_steward_republishes_a_changed_thread_mode_setting(room_state: RoomState, steward: str) -> None:
-    """Every bot sees a `thread_mode` setting change in sync; the room's steward alone publishes the mode it gives."""
+    """The room's steward publishes the mode a changed `thread_mode` setting gives, and nothing else of the room's."""
     _, _, _, events, client = room_state
     events[SETTING] = {"value": "room"}
     duties = _router_duties(room_state)
     duties.deps.runtime.orchestrator.room_steward.return_value = MagicMock(agent_name=steward)
 
-    await duties.thread_mode_setting_changed(ROOM_ID)
+    duties.thread_mode_setting_changed(ROOM_ID)
+    await asyncio.gather(*duties._room_state_publishes)
 
     if steward == ROUTER_AGENT_NAME:
-        assert events[EVENT_TYPE, ""] == {"mode": "room"}
+        assert [call.args[1:3] for call in client.room_put_state.await_args_list] == [(EVENT_TYPE, {"mode": "room"})]
+        assert [call.args[1] for call in client.room_get_state_event.await_args_list].count(SETTING[0]) == 1
     else:
         client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_thread_mode_republish_that_fails_is_retried_alone(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A republish the room did not take is retried like any room state, without the rest of the room's state."""
+    monkeypatch.setattr("mindroom.steward_duties.uniform", lambda _low, _high: 0)
+    _, _, _, events, client = room_state
+    events[SETTING] = {"value": "room"}
+    duties = _router_duties(room_state)
+    write = client.room_put_state.side_effect
+    client.room_put_state.side_effect = [nio.RoomPutStateError("Temporarily unavailable", "M_UNKNOWN")]
+
+    duties.thread_mode_setting_changed(ROOM_ID)
+    await asyncio.gather(*duties._room_state_publishes)
+    client.room_put_state.side_effect = write
+    await asyncio.wait_for(duties._room_state_retries[ROOM_ID], timeout=3)
+
+    assert events[EVENT_TYPE, ""] == {"mode": "room"}
+    assert {call.args[1] for call in client.room_put_state.await_args_list} == {EVENT_TYPE}
 
 
 def _publish_joined_rooms(duties: StewardDuties) -> asyncio.Task[None]:

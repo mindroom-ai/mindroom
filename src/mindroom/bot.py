@@ -1092,15 +1092,17 @@ class AgentBot:
         await self.orchestrator.thread_snooze.restore_room(self, room_id)
 
     async def _reread_room_setting(self, client: nio.AsyncClient, room_id: str, setting: RoomSetting[Any]) -> None:
+        if setting is THREAD_MODE and self.steward_duties.is_steward(room_id):
+            # The steward's republish is its read of the setting.
+            self.steward_duties.thread_mode_setting_changed(room_id)
+            return
         put_state = partial(room_state_response_as_steward, self.orchestrator.room_steward)
         await refresh_room_setting(setting, client, self.runtime_paths, room_id, force=True, put_state=put_state)
-        if setting is THREAD_MODE:
-            await self.steward_duties.thread_mode_setting_changed(room_id)
 
     def _on_room_state_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Take a live thread tag or room settings state event from sync; never raise into nio's callback loop.
 
-        Each bot reads a changed setting again; the room's steward then republishes a changed thread mode.
+        Each bot reads a changed setting again; the room's steward republishes a changed thread mode instead.
         """
         if "state_key" not in event.source or event.decrypted:
             return

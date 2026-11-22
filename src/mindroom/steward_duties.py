@@ -37,7 +37,7 @@ from mindroom.matrix.room_member_joins import (
 from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Coroutine
 
     import structlog
 
@@ -129,6 +129,12 @@ async def put_room_state_as_steward(
     return isinstance(response, nio.RoomPutStateResponse)
 
 
+def republish_thread_mode_as_steward(room_steward: Callable[[str], AgentBot | None], room_id: str) -> None:
+    """Have the room's steward republish the thread mode clients see, after a read found its setting changed."""
+    if (steward := room_steward(room_id)) is not None:
+        steward.steward_duties.thread_mode_setting_changed(room_id)
+
+
 async def reconcile_held_room_states(runtime: OrchestratorRuntime) -> None:
     """Reconcile the thread mode, MindRoom accounts and binding of every room a bot holds, once, through its steward."""
     bots = runtime.agent_bots.values()
@@ -211,10 +217,12 @@ class StewardDuties:
         """Publish the state of a room this bot joined or left by any path, once a sync frame carries its members."""
         self._joined_room_ids.add(room_id)
 
-    async def thread_mode_setting_changed(self, room_id: str) -> None:
-        """Republish a room's thread mode after its `thread_mode` setting changed, when this bot is its steward."""
-        if self.is_steward(room_id):
-            await self._publish_room_state(room_id)
+    def thread_mode_setting_changed(self, room_id: str) -> None:
+        """Republish the thread mode of a room this bot stewards, alone, after its `thread_mode` setting changed.
+
+        The republish reads the setting itself. It runs in the background, so no sync frame or turn waits for it.
+        """
+        self._publish_in_background(self._publish_room_state(room_id, {"mode"}))
 
     async def power_levels_event(self, room: nio.MatrixRoom, _event: nio.PowerLevelsEvent) -> None:
         """Publish a room's state after its power levels changed, which can change its steward."""
@@ -231,23 +239,22 @@ class StewardDuties:
             self._joined_room_ids.update(room_id for room_id in client.rooms if self.is_steward(room_id))
         room_ids, self._joined_room_ids = self._joined_room_ids, set()
         if room_ids:
-            task = create_background_task(
-                self._publish_rooms(room_ids),
-                name="steward_joined_room_state",
-                owner=self.deps.runtime,
-            )
-            self._room_state_publishes.add(task)
-            task.add_done_callback(self._room_state_publishes.discard)
+            self._publish_in_background(self._publish_rooms(room_ids))
+
+    def _publish_in_background(self, publish: Coroutine[Any, Any, None]) -> None:
+        task = create_background_task(publish, name="steward_joined_room_state", owner=self.deps.runtime)
+        self._room_state_publishes.add(task)
+        task.add_done_callback(self._room_state_publishes.discard)
 
     async def _publish_rooms(self, room_ids: set[str]) -> None:
         await asyncio.gather(*(self._publish_room_state(room_id) for room_id in room_ids))
 
-    async def _publish_room_state(self, room_id: str) -> None:
-        """Reconcile one held room and let transient failures retry without another trigger."""
+    async def _publish_room_state(self, room_id: str, only: set[str] | None = None) -> None:
+        """Reconcile one held room, or ``only`` some of its state, and let transient failures retry without another trigger."""
         queued = self._room_state_reruns.get(room_id)
-        failed = await self._reconcile_room_state(room_id)
-        # Supersede only the older work; concurrent failures replace the set.
-        if queued is not None and self._room_state_reruns.get(room_id) is queued:
+        failed = await self._reconcile_room_state(room_id, only)
+        # Supersede only the older work, which a publish of the whole state redid; concurrent failures replace the set.
+        if only is None and queued is not None and self._room_state_reruns.get(room_id) is queued:
             del self._room_state_reruns[room_id]
         if not failed:
             if room_id not in self._room_state_reruns and room_id not in self._room_state_retrying:
