@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -67,14 +68,18 @@ def recover_sticky_replay(
     """Return ``request`` without encrypted replay state after an OpenRouter sticky-upstream failure, else None.
 
     That failure is a rejection of the encrypted items, or a rate limit left after the transient retries, of a
-    request that replayed such items. The resend keeps the request's routing preferences. An authored ``input``
-    the body sends in place of the replay would go unchanged, so such a request is not resent.
+    request that replayed such items. The resend keeps the request's routing preferences, so a rate limit is not
+    resent when ``provider.only`` names one upstream: that upstream created the items and would be sent the whole
+    history. An authored ``input`` the body sends in place of the replay would go unchanged, so such a request is
+    not resent.
     """
     params = settings.request_params or {}
     # ``request_params.extra_body`` replaces the settings' ``extra_body`` (``responses_request_kwargs``).
-    extra_body = params.get("extra_body", settings.extra_body)
-    sticky = error.code == ENCRYPTED_REPLAY_REJECTED or isinstance(error, RateLimited)
-    if not sticky or "input" in params or "input" in (extra_body or {}):
+    extra_body = params.get("extra_body", settings.extra_body) or {}
+    routing = extra_body.get("provider", params.get("provider"))
+    only = routing.get("only") if isinstance(routing, Mapping) else None
+    rate_limited = isinstance(error, RateLimited) and not (isinstance(only, list) and len(only) == 1)
+    if not (error.code == ENCRYPTED_REPLAY_REJECTED or rate_limited) or "input" in params or "input" in extra_body:
         return None
     if not replays_encrypted_state(request_replay(wire, request)):
         return None

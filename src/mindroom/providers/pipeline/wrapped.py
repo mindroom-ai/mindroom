@@ -190,25 +190,17 @@ async def attempts(
                 return
             raise incomplete_stream_error(provider=inner.identity.provider)
         except ProviderError as error:
+            # The failure of an attempt that went without provider-encrypted replay state says so, here and to the
+            # stages around this one, and every reissue after it goes without that state too.
+            error.replay_stripped = stripped = error.replay_stripped or request.strip_encrypted_replay
             if committed or (reissue := retry(error)) is None:
                 raise
-            reissue = _keeping_replay_stripped(reissue, request, error)
         if (report := usage.settle()) is not None:
             yield _with_carried_usage(report, carried)
         if reissue.delay_seconds:
             await asyncio.sleep(reissue.delay_seconds)
         carried = add_usage(carried, usage.settled)
-        request = reissue.request
-
-
-def _keeping_replay_stripped(reissue: Retry, failed: ModelRequest, error: ProviderError) -> Retry:
-    """Return ``reissue`` without provider-encrypted replay state once an attempt went without it.
-
-    That attempt is ``failed``, or the request the retry stage resent in its place before ``error``.
-    """
-    if not (failed.strip_encrypted_replay or error.replay_stripped):
-        return reissue
-    return replace(reissue, request=replace(reissue.request, strip_encrypted_replay=True))
+        request = replace(reissue.request, strip_encrypted_replay=True) if stripped else reissue.request
 
 
 def _commits_attempt(event: StreamEvent) -> bool:

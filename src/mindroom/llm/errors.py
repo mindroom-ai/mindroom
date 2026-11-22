@@ -44,8 +44,8 @@ class ProviderError(Exception):
     ``rejected_media`` holds the ids of the request's media items the failure points to: an attachment MindRoom could
     not read or download, or the attachments a provider's rejection names. For an ``InvalidRequest`` the media fallback
     leaves out only those, when the rest of the request's media can still go. ``replay_stripped`` marks the failure
-    of a request the retry stage had resent without provider-encrypted replay state, which every later reissue of the
-    request keeps out (``providers/pipeline/wrapped.py`` ``attempts``).
+    of an attempt sent without provider-encrypted replay state, which every later reissue of the request keeps out
+    (``providers/pipeline/wrapped.py`` ``attempts``).
     """
 
     retryable: ClassVar[bool] = False

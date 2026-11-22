@@ -483,10 +483,12 @@ def _native_compaction_supported(
     """Native compaction needs explicit replay on a public route and no authored replay policy.
 
     ``openrouter`` is the ``openai`` route at OpenRouter's endpoint, which serves the same models under ``openai/``
-    ids unless a request field lets it answer with another model.
+    ids unless a field the request sends lets it answer with another model; ``request_params.extra_body`` replaces
+    ``extra_body`` there.
     """
     request_params = settings.request_params or {}
     bodies = (request_params, settings.extra_body or {}, request_params.get("extra_body") or {})
+    sent = (request_params, request_params.get("extra_body", settings.extra_body) or {})
     return (
         store is not True
         and (model_id.removeprefix("openai/") if openrouter else model_id).startswith(_NATIVE_COMPACTION_MODEL_PREFIXES)
@@ -494,7 +496,7 @@ def _native_compaction_supported(
         and not any(key in body for body in bodies for key in _NATIVE_COMPACTION_AUTHORED_KEYS)
         and not (
             openrouter
-            and ("@preset/" in model_id or any(key in body for body in bodies for key in _MODEL_REROUTING_KEYS))
+            and ("@preset/" in model_id or any(key in body for body in sent for key in _MODEL_REROUTING_KEYS))
         )
     )
 

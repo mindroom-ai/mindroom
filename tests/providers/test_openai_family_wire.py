@@ -1811,6 +1811,26 @@ _OPENROUTER_RESPONSES = {
         ("openai/gpt-6.2-sol", "https://openrouter.ai/api/v1", {"store": True}, False),
         ("openai/gpt-6.2-sol", "https://api.openai.com/v1", {}, False),
         ("gpt-6.2-sol", "https://api.openai.com/v1", {}, True),
+        # ``request_params.extra_body`` replaces ``extra_body``, so its ``models`` is never sent and cannot reroute.
+        (
+            "openai/gpt-6.2-sol",
+            "https://openrouter.ai/api/v1",
+            {
+                "extra_body": {"models": ["anthropic/claude-opus-5.5"]},
+                "request_params": {"extra_body": {"provider": {"order": ["openai"]}}},
+            },
+            True,
+        ),
+        # As on main, an authored replay policy opts out wherever it is written.
+        (
+            "openai/gpt-6.2-sol",
+            "https://openrouter.ai/api/v1",
+            {
+                "extra_body": {"background": True},
+                "request_params": {"extra_body": {"provider": {"order": ["openai"]}}},
+            },
+            False,
+        ),
         # As on main, the ``openai`` route stays eligible at the Codex endpoint.
         ("gpt-6.2-sol", CODEX_BASE_URL, {}, True),
     ],
@@ -1930,6 +1950,28 @@ _UPSTREAM_429_BODY = {
 }
 
 
+def _openrouter_route(
+    tmp_path: Path,
+    *replies: dict[str, Any],
+    config: dict[str, Any] = _OPENROUTER_RESPONSES,
+) -> tuple[ResponsesAdapter, ModelProvider, NativeCompactionReplay, list[httpx2.Request]]:
+    """Return an OpenRouter Responses route, in its pipeline, with its native settings and the requests it sends.
+
+    The wire answers with ``replies`` in turn, and with the last one from then on.
+    """
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return encoded_response(replies[min(len(sent), len(replies)) - 1])
+
+    adapter = openai_family_adapter(config, tmp_path, respond)
+    assert isinstance(adapter, ResponsesAdapter)
+    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
+    assert native is not None
+    return adapter, pipeline_provider(adapter), native, sent
+
+
 def _encrypted_history(native: NativeCompactionReplay) -> list[Message]:
     """Return stored history with an earlier turn, a compacted checkpoint turn, and an encrypted-reasoning turn."""
     checkpoint_output = [
@@ -2019,17 +2061,7 @@ async def test_openrouter_responses_recovers_once_from_sticky_400_and_stores_new
         _json_reply(_STICKY_400_BODY, status=400),
         _responses_reply(*_text_events("Recovered"), _completed(new_output)),
     ]
-    sent: list[httpx2.Request] = []
-
-    def respond(request: httpx2.Request) -> httpx.Response:
-        sent.append(request)
-        return encoded_response(replies[len(sent) - 1])
-
-    adapter = openai_family_adapter(_OPENROUTER_RESPONSES, tmp_path, respond)
-    assert isinstance(adapter, ResponsesAdapter)
-    provider = pipeline_provider(adapter)
-    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
-    assert native is not None
+    _adapter, provider, native, sent = _openrouter_route(tmp_path, *replies)
     messages = _encrypted_history(native)
     original_snapshot = deepcopy(messages)
 
@@ -2091,24 +2123,15 @@ async def test_openrouter_responses_recovers_from_a_sticky_rejection_sent_as_a_s
         "message": _STICKY_400_BODY["error"]["message"],
         "param": None,
     }
-    replies = [
+    _adapter, provider, native, sent = _openrouter_route(
+        tmp_path,
         _responses_reply(_text_events("")[0], rejection),
         _responses_reply(*_text_events("Recovered"), _completed()),
-    ]
-    sent: list[httpx2.Request] = []
-
-    def respond(request: httpx2.Request) -> httpx.Response:
-        sent.append(request)
-        return encoded_response(replies[len(sent) - 1])
-
-    adapter = openai_family_adapter(_OPENROUTER_RESPONSES, tmp_path, respond)
-    assert isinstance(adapter, ResponsesAdapter)
-    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
-    assert native is not None
+    )
     history = _encrypted_history(native)
     history[-1] = replace(history[-1], images=[Image(id="att_photo", content=_PNG, mime_type="image/png")])
 
-    turn = await complete(pipeline_provider(adapter), ModelRequest(messages=history, native_compaction=native))
+    turn = await complete(provider, ModelRequest(messages=history, native_compaction=native))
 
     assert (turn.content, len(sent)) == ("Recovered", 2)
     inputs = [json.dumps(json.loads(request.content)["input"]) for request in sent]
@@ -2118,17 +2141,7 @@ async def test_openrouter_responses_recovers_from_a_sticky_rejection_sent_as_a_s
 
 @pytest.mark.asyncio
 async def test_openrouter_responses_sticky_400_retries_at_most_once(tmp_path: Path) -> None:
-    sent: list[httpx2.Request] = []
-
-    def respond(request: httpx2.Request) -> httpx.Response:
-        sent.append(request)
-        return encoded_response(_json_reply(_STICKY_400_BODY, status=400))
-
-    adapter = openai_family_adapter(_OPENROUTER_RESPONSES, tmp_path, respond)
-    assert isinstance(adapter, ResponsesAdapter)
-    provider = pipeline_provider(adapter)
-    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
-    assert native is not None
+    _adapter, provider, native, sent = _openrouter_route(tmp_path, _json_reply(_STICKY_400_BODY, status=400))
 
     with pytest.raises(InvalidRequest, match="can only be processed by the provider that created it"):
         await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
@@ -2138,17 +2151,11 @@ async def test_openrouter_responses_sticky_400_retries_at_most_once(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_direct_openai_responses_does_not_retry_sticky_400(tmp_path: Path) -> None:
-    sent: list[httpx2.Request] = []
-
-    def respond(request: httpx2.Request) -> httpx.Response:
-        sent.append(request)
-        return encoded_response(_json_reply(_STICKY_400_BODY, status=400))
-
-    adapter = openai_family_adapter(_OPENAI_RESPONSES, tmp_path, respond)
-    assert isinstance(adapter, ResponsesAdapter)
-    provider = pipeline_provider(adapter)
-    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
-    assert native is not None
+    _adapter, provider, native, sent = _openrouter_route(
+        tmp_path,
+        _json_reply(_STICKY_400_BODY, status=400),
+        config=_OPENAI_RESPONSES,
+    )
 
     with pytest.raises(InvalidRequest, match="can only be processed by the provider that created it"):
         await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
@@ -2270,17 +2277,7 @@ async def test_openrouter_responses_recovery_boundary_persists_to_following_requ
         _responses_reply(*_text_events("Recovered"), _completed(new_output)),
         _responses_reply(*_text_events("Next ok"), _completed()),
     ]
-    sent: list[httpx2.Request] = []
-
-    def respond(request: httpx2.Request) -> httpx.Response:
-        sent.append(request)
-        return encoded_response(replies[len(sent) - 1])
-
-    adapter = openai_family_adapter(_OPENROUTER_RESPONSES, tmp_path, respond)
-    assert isinstance(adapter, ResponsesAdapter)
-    provider = pipeline_provider(adapter)
-    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
-    assert native is not None
+    _adapter, provider, native, sent = _openrouter_route(tmp_path, *replies)
     history = _encrypted_history(native)
 
     recovered = await complete(provider, ModelRequest(messages=history, native_compaction=native))
@@ -2326,17 +2323,7 @@ async def test_openrouter_responses_request_after_recovery_is_sized_as_the_wire_
         _responses_reply(*_text_events("Recovered"), _completed(recovered_output)),
         _responses_reply(*_text_events("Next ok"), _completed()),
     ]
-    sent: list[httpx2.Request] = []
-
-    def respond(request: httpx2.Request) -> httpx.Response:
-        sent.append(request)
-        return encoded_response(replies[len(sent) - 1])
-
-    adapter = openai_family_adapter(_OPENROUTER_RESPONSES, tmp_path, respond)
-    assert isinstance(adapter, ResponsesAdapter)
-    provider = pipeline_provider(adapter)
-    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
-    assert native is not None
+    adapter, provider, native, sent = _openrouter_route(tmp_path, *replies)
     history = _encrypted_history(native)
     early_text = "Earliest question before compaction. " + "The long trip notes go on. " * 4_000
     history[0] = replace(
@@ -2377,17 +2364,7 @@ async def test_openrouter_responses_always_429_stops_at_single_stripped_attempt(
 ) -> None:
     monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
     transient_attempts = 1 + retry_stage._MAX_TRANSIENT_RETRIES
-    sent: list[httpx2.Request] = []
-
-    def respond(request: httpx2.Request) -> httpx.Response:
-        sent.append(request)
-        return encoded_response(_json_reply(_UPSTREAM_429_BODY, status=429))
-
-    adapter = openai_family_adapter(_OPENROUTER_RESPONSES, tmp_path, respond)
-    assert isinstance(adapter, ResponsesAdapter)
-    provider = pipeline_provider(adapter)
-    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
-    assert native is not None
+    _adapter, provider, native, sent = _openrouter_route(tmp_path, _json_reply(_UPSTREAM_429_BODY, status=429))
 
     with pytest.raises(RateLimited):
         await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
@@ -2425,21 +2402,15 @@ async def test_openrouter_responses_only_an_effective_authored_input_skips_429_s
 ) -> None:
     monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
     transient_attempts = 1 + retry_stage._MAX_TRANSIENT_RETRIES
-    sent: list[httpx2.Request] = []
-
-    def respond(request: httpx2.Request) -> httpx.Response:
-        sent.append(request)
-        return encoded_response(_json_reply(_UPSTREAM_429_BODY, status=429))
-
     config = {
         **_OPENROUTER_RESPONSES,
         "extra_kwargs": {"base_url": "https://openrouter.ai/api/v1", **extra_override},
     }
-    adapter = openai_family_adapter(config, tmp_path, respond)
-    assert isinstance(adapter, ResponsesAdapter)
-    provider = pipeline_provider(adapter)
-    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
-    assert native is not None
+    _adapter, provider, native, sent = _openrouter_route(
+        tmp_path,
+        _json_reply(_UPSTREAM_429_BODY, status=429),
+        config=config,
+    )
 
     with pytest.raises(RateLimited):
         await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
@@ -2450,22 +2421,27 @@ async def test_openrouter_responses_only_an_effective_authored_input_skips_429_s
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("routing", "recovers"),
+    [
+        # With fallbacks off both listed upstreams stay eligible.
+        ({"order": ["openai", "azure"], "allow_fallbacks": False}, True),
+        ({"only": ["openai", "azure"]}, True),
+        # The one upstream the request may reach created the encrypted items, and would be sent the whole history.
+        ({"only": ["openai"]}, False),
+    ],
+    ids=["order-without-fallbacks", "only-two", "only-one"],
+)
 async def test_openrouter_responses_429_sticky_recovery_keeps_the_routing_preferences(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    routing: dict[str, Any],
+    *,
+    recovers: bool,
 ) -> None:
-    """With fallbacks off both listed upstreams stay eligible, so the stripped resend goes with the same preferences."""
+    """The stripped resend goes with the same preferences, so it goes only when they admit another upstream."""
     monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
     transient_attempts = 1 + retry_stage._MAX_TRANSIENT_RETRIES
-    routing = {"order": ["openai", "azure"], "allow_fallbacks": False}
-    sent: list[httpx2.Request] = []
-
-    def respond(request: httpx2.Request) -> httpx.Response:
-        sent.append(request)
-        if len(sent) <= transient_attempts:
-            return encoded_response(_json_reply(_UPSTREAM_429_BODY, status=429))
-        return encoded_response(_responses_reply(*_text_events("Other upstream ok"), _completed()))
-
     config = {
         **_OPENROUTER_RESPONSES,
         "extra_kwargs": {
@@ -2473,35 +2449,83 @@ async def test_openrouter_responses_429_sticky_recovery_keeps_the_routing_prefer
             "request_params": {"extra_body": {"provider": routing}},
         },
     }
-    adapter = openai_family_adapter(config, tmp_path, respond)
-    assert isinstance(adapter, ResponsesAdapter)
-    provider = pipeline_provider(adapter)
-    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
-    assert native is not None
+    _adapter, provider, native, sent = _openrouter_route(
+        tmp_path,
+        *[_json_reply(_UPSTREAM_429_BODY, status=429)] * transient_attempts,
+        _responses_reply(*_text_events("Other upstream ok"), _completed()),
+        config=config,
+    )
+    request = ModelRequest(messages=_encrypted_history(native), native_compaction=native)
+
+    if recovers:
+        assert (await complete(provider, request)).content == "Other upstream ok"
+    else:
+        with pytest.raises(RateLimited):
+            await complete(provider, request)
+
+    assert len(sent) == transient_attempts + recovers
+    bodies = [json.loads(request.content) for request in sent]
+    assert [body["provider"] for body in bodies] == [routing] * len(sent)
+    assert all("encrypted_content" in json.dumps(body["input"]) for body in bodies[:transient_attempts])
+    if recovers:
+        assert "encrypted_content" not in json.dumps(bodies[-1]["input"])
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_sticky_400_recovers_under_a_single_upstream_pin(tmp_path: Path) -> None:
+    """A rejection says another upstream created the items, so a pin to one upstream still resends without them."""
+    config = {
+        **_OPENROUTER_RESPONSES,
+        "extra_kwargs": {
+            "base_url": "https://openrouter.ai/api/v1",
+            "request_params": {"extra_body": {"provider": {"only": ["openai"]}}},
+        },
+    }
+    _adapter, provider, native, sent = _openrouter_route(
+        tmp_path,
+        _json_reply(_STICKY_400_BODY, status=400),
+        _responses_reply(*_text_events("Recovered"), _completed()),
+        config=config,
+    )
 
     turn = await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
 
-    assert (turn.content, len(sent)) == ("Other upstream ok", transient_attempts + 1)
-    bodies = [json.loads(request.content) for request in sent]
-    assert [body["provider"] for body in bodies] == [routing] * len(sent)
-    assert all("encrypted_content" in json.dumps(body["input"]) for body in bodies[:-1])
-    assert "encrypted_content" not in json.dumps(bodies[-1]["input"])
+    assert (turn.content, len(sent)) == ("Recovered", 2)
+    assert "encrypted_content" not in json.dumps(json.loads(sent[1].content)["input"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "message", "error_type"),
+    [
+        ("400", _STICKY_400_BODY["error"]["message"], InvalidRequest),
+        ("429", _UPSTREAM_429_BODY["error"]["message"], RateLimited),
+    ],
+    ids=["sticky-400", "429"],
+)
+async def test_openrouter_responses_failure_after_output_is_sent_once(
+    tmp_path: Path,
+    code: str,
+    message: str,
+    error_type: type[ProviderError],
+) -> None:
+    """Text the caller already received commits the attempt, so its failure is neither retried nor recovered."""
+    failure = {"type": "error", "sequence_number": 2, "code": code, "message": message, "param": None}
+    _adapter, provider, native, sent = _openrouter_route(
+        tmp_path,
+        _responses_reply(*_text_events("Partial answer"), failure),
+    )
+
+    with pytest.raises(error_type):
+        await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
+
+    assert len(sent) == 1
 
 
 @pytest.mark.asyncio
 async def test_openrouter_responses_sticky_400_twice_sends_twice_with_an_attachment(tmp_path: Path) -> None:
     """A sticky rejection is not a media rejection, so the media fallback never resends the request without media."""
-    sent: list[httpx2.Request] = []
-
-    def respond(request: httpx2.Request) -> httpx.Response:
-        sent.append(request)
-        return encoded_response(_json_reply(_STICKY_400_BODY, status=400))
-
-    adapter = openai_family_adapter(_OPENROUTER_RESPONSES, tmp_path, respond)
-    assert isinstance(adapter, ResponsesAdapter)
-    provider = pipeline_provider(adapter)
-    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
-    assert native is not None
+    _adapter, provider, native, sent = _openrouter_route(tmp_path, _json_reply(_STICKY_400_BODY, status=400))
     history = _encrypted_history(native)
     history[-1] = replace(history[-1], images=[Image(id="att_photo", content=_PNG, mime_type="image/png")])
 
@@ -2521,17 +2545,7 @@ async def test_openrouter_responses_media_fallback_after_recovery_stays_stripped
         _json_reply({"error": {"message": "This model does not support image input.", "code": 400}}, status=400),
         _responses_reply(*_text_events("Without the photo"), _completed()),
     ]
-    sent: list[httpx2.Request] = []
-
-    def respond(request: httpx2.Request) -> httpx.Response:
-        sent.append(request)
-        return encoded_response(replies[len(sent) - 1])
-
-    adapter = openai_family_adapter(_OPENROUTER_RESPONSES, tmp_path, respond)
-    assert isinstance(adapter, ResponsesAdapter)
-    provider = pipeline_provider(adapter)
-    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
-    assert native is not None
+    adapter, provider, native, sent = _openrouter_route(tmp_path, *replies)
     history = _encrypted_history(native)
     history[-1] = replace(history[-1], images=[Image(id="att_photo", content=_PNG, mime_type="image/png")])
 
@@ -2548,19 +2562,10 @@ async def test_openrouter_responses_media_fallback_after_recovery_stays_stripped
 
 @pytest.mark.asyncio
 async def test_openrouter_responses_plain_non_sticky_400_is_not_retried(tmp_path: Path) -> None:
-    sent: list[httpx2.Request] = []
-
-    def respond(request: httpx2.Request) -> httpx.Response:
-        sent.append(request)
-        return encoded_response(
-            _json_reply({"error": {"message": "Invalid parameter: max_output_tokens", "code": 400}}, status=400),
-        )
-
-    adapter = openai_family_adapter(_OPENROUTER_RESPONSES, tmp_path, respond)
-    assert isinstance(adapter, ResponsesAdapter)
-    provider = pipeline_provider(adapter)
-    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
-    assert native is not None
+    _adapter, provider, native, sent = _openrouter_route(
+        tmp_path,
+        _json_reply({"error": {"message": "Invalid parameter: max_output_tokens", "code": 400}}, status=400),
+    )
 
     with pytest.raises(InvalidRequest, match="Invalid parameter"):
         await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))

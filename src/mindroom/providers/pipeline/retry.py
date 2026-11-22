@@ -146,23 +146,19 @@ def retrying_stream(
 
     A request whose caller retries it itself passes through unchanged, without the idle limit. On a route with
     ``sticky_replay_recovery``, a failure the transient retries did not resolve is resent once without
-    provider-encrypted replay state. That resend is final by design: its failure gets no further retry here, and is
-    marked so the stages that rewrite the request keep that state out (``attempts``).
+    provider-encrypted replay state. That resend is final by design: its failure, which ``attempts`` marks so the
+    stages that rewrite the request keep that state out, gets no further retry here.
     """
     if request.overrides.caller_retries:
         return inner.stream(request)
     identity, recover = inner.identity, inner.capabilities.sticky_replay_recovery
     transient = partial(_reissue, request=request, budget=_RetryBudget(), model_id=identity.id)
-    stripped = request.strip_encrypted_replay
 
     def reissue(error: ProviderError) -> Retry | None:
-        nonlocal stripped
-        if stripped:
-            error.replay_stripped = True
+        if error.replay_stripped:
             return None
         if (retry := transient(error)) is not None or recover is None or (recovered := recover(request, error)) is None:
             return retry
-        stripped = True
         logger.warning(
             "Retrying model request without provider-encrypted replay state",
             provider=identity.provider,
