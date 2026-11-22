@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.delegation.background import delegation_child
+from mindroom.delegation.background import ACKNOWLEDGED_BY, delegation_child
 from mindroom.delegation.cost import receive_subagent_cost
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.logging_config import get_logger
@@ -66,7 +66,7 @@ def job_failure(job: BackgroundJob, value: Any, payload: ToolResultPayload) -> s
 @dataclass(frozen=True)
 class _Consumption:
     runtime: ToolJobRuntime
-    job_id: str
+    job: BackgroundJob
     claim: JobClaim
     run_id: str
     team: bool
@@ -98,7 +98,7 @@ class ConsumptionOwner:
     def register(
         self,
         runtime: ToolJobRuntime,
-        job_id: str,
+        job: BackgroundJob,
         claim: JobClaim,
         *,
         run_id: str,
@@ -107,9 +107,9 @@ class ConsumptionOwner:
         returned_inline: bool,
     ) -> None:
         """Keep a claim until the parent run ``run_id`` is saved with its tool call ``call_id`` finished."""
-        self._claims.append(_Consumption(runtime, job_id, claim, run_id, team, call_id, returned_inline))
+        self._claims.append(_Consumption(runtime, job, claim, run_id, team, call_id, returned_inline))
         if returned_inline:
-            runtime.hold_inline(job_id, claim)
+            runtime.hold_inline(job.job_id, claim)
 
     async def finalize(self) -> None:
         """Acknowledge exact saved rows; release missing, failed, or unsaved evidence."""
@@ -122,19 +122,21 @@ class ConsumptionOwner:
                 )
                 if saved:
                     await consumption.runtime.acknowledge_wait(
-                        consumption.job_id,
+                        consumption.job.job_id,
                         consumption.claim,
                         returned_inline=consumption.returned_inline,
+                        # A tool's job keeps the adapter it was admitted with, which a call that reattaches to it matches.
+                        adapter={ACKNOWLEDGED_BY: consumption.run_id} if consumption.job.kind == "delegation" else None,
                     )
             except Exception:
                 logger.warning(
                     "Tool result persistence was not confirmed",
-                    job_id=consumption.job_id,
+                    job_id=consumption.job.job_id,
                     run_id=consumption.run_id,
                     exc_info=True,
                 )
             finally:
-                await consumption.runtime.release_wait(consumption.job_id, consumption.claim)
+                await consumption.runtime.release_wait(consumption.job.job_id, consumption.claim)
 
 
 @contextmanager
@@ -198,7 +200,7 @@ def _merge_session_state(value: Any, job: BackgroundJob, payload: ToolResultPayl
 
 async def _retain_claim(
     runtime: ToolJobRuntime,
-    job_id: str,
+    job: BackgroundJob,
     claim: JobClaim,
     call: JobCall | None,
     *,
@@ -207,15 +209,15 @@ async def _retain_claim(
     """Keep a claim until the parent run saves the exact tool call, releasing it when no such run will be saved."""
     owner = _OWNER.get()
     if call is None or owner is None:
-        await runtime.release_wait(job_id, claim)
+        await runtime.release_wait(job.job_id, claim)
         return
     if not call.context.run_id or not call.context.call_id:
-        await runtime.release_wait(job_id, claim)
+        await runtime.release_wait(job.job_id, claim)
         msg = "Tool result consumption requires the exact run and tool call"
         raise ValueError(msg)
     owner.register(
         runtime,
-        job_id,
+        job,
         claim,
         run_id=call.context.run_id,
         team=call.team,
@@ -245,9 +247,10 @@ async def consume_tool_job(
             value = _merge_session_state(value, job, payload, call)
         if job.kind == "delegation" and not job.consumed:
             # The turn that reads a subagent job's result first receives what its child cost.
-            receive_subagent_cost(delegation_child(job).cost_usd)
+            child = delegation_child(job)
+            receive_subagent_cost(child.delegation_id, child.cost_usd)
     except BaseException:
         await runtime.release_wait(job.job_id, claim)
         raise
-    await _retain_claim(runtime, job.job_id, claim, call, returned_inline=returned_inline)
+    await _retain_claim(runtime, job, claim, call, returned_inline=returned_inline)
     return value, payload

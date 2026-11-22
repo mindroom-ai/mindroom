@@ -541,6 +541,7 @@ __all__ = [
     "delivered_matrix_side_effect",
     "drain_coalescing",
     "enforce_turn_authorization",
+    "gc_paused",
     "handle_card_response_for_test",
     "initialize_approval_store_for_test",
     "install_edit_message_mock",
@@ -664,6 +665,18 @@ def bound_worker_launch_config(config: Config) -> Iterator[None]:
         yield
 
 
+@contextmanager
+def gc_paused() -> Iterator[None]:
+    """Pause automatic garbage collection, so only refcounting frees what the body drops; restore it afterwards."""
+    collecting = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if collecting:
+            gc.enable()
+
+
 def live_turn_tools_for_test(
     owner: "CliTurnOwner",
     *,
@@ -680,7 +693,11 @@ def live_turn_tools_for_test(
         "delegation_depth": 0,
         "refresh_scheduler": None,
     }
-    return LiveTurnTools(owner, catalog=catalog, authorize=authorize, **(turn_options | options))
+
+    async def authorize_call(_owner: LiveTurnTools, key: "ToolKey", arguments: dict[str, object]) -> None:
+        await authorize(key, arguments)
+
+    return LiveTurnTools(owner, catalog=catalog, authorize=authorize_call, **(turn_options | options))
 
 
 async def _no_approval_event(

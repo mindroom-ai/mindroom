@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from html import escape
 from typing import TYPE_CHECKING
 
-import nio
 from pydantic import BaseModel, Field
 
 from mindroom.agent_loop.helper import complete_prompt
@@ -16,10 +15,8 @@ from mindroom.entity_resolution import resolve_room_scoped_value
 from mindroom.helper_usage import record_system_usage
 from mindroom.llm.provider import RequestOverrides
 from mindroom.logging_config import get_logger
-from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
-from mindroom.matrix.state_failures import StateFailure, state_failure
 from mindroom.providers import registry as provider_registry
-from mindroom.room_settings import state_event_content
+from mindroom.room_settings import ROOM_TEXT_SETTING_MAX_LENGTH, read_room_text_setting
 from mindroom.thread_summary.notices import normalize_thread_summary_text
 from mindroom.thread_tags import AUTOMATIC_THREAD_TAG_EXCLUSIONS, coerce_tag_name
 from mindroom.timing import timed
@@ -28,6 +25,8 @@ from mindroom.tool_system.events import body_without_tool_markers
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
+
+    import nio
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -41,7 +40,6 @@ _TRUNCATION_MIDDLE_COUNT = 12
 _MAX_MESSAGE_CHARS = 600
 _CLIP_TAIL_CHARS = 250
 _CLIP_SEPARATOR = " … "
-_ROOM_INSTRUCTIONS_MAX_LENGTH = 2000
 # Each room's `thread_summary_model` setting that names no configured model, which is logged once.
 _unknown_room_models_logged: set[tuple[Path, str, str]] = set()
 # A new generated title over these after normalization goes back to the model; a person's pin may use
@@ -182,21 +180,6 @@ def _conversation_text(messages: Sequence[ResolvedVisibleMessage]) -> str:
     return "\n".join(sampled)
 
 
-async def _room_title_setting(client: nio.AsyncClient, room_id: str, key: str) -> str | None:
-    """Return one of the room's title settings as the room holds it now; unset or unreadable is None, logged if unread."""
-    try:
-        response = await client.room_get_state_event(room_id, ROOM_SETTINGS_EVENT_TYPE, key)
-    except Exception:
-        logger.warning("Room thread summary setting read failed", room_id=room_id, setting=key, exc_info=True)
-        return None
-    if (content := await state_event_content(response)) is not None:
-        value = content.get("value")
-        return (value.strip() or None) if isinstance(value, str) else None
-    if not isinstance(response, nio.RoomGetStateEventError) or state_failure(response) is not StateFailure.MISSING:
-        logger.warning("Room thread summary setting read failed", room_id=room_id, setting=key, error=str(response))
-    return None
-
-
 async def room_title_settings(
     client: nio.AsyncClient,
     config: Config,
@@ -209,15 +192,20 @@ async def room_title_settings(
     is None too, logged once, so the configured summary model applies.
     """
     model_name, instructions = await asyncio.gather(
-        _room_title_setting(client, room_id, "thread_summary_model"),
-        _room_title_setting(client, room_id, "thread_summary_instructions"),
+        read_room_text_setting(client, room_id, "thread_summary_model"),
+        read_room_text_setting(
+            client,
+            room_id,
+            "thread_summary_instructions",
+            max_length=ROOM_TEXT_SETTING_MAX_LENGTH,
+        ),
     )
     if model_name is not None and model_name not in config.models:
         if (seen := (runtime_paths.storage_root, room_id, model_name)) not in _unknown_room_models_logged:
             _unknown_room_models_logged.add(seen)
             logger.warning("Room thread summary model ignored", room_id=room_id, model=model_name)
         model_name = None
-    return model_name, instructions and instructions[:_ROOM_INSTRUCTIONS_MAX_LENGTH]
+    return model_name, instructions
 
 
 @timed("thread_summary_generation")

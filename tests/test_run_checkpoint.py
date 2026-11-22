@@ -158,7 +158,8 @@ def _store(config: Config) -> ConversationStore:
 
 
 def _recover(config: Config, *, natively: bool = True) -> list[str]:
-    return recover_interrupted_turn(_store(config), _SESSION, _SCOPE, {_EVENT}, natively=natively)
+    """Return the turn's unlinked attempts, which the recovered run metadata names for the replay's runs."""
+    return recover_interrupted_turn(_store(config), _SESSION, _SCOPE, {_EVENT}, natively=natively).attempts
 
 
 def _only_run(config: Config) -> AnyRunRecord:

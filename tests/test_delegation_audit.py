@@ -335,7 +335,7 @@ async def test_a_child_recovery_settles_a_completed_run_with_the_usage_its_turn_
         status=RunStatus.completed,
         content="Report written.",
         metrics=RunMetrics(tokens=TokenCounts(input_tokens=120, output_tokens=9)),
-        metadata=with_prior_usage(None, [RunMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=5))]),
+        metadata=with_prior_usage(None, {"run-1": RunMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=5))}),
     )
     assert storage.save_run(session, completed, record_usage=False) == "written"
 

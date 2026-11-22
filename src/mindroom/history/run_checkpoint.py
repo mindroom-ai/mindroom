@@ -11,26 +11,29 @@ tool, since its replay sends the prompt again; a run its user stopped, once a re
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.agent_loop.tools import tool_result_message
-from mindroom.constants import CONTINUED_RUNS_METADATA_KEY, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
+from mindroom.ai_run_metadata import merge_usage, prior_usage_by_run
+from mindroom.constants import CONTINUED_RUNS_METADATA_KEY, LEGACY_COST_ID, MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
 from mindroom.history.run_visibility import is_model_history_visible_run, run_in_scope
 from mindroom.llm.messages import CUT_OFF_TEXT_KEY, Message
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
+from mindroom.llm.usage import team_run_usage
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.store import source_event_ids, write_with_session_state
 from mindroom.session_storage.summary_rows import folded_tool_call_ids
 from mindroom.usage.storage import carry_request_usage
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
+    from collections.abc import Collection, Mapping, Sequence
 
     from mindroom.agent_loop.model_loop import BeforeDispatchHook, BeforeRequestHook, LoopState, RequestDecision
     from mindroom.agent_loop.tools import PlannedCall
     from mindroom.history.types import HistoryScope
     from mindroom.llm.runs import AnyRunRecord
+    from mindroom.llm.usage import RunMetrics
     from mindroom.run_storage import RunStorage
     from mindroom.session_storage.store import ConversationStore
     from mindroom.session_storage.types import ConversationSession
@@ -213,6 +216,14 @@ def recover_stopped_run(
     return True
 
 
+class InterruptedTurn(NamedTuple):
+    """A turn's attempts that no answer links yet: their run ids, their usage by run id, their runs' stored metadata."""
+
+    attempts: list[str]
+    usage: dict[str, RunMetrics]
+    ran: dict[str, dict[str, Any] | None]
+
+
 def recover_interrupted_turn(
     store: ConversationStore,
     session_id: str,
@@ -220,8 +231,8 @@ def recover_interrupted_turn(
     event_ids: Collection[str],
     *,
     natively: bool,
-) -> list[str]:
-    """Recover the runs of ``scope`` cut short while they answered ``event_ids``; return the turn's unlinked attempts.
+) -> InterruptedTurn:
+    """Recover the runs of ``scope`` cut short while they answered ``event_ids``; return the attempts their replay continues.
 
     A turn a restart interrupted is replayed, and its replay calls this before it loads history, so its request
     continues from the interrupted attempt's own messages. Without ``natively``, for a turn that keeps being
@@ -229,14 +240,20 @@ def recover_interrupted_turn(
     attempt starts from the conversation before the turn. Either way, every attempt at the turn no answer links yet is
     returned, whatever recovery did with it, so the turn's answer links it (``link_response_event``): a summary can
     hold its work, from its own mid-turn fold or a later compaction, and redacting the answer removes that too.
+
+    The replay's reply reports what those attempts spent with its own: their usage is merged by run id over the
+    attempts' rows, a team run's member rows, and the earlier attempts the rows name, without a sum stored without ids.
     """
     session = store.load_session(session_id)
     if session is None:
-        return []
+        return InterruptedTurn([], {}, {})
     loaded = {run.run_id for run in session.runs}
     attempts: list[str] = []
+    usage: list[Mapping[str, RunMetrics]] = []
+    ran: dict[str, dict[str, Any] | None] = {}
     # The loaded session leaves out the runs a summary covers, so the turn's attempts are read from every stored run.
-    for run in store.list_runs(session_id):
+    runs = store.list_runs(session_id)
+    for run in runs:
         if run.parent_run_id is not None or not run_in_scope(run, scope):
             continue
         if not source_event_ids(run.metadata).intersection(event_ids):
@@ -247,7 +264,13 @@ def recover_interrupted_turn(
             store.save_interrupted_record(session, replace(run, status=RunStatus.error, error=_CRASH_LOOP_ERROR))
         if MATRIX_RESPONSE_EVENT_ID_METADATA_KEY not in (run.metadata or {}):
             attempts.append(run.run_id)
-    return attempts
+            # A team run's stored member rows are the member runs its usage counts (``team_usage_runs``).
+            members = [member for member in runs if member.parent_run_id == run.run_id]
+            own = team_run_usage(run.metrics, (member.metrics for member in members))
+            usage += [prior_usage_by_run(run.metadata), {} if own is None else {run.run_id: own}]
+            ran.update({record.run_id: record.metadata for record in (run, *members)})
+    spent = {run_id: used for run_id, used in merge_usage(*usage).items() if run_id != LEGACY_COST_ID}
+    return InterruptedTurn(attempts, spent, ran)
 
 
 def link_response_event(store: ConversationStore, session_id: str, run_id: str, response_event_id: str) -> None:

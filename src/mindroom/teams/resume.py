@@ -14,13 +14,13 @@ from functools import partial
 from typing import TYPE_CHECKING, cast
 
 from mindroom.ai import run_delegated_child_response
-from mindroom.ai_run_metadata import prior_usage_of
+from mindroom.ai_run_metadata import prior_usage_by_run
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import approval_decisions, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import require_original_toolkit, required_approval_tool_names
 from mindroom.config.resolution import entity_timezone
 from mindroom.constants import is_silent_schedule_no_report_response, without_no_report_lines
-from mindroom.delegation.cost import receiving_subagent_cost, resumed_subagent_cost
+from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost, stored_receipts
 from mindroom.delegation.execution import drive_delegation_stream, resume_from_approval
 from mindroom.delegation.state import member_call_id, member_delegation_card, pending_call_slot
 from mindroom.helper_usage import helper_usage_context
@@ -463,7 +463,7 @@ async def continue_paused_team_run(
         )
         events = with_resumed_turn_log_context(events, entity_name=entity_name)
         # The resumed turn goes on from what its subagents had cost before the pause, and its reply reports it.
-        subagent_cost = resumed_subagent_cost(persisted.metadata)
+        subagent_cost = SubagentCost(stored_receipts(persisted.metadata))
         with helper_usage_context(scope), receiving_subagent_cost(subagent_cost):
             await publish_team_presentation(progress, presentation)
             async with closing_async_stream(events):
@@ -503,7 +503,7 @@ async def continue_paused_team_run(
                     session_id=session_id,
                     status=continued.status,
                     # The usage of the turn's attempts before the paused run, which its record carries across the pause.
-                    prior_usage=prior_usage_of(persisted),
+                    prior_usage=tuple(prior_usage_by_run(persisted.metadata).values()),
                 ),
             )
     finally:

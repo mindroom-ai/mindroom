@@ -7,7 +7,7 @@ import contextlib
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -35,6 +35,8 @@ from mindroom.script_runs.recovery import script_recovery_signature
 from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
 from mindroom.script_runs.supervised import signal_supervised_script, supervised_script_status, worker_script_namespace
 from mindroom.shell.supervisor import _ShellSupervisorManager, run_command_via_supervisor
+from mindroom.workers.backends._dedicated_worker_common import stable_json_digest
+from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, KubernetesWorkerBackendConfig
 from mindroom.workers.models import WorkerHandle, WorkerSpec
 from tests.process_helpers import assert_linux_pid_not_running
 
@@ -66,13 +68,14 @@ class _RecoveringWorkerBackend:
     handle: WorkerHandle
     configured_image: str
     worker_template_image: str
+    recovery_digest: str
     cleanup_locator: str | None = "kubernetes:test"
     backend_name: str = "kubernetes"
     idle_timeout_seconds: float = 3600
     ensure_calls: int = 0
 
     def script_recovery_signature(self) -> str:
-        return "stable-worker-authority"
+        return self.recovery_digest
 
     def script_resource_recovery_authority(self, resource_profile: str | None) -> dict[str, object]:
         return {"profile": resource_profile, "requests": {}, "limits": {}}
@@ -156,6 +159,8 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
         storage_root=tmp_path / "storage",
         control_state_root=tmp_path / "control",
         process_env={
+            "MINDROOM_KUBERNETES_WORKER_IMAGE": "worker-image-v1",
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "worker-storage",
             "MINDROOM_SANDBOX_EXECUTION_MODE": "all",
             "MINDROOM_SCRIPT_GATEWAY_ISOLATED": "true",
             "MINDROOM_SCRIPT_GATEWAY_URL": _GATEWAY_URL,
@@ -227,10 +232,23 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
         created_at=1.0,
         debug_metadata={"image": "worker-image-v1"},
     )
+    kubernetes = KubernetesWorkerBackend(
+        runtime_paths=runtime_paths,
+        config=KubernetesWorkerBackendConfig.from_runtime(runtime_paths),
+        auth_token=None,
+        storage_root=runtime_paths.storage_root,
+        current_launch=lambda: pytest.fail("Recovery must not build a worker launch"),
+    )
+    # The first primary persisted the digest before the SSH release label existed.
+    main_payload = kubernetes._script_recovery_payload()
+    main_config = main_payload["config"]
+    assert isinstance(main_config, dict)
+    main_config.pop("tailnet_ssh_release_id", None)
     backend = _RecoveringWorkerBackend(
         handle=worker,
         configured_image="worker-image-v1",
         worker_template_image="worker-image-v1",
+        recovery_digest=stable_json_digest(main_payload),
     )
     recovery_signature = script_recovery_signature(
         backend=backend,  # type: ignore[arg-type]
@@ -324,6 +342,8 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
         assert store.get_call(_RUN_ID, "accepted-before-restart").state is ScriptCallState.INDETERMINATE
 
         backend.configured_image = "worker-image-v2"
+        kubernetes.config = replace(kubernetes.config, image=backend.configured_image)
+        backend.recovery_digest = kubernetes.script_recovery_signature()
         reopened_store = ScriptRunStore(runtime_paths)
         second_lifecycle = _lifecycle(
             runtime_paths=runtime_paths,

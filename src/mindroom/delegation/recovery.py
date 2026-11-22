@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Literal
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost
 from mindroom.delegation.hooks import after_delegation
-from mindroom.delegation.lifecycle import finish_child_turn, settle_child_response
+from mindroom.delegation.lifecycle import child_own_usage, finish_child_turn, price_child, settle_child_response
 from mindroom.delegation.sessions import (
     SUBAGENT_BUSY,
     SubagentSessionError,
@@ -225,6 +225,9 @@ async def interrupt_child(
         # The save runs in the parent's context; the child's run keeps its own stored cost, not the parent's.
         with receiving_subagent_cost(SubagentCost()):
             await run_session_storage_operation(partial(_child_storage, child, config, runtime_paths), persist)
+    if response is not None:
+        # What the cut-short turn spent stands as its cost, which the turn that receives its job's result adds.
+        price_child(child, response, child_own_usage(response, config)[1])
     await finish_child_turn(child, config=config, runtime_paths=runtime_paths, status=status, reason=reason)
 
 

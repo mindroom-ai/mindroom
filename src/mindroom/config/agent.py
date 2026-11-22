@@ -476,6 +476,12 @@ class AgentConfig(BaseModel):
         default=False,
         description="Allow run_subagent to run a subagent in its own dedicated worker on the docker or kubernetes worker backend",
     )
+    tailnet_ssh: bool = Field(
+        default=False,
+        description=(
+            "Let authorized users SSH from the operator's tailnet to the dedicated worker this agent's shell uses"
+        ),
+    )
     named_workers: int = Field(
         default=0,
         ge=0,

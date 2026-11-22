@@ -219,7 +219,7 @@ class ResponsesAdapter:
             store=request_store(self.wire, request),
             portable_replay=request.portable_replay,
             native_compaction=request.native_compaction,
-            conversation_digest=conversation_digest(request.messages),
+            conversation_digest=await asyncio.to_thread(conversation_digest, request.messages),
             encrypted_replay_reset=self.wire.reset_scope if request.strip_encrypted_replay else None,
         )
         try:

@@ -22,6 +22,7 @@ Use this chart when MindRoom should run inside an existing platform.
 - [Worker Egress Proxy](#worker-egress-proxy)
 - [Background Script Gateway](#background-script-gateway)
 - [Egress Broker](#egress-broker)
+- [Tailnet SSH](#tailnet-ssh)
 - [Matrix Managed Account Authentication](#matrix-managed-account-authentication)
 - [Existing Platform Example](#existing-platform-example)
 - [Notes](#notes)
@@ -742,6 +743,12 @@ env:
 
 See [Trusted Upstream Browser Auth](../../../docs/deployment/trusted-upstream-auth.md) for every setting and what the chart checks, the Matrix identity options, and what users outside `administrators` can reach.
 Connecting accounts also needs the providers' [OAuth clients](../../../docs/oauth-framework.md#built-in-providers), and personal GitHub and Atlassian accounts need agents with worker scope `user` or `user_agent` unless the service sets `oauth_on_shared_workers`; see [Personal accounts and shared sandboxes](../../../docs/deployment/egress-broker.md#personal-accounts-and-shared-sandboxes).
+
+## Tailnet SSH
+
+Enable `tailnetSsh.enabled` with the Kubernetes worker backend and set `tailnetSsh.authKeySecret` to a release Secret containing `auth-key`.
+For GitOps or `helm template`, set `tailnetSsh.existingSecret` to a Secret holding the shared listener token (`tailnetSsh.key` defaults to `token`) so offline renders do not rotate it.
+See [Kubernetes Tailnet SSH](../../../docs/tailnet-ssh.md#kubernetes) for setup, release-scoped network policies, and upgrade notes, and [values.yaml](values.yaml) for all chart settings.
 
 ## Matrix Managed Account Authentication
 

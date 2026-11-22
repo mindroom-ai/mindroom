@@ -525,6 +525,7 @@ class _TeamTurn:
     ) -> AsyncGenerator[TeamStreamChunk | AttemptResolved]:
         """Stream one team attempt as its document grows, ending with its ``AttemptResolved`` sentinel."""
         attempt, events = await self.start_attempt(run, continuation_state)
+        prior_usage = tuple(run.prior_usage.values())
         shown: str | None = None
         try:
             async with closing_async_stream(events):
@@ -540,7 +541,7 @@ class _TeamTurn:
             yield AttemptResolved(
                 HandledAttempt(
                     FailedReply(self.error_text(error), error),
-                    build_run_metadata=self.run_metadata_builder(attempt, RunStatus.error, run.prior_usage),
+                    build_run_metadata=self.run_metadata_builder(attempt, RunStatus.error, prior_usage),
                 ),
             )
             return
@@ -581,7 +582,7 @@ class _TeamTurn:
             self.resolve_completed(
                 attempt,
                 record,
-                run.prior_usage,
+                prior_usage,
                 shown=shown is not None,
                 silent_answer=silent_answer,
             ),

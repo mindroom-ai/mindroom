@@ -7,12 +7,14 @@ team replies through ``respond_team``, and continue their pauses through ``resum
 
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 from agno.tools import Toolkit
 
@@ -21,10 +23,17 @@ from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.ai import ai_response
+from mindroom.ai_run_metadata import with_prior_usage
 from mindroom.approval.execution import AgentApprovalExecution
 from mindroom.approval.resume import ResumeRunner
 from mindroom.config.main import Config
-from mindroom.constants import resolve_runtime_paths
+from mindroom.constants import CONTINUED_RUNS_METADATA_KEY, resolve_runtime_paths
+from mindroom.delegation.cost import (
+    carried_receipts,
+    receipts_metadata,
+    receive_subagent_cost,
+    received_subagent_cost_usd,
+)
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.storage import new_scope_session
@@ -66,6 +75,7 @@ if TYPE_CHECKING:
     from mindroom.config.agent import AgentConfig
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationState
+    from mindroom.history.run_checkpoint import InterruptedTurn
     from mindroom.hooks import HookRegistry
     from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import AnyRunRecord
@@ -84,6 +94,17 @@ def _runtime_paths(storage_path: Path) -> RuntimePaths:
         storage_path=storage_path,
         process_env={},
     )
+
+
+def replay_run_metadata(turn: InterruptedTurn, jobs: Mapping[str, str | None]) -> dict[str, object]:
+    """Return the run metadata a replay's runs carry of ``turn``, as the response runner builds it from ``jobs``.
+
+    ``jobs`` names the run that acknowledged each subagent job, by its child's delegation id (``job_acknowledgers``).
+    """
+    if not turn.attempts:
+        return {}
+    received = receipts_metadata(carried_receipts(turn.ran, jobs))
+    return with_prior_usage({CONTINUED_RUNS_METADATA_KEY: turn.attempts, **received}, turn.usage) or {}
 
 
 def native_delegation_config(agents: Mapping[str, AgentConfig], **fields: object) -> Config:
@@ -581,6 +602,33 @@ class ReportTools(Toolkit):
         """Write the report."""
         type(self).written.append("written")
         return "report written"
+
+
+class CostProbeTools(Toolkit):
+    """The ``restart_cost_probe`` toolkit: its calls receive a subagent's cost, ask for an approval, or stall for a restart."""
+
+    stalled: ClassVar[asyncio.Event]
+    # What the turn that last ran ``checked`` had received by then.
+    received_when_checked: ClassVar[float | None] = None
+
+    def __init__(self) -> None:
+        super().__init__(name="restart_cost_probe", tools=[self.charge_subagent, self.checked, self.stall])
+
+    async def charge_subagent(self, usd: float, child: str = "") -> str:
+        """Receive subagent turn ``child``, a new one when unnamed, which cost ``usd``."""
+        receive_subagent_cost(child or f"probe-{uuid4().hex}", usd)
+        return f"charged {usd}"
+
+    async def checked(self) -> str:
+        """Do work that asks for an approval first."""
+        type(self).received_when_checked = received_subagent_cost_usd()
+        return "checked"
+
+    async def stall(self) -> str:
+        """Block until the turn is cancelled by a simulated process shutdown."""
+        self.stalled.set()
+        await asyncio.Event().wait()
+        raise AssertionError
 
 
 class MetadataProbeTools(Toolkit):

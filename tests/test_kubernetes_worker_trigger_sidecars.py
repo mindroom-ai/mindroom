@@ -333,7 +333,7 @@ def test_kubernetes_config_names_sidecar_fields_the_client_rejects_without_their
                                 "signerName": "x",
                                 "keyType": "RSA3072",
                                 "userAnnotations": {"hunter2": True},
-                            }
+                            },
                         },
                     ],
                 },

@@ -500,6 +500,7 @@ expose = [
 path = "mindroom.agent_cli.shell_contract"
 depends_on = []
 visibility = [
+    "mindroom.config.main",
     "mindroom.agent_cli.bash",
     "mindroom.agent_cli.cli_shell_agent",
     "mindroom.agent_cli.client",
@@ -510,6 +511,7 @@ visibility = [
     "mindroom.delegation.personas",
     "mindroom.agent_cli.minimal_agent",
     "mindroom.agent_cli.minimal_mode_preflight",
+    "mindroom.tailnet_ssh.links",
     "mindroom.terminal.client",
     "mindroom.tool_system.agent_tool_calls",
     "mindroom.tool_system.tool_environment",
@@ -831,6 +833,7 @@ visibility = [
 [[modules]]
 path = "mindroom.response_turn"
 depends_on = [
+    "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
     "mindroom.agent_cli.lifetime",
     "mindroom.cancellation",
@@ -2143,6 +2146,7 @@ depends_on = [
     "mindroom.api.script_gateway",
     "mindroom.api.secret_requests",
     "mindroom.api.skills",
+    "mindroom.api.tailnet_ssh_gateway",
     "mindroom.api.tools",
     "mindroom.api.budgets",
     "mindroom.integrations",
@@ -2166,8 +2170,8 @@ depends_on = [
     "mindroom.ai_run_metadata",
     "mindroom.api.config_lifecycle",
     "mindroom.plugin_http",
-    "mindroom.room_agent_access",
     "mindroom.tool_system.agent_tools",
+    "mindroom.tool_system.metadata",
     "mindroom.tool_system.plugins",
     "mindroom.turn_model",
 ]
@@ -2406,6 +2410,7 @@ depends_on = [
     "mindroom.api.validation_errors",
     "mindroom.api.worker_preview",
     "mindroom.api.worker_services",
+    "mindroom.api.worker_ssh",
     "mindroom.api.worker_terminal",
 ]
 
@@ -2515,6 +2520,7 @@ path = "mindroom.api.workers"
 depends_on = [
     "mindroom.api.computers",
     "mindroom.api.config_lifecycle",
+    "mindroom.api.tailnet_ssh_gateway",
     "mindroom.api.worker_responses",
 ]
 
@@ -3422,6 +3428,7 @@ depends_on = [
     "mindroom.api.main",
     "mindroom.api.plugin_origins",
     "mindroom.api.script_gateway",
+    "mindroom.api.tailnet_ssh_gateway",
     "mindroom.approval.transport",
     "mindroom.bot",
     "mindroom.constants",
@@ -3513,6 +3520,7 @@ depends_on = [
     "mindroom.ai_runtime",
     "mindroom.automations.steps",
     "mindroom.config.resolution",
+    "mindroom.constants",
     "mindroom.contacts.turns",
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
@@ -3560,6 +3568,8 @@ depends_on = [
     "mindroom.constants",
     "mindroom.contacts.turns",
     "mindroom.conversation_state_writer",
+    "mindroom.delegation.background",
+    "mindroom.delegation.cost",
     "mindroom.delivery_gateway",
     "mindroom.event_journal",
     "mindroom.history.reply_compactions",
@@ -3785,6 +3795,8 @@ depends_on = []
 [[modules]]
 path = "mindroom.config.main"
 depends_on = [
+    "mindroom.agent_cli.shell_contract",
+    "mindroom.tool_system.agent_tools",
     "mindroom.config.contacts",
     "mindroom.config.judgment",
     "mindroom.agent_policy",
@@ -3810,6 +3822,37 @@ depends_on = [
     "mindroom.config.resolution",
     "mindroom.tool_system.plugins",
     "mindroom.delegation.personas",
+    "mindroom.config.tailnet_ssh",
+]
+
+[[modules]]
+path = "mindroom.config.tailnet_ssh"
+depends_on = ["mindroom.config.schema_hints"]
+
+[[modules]]
+path = "mindroom.tailnet_ssh.store"
+depends_on = ["mindroom.constants"]
+
+[[modules]]
+path = "mindroom.tailnet_ssh.projection"
+depends_on = ["mindroom.atomic_file"]
+
+[[modules]]
+path = "mindroom.tailnet_ssh.session"
+depends_on = []
+
+[[modules]]
+path = "mindroom.tailnet_ssh.links"
+depends_on = [
+    "mindroom.agent_cli.shell_contract",
+    "mindroom.runtime_resolution",
+    "mindroom.tailnet_ssh.projection",
+    "mindroom.tailnet_ssh.store",
+    "mindroom.tool_system.agent_tools",
+    "mindroom.tool_system.plugins",
+    "mindroom.tool_system.sandbox_proxy",
+    "mindroom.tool_system.worker_routing",
+    "mindroom.workers.backend_kinds",
 ]
 
 # ARCH-B memory enforcement slice: keep memory consumers on the package facade.
@@ -4948,6 +4991,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.room_settings"
 depends_on = [
+    "mindroom.hooks.types",
     "mindroom.legacy_room_settings",
     "mindroom.matrix.state_failures",
 ]
@@ -5027,6 +5071,7 @@ depends_on = [
     "mindroom.agent_run_context",
     "mindroom.agents",
     "mindroom.ai",
+    "mindroom.custom_tools.attachment_helpers",
     "mindroom.helper_usage",
     "mindroom.history.interrupted_replay",
     "mindroom.history.turn_recorder",
@@ -5041,6 +5086,7 @@ depends_on = [
     "mindroom.tool_system.tool_function",
     "mindroom.matrix_rtc.voice_agent",
     "mindroom.response_turn",
+    "mindroom.room_settings",
     "mindroom.session_storage.types",
     "mindroom.tool_jobs.execution",
     "mindroom.tool_system.agent_tools",
@@ -5754,7 +5800,6 @@ depends_on = []
 visibility = [
     "mindroom.mcp.manager",
     "mindroom.mcp.toolkit",
-    "mindroom.room_agent_access",
     "mindroom.tool_jobs.authorization",
     "mindroom.tool_system.metadata",
 ]
@@ -6375,6 +6420,7 @@ depends_on = [
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.thread_history_result",
     "mindroom.reply_turn.request",
+    "mindroom.room_settings",
 ]
 visibility = [
     "mindroom.bot",
@@ -7553,6 +7599,7 @@ expose = [
     "visible_workspace_roots",
     "written_by_other_workers",
     "worker_dir_name",
+    "worker_key_agent_name",
     "worker_log_id",
     "worker_root_path",
     "worker_scope_allows_shared_only_integrations",
@@ -8781,6 +8828,18 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.api.worker_ssh"
+depends_on = [
+    "mindroom.api.sandbox_exec",
+    "mindroom.api.sandbox_runner",
+    "mindroom.atomic_file",
+    "mindroom.constants",
+    "mindroom.previews.listeners",
+    "mindroom.tailnet_ssh.session",
+    "mindroom.terminal.session",
+]
+
+[[modules]]
 path = "mindroom.terminal.session"
 depends_on = []
 
@@ -8867,6 +8926,15 @@ depends_on = [
 ]
 visibility = ["mindroom.orchestrator", "mindroom.plugin_http"]
 
+[[modules]]
+path = "mindroom.api.tailnet_ssh_gateway"
+depends_on = [
+    "mindroom.api.config_lifecycle",
+    "mindroom.api.script_gateway",
+    "mindroom.tailnet_ssh.links",
+]
+visibility = ["mindroom.api.main", "mindroom.api.workers", "mindroom.orchestrator"]
+
 # Public: plugin routes and tools import it, and its `__all__` lists what they may use.
 [[modules]]
 path = "mindroom.plugin_http"
@@ -8910,8 +8978,6 @@ depends_on = [
     "mindroom.runtime_resolution",
     "mindroom.tool_system.agent_tools",
     "mindroom.tool_system.declarations",
-    "mindroom.tool_system.filters",
-    "mindroom.tool_system.metadata",
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.worker_routing",
@@ -9290,6 +9356,7 @@ visibility = [
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.tool_jobs.consumption",
     "mindroom.delegation.continuation",
+    "mindroom.response_runner",
 ]
 
 [[modules]]
@@ -9388,7 +9455,9 @@ visibility = [
 path = "mindroom.delegation.continuation"
 depends_on = [
     "mindroom.ai",
+    "mindroom.ai_run_metadata",
     "mindroom.delegation.background",
+    "mindroom.delegation.cost",
     "mindroom.delegation.execution",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.personas",
@@ -10439,6 +10508,7 @@ visibility = [
 path = "mindroom.history.run_checkpoint"
 depends_on = [
     "mindroom.agent_loop",
+    "mindroom.ai_run_metadata",
     "mindroom.constants",
     "mindroom.history.run_visibility",
     "mindroom.llm",

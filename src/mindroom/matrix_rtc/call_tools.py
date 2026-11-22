@@ -32,6 +32,7 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.background_tasks import drain_tasks, run_blocking_until_complete, wait_for_future_until_complete
+from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context, record_helper_usage
 from mindroom.history.interrupted_replay import (
     build_interrupted_replay_snapshot,
@@ -40,7 +41,7 @@ from mindroom.history.interrupted_replay import (
 from mindroom.history.storage import new_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
-from mindroom.hooks import EnrichmentItem
+from mindroom.hooks import EnrichmentItem, render_system_enrichment_block
 from mindroom.knowledge.utils import knowledge_runtime_identity, resolve_agent_knowledge_access_async
 from mindroom.llm.messages import ModelProvenance, system_text
 from mindroom.llm.runs import RunStatus
@@ -50,6 +51,7 @@ from mindroom.matrix_rtc.voice_agent import CallAgentResponse
 from mindroom.message_target import MessageTarget
 from mindroom.providers.names import ROUTE_PROVIDERS
 from mindroom.providers.registry import model_token_counter
+from mindroom.room_settings import room_instructions_item
 from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -94,6 +96,7 @@ _TEXT_CHAT_REQUIRED_MESSAGE = (
 
 _MAX_TOOL_RESULT_CHARS = 8000
 _CALL_UNAVAILABLE_COMPOSITE_FUNCTIONS = frozenset({"run_workflow"})
+_ROOM_INSTRUCTIONS_TIMEOUT_SECONDS = 5.0
 
 
 async def _save_call_usage(
@@ -368,6 +371,7 @@ class _CallAgentCache:
     runtime_paths: RuntimePaths
     context: ToolRuntimeContext
     active_model_name: str | None
+    instructions_room_id: str | None = None
     build: AgentBuild | None = None
     knowledge_identity: tuple[int, ...] = ()
     refresh_scheduler: KnowledgeRefreshScheduler | None = None
@@ -378,16 +382,25 @@ class _CallAgentCache:
         scheduler = (
             self.context.orchestrator.knowledge_refresh_scheduler if self.context.orchestrator is not None else None
         )
-        resolution = await resolve_agent_knowledge_access_async(
-            self.agent_name,
-            self.config,
-            self.runtime_paths,
-            refresh_scheduler=scheduler,
-            execution_identity=self.context.execution_identity,
+        resolution, instructions_item = await asyncio.gather(
+            resolve_agent_knowledge_access_async(
+                self.agent_name,
+                self.config,
+                self.runtime_paths,
+                refresh_scheduler=scheduler,
+                execution_identity=self.context.execution_identity,
+            ),
+            _call_room_instructions_item(
+                self.context,
+                room_id=self.context.room_id,
+                instructions_room_id=self.instructions_room_id,
+                config=self.config,
+            ),
         )
+        room_enrichment = render_system_enrichment_block((instructions_item,)) if instructions_item is not None else ""
 
         async def render(build: AgentBuild) -> str:
-            return _call_instructions(build)
+            return _call_instructions(build, room_enrichment)
 
         return await self.run(
             knowledge=resolution.knowledge,
@@ -473,6 +486,7 @@ async def build_call_tools(
     voice_instructions: str | None = None,
     active_model_name: str | None = None,
     origin_brief: Callable[[TokenCounter], str] | None = None,
+    instructions_room_id: str | None = None,
 ) -> CallAgentTooling:
     """Materialize the agent for the selected voice backend.
 
@@ -515,6 +529,7 @@ async def build_call_tools(
         ),
     )
     execution_identity = context.execution_identity
+    resolved_instructions_room_id = instructions_room_id or room_id
     if enable_responder:
         voice_enrichment_items: tuple[EnrichmentItem, ...] = ()
         if voice_instructions:
@@ -547,6 +562,7 @@ async def build_call_tools(
             runtime_paths=runtime_paths,
             context=context,
             active_model_name=active_model_name,
+            instructions_room_id=resolved_instructions_room_id,
         )
         responder = functools.partial(
             _run_call_agent,
@@ -555,6 +571,7 @@ async def build_call_tools(
             runtime_paths=runtime_paths,
             context=context,
             room_id=room_id,
+            instructions_room_id=resolved_instructions_room_id,
             requester_id=requester_id,
             session_id=session_id,
             voice_enrichment_items=voice_enrichment_items,
@@ -575,12 +592,20 @@ async def build_call_tools(
         )
 
     refresh_scheduler = context.orchestrator.knowledge_refresh_scheduler if context.orchestrator is not None else None
-    knowledge_resolution = await resolve_agent_knowledge_access_async(
-        agent_name,
-        config,
-        runtime_paths,
-        refresh_scheduler=refresh_scheduler,
-        execution_identity=execution_identity,
+    knowledge_resolution, instructions_item = await asyncio.gather(
+        resolve_agent_knowledge_access_async(
+            agent_name,
+            config,
+            runtime_paths,
+            refresh_scheduler=refresh_scheduler,
+            execution_identity=execution_identity,
+        ),
+        _call_room_instructions_item(
+            context,
+            room_id=room_id,
+            instructions_room_id=resolved_instructions_room_id,
+            config=config,
+        ),
     )
     build = _spoken(
         # Finished before a cancellation goes on, as the live agent cache does, so no build outlives the call.
@@ -634,10 +659,11 @@ async def build_call_tools(
                     connect=functools.partial(connections.connect, toolkit),
                 ),
             )
+    room_enrichment = render_system_enrichment_block((instructions_item,)) if instructions_item is not None else ""
     logger.info("call_tools_built", agent=agent_name, room_id=room_id, tool_count=len(tools))
     return CallAgentTooling(
         tools=tuple(tools),
-        instructions=_call_instructions(build),
+        instructions=_call_instructions(build, room_enrichment),
         execution_identity=execution_identity,
         close=connections.close,
     )
@@ -690,6 +716,7 @@ async def _run_call_agent(
     active_model_name: str | None,
     authorize_operation: _CallAuthorizationGuard,
     reconcile_spoken_response: bool = True,
+    instructions_room_id: str | None = None,
 ) -> CallAgentResponse:
     """Run one finalized transcript only while its current caller remains authorized."""
     await response_tracker.wait_for_settlements()
@@ -704,6 +731,7 @@ async def _run_call_agent(
             runtime_paths=runtime_paths,
             context=context,
             room_id=room_id,
+            instructions_room_id=instructions_room_id,
             requester_id=requester_id,
             session_id=session_id,
             voice_enrichment_items=voice_enrichment_items,
@@ -730,6 +758,7 @@ async def _run_authorized_call_agent(
     agent_cache: _CallAgentCache,
     active_model_name: str | None,
     reconcile_spoken_response: bool = True,
+    instructions_room_id: str | None = None,
 ) -> CallAgentResponse:
     """Run one admitted call transcript through the normal MindRoom agent."""
     from mindroom.ai import ai_response  # noqa: PLC0415 - heavy optional call path
@@ -753,16 +782,27 @@ async def _run_authorized_call_agent(
         refresh_scheduler = (
             context.orchestrator.knowledge_refresh_scheduler if context.orchestrator is not None else None
         )
-        knowledge_resolution = await resolve_agent_knowledge_access_async(
-            agent_name,
-            config,
-            runtime_paths,
-            refresh_scheduler=refresh_scheduler,
-            execution_identity=context.execution_identity,
+        knowledge_resolution, instructions_item = await asyncio.gather(
+            resolve_agent_knowledge_access_async(
+                agent_name,
+                config,
+                runtime_paths,
+                refresh_scheduler=refresh_scheduler,
+                execution_identity=context.execution_identity,
+            ),
+            _call_room_instructions_item(
+                context,
+                room_id=room_id,
+                instructions_room_id=instructions_room_id,
+                config=config,
+            ),
         )
         transient_enrichment_items = append_knowledge_availability_enrichment(
             (),
             knowledge_resolution.unavailable,
+        )
+        system_enrichment_items = (
+            (*voice_enrichment_items, instructions_item) if instructions_item is not None else voice_enrichment_items
         )
         turn = ResponseTurnContext(
             entity_label=agent_name,
@@ -776,7 +816,7 @@ async def _run_authorized_call_agent(
             matrix_run_metadata=None,
             active_model_name=active_model_name,
             transient_enrichment_items=transient_enrichment_items,
-            system_enrichment_items=voice_enrichment_items,
+            system_enrichment_items=system_enrichment_items,
             inline_tools=True,
             prompt=transcript,
             show_tool_calls=False,
@@ -862,9 +902,44 @@ def _spoken(build: AgentBuild) -> AgentBuild:
     return replace(build, prompt=replace(build.prompt, markdown=False))
 
 
-def _call_instructions(build: AgentBuild) -> str:
+async def _call_room_instructions_item(
+    context: ToolRuntimeContext,
+    *,
+    room_id: str,
+    instructions_room_id: str | None,
+    config: Config,
+) -> EnrichmentItem | None:
+    """Read ``agent_instructions`` for a call, re-checking origin-room access on cross-room reads."""
+    target_room_id = instructions_room_id or room_id
+    try:
+        async with asyncio.timeout(_ROOM_INSTRUCTIONS_TIMEOUT_SECONDS):
+            if target_room_id != room_id:
+                try:
+                    allowed = await room_access_allowed(context, target_room_id)
+                except Exception:
+                    logger.warning(
+                        "call_room_instructions_access_check_failed",
+                        room_id=target_room_id,
+                        call_room_id=room_id,
+                        exc_info=True,
+                    )
+                    return None
+                if not allowed:
+                    return None
+            return await room_instructions_item(context.client, target_room_id, config)
+    except TimeoutError:
+        logger.warning(
+            "call_room_instructions_timed_out",
+            room_id=target_room_id,
+            call_room_id=room_id,
+            timeout_seconds=_ROOM_INSTRUCTIONS_TIMEOUT_SECONDS,
+        )
+        return None
+
+
+def _call_instructions(build: AgentBuild, system_enrichment: str = "") -> str:
     """Return the system prompt a turn of the call's agent starts from, without the turn's own context."""
-    content = system_text(prompt_for_turn(build))
+    content = system_text(prompt_for_turn(build, system_enrichment))
     if not content.strip():
         msg = "Agent produced an empty system prompt for its voice session"
         raise ValueError(msg)

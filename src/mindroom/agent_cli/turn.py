@@ -170,7 +170,7 @@ class LiveTurnTools(TurnToolBridge):
         owner: CliTurnOwner,
         *,
         catalog: PreparedAgentToolCatalog,
-        authorize: Callable[[ToolKey, dict[str, object]], Awaitable[None]],
+        authorize: Callable[[LiveTurnTools, ToolKey, dict[str, object]], Awaitable[None]],
         context: Mapping[str, str],
         output_file_policy: ToolOutputFilePolicy,
         delegation_depth: int,
@@ -184,6 +184,8 @@ class LiveTurnTools(TurnToolBridge):
         self.checkpoint = BatchCheckpoint(catalog)
         # Set once the response's grant exists, before any Bash call.
         self.shell_env: AgentCliShellEnv | None = None
+        # Called with this owner, so it holds no reference back to it: that would be a reference cycle, which keeps
+        # the turn's whole tool catalog until the cyclic garbage collector runs.
         self._authorize = authorize
         self._context = dict(context)
         self._output_file_policy = output_file_policy
@@ -616,12 +618,12 @@ class LiveTurnTools(TurnToolBridge):
                 msg = "Bash binding is unavailable"
                 raise ValueError(msg)
             await self.checkpoint.persist(call_id)
-            await self._authorize(key, arguments)
+            await self._authorize(self, key, arguments)
             binding = await self.catalog.bind(key)
 
             async def authorize() -> None:
                 self._check_live()
-                await self._authorize(key, arguments)
+                await self._authorize(self, key, arguments)
 
             events = self.execute_shell(
                 binding,
@@ -903,7 +905,7 @@ class LiveTurnTools(TurnToolBridge):
         try:
             self._check_dispatch()
             try:
-                await self._authorize(key, {})
+                await self._authorize(self, key, {})
                 binding = await self.catalog.bind(key, check_current=self._check_dispatch)
             except PermissionError as exc:
                 msg = "Tool is unavailable"
@@ -957,7 +959,7 @@ class LiveTurnTools(TurnToolBridge):
         media_results: list[ToolValue] = []
         try:
             self._check_dispatch()
-            await self._authorize(key, arguments)
+            await self._authorize(self, key, arguments)
             binding = await self.catalog.bind(key, check_current=self._check_dispatch)
 
             async def authorize() -> None:
@@ -965,7 +967,7 @@ class LiveTurnTools(TurnToolBridge):
                     self._check_live()
                 else:
                     self._check_dispatch()
-                await self._authorize(key, arguments)
+                await self._authorize(self, key, arguments)
 
             def mark_refused() -> None:
                 nonlocal refused
