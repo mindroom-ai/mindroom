@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import weakref
 from collections.abc import AsyncIterator, Iterator, Sequence  # noqa: TC003 - Agno reads tool annotations at runtime
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
@@ -85,6 +86,7 @@ from tests.approval_card_helpers import card_is_terminal, pending_card
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import (
     approval_manager_for_test,
+    gc_paused,
     handle_card_response_for_test,
     initialize_approval_store_for_test,
     install_model_providers,
@@ -2366,6 +2368,16 @@ def test_only_a_build_offering_the_scheduler_binds_its_live_functions(
     names = [middleware.__name__ for middleware in build.tool_policy]
     assert names.count("bind_live_functions") == int(offered is not None)
     assert (names[0] == "bind_live_functions") is (offered is not None)
+
+
+def test_the_live_functions_binding_is_freed_without_a_garbage_collection() -> None:
+    """The step binding a run's functions holds no reference cycle, so dropping the run's policy frees it at once."""
+    functions = {function.name: function for function in adapt_toolkit(SchedulerTools(), key="scheduler").functions}
+    with gc_paused():
+        policy = bind_live_tools(functions, ())
+        released = weakref.ref(policy[0])
+        del policy
+        assert released() is None
 
 
 @pytest.mark.asyncio

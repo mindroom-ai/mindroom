@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import weakref
 from collections.abc import AsyncIterator, Iterator  # noqa: TC003 - Agno resolves tool annotations
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
@@ -39,7 +40,7 @@ from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
 from mindroom.workers.placements import DedicatedWorkerPlacement, dedicated_worker_placement
 from tests.agent_tool_helpers import offered_agno_function
 from tests.authorization_helpers import make_test_tool_runtime_context
-from tests.conftest import make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
+from tests.conftest import gc_paused, make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -506,6 +507,33 @@ async def test_closed_catalog_rejects_later_bindings(tmp_path: Path) -> None:
     await catalog.close()
     with pytest.raises(RuntimeError, match="closed"):
         await catalog.bind(ToolKey("existing", "action"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close_fails", [False, True], ids=["closes", "close-fails"])
+async def test_closed_catalog_is_freed_without_a_garbage_collection(tmp_path: Path, close_fails: bool) -> None:
+    """A closed catalog holds no reference cycle, even when a toolkit fails to close, so dropping it frees it at once."""
+
+    def action() -> str:
+        return "ok"
+
+    async def connect() -> Callable[[], Awaitable[None]]:
+        async def close() -> None:
+            if close_fails:
+                msg = "close failed"
+                raise RuntimeError(msg)
+
+        return close
+
+    toolkit = replace(_toolkit("existing", action), connect=connect)
+    catalog = await _catalog(tmp_path, [toolkit])
+    await catalog.connect([toolkit])
+    with pytest.raises(RuntimeError, match="close failed") if close_fails else nullcontext():
+        await catalog.close()
+    released = weakref.ref(catalog)
+    with gc_paused():
+        del catalog
+        assert released() is None
 
 
 @pytest.mark.asyncio
