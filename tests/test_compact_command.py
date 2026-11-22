@@ -35,6 +35,7 @@ from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, up
 from mindroom.event_journal import EventClass, EventKind, InboundEvent, journal
 from mindroom.event_journal.approval_signals import PausedReply
 from mindroom.event_journal.projection import ProjectedEvent
+from mindroom.history import session_context as session_context_module
 from mindroom.history.runtime import _manual_summary_cap
 from mindroom.history.session_context import create_scope_session_storage, scope_session_database_path
 from mindroom.history.storage import has_queued_force_compaction, new_scope_session
@@ -1373,7 +1374,7 @@ async def test_compaction_defers_when_target_history_is_not_ready(  # noqa: C901
     if boundary != "origin_timeout":
         await admit_dispatch_event(target._journal_dispatcher, room, origin, EventKind.MESSAGE, EventClass.CONTEXT_ONLY)
     await _dispatch_message(owner, room, origin)
-    scrub = runner_module.remove_history_of_redacted_events
+    scrub = session_context_module.remove_history_of_redacted_events
     if boundary == "first_recovery_check":
         assert await record_room_history_recovery(store, ROOM) is not None
         load = MagicMock(side_effect=AssertionError("open recovery should not load history"))
@@ -1385,7 +1386,7 @@ async def test_compaction_defers_when_target_history_is_not_ready(  # noqa: C901
             assert await record_room_history_recovery(store, ROOM) is not None
 
         record_gap = AsyncMock(side_effect=scrub_then_gap)
-        monkeypatch.setattr(runner_module, "remove_history_of_redacted_events", record_gap)
+        monkeypatch.setattr(session_context_module, "remove_history_of_redacted_events", record_gap)
     elif boundary in {"degraded", "read_failed", "rejoin_during_read"}:
 
         async def fail_read(_room: str, _thread: str) -> None:

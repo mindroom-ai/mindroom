@@ -17,7 +17,7 @@ from mindroom.ai import stream_agent_response
 from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata
 from mindroom.ai_runtime import reply_ended_for_follow_up
 from mindroom.approval.response import continuation_response_kind, continuation_target
-from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
+from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
 from mindroom.bot_runtime_view import RunPhase
 from mindroom.config.resolution import cheap_model as agent_cheap_model
@@ -48,8 +48,8 @@ from mindroom.final_delivery import (
 from mindroom.history.manual import resolve_manual_compaction_plan
 from mindroom.history.reply_compactions import ReplyCompactionLifecycle, ReplyCompactions
 from mindroom.history.runtime import compact_scope_now
-from mindroom.history.session_context import load_scope_session
-from mindroom.history.storage import has_queued_force_compaction, read_scope_state, remove_history_of_redacted_events
+from mindroom.history.session_context import load_scope_session, load_scrubbed_scope_session
+from mindroom.history.storage import has_queued_force_compaction, read_scope_state
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.judgment.cold_cache import idle_seconds_before_turn, select_cold_cache_model
 from mindroom.matrix.guarded_rooms import allowed_send, guarded_room
@@ -104,6 +104,7 @@ from mindroom.reply_turn.request import (
     ResponseRequest,
     correlation_id_for_request,
     merge_response_extra_content,
+    requester_remains_authorized,
     response_typing_indicator,
 )
 from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
@@ -809,14 +810,13 @@ class ResponseRunner:
         runtime = self.deps.runtime
         config, paths = runtime.config, self.deps.runtime_paths
         store, room, thread = self.deps.replies.store, target.room_id, target.resolved_thread_id
-        if not is_sender_allowed_for_responder(
+        if not requester_remains_authorized(
             requester,
-            self.deps.agent_name,
             room,
-            config,
-            paths,
-            runtime.agent_reply_memberships,
-            require_resolved_membership=True,
+            owner_entity_name=self.deps.agent_name,
+            config=config,
+            runtime_paths=paths,
+            membership_index=runtime.agent_reply_memberships,
         ):
             return None
         scope = self.deps.state_writer.history_scope()
@@ -835,11 +835,9 @@ class ResponseRunner:
             return _COMPACTION_DEFERRED
         model_name, inputs = plan
         load = partial(load_scope_session, scope, target.session_id, paths, config, identity)
-        context = await run_blocking_until_complete(load)
-        if (session := context.session) is None or not read_scope_state(session).force_compact_before_next_run:
+        context, _ = await load_scrubbed_scope_session(load, partial(self.deps.redacted_history_events, target))
+        if context.session is None or not read_scope_state(context.session).force_compact_before_next_run:
             return None
-        redactions = partial(self.deps.redacted_history_events, target)
-        await remove_history_of_redacted_events(context.storage, session, redactions)
         if await store.room_history_recovery(room) is not None or epoch != await store.active_membership_epoch(room):
             return _COMPACTION_DEFERRED
         build = partial(provider_registry.build_model_provider, config, paths, model_name, execution_identity=identity)

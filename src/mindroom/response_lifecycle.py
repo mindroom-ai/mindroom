@@ -665,9 +665,9 @@ class ResponseLifecycleCoordinator:
     async def run_locked[T](self, target: MessageTarget, runtime: BotRuntimeView, op: Callable[[], Awaitable[T]]) -> T:
         """Run work that is no reply under one conversation's lock, in turn with its replies, through a reply's claim.
 
-        It begins no turn, so the conversation is not busy and the running reply hears of no message, and it waits out
-        a pending approval without holding admission. ``op`` starts only while ``runtime`` accepts work, checked under
-        the lock; only an approval that appears while this waits for the lock makes it wait and admit again.
+        It begins no turn, so the conversation is not busy, and it waits out a pending approval without holding
+        admission. ``op`` starts only while ``runtime`` accepts work, checked under the lock; only an approval that
+        appears while this waits for the lock makes it wait and admit again.
         """
         key = target.lifecycle_key
         while True:

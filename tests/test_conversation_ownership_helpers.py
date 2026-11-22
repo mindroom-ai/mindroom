@@ -491,6 +491,19 @@ def test_reply_refresh_and_compaction_read_threads_only_through_the_fresh_read_h
         assert "fetch_thread_history(" not in source
 
 
+def test_compaction_owns_its_conversation_only_through_the_reply_path_helpers() -> None:
+    """The runner, where compaction's fold lives, has no requester check, scrub, lock or admission code of its own."""
+    source = inspect.getsource(response_runner_module)
+    for shared in (
+        "requester_remains_authorized(",
+        "load_scrubbed_scope_session(",
+        "lifecycle_coordinator.run_locked(",
+    ):
+        assert shared in source
+    for own in ("is_sender_allowed_for", "remove_history_of_redacted_events", "admission_fence", "_approval_holds"):
+        assert own not in source
+
+
 @pytest.mark.asyncio
 async def test_edit_cut_opens_its_store_before_its_first_suspension(tmp_path: Path) -> None:
     """Edit regeneration opens its store synchronously, so a failed open surfaces before a pending cancellation runs."""
