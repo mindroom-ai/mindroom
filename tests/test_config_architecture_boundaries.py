@@ -236,11 +236,15 @@ def test_response_runner_delegates_lifecycle_coordination() -> None:
     tree = ast.parse(RESPONSE_RUNNER_MODULE.read_text(encoding="utf-8"))
     forbidden_names = {
         "_Conversation",
+        "_QueuedMessageState",
         "_conversation_for",
+        "_conversation_for_key",
+        "_conversations",
+        "_get_or_create_queued_signal",
         "_response_lifecycle_lock",
         "_response_lifecycle_locks",
         "_should_signal_queued_message",
-        "_conversations",
+        "_thread_queued_signals",
     }
     found: list[str] = []
     for node in ast.walk(tree):
