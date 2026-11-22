@@ -14,6 +14,7 @@ from structlog.testing import capture_logs
 
 from mindroom import reply_lifecycle as rl
 from mindroom.ai_run_metadata import (
+    build_prepared_history_metadata_content,
     build_streaming_ai_run_metadata_content,
     build_terminal_note_ai_run_metadata_content,
     model_payload,
@@ -81,6 +82,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.history.types import PreparedHistoryState
     from mindroom.reply_turn.request import ResponseRequest
     from mindroom.response_runner import ResponseRunner
     from mindroom.turn_model import TurnModel
@@ -138,6 +140,25 @@ def _assert_provisional_ai_run(event_content: Mapping[str, Any], expected_model:
     assert "status" not in ai_run
     assert "run_id" not in ai_run
     assert "session_id" not in ai_run
+
+
+def _assert_only_final_write_reports_error(
+    writes: Sequence[Mapping[str, Any]],
+    model: Mapping[str, str] | None,
+) -> None:
+    """Assert every write before the last is live and status-less, and the last one completes with ``status='error'``."""
+    assert len(writes) >= 2
+    for write in writes[:-1]:
+        assert _stream_status(write) in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}
+        if model is None:
+            assert _ai_run(write) is None
+        else:
+            _assert_provisional_ai_run(write, model)
+    final_ai_run = _ai_run(writes[-1])
+    assert _stream_status(writes[-1]) == STREAM_STATUS_COMPLETED
+    assert final_ai_run is not None
+    assert final_ai_run["status"] == "error"
+    assert final_ai_run.get("model") == model
 
 
 @dataclass
@@ -1240,22 +1261,65 @@ async def test_handled_failed_reply_without_metadata_builder_reports_error_ai_ru
     *,
     streaming: bool,
 ) -> None:
-    """Preparation failure yielding FailedReply with build_run_metadata=None sets ai_run.status='error'."""
+    """Preparation failure yielding FailedReply with build_run_metadata=None sets ai_run.status='error' on the final write alone."""
     turn = await _setup_turn(
         tmp_path,
         monkeypatch,
         streaming=streaming,
         scripts={"default": [answer("never called")]},
     )
+    model = model_payload(turn.bot.config, "default")
 
     with patch("mindroom.ai._prepare_agent_run_context", side_effect=RuntimeError("prep boom")):
         assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
 
+    writes = turn.homeserver.writes
+    assert "prep boom" in str(_visible_content(writes[-1]).get("body", ""))
+    assert _ai_run(writes[-1]) == {"version": 1, "status": "error", "model": model}
+    _assert_only_final_write_reports_error(writes, model)
+    if streaming:
+        # The failure text reaches the room in a progress edit, after the turn settled its error metadata.
+        assert any("prep boom" in str(_visible_content(write).get("body", "")) for write in writes[1:-1])
+
+
+@pytest.mark.asyncio
+async def test_collected_failure_after_preparation_keeps_prepared_context_and_compaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A collected turn failing after preparation with no run record keeps its diagnostics beside status='error'."""
+    turn = await _setup_turn(
+        tmp_path,
+        monkeypatch,
+        streaming=False,
+        scripts={"default": [answer("never called")]},
+    )
+    prepared: list[dict[str, Any]] = []
+
+    def record_prepared_history(prepared_history: PreparedHistoryState) -> dict[str, Any]:
+        prepared.append(build_prepared_history_metadata_content(prepared_history))
+        return prepared[-1]
+
+    async def failing_attempt(**_kwargs: object) -> AsyncIterator[str]:
+        msg = "post-prep boom"
+        raise RuntimeError(msg)
+        yield ""
+
+    with (
+        patch("mindroom.ai.build_prepared_history_metadata_content", side_effect=record_prepared_history),
+        patch("mindroom.ai._stream_agent_attempt_chunks", failing_attempt),
+    ):
+        assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
+
+    assert len(prepared) == 1
+    prepared_ai_run = prepared[0][AI_RUN_METADATA_KEY]
+    assert prepared_ai_run["prepared_context"]["tokens"] > 0
+    assert prepared_ai_run["compaction"]["decision"] == "none"
     final_write = turn.homeserver.writes[-1]
-    assert "prep boom" in str(_visible_content(final_write).get("body", ""))
+    assert "post-prep boom" in str(_visible_content(final_write).get("body", ""))
     assert _stream_status(final_write) == STREAM_STATUS_COMPLETED
     assert _ai_run(final_write) == {
-        "version": 1,
+        **prepared_ai_run,
         "status": "error",
         "model": model_payload(turn.bot.config, "default"),
     }
@@ -1268,7 +1332,7 @@ async def test_streaming_response_failed_reply_chunk_sets_error_ai_run_status(
     *,
     with_model: bool,
 ) -> None:
-    """Direct StreamingResponse callers yielding FailedReply report ai_run.status='error' with stream_status='completed'."""
+    """A FailedReply stream reports ai_run.status='error' on its final write alone, though the turn settled it earlier."""
     config = _config(tmp_path)
     config.defaults.streaming.update_interval = 0.0
     config.defaults.streaming.min_update_interval = 0.0
@@ -1278,9 +1342,15 @@ async def test_streaming_response_failed_reply_chunk_sets_error_ai_run_status(
     client.room_send = AsyncMock(side_effect=homeserver.room_send)
     records = FakeReplyRecords()
     model = model_payload(config, "default") if with_model else None
+    run_metadata_content: dict[str, Any] = {}
 
-    async def chunks() -> AsyncIterator[FailedReply]:
-        yield FailedReply("[general] ⚠️ Error: prep failed", RuntimeError("prep failed"))
+    async def chunks() -> AsyncIterator[str | FailedReply]:
+        yield "Partial answer."
+        await asyncio.sleep(0.02)
+        # The turn driver settles the failure's error metadata before it yields the reply.
+        run_metadata_content.update(build_terminal_note_ai_run_metadata_content("error", model=model))
+        yield FailedReply("\n\n[general] ⚠️ Error: prep failed", RuntimeError("prep failed"))
+        await asyncio.sleep(0.02)
 
     await send_streaming_response(
         client,
@@ -1288,13 +1358,15 @@ async def test_streaming_response_failed_reply_chunk_sets_error_ai_run_status(
         config,
         runtime_paths_for(config),
         chunks(),
-        extra_content=None,
+        extra_content=run_metadata_content,
         active_model=(lambda: model) if with_model else None,
         **records.hooks(),
     )
-    final_write = homeserver.writes[-1]
-    assert _stream_status(final_write) == STREAM_STATUS_COMPLETED
+    writes = homeserver.writes
     expected: dict[str, Any] = {"version": 1, "status": "error"}
     if model is not None:
         expected["model"] = model
-    assert _ai_run(final_write) == expected
+    assert _ai_run(writes[-1]) == expected
+    _assert_only_final_write_reports_error(writes, model)
+    # A progress edit showed the failure after the error metadata settled, and stayed status-less.
+    assert any("prep failed" in str(_visible_content(write).get("body", "")) for write in writes[:-1])

@@ -27,6 +27,7 @@ from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.config.resolution import cheap_model as agent_cheap_model
 from mindroom.config.resolution import entity_timezone, show_reasoning, show_tool_calls
 from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
     COMPACTIONS_CONTENT_KEY,
     CONTINUED_RUNS_METADATA_KEY,
     HOOK_SOURCE_RUN_METADATA_KEY,
@@ -1917,10 +1918,16 @@ class ResponseRunner:
         def final_extra_content() -> dict[str, Any] | None:
             # A turn that published no run metadata still names the run the record holds.
             fallback = ai_run_extra_content_from_metadata(recorder.run_metadata) or {}
+            published = dict(run_metadata_content)
+            ai_run = published.get(AI_RUN_METADATA_KEY)
+            # A failure that stored no run publishes only its status and model, so the reply keeps the prepared
+            # context and compaction its record holds; a stored run's metadata replaces the record's.
+            if fallback and ai_run is not None and "run_id" not in ai_run:
+                published[AI_RUN_METADATA_KEY] = {**fallback[AI_RUN_METADATA_KEY], **ai_run}
             entries = compactions.content()
             compaction_content = {COMPACTIONS_CONTENT_KEY: entries} if entries is not None else {}
             return merge_response_extra_content(
-                {**fallback, **run_metadata_content, **compaction_content} or None,
+                {**fallback, **published, **compaction_content} or None,
                 request.attachment_ids,
             )
 

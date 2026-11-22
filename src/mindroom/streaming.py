@@ -1201,27 +1201,35 @@ class StreamingResponse:
         return dict(model) if model is not None else None
 
     def _apply_ai_run_metadata(self, extra_content: dict[str, Any], *, is_final: bool) -> None:
-        """Attach provisional or terminal ``io.mindroom.ai_run`` metadata without masking settled run metadata."""
-        terminal_status: Literal["completed", "error"] = "error" if self._saw_failed_reply else "completed"
-        ai_run = extra_content.get(AI_RUN_METADATA_KEY)
-        if not isinstance(ai_run, dict):
-            model = self._active_model_payload()
-            if model is None and not (is_final and self._saw_failed_reply):
-                return
-            if is_final:
-                extra_content.update(build_terminal_note_ai_run_metadata_content(terminal_status, model=model))
-            elif model is not None:
+        """Attach ``io.mindroom.ai_run`` metadata: provisional on a progress write, terminal on the final one.
+
+        A progress write names the reply's model alone, even once the turn has settled its run metadata into the
+        caller's content, so a terminal status reaches the room only with the final write, which keeps settled run
+        metadata whole.
+        """
+        settled = extra_content.get(AI_RUN_METADATA_KEY)
+        ai_run = dict(settled) if isinstance(settled, dict) else None
+        model = self._active_model_payload()
+        if not is_final:
+            settled_model = ai_run.get("model") if ai_run is not None else None
+            if model is None and isinstance(settled_model, dict):
+                model = settled_model
+            if model is not None:
                 extra_content.update(streaming_ai_run_content(model))
+            elif ai_run is not None and "status" in ai_run:
+                del extra_content[AI_RUN_METADATA_KEY]
+            return
+        terminal_status: Literal["completed", "error"] = "error" if self._saw_failed_reply else "completed"
+        if ai_run is None:
+            if model is not None or self._saw_failed_reply:
+                extra_content.update(build_terminal_note_ai_run_metadata_content(terminal_status, model=model))
             return
         if "status" in ai_run:
             return
-        model = self._active_model_payload()
-        updated = dict(ai_run)
-        if model is not None and (not is_final or "model" not in updated):
-            updated["model"] = model
-        if is_final:
-            updated["status"] = terminal_status
-        extra_content[AI_RUN_METADATA_KEY] = updated
+        if model is not None and "model" not in ai_run:
+            ai_run["model"] = model
+        ai_run["status"] = terminal_status
+        extra_content[AI_RUN_METADATA_KEY] = ai_run
 
     def _delivery_extra_content(self, *, is_final: bool) -> dict[str, Any]:
         """Return the extra content of one durable write: the caller's, active model, live watermark, compactions, and reasoning.
