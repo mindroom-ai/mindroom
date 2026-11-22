@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import os
 import signal
 import sys
@@ -18,7 +19,7 @@ from mindroom.agent_cli.main import main
 from mindroom.agent_cli.protocol import ToolCallOperation
 from mindroom.agent_cli.turn import ToolKey
 from mindroom.constants import resolve_primary_runtime_paths
-from mindroom.shell.execution import ProcessRecord, run_command
+from mindroom.shell.execution import ShellRunResult, run_command
 from mindroom.shell.output_capture import ShellOutputDestination, format_shell_completion
 from mindroom.tool_system.catalog import builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import WorkerStandIns
@@ -181,32 +182,92 @@ def test_r1_successful_command_printing_launch_failure_text_exits_0(
 
 
 @pytest.mark.asyncio
-async def test_r1_output_capture_eacces_stays_execution_error(tmp_path: Path) -> None:
-    """EACCES from ShellOutputCapture temp-file creation stays an execution error, not a command that exited 126."""
-    ro_dir = tmp_path / "readonly"
-    ro_dir.mkdir()
-    ro_dir.chmod(0o555)
+async def test_r1_output_capture_eacces_stays_execution_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A PermissionError from creating the capture's file stays an execution error, even one that names the program."""
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError(errno.EACCES, "Permission denied", "/bin/sh")
+
+    monkeypatch.setattr("mindroom.shell.output_capture.tempfile.TemporaryFile", refuse)
+    result = await run_command(
+        {},
+        namespace="test",
+        argv=["/bin/sh", "-c", "echo ok"],
+        env=dict(os.environ),
+        cwd=str(tmp_path),
+        tail=10,
+        timeout=5.0,
+        output_destination=ShellOutputDestination(workspace_root=str(tmp_path), path="out.txt", max_bytes=1024),
+        launch_failure_exits=True,
+    )
+    assert result.execution_error is True
+    assert result.message.startswith("Error: [Errno 13]")
+
+
+async def _launch(argv: list[str], *, path: Path | str, cwd: Path) -> ShellRunResult:
+    """Run a command whose launch failure exits as a shell reports it, with ``path`` as its whole PATH."""
+    return await run_command(
+        {},
+        namespace="test",
+        argv=argv,
+        env={"PATH": str(path)},
+        cwd=str(cwd),
+        tail=10,
+        timeout=5.0,
+        launch_failure_exits=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_r3_bare_name_missing_from_a_path_with_a_file_entry_is_command_not_found(tmp_path: Path) -> None:
+    """A bare name no PATH entry holds is not found, whatever error the last entry gave: here it is a regular file."""
+    entry = tmp_path / "not-a-directory"
+    entry.write_text("")
+    result = await _launch(["missing-program-xyz"], path=f"{tmp_path}{os.pathsep}{entry}", cwd=tmp_path)
+    assert result == ShellRunResult(message="Exit code 127\nStderr:\nmissing-program-xyz: command not found")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "reason"),
+    [
+        (0o755, "/nonexistent/interp: bad interpreter: No such file or directory"),
+        (0o644, "Permission denied"),
+    ],
+)
+@pytest.mark.parametrize("bare", [True, False])
+async def test_r3_program_that_is_found_but_cannot_run_is_reported_as_bash_reports_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: int,
+    reason: str,
+    bare: bool,
+) -> None:
+    """A script with a missing interpreter, or without the execute bit, exits 126 with bash's words, by name or by path."""
+    # Where the idle policy is refused, a command starts directly, so its spawn error is the one that is reported.
+    monkeypatch.setattr("mindroom.shell.execution._idle_launcher", lambda: None)
+    script = tmp_path / "script-xyz"
+    script.write_text("#!/nonexistent/interp -x\necho hi\n")
+    script.chmod(mode)
+    result = await _launch(["script-xyz" if bare else str(script)], path=tmp_path, cwd=tmp_path)
+    assert result == ShellRunResult(message=f"Exit code 126\nStderr:\n{script}: {reason}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.geteuid() == 0, reason="root enters every directory")
+async def test_r3_cwd_that_cannot_be_entered_stays_an_execution_error_when_it_is_the_program(tmp_path: Path) -> None:
+    """A working directory the command cannot enter fails the call before any program starts, as a missing one does."""
+    closed = tmp_path / "closed"
+    closed.mkdir(mode=0o600)
     try:
-        registry: dict[str, ProcessRecord] = {}
-        result = await run_command(
-            registry,
-            namespace="test",
-            argv=["/bin/sh", "-c", "echo ok"],
-            env=dict(os.environ),
-            cwd=str(tmp_path),
-            tail=10,
-            timeout=5.0,
-            output_destination=ShellOutputDestination(
-                workspace_root=str(ro_dir),
-                path="out.txt",
-                max_bytes=1024,
-            ),
-            launch_failure_exits=True,
-        )
-        assert result.execution_error is True
-        assert result.message.startswith("Error: [Errno 13]")
+        result = await _launch([str(closed)], path=tmp_path, cwd=closed)
     finally:
-        ro_dir.chmod(0o755)
+        closed.chmod(0o700)
+    assert result.execution_error is True
+    assert result.message.startswith("Error: [Errno 13]")
 
 
 def test_r1_signal_during_first_tty_progress_flush_still_ends_line(monkeypatch: pytest.MonkeyPatch) -> None:

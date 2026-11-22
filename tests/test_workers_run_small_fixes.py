@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import errno
 import json
+import os
 import signal
 import sys
 import threading
@@ -470,6 +471,23 @@ def test_item11_tty_progress_rewrites_in_place_and_ends_with_newline_before_cli_
         "\r\x1b[Kmindroom-agent: starting worker f1..."
         "\r\x1b[Kmindroom-agent: starting worker f1... (5s)"
         "\r\x1b[Kmindroom-agent: worker f1 ready (7s)\n"
+        "mindroom-agent: started worker f1\n"
+    )
+
+
+def test_item11_tty_progress_is_cut_to_the_terminal_width(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A progress line wider than the terminal would wrap, and the next rewrite would leave its first rows behind."""
+    tty = _FakeTtyStderr(is_tty=True)
+    monkeypatch.setattr(tty, "fileno", lambda: 2)
+    monkeypatch.setattr("mindroom.agent_cli.main.os.get_terminal_size", lambda _fd: os.terminal_size((30, 24)))
+    code, out, err = _run_progress_cli(monkeypatch, stderr_stream=tty)
+
+    assert code == 0
+    assert out == "done\n"
+    assert err == (
+        "\r\x1b[Kmindroom-agent: starting work"
+        "\r\x1b[Kmindroom-agent: starting work"
+        "\r\x1b[Kmindroom-agent: worker f1 rea\n"
         "mindroom-agent: started worker f1\n"
     )
 
