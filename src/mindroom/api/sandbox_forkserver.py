@@ -217,16 +217,9 @@ class _SandboxForkserver:
         self._failed_fingerprints: dict[str, tuple[str, float]] = {}
         self._template_preload = template_preload
 
-    def warm(
-        self,
-        *,
-        python_executable: str | None,
-        template_env: dict[str, str] | None,
-        startup_timeout_seconds: float,
-    ) -> None:
+    def warm(self, python_executable: str | None, template_env: dict[str, str] | None, timeout_seconds: float) -> None:
         """Start one template ahead of the first request and wait until it serves."""
-        key = python_executable or sys.executable
-        self._warm_template(key, template_env, time.monotonic() + startup_timeout_seconds)
+        self._warm_template(python_executable or sys.executable, template_env, time.monotonic() + timeout_seconds)
 
     def execute(
         self,
@@ -533,8 +526,7 @@ _preloading_forkserver: _SandboxForkserver | None = None
 def start_preloading_forkserver(template_preload: str) -> None:
     """Add this process's manager of templates that import ``template_preload`` before they serve.
 
-    It stays apart from the plain manager, so a request the preload does not suit, and every request once the preload
-    is given up, forks from a template that never imported those plugins.
+    The plain manager's templates never import it, for the requests it does not suit and once it is given up.
     """
     global _preloading_forkserver
     with _forkserver_lock:

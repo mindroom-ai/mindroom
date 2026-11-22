@@ -407,16 +407,13 @@ def start_eager_worker_setup(app: FastAPI) -> asyncio.Task[None] | None:
     if not isinstance(plugin_paths, list):
         return None
     if plugin_paths:
-        sandbox_forkserver.start_preloading_forkserver(
-            json.dumps(
-                {
-                    "config_path": str(runtime_paths.config_path),
-                    "storage_root": str(runtime_paths.storage_root),
-                    "plugins": plugin_paths,
-                    "budget_seconds": _PRELOAD_BUDGET_SECONDS,
-                },
-            ),
-        )
+        preload = {
+            "config_path": str(runtime_paths.config_path),
+            "storage_root": str(runtime_paths.storage_root),
+            "plugins": plugin_paths,
+            "budget_seconds": _PRELOAD_BUDGET_SECONDS,
+        }
+        sandbox_forkserver.start_preloading_forkserver(json.dumps(preload))
     app.state.worker_setup = "preparing"
     return asyncio.create_task(_eager_worker_setup(app, runtime_paths))
 
@@ -452,23 +449,15 @@ def _warm_forkserver_template(paths: LocalWorkerStatePaths, budget_seconds: floa
     """
     python_executable, template_env, _ = sandbox_exec.resolve_subprocess_worker_context(paths)
     deadline = time.monotonic() + budget_seconds
-    preloading = sandbox_forkserver.preloading_forkserver()
-    if preloading is not None:
+    if (preloading := sandbox_forkserver.preloading_forkserver()) is not None:
         try:
-            preloading.warm(
-                python_executable=python_executable,
-                template_env=template_env,
-                startup_timeout_seconds=budget_seconds,
-            )
+            preloading.warm(python_executable, template_env, budget_seconds)
         except sandbox_forkserver.ForkserverError as exc:
             sandbox_forkserver.abandon_preload(str(exc) or "The preload outlasted the worker's setup budget.")
         else:
             return
-    sandbox_forkserver.get_sandbox_forkserver().warm(
-        python_executable=python_executable,
-        template_env=template_env,
-        startup_timeout_seconds=max(deadline - time.monotonic(), 1.0),
-    )
+    remaining_seconds = max(deadline - time.monotonic(), 1.0)
+    sandbox_forkserver.get_sandbox_forkserver().warm(python_executable, template_env, remaining_seconds)
 
 
 def _freeze_private_agent_names(private_agent_names: list[str] | None) -> frozenset[str] | None:
@@ -1685,8 +1674,7 @@ def _run_forkserver_template() -> int:
     preload = os.environ.pop(sandbox_forkserver.PRELOAD_ENV, None)
     if preload is not None and (error := _preload_template_plugins(json.loads(preload))) is not None:
         # An import cannot be undone, so this template ends, and the runner serves from one that never tried it.
-        sys.stderr.write(error)
-        sys.stderr.flush()
+        os.write(2, error.encode())
         os._exit(1)
     return sandbox_forkserver.serve_template(socket_path, _run_subprocess_worker_payload)
 
@@ -1697,6 +1685,7 @@ def _preload_template_plugins(spec: dict[str, Any]) -> str | None:
     The kernel ends the template when the import outlasts its budget, also one that never returns to Python.
     """
     threads_and_files = sandbox_forkserver.threads_and_open_files()
+    os.write(2, f"Importing the plugins that set worker_preload, for at most {spec['budget_seconds']} s.\n".encode())
     signal.setitimer(signal.ITIMER_REAL, spec["budget_seconds"])
     try:
         runtime_paths = constants.resolve_primary_runtime_paths(
