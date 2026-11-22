@@ -1744,6 +1744,118 @@ def test_responses_native_compaction_settings_match_the_claude_contract(tmp_path
     assert proxied.native_compaction_settings(threshold=60_000, history_generation="", allow_authored=False) is None
 
 
+_OPENROUTER_RESPONSES = {
+    "provider": "openai",
+    "api": "responses",
+    "id": "openai/gpt-6.2-sol",
+    "api_key": "or-test-key",
+    "extra_kwargs": {"base_url": "https://openrouter.ai/api/v1"},
+}
+
+
+@pytest.mark.parametrize(
+    ("model_id", "base_url", "extra_kwargs", "expected"),
+    [
+        ("openai/gpt-6.2-sol", "https://openrouter.ai/api/v1", {}, True),
+        ("openai/gpt-5.4", "https://openrouter.ai/api/v1", {}, True),
+        ("openai/gpt-5.3-codex", "https://openrouter.ai/api/v1", {}, True),
+        ("anthropic/claude-opus-5.5", "https://openrouter.ai/api/v1", {}, False),
+        ("anthropic/gpt-6.2-sol", "https://openrouter.ai/api/v1", {}, False),
+        (
+            "openai/gpt-6.2-sol",
+            "https://openrouter.ai/api/v1",
+            {"extra_body": {"provider": {"order": ["openai"], "allow_fallbacks": False}}},
+            True,
+        ),
+        (
+            "openai/gpt-6.2-sol",
+            "https://openrouter.ai/api/v1",
+            {"request_params": {"extra_body": {"provider": {"order": ["openai"]}}}},
+            True,
+        ),
+        (
+            "openai/gpt-6.2-sol",
+            "https://openrouter.ai/api/v1",
+            {"extra_body": {"models": ["openai/gpt-6.2-sol"]}},
+            False,
+        ),
+        ("openai/gpt-6.2-sol", "https://openrouter.ai/api/v1", {"request_params": {"route": "fallback"}}, False),
+        (
+            "openai/gpt-6.2-sol",
+            "https://openrouter.ai/api/v1",
+            {"request_params": {"extra_body": {"model": "anthropic/claude-opus-5.5"}}},
+            False,
+        ),
+        ("openai/gpt-6.2-sol", "https://openrouter.ai/api/v1", {"store": True}, False),
+        ("openai/gpt-6.2-sol", "https://api.openai.com/v1", {}, False),
+        ("gpt-6.2-sol", "https://api.openai.com/v1", {}, True),
+    ],
+)
+def test_openrouter_responses_native_compaction_eligibility(
+    tmp_path: Path,
+    model_id: str,
+    base_url: str,
+    extra_kwargs: dict[str, Any],
+    *,
+    expected: bool,
+) -> None:
+    runtime = _runtime(tmp_path)
+    adapter = build_provider(
+        ModelConfig(
+            provider="openai",
+            api="responses",
+            id=model_id,
+            api_key="or-test-key",
+            extra_kwargs={"base_url": base_url, **extra_kwargs},
+        ),
+        runtime,
+    )
+
+    assert isinstance(adapter, ResponsesAdapter)
+    assert adapter.capabilities.native_compaction is expected
+    if base_url == "https://openrouter.ai/api/v1":
+        assert adapter.capabilities.native_tool_search is False
+        assert adapter.wire.explicit_breakpoint is False
+    if model_id.endswith("gpt-6.2-sol"):
+        assert adapter.capabilities.provider_default_sampling is True
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_native_compaction_wire_send(tmp_path: Path) -> None:
+    output = [
+        {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Pack", "annotations": []}],
+        },
+    ]
+    config = {
+        **_OPENROUTER_RESPONSES,
+        "extra_kwargs": {
+            "base_url": "https://openrouter.ai/api/v1",
+            "request_params": {"extra_body": {"provider": {"order": ["openai"], "allow_fallbacks": False}}},
+        },
+    }
+    built = _Built(tmp_path, config, _responses_reply(*_text_events("Pack"), _completed(output)))
+    assert isinstance(built.adapter, ResponsesAdapter)
+    native = built.adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
+    assert native is not None
+
+    turn = await _turn(built, ModelRequest(messages=[_user()], native_compaction=native))
+
+    body = built.body()
+    assert str(built.requests[0].url) == "https://openrouter.ai/api/v1/responses"
+    assert built.requests[0].headers["authorization"] == "Bearer or-test-key"
+    assert body["model"] == "openai/gpt-6.2-sol"
+    assert body["store"] is False
+    assert body["include"] == ["reasoning.encrypted_content"]
+    assert body["context_management"] == [{"type": "compaction", "compact_threshold": 50_000}]
+    assert body["provider"] == {"order": ["openai"], "allow_fallbacks": False}
+    assert turn.message.provider_data["mindroom_native_compaction"]["route"] == native.route
+
+
 # --- Request settings -----------------------------------------------------------------------------------------
 
 

@@ -75,11 +75,13 @@ __all__ = [
 logger = get_logger(__name__)
 
 # Routes whose public endpoint and model ids support Responses native compaction.
-_NATIVE_COMPACTION_ENDPOINTS = frozenset({OPENAI_BASE_URL_DEFAULT, CODEX_BASE_URL})
+_NATIVE_COMPACTION_ENDPOINTS = frozenset({OPENAI_BASE_URL_DEFAULT, CODEX_BASE_URL, OPENROUTER_BASE_URL_DEFAULT})
 _NATIVE_COMPACTION_MODEL_PREFIXES = ("gpt-5.3-codex", "gpt-5.4", "gpt-6")
 _NATIVE_COMPACTION_AUTHORED_KEYS = ("context_management", "previous_response_id", "background", "store")
+# Request fields that let OpenRouter answer with another model than the configured id names.
+_MODEL_REROUTING_KEYS = ("model", "models", "route")
 # Request fields that let OpenRouter answer with another model or upstream provider than the configured id names.
-_REROUTING_KEYS = ("model", "models", "route", "provider")
+_REROUTING_KEYS = (*_MODEL_REROUTING_KEYS, "provider")
 # Explicit prompt-cache breakpoints exist on the public API from GPT-5.6.
 _BREAKPOINT_MODEL = re.compile(r"gpt-(\d+)(?:\.(\d+))?(?:-|$)")
 
@@ -472,15 +474,15 @@ def _supports_explicit_breakpoint(model_id: str, endpoint: str) -> bool:
 def _native_compaction_supported(model_id: str, endpoint: str, store: bool | None, settings: ResponsesSettings) -> bool:
     """Native compaction needs explicit replay on a public route and no authored replay policy."""
     request_params = settings.request_params or {}
+    bodies = (request_params, settings.extra_body or {}, request_params.get("extra_body") or {})
+    openrouter = endpoint == OPENROUTER_BASE_URL_DEFAULT
+    effective_id = model_id.removeprefix("openai/") if openrouter else model_id
     return (
         store is not True
-        and model_id.startswith(_NATIVE_COMPACTION_MODEL_PREFIXES)
+        and effective_id.startswith(_NATIVE_COMPACTION_MODEL_PREFIXES)
         and endpoint in _NATIVE_COMPACTION_ENDPOINTS
-        and not any(
-            key in params
-            for params in (request_params, settings.extra_body or {}, request_params.get("extra_body") or {})
-            for key in _NATIVE_COMPACTION_AUTHORED_KEYS
-        )
+        and not any(key in body for body in bodies for key in _NATIVE_COMPACTION_AUTHORED_KEYS)
+        and not (openrouter and any(key in body for body in bodies for key in _MODEL_REROUTING_KEYS))
     )
 
 
