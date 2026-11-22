@@ -699,11 +699,15 @@ def _error_http_response(kind: str) -> web.StreamResponse:
         return web.Response(text="<html>503 Service Unavailable</html>", status=503, content_type="text/html")
     if kind == "forbidden_403":
         return web.json_response({"errcode": "M_FORBIDDEN", "error": "Forbidden"}, status=403)
+    if kind == "not_found_503":
+        return web.json_response({"errcode": "M_NOT_FOUND", "error": "Not found"}, status=503)
+    if kind == "forbidden_503":
+        return web.json_response({"errcode": "M_FORBIDDEN", "error": "Forbidden"}, status=503)
     return web.json_response({"errcode": "M_UNKNOWN", "error": "Service Unavailable"}, status=503)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("response_kind", ["json_503", "html_503"])
+@pytest.mark.parametrize("response_kind", ["json_503", "html_503", "not_found_503", "forbidden_503"])
 async def test_non_200_binding_read_in_accounts_retries_without_writing(
     room_state: RoomState,
     response_kind: str,
@@ -744,6 +748,8 @@ async def test_non_200_binding_read_in_accounts_retries_without_writing(
     [
         ("json_503", False, "warning"),
         ("html_503", False, "warning"),
+        ("not_found_503", False, "warning"),
+        ("forbidden_503", False, "warning"),
         ("forbidden_403", True, "debug"),
     ],
 )
@@ -782,6 +788,10 @@ async def test_non_200_binding_read_in_claim_path_never_claims(
         ("steward", "forbidden_403", True, "debug"),
         ("bound", "json_503", False, "warning"),
         ("steward", "json_503", False, "warning"),
+        ("bound", "not_found_503", False, "warning"),
+        ("steward", "not_found_503", False, "warning"),
+        ("bound", "forbidden_503", False, "warning"),
+        ("steward", "forbidden_503", False, "warning"),
     ],
 )
 async def test_non_200_roster_get_stops_before_put(
