@@ -881,21 +881,19 @@ _NEVER_SAVED = 1_000_000
         (["/etc/passwd"], 126, 32, "Stderr:\n/etc/passwd: Permission denied\n"),
     ],
 )
-async def test_workers_run_prints_saved_output_from_its_named_worker(
+async def test_a_cli_call_reads_saved_output_from_its_named_worker(
     runtime_paths: RuntimePaths,
     backend: _FakeBackend,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
     command: list[str],
     exit_code: int,
     threshold: int,
     printed: str,
 ) -> None:
-    """The CLI keeps the real exit status and saved output path, whether or not the runner auto-saves the result."""
+    """A CLI call's receipt keeps the real exit status and saved output path, whether or not the runner saves it."""
     from uuid import uuid4  # noqa: PLC0415
 
-    from mindroom.agent_cli.main import main  # noqa: PLC0415
     from mindroom.agent_cli.protocol import ToolCallOperation  # noqa: PLC0415
     from mindroom.agent_cli.session import CliTurnOwner  # noqa: PLC0415
     from mindroom.agent_cli.shell_contract import AgentCliShellEnv  # noqa: PLC0415
@@ -958,20 +956,17 @@ async def test_workers_run_prints_saved_output_from_its_named_worker(
         cli_receipt = await settled_receipt(owner, queued["call_id"])
     await owner.close()
 
-    class Client:
-        def operation(self, payload: dict[str, Any]) -> dict[str, object]:
-            assert payload["arguments"]["args"] == command
-            # Only what every released CLI reads: the exit code is in the result itself.
-            return {"status": cli_receipt["status"], "outcome": cli_receipt["outcome"]}
-
-    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
-    assert main(["workers", "run", "shard", "--", *command]) == exit_code
-    output = capsys.readouterr()
-    assert output.out == printed if printed.startswith("Stderr:") else printed in output.out
-    notes = ["mindroom-agent: started worker shard"]
+    # `workers run` streams its command's output instead, so only a `tools call` reads a result the runner formatted.
+    assert cli_receipt["status"] == "completed"
+    outcome = cli_receipt["outcome"]
     if saved_path is not None:
-        notes.append(f"mindroom-agent: full output saved to {saved_path}")
-    assert output.err.splitlines() == notes
+        saved_to = outcome["mindroom_tool_output"]
+        assert saved_to["path"] == saved_path
+        outcome = saved_to["preview"]
+    header, _, body = outcome.partition("\n")
+    assert header == "[worker: shard, started]"
+    assert body.startswith(f"Exit code {exit_code}\n") is bool(exit_code)
+    assert printed.strip() in body
 
 
 @pytest.mark.asyncio
@@ -1051,6 +1046,9 @@ async def test_cli_catalog_explains_why_named_workers_are_not_offered(
     class Client:
         def operation(self, _payload: object) -> dict[str, object]:
             return receipt
+
+        def stream(self, _call_id: str) -> object:
+            return iter([receipt])
 
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
     assert main(["workers", "run", "build", "--", "true"]) == 125

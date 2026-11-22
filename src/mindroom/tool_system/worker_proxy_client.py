@@ -35,6 +35,8 @@ from mindroom.workers.protocol import (
     LeaseResponse,
     SaveAttachmentRequest,
     SaveAttachmentResponse,
+    StdinRequest,
+    StdinResponse,
     ViewFileRequest,
     ViewFileResponse,
     WorkerFailure,
@@ -42,11 +44,14 @@ from mindroom.workers.protocol import (
 
 if TYPE_CHECKING:
     from mindroom.credentials.manager import CredentialsManager
+    from mindroom.tool_system.runtime_context import CallOutputStream
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
     from mindroom.workers.backend import WorkerBackend
 
 _SANDBOX_PROXY_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
 _EXECUTE_CANCEL_TIMEOUT_SECONDS = 10.0
+# How long a cancelled streamed command is waited for to confirm it stopped; the runner kills it within about a second.
+STOP_CONFIRMATION_SECONDS = 3.0
 # The runner streams at least one line this often while a call runs; a longer silence means the runner is gone.
 EXECUTE_KEEPALIVE_SECONDS = 5.0
 
@@ -375,6 +380,38 @@ def _post_execute_cancel(
         logger.warning("worker_execute_cancel_failed", url=url, exc_info=True)
 
 
+async def _post_execute_stdin(
+    post: Callable[..., _WorkerProxyResponse],
+    failing: list[int],
+    seq: int,
+    data: str,
+    eof: bool,
+) -> bool:
+    """Write one chunk to the stdin of a streamed call's command, and return whether its stdin takes more.
+
+    ``post`` sends through the call's own client, which keeps one connection for the chunks. Only the runner's
+    answer says that stdin is closed. TimeoutError says the chunk is to be sent again, which writes it once: the
+    command has not read what it was sent, or the request or its answer was lost on the way. A call that ended
+    closed its client, and the chunk sent again finds no call to write to. ``failing`` holds the chunk that failed
+    last and how often, to log one that fails again.
+    """
+    request = StdinRequest(protocol=WORKER_PROTOCOL_VERSION, seq=seq, b=data, eof=eof)
+    try:
+        response = await asyncio.to_thread(post, json=request.model_dump(mode="json"))
+        # A 408 or 429 passes, as a 5xx does, so that chunk is sent again too; any other 4xx is a refusal.
+        passing = response.status_code in (httpx.codes.REQUEST_TIMEOUT, httpx.codes.TOO_MANY_REQUESTS)
+        if not (refused := httpx.codes.is_client_error(response.status_code) and not passing):
+            response.raise_for_status()
+    except (httpx.HTTPError, RuntimeError) as exc:
+        failing[:] = [seq, failing[1] + 1 if failing[0] == seq else 1]
+        if failing[1] == 2:
+            logger.warning("worker_stdin_chunk_not_written", seq=seq, error=repr(exc))
+        raise TimeoutError from None
+    if refused:
+        raise ValueError(_proxy_http_error_message(response))
+    return StdinResponse.model_validate(response.json()).open
+
+
 def _ndjson_lines(chunks: Iterator[bytes]) -> Iterator[str]:
     """Split a streamed body on newlines alone, since JSON text may hold other Unicode line separators."""
     pending = bytearray()
@@ -395,24 +432,41 @@ def _read_execute_stream(
     *,
     deadline: float | None,
     cancellation: WorkerCallCancellation | None,
+    on_frame: Callable[[dict[str, object]], None] | None = None,
 ) -> dict[str, object] | None:
     """Relay a call's progress until its result line; None when that line is not a JSON object.
 
     Dropping the stream stops the call at the runner, so a cancelled call stops reading at its next line.
+    ``on_frame`` takes each frame of a streamed command (a line with ``t``) as it arrives, and reads no further
+    until it returns. A cancelled streamed command is read a little longer for its exit, which says the stop took
+    effect; its output is dropped meanwhile.
     """
+    stop_reading: float | None = None
+    # Time spent handing frames to a slow reader is not time waited for the runner.
+    handed_on = 0.0
     for line in _ndjson_lines(response.iter_bytes()):
         if not line:
             continue
         frame = _json_object(json.loads(line))
-        if frame is None or ("progress" not in frame and frame.get("keepalive") is not True):
+        if frame is None or ("progress" not in frame and "t" not in frame and frame.get("keepalive") is not True):
             return frame
         if cancellation is not None and cancellation.cancelled:
+            stop_reading = stop_reading or time.monotonic() + STOP_CONFIRMATION_SECONDS
+            if on_frame is None or time.monotonic() >= stop_reading:
+                raise asyncio.CancelledError
+            if frame.get("t") != "exit":
+                continue
+            on_frame(frame)
             raise asyncio.CancelledError
-        if deadline is not None and time.monotonic() >= deadline:
+        if deadline is not None and time.monotonic() - handed_on >= deadline:
             msg = "Worker call exceeded its time limit."
             raise httpx.ReadTimeout(msg)
         if "progress" in frame:
             report_tool_progress(str(frame["progress"]))
+        elif "t" in frame and on_frame is not None:
+            started = time.monotonic()
+            on_frame(frame)
+            handed_on += time.monotonic() - started
     msg = "Sandbox proxy stream ended without a result."
     raise RuntimeError(msg)
 
@@ -429,12 +483,15 @@ def execute_worker_proxy_request(
     primary_built_service: Callable[[str], bool] | None = None,
     worker_grantable_credentials: frozenset[str] | None = None,
     cancellation: WorkerCallCancellation | None = None,
+    stream: CallOutputStream | None = None,
+    on_frame: Callable[[dict[str, object]], None] | None = None,
 ) -> object:
     """Execute one tool call through the sandbox proxy or selected dedicated worker.
 
     ``primary_built_service`` names leased services whose settings live in primary stores.
     ``worker_grantable_credentials`` names shared services a scoped call may lease.
     ``cancellation`` lets the caller stop the call at the runner once it stops waiting for it.
+    ``stream`` is given the way to the stdin of a call's streamed command, whose frames ``on_frame`` takes.
     """
     if worker_handle is None and config.proxy_url is None:
         msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_url']} must be set when sandbox proxying is enabled."
@@ -469,6 +526,10 @@ def execute_worker_proxy_request(
                         cancellation.request_id,
                     ),
                 )
+                if stream is not None:
+                    stdin_url = f"{cancel_url.removesuffix('/cancel')}/{cancellation.request_id}/stdin"
+                    post_stdin = functools.partial(client.post, stdin_url, headers=headers)
+                    stream.write_stdin = functools.partial(_post_execute_stdin, post_stdin, [-1, 0])
             lease_id = _create_credential_lease(
                 client,
                 config=config,
@@ -505,7 +566,12 @@ def execute_worker_proxy_request(
                 except httpx.HTTPStatusError as exc:
                     response.read()
                     raise _WorkerHttpError(exc.response) from exc
-                data = _read_execute_stream(response, deadline=deadline, cancellation=cancellation)
+                data = _read_execute_stream(
+                    response,
+                    deadline=deadline,
+                    cancellation=cancellation,
+                    on_frame=on_frame,
+                )
     except Exception as exc:
         _record_proxy_exception_for_worker(
             exc,
@@ -513,6 +579,10 @@ def execute_worker_proxy_request(
             worker_manager=worker_manager,
         )
         raise
+    finally:
+        if stream is not None:
+            # The client that reached the command's stdin is closed.
+            stream.write_stdin = None
 
     answer = _checked_worker_answer(
         data,

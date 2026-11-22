@@ -11,7 +11,6 @@ import signal
 import sys
 import threading
 from contextlib import contextmanager
-from io import StringIO
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -22,7 +21,7 @@ from mindroom.agent_cli.protocol import ToolCallOperation
 from mindroom.agent_cli.turn import ToolKey
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.shell.execution import ShellRunResult, _launch_failure, run_command
-from mindroom.shell.output_capture import ShellOutputDestination, format_shell_completion
+from mindroom.shell.output_capture import ShellOutputDestination
 from mindroom.tool_system.catalog import builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import WorkerStandIns
 from mindroom.tool_system.worker_proxy_client import WorkerCallCancellation
@@ -31,10 +30,12 @@ from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteRequest
 from tests.test_workers_run_control import (
     SETTLE_TIMEOUT_SECONDS,
     _make_owner,
+    _NoStdin,
     capture_bash_batch,
     response_cli_lifetime,
 )
-from tests.test_workers_run_small_fixes import _FakeWorkerManager
+from tests.test_workers_run_small_fixes import _cli_with_stream, _FakeWorkerManager
+from tests.workers_run_frames import FakeStream, command_frames
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -168,15 +169,7 @@ def test_r1_successful_command_printing_launch_failure_text_exits_0(
     """A successful command printing 'Could not start command (exit code 127): example' exits 0 on stdout."""
     text = "Could not start command (exit code 127): example"
 
-    class Client:
-        def operation(self, payload: dict[str, object]) -> dict[str, object]:
-            return {
-                "status": "completed",
-                "call_id": payload["call_id"],
-                "outcome": f"[worker: w1]\n{format_shell_completion(text, None, return_code=0)}",
-            }
-
-    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    _cli_with_stream(monkeypatch, command_frames(f"{text}\n".encode(), header="[worker: w1]"))
     assert main(["workers", "run", "w1", "--", "echo", text]) == 0
     output = capsys.readouterr()
     assert output.out == f"{text}\n"
@@ -380,13 +373,10 @@ def test_r1_signal_during_first_tty_progress_flush_still_ends_line(monkeypatch: 
         installed[signum] = handler
         return prev
 
-    class _SignallingTty(StringIO):
+    class _SignallingTty(FakeStream):
         def __init__(self) -> None:
-            super().__init__()
+            super().__init__(is_tty=True)
             self._signalled = False
-
-        def isatty(self) -> bool:
-            return True
 
         def flush(self) -> None:
             super().flush()
@@ -396,13 +386,14 @@ def test_r1_signal_during_first_tty_progress_flush_still_ends_line(monkeypatch: 
                 assert callable(handler)
                 handler(int(signal.SIGTERM), None)
 
-    class Client:
+    class Client(_NoStdin):
         def operation(self, payload: dict[str, object]) -> dict[str, object]:
             return {"status": "queued", "call_id": payload["call_id"]}
 
-        def receipt(self, call_id: str, **_kwargs: object) -> dict[str, object]:
+        def stream(self, call_id: str) -> Iterator[dict[str, object]]:
             del call_id
-            return {"status": "running", "progress": "starting worker f1...", "progress_revision": 1}
+            yield {"t": "progress", "text": "starting worker f1..."}
+            pytest.fail("the signal should have ended the relay")
 
         def cancel(self, call_id: str, *, timeout: float = 8.0) -> dict[str, object]:
             del call_id, timeout
@@ -410,7 +401,6 @@ def test_r1_signal_during_first_tty_progress_flush_still_ends_line(monkeypatch: 
 
     tty = _SignallingTty()
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
-    monkeypatch.setattr("mindroom.agent_cli.main._POLL_FLOOR_SECONDS", 0.0)
     monkeypatch.setattr(signal, "signal", fake_signal)
     monkeypatch.setattr(sys, "stderr", tty)
 
@@ -424,27 +414,18 @@ def test_r1_signal_during_first_tty_progress_flush_still_ends_line(monkeypatch: 
 def test_r1_escaping_exception_ends_open_tty_progress_line(monkeypatch: pytest.MonkeyPatch) -> None:
     """An unexpected escaping exception ends an open TTY progress line with a newline."""
 
-    class _Tty(StringIO):
-        def isatty(self) -> bool:
-            return True
-
-    class Client:
+    class Client(_NoStdin):
         def operation(self, payload: dict[str, object]) -> dict[str, object]:
-            return {
-                "status": "running",
-                "call_id": payload["call_id"],
-                "progress": "starting worker f1...",
-                "progress_revision": 1,
-            }
+            return {"status": "running", "call_id": payload["call_id"]}
 
-        def receipt(self, call_id: str, **_kwargs: object) -> dict[str, object]:
+        def stream(self, call_id: str) -> Iterator[dict[str, object]]:
             del call_id
+            yield {"t": "progress", "text": "starting worker f1..."}
             msg = "unexpected boom"
             raise RuntimeError(msg)
 
-    tty = _Tty()
+    tty = FakeStream(is_tty=True)
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
-    monkeypatch.setattr("mindroom.agent_cli.main._POLL_FLOOR_SECONDS", 0.0)
     monkeypatch.setattr(sys, "stderr", tty)
 
     with pytest.raises(RuntimeError, match="unexpected boom"):

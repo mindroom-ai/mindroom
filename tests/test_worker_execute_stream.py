@@ -5,13 +5,16 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from contextlib import contextmanager
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Self
 
 import httpx
 import pytest
 
 from mindroom.tool_jobs.control import JobControl, job_control_context
+from mindroom.tool_system import worker_proxy_client
 from mindroom.tool_system.progress import tool_progress_reporter
 from mindroom.tool_system.worker_proxy_client import (
     WorkerCallCancellation,
@@ -64,10 +67,20 @@ class _StreamedResponse:
             yield line.encode() + b"\n"
 
 
-def _client(lines: Callable[[dict[str, Any]], Iterator[str]], seen: list[dict[str, Any]]) -> type:
+def _client(
+    lines: Callable[[dict[str, Any]], Iterator[str]],
+    seen: list[dict[str, Any]],
+    posts: list[tuple[str, object]] | None = None,
+) -> type:
     class _Client:
         def __init__(self, *, timeout: float) -> None:
             del timeout
+            seen.append({"client": self})
+
+        def post(self, url: str, **kwargs: Any) -> httpx.Response:  # noqa: ANN401
+            assert posts is not None
+            posts.append((url, kwargs["json"]))
+            return httpx.Response(200, json={"open": not kwargs["json"]["eof"]}, request=httpx.Request("POST", url))
 
         def __enter__(self) -> Self:
             return self
@@ -108,6 +121,9 @@ def _execute(
     seen: list[dict[str, Any]] | None = None,
     timeout: float = 7.0,
     cancellation: WorkerCallCancellation | None = None,
+    on_frame: Callable[[dict[str, object]], None] | None = None,
+    stream: Any = None,  # noqa: ANN401
+    posts: list[tuple[str, object]] | None = None,
 ) -> object:
     return execute_worker_proxy_request(
         config=WorkerProxyClientConfig(
@@ -123,8 +139,10 @@ def _execute(
         worker_target=None,
         worker_handle=_HANDLE,
         worker_manager=manager or _Manager(),
-        client_factory=_client(lines, [] if seen is None else seen),
+        client_factory=_client(lines, [] if seen is None else seen, posts),
         cancellation=cancellation,
+        stream=stream,
+        on_frame=on_frame,
     )
 
 
@@ -191,6 +209,61 @@ def test_a_cancelled_call_stops_reading_at_the_next_frame() -> None:
     with pytest.raises(asyncio.CancelledError):
         _execute(lines, cancellation=cancellation)
     assert not read_after_cancel.is_set()
+
+
+@pytest.mark.parametrize("wait", [3.0, 0.0])
+def test_a_cancelled_streamed_command_is_read_for_its_exit_alone(monkeypatch: pytest.MonkeyPatch, wait: float) -> None:
+    """The exit that follows a stop says the command is gone; its output is dropped, and the wait for it is short."""
+    monkeypatch.setattr(worker_proxy_client, "STOP_CONFIRMATION_SECONDS", wait)
+    cancellation = WorkerCallCancellation()
+    frames: list[dict[str, object]] = []
+    read_after_exit = threading.Event()
+
+    def lines(_payload: dict[str, Any]) -> Iterator[str]:
+        cancellation.cancel()
+        yield json.dumps({"t": "out", "b": "bGF0ZQ=="})
+        yield json.dumps({"t": "exit", "cancelled": True})
+        read_after_exit.set()
+        yield _result("too late")
+
+    with pytest.raises(asyncio.CancelledError):
+        _execute(lines, cancellation=cancellation, on_frame=frames.append)
+    assert frames == ([{"t": "exit", "cancelled": True}] if wait else [])
+    assert not read_after_exit.is_set()
+
+
+def test_time_spent_handing_frames_on_is_not_time_waited_for_the_runner() -> None:
+    """A slow reader of a streamed command's output does not use up the time the call may take at the runner."""
+
+    def lines(_payload: dict[str, Any]) -> Iterator[str]:
+        for _ in range(3):
+            yield json.dumps({"t": "out", "b": ""})
+        yield _result("done")
+
+    assert _execute(lines, timeout=0.3, on_frame=lambda _frame: time.sleep(0.2)) == "done"
+
+
+def test_stdin_chunks_go_through_the_calls_own_client() -> None:
+    """A streamed command's stdin reaches the runner over the client its call holds, not one opened per chunk."""
+    seen: list[dict[str, Any]] = []
+    posts: list[tuple[str, object]] = []
+    answers: list[bool] = []
+    stream = SimpleNamespace(write_stdin=None)
+    cancellation = WorkerCallCancellation()
+
+    def lines(_payload: dict[str, Any]) -> Iterator[str]:
+        answers.append(asyncio.run(stream.write_stdin(0, "aGk=", False)))
+        answers.append(asyncio.run(stream.write_stdin(1, "", True)))
+        yield _result("done")
+
+    assert _execute(lines, seen=seen, cancellation=cancellation, stream=stream, posts=posts) == "done"
+    url = f"http://worker/api/sandbox-runner/execute/{cancellation.request_id}/stdin"
+    chunk = {"protocol": WORKER_PROTOCOL_VERSION, "seq": 0, "b": "aGk=", "eof": False}
+    assert posts == [(url, chunk), (url, chunk | {"seq": 1, "b": "", "eof": True})]
+    assert answers == [True, False]
+    assert len([entry for entry in seen if "client" in entry]) == 1
+    # Once the call ended, nothing writes through its closed client.
+    assert stream.write_stdin is None
 
 
 def test_a_call_keeps_its_worker_from_idle_cleanup_while_it_runs() -> None:
