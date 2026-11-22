@@ -789,6 +789,33 @@ async def test_call_is_waited_for_also_when_the_look_at_its_run_failed_as_it_sta
     assert await asyncio.wait_for(stack.result("@0", kind, args), 10) == result
 
 
+@pytest.mark.asyncio
+async def test_engine_that_closes_while_an_agent_starts_begins_no_wait_for_it(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A closed engine starts no task: the job is the next start's to continue, not settled from how the stop left it."""
+    start, at_start = stack.jobs.start, asyncio.Event()
+
+    async def started_then_held(job_id: str, **options: Any) -> None:  # noqa: ANN401 - the runtime's own options.
+        _, claim = await start(job_id, **options)
+        await stack.jobs.release_wait(job_id, claim)
+        at_start.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(stack.jobs, "start", started_then_held)
+    _hanging(stack)
+    request = asyncio.create_task(stack.submit("@0", "agent", _PROMPT))
+    await at_start.wait()
+
+    await stack.engine.close()
+
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    assert not any(stack.engine._tasks.values())
+    assert (_node(stack).state, stack.node_job("@0").status) == (WorkflowNodeState.RUNNING, "running")
+
+
 async def _ended_between_attempts(stack: WorkflowStack) -> None:
     """Let the call's turn end while no attempt waits for it, have its owner collect the job, and unsettle the access."""
     gate = _hanging(stack)

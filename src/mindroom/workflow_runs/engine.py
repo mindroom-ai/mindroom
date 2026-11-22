@@ -713,6 +713,9 @@ class WorkflowEngine:
         on time between two attempts as well. What it reads then it cannot save, and leaves to the next wait.
         """
         assert node.handle is not None
+        if self._closed:
+            # A closed engine starts nothing: the job stays as it is, for the next start to continue or to read.
+            return
         name = f"{_TIMED}{node.handle.ref}"
         for stale in [task for task in self._tasks.get(run.run_id, ()) if task.get_name() == name]:
             stale.cancel()
