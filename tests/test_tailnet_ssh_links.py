@@ -17,7 +17,7 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
-from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
 from mindroom.room_agent_access import room_execution_identity
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tailnet_ssh import links
@@ -790,6 +790,46 @@ async def test_malformed_stored_shell_settings_only_refuse_their_own_route(
     assert manager.specs == []
     assert await _connect(config, paths, healthy.id) == ("10.0.0.5", 2222)
     assert [spec.worker_key for spec in manager.specs] == [healthy.worker_key]
+
+
+@pytest.mark.asyncio
+async def test_unreadable_scoped_store_only_refuses_its_own_route(
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scoped store that cannot be opened does not break listing or connecting to other workers."""
+    broken = _link(paths, "mine")
+    healthy = _link(paths, "mind")
+    manager = _wire_connect(monkeypatch, tmp_path, healthy)
+    for_scope = CredentialsManager.for_primary_runtime_scope
+    private_path = str(tmp_path / "private-store")
+
+    def open_store(self: CredentialsManager, requester_id: str, agent_name: str | None) -> CredentialsManager:
+        if (requester_id, agent_name) == (ALICE, "mine"):
+            raise PermissionError(13, "Permission denied", private_path)
+        return for_scope(self, requester_id, agent_name)
+
+    monkeypatch.setattr(CredentialsManager, "for_primary_runtime_scope", open_store)
+
+    with capture_logs() as logs:
+        rows = desired_links(config, paths, AgentReplyMembershipIndex())
+        assert rows == [{"id": healthy.id, "hostname": healthy.hostname, "allowed_logins": ["alice@github"]}]
+        with pytest.raises(_ConnectRefused, match="not authorized"):
+            await _connect(config, paths, broken.id)
+        assert manager.specs == []
+        assert await _connect(config, paths, healthy.id) == ("10.0.0.5", 2222)
+    assert [spec.worker_key for spec in manager.specs] == [healthy.worker_key]
+    assert any(
+        log["event"] == "tailnet_ssh_shell_settings_invalid"
+        and log.get("agent") == "mine"
+        and log.get("worker") == worker_log_id(broken.worker_key)
+        and log.get("error_type") == "PermissionError"
+        for log in logs
+    )
+    assert private_path not in str(logs)
+    assert broken.worker_key not in str(logs)
 
 
 @pytest.mark.asyncio

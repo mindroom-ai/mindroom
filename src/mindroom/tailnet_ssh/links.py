@@ -115,9 +115,14 @@ def _roster(  # noqa: C901 - keep the ordered route checks together
                 continue
             try:
                 functions, _ = agent_tools.functions_for(entry, paths, target, validate_filters=True)
-            except (ValueError, TypeError):
-                # Invalid stored function filters raise TypeError rather than an override error.
-                logger.warning("tailnet_ssh_shell_settings_invalid", agent=agent, worker=worker_log_id(key))
+            except (OSError, ValueError, TypeError) as error:
+                # Skip only this route if its scoped store is inaccessible or its settings are invalid.
+                logger.warning(
+                    "tailnet_ssh_shell_settings_invalid",
+                    agent=agent,
+                    worker=worker_log_id(key),
+                    error_type=type(error).__name__,
+                )
                 continue
             if functions is not None and SHELL_FUNCTION in functions:
                 roster.setdefault(key, {}).setdefault(login, target)
