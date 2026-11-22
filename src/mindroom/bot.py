@@ -102,6 +102,7 @@ from .matrix.client_room_admin import get_joined_rooms
 from .matrix.client_session import PermanentMatrixStartupError
 from .matrix.conversation_hydration import ConversationHydrator
 from .matrix.conversation_reads import ConversationReader
+from .matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 from .matrix.relation_lookup import RelationLookup
 from .reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
 from .reply_scope import ReplyRuntime
@@ -1097,14 +1098,18 @@ class AgentBot:
         await self.orchestrator.scheduled_tasks.restore_room(self, room_id)
         await self.orchestrator.thread_snooze.restore_room(self, room_id)
 
+    async def _in_room(self, room_id: str) -> bool:
+        """Return whether this bot is in the room as far as its sync has shown, which a room it never left is."""
+        position = await self.journal_principal().ingestion_membership_position(room_id)
+        return position is None or position.membership == "join"
+
     async def _refresh_room_settings(self, room_id: str) -> None:
         """Read the room's settings before one of its events is handled, unless this bot left the room.
 
         A bot that left is answered with the room's state as it left it, which would replace a setting changed since.
         The events it still owes go by what the runtime knows, or an older runtime's override, and move nothing.
         """
-        position = await self.journal_principal().ingestion_membership_position(room_id)
-        if self.client is not None and (position is None or position.membership == "join"):
+        if self.client is not None and await self._in_room(room_id):
             put_state = partial(room_state_response_as_steward, self.orchestrator.room_steward)
             await refresh_room_settings(self.client, self.runtime_paths, room_id, put_state=put_state)
 
@@ -1119,14 +1124,17 @@ class AgentBot:
         put_state = partial(room_state_response_as_steward, self.orchestrator.room_steward)
         await refresh_room_setting(setting, client, self.runtime_paths, room_id, force=True, put_state=put_state)
 
-    def _on_room_state_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
+    async def _on_room_state_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Take a live thread tag or room settings state event from sync; never raise into nio's callback loop.
 
-        Each bot reads a changed setting again and has the room's steward republish a changed thread mode.
+        Each bot reads a changed setting again and has the room's steward republish a changed thread mode. A bot
+        that left takes none: its last events are older than what the room's other bots know, and it would read
+        the room as it left it.
         """
         if "state_key" not in event.source or event.decrypted:
             return
-        setting = observe_room_settings_event(self.runtime_paths, room.room_id, event.source)
+        in_room = event.type == ROOM_SETTINGS_EVENT_TYPE and await self._in_room(room.room_id)
+        setting = observe_room_settings_event(self.runtime_paths, room.room_id, event.source) if in_room else None
         if setting is not None and self.client is not None:
             # The event may be a late copy of an older change: the room's state decides, read at once.
             self.create_owned_task(

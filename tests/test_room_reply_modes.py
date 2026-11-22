@@ -255,7 +255,8 @@ async def test_a_live_change_applies_at_once_and_a_read_of_the_room_decides(tmp_
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
 
 
-def test_a_live_setting_event_has_the_bot_read_the_room_again(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_a_live_setting_event_has_the_bot_read_the_room_again(tmp_path: Path) -> None:
     """Each bot that sees a `reply_mode` event reads the room at once; other state events start no read."""
     runtime_paths = test_runtime_paths(tmp_path)
     bot = SimpleNamespace(
@@ -263,15 +264,17 @@ def test_a_live_setting_event_has_the_bot_read_the_room_again(tmp_path: Path) ->
         client=MagicMock(),
         create_owned_task=MagicMock(),
         _reread_room_setting=MagicMock(return_value="reread"),
+        _in_room=AsyncMock(return_value=True),
     )
     room = nio.MatrixRoom(ROOM_ID, "@mindroom_general:localhost")
 
     def state_event(source: dict[str, object]) -> nio.UnknownEvent:
         return nio.UnknownEvent.from_dict({"event_id": "$e", "sender": ADMIN, **source})
 
-    AgentBot._on_room_state_event(bot, room, state_event({**_setting_event({"value": "mentions"}), "type": "x.other"}))
+    other = state_event({**_setting_event({"value": "mentions"}), "type": "x.other"})
+    await AgentBot._on_room_state_event(bot, room, other)
     bot.create_owned_task.assert_not_called()
-    AgentBot._on_room_state_event(bot, room, state_event(_setting_event({"value": "mentions"})))
+    await AgentBot._on_room_state_event(bot, room, state_event(_setting_event({"value": "mentions"})))
     bot._reread_room_setting.assert_called_once_with(bot.client, ROOM_ID, REPLY_MODE)
     assert bot.create_owned_task.call_args.args == ("reread",)
     assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"

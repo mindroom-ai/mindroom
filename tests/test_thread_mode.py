@@ -39,7 +39,7 @@ from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.room_settings import MODEL, THREAD_MODE, resolve_room_setting
+from mindroom.room_settings import MODEL, THREAD_MODE, refresh_room_setting, resolve_room_setting
 from mindroom.router.relay import execute_router_relay
 from mindroom.routing_judgment import ResponderSelection
 from mindroom.session_ids import create_session_id
@@ -73,7 +73,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
-from tests.room_settings_helpers import RoomStateHomeserver
+from tests.room_settings_helpers import RoomStateHomeserver, set_room_model_override
 from tests.streaming_helpers import FakeReplyRecords
 from tests.threading_helpers import seed_thread_history
 
@@ -875,6 +875,45 @@ class TestRoomModeThreadDecision:
         bot.client.room_get_state_event.assert_not_awaited()
         bot.client.room_put_state.assert_not_awaited()
         assert json.loads(legacy.read_text()) == {room_id: {THREAD_MODE.legacy_field: "room"}}
+
+    @pytest.mark.asyncio
+    async def test_a_bot_that_left_a_room_takes_none_of_its_setting_events(
+        self,
+        room_mode_config: Config,
+        coder_user: AgentMatrixUser,
+    ) -> None:
+        """The last events sync shows a bot that left can be older than what the room's other bots know.
+
+        It takes no setting from them and does not read the room, which it would see as it left it. So what a bot
+        in the room read stays the runtime's copy, confirmed, and that bot's next read asks the room nothing.
+        """
+        bot = _agent_bot(config=room_mode_config, agent_user=coder_user)
+        paths, room_id = bot.runtime_paths, "!room:localhost"
+        as_it_left = RoomStateHomeserver()
+        as_it_left.events[ROOM_SETTINGS_EVENT_TYPE, "model"] = {"value": "old"}
+        bot.client = as_it_left.client()
+        set_room_model_override(paths, room_id=room_id, model_name="new")
+        await admit_room_membership(bot.journal_principal(), room_id, "join")
+        await admit_room_membership(bot.journal_principal(), room_id, "leave")
+        older = nio.UnknownEvent.from_dict(
+            {
+                "type": ROOM_SETTINGS_EVENT_TYPE,
+                "state_key": "model",
+                "content": {"value": "old"},
+                "event_id": "$old:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+            },
+        )
+
+        await bot._on_room_state_event(_matrix_room(room_id, name="Test Room"), older)
+        await asyncio.sleep(0)
+
+        assert resolve_room_setting(MODEL, paths, room_id) == "new"
+        bot.client.room_get_state_event.assert_not_awaited()
+        in_room = RoomStateHomeserver().client()
+        assert await refresh_room_setting(MODEL, in_room, paths, room_id, put_state=None) == (True, "new")
+        in_room.room_get_state_event.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_room_override_skips_derive_only_for_matching_room(
