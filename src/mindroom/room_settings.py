@@ -76,7 +76,8 @@ REPLY_MODE: RoomSetting[RoomReplyMode] = RoomSetting(
     "room_reply_modes.json",
     "mode",
 )
-# A model reference, `name` or `name@level`, kept as written: whether this runtime configures it is decided when read.
+# A model reference, `name` or `name@level`, kept whatever it names: whether this runtime configures it is decided
+# each time it is used, so a config reload can bring it back.
 MODEL: RoomSetting[str] = RoomSetting("model", _model_reference, "room_model_overrides.json", "model")
 THREAD_MODE: RoomSetting[RoomThreadMode] = RoomSetting(
     "thread_mode",
