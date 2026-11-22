@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from contextvars import copy_context
@@ -1340,15 +1341,13 @@ async def test_a_named_launch_failure_saves_to_an_output_path_as_a_failed_comman
     for name in ("launch.txt", "failed.txt"):
         (tmp_path / name).write_text("previous contents")
 
-    launch = await call([_MISSING], worker="build", mindroom_output_path="launch.txt")
-    failed = await call(
-        ["bash", "-c", f"echo '{said}' >&2; exit 127"],
-        worker="build",
-        mindroom_output_path="failed.txt",
-    )
+    launch = json.loads(await call([_MISSING], worker="build", mindroom_output_path="launch.txt"))
+    command = ["bash", "-c", f"echo '{said}' >&2; exit 127"]
+    failed = json.loads(await call(command, worker="build", mindroom_output_path="failed.txt"))
 
     assert launch["mindroom_tool_output"] == {**failed["mindroom_tool_output"], "path": "launch.txt"}
     assert launch["mindroom_tool_output"]["exit_code"] == 127
+    assert launch["mindroom_tool_output"]["overwritten"] is True
     saved = (tmp_path / "launch.txt").read_text()
     assert saved == (tmp_path / "failed.txt").read_text() == f"Exit code 127\nStderr:\n{said}\n"
 

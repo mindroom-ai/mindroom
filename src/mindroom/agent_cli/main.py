@@ -512,22 +512,6 @@ def _print_worker_result(
         return _EXIT_UNKNOWN
     if header == started_header:
         stderr.note(f"mindroom-agent: started worker {args.name}")
-    return _print_worker_body(args, body, result=result, saved_path=saved_path, stderr=stderr)
-
-
-def _print_worker_body(
-    args: argparse.Namespace,
-    body: str,
-    *,
-    result: dict[str, object],
-    saved_path: object,
-    stderr: _WorkerStderr,
-) -> int:
-    """Print a completed worker command's body and return its exit code."""
-    launch_code, launch_error = result.get("launch_exit_code"), result.get("launch_error")
-    if launch_code in (126, 127) and isinstance(launch_error, str):
-        stderr.note(f"mindroom-agent: {launch_error}")
-        return cast("int", launch_code)
     failed = _FAILED_COMMAND.match(body)
     # `format_shell_timeout` gives an exact line, then only output and stderr sections if present.
     first_line, newline, streams = body.partition("\n")

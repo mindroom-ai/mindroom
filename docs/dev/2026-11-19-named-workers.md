@@ -59,7 +59,10 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
   The result and the cancel notice are printed after the CLI's signal handlers are removed, so a signal during a blocked write stops the CLI as it does on any program.
   A delegated child's worker progress and refusals are not bound to the delegate call's receipt.
   It reads the exit code and the stop at the time limit from the words the shell leads its result with, which tests build with the shell's own formatters; a receipt field for the exit status would be a second contract through the runner, the proxy, and the receipt for the same fact.
-  A missing or non-executable binary completes with structured `launch_exit_code` (`127` or `126`) and `launch_error` on the receipt (not parsed command output); other launch failures remain failed tool calls. When the runner saves the output, the worker header and the shell’s exit line are in the preview.
+  A program the worker cannot find or execute completes as the result of a command that exited `127` or `126` with a shell's words on stderr, so output saving, an output path, and every CLI version treat it as any failed command.
+  A receipt field for it was rejected: the runner's output saving replaced the result that carried it, and a CLI that predates the field exited `0`.
+  Other launch failures remain failed tool calls.
+  When the runner saves the output, the worker header and the shell’s exit line are in the preview.
   It submits once and retries only receipt reads, even when the submission response is lost, because a second submission could run the command twice.
 - **Maintenance retries a failed removal from the worker's files.**
   A removal deletes the Deployment before the files, because the pod must be gone first, so a failure in between left files no pass found.

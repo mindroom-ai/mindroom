@@ -38,7 +38,6 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
     get_worker_progress_pump,
     note_call_cancelled_never_ran,
-    note_call_launch_error,
     note_call_refusal,
 )
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
@@ -955,14 +954,6 @@ def _call_proxy_sync(
         if named is not None and worker_handle is not None:
             if isinstance(result, str):
                 return f"{named.header(worker_handle)}\n{result}"
-            launch = result.get("mindroom_shell_launch_error") if isinstance(result, dict) else None
-            if (
-                isinstance(launch, dict)
-                and launch.get("exit_code") in (126, 127)
-                and isinstance(launch.get("message"), str)
-            ):
-                note_call_launch_error(cast("int", launch["exit_code"]), launch["message"])
-                return f"{named.header(worker_handle)}\n{launch['message']}"
             # The runner can save its shell result before it gets here. The preview has the same exit line.
             saved = result.get("mindroom_tool_output") if isinstance(result, dict) else None
             if isinstance(saved, dict) and saved.get("status") == "saved_to_file":

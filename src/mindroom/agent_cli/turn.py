@@ -853,8 +853,6 @@ class LiveTurnTools(TurnToolBridge):
         started = False
         refused = False
         cancelled_never_ran = False
-        launch_exit_code: int | None = None
-        launch_error: str | None = None
         status = "failed"
         result: object = "Tool did not return a terminal execution"
         media_results: list[ToolValue] = []
@@ -878,15 +876,10 @@ class LiveTurnTools(TurnToolBridge):
                 nonlocal cancelled_never_ran
                 cancelled_never_ran = True
 
-            def mark_launch_error(code: int, message: str) -> None:
-                nonlocal launch_exit_code, launch_error
-                launch_exit_code, launch_error = code, message[:1024]
-
             with call_progress_sink_scope(
                 self._progress_reporter(call, asyncio.get_running_loop()),
                 on_refused=mark_refused,
                 on_cancelled_never_ran=mark_cancelled_never_ran,
-                on_launch_error=mark_launch_error,
             ):
                 events = self._execute(
                     binding,
@@ -943,8 +936,6 @@ class LiveTurnTools(TurnToolBridge):
                     | {
                         "status": status,
                         "error_kind": error_kind,
-                        "launch_exit_code": launch_exit_code if status == "completed" else None,
-                        "launch_error": launch_error if status == "completed" else None,
                         "cancel_outcome": "never_ran"
                         if status == "cancelled" and (cancelled_never_ran or not started)
                         else None,

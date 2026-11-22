@@ -7480,7 +7480,6 @@ expose = [
     "emit_custom_event",
     "call_progress_sink_scope",
     "note_call_refusal",
-    "note_call_launch_error",
     "note_call_cancelled_never_ran",
     "get_call_progress_sink",
     "get_worker_progress_pump",

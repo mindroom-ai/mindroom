@@ -525,7 +525,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             timeout: int | None = None,  # noqa: ASYNC109
             worker: str | None = None,
             resource_profile: ScriptResourceProfileName | None = None,
-        ) -> str | ToolOutputFileHandled | dict[str, object]:
+        ) -> str | ToolOutputFileHandled:
             """Runs a shell command and returns the output or error.
 
             The last ``tail`` lines of stdout, then of stderr, are returned; on
@@ -608,6 +608,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                     on_timeout="kill",
                     on_progress=report_tool_progress,
                     output_destination=output_destination,
+                    launch_failure_exits=worker is not None,
                 )
             else:
                 result = await run_command(
@@ -623,17 +624,10 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                     on_timeout="kill",
                     on_progress=report_tool_progress,
                     output_destination=output_destination,
+                    launch_failure_exits=worker is not None,
                 )
-            if worker is not None:
-                if result.launch_exit_code is not None and result.launch_error is not None:
-                    return {
-                        "mindroom_shell_launch_error": {
-                            "exit_code": result.launch_exit_code,
-                            "message": result.launch_error,
-                        },
-                    }
-                if result.execution_error:
-                    raise ValueError(result.message)
+            if worker is not None and result.execution_error:
+                raise ValueError(result.message)
             return ToolOutputFileHandled(result.message) if result.output_file_handled else result.message
 
     return MindRoomShellTools

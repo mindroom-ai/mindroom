@@ -225,8 +225,6 @@ class ShellRunResult:
     handle: str | None = None
     output_file_handled: bool = False
     execution_error: bool = False
-    launch_exit_code: int | None = None
-    launch_error: str | None = None
 
 
 def shell_call_timeout(timeout: float | None) -> float | None:
@@ -281,6 +279,7 @@ async def run_command(
     stderr: int = asyncio.subprocess.PIPE,
     kill_group_after_exit: bool = False,
     register_finished: bool = False,
+    launch_failure_exits: bool = False,
 ) -> ShellRunResult:
     """Run one shell command; return output, an error message, or a background handle.
 
@@ -300,7 +299,9 @@ async def run_command(
     ``kill_group_after_exit``, whatever remains of the process group is killed
     once the foreground process exits or is cancelled. With ``register_finished``,
     a command that finishes within ``timeout`` is also registered, as a finished
-    record whose handle the caller can check or discard later.
+    record whose handle the caller can check or discard later. With
+    ``launch_failure_exits``, a program that is missing or cannot be executed
+    ends the call as a shell ends it: exit code 127 or 126, the reason on stderr.
     """
     _sweep_stale_records(registry)
     if handle is not None:
@@ -330,6 +331,7 @@ async def run_command(
             stderr=stderr,
             kill_group_after_exit=kill_group_after_exit,
             register_finished=register_finished,
+            launch_failure_exits=launch_failure_exits,
         )
     finally:
         if handle is not None and handle_reservations is not None:
@@ -354,6 +356,7 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
     stderr: int,
     kill_group_after_exit: bool,
     register_finished: bool,
+    launch_failure_exits: bool,
 ) -> ShellRunResult:
     """Spawn one command after any caller-supplied handle is reserved."""
     capture = output_capture
@@ -385,15 +388,12 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
             capture.close()
         raise
     except Exception as exc:
-        if capture is not None:
-            capture.close()
-        launch = _launch_failure(argv, cwd, exc) if isinstance(exc, OSError) else None
-        return ShellRunResult(
-            message=f"Error: {exc}",
-            execution_error=True,
-            launch_exit_code=launch[0] if launch is not None else None,
-            launch_error=launch[1] if launch is not None else None,
-        )
+        try:
+            exited = _launch_failure(argv, cwd, exc, capture) if launch_failure_exits else None
+            return exited or ShellRunResult(message=f"Error: {exc}", execution_error=True)
+        finally:
+            if capture is not None:
+                capture.close()
     # A busy command, such as a build, must not take the CPU from the process that runs MindRoom; processes the
     # command starts later inherit the priority.
     with contextlib.suppress(OSError):
@@ -827,17 +827,36 @@ def _idle_launcher() -> str | None:
     return None
 
 
-def _launch_failure(argv: list[str], cwd: str | None, exc: OSError) -> tuple[int, str] | None:
-    """Return ``(exit_code, detail)`` for a missing or non-executable binary, else None."""
-    if not argv or exc.filename != argv[0] or (cwd is not None and exc.filename == cwd and not Path(cwd).is_dir()):
+def _launch_failure(
+    argv: list[str],
+    cwd: str | None,
+    exc: Exception,
+    capture: ShellOutputCapture | None,
+) -> ShellRunResult | None:
+    """Return a spawn error of a program that is missing or cannot be executed as a shell reports it, else None.
+
+    The result is the one of a command that exited 127 or 126 with the shell's words on stderr, so everything that
+    reads a failed command's result reads this one.
+    """
+    if (
+        not isinstance(exc, OSError)
+        or not argv
+        or exc.filename != argv[0]
+        or (cwd is not None and exc.filename == cwd and not Path(cwd).is_dir())
+    ):
         return None
     program = argv[0]
     if exc.errno == errno.ENOENT:
-        reason = "No such file or directory" if os.sep in program else "command not found"
-        return 127, f"{program}: {reason}"
-    if exc.errno in {errno.EACCES, errno.EISDIR, errno.ENOTDIR, errno.ENOEXEC}:
-        return 126, f"{program}: {exc.strerror or os.strerror(exc.errno)}"
-    return None
+        return_code, reason = 127, "No such file or directory" if os.sep in program else "command not found"
+    elif exc.errno in {errno.EACCES, errno.EISDIR, errno.ENOTDIR, errno.ENOEXEC}:
+        return_code, reason = 126, exc.strerror or os.strerror(exc.errno)
+    else:
+        return None
+    if capture is None:
+        return ShellRunResult(message=format_shell_completion("", f"{program}: {reason}", return_code=return_code))
+    capture.stderr.append(f"{program}: {reason}\n")
+    capture.stdout.reached_eof = capture.stderr.reached_eof = True
+    return ShellRunResult(message=capture.publish(return_code), output_file_handled=True)
 
 
 def _idle_launch_argv(argv: list[str], env: dict[str, str], cwd: str | None) -> list[str]:

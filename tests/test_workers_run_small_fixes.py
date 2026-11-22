@@ -21,14 +21,12 @@ from mindroom.agent_cli.main import main
 from mindroom.agent_cli.shell_contract import AGENT_CLI_WINDOW_HEADER
 from mindroom.agent_cli.turn import ToolKey
 from mindroom.constants import resolve_primary_runtime_paths
-from mindroom.shell.execution import ShellRunResult
 from mindroom.shell.output_capture import format_shell_completion
-from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, run_command_via_supervisor
+from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV
 from mindroom.tool_system.catalog import builtin_tool_registry, get_tool_by_name
 from mindroom.tool_system.sandbox_proxy import WorkerStandIns
 from mindroom.workers.models import WorkerHandle
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteRequest
-from tests.test_shell_supervisor import _running_server
 from tests.test_workers_run_control import (
     SETTLE_TIMEOUT_SECONDS,
     _make_app,
@@ -132,31 +130,6 @@ async def test_item7_missing_cwd_still_fails_as_execution_error(
     run_shell = _shell_entrypoint(tmp_path, monkeypatch, base_dir=missing_dir)
     with pytest.raises(ValueError, match="missing-cwd"):
         await run_shell(["echo", "hi"], worker="w1")
-
-
-@pytest.mark.asyncio
-async def test_item7_supervised_launch_failure_exits_only_when_asked(tmp_path: Path) -> None:
-    """The supervisor ends a launch failure as a failed command for a caller that asks, and as an error otherwise."""
-
-    async def run(**asked: bool) -> ShellRunResult:
-        return await run_command_via_supervisor(
-            socket_path,
-            namespace="test",
-            argv=["/nonexistent-binary-xyz"],
-            env={},
-            cwd=str(tmp_path),
-            tail=10,
-            timeout=5.0,
-            on_timeout="kill",
-            **asked,
-        )
-
-    async with _running_server({}) as socket_path:
-        asked, unasked = await run(launch_failure_exits=True), await run()
-
-    assert asked == ShellRunResult(message="Exit code 127\nStderr:\n/nonexistent-binary-xyz: No such file or directory")
-    assert unasked.execution_error
-    assert unasked.message.startswith("Error: [Errno 2]")
 
 
 # ---------------------------------------------------------------------------
