@@ -50,7 +50,14 @@ from mindroom.plugin_worker_relay import WorkerRelay, open_worker_relay
 from mindroom.requester_identity import is_access_checked_requester_id, resolve_human_requester_alias
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.room_agent_access import AgentWorkspace, room_agent_workspaces, room_execution_identity
-from mindroom.room_settings import REPLY_MODE, THREAD_MODE, RoomThreadMode, resolve_room_setting, write_room_setting
+from mindroom.room_settings import (
+    REPLY_MODE,
+    THREAD_MODE,
+    RoomSetting,
+    RoomThreadMode,
+    resolve_room_setting,
+    write_room_setting,
+)
 from mindroom.room_steward import joined_bot, room_poster, room_steward
 from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.steward_duties import moderator_rights_message
@@ -345,17 +352,23 @@ class RoomReader:
         steward = self._steward()
         client = cast("nio.AsyncClient", steward.client)
         paths = steward.runtime_paths
-        for setting, value, name, untaken in (
-            (REPLY_MODE, reply, "reply mode", "The room did not take its reply mode; nothing was changed."),
-            (THREAD_MODE, thread, "thread mode", "The room did not take its thread mode; try again."),
-        ):
+
+        async def write[T: str](
+            setting: RoomSetting[T],
+            value: T | None | EllipsisType,
+            name: str,
+            untaken: str,
+        ) -> None:
             if value is ...:
-                continue
+                return
             taken = await write_room_setting(setting, client, paths, self._room_id, value)
             if taken is None:
                 raise HTTPException(403, moderator_rights_message(f"change the {name}"))
             if not taken:
                 raise HTTPException(503, untaken)
+
+        await write(REPLY_MODE, reply, "reply mode", "The room did not take its reply mode; nothing was changed.")
+        await write(THREAD_MODE, thread, "thread mode", "The room did not take its thread mode; try again.")
         published = thread is ... or await reconcile_room_thread_mode(client, steward.config, paths, self._room_id)
         if published is None:
             raise HTTPException(403, moderator_rights_message("show clients this room's thread mode"))

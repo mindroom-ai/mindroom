@@ -7,7 +7,7 @@ import random
 import time
 from contextvars import Context
 from functools import cached_property, partial
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 
 import nio
@@ -1091,7 +1091,7 @@ class AgentBot:
         await self.orchestrator.scheduled_tasks.restore_room(self, room_id)
         await self.orchestrator.thread_snooze.restore_room(self, room_id)
 
-    async def _reread_room_setting(self, client: nio.AsyncClient, room_id: str, setting: RoomSetting[str]) -> None:
+    async def _reread_room_setting(self, client: nio.AsyncClient, room_id: str, setting: RoomSetting[Any]) -> None:
         put_state = partial(room_state_response_as_steward, self.orchestrator.room_steward)
         await refresh_room_setting(setting, client, self.runtime_paths, room_id, force=True, put_state=put_state)
         if setting is THREAD_MODE:

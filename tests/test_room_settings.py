@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
 import nio
@@ -47,7 +47,7 @@ def _event(key: str, content: dict[str, object]) -> dict[str, object]:
     return {"type": ROOM_SETTINGS_EVENT_TYPE, "state_key": key, "content": content}
 
 
-def _write_legacy_overrides(runtime_paths: RuntimePaths, setting: RoomSetting[str], room_ids: tuple[str, ...]) -> Path:
+def _write_legacy_overrides(runtime_paths: RuntimePaths, setting: RoomSetting[Any], room_ids: tuple[str, ...]) -> Path:
     """Store a value of ``setting`` for each room the way an older runtime did."""
     legacy = tracking_dir(runtime_paths) / setting.legacy_filename
     legacy.parent.mkdir(parents=True, exist_ok=True)
@@ -61,7 +61,7 @@ def _write_legacy_overrides(runtime_paths: RuntimePaths, setting: RoomSetting[st
 @pytest.mark.parametrize("refused", [False, True], ids=["moved", "room-refuses"])
 async def test_an_older_runtimes_override_applies_until_it_moves_into_the_room(
     tmp_path: Path,
-    setting: RoomSetting[str],
+    setting: RoomSetting[Any],
     *,
     refused: bool,
 ) -> None:
@@ -96,7 +96,7 @@ async def test_an_older_runtimes_override_applies_until_it_moves_into_the_room(
 @_SETTINGS
 async def test_a_setting_the_room_already_has_supersedes_an_older_runtimes_override(
     tmp_path: Path,
-    setting: RoomSetting[str],
+    setting: RoomSetting[Any],
 ) -> None:
     """A room whose setting was cleared stays cleared: its `{}` decides, and the stored override leaves the file."""
     runtime_paths = test_runtime_paths(tmp_path)
@@ -115,7 +115,7 @@ async def test_a_setting_the_room_already_has_supersedes_an_older_runtimes_overr
 
 @pytest.mark.asyncio
 @_SETTINGS
-async def test_an_unreadable_room_keeps_an_older_runtimes_override(tmp_path: Path, setting: RoomSetting[str]) -> None:
+async def test_an_unreadable_room_keeps_an_older_runtimes_override(tmp_path: Path, setting: RoomSetting[Any]) -> None:
     """Only a room that answers it has no such setting takes the stored override; a failed read moves nothing."""
     runtime_paths = test_runtime_paths(tmp_path)
     legacy = _write_legacy_overrides(runtime_paths, setting, (ROOM_ID,))
@@ -189,7 +189,8 @@ async def test_a_turn_refreshes_every_setting_at_once(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 @_SETTINGS
 async def test_a_live_thread_mode_change_tells_the_bots_steward_duties(
-    tmp_path: Path, setting: RoomSetting[str]
+    tmp_path: Path,
+    setting: RoomSetting[Any],
 ) -> None:
     """A bot reads a changed setting again, and hands a changed thread mode to its steward duties to republish."""
     runtime_paths = test_runtime_paths(tmp_path)

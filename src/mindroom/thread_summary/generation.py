@@ -168,22 +168,13 @@ async def room_summary_instructions(client: nio.AsyncClient, room_id: str) -> st
     return instructions and instructions[:_ROOM_INSTRUCTIONS_MAX_LENGTH]
 
 
-async def room_thread_summary_model_name(
-    client: nio.AsyncClient,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    room_id: str,
-    *,
-    entity_name: str | None = None,
-) -> str:
-    """Return the model that titles a room's threads now: its `thread_summary_model` setting, else the configured one.
+async def room_summary_model(client: nio.AsyncClient, config: Config, room_id: str) -> str | None:
+    """Return the model the room's `thread_summary_model` setting names, `name` or `name@level`.
 
-    The setting is a model reference, `name` or `name@level`; one that names no configured model is ignored.
+    None when it is unset or unreadable, or names no configured model; the configured summary model then applies.
     """
     model_name = await _room_title_setting(client, room_id, "thread_summary_model")
-    if model_name is not None and model_name in config.models:
-        return model_name
-    return resolve_thread_summary_model_name(config, runtime_paths, room_id, entity_name=entity_name)
+    return model_name if model_name is not None and model_name in config.models else None
 
 
 @timed("thread_summary_generation")

@@ -46,7 +46,10 @@ class RoomStateHomeserver:
 
 
 def set_room_setting[T: str](
-    setting: RoomSetting[T], runtime_paths: RuntimePaths, room_id: str, value: T | None
+    setting: RoomSetting[T],
+    runtime_paths: RuntimePaths,
+    room_id: str,
+    value: T | None,
 ) -> None:
     """Give the runtime a room's setting as a read of the room just found it, so no turn reads it again soon."""
     room_settings._known.pop(room_settings._key(setting, runtime_paths, room_id), None)

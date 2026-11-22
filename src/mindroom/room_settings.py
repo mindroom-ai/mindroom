@@ -21,7 +21,7 @@ import asyncio
 import itertools
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, NamedTuple, cast, get_args
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, get_args
 from weakref import WeakValueDictionary
 
 from mindroom.config.agent import RoomReplyMode
@@ -84,7 +84,7 @@ THREAD_MODE: RoomSetting[RoomThreadMode] = RoomSetting(
     "room_thread_modes.json",
     "mode",
 )
-_SETTINGS: tuple[RoomSetting[str], ...] = (REPLY_MODE, MODEL, THREAD_MODE)
+_SETTINGS: tuple[RoomSetting[Any], ...] = (REPLY_MODE, MODEL, THREAD_MODE)
 
 
 class _Copy(NamedTuple):
@@ -102,7 +102,7 @@ class SettingRead[T: str](NamedTuple):
     value: T | None
 
 
-class RoomModelOverride(NamedTuple):
+class _RoomModelOverride(NamedTuple):
     """A room's `model` setting: ``active`` when this runtime configures the model it names, else ``stale``."""
 
     active: str | None
@@ -118,7 +118,7 @@ _writes: WeakValueDictionary[_Key, asyncio.Lock] = WeakValueDictionary()
 _stale_models_logged: set[_Key] = set()
 
 
-def _key(setting: RoomSetting[str], runtime_paths: RuntimePaths, room_id: str) -> _Key:
+def _key(setting: RoomSetting[Any], runtime_paths: RuntimePaths, room_id: str) -> _Key:
     return (runtime_paths.storage_root, room_id, setting.key)
 
 
@@ -126,7 +126,7 @@ def _value_from_content[T: str](setting: RoomSetting[T], content: object) -> T |
     return setting.parse(content.get("value")) if isinstance(content, dict) else None
 
 
-def _setting_of(source: Mapping[str, object]) -> RoomSetting[str] | None:
+def _setting_of(source: Mapping[str, object]) -> RoomSetting[Any] | None:
     if source.get("type") != ROOM_SETTINGS_EVENT_TYPE:
         return None
     return next((setting for setting in _SETTINGS if setting.key == source.get("state_key")), None)
@@ -143,7 +143,7 @@ def _legacy_override[T: str](setting: RoomSetting[T], runtime_paths: RuntimePath
     return setting.parse(legacy_room_override(runtime_paths, room_id, setting.legacy_filename, setting.legacy_field))
 
 
-def _drop_legacy_override(setting: RoomSetting[str], runtime_paths: RuntimePaths, room_id: str) -> None:
+def _drop_legacy_override(setting: RoomSetting[Any], runtime_paths: RuntimePaths, room_id: str) -> None:
     drop_legacy_room_override(runtime_paths, room_id, setting.legacy_filename, setting.legacy_field)
 
 
@@ -158,12 +158,12 @@ def resolve_room_setting[T: str](setting: RoomSetting[T], runtime_paths: Runtime
     return _legacy_override(setting, runtime_paths, room_id) if known is None else cast("T | None", known.value)
 
 
-def classify_room_model(model: str | None, configured_models: Container[str]) -> RoomModelOverride:
+def classify_room_model(model: str | None, configured_models: Container[str]) -> _RoomModelOverride:
     """Split a room's `model` setting by whether ``configured_models`` has the model it names."""
     return (
-        RoomModelOverride(None, model)
+        _RoomModelOverride(None, model)
         if model is not None and model not in configured_models
-        else RoomModelOverride(model, None)
+        else _RoomModelOverride(model, None)
     )
 
 
@@ -172,7 +172,7 @@ def resolve_room_model_override(
     room_id: str | None,
     *,
     configured_models: Container[str],
-) -> RoomModelOverride:
+) -> _RoomModelOverride:
     """Classify a room's `model` setting as the runtime last knew it; a model this runtime lacks is ignored."""
     override = classify_room_model(resolve_room_setting(MODEL, runtime_paths, room_id), configured_models)
     if override.stale is not None and room_id is not None:
@@ -187,7 +187,7 @@ def observe_room_settings_event(
     runtime_paths: RuntimePaths,
     room_id: str,
     source: Mapping[str, object],
-) -> RoomSetting[str] | None:
+) -> RoomSetting[Any] | None:
     """Take a live setting event's value, unconfirmed; return the setting it was, which the caller reads again."""
     setting = _setting_of(source)
     if setting is not None:
