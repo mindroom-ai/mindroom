@@ -763,7 +763,7 @@ async def test_fold_queues_between_replies_without_claiming_unmentioned_messages
         coordinator = target._response_runner.lifecycle_coordinator
         await _dispatch_message(target, room, _addressed(target, "later question", "$later"))
         async with asyncio.timeout(30):  # The later reply begins its turn and queues for the lock behind the fold.
-            while not coordinator.has_active_response_for_target(_target()):
+            while not coordinator.has_active_response_for_target(_target()):  # noqa: ASYNC110
                 await asyncio.sleep(0)
         assert coordinator._conversation_for(_target()).lock.locked()
         if addressed_first:

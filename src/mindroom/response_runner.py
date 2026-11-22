@@ -31,6 +31,7 @@ from mindroom.constants import (
     TURN_INTENT_RUN_METADATA_KEY,
 )
 from mindroom.contacts.turns import contact_room, contact_turn_instructions, contact_turn_tools
+from mindroom.conversation_resolver import DegradedThreadHistoryError, read_fresh_thread_history
 from mindroom.conversation_state_writer import ReplySession
 from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.error_handling import get_user_friendly_error_message
@@ -53,7 +54,6 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.judgment.cold_cache import idle_seconds_before_turn, select_cold_cache_model
 from mindroom.matrix.guarded_rooms import allowed_send, guarded_room
 from mindroom.matrix.presence import should_use_streaming
-from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
 from mindroom.message_target import MessageTarget
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.orchestration.runtime import (
@@ -788,7 +788,7 @@ class ResponseRunner:
         except ResponseAdmissionRefusedError:
             raise  # Replacement must replay the pending source.
         except Exception as error:
-            if not isinstance(error, ReplyMembershipPendingError):
+            if not isinstance(error, ReplyMembershipPendingError | DegradedThreadHistoryError):
                 self.deps.logger.exception("manual_compaction_preparation_failed", source=event.event_id)
             notice = _COMPACTION_DEFERRED
         if notice:
@@ -834,10 +834,7 @@ class ResponseRunner:
             return _COMPACTION_DEFERRED
         if (epoch := await self._compaction_epoch(room, origin, source, wait=True)) is None:
             return None
-        if thread is not None and is_thread_history_degraded(
-            await self.deps.resolver.fetch_thread_history(room, thread),
-        ):
-            return _COMPACTION_DEFERRED
+        await read_fresh_thread_history(self.deps.resolver, target, strict=True)
         budget = TurnBudget(self.deps.runtime.orchestrator.budgets, requester, log_fallback=False)
         plan = resolve_manual_compaction_plan(scope, config, paths, room, thread, budget)
         if isinstance(plan, str):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import threading
 from dataclasses import replace
 from functools import partial
@@ -12,11 +13,13 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
+from mindroom import response_runner as response_runner_module
 from mindroom import response_turn as response_turn_module
 from mindroom import turn_store as turn_store_module
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.conversation_resolver import DegradedThreadHistoryError, read_fresh_thread_history
 from mindroom.event_journal import (
     RUNTIME_SOURCE_KINDS,
     EventClass,
@@ -33,7 +36,10 @@ from mindroom.history.session_context import (
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord
 from mindroom.matrix.state import MatrixState
+from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
+from mindroom.reply_turn import locked_turn as locked_turn_module
 from mindroom.reply_turn.request import requester_remains_authorized
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.response_runner import ResponseRunner
@@ -438,6 +444,51 @@ async def test_runtime_source_handoff_dispatches_by_kind_and_settles_unclaimed(
 def test_runtime_source_kinds_matches_runner_handler_table() -> None:
     """The journal dispatcher's RUNTIME_SOURCE_KINDS stays in lockstep with ResponseRunner's handler table."""
     assert set(ResponseRunner._RUNTIME_SOURCE_HANDLERS) == set(RUNTIME_SOURCE_KINDS)
+
+
+@pytest.mark.asyncio
+async def test_read_fresh_thread_history_handles_room_mode_normal_and_strict_degraded(tmp_path: Path) -> None:
+    """The post-lock thread read returns None in room mode and refuses a degraded read only when strict."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    resolver = runner.deps.resolver
+
+    room_target = MessageTarget.resolve("!room:localhost", None, "$src", room_mode=True)
+    fetch = AsyncMock()
+    resolver.fetch_thread_history = fetch
+    assert await read_fresh_thread_history(resolver, room_target, strict=True) is None
+    fetch.assert_not_awaited()
+
+    thread_target = MessageTarget.resolve("!room:localhost", "$thread", "$src")
+    healthy = thread_history_result([], is_full_history=True)
+    degraded = thread_history_result([], is_full_history=False, diagnostics={THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True})
+
+    resolver.fetch_thread_history = AsyncMock(return_value=healthy)
+    assert await read_fresh_thread_history(resolver, thread_target, strict=True) is healthy
+    resolver.fetch_thread_history.assert_awaited_once_with("!room:localhost", "$thread")
+
+    resolver.fetch_thread_history = AsyncMock(return_value=degraded)
+    assert await read_fresh_thread_history(resolver, thread_target) is degraded
+    with pytest.raises(DegradedThreadHistoryError):
+        await read_fresh_thread_history(resolver, thread_target, strict=True)
+
+    # The reply's refresh is the non-strict read: it keeps a degraded history and falls back when the read fails.
+    refreshed = await runner.locked.refresh_model_history(_plain_request(thread_target))
+    assert refreshed.thread_history is degraded
+    assert refreshed.requires_model_history_refresh is False
+    resolver.fetch_thread_history.assert_awaited_with("!room:localhost", "$thread")
+
+    resolver.fetch_thread_history = AsyncMock(side_effect=RuntimeError("boom"))
+    fallback = await runner.locked.refresh_model_history(_plain_request(thread_target))
+    assert fallback.requires_model_history_refresh is True
+
+
+def test_reply_refresh_and_compaction_read_threads_only_through_the_fresh_read_helper() -> None:
+    """Neither the reply's post-lock refresh nor compaction reads a thread except through the shared helper."""
+    for module in (locked_turn_module, response_runner_module):
+        source = inspect.getsource(module)
+        assert "read_fresh_thread_history(" in source
+        assert "fetch_thread_history(" not in source
 
 
 @pytest.mark.asyncio

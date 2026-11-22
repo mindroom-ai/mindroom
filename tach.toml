@@ -3509,6 +3509,7 @@ visibility = [
 [[modules]]
 path = "mindroom.reply_turn.locked_turn"
 depends_on = [
+    "mindroom.conversation_resolver",
     "mindroom.ai_runtime",
     "mindroom.automations.steps",
     "mindroom.config.resolution",
@@ -3551,6 +3552,7 @@ expose = ["InboxResponses"]
 path = "mindroom.response_runner"
 depends_on = [
     "mindroom.bot_runtime_view",
+    "mindroom.conversation_resolver",
     "mindroom.event_journal",
     "mindroom.history.manual",
     "mindroom.history.runtime",
