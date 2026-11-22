@@ -10074,7 +10074,8 @@ A script can start agents and runs through `tool()` as well.
 - A run inside the run is in both sums, once, and it is part of the attempt it was started in.
   It is kept for as long as the run around it, so that run's sums never shrink.
 - A turn on a model without a price in the configuration adds its tokens and sets `cost_unknown`; `cost_usd` is then a lower bound.
-  So does an agent's subagent whose cost is not known, when the agent received no subagent cost at all.
+  So does a subagent of a run's agent whose cost is not known, whatever the agent's other subagents cost.
+- An agent whose turn had ended before a restart is counted for the attempt that started it, not for the one that read its answer.
 - Each call that asked a model shows its own `usage` in `nodes`.
 
 ## Fan-Out
