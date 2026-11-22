@@ -686,9 +686,7 @@ class ResponseLifecycleCoordinator:
                         return await op()
             finally:
                 await claim.release()
-            if (
-                not paused
-            ):  # The runtime stopped accepting, or an admission swallowed what ended this: never admit twice.
+            if not paused:  # The runtime stopped accepting, or its admission swallowed what ended this: admit once.
                 raise ResponseAdmissionRefusedError
 
     async def run_locked_response(
