@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, Mock, call, patch
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.bot import AgentBot
 from mindroom.constants import tracking_dir
@@ -189,7 +190,10 @@ async def test_an_override_file_read_that_fails_once_keeps_the_override(
     setting: RoomSetting[Any],
     failure: OSError | str,
 ) -> None:
-    """One read of the file decides: when it fails, the room is not taken for one without an override."""
+    """One read of the file decides: when it fails, the room is not taken for one without an override.
+
+    A read that gives bytes which are no JSON is a file without overrides, as it is when nothing has to be read.
+    """
     runtime_paths = test_runtime_paths(tmp_path)
     value = _VALUES[setting.key]
     legacy = _write_legacy_overrides(runtime_paths, setting, (ROOM_ID,))
@@ -206,15 +210,43 @@ async def test_an_override_file_read_that_fails_once_keeps_the_override(
 
     with monkeypatch.context() as patched:
         patched.setattr(Path, "read_text", failing_read)
-        failed = await refresh_room_setting(setting, client, runtime_paths, ROOM_ID, put_state=client.room_put_state)
-    assert not failed.ok
+        first = await refresh_room_setting(setting, client, runtime_paths, ROOM_ID, put_state=client.room_put_state)
     client.room_put_state.assert_not_awaited()
+    if isinstance(failure, str):
+        assert first == SettingRead(ok=True, value=None)
+        return
+    assert not first.ok
 
     read = await refresh_room_setting(setting, client, runtime_paths, ROOM_ID, put_state=client.room_put_state)
 
     assert read == SettingRead(ok=True, value=value)
     assert homeserver.events[ROOM_SETTINGS_EVENT_TYPE, setting.key] == {"value": value}
     assert json.loads(legacy.read_text()) == {}
+
+
+@pytest.mark.asyncio
+@_SETTINGS
+@pytest.mark.parametrize("stored", ["{", "[]"], ids=["not-json", "not-an-object"])
+async def test_an_override_file_that_holds_no_json_object_holds_no_override(
+    tmp_path: Path,
+    setting: RoomSetting[Any],
+    stored: str,
+) -> None:
+    """A corrupt file fails no read: every room without the setting reads as unset, and the file is logged once."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    legacy = _write_legacy_overrides(runtime_paths, setting, (ROOM_ID,))
+    legacy.write_text(stored)
+    client = RoomStateHomeserver().client()
+
+    with capture_logs() as logs:
+        reads = [
+            await refresh_room_setting(setting, client, runtime_paths, room_id, put_state=client.room_put_state)
+            for room_id in (ROOM_ID, OTHER_ROOM)
+        ]
+
+    assert reads == [SettingRead(ok=True, value=None)] * 2
+    assert [log["event"] for log in logs].count("legacy_room_overrides_undecodable") == 1
+    assert legacy.read_text() == stored
 
 
 @pytest.mark.asyncio
