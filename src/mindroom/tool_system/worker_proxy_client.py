@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import AbstractContextManager, nullcontext, suppress
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
@@ -28,7 +28,6 @@ from mindroom.workers.models import WorkerHandle, normalize_sandbox_runner_api_r
 from mindroom.workers.protocol import (
     WORKER_PROTOCOL_VERSION,
     CancelRequest,
-    CancelResponse,
     ExecuteRequest,
     ExecuteResponse,
     FailureKind,
@@ -334,15 +333,13 @@ class WorkerCallCancellation:
         self.request_id = secrets.token_hex(16)
         self._lock = threading.Lock()
         self._cancelled = False
-        self._armed = False
-        self._stop: Callable[[], bool] | None = None
+        self._stop: Callable[[], None] | None = None
 
-    def _arm(self, stop: Callable[[], bool]) -> None:
+    def _arm(self, stop: Callable[[], None]) -> None:
         """Keep the runner stop request until it is needed; refuse to dispatch an abandoned call."""
         with self._lock:
             if self._cancelled:
                 raise asyncio.CancelledError
-            self._armed = True
             self._stop = stop
 
     @property
@@ -351,42 +348,15 @@ class WorkerCallCancellation:
         with self._lock:
             return self._cancelled
 
-    def cancel(self) -> None:
-        """Ask the runner to stop the call in the background, so the caller's cancellation stays prompt."""
+    def cancel(self) -> bool:
+        """Ask the runner to stop the call in the background; return True if cancelled before dispatch."""
         with self._lock:
             self._cancelled = True
-            stop, self._stop = self._stop, None
+            stop = self._stop
         if stop is not None:
             threading.Thread(target=stop, name="mindroom-worker-cancel", daemon=True).start()
-
-    async def cancel_and_confirm(self, *, wait_seconds: float) -> Literal["never_ran", "stopped"] | None:
-        """Ask the runner to stop the call and wait up to *wait_seconds* on the event loop for confirmation."""
-        with self._lock:
-            self._cancelled = True
-            armed, stop, self._stop = self._armed, self._stop, None
-        if stop is None:
-            return "never_ran" if not armed else None
-        loop = asyncio.get_running_loop()
-        done: asyncio.Future[bool] = loop.create_future()
-
-        def _resolve(confirmed: bool) -> None:
-            if not done.done():
-                done.set_result(confirmed)
-
-        def _run() -> None:
-            confirmed = False
-            try:
-                confirmed = bool(stop())
-            finally:
-                with suppress(RuntimeError):
-                    loop.call_soon_threadsafe(_resolve, confirmed)
-
-        threading.Thread(target=_run, name="mindroom-worker-cancel", daemon=True).start()
-        try:
-            confirmed = await asyncio.wait_for(done, timeout=wait_seconds)
-        except TimeoutError:
-            return None
-        return "stopped" if confirmed else None
+            return False
+        return True
 
 
 def _post_execute_cancel(
@@ -394,18 +364,15 @@ def _post_execute_cancel(
     url: str,
     headers: dict[str, str],
     request_id: str,
-) -> bool:
-    """Ask the runner to stop one execute request the primary no longer waits for; return whether confirmed."""
+) -> None:
+    """Ask the runner to stop one execute request the primary no longer waits for."""
     try:
         with client_factory(timeout=_EXECUTE_CANCEL_TIMEOUT_SECONDS) as client:
             request = CancelRequest(protocol=WORKER_PROTOCOL_VERSION, request_id=request_id)
-            response = client.post(url, json=request.model_dump(mode="json"), headers=headers)
-            response.raise_for_status()
-            return CancelResponse.model_validate(response.json()).stopped
+            client.post(url, json=request.model_dump(mode="json"), headers=headers).raise_for_status()
     except Exception:
         # Best effort: the call was already abandoned, and the runner's own timeouts still apply.
         logger.warning("worker_execute_cancel_failed", url=url, exc_info=True)
-        return False
 
 
 def _ndjson_lines(chunks: Iterator[bytes]) -> Iterator[str]:

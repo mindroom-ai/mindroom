@@ -1243,11 +1243,6 @@ def _shell_subprocess_dispatch_context(
     socket_path = shell_supervisor.ensure_shell_supervisor()
     subprocess_env = dict(subprocess_context.subprocess_env or {})
     subprocess_env[shell_supervisor.SHELL_SUPERVISOR_SOCKET_ENV] = socket_path
-    if (request_id := sandbox_request_cancellation.current_request_id()) is not None:
-        subprocess_env[shell_supervisor.SHELL_SUPERVISOR_REQUEST_ID_ENV] = request_id
-        sandbox_request_cancellation.bind_request_stop_confirm(
-            partial(shell_supervisor.cancel_supervised_run, socket_path, request_id),
-        )
     if timeout_seconds is not None:
         timeout_seconds = max(
             timeout_seconds,
@@ -1412,13 +1407,9 @@ def _run_request_subprocess(
             ).start()
             stopped = threading.Event()
 
-            def stop() -> bool:
+            def stop() -> None:
                 stopped.set()
-                if process.poll() is not None:
-                    return False
                 _kill_request_process_group(process)
-                process.wait()
-                return True
 
             sandbox_request_cancellation.bind_request_stop(stop)
             pending_input: str | None = input
@@ -1837,8 +1828,7 @@ async def cancel_tool_call(payload: CancelRequest) -> CancelResponse | WorkerFai
     """Stop one execute request; a cancel that arrives first stops that request on arrival."""
     if (failure := _protocol_failure(payload.protocol)) is not None:
         return failure
-    cancelled, stopped = await sandbox_request_cancellation.cancel_request_and_wait(payload.request_id)
-    return CancelResponse(cancelled=cancelled, stopped=stopped)
+    return CancelResponse(cancelled=sandbox_request_cancellation.cancel_request(payload.request_id))
 
 
 @dataclass(frozen=True)
@@ -1946,17 +1936,7 @@ async def _run_cancellable(
     """Run one request inside this process as a task the primary's cancel can stop."""
     call = asyncio.create_task(execution)
     loop = asyncio.get_running_loop()
-    done = asyncio.Event()
-    was_stopped = False
-
-    async def confirm_stopped() -> bool:
-        await done.wait()
-        return was_stopped
-
-    sandbox_request_cancellation.bind_request_stop(
-        lambda: loop.call_soon_threadsafe(call.cancel),
-        confirm=confirm_stopped,
-    )
+    sandbox_request_cancellation.bind_request_stop(lambda: loop.call_soon_threadsafe(call.cancel))
     try:
         return await call
     except asyncio.CancelledError:
@@ -1965,10 +1945,7 @@ async def _run_cancellable(
         if current.cancelling() or not sandbox_request_cancellation.request_cancelled():
             call.cancel()
             raise
-        was_stopped = True
         return _cancelled_response()
-    finally:
-        done.set()
 
 
 if __name__ == "__main__":

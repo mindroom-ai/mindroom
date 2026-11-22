@@ -265,20 +265,20 @@ def _run_signalled_cli(
     return code, submitted[0]
 
 
-def test_item10_confirmed_cancel_prints_stopped_notice_without_call_id(
+def test_item10_never_ran_cancel_prints_never_ran_notice_without_call_id(
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When cancel returns status=cancelled with cancel_confirmed=True, print stopped notice without call id."""
+    """When cancel returns status=cancelled with cancel_outcome='never_ran', print never-ran notice without call id."""
     code, call_id = _run_signalled_cli(
         monkeypatch,
         worker="f2",
-        cancel_response={"status": "cancelled", "cancel_outcome": "stopped"},
+        cancel_response={"status": "cancelled", "cancel_outcome": "never_ran"},
     )
     output = capsys.readouterr()
     assert code == 128 + int(signal.SIGTERM)
     assert output.out == ""
-    assert output.err == "mindroom-agent: cancelled by SIGTERM; stopped the command in worker f2\n"
+    assert output.err == "mindroom-agent: cancelled by SIGTERM; the command never ran in worker f2\n"
     assert call_id not in output.err
 
 
@@ -409,21 +409,11 @@ def _install_fake_worker_proxy(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("runner_cancel_response", "expected_outcome"),
-    [
-        (httpx.Response(200, json={"cancelled": True, "stopped": True}), "stopped"),
-        (httpx.Response(200, json={"cancelled": True, "stopped": False}), None),
-        (httpx.Response(500, json={"detail": "boom"}), None),
-    ],
-)
-async def test_item10_server_cancel_sets_cancel_confirmed_from_runner_response(
+async def test_item10_server_cancel_in_flight_leaves_cancel_outcome_none(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    runner_cancel_response: httpx.Response,
-    expected_outcome: str | None,
 ) -> None:
-    """Server cancel route sets cancel_confirmed only when the worker runner confirms the cancel."""
+    """A cancel after dispatch to the worker leaves cancel_outcome=None (CLI says may still be running)."""
     outer_entered = asyncio.Event()
     release_outer = asyncio.Event()
     in_flight = threading.Event()
@@ -431,7 +421,7 @@ async def test_item10_server_cancel_sets_cancel_confirmed_from_runner_response(
     proxied_shell = _install_fake_worker_proxy(
         tmp_path,
         monkeypatch,
-        runner_cancel_response=runner_cancel_response,
+        runner_cancel_response=httpx.Response(200, json={"cancelled": True}),
         in_flight=in_flight,
         release_stream=release_stream,
     )
@@ -478,7 +468,7 @@ async def test_item10_server_cancel_sets_cancel_confirmed_from_runner_response(
                     assert cancel_resp.status_code == 200
                     receipt = cancel_resp.json()
                     assert receipt["status"] == "cancelled"
-                    assert receipt["cancel_outcome"] == expected_outcome
+                    assert receipt["cancel_outcome"] is None
                 release_outer.set()
                 await bash_task
     finally:
@@ -682,7 +672,7 @@ def test_item11_tty_progress_ends_with_newline_before_cancel_notice(monkeypatch:
 
         def cancel(self, call_id: str, *, timeout: float = 8.0) -> dict[str, object]:
             del call_id, timeout
-            return {"status": "cancelled", "cancel_outcome": "stopped"}
+            return {"status": "cancelled", "cancel_outcome": "never_ran"}
 
     tty = _FakeTtyStderr(is_tty=True)
     monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
@@ -692,5 +682,5 @@ def test_item11_tty_progress_ends_with_newline_before_cancel_notice(monkeypatch:
     assert main(["workers", "run", "f1", "--", "sleep", "60"]) == 128 + int(signal.SIGTERM)
     assert tty.getvalue() == (
         "\r\x1b[Kmindroom-agent: starting worker f1...\n"
-        "mindroom-agent: cancelled by SIGTERM; stopped the command in worker f1\n"
+        "mindroom-agent: cancelled by SIGTERM; the command never ran in worker f1\n"
     )

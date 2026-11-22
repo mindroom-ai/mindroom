@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager, suppress
 from contextvars import Context, copy_context
 from dataclasses import dataclass, field, replace
 from functools import partial
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 from mindroom.agent_cli.approval import CliApprovalCall
@@ -852,7 +852,7 @@ class LiveTurnTools(TurnToolBridge):
         call.receipt = call.receipt.model_copy(update={"status": "running"})
         started = False
         refused = False
-        cancel_outcome: Literal["never_ran", "stopped"] | None = None
+        cancelled_never_ran = False
         launch_exit_code: int | None = None
         launch_error: str | None = None
         status = "failed"
@@ -874,9 +874,9 @@ class LiveTurnTools(TurnToolBridge):
                 nonlocal refused
                 refused = True
 
-            def mark_cancel_outcome(outcome: Literal["never_ran", "stopped"]) -> None:
-                nonlocal cancel_outcome
-                cancel_outcome = outcome
+            def mark_cancelled_never_ran() -> None:
+                nonlocal cancelled_never_ran
+                cancelled_never_ran = True
 
             def mark_launch_error(code: int, message: str) -> None:
                 nonlocal launch_exit_code, launch_error
@@ -885,7 +885,7 @@ class LiveTurnTools(TurnToolBridge):
             with call_progress_sink_scope(
                 self._progress_reporter(call, asyncio.get_running_loop()),
                 on_refused=mark_refused,
-                on_cancel_outcome=mark_cancel_outcome,
+                on_cancelled_never_ran=mark_cancelled_never_ran,
                 on_launch_error=mark_launch_error,
             ):
                 events = self._execute(
@@ -945,7 +945,9 @@ class LiveTurnTools(TurnToolBridge):
                         "error_kind": error_kind,
                         "launch_exit_code": launch_exit_code if status == "completed" else None,
                         "launch_error": launch_error if status == "completed" else None,
-                        "cancel_outcome": cancel_outcome if status == "cancelled" else None,
+                        "cancel_outcome": "never_ran"
+                        if status == "cancelled" and (cancelled_never_ran or not started)
+                        else None,
                         "outcome": result,
                         "attachments": attachments,
                     },

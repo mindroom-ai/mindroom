@@ -179,7 +179,6 @@ class LeaseResponse(_WireModel):
 
 
 class CancelResponse(_WireModel):
-    """Whether the request was running when its cancel arrived, and whether its process group stopped."""
+    """Whether the request was running when its cancel arrived."""
 
     cancelled: bool
-    stopped: bool = False
