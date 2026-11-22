@@ -431,18 +431,29 @@ class WorkflowRunStore:
         """Delete finished runs that ended before *finished_before*, with all they own; return how many.
 
         A run of one of the jobs *held* stays: that job has not saved the run's report as its own end yet.
-        So does every run of a job while nobody can say which those are (None).
+        So does every run of a job while nobody can say which those are (None). A run inside a run stays for as
+        long as the run around it: what it spent is part of that run's totals, and its report is its call's.
         The timestamps are compared as instants, because their text leaves out a zero fraction of a second.
         """
         cutoff = datetime.fromisoformat(finished_before)
         with self._write_transaction() as connection:
             rows = connection.execute(
-                f"SELECT run_id, job_id, finished_at FROM workflow_runs "  # noqa: S608
+                f"SELECT run_id, job_id, finished_at, parent_run_id FROM workflow_runs "  # noqa: S608
                 f"WHERE state IN ({_TERMINAL_STATE_PLACEHOLDERS}) AND finished_at IS NOT NULL",
                 _TERMINAL_STATE_VALUES,
             ).fetchall()
             rows = [row for row in rows if row["job_id"] is None or (held is not None and row["job_id"] not in held)]
-            run_ids = [row["run_id"] for row in rows if datetime.fromisoformat(row["finished_at"]) < cutoff]
+            outer = {
+                row["run_id"]: row["parent_run_id"]
+                for row in rows
+                if datetime.fromisoformat(row["finished_at"]) < cutoff
+            }
+            kept = {row["run_id"] for row in connection.execute("SELECT run_id FROM workflow_runs")} - outer.keys()
+            # From the outermost run inwards: a run goes when the run around it goes with it, or is gone already.
+            while staying := {run_id for run_id, parent in outer.items() if parent in kept}:
+                kept |= staying
+                outer = {run_id: parent for run_id, parent in outer.items() if run_id not in staying}
+            run_ids = list(outer)
             connection.executemany("DELETE FROM workflow_runs WHERE run_id = ?", [(run_id,) for run_id in run_ids])
         for run_id in run_ids:
             shutil.rmtree(self.directory / "results" / run_id, ignore_errors=True)

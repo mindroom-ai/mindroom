@@ -2533,6 +2533,7 @@ depends_on = [
     "mindroom.ai",
     "mindroom.ai_run_metadata",
     "mindroom.delegation.background",
+    "mindroom.delegation.cost",
     "mindroom.delegation.execution",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.recovery",
@@ -2549,6 +2550,7 @@ depends_on = [
 [[interfaces]]
 from = ["mindroom.workflow_runs.agent_nodes"]
 expose = [
+    "EARLIER_TURN",
     "FRESH_AGENT_FUNCTION",
     "AgentNodeError",
     "AgentNotReadyError",

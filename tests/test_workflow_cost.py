@@ -135,6 +135,19 @@ async def test_agent_on_an_unpriced_model_with_a_priced_subagent_is_a_lower_boun
 
 
 @pytest.mark.asyncio
+async def test_priced_agent_with_a_subagent_on_an_unpriced_model_is_a_lower_bound(stack: WorkflowStack) -> None:
+    """What the agent itself cost is known and what its subagent cost is not: the sum is no exact twenty cents."""
+    delegated = tool_call("run_subagent", "c1", task="Help.", agent_name="helper")
+    stack.child_script(calls(delegated, metrics=_usd(0.10)), answer("done", _usd(0.10)))
+    stack.models["helper"] = ScriptedModel([answer("helped", usage(1_000, 0))])
+
+    assert await stack.result("@0", "agent", _PROMPT) == "done"
+
+    assert _costs(stack) == (pytest.approx(0.20), pytest.approx(0.20), True)
+    assert _ledger(stack) == [("@0", 1, "1"), ("@0", 1, "sub")]
+
+
+@pytest.mark.asyncio
 async def test_unpriced_model_marks_the_total_unknown(unpriced: WorkflowStack) -> None:
     """A turn on a model with no price counts its tokens and marks the cost as a lower bound."""
     unpriced.child_script(answer("hi", usage(11, 3)))

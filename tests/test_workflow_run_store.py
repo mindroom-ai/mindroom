@@ -179,6 +179,28 @@ def test_reserve_binds_the_call_that_made_it_to_its_run_in_the_same_write(tmp_pa
         assert connection.execute("SELECT COUNT(*) FROM workflow_calls").fetchone() == (0,)
 
 
+def test_prune_keeps_a_run_inside_a_run_for_as_long_as_the_run_around_it(tmp_path: Path) -> None:
+    """What a run inside a run spent is part of the outer run's totals, and its report is its call's: it goes with it."""
+    store = WorkflowRunStore(tmp_path / "w.sqlite3")
+    old = {"state": WorkflowRunState.COMPLETED, "finished_at": "2000-01-01T00:00:00Z"}
+    store.reserve_run(_run(_RUN_A))
+    store.reserve_run(_run(_RUN_B, origin_job_id="nested:1", parent_run_id=_RUN_A, parent_node_key="@0"))
+    store.add_usage(_RUN_B, "@0", 1, 1, 1, {"cost_usd": 0.3})
+    store.update_run(_RUN_B, 0, **old)
+
+    # The outer run is live, and then ended a moment ago: the run inside it stays, however long ago it ended.
+    assert store.prune("2001-01-01T00:00:00Z") == 0
+    store.update_run(_RUN_A, 0, state=WorkflowRunState.COMPLETED, finished_at="2001-06-01T00:00:00Z")
+    assert store.prune("2001-01-01T00:00:00Z") == 0
+    assert store.usage_totals(_RUN_B)["cost_usd"] == pytest.approx(0.3)
+
+    assert store.prune("2002-01-01T00:00:00Z") == 2
+    # A run whose outer run is gone has nobody to count it: it goes by its own age.
+    store.reserve_run(_run(_RUN_C, origin_job_id="nested:2", parent_run_id=_RUN_A, parent_node_key="@1"))
+    store.update_run(_RUN_C, 0, **old)
+    assert store.prune("2002-01-01T00:00:00Z") == 1
+
+
 @pytest.mark.parametrize(
     "changes",
     [

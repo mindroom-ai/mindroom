@@ -12,7 +12,9 @@ from typing import TYPE_CHECKING
 
 from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import prior_usage_of, turn_usage
+from mindroom.budgets.pricing import model_prices, run_cost_usd
 from mindroom.delegation.background import delegation_child
+from mindroom.delegation.cost import resumed_subagent_cost
 from mindroom.delegation.execution import delegation_call_job
 from mindroom.delegation.lifecycle import (
     DelegationPendingError,
@@ -21,7 +23,13 @@ from mindroom.delegation.lifecycle import (
     reload_stopped_child_result,
 )
 from mindroom.delegation.recovery import read_child_run
-from mindroom.delegation.state import RESTART_INTERRUPTION_REASON, RUN_SUBAGENT, SPENT_RUNS_KEY, SubagentPersona
+from mindroom.delegation.state import (
+    CONTINUE_SUBAGENT,
+    RESTART_INTERRUPTION_REASON,
+    RUN_SUBAGENT,
+    SPENT_RUNS_KEY,
+    SubagentPersona,
+)
 from mindroom.delegation.targets import resolve_fresh_target
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, JobAccessError
@@ -35,7 +43,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.runs import ToolExecution
+    from mindroom.llm.runs import RunRecord, ToolExecution
     from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.workflow_runs.models import WorkflowNode, WorkflowRun
@@ -66,6 +74,9 @@ _RECHECK_SECONDS = 1.0
 type ChildOutcome = tuple[str, str]
 # What one agent turn adds to its run's ledger, by the turn each entry is saved under.
 type TurnUsage = dict[int | str, dict[str, object]]
+# How the ledger names what a run that a restart cut short spent, before that run's ID: the attempt that settles its
+# node did not spend it.
+EARLIER_TURN = "cut:"
 
 
 class AgentNodeError(Exception):
@@ -308,17 +319,23 @@ async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[Child
     *cut_short, record = [await read_child_run(turn, runtime.config, runtime.paths) for turn in (*spent, child)]
     text = (record.handover_content if record is not None else None) or job.result or _NO_ANSWER
     usage: TurnUsage = {}
-    if records := [run for run in (*cut_short, record) if run is not None]:
-        used = [turn_usage(prior_usage_of(run), run.metrics) for run in records]
+    records = [run for run in (*cut_short, record) if run is not None]
+    prices = model_prices(runtime.config)
+    for run in records[: len(records) - (record is not None)]:
+        # What a run that a restart cut short spent, with what the subagents it had received cost: the child that
+        # went on after it carries neither. A run without usage made no request, which costs nothing.
+        used = turn_usage(prior_usage_of(run), run.metrics)
+        own = run_cost_usd(used, model_provider=run.model_provider, model_id=run.model, prices=prices)
+        theirs = resumed_subagent_cost(run.metadata).usd
+        known = [usd for usd in (own, theirs) if usd is not None]
+        usage[f"{EARLIER_TURN}{run.run_id}"] = _spent(run, sum(known) if known or used is None else None)
+    if record is not None:
         # The child's cost is its own and its subagents' together: a cost that is theirs alone prices none of its own.
         cost, theirs = child.cost_usd, child.subagents_cost_usd
-        usage[1] = {
-            "input_tokens": sum(metrics.tokens.input_tokens for metrics in used if metrics is not None),
-            "output_tokens": sum(metrics.tokens.output_tokens for metrics in used if metrics is not None),
-            "tool_calls": sum(len(run.tools or ()) for run in records),
-            "cost_usd": cost if cost is None or theirs is None else None if cost == theirs else cost - theirs,
-        }
-        if theirs is not None:
+        usage[1] = _spent(record, cost if cost is None or theirs is None else None if cost == theirs else cost - theirs)
+        # A subagent the turn ran whose cost nobody knows makes the sum a lower bound, as an unpriced turn does.
+        ran = any(tool.tool_name in (RUN_SUBAGENT, CONTINUE_SUBAGENT) for tool in record.tools or ())
+        if theirs is not None or ran:
             usage[f"sub:{child.delegation_id}"] = {"cost_usd": theirs}
     stopped = record is not None and reload_stopped_child_result(child, record) is not None
     if job.status in ("interrupted", "cancelled") or stopped:
@@ -334,6 +351,17 @@ async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[Child
         # A turn that completed without a record to read its answer from did what nobody can say.
         return ("indeterminate", _NO_ANSWER) if record is None else ("completed", record.handover_content or ""), usage
     return (job.status, text), usage
+
+
+def _spent(run: RunRecord, cost: float | None) -> dict[str, object]:
+    """Return the ledger entry of one run of an agent's turn: its tokens, its calls, and *cost*."""
+    used = turn_usage(prior_usage_of(run), run.metrics)
+    return {
+        "input_tokens": used.tokens.input_tokens if used is not None else 0,
+        "output_tokens": used.tokens.output_tokens if used is not None else 0,
+        "tool_calls": len(run.tools or ()),
+        "cost_usd": cost,
+    }
 
 
 def _never_started(tool: ToolExecution) -> bool:

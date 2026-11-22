@@ -40,6 +40,7 @@ from mindroom.script_runs.store import (
 )
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES
 from mindroom.workflow_runs.agent_nodes import (
+    EARLIER_TURN,
     FRESH_AGENT_FUNCTION,
     AgentNodeError,
     AgentNotReadyError,
@@ -1114,7 +1115,8 @@ class WorkflowEngine:
         settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
         try:
             for turn, used in usage.items():
-                add = partial(self.store.add_usage, node.run_id, node.key, node.generation, turn, run.attempt, used)
+                attempt = run.attempt - str(turn).startswith(EARLIER_TURN)
+                add = partial(self.store.add_usage, node.run_id, node.key, node.generation, turn, attempt, used)
                 await asyncio.to_thread(add)
             with suppress(SupersededAttemptError):
                 await asyncio.to_thread(partial(settle, state=state, result=result, error=error))

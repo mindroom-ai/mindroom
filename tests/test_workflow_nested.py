@@ -220,6 +220,40 @@ async def test_nested_run_cost_is_in_the_parent_total_once(stack: WorkflowStack)
     await stack.resume(parent)
     resumed = stack.engine.run_usage(parent)
     assert (resumed["cost_usd"], resumed["attempt_cost_usd"]) == (pytest.approx(0.50), 0.0)
+    # The run inside ended long ago for the retention pass, and its outer run lives: what it spent stays counted.
+    assert stack.store.prune("9999-01-01T00:00:00Z") == 0
+    assert stack.engine.run_usage(parent)["cost_usd"] == pytest.approx(0.50)
+
+
+@pytest.mark.asyncio
+async def test_agent_that_a_restart_continued_is_charged_for_the_turn_it_cut_short_too(stack: WorkflowStack) -> None:
+    """The turn before the restart spent ten cents and the one after it twenty: the run's total holds both.
+
+    So it does the thirty cents of the subagent that the first turn ran. What was spent before the restart is no
+    cost of the attempt that followed it.
+    """
+    await stack.start()
+    working = asyncio.Event()
+
+    async def held() -> None:
+        working.set()
+        await asyncio.Event().wait()
+
+    helped = calls(tool_call("run_subagent", "c1", task="Help.", agent_name="helper"), metrics=usage(100_000, 0))
+    stack.child_script(helped, [Await(held), *answer("never")])
+    stack.child_script(answer("helped", usage(300_000, 0)), agent="helper")
+    await stack.submit("@0", "agent", _PROMPT)
+    await asyncio.wait_for(working.wait(), 5)
+    await stack.restart()
+    assert await stack.recover() == [stack.run_id]
+    stack.child_script(answer("continued", usage(200_000, 0)))
+
+    await stack.continue_agents()
+
+    assert await stack.result("@0", "agent", _PROMPT) == "continued"
+    used = stack.engine.run_usage(stack.run_id)
+    assert (used["input_tokens"], used["cost_unknown"]) == (300_000, False)
+    assert (used["cost_usd"], used["attempt_cost_usd"]) == (pytest.approx(0.60), pytest.approx(0.20))
 
 
 @pytest.mark.asyncio
