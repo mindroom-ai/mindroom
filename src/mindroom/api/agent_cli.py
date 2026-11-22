@@ -141,6 +141,11 @@ async def stream_call(request: Request, call_id: str) -> Response:
     async def lines() -> AsyncIterator[bytes]:
         async with aclosing(frames):
             async for frame in frames:
+                try:
+                    _owner(request)
+                except HTTPException:
+                    # A grant that expired or was revoked while the stream waited reads nothing more.
+                    return
                 yield canonical_json(frame).encode() + b"\n"
 
     # Proxies must pass each line on as it comes instead of collecting the response.
@@ -157,15 +162,19 @@ async def write_call_stdin(request: Request, call_id: str) -> Response:
     """
     owner = _owner(request)
     try:
+        call = str(UUID(call_id))
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Agent CLI authority is unavailable") from None
+    try:
         match read_json(await _bounded_body(request)):
-            case {"seq": int(seq), "b": str(data), "eof": bool(eof)} if seq >= 0:
+            case {"seq": int(seq), "b": str(data), "eof": bool(eof)} if seq >= 0 and not isinstance(seq, bool):
                 pass
             case _:
                 raise ValueError  # noqa: TRY301 - Every malformed chunk gets the one answer.
     except ValueError:
         raise HTTPException(status_code=422, detail="Invalid stdin chunk") from None
     try:
-        still_open = await owner.write_stdin(str(UUID(call_id)), seq, data, eof=eof)
+        still_open = await owner.write_stdin(call, seq, data, eof=eof)
     except CliAuthenticationError:
         raise HTTPException(status_code=401, detail="Agent CLI authority is unavailable") from None
     except TimeoutError:
