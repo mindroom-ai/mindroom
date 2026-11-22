@@ -6,6 +6,7 @@ __all__ = ["main", "parse_arguments", "read_call_arguments"]
 
 import argparse
 import base64
+import errno
 import json
 import os
 import signal
@@ -332,15 +333,17 @@ class _WorkerStderr:
 
 
 class _StdoutClosedError(Exception):
-    """The CLI's stdout takes no more of the command's output."""
+    """The CLI's stdout takes no more of the command's output; its argument says why, unless it is closed."""
 
 
 def _write_stdout(data: bytes) -> None:
     try:
         sys.stdout.buffer.write(data)
         sys.stdout.buffer.flush()
-    except (OSError, ValueError, AttributeError):
-        raise _StdoutClosedError from None
+    except (OSError, ValueError, AttributeError) as exc:
+        # Only a stdout that is closed, or whose reader left, ends the CLI as SIGPIPE ends a program.
+        closed = not isinstance(exc, OSError) or exc.errno in (errno.EPIPE, errno.EBADF)
+        raise _StdoutClosedError(None if closed else exc.strerror) from None
 
 
 def _discard_stdout() -> None:
@@ -423,6 +426,11 @@ def _relay(
     done = threading.Event()
     try:
         return _relay_frames(client, call_id, worker, ended, done, stderr)
+    except _StdoutClosedError:
+        with suppress(AgentCliUnavailableError, ValueError):
+            client.cancel(call_id, timeout=_CANCEL_TIMEOUT_SECONDS)
+        _discard_stdout()
+        raise
     finally:
         done.set()
 
@@ -540,12 +548,7 @@ def _run_in_worker(args: argparse.Namespace) -> int:
                     client = submitting
                     signals.release()
                     result = _relay(client, call_id, args.name, ended, stderr)
-                except _StdoutClosedError:
-                    with suppress(AgentCliUnavailableError, ValueError):
-                        submitting.cancel(call_id, timeout=_CANCEL_TIMEOUT_SECONDS)
-                    _discard_stdout()
-                    return _EXIT_STDOUT_CLOSED
-                except (AgentCliUnavailableError, ValueError) as exc:
+                except (_StdoutClosedError, AgentCliUnavailableError, ValueError) as exc:
                     error = exc
                 # A signal held through a refused submit is raised now; after that nothing is left to cancel.
                 signals.release()
@@ -561,6 +564,10 @@ def _run_in_worker(args: argparse.Namespace) -> int:
         stderr.finish_progress()
     if ended or signum is not None or error is None:
         return _worker_exit_code(args, call_id, ended, signum, result, stderr)
+    if isinstance(error, _StdoutClosedError):
+        if error.args[0] is not None:
+            stderr.note(f"mindroom-agent: cannot write the command's output: {error.args[0]} (call {call_id})")
+        return _EXIT_STDOUT_CLOSED if error.args[0] is None else 1
     if client is None:
         stderr.note(f"mindroom-agent: {error}")
         return _EXIT_NOT_RUN
