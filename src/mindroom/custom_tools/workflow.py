@@ -121,6 +121,8 @@ The call returns {run_id, job_id, status, title} at once, and you receive the ru
 Where the call cannot be a background job, it waits and returns the report itself.
 A run that completed although calls failed says so in the first line of the report.
 get_workflow(run_id) shows each call and what the run cost: cost_usd for the whole run, attempt_cost_usd for this attempt.
+Nothing caps a run's cost unless you pass max_cost_usd: then, once the run has cost that much, no further call starts,
+running ones finish, and the user is asked whether to continue with the same amount again or to stop.
 An agent that needs an approval waits for the user; it does not fail.
 """
 _OWN_RUN = "A call of a run cannot cancel that run or one it is inside. Return from main() or raise to end the script."
@@ -188,6 +190,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         title: str | None = None,
         max_concurrent: int = 16,
         resource_profile: ScriptResourceProfileName | None = None,
+        max_cost_usd: float | None = None,
     ) -> str:
         """Run a workflow where the call cannot be a background job: wait for the run and return its report.
 
@@ -200,6 +203,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
             title: Three to six words shown on the run's card.
             max_concurrent: How many agents run at once. Raise it for large fan-outs.
             resource_profile: Worker size for the script itself.
+            max_cost_usd: Pause and ask the user before the run spends more than this.
 
         """
         arguments = {
@@ -209,6 +213,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
             "title": title,
             "max_concurrent": max_concurrent,
             "resource_profile": resource_profile,
+            "max_cost_usd": max_cost_usd,
         }
         engine, context = _waiting_runtime()
         outer = _outer_call()
@@ -370,6 +375,12 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         if not isinstance(max_concurrent, int) or max_concurrent < 1:
             msg = "max_concurrent must be a whole number of at least 1."
             raise WorkflowRunStoreError(msg)
+        max_cost = arguments.get("max_cost_usd")
+        if max_cost is not None and (
+            isinstance(max_cost, bool) or not isinstance(max_cost, (int, float)) or max_cost <= 0
+        ):
+            msg = "max_cost_usd must be a positive amount in USD."
+            raise WorkflowRunStoreError(msg)
         # The operator's ceiling is the most a start may ask for.
         max_concurrent = min(max_concurrent, self.limits.max_concurrent_agents or max_concurrent)
         placement = workflow_placement(context.config, context.runtime_paths)
@@ -393,7 +404,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
             source_digest=hashlib.sha256(text.encode()).hexdigest(),
             args=arguments.get("args"),
             max_concurrent=max_concurrent,
-            max_cost_usd=None,
+            max_cost_usd=max_cost,
             resource_profile=arguments.get("resource_profile"),
             runtime_seconds_left=hours * 3600 if hours else None,
             origin_job_id=origin,

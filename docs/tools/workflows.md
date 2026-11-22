@@ -43,7 +43,7 @@ background_tool_jobs:
 | `max_runtime_hours` | `72` | Working time one run may use, `0` for no limit; see [Working time](#working-time) |
 | `max_tool_calls_per_minute` | `600` | New `tool()` and `shell()` calls per minute for one run; a call above the rate waits for the minute to have room, it does not fail |
 | `max_concurrent_agents` | none | Ceiling for the `max_concurrent` a call asks for: a start that asks for more gets this many |
-| `large_run_notice_usd` | `10` | Projected cost at which a run is marked as large; not used yet |
+| `large_run_notice_usd` | `10` | Projected cost at which a run is marked as large, `0` for never by cost; see [Cost Limit](#cost-limit) |
 
 A run is a background job, so `start_workflow` needs `background_tool_jobs.enabled: true` and `workflow` must not be in `background_tool_jobs.exclude_toolkits`.
 Otherwise a call from the agent's own reply fails with `Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow.`
@@ -55,7 +55,7 @@ Do not rely on an after-call hook running exactly once for a workflow call.
 ## Functions
 
 ```text
-start_workflow(source=None, path=None, args=None, title=None, max_concurrent=16, resource_profile=None)
+start_workflow(source=None, path=None, args=None, title=None, max_concurrent=16, resource_profile=None, max_cost_usd=None)
 get_workflow(run_id, nodes="active")
 cancel_workflow(run_id)
 resume_workflow(run_id, source=None, path=None, rerun=None)
@@ -63,6 +63,7 @@ resume_workflow(run_id, source=None, path=None, rerun=None)
 
 - `start_workflow` takes exactly one of `source` (inline Python) or `path` (a file in the agent's workspace) and returns `{job_id, run_id, status, title}` at once.
   The report reaches the agent through the [background job](agent-orchestration.md#background-jobs) of the run, in full; a failed run delivers the last 4 KiB of the script's output and traceback.
+  `max_cost_usd` pauses the run at that cost and asks the requester; see [Cost Limit](#cost-limit).
 - `get_workflow` returns the run's status, attempt, node counts, usage, waiting and failed calls, and the calls `nodes` selects: `active`, `failed`, or `all`.
   For a run that has ended it also returns `result`: the report, or why the run has none.
   See [Cost](#cost) for `usage`.
@@ -268,6 +269,24 @@ A script can start agents and runs through `tool()` as well.
   So does a subagent of a run's agent whose cost is not known, whatever the agent's other subagents cost.
 - An agent whose turn had ended before a restart is counted for the attempt that started it, not for the one that read its answer.
 - Each call that asked a model shows its own `usage` in `nodes`.
+
+### Cost Limit
+
+Nothing caps what a run costs unless its start names a limit: `start_workflow(..., max_cost_usd=5)`.
+
+- When `cost_usd`, the sum over every attempt and every run inside the run, reaches the limit, no further agent or tool call starts.
+  Calls that already run finish, and calls the script makes meanwhile wait as `queued`.
+- The run's requester is asked once, as with [`ask_user`](#questions): `This run has spent $5.20 of its $5.00 limit. Continue?` with the options `Continue with $5.00 more` and `Stop`.
+- `Continue with $5.00 more` adds the original amount to the limit and starts the waiting calls; at the next limit the run asks again.
+  `Stop` cancels the run, and its finished calls stay saved.
+- The run shows `waiting` once nothing of it works any more.
+- A resume keeps the run's limit and what it has cost, so a run that was stopped at its limit asks again before it starts a call.
+  A saved answer that a resume reuses costs nothing and does not move the limit; a call that runs again does.
+- A turn on a model without a price adds nothing to `cost_usd`, so a limit cannot hold a run of unpriced models.
+- The limit is checked when a call would start and when an agent's turn ended, so the run can pass it by what the calls that were running cost.
+
+A run is marked `large` once it has more than 25 agent calls, or once its projected cost passes the `large_run_notice_usd` of the agent's `workflow` tool entry (10 by default, 0 turns the cost test off).
+The mark is advisory: the run's log says `Large run: <n> agents, about $<projected> projected.`, its card is edited at once, and nothing is paused.
 
 ## The Run In The Room
 

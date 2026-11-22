@@ -1635,6 +1635,8 @@ The call returns {run_id, job_id, status, title} at once, and you receive the ru
 Where the call cannot be a background job, it waits and returns the report itself.
 A run that completed although calls failed says so in the first line of the report.
 get_workflow(run_id) shows each call and what the run cost: cost_usd for the whole run, attempt_cost_usd for this attempt.
+Nothing caps a run's cost unless you pass max_cost_usd: then, once the run has cost that much, no further call starts,
+running ones finish, and the user is asked whether to continue with the same amount again or to stop.
 An agent that needs an approval waits for the user; it does not fail.
 
 Models: haiku, opus (add an effort as in opus@high).
@@ -1672,6 +1674,7 @@ def test_description_teaches_what_this_release_runs_and_lists_the_configured_mod
         "title",
         "max_concurrent",
         "resource_profile",
+        "max_cost_usd",
     }
     assert (functions["cancel_workflow"].description or "").startswith(
         "Stop a run and its agents. Finished calls stay saved, so resume_workflow can continue it.",
