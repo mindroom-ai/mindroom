@@ -5855,7 +5855,8 @@ def test_dedicated_worker_python_tool_hook_sees_worker_resource_limits(
                     "result = {k: os.environ.get(k) for k in ("
                     '"HOOK_SEEN_CPUS", "HOOK_SEEN_OMP", "MINDROOM_WORKER_CPUS", '
                     '"MINDROOM_WORKER_MEMORY_BYTES", "OMP_NUM_THREADS", '
-                    '"PYTHON_CPU_COUNT", "PYTEST_XDIST_AUTO_NUM_WORKERS")}',
+                    '"PYTHON_CPU_COUNT", "PYTEST_XDIST_AUTO_NUM_WORKERS")}\n'
+                    'result["CPU_COUNT"] = os.cpu_count()',
                     "result",
                 ],
                 "kwargs": {},
@@ -5879,6 +5880,8 @@ def test_dedicated_worker_python_tool_hook_sees_worker_resource_limits(
         "OMP_NUM_THREADS": "2",
         "PYTHON_CPU_COUNT": "4",
         "PYTEST_XDIST_AUTO_NUM_WORKERS": "4",
+        # The interpreter itself honors the pod limit, not only its environment (forkserver starts it early).
+        "CPU_COUNT": 4,
     }
 
 
