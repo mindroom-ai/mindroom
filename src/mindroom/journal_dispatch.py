@@ -240,10 +240,12 @@ class JournalDispatcher:
         Turn work waits until the orchestrator has started responders, and a runtime source its owner will not
         start in a runtime that stopped accepting work waits until that runtime accepts work again.
         """
-        if not _needs_turn_replay(event):
-            return False
+        return _needs_turn_replay(event) and (not self._turn_replay_released or self._runtime_source_refused(event))
+
+    def _runtime_source_refused(self, event: JournalEvent) -> bool:
+        """Return whether the runner will not start this runtime source until its runtime accepts work again."""
         refused = self.callbacks.runtime_source_parked
-        return not self._turn_replay_released or (refused is not None and refused(event))
+        return refused is not None and refused(event)
 
     async def _run_event(self, event: JournalEvent) -> bool:
         """Run one journal event's callback and report whether it may settle.
@@ -431,9 +433,9 @@ class JournalDispatcher:
         self.retry_turn_sources(room_id, (event_id,))
 
     def retry_turn_sources(self, room_id: str, event_ids: tuple[str, ...]) -> None:
-        """Return several undelivered turn sources to the worker; a parked one stays deferred until its release."""
+        """Return several undelivered turn sources to the worker; one the runner refused stays deferred."""
         self._deferred_reaction_ids.difference_update(event_ids)
-        self._worker.release(event_ids, keep=self._parked)
+        self._worker.release(event_ids, keep=self._runtime_source_refused)
         self._worker.wake(room_id=room_id)
 
     def _release_sources(self, event_ids: tuple[str, ...]) -> None:
