@@ -9,7 +9,7 @@ import json
 import re
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import nio
 import pytest
@@ -28,6 +28,7 @@ from mindroom.room_settings import (
     refresh_room_settings,
     resolve_room_setting,
     seed_room_settings,
+    write_room_setting,
 )
 from tests.conftest import test_runtime_paths
 from tests.room_settings_helpers import RoomStateHomeserver
@@ -117,6 +118,45 @@ async def test_a_setting_the_room_already_has_supersedes_an_older_runtimes_overr
 
 
 @pytest.mark.asyncio
+async def test_an_override_file_that_cannot_be_rewritten_keeps_its_record_for_a_later_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The room's setting applies whatever becomes of the file: a turn's read never fails for it and a later one retries."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    legacy = _write_legacy_overrides(runtime_paths, THREAD_MODE, (ROOM_ID,))
+    homeserver = RoomStateHomeserver()
+    homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "thread_mode"] = {}
+    client = homeserver.client()
+    with monkeypatch.context() as patched:
+        patched.setattr("mindroom.legacy_room_settings.write_override_records", Mock(side_effect=OSError("read-only")))
+        await refresh_room_settings(client, runtime_paths, ROOM_ID, put_state=client.room_put_state)
+
+    assert resolve_room_setting(THREAD_MODE, runtime_paths, ROOM_ID) is None
+    assert set(json.loads(legacy.read_text())) == {ROOM_ID}
+
+    await refresh_room_setting(THREAD_MODE, client, runtime_paths, ROOM_ID, force=True, put_state=None)
+
+    assert json.loads(legacy.read_text()) == {}
+
+
+@pytest.mark.asyncio
+@_SETTINGS
+async def test_a_write_the_room_takes_replaces_an_older_runtimes_override(
+    tmp_path: Path,
+    setting: RoomSetting[Any],
+) -> None:
+    """A setting cleared before any read stays cleared after a restart: the stored override leaves the file."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    legacy = _write_legacy_overrides(runtime_paths, setting, (ROOM_ID, OTHER_ROOM))
+    client = RoomStateHomeserver().client()
+
+    assert await write_room_setting(setting, client, runtime_paths, ROOM_ID, None) is True
+
+    assert set(json.loads(legacy.read_text())) == {OTHER_ROOM}
+
+
+@pytest.mark.asyncio
 @_SETTINGS
 async def test_an_unreadable_room_keeps_an_older_runtimes_override(tmp_path: Path, setting: RoomSetting[Any]) -> None:
     """Only a room that answers it has no such setting takes the stored override; a failed read moves nothing."""
@@ -154,7 +194,7 @@ async def test_a_failed_read_nio_decodes_as_an_event_keeps_the_copy_and_the_over
     """Nio decodes every failed read but a 404 as the event's own response, so the HTTP status decides what was read."""
     runtime_paths = test_runtime_paths(tmp_path)
     value = _VALUES[setting.key]
-    legacy = _write_legacy_overrides(runtime_paths, setting, (ROOM_ID, OTHER_ROOM))
+    legacy = _write_legacy_overrides(runtime_paths, setting, (ROOM_ID,))
     seed_room_settings(runtime_paths, OTHER_ROOM, [_event(setting.key, {"value": value})])
     state_url = re.compile(r"http://localhost:8008/_matrix/client/v3/rooms/.*/state/.*")
     aioresponse.get(state_url, status=status, repeat=True, **answer)
@@ -172,14 +212,14 @@ async def test_a_failed_read_nio_decodes_as_an_event_keeps_the_copy_and_the_over
         await client.close()
 
     assert unread == known == SettingRead(ok=False, value=value)
-    assert set(json.loads(legacy.read_text())) == {ROOM_ID, OTHER_ROOM}
+    assert set(json.loads(legacy.read_text())) == {ROOM_ID}
     put_state.assert_not_awaited()
 
 
 def test_a_full_state_read_seeds_every_setting(tmp_path: Path) -> None:
     """The room state a restore reads gives each setting before any turn, and an older runtime's override until then."""
     runtime_paths = test_runtime_paths(tmp_path)
-    _write_legacy_overrides(runtime_paths, THREAD_MODE, (ROOM_ID, OTHER_ROOM))
+    legacy = _write_legacy_overrides(runtime_paths, THREAD_MODE, (ROOM_ID, OTHER_ROOM))
     state = [
         {"type": "m.room.create", "state_key": "", "content": {}},
         _event("reply_mode", {"value": "mentions"}),
@@ -195,6 +235,8 @@ def test_a_full_state_read_seeds_every_setting(tmp_path: Path) -> None:
     assert resolve_room_setting(MODEL, runtime_paths, ROOM_ID) == "large@high"
     assert resolve_room_setting(THREAD_MODE, runtime_paths, ROOM_ID) is None
     assert resolve_room_setting(THREAD_MODE, runtime_paths, OTHER_ROOM) == "room"
+    # The setting the read found replaces the override, even after a restart.
+    assert set(json.loads(legacy.read_text())) == {OTHER_ROOM}
 
 
 @pytest.mark.parametrize(

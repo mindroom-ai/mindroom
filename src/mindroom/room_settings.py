@@ -145,7 +145,11 @@ def _legacy_override[T: str](setting: RoomSetting[T], runtime_paths: RuntimePath
 
 
 def _drop_legacy_override(setting: RoomSetting[Any], runtime_paths: RuntimePaths, room_id: str) -> None:
-    drop_legacy_room_override(runtime_paths, room_id, setting.legacy_filename, setting.legacy_field)
+    """Remove the override the room's state replaced; a file that cannot be rewritten keeps it for a later read."""
+    try:
+        drop_legacy_room_override(runtime_paths, room_id, setting.legacy_filename, setting.legacy_field)
+    except OSError:
+        logger.warning("room_setting_legacy_override_kept", room_id=room_id, setting=setting.key, exc_info=True)
 
 
 def state_event_was_read(response: object) -> TypeGuard[nio.RoomGetStateEventResponse]:
@@ -211,12 +215,15 @@ def seed_room_settings(runtime_paths: RuntimePaths, room_id: str, events: Iterab
     """Take each setting from a full read of the room's state made for something else, unless it is known already.
 
     A room without a setting keeps no copy of it, so its first turn reads it and moves any override an older runtime
-    stored, which applies until then.
+    stored, which applies until then. A setting the room has replaces that override, which leaves the file.
     """
     for source in events:
         setting = _setting_of(source)
-        if setting is not None and (key := _key(setting, runtime_paths, room_id)) not in _known:
+        if setting is None:
+            continue
+        if (key := _key(setting, runtime_paths, room_id)) not in _known:
             _take(key, _value_from_content(setting, source.get("content")), next(_order), confirmed=True)
+        _drop_legacy_override(setting, runtime_paths, room_id)
 
 
 async def refresh_room_setting[T: str](
@@ -248,26 +255,26 @@ async def refresh_room_setting[T: str](
         logger.warning("room_setting_read_failed", room_id=room_id, setting=setting.key, exc_info=True)
         return SettingRead(ok=False, value=resolve_room_setting(setting, runtime_paths, room_id))
     if state_event_was_read(response):
-        value = _value_from_content(setting, response.content)
-        # The room's own event, even an empty one, decides over the override an older runtime stored.
         # Only a read the homeserver answered with the event counts: a failed one keeps the copy and the override.
-        _drop_legacy_override(setting, runtime_paths, room_id)
+        value = _value_from_content(setting, response.content)
     elif isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
         # A room without the setting takes the override an older runtime stored on disk, which then leaves the file.
         # While the room refuses the write, the stored override still applies and the next read tries again.
         value = _legacy_override(setting, runtime_paths, room_id)
         move = None if value is None or put_state is None else write_room_setting
         if move and await move(setting, client, runtime_paths, room_id, value, put_state=put_state, moves_read=started):
-            _drop_legacy_override(setting, runtime_paths, room_id)
             return SettingRead(ok=True, value=value)
-        # A write or another read's move that the room took meanwhile is its setting, not the override on disk.
+        # A write or another read's move that the room took meanwhile is its setting, and took the override off disk.
         newer = _known.get(key, _NEVER_READ)
-        if move and newer.order > started:
+        if newer.order > started:
             return SettingRead(ok=True, value=cast("T | None", newer.value))
     else:
         logger.warning("room_setting_read_failed", room_id=room_id, setting=setting.key, error=str(response))
         return SettingRead(ok=False, value=resolve_room_setting(setting, runtime_paths, room_id))
     _take(key, value, started, confirmed=True)
+    if state_event_was_read(response):
+        # The room's own event, even an empty one, decides over the override an older runtime stored.
+        _drop_legacy_override(setting, runtime_paths, room_id)
     return SettingRead(ok=True, value=value)
 
 
@@ -338,4 +345,6 @@ async def write_room_setting[T: str](
         else:
             _known[key] = known._replace(order=next(_order), confirmed_at=_UNCONFIRMED)
             await refresh_room_setting(setting, client, runtime_paths, room_id, force=True, put_state=None)
+        # The room now has the setting, so the override an older runtime stored never applies again.
+        _drop_legacy_override(setting, runtime_paths, room_id)
         return True
