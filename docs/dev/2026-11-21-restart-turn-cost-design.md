@@ -28,7 +28,7 @@ Success: a reply's `cost.usd` and `cost.subagents_usd` count every attempt at it
    Only the driver's carriers (`TurnResume.prior_usage`, `TurnRunState.prior_usage`) are maps; the builders that price a reply still take the usage values.
 3. **One merge rule everywhere: per key, the larger value** (`merge_by_key`).
    Two views of one turn hold the same value under a key unless one is older, and what a turn spent only grows.
-   A run save stores the row's receipts merged with the bound holder's, a delegation state's save stores its run's merged with the holder's, a metadata patch that carries receipts merges them into the row's, and a resumed, seeded, or recovered turn starts from a merge.
+   A run save stores the record's receipts merged with its stored row's and the bound holder's, a delegation state's save stores its run's merged with the holder's, a metadata patch that carries receipts merges them into the row's, and a resumed, seeded, or recovered turn starts from a merge.
    Rows stay cumulative; the change is that two cumulative views can be merged.
 4. **The maps are stored under new keys, beside the sums an earlier release reads.**
    `mindroom_subagent_receipts` sits beside `mindroom_subagent_cost_usd`, and `mindroom_prior_usage_by_run` beside `mindroom_prior_usage`; each sum is the total of its map.
@@ -44,6 +44,7 @@ Success: a reply's `cost.usd` and `cost.subagents_usd` count every attempt at it
    The acknowledging run is kept in the job's adapter, not in a new job field, because an older backend rejects a job with a field it does not know; a tool's job keeps its adapter as admitted, which a reattaching call must match.
    A job acknowledged with no run recorded is left out too: a keyed receipt beside such a job can only come from an older backend that acknowledged it after a rollback, whose own reply reported it if it collected it, so carrying it could count it twice and leaving it out cannot.
    Of a saved job, recovery reads its consumed flag, its acknowledging run, and the delegation id its saved child names, and decodes no child, so a snapshot no reader decodes stops no replay.
+   The read checks each shape itself, because a job record parses whatever its adapter holds: a job whose adapter or child is no mapping, or names no id, is no receipt's job, and an acknowledging run that is no text reads as none recorded.
    A filter by conversation was not enough for that: a session id names a room and thread, which several agents and requesters share, and a turn never collects their jobs.
    The jobs are the job runtime's or, on an instance that runs no jobs or has yet to recover them, the saved job records, read without taking them over.
    Turning jobs off keeps the saved ones for the next enabled start, whose turns still collect an unacknowledged one, so a replay without a runtime must leave that one out too.
@@ -126,6 +127,9 @@ Success: a reply's `cost.usd` and `cost.subagents_usd` count every attempt at it
 | Two views of one id can disagree | Decision 3. |
 | A caller's holder is not seeded | Decision 7. |
 | A delegation state's save writes only the holder's receipts, and its patch replaces the row's | Decision 3. |
+| A paused run's whole-row save drops a receipt only the handed-over record holds | Decision 3: a save merges the record, its stored row, and the holder. |
+| A saved job with no adapter, or an acknowledging run that is no run id, stops every replay that reads it | Decision 6: the read checks each shape. |
+| A recovered row with token totals and a model but no per-model breakdown adds tokens and no dollars | Not handled (limitation 10). |
 | Losing the latest child row drops earlier saved work | Not handled (limitation 3). |
 | Regeneration, and other unlinked runs, are counted again | Not handled (limitation 5). |
 | Follow-up rows of an earlier release are not matched | Not handled, as before. |
@@ -148,19 +152,22 @@ Each is at parity with the behaviour before this change or better, except 5.
 7. A minimal-mode CLI approval that starts a fresh envelope does not add the paused run's own usage, as before.
 8. An older backend after a rollback reads the sums and ignores the maps and the job adapter's receipts, so it reports as it did.
 9. After a rollback and a second upgrade, a job the older backend acknowledged names no run, so a replay leaves its receipt out, and prior usage the older backend added to the summed key alone is not read back, unlike receipts (decision 12).
+10. A recovered run that stored token totals and its model but no per-model breakdown adds its tokens to the reply and nothing to its cost, once the replay's own breakdown exists.
+    Pricing reads the breakdown alone when there is one, and recovery carries the row's usage without its model.
+    No writer since the owned runtime (2026-10-24) stores such a row, and before this change the reply reported neither its tokens nor its cost, so the dollars are unchanged.
 
 ## Testing
 
-- Unit: saving a row twice, merging two rows, patching a row, and resuming from a row give the same receipts; recovery merges rows by id, drops sums and the jobs its runs did not acknowledge, and counts a team run's member rows; a subagent job keeps its first acknowledging run over a restart and a reread, and its adapter when the save fails; the saved jobs are read without a runtime past one that does not parse; an acknowledger is read beside the id a saved child names, whatever else it holds.
-- Scenarios through the response runner: one and two restarts, a lost attempt, past the crash-loop limit, a model switch before a restart, a billed empty retry over one and two restarts, a job follow-up replay with the job acknowledged, collected again, or left for a later turn, a job another turn collects between the crash and the replay, a replay on an instance that runs no jobs for a job its run did and did not acknowledge, an undecodable job in another conversation and of another requester in the thread, and the undated budget cost.
+- Unit: saving a row twice, merging two rows, patching a row, and resuming from a row give the same receipts; recovery merges rows by id, drops sums and the jobs its runs did not acknowledge, and counts a team run's member rows; a subagent job keeps its first acknowledging run over a restart and a reread, and its adapter when the save fails; the saved jobs are read without a runtime past one that does not parse; an acknowledger is read beside the id a saved child names, whatever else the job holds or lacks; a paused run's whole-row save keeps what its record, its row, and its turn each hold.
+- Scenarios through the response runner: one and two restarts, a lost attempt, past the crash-loop limit, a model switch before a restart, a billed empty retry over one and two restarts, a job follow-up replay with the job acknowledged, collected again, or left for a later turn, a job another turn collects between the crash and the replay, a replay on an instance that runs no jobs for a job its run did and did not acknowledge, an undecodable job in another conversation and of another requester in the thread, a malformed saved job on an instance that runs no jobs, and the undated budget cost.
 - Continued subagent jobs: over two restarts, at the cap, refused by a hook, after a model switch and an approval, killed before the continuation's first row, from a row that stored a sum, and with nested jobs its runs did and did not acknowledge.
 - Approval paths: an approval, then a continuation, then an approval with no restart, for a receipt held by id and for a sum; a child that goes on in a new run after its approval; a completed child run settled from a stale handle; a team turn cut short and replayed.
 - A reply whose run metadata holds receipts reports them, streamed or collected into its caller's holder, and a delegation state's save keeps what its run holds.
 - The usage ledger holds each run's own usage once in the restart scenarios.
-- The first tests were written after the code, so each rule was then removed in a scratch copy to see its test fail; the reproductions of the third and fourth review rounds were written first and seen to fail.
+- The first tests were written after the code, so each rule was then removed in a scratch copy to see its test fail; the reproductions of the third, fourth, and fifth review rounds were written first and seen to fail.
 
 ## Size
 
-Net `src/` lines against the base are +200, against +199 for the first implementation; no lock is added.
-The change was sized for 160 and stood at +165 before the third review round, whose fixes, net of its simplifications, added 22; the fourth round's added 13.
-The largest pieces are the keyed holder and its stored forms (`delegation/cost.py`, +50), recovery (`history/run_checkpoint.py`, +26), the job's acknowledging run and the read of the saved jobs (`tool_jobs/runtime.py`, +25, seven of them a signature that no longer fits one line), and the continuation's receipts (`delegation/continuation.py`, +17).
+Net `src/` lines against the base are +204, against +199 for the first implementation; no lock is added.
+The change was sized for 160 and stood at +165 before the third review round, whose fixes, net of its simplifications, added 22; the fourth round's added 13 and the fifth's 4.
+The largest pieces are the keyed holder and its stored forms (`delegation/cost.py`, +50), recovery (`history/run_checkpoint.py`, +26), the job's acknowledging run and the read of the saved jobs (`tool_jobs/runtime.py`, +26, seven of them a signature that no longer fits one line), and the continuation's receipts (`delegation/continuation.py`, +17).

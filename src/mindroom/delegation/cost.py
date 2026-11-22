@@ -59,7 +59,7 @@ class SubagentCost:
 
     def add(self, receipts: Mapping[str, float]) -> None:
         """Merge another view of what the turn received into this one."""
-        self.receipts.update(merge_by_key((self.receipts, receipts), float))
+        self.receipts.update({key: max(usd, self.receipts.get(key, usd)) for key, usd in receipts.items()})
 
 
 _RECEIVING: ContextVar[SubagentCost | None] = ContextVar("received_subagent_cost", default=None)
@@ -106,12 +106,12 @@ def receipts_metadata(*views: Mapping[str, float]) -> dict[str, Any]:
     return {SUBAGENT_RECEIPTS_RUN_METADATA_KEY: receipts, **total} if receipts else {}
 
 
-def subagent_cost_metadata(stored: Mapping[str, Any] | None = None) -> dict[str, Any]:
+def subagent_cost_metadata(*stored: Mapping[str, Any] | None) -> dict[str, Any]:
     """Return the metadata entries a run's save stores of what its turn received so far, empty for nothing received.
 
-    They merge what the ``stored`` metadata holds with what the turn in this context received, so with nothing
-    received here, as in recovery's saves, they keep the stored cost. A turn that resumes the run after a pause goes
-    on from it (``stored_receipts``).
+    They merge what each ``stored`` metadata holds, the record's and its row's, with what the turn in this context
+    received, so with nothing received here, as in recovery's saves, they keep the stored cost. A turn that resumes
+    the run after a pause goes on from it (``stored_receipts``).
     """
     cost = _RECEIVING.get()
-    return receipts_metadata(stored_receipts(stored), cost.receipts if cost is not None else {})
+    return receipts_metadata(*map(stored_receipts, stored), cost.receipts if cost is not None else {})

@@ -1500,6 +1500,32 @@ async def test_a_parent_that_gets_only_its_delegation_key_keeps_what_its_subagen
 
 
 @pytest.mark.asyncio
+async def test_a_paused_parent_s_save_keeps_what_its_record_its_row_and_its_turn_each_hold(tmp_path: Path) -> None:
+    """A paused run is saved whole, and its row then holds every receipt the record, the stored row, or the turn held."""
+    paths = _runtime_paths(tmp_path)
+    store = create_session_storage("leader", _config(paths), paths, _leader_identity())
+    session = new_scope_session(session_id="parent", scope=HistoryScope(kind="agent", scope_id="leader"))
+    checkpoint = RunRecord(
+        run_id="parent-run",
+        session_id="parent",
+        status=RunStatus.cancelled,
+        metadata=receipts_metadata({"first": 0.5, "only on the row": 0.125}),
+    )
+    await persist_to(store, session)(checkpoint)
+    paused = replace(checkpoint, status=RunStatus.paused, metadata=receipts_metadata({"first": 0.5, "second": 0.75}))
+
+    with receiving_subagent_cost(SubagentCost({"third": 0.25})):
+        await execution.persist_delegation_state(store, session, paused, DelegationState())
+
+    stored = store.get_run("parent-run")
+    assert stored is not None
+    assert stored.status is RunStatus.paused
+    expected = {"first": 0.5, "only on the row": 0.125, "second": 0.75, "third": 0.25}
+    assert stored_receipts(stored.metadata) == expected
+    assert (stored.metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY) == 1.625
+
+
+@pytest.mark.asyncio
 async def test_the_driver_rewrites_the_parent_without_touching_its_recorded_usage(tmp_path: Path) -> None:
     """The loop records a paused run's usage when it stores the pause, so the driver's rewrite leaves that record."""
     paths = _runtime_paths(tmp_path)

@@ -888,8 +888,9 @@ def _write_run(
         # A top-level run saved visible over its paused, cancelled, or errored row finished after the turns it awaited.
         moved = parent_run_id is None and stored.status in _NON_VISIBLE and data["status"] not in _NON_VISIBLE
         created_at, seq = stored.created_at, _next_seq(connection, names) if moved else stored.seq
-    # Every save of a run, however it is handed over, stores what its turn's subagents cost so far.
-    if cost := subagent_cost_metadata(decoded_mapping(stored.metadata) if stored is not None else None):
+    # Every save of a run stores what its turn's subagents cost so far: the record's, its stored row's, the context's.
+    kept = decoded_mapping(stored.metadata) if stored is not None else None
+    if cost := subagent_cost_metadata(data.get("metadata"), kept):
         data = {**data, "metadata": {**(data.get("metadata") or {}), **cost}}
     if stored is None or known is None or known.seq != stored.seq:
         known = None

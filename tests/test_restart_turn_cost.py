@@ -92,6 +92,7 @@ from tests.tool_job_helpers import (
     start_job,
     tool_job_runtime,
     wait_for_status,
+    write_saved_job,
 )
 
 if TYPE_CHECKING:
@@ -829,6 +830,37 @@ async def test_a_saved_child_no_reader_decodes_does_not_stop_another_turn_s_repl
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        {"adapter": None},
+        {"consumed": True, "adapter": {"child": {"delegation_id": "elsewhere"}, "acknowledged_by_run": []}},
+    ],
+    ids=["no adapter", "an acknowledging run that is no run id"],
+)
+async def test_a_malformed_saved_job_does_not_stop_a_replay_on_an_instance_that_runs_no_jobs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    malformed: dict[str, Any],
+) -> None:
+    """A saved job record that parses but holds what no writer saves is no receipt's job, and stops no turn's replay."""
+    bot = _priced_bot(tmp_path)
+    await bot._take_over_replies()
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    job = BackgroundJob("malformed", job_owner(), "worker", 0, kind="delegation", status="completed")
+    await write_saved_job(bot.runtime_paths.storage_root, job.job_id, json.dumps({**asdict(job), **malformed}))
+    source = "$beside-a-malformed-job"
+    await _admit_user_message(bot, source_event_id=source)
+    request = _user_request(source_event_id=source)
+    attempt = runner.generate_response(request)
+    await _run_turn(monkeypatch, bot, attempt, _charge("c1", 0.5), _stall("s1"), cut_short=True)
+    await _simulate_restart(bot, "gen-2")
+    await _run_turn(monkeypatch, bot, runner.generate_response(request), answer("Done.", metrics=_REQ_USAGE))
+
+    assert _final_ai_run_metadata(bot)[1]["cost"] == {"usd": "3.6", "subagents_usd": "0.5"}
+
+
+@pytest.mark.asyncio
 async def test_restart_with_stored_then_lost_attempt_counts_stored_and_final(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -892,8 +924,10 @@ def test_every_view_of_a_turn_s_receipts_merges_to_the_same_total() -> None:
         assert received_subagent_cost_usd() == pytest.approx(0.9)
         assert subagent_cost_metadata(first)[SUBAGENT_RECEIPTS_RUN_METADATA_KEY] == {"d1": 0.4, "d2": 0.3, "d3": 0.2}
     assert receipts_metadata(stored_receipts(first), stored_receipts(second)) == second
-    # An older view of one id holds less, never more.
+    # An older view of one id holds less, never more, whether views are merged or one is added to a turn's holder.
     assert merge_by_key(({"d1": 0.1}, {"d1": 0.4}, {"d1": 0.2}), float) == {"d1": 0.4}
+    cost.add({"d1": 0.1, "d2": 0.5})
+    assert cost.receipts == {"d1": 0.4, "d2": 0.5, "d3": 0.2}
 
 
 def test_two_records_of_one_attempt_merge_to_the_one_that_counted_more() -> None:
@@ -1484,11 +1518,14 @@ def test_recovery_merges_what_the_attempts_rows_hold_by_id_and_leaves_out_jobs_t
 def test_a_job_s_acknowledger_is_read_beside_the_id_its_saved_child_names_and_nothing_else() -> None:
     """A subagent job whose saved child names an id is that receipt's job, whatever else its snapshot holds or lacks."""
 
-    def job(kind: str, child: object, *, consumed: bool = False, run: str | None = None) -> BackgroundJob:
+    def job(kind: str, child: object, *, consumed: bool = False, run: object = None) -> BackgroundJob:
         adapter = {"child": child} if run is None else {"child": child, "acknowledged_by_run": run}
         return BackgroundJob("a-job", job_owner(), "worker", 0, kind=kind, adapter=adapter, consumed=consumed)
 
     jobs = [
+        replace(job("delegation", {"delegation_id": "of a job without an adapter"}), adapter=None),
+        replace(job("delegation", {"delegation_id": "of a job whose adapter is no mapping"}), adapter=["child"]),
+        job("delegation", {"delegation_id": "acknowledged by what is no run id"}, consumed=True, run=["run-1"]),
         job("delegation", {"delegation_id": "acknowledged", "field_of_a_later_release": 1}, consumed=True, run="run-1"),
         job("delegation", {"delegation_id": "acknowledged by an earlier release"}, consumed=True),
         job("delegation", {"delegation_id": "left for a later turn"}),
@@ -1499,6 +1536,7 @@ def test_a_job_s_acknowledger_is_read_beside_the_id_its_saved_child_names_and_no
     ]
     assert job_acknowledgers(jobs) == {
         "acknowledged": "run-1",
+        "acknowledged by what is no run id": None,
         "acknowledged by an earlier release": None,
         "left for a later turn": None,
     }

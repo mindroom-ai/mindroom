@@ -36,9 +36,11 @@ def job_acknowledgers(jobs: Iterable[BackgroundJob]) -> dict[str, str | None]:
 
     None stands for a job no run acknowledged yet, and for one a release that kept no such record acknowledged. The
     turn whose run acknowledges a job reports its cost, though a crash can store its result on another turn's run.
-    Nothing else of a child is read, so one no reader decodes stops no turn's replay; one without an id is no receipt's.
+    Nothing else of a child is read, so one no reader decodes stops no turn's replay; a job whose adapter or child is
+    no mapping, or names no id, is no receipt's.
     """
-    children = ((job, job.adapter.get("child")) for job in jobs if job.kind == "delegation")
+    owned = (job for job in jobs if job.kind == "delegation" and isinstance(job.adapter, dict))
+    children = ((job, job.adapter.get("child")) for job in owned)
     ids = ((job, child.get("delegation_id")) for job, child in children if isinstance(child, dict))
     return {key: job.acknowledged_by for job, key in ids if isinstance(key, str)}
 

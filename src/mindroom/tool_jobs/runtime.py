@@ -148,7 +148,8 @@ class BackgroundJob:
     @property
     def acknowledged_by(self) -> str | None:
         """The run whose saved result first acknowledged a subagent job; an adapter entry, which older releases ignore."""
-        return self.adapter.get("acknowledged_by_run") if self.consumed else None
+        by = self.adapter.get("acknowledged_by_run") if self.consumed else None
+        return by if isinstance(by, str) else None
 
 
 @dataclass(frozen=True)
