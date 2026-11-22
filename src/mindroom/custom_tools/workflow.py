@@ -384,6 +384,8 @@ class WorkflowTools(Toolkit):
         if not isinstance(max_concurrent, int) or max_concurrent < 1:
             msg = "max_concurrent must be a whole number of at least 1."
             raise WorkflowRunStoreError(msg)
+        # The operator's ceiling is the most a start may ask for.
+        max_concurrent = min(max_concurrent, self.limits.max_concurrent_agents or max_concurrent)
         placement = workflow_placement(context.config, context.runtime_paths)
         if placement not in ("worker", "local"):
             raise WorkflowRunStoreError(placement)

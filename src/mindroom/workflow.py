@@ -254,12 +254,14 @@ def _call(
             receipt = gateway.poll(node_id)
     if receipt["state"] == "completed":
         return gateway.result(node_id) if receipt.get("result_ref") else receipt.get("result")
+    raise _failure(receipt, ToolError if kind == "tool" else AgentError)
+
+
+def _failure(receipt: dict[str, object], error_type: type[WorkflowError]) -> WorkflowError:
+    """Return what a call whose node ended without a result raises: its message, and its kind to branch on."""
     details = cast("dict[str, object]", receipt.get("error") or {})
-    error_type = ToolError if kind == "tool" else AgentError
-    raise error_type(
-        str(details.get("message") or f"The call ended {receipt['state']}."),
-        kind=str(details.get("kind") or receipt["state"]),
-    )
+    message = str(details.get("message") or f"The call ended {receipt['state']}.")
+    return error_type(message, kind=str(details.get("kind") or receipt["state"]))
 
 
 def _check_options(function: str, given: Iterable[str], allowed: frozenset[str]) -> None:
@@ -393,7 +395,10 @@ def _fan_out(
     positional = items is not None and any(name.startswith("p") for name in names)
     meta = {"cached": True, "phase": lane.phase, "members": members}
     args: dict[str, object] = {"op": op, "positional": True} if positional else {"op": op}
-    _gateway().submit(key, "group", args, {name: value for name, value in meta.items() if value is not None})
+    group = _gateway().submit(key, "group", args, {name: value for name, value in meta.items() if value is not None})
+    if group["state"] != "completed":
+        # The key holds a call that may have run, which no lane of a fan-out there may run again unasked.
+        raise _failure(group, ToolError)
     lanes = _Lanes(threading.Semaphore(min(len(calls), max_concurrent or _MAX_ACTIVE_LANES) or 1), [None] * len(calls))
     threads: list[threading.Thread] = []
     for position, call in enumerate(calls):

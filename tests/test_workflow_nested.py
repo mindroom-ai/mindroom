@@ -533,6 +533,8 @@ async def test_denied_or_approval_required_script_tool_delegate_launches_nothing
     else:
         assert (ended.state, (ended.error or {}).get("kind"), _agent_jobs(gated)) == ("failed", "denied", 0)
         assert gated.models["helper"].requests == []
+    # The call that ended, denied or not, holds no place: the next call of a run with one place runs.
+    assert await asyncio.wait_for(gated.result("@1", "tool", tool_args("counter", "text", size=2)), 5) == "xx"
 
 
 @pytest.mark.asyncio

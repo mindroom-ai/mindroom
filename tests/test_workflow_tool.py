@@ -246,6 +246,23 @@ async def test_a_redelivery_cancelled_while_it_finds_its_run_takes_nothing_from_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("ceiling_", "asked", "saved"), [(4, 16, 4), (4, 2, 2), (None, 64, 64)])
+async def test_the_operators_ceiling_caps_how_many_calls_of_a_run_work_at_once(
+    stack: WorkflowStack,
+    ceiling_: int | None,
+    asked: int,
+    saved: int,
+) -> None:
+    """`max_concurrent_agents` is the most a start may ask for: the run is saved with the lower of the two."""
+    toolkit = WorkflowTools(stack.context.config, max_concurrent_agents=ceiling_)
+    arguments = {"source": SCRIPT, "args": None, "title": None, "max_concurrent": asked, "resource_profile": None}
+
+    run, _ = await toolkit._reserve(stack.engine, stack.context, _job_id(stack, "call-1"), arguments)
+
+    assert run.max_concurrent == saved
+
+
+@pytest.mark.asyncio
 async def test_a_refused_retry_takes_back_an_intent_that_no_job_owns(stack: WorkflowStack) -> None:
     """An intent an earlier delivery left without a job is taken back by the delivery the runtime refuses."""
     leftover = await WorkflowTools(stack.context.config)._reserve(

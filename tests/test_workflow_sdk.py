@@ -386,6 +386,26 @@ def test_foreach_lanes_are_keyed_by_item_value(gateway: FakeWorkflowGateway, sdk
 
 
 @pytest.mark.usefixtures("in_main")
+@pytest.mark.parametrize("fan_out", ["foreach", "parallel"])
+def test_a_fan_out_whose_group_was_refused_opens_no_lane(
+    gateway: FakeWorkflowGateway, sdk: ModuleType, fan_out: str
+) -> None:
+    """The key of the group holds a call that may have run: the refusal is raised, and no item's call is submitted."""
+    refused = failed("indeterminate", "This call may already have run (attempt 1).")
+    gateway.respond = lambda request: refused if request["kind"] == "group" else completed("ran")
+
+    calls = {
+        "foreach": lambda: sdk.foreach(["a", "b"], lambda item: sdk.tool("files", "write", path=item)),
+        "parallel": lambda: sdk.parallel([lambda: sdk.tool("files", "write", path="a")]),
+    }
+
+    with pytest.raises(sdk.ToolError, match=r"This call may already have run \(attempt 1\)\.") as raised:
+        calls[fan_out]()
+
+    assert (raised.value.kind, [node["kind"] for node in gateway.nodes]) == ("indeterminate", ["group"])
+
+
+@pytest.mark.usefixtures("in_main")
 def test_fan_out_inside_a_lane_opens_lanes_below_it(gateway: FakeWorkflowGateway, sdk: ModuleType) -> None:
     """A lane counts its own calls, and a fan-out inside it names its lanes under the lane's path."""
     gateway.respond = lambda _request: completed("ok")

@@ -862,15 +862,14 @@ class WorkflowEngine:
         async with self._condition(run.run_id):
             if outcome[0] is WorkflowNodeState.COMPLETED:
                 places = self._places.setdefault(run.run_id, _Places(max(1, run.max_concurrent)))
-                # A call whose approval came counts as working since then, and has no place yet.
-                places.working.discard(node.key)
                 start = partial(self._dispatch_agent, run, node, timeout=None, queued=True)
                 places.queued.append((node.key, start))
-                self._leave(run.run_id, None)
             else:
                 settle = partial(self.store.settle_node, run.run_id, node.key, node.generation, run.epoch)
                 with suppress(SupersededAttemptError):
                     await asyncio.to_thread(partial(settle, state=outcome[0], error=outcome[2]))
+            # A call whose approval came counts as working since then: it has no place yet, or needs none now.
+            self._leave(run.run_id, node.key)
         await self._notify(run.run_id)
 
     async def nest(self, child: WorkflowRun) -> None:
