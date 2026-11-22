@@ -311,10 +311,18 @@ class KubernetesWorkerBackend:
                     handle = self._provision_worker_locked(spec, launch, timestamp=timestamp)
             # Outside the worker's lock, so a caller that only shows the worker goes on while tool callers wait here.
             if spec.wait_for_setup and (setup := self._setup_waits.get(spec.worker_key)) is not None:
+                started_at = time.monotonic()
                 lock, due = setup
                 with lock:  # The first tool caller waits for the setup; a later one waits here until that ended.
-                    if due:
-                        self._wait_for_worker_setup(*due.pop())
+                    try:
+                        if due:
+                            self._wait_for_worker_setup(*due.pop())
+                        # Idle cleanup left the worker alone during the wait, and its idle time starts only now.
+                        if (waited := time.monotonic() - started_at) >= _SETUP_POLL_INTERVAL_SECONDS:
+                            handle = self.touch_worker(spec.worker_key, now=timestamp + waited) or handle
+                    finally:
+                        if self._setup_waits.get(spec.worker_key) is setup:  # A newer start keeps its own wait.
+                            del self._setup_waits[spec.worker_key]
             return handle
 
     def _provision_worker_locked(  # noqa: C901, PLR0912, PLR0915
@@ -711,6 +719,8 @@ class KubernetesWorkerBackend:
         removed, because its next start replaces it anyway. One an earlier process created is removed at once, pod
         and all: no reply can reach it, and until it is gone it counts against the limits of those that start.
         """
+        if handle.worker_key in self._setup_waits:
+            return None  # A tool caller that waits for this worker's setup is using it.
         named = pinned_worker_kind(handle.worker_key) == "named"
         if named and handle.created_at < self._process_started_at:
             return "retire"
