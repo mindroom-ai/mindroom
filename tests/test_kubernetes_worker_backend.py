@@ -6545,7 +6545,9 @@ def test_kubernetes_startup_manifest_and_template_ignore_plugins_that_do_not_opt
     assert with_plugins == without_plugins
     # A manifest written without the list, as the Docker backend writes it, leaves the worker preparing lazily.
     other_manifest = write_startup_manifest(
-        Path(tempfile.mkdtemp()), backend_with([])[0].runtime_paths, public_runtime=True
+        Path(tempfile.mkdtemp()),
+        backend_with([])[0].runtime_paths,
+        public_runtime=True,
     )
     assert "eager_setup_plugins" not in json.loads(other_manifest.read_text(encoding="utf-8"))
 
