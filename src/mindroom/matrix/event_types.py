@@ -19,5 +19,7 @@ MINDROOM_ACCOUNTS_EVENT_TYPE = "io.mindroom.accounts"
 ROUTER_BINDING_EVENT_TYPE = "io.mindroom.router"
 # The live graph of a workflow run: ephemeral frames, sent as `io.mindroom.subagents` frames are.
 WORKFLOW_FRAME_EVENT_TYPE = "io.mindroom.workflow"
+# The card of a workflow run: a notice of the run's agent that carries the run under this content key, and is edited.
+WORKFLOW_RUN_CONTENT_KEY = "io.mindroom.workflow_run"
 # Room admins set per-room MindRoom settings, one state event per setting keyed by its name, content `{"value": ...}`.
 ROOM_SETTINGS_EVENT_TYPE = "io.mindroom.room_settings"

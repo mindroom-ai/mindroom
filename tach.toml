@@ -2635,14 +2635,32 @@ expose = [
 ]
 
 [[modules]]
+path = "mindroom.workflow_runs.view"
+depends_on = [
+    "mindroom.delegation.activity",
+    "mindroom.live_frames.workflow",
+    "mindroom.matrix.client_delivery",
+    "mindroom.workflow_runs.engine",
+    "mindroom.workflow_runs.graph",
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.store",
+]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.view"]
+expose = ["RunViews"]
+
+[[modules]]
 path = "mindroom.orchestration.workflow_runtime"
 depends_on = [
+    "mindroom.constants",
     "mindroom.custom_tools.workflow",
     "mindroom.tool_jobs.runtime",
     "mindroom.workflow_runs.agent_nodes",
     "mindroom.workflow_runs.engine",
     "mindroom.workflow_runs.recovery",
     "mindroom.workflow_runs.store",
+    "mindroom.workflow_runs.view",
 ]
 visibility = ["mindroom.orchestrator"]
 
@@ -4462,6 +4480,7 @@ visibility = [
     "mindroom.custom_tools.matrix_user_writes",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.email_invites.receiver",
+    "mindroom.workflow_runs.view",
 ]
 
 [[modules]]
@@ -8455,7 +8474,7 @@ depends_on = [
     "mindroom.delegation.state",
     "mindroom.tool_system.events",
 ]
-visibility = ["mindroom.delegation.lifecycle"]
+visibility = ["mindroom.delegation.lifecycle", "mindroom.workflow_runs.view"]
 
 [[modules]]
 path = "mindroom.live_frames.subagents"

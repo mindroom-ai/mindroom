@@ -21,10 +21,13 @@ from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal, Self
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import httpx
+import nio
 from fastapi import FastAPI
+from nio.api import Api
 
 import mindroom.workflow as sdk
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
@@ -74,6 +77,7 @@ from mindroom.workflow_runs.models import (
 )
 from mindroom.workflow_runs.recovery import recover_runs
 from mindroom.workflow_runs.store import WorkflowRunStore
+from mindroom.workflow_runs.view import RunViews
 from tests.access_schema_support import with_responder_access
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
@@ -87,6 +91,7 @@ from tests.delegation_helpers import ScriptedAgents
 from tests.fakes.scripted_model import ScriptedModel
 from tests.identity_helpers import entity_ids
 from tests.scripted_agent_helpers import registered_toolkit
+from tests.subagent_activity_helpers import FrameRoom
 from tests.tool_job_helpers import (
     call_job_tool,
     continue_stopped_jobs,
@@ -621,6 +626,61 @@ def _copy_saved(source: Path, target: Path) -> None:
                 shutil.copy2(path, copy)
 
 
+class StackRoom(FrameRoom):
+    """The stack's room as its bot's client sends to it: frames as `FrameRoom` records them, and room events.
+
+    An event sent again under a transaction ID the room has seen gets the event of the first send, as a homeserver
+    answers it. In an encrypted room `encrypted_size` says how large an event is once it is encrypted.
+    """
+
+    def __init__(self, room_id: str, *, encrypted: bool = False) -> None:
+        super().__init__(encrypted=encrypted, room_id=room_id)
+        self.events: list[tuple[str, str, dict[str, Any]]] = []
+        """Each event the room took: its ID, its type and its content."""
+        self.refuse_sends = False
+        self._by_transaction: dict[str, str] = {}
+        self.client.room_send = AsyncMock(side_effect=self._room_send)
+        if encrypted:
+            self.client.olm = SimpleNamespace(device_id="TESTDEVICE")
+
+    async def _room_send(
+        self,
+        room_id: str,
+        message_type: str,
+        content: dict[str, Any],
+        tx_id: str | None = None,
+        **_options: object,
+    ) -> nio.RoomSendResponse | nio.RoomSendError:
+        assert room_id == self.room_id
+        if self.refuse_sends:
+            return nio.RoomSendError("refused", "M_UNKNOWN")
+        event_id = self._by_transaction.get(tx_id or "")
+        if event_id is None:
+            event_id = f"$event-{len(self.events)}:example.test"
+            self.events.append((event_id, message_type, content))
+            if tx_id:
+                self._by_transaction[tx_id] = event_id
+        return nio.RoomSendResponse(event_id, room_id)
+
+    def carried(self, key: str) -> list[dict[str, Any]]:
+        """Return what each message that carries the content *key* says under it, a post or an edit, in order."""
+        contents = [content.get("m.new_content", content) for _, _, content in self.events]
+        return [content[key] for content in contents if key in content]
+
+    def encrypted_size(self, content: dict[str, Any]) -> int:
+        """Return the size of the event that carries *content* as the room's real Megolm session encrypts it."""
+        plaintext = Api.to_json({"content": content, "type": "m.room.message", "room_id": self.room_id})
+        envelope = {
+            "algorithm": "m.megolm.v1.aes-sha2",
+            "sender_key": "k" * 43,
+            "ciphertext": self._session.encrypt(plaintext, count=False),
+            "session_id": self._session.id,
+            "device_id": "TESTDEVICE",
+            "m.relates_to": content.get("m.relates_to"),
+        }
+        return len(Api.to_json({"content": envelope, "type": "m.room.encrypted", "room_id": self.room_id}))
+
+
 def set_run(store: WorkflowRunStore, run_id: str, **changes: object) -> WorkflowRun:
     """Write fields of a run as a test arranges it, in whatever state it is; a new state raises its epoch."""
     return store.update_run(run_id, store.get_run(run_id).epoch, when=frozenset(WorkflowRunState), **changes)
@@ -652,7 +712,31 @@ class WorkflowStack:
         self.unsynced: set[str] = set()
         """The agents whose bots have not finished their first sync, so they do not know their rooms yet."""
         """The rooms each agent's bot is in, as a run's check of the agents it may run reads them."""
+        self.room: StackRoom | None = None
+        """The room the stack's bot posts to, once `show` gave it one."""
         self._open()
+
+    def show(self, *, encrypted: bool = False) -> RunViews:
+        """Give the stack a room and the views that show its runs there; a test builds a view with `views.show`.
+
+        No frames are sent unless the test turns `views.live_frames` on.
+        """
+        self.room = StackRoom(self.context.room_id, encrypted=encrypted)
+        self._open_views()
+        return self.views
+
+    def _open_views(self) -> None:
+        room = self.room
+        assert room is not None
+        self.context = replace(self.context, client=room.client)
+        self.resolver.context = self.context
+        self.views = RunViews(
+            self.engine,
+            bot=lambda _run: (self.context.agent_name, room.client),
+            homeserver_url="http://homeserver.test",
+            live_frames=lambda: False,
+            clock=lambda: self.now,
+        )
 
     def _open(self) -> None:
         """Build the runtimes on the stack's databases, as a starting primary does."""
@@ -685,6 +769,8 @@ class WorkflowStack:
         self.context = replace(self.context, orchestrator=orchestrator)  # type: ignore[arg-type]
         # A script's tool call runs in the same live context, so a call of the `workflow` toolkit finds the engine.
         self.resolver.context = self.context
+        if self.room is not None:
+            self._open_views()
 
     def _agents(self) -> AgentRuntime | None:
         """Answer as the live runtime does: the job runtime once `open_jobs` started it, with the owner's config."""

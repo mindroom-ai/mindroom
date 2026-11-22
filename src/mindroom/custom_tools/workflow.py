@@ -149,8 +149,8 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
             max_runtime_hours=max_runtime_hours,
             max_tool_calls_per_minute=max_tool_calls_per_minute,
             max_concurrent_agents=max_concurrent_agents,
+            large_run_notice_usd=large_run_notice_usd,
         )
-        self.large_run_notice_usd = large_run_notice_usd
         # The models of this deployment, named as `run_subagent` names them, end the description.
         models = sorted((runtime_config.models if runtime_config is not None else {}).items())
         levels = [f"{name}@{model.reasoning.levels[-1]}" for name, model in models if model.reasoning]

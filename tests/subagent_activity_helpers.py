@@ -61,9 +61,11 @@ class FrameRoom:
         self,
         *responses: nio.RoomSendEphemeralResponse | nio.RoomSendEphemeralError,
         encrypted: bool = False,
+        room_id: str = FRAME_ROOM_ID,
     ) -> None:
+        self.room_id = room_id
         self.client = make_matrix_client_mock(user_id=_ACCOUNT)
-        self.client.rooms = {FRAME_ROOM_ID: SimpleNamespace(encrypted=encrypted)}
+        self.client.rooms = {room_id: SimpleNamespace(encrypted=encrypted)}
         self.client.room_encrypt = AsyncMock(side_effect=self._encrypt)
         self.client.room_send_ephemeral = AsyncMock(side_effect=self._send)
         self.sent: list[dict[str, Any]] = []
@@ -103,7 +105,7 @@ class FrameRoom:
         tx_id: str,
     ) -> nio.RoomSendEphemeralResponse | nio.RoomSendEphemeralError:
         frame = self.encrypted.pop() if "encrypted" in content else content
-        assert room_id == FRAME_ROOM_ID
+        assert room_id == self.room_id
         assert tx_id == f"{_TRANSACTIONS[event_type]}.{frame['sid']}.{frame['seq']}"
         self.sent.append(frame)
         self.sent_types.append(event_type)

@@ -87,6 +87,7 @@ class WorkflowRun:
     args: object
     max_concurrent: int
     max_cost_usd: float | None
+    """What the run may spend before it asks its requester; each "continue" allows as much again."""
     resource_profile: str | None
     runtime_seconds_left: float | None
     """Working time left; `None` is no limit."""
@@ -109,6 +110,8 @@ class WorkflowRun:
     claims: dict[str, str | None] = field(default_factory=dict)
     """Each invocation that took the run when it had ended, with the report of a call that waited for it itself."""
     card_event_id: str | None = None
+    large: bool = False
+    """Set once, when the run scheduled more agents or projects a higher cost than the notice of a large run allows."""
     result: object | None = None
     error: str | None = None
     created_at: str = field(default_factory=utc_timestamp)
@@ -153,7 +156,8 @@ class WorkflowNode:
     group_key: str | None = None
     members: tuple[str, ...] | None = None
     session_key: str | None = None
-    cached: bool = True
+    cached: bool = False
+    """Whether the attempt the node is of reused the node's saved result, and did not make it."""
     started_at: str | None = None
     ended_at: str | None = None
     result: object | None = None

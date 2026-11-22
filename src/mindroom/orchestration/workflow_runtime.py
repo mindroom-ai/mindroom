@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import TYPE_CHECKING, cast
 
+from mindroom.constants import runtime_matrix_homeserver
 from mindroom.custom_tools.workflow import (
     undelivered_workflow_jobs,
     workflow_job_admission,
@@ -21,8 +22,11 @@ from mindroom.workflow_runs.agent_nodes import AgentRuntime
 from mindroom.workflow_runs.engine import WorkflowEngine
 from mindroom.workflow_runs.recovery import recover_runs
 from mindroom.workflow_runs.store import WorkflowRunStore
+from mindroom.workflow_runs.view import RunViews
 
 if TYPE_CHECKING:
+    import nio
+
     from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle
     from mindroom.script_runs.models import ScriptRunRecord
     from mindroom.workflow_runs.engine import ResumeAccess
@@ -38,12 +42,16 @@ class WorkflowRuntimeLifecycle:
 
     engine: WorkflowEngine
     script_runtime: ScriptRuntimeLifecycle
+    # What shows the runs in their rooms; None shows nothing.
+    views: RunViews | None = None
 
     async def start(self) -> None:
-        """Follow each pass of the script runtime, which records the attempts that ended."""
+        """Follow each pass of the script runtime, which records the attempts that ended, and show the runs."""
         self.engine.owner_access = self._access
         self.engine.agents = self._agents
         self.script_runtime.after_reconcile = self._maintain
+        if self.views is not None:
+            self.views.start()
 
     async def _maintain(self) -> None:
         """Settle the runs whose attempts ended, then delete the runs that ended before the script runtime's retention.
@@ -106,6 +114,8 @@ class WorkflowRuntimeLifecycle:
     async def shutdown(self) -> None:
         """Stop following the script runtime and stop the engine's tasks; saved handles keep what was in flight."""
         self.script_runtime.after_reconcile = None
+        if self.views is not None:
+            await self.views.close()
         await self.engine.close()
 
 
@@ -114,4 +124,16 @@ def build_workflow_runtime(script_runtime: ScriptRuntimeLifecycle) -> WorkflowRu
     control_root = script_runtime.store.database_path.parents[1]
     store = WorkflowRunStore(control_root / "workflow_runs" / "workflow_runs.sqlite3")
     engine = WorkflowEngine(store, script_runtime.manager, script_runtime.broker)
-    return WorkflowRuntimeLifecycle(engine=engine, script_runtime=script_runtime)
+
+    def bot(run: WorkflowRun) -> tuple[str, nio.AsyncClient] | None:
+        """Return the account and the client of the running bot that serves the run, which posts what the run shows."""
+        serving = script_runtime.resolver.serving_bot(cast("ScriptRunRecord", run))
+        return None if serving is None or serving.client is None else (serving.agent_name, serving.client)
+
+    def live_frames() -> bool:
+        config = script_runtime.config_provider()
+        return config is not None and config.defaults.streaming.live_frames
+
+    homeserver_url = runtime_matrix_homeserver(script_runtime.runtime_paths)
+    views = RunViews(engine, bot=bot, homeserver_url=homeserver_url, live_frames=live_frames)
+    return WorkflowRuntimeLifecycle(engine=engine, script_runtime=script_runtime, views=views)

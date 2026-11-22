@@ -947,3 +947,54 @@ def test_report_that_was_accepted_is_delivered_in_a_form_that_is_no_larger_than_
     text = _run(state=done, result=deep).outcome_text()
     assert json.loads(text) == deep
     assert len(text) <= len(json.dumps(deep))
+
+
+def test_nodes_for_a_view_come_without_their_requests_and_results(tmp_path: Path) -> None:
+    """What a run's view reads of a call is all but its request and its result, which can be megabytes each."""
+    store = WorkflowRunStore(tmp_path / "w.sqlite3")
+    store.reserve_run(_run())
+    store.put_node(_node("@0", kind="group", request={"op": "foreach"}, members=("/0:a",), label="foreach"), 0)
+    call = _node("/0:a@0", request={"prompt": "p" * 10_000}, result="r" * 10_000, links={"job_id": "job"})
+    store.put_node(replace(call, state=WorkflowNodeState.FAILED, error={"kind": "failed", "message": "boom"}), 0)
+
+    group, light = store.nodes(_RUN_A, light=True)
+
+    assert (group.request, group.members, group.label) == ({"op": "foreach"}, None, "foreach")
+    assert (light.request, light.result) == ({"op": None}, None)
+    assert (light.state, light.error, light.links) == (
+        call.state.FAILED,
+        {"kind": "failed", "message": "boom"},
+        call.links,
+    )
+    assert store.nodes(_RUN_A)[1].request == call.request
+
+
+def test_every_write_of_a_run_tells_who_listens_which_run_changed(tmp_path: Path) -> None:
+    """Each write that changes what a run shows names the run, after it is saved; a refused write names none."""
+    store = WorkflowRunStore(tmp_path / "w.sqlite3")
+    store.reserve_run(_run())
+    changed: list[str] = []
+    store.on_change = changed.append
+
+    store.put_node(_node("@0"), 0)
+    store.update_node(_RUN_A, "@0", 1, 0, state=WorkflowNodeState.RUNNING)
+    store.settle_node(_RUN_A, "@0", 1, 0, state=WorkflowNodeState.COMPLETED, result=1)
+    store.add_usage(_RUN_A, "@0", 1, 1, 1, {"cost_usd": 0.5})
+    store.append_log(_RUN_A, 0, "a line")
+    store.mark_stale(_RUN_A, 0, ["@0"])
+    store.update_run(_RUN_A, 0, large=True)
+    with pytest.raises(SupersededAttemptError):
+        store.append_log(_RUN_A, 7, "of an attempt the run left")
+
+    assert changed == [_RUN_A] * 7
+    assert store.get_run(_RUN_A).large is True
+
+
+def test_turn_costs_are_those_of_the_runs_own_priced_turns(tmp_path: Path) -> None:
+    """The cost of each model turn of a run's agents is listed by itself; a subagent's and an unpriced one are not."""
+    store = WorkflowRunStore(tmp_path / "w.sqlite3")
+    store.reserve_run(_run())
+    for turn, cost in ((1, 0.6), (2, 0.0), ("cut:run", 0.3), ("sub:del", 9.0), (3, None)):
+        store.add_usage(_RUN_A, "@0", 1, turn, 1, {"cost_usd": cost})
+
+    assert sorted(store.turn_costs(_RUN_A)) == [0.0, 0.3, 0.6]

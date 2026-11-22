@@ -309,13 +309,17 @@ class _SubagentActivity:
             items_dropped=self.items_dropped + dropped,
             result_preview=None if self.result is None else _clip(self.result, _MAX_RESULT_CHARACTERS),
             interrupted_by_restart=self.interrupted_by_restart,
-            usage={
-                "input_tokens": self.input_tokens,
-                "output_tokens": self.output_tokens,
-                "tool_calls": self.tool_calls,
-                **({} if self.cost_usd is None else {"cost_usd": self.cost_usd}),
-            },
+            usage=self.usage(),
         )
+
+    def usage(self) -> dict[str, int | float]:
+        """Return what the run has used so far, as its snapshots say it."""
+        return {
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "tool_calls": self.tool_calls,
+            **({} if self.cost_usd is None else {"cost_usd": self.cost_usd}),
+        }
 
 
 # The feed of each child that runs or may still resume, such as one paused for an approval, which the child's updates
@@ -369,6 +373,12 @@ class ActivityFeed:
     def find(delegation_id: str) -> ActivityFeed | None:
         """Return the feed of a child that has not ended, such as one waiting for its approvals."""
         return _OPEN.get(delegation_id)
+
+    @staticmethod
+    def used(delegation_id: str) -> dict[str, int | float] | None:
+        """Return what a child that has not ended used so far, None for one that ended or never ran here."""
+        feed = _OPEN.get(delegation_id)
+        return None if feed is None else feed._activity.usage()
 
     def text(self, text: str) -> None:
         """Add the child's words; they go out with the next window's snapshot."""

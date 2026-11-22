@@ -197,6 +197,8 @@ class WorkflowLimits:
     max_runtime_hours: float = 72
     max_tool_calls_per_minute: int = 600
     max_concurrent_agents: int | None = None
+    # What a run may be projected to cost before its card says it is large; 0 never says so for its cost.
+    large_run_notice_usd: float = 10
 
 
 @dataclass(slots=True)
@@ -709,7 +711,7 @@ class WorkflowEngine:
                 raise ScriptRuntimeUnavailableError(_STOPPING)
         if saved is not None and action != "run":
             # Reused: the node is this attempt's now, and a fan-out whose items changed dirties what follows it.
-            stamp: dict[str, object] = {"attempt": run.attempt, "stale": False}
+            stamp: dict[str, object] = {"attempt": run.attempt, "stale": False, "cached": action == "hit"}
             if regrouped := members != saved.members:
                 stamp["members"] = members
                 # What follows the group is dirty and no member lane is, which is what marking the group does.
@@ -753,7 +755,6 @@ class WorkflowEngine:
             name=cast("str | None", meta.get("name")),
             phase=cast("str | None", meta.get("phase")),
             members=members,
-            cached=cached,
             started_at=utc_timestamp(),
         )
         # Before a tool call is saved or sent anywhere, whether it is a tool's or an agent's behind a gate.
