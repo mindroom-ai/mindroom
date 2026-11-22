@@ -458,6 +458,9 @@ def _cancel_notice(worker: str, call_id: str, signum: int, receipt: dict[str, ob
     status = receipt.get("status")
     if status == "cancelled" and receipt.get("cancel_outcome") == "never_ran":
         return f"{cancelled}; the command never ran in worker {worker}"
+    if status == "cancelled" and receipt.get("cancel_outcome") == "stopped":
+        # The command's exit followed the stop, so nothing is left to look up under a call ID.
+        return f"{cancelled}; stopped the command in worker {worker}"
     if status == "failed" and receipt.get("error_kind") == "named_worker_refusal":
         what = f"command never ran ({receipt.get('outcome')})"
     elif status == "waiting":

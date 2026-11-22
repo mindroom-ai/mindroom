@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -471,16 +471,20 @@ class CallOutputStream:
         self._loop = loop
         self.frames: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=queued_frames)
         self.attached = False
+        # Set once the command's exit arrived: it ran to its end, or the stop of a cancelled call took effect.
+        self.ended = asyncio.Event()
         # Writes one chunk (its number, base64 bytes, and whether stdin ends after it) to the command's stdin and
         # returns whether stdin takes more; set once the call's worker request is on its way.
         self.write_stdin: Callable[[int, str, bool], Awaitable[bool]] | None = None
 
     def put(self, frame: dict[str, object]) -> None:
-        """Queue one frame from the worker call's thread, which stops waiting for a call that ended."""
-        try:
+        """Queue one frame from the worker call's thread; the frames of a call nobody reads any more are dropped."""
+        if frame.get("t") == "exit":
+            self._loop.call_soon_threadsafe(self.ended.set)
+            if frame.get("cancelled"):
+                return
+        with suppress(asyncio.QueueShutDown):
             asyncio.run_coroutine_threadsafe(self.frames.put(frame), self._loop).result()
-        except asyncio.QueueShutDown:
-            raise asyncio.CancelledError from None
 
 
 _CALL_OUTPUT_STREAM: ContextVar[CallOutputStream | None] = ContextVar("call_output_stream", default=None)

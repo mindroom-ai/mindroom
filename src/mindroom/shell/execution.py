@@ -402,6 +402,24 @@ class CommandStdin:
         return self._writer is not None
 
 
+async def _start_streamed_command(
+    argv: list[str],
+    env: dict[str, str],
+    cwd: str | None,
+    on_start: Callable[[], Awaitable[None]],
+    on_output: Callable[[Literal["out", "err"], bytes], Awaitable[None]],
+) -> asyncio.subprocess.Process | int:
+    """Start a streamed command; one whose program is missing or cannot be executed gets its exit code back."""
+    try:
+        return await _start_command(argv, env, cwd, stdin=asyncio.subprocess.PIPE)
+    except OSError as exc:
+        if (failure := _launch_failure_exit(argv, env, cwd, exc)) is None:
+            raise
+        await on_start()
+        await on_output("err", f"{failure[1]}\n".encode())
+        return failure[0]
+
+
 async def stream_command(
     argv: list[str],
     env: dict[str, str],
@@ -417,9 +435,12 @@ async def stream_command(
     ``on_start`` is awaited once the command runs and ``stdin`` reaches it. A slow ``on_output`` slows the command
     down instead of letting its output pile up. Return the exit code and whether the command was stopped at
     ``timeout``, once both pipes ended; a pipe that only a process the command left behind keeps open is not
-    waited for. Cancellation stops the command's process group.
+    waited for. Cancellation stops the command's process group. A program that is missing or cannot be executed
+    ends as a shell ends it: the reason on stderr, exit code 127 or 126.
     """
-    process = await _start_command(argv, env, cwd, stdin=asyncio.subprocess.PIPE)
+    process = await _start_streamed_command(argv, env, cwd, on_start, on_output)
+    if isinstance(process, int):
+        return process, False
     moved = 0
     idle: set[str] = set()
 
@@ -959,18 +980,16 @@ _FOUND_NAME_LAUNCH_FAILURES = {
 }
 
 
-def _launch_failure(
+def _launch_failure_exit(
     argv: list[str],
     env: dict[str, str],
     cwd: str | None,
     exc: Exception,
-    capture: ShellOutputCapture | None,
-) -> ShellRunResult | None:
-    """Return a spawn error of a program that is missing or cannot be executed as Bash reports it, else None.
+) -> tuple[int, str] | None:
+    """Return Bash's exit code and words for a spawn error of a program that is missing or cannot be executed, else None.
 
-    The result is the one of a command that exited 127 or 126 with Bash's words on stderr, so everything that reads a
-    failed command's result reads this one. A working directory the command cannot enter fails before any program.
-    The error number and the program's name as given decide alone: the program file is never opened.
+    A working directory the command cannot enter fails before any program. The error number and the program's name
+    as given decide alone: the program file is never opened.
     """
     if (
         not isinstance(exc, OSError)
@@ -987,9 +1006,25 @@ def _launch_failure(
     else:
         # Bash names a program it found on PATH by where it found it.
         program, failures = found, _FOUND_NAME_LAUNCH_FAILURES
-    if (failure := failures.get(exc.errno or 0)) is None:
+    failure = failures.get(exc.errno or 0)
+    return None if failure is None else (failure[0], f"{program}: {failure[1]}")
+
+
+def _launch_failure(
+    argv: list[str],
+    env: dict[str, str],
+    cwd: str | None,
+    exc: Exception,
+    capture: ShellOutputCapture | None,
+) -> ShellRunResult | None:
+    """Return a spawn error of a program that is missing or cannot be executed as Bash reports it, else None.
+
+    The result is the one of a command that exited 127 or 126 with Bash's words on stderr, so everything that reads a
+    failed command's result reads this one.
+    """
+    if (failure := _launch_failure_exit(argv, env, cwd, exc)) is None:
         return None
-    return_code, said = failure[0], f"{program}: {failure[1]}"
+    return_code, said = failure
     if capture is None:
         return ShellRunResult(message=format_shell_completion("", said, return_code=return_code))
     capture.stderr.append(f"{said}\n")

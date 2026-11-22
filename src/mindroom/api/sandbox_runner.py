@@ -1225,6 +1225,12 @@ async def _execute_streamed(call: _ExecuteCall, frames: asyncio.Queue[bytes]) ->
         )
     except OSError as exc:
         return ExecuteResponse(ok=False, error=f"Error: {exc}", failure_kind="tool")
+    except asyncio.CancelledError:
+        # The command's processes are gone. That takes the place of the output its caller no longer reads.
+        while not frames.empty():
+            frames.get_nowait()
+        frames.put_nowait(line(t="exit", cancelled=True))
+        raise
     finally:
         if request.request_id is not None:
             _command_stdins.pop(request.request_id, None)

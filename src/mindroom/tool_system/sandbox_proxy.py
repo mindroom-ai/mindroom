@@ -44,6 +44,7 @@ from mindroom.tool_system.runtime_context import (
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_proxy_client import (
+    STOP_CONFIRMATION_SECONDS,
     WorkerCallCancellation,
     WorkerProxyClientConfig,
     execute_worker_proxy_request,
@@ -1089,6 +1090,10 @@ class WorkerStandIns:
                 # The blocking request keeps running after this await is cancelled; stop it at the worker too.
                 if cancellation.cancel():
                     note_call_cancelled_never_ran()
+                elif self.tool_name == "shell" and (stream := get_call_output_stream()) is not None:
+                    # The exit of a streamed command says its stop took effect, which its caller's cancel reports.
+                    with suppress(TimeoutError):
+                        await asyncio.wait_for(stream.ended.wait(), STOP_CONFIRMATION_SECONDS)
                 raise
 
         return proxy_entrypoint

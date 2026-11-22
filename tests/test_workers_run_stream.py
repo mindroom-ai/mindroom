@@ -469,8 +469,13 @@ async def test_a_streamed_call_nobody_reads_is_cancelled(tmp_path: Path, monkeyp
         assert (await http.post("/api/agent-cli/operations", headers=stack.headers, json=operation)).status_code == 200
         pid = await _pid(leader)
         await _until(lambda: not _alive(pid), what="the unread command kept running")
-        receipt = await http.get(f"/api/agent-cli/calls/{operation['call_id']}", headers=stack.headers)
-        assert receipt.json()["status"] == "cancelled"
+        # The call ends once the runner said its command stopped.
+        route = f"/api/agent-cli/calls/{operation['call_id']}"
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            receipt = {"status": "running"}
+            while receipt["status"] == "running":
+                receipt = (await http.get(route, params={"wait": 5}, headers=stack.headers)).json()
+        assert (receipt["status"], receipt["cancel_outcome"]) == ("cancelled", "stopped")
 
 
 @_RUNNER_MODES

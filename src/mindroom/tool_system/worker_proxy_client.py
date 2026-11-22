@@ -50,6 +50,8 @@ if TYPE_CHECKING:
 
 _SANDBOX_PROXY_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
 _EXECUTE_CANCEL_TIMEOUT_SECONDS = 10.0
+# How long a cancelled streamed command is waited for to confirm it stopped; the runner kills it within about a second.
+STOP_CONFIRMATION_SECONDS = 3.0
 # How long one chunk of a streamed command's stdin may wait for the command to read; its sender then repeats it.
 _EXECUTE_STDIN_TIMEOUT_SECONDS = 25.0
 # The runner streams at least one line this often while a call runs; a longer silence means the runner is gone.
@@ -421,8 +423,10 @@ def _read_execute_stream(
 
     Dropping the stream stops the call at the runner, so a cancelled call stops reading at its next line.
     ``on_frame`` takes each frame of a streamed command (a line with ``t``) as it arrives, and reads no further
-    until it returns.
+    until it returns. A cancelled streamed command is read a little longer for its exit, which says the stop took
+    effect; its output is dropped meanwhile.
     """
+    stop_reading: float | None = None
     for line in _ndjson_lines(response.iter_bytes()):
         if not line:
             continue
@@ -430,6 +434,12 @@ def _read_execute_stream(
         if frame is None or ("progress" not in frame and "t" not in frame and frame.get("keepalive") is not True):
             return frame
         if cancellation is not None and cancellation.cancelled:
+            stop_reading = stop_reading or time.monotonic() + STOP_CONFIRMATION_SECONDS
+            if on_frame is None or time.monotonic() >= stop_reading:
+                raise asyncio.CancelledError
+            if frame.get("t") != "exit":
+                continue
+            on_frame(frame)
             raise asyncio.CancelledError
         if deadline is not None and time.monotonic() >= deadline:
             msg = "Worker call exceeded its time limit."

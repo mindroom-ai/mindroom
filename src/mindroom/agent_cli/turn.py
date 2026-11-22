@@ -110,6 +110,7 @@ class _Call:
     receipt: ToolCallReceipt
     task: asyncio.Task[None] | None = None
     cancel_requested: bool = False
+    cancel_awaited: bool = False
     # The approval layer owns a call that waits for approval, so a cancel then takes effect when that wait ends.
     awaiting_approval: bool = False
     changed: asyncio.Event = field(default_factory=asyncio.Event)
@@ -397,7 +398,16 @@ class LiveTurnTools(TurnToolBridge):
         if call is None:
             msg = "Agent CLI authority is unavailable"
             raise CliAuthenticationError(msg)
-        if self._request_cancel(call):
+        self._request_cancel(call)
+        # Only the first cancel request waits for the task to end, so repeats hold no waiters.
+        waits, call.cancel_awaited = not call.cancel_awaited, True
+        if (
+            waits
+            and not call.awaiting_approval
+            and call.task is not None
+            and not call.task.done()
+            and call.receipt.status not in _TERMINAL_STATUSES
+        ):
             await self._wait_for_call(
                 call,
                 _CANCEL_SETTLE_TIMEOUT_SECONDS,
@@ -405,10 +415,10 @@ class LiveTurnTools(TurnToolBridge):
             )
         return call.receipt.model_dump(mode="json")
 
-    def _request_cancel(self, call: _Call) -> bool:
-        """Cancel a call that has not ended; return whether this request cancelled its task, which then ends soon."""
+    def _request_cancel(self, call: _Call) -> None:
+        """Cancel a call that has not ended, once: its task then ends soon."""
         if call.receipt.status in _TERMINAL_STATUSES:
-            return False
+            return
         first, call.cancel_requested = not call.cancel_requested, True
         if call.receipt.status == "queued":
             call.receipt = call.receipt.model_copy(
@@ -419,12 +429,15 @@ class LiveTurnTools(TurnToolBridge):
                 },
             )
             call.notify()
-        # Only the request that cancels the task waits for it, so repeats hold no waiters.
-        if call.awaiting_approval or not first:
-            return False
-        if call.task is not None and not call.task.done():
+        if first and not call.awaiting_approval and call.task is not None and not call.task.done():
             request_task_cancel(call.task, process_shutdown=self._is_shutdown())
-        return call.task is not None and call.receipt.status not in _TERMINAL_STATUSES
+
+    @staticmethod
+    def _cancel_outcome(call: _Call, *, never_ran: bool) -> str | None:
+        """Say what is known of a cancelled call's command: it never ran, or its exit confirmed that it stopped."""
+        if never_ran:
+            return "never_ran"
+        return "stopped" if call.stream is not None and call.stream.ended.is_set() else None
 
     def _streamed_call(self, call_id: str) -> tuple[_Call, CallOutputStream]:
         self._check_live()
@@ -1014,8 +1027,8 @@ class LiveTurnTools(TurnToolBridge):
                     | {
                         "status": status,
                         "error_kind": error_kind,
-                        "cancel_outcome": "never_ran"
-                        if status == "cancelled" and (cancelled_never_ran or not started)
+                        "cancel_outcome": self._cancel_outcome(call, never_ran=cancelled_never_ran or not started)
+                        if status == "cancelled"
                         else None,
                         "outcome": result,
                         "attachments": attachments,
