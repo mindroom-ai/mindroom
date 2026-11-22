@@ -370,19 +370,45 @@ async def test_a_reader_that_hangs_up_stops_the_command_and_frees_its_slot(tmp_p
         assert (await http.get(route, headers=stack.headers)).json()["status"] == "cancelled"
 
 
-async def test_sigterm_to_the_cli_stops_the_command_and_exits_143(tmp_path: Path) -> None:
-    """The CLI cancels a command whose output it is relaying, as it does one it waits for in silence."""
+@pytest.mark.parametrize("then", ["wait", "yes"])
+async def test_sigterm_to_the_cli_stops_the_command_and_says_so(tmp_path: Path, then: str) -> None:
+    """The CLI cancels a command whose output it relays, quiet or not, and says it stopped once that is confirmed."""
     leader, child = tmp_path / "leader", tmp_path / "child"
     async with _stack(tmp_path) as stack:
-        process = await stack.spawn("--", f"echo $$ > {leader}; sleep 300 & echo $! > {child}; echo up; wait")
+        process = await stack.spawn("--", f"echo $$ > {leader}; sleep 300 & echo $! > {child}; echo up; {then}")
         assert process.stdout is not None
+        assert process.stderr is not None
         async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
             assert await process.stdout.readline() == b"up\n"
             pids = [await _pid(leader), await _pid(child)]
             process.send_signal(signal.SIGTERM)
             assert await process.wait() == 128 + signal.SIGTERM
-        await _until(lambda: not any(map(_alive, pids)), what="the command outlived the CLI")
+            assert (
+                await process.stderr.read()
+                == b"mindroom-agent: cancelled by SIGTERM; stopped the command in worker w\n"
+            )
+        # The notice is true when it is printed: nothing of the command is left.
+        assert not any(map(_alive, pids))
         await _until(lambda: _running_calls(stack.owner) == 0, what="the call kept its slot")
+
+
+@pytest.mark.parametrize(
+    ("program", "exit_code", "said"),
+    [
+        ("/missing-program-xyz", 127, "/missing-program-xyz: No such file or directory\n"),
+        ("missing-program-xyz", 127, "missing-program-xyz: command not found\n"),
+        ("/etc/passwd", 126, "/etc/passwd: Permission denied\n"),
+    ],
+)
+async def test_a_program_that_cannot_start_exits_as_a_shell_reports_it_on_stderr(
+    tmp_path: Path,
+    program: str,
+    exit_code: int,
+    said: str,
+) -> None:
+    """A program the worker cannot start ends `workers run` as a shell would: 127 or 126, the reason on stderr."""
+    async with _stack(tmp_path) as stack:
+        assert await stack.run("--", program) == (exit_code, b"", said.encode())
 
 
 async def test_a_closed_stdout_stops_the_command_and_exits_141(tmp_path: Path) -> None:

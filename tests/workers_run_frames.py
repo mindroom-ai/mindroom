@@ -3,8 +3,38 @@
 from __future__ import annotations
 
 import base64
+import io
 
-__all__ = ["command_frames"]
+__all__ = ["FakeStream", "command_frames"]
+
+
+class _Recorded(io.BytesIO):
+    def __init__(self, name: str, log: list[tuple[str, bytes]]) -> None:
+        super().__init__()
+        self._name, self._log = name, log
+
+    def write(self, data: bytes) -> int:  # type: ignore[override]
+        self._log.append((self._name, bytes(data)))
+        return super().write(data)
+
+
+class FakeStream(io.TextIOWrapper):
+    """A stdout or stderr for the CLI that keeps what is written to it, as text or as bytes, and may be a terminal.
+
+    ``log`` takes every write under ``name`` in the order it reached the stream, across the streams that share it.
+    """
+
+    def __init__(self, *, is_tty: bool = False, name: str = "", log: list[tuple[str, bytes]] | None = None) -> None:
+        super().__init__(_Recorded(name, [] if log is None else log), encoding="utf-8", newline="", write_through=True)
+        self._is_tty = is_tty
+
+    def isatty(self) -> bool:
+        """Whether the CLI takes this stream for a terminal."""
+        return self._is_tty
+
+    def getvalue(self) -> str:
+        """Return everything written so far."""
+        return self.buffer.getvalue().decode()  # type: ignore[attr-defined]
 
 
 def command_frames(
