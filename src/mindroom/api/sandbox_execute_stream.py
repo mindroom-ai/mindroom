@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from mindroom.api import sandbox_request_cancellation
 from mindroom.background_tasks import create_background_task
@@ -88,7 +88,7 @@ async def stream_execution(
                     wait.cancel()
             text = progress.take()
             lines = [] if text is None else [json.dumps({"progress": text}).encode() + b"\n"]
-            lines += [wait.result() for wait in waits[2:] if wait in done]
+            lines += [cast("bytes", wait.result()) for wait in waits[2:] if wait in done]
             # The result follows the last line the call queued before it.
             finished = call.done() and not lines
             if finished:

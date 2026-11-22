@@ -1234,11 +1234,8 @@ def test_r2_cancel_messages_for_submitted_refused_and_completed(
         assert main(["workers", "run", "fan3", "--", "true"]) == expected_code
         output = capsys.readouterr()
         assert output.out == expected_out
-        if expected_err_sub:
-            assert expected_err_sub in output.err
-            assert f"(call {submitted[0]})" in output.err
-        else:
-            assert output.err == ""
+        assert expected_err_sub in output.err
+        assert f"(call {submitted[0]})" in output.err
         assert forbidden_err_sub not in output.err
 
 

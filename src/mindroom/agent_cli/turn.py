@@ -58,7 +58,7 @@ from mindroom.tool_system.tool_access import ToolKey, UnknownToolError, search_t
 from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 
     from mindroom.agent_cli.protocol import AgentCliOperation
     from mindroom.agent_cli.session import CliTurnOwner
@@ -430,7 +430,7 @@ class LiveTurnTools(TurnToolBridge):
             raise CliAuthenticationError(msg)
         return call, call.stream
 
-    def stream_call(self, call_id: str) -> AsyncIterator[dict[str, object]]:
+    def stream_call(self, call_id: str) -> AsyncGenerator[dict[str, object]]:
         """Return the frames of one streamed call for its only reader; a reader that leaves cancels the call.
 
         Each frame has a ``t``: the call's ``progress``, then its command's ``started``, ``out`` and ``err`` bytes
@@ -444,7 +444,7 @@ class LiveTurnTools(TurnToolBridge):
         stream.attached = True
         return self._relay(call, stream)
 
-    async def _relay(self, call: _Call, stream: CallOutputStream) -> AsyncIterator[dict[str, object]]:
+    async def _relay(self, call: _Call, stream: CallOutputStream) -> AsyncGenerator[dict[str, object]]:
         revision = 0
         try:
             while not self._closed and not self._revoked:

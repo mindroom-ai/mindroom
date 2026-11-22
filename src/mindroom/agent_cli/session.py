@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncGenerator
 
     from mindroom.agent_cli.protocol import AgentCliOperation
     from mindroom.response_turn import ResponseTurnContext
@@ -207,7 +207,7 @@ class CliOperationOwner(Protocol):
         """Idempotently cancel one exact-owner call without requiring a free capacity slot."""
         ...
 
-    def stream_call(self, call_id: str) -> AsyncIterator[dict[str, object]]:
+    def stream_call(self, call_id: str) -> AsyncGenerator[dict[str, object]]:
         """Return the frames of one exact-owner streamed call for its only reader, ending with its receipt."""
         ...
 

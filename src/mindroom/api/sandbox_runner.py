@@ -1187,12 +1187,13 @@ async def _execute_streamed(call: _ExecuteCall, frames: asyncio.Queue[bytes]) ->
     request = call.request
     try:
         launch, stop_after = await asyncio.to_thread(
-            _shell_launch,
-            call,
-            lambda toolkit, process_environ: toolkit.command_launch(
-                *request.args,
-                process_environ=process_environ,
-                **request.kwargs,
+            lambda: _shell_launch(
+                call,
+                lambda toolkit, process_environ: toolkit.command_launch(
+                    *request.args,
+                    process_environ=process_environ,
+                    **request.kwargs,
+                ),
             ),
         )
     except (TerminalError, ValueError, TypeError) as exc:

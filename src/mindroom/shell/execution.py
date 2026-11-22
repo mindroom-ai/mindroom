@@ -49,7 +49,7 @@ _MAX_OUTPUT_LINES = 10_000
 _MAX_OUTPUT_BYTES = 50 * 1024
 _STREAM_READ_CHUNK_BYTES = 8192
 # The most bytes of a streamed command's output handed on at once.
-STREAM_CHUNK_BYTES = 32 * 1024
+_STREAM_CHUNK_BYTES = 32 * 1024
 _PROCESS_EXIT_POLL_INTERVAL_SECONDS = 0.05
 _POST_EXIT_READER_GRACE_SECONDS = 0.5
 # A running command reports the tail of its output at most this often, and only when it changed; replies show it live.
@@ -423,7 +423,7 @@ async def stream_command(
         assert stream is not None
         while True:
             idle.add(kind)
-            chunk = await stream.read(STREAM_CHUNK_BYTES)
+            chunk = await stream.read(_STREAM_CHUNK_BYTES)
             idle.discard(kind)
             if not chunk:
                 return
