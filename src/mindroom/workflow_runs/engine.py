@@ -21,7 +21,6 @@ from mindroom.background_tasks import run_coroutine_until_complete, wait_for_fut
 from mindroom.delegation.personas import persona_allows
 from mindroom.delegation.state import RUN_SUBAGENT, SubagentPersona
 from mindroom.logging_config import get_logger
-from mindroom.redaction import redact_sensitive_text
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
 from mindroom.script_runs.manager import ScriptRunLimits, ScriptRuntimeNotReadyError
 from mindroom.script_runs.models import (
@@ -49,6 +48,7 @@ from mindroom.workflow_runs.agent_nodes import (
     launch_child,
 )
 from mindroom.workflow_runs.faults import hold
+from mindroom.workflow_runs.graph import node_label
 from mindroom.workflow_runs.models import (
     LIVE_NODE_STATES,
     RECHECK_SECONDS,
@@ -89,7 +89,6 @@ logger = get_logger(__name__)
 # How many failed calls the first line of a report names; `get_workflow` lists them all.
 _MAX_FAILED_NAMED = 10
 _SHELL_COMMAND = ScriptToolGrant("shell", "run_shell_command")
-_MAX_LABEL_CHARS = 80
 # The owner of the tasks that admit calls: they outlive their requests, and a run's end waits for them, not stops them.
 _ADMISSIONS = "admissions"
 # How the engine's wait for an agent with a timeout is named, before its job's ID.
@@ -750,11 +749,7 @@ class WorkflowEngine:
             generation=generation,
             state=WorkflowNodeState.COMPLETED,
             attempt=run.attempt,
-            # The label goes into the job, the room and the run's view: redacted whole, then cut.
-            label=redact_sensitive_text(
-                str(meta.get("label") or _default_label(shown, asked)),
-                max_length=_MAX_LABEL_CHARS,
-            ),
+            label=node_label(shown, asked, meta.get("label") or asked.get("name")),
             name=cast("str | None", meta.get("name")),
             phase=cast("str | None", meta.get("phase")),
             members=members,
@@ -1608,18 +1603,6 @@ def _works(runtime: AgentRuntime | None, job_id: str) -> bool:
     """Return whether the job still works, as far as anyone can say: without a job runtime nobody can."""
     jobs = runtime.jobs.retained_jobs() if runtime is not None else ()
     return runtime is None or any(job.job_id == job_id and job.status not in TERMINAL_STATUSES for job in jobs)
-
-
-def _default_label(kind: str, args: dict[str, object]) -> object:
-    """Return what a node is called when its script gave no label: its function, name, prompt or operation."""
-    if kind == "agent":
-        # Where the label goes the prompt does not: its first line stands for it.
-        return args.get("name") or str(args.get("prompt") or kind).strip().partition("\n")[0]
-    return (
-        f"{args.get('toolkit')}.{args.get('function')}"
-        if kind == "tool"
-        else args.get("op") or args.get("type") or kind
-    )
 
 
 def _timeout(meta: dict[str, object]) -> float | None:

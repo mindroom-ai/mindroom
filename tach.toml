@@ -2541,6 +2541,24 @@ expose = [
 ]
 
 [[modules]]
+path = "mindroom.workflow_runs.graph"
+depends_on = ["mindroom.workflow_runs.models", "mindroom.workflow_runs.replay"]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.graph"]
+expose = [
+    "LOG_LINES",
+    "REPLACE",
+    "Graph",
+    "fit_snapshot",
+    "graph_delta",
+    "graph_meta",
+    "graph_rows",
+    "node_label",
+    "projected_cost_usd",
+]
+
+[[modules]]
 path = "mindroom.workflow_runs.faults"
 depends_on = []
 
@@ -2597,6 +2615,7 @@ depends_on = [
     "mindroom.tool_jobs.runtime",
     "mindroom.workflow_runs.agent_nodes",
     "mindroom.workflow_runs.faults",
+    "mindroom.workflow_runs.graph",
     "mindroom.workflow_runs.models",
     "mindroom.workflow_runs.recovery",
     "mindroom.workflow_runs.replay",
