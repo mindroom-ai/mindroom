@@ -424,7 +424,6 @@ async def test_r1_item3_launch_error_travels_through_sandbox_proxy_into_receipt(
     from mindroom.tool_system.catalog import builtin_tool_registry  # noqa: PLC0415
     from mindroom.tool_system.sandbox_proxy import WorkerStandIns  # noqa: PLC0415
     from mindroom.workers.models import WorkerHandle  # noqa: PLC0415
-    from mindroom.workers.named import NamedWorkerCall  # noqa: PLC0415
     from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteRequest  # noqa: PLC0415
     from tests.test_workers_run_small_fixes import _FakeWorkerManager  # noqa: PLC0415
 
@@ -488,9 +487,16 @@ async def test_r1_item3_launch_error_travels_through_sandbox_proxy_into_receipt(
             handle,
         ),
     )
+
+    class _FakeNamed:
+        name = "f2"
+
+        def header(self, _handle: object) -> str:
+            return "[worker: f2]"
+
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy._named_worker_call",
-        lambda *_args, **_kwargs: NamedWorkerCall(name="f2", resource_profile=None, turn_id="t1"),
+        lambda *_args, **_kwargs: _FakeNamed(),
     )
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _LaunchErrorHttpClient)
 
