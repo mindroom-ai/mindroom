@@ -326,22 +326,23 @@ class KubernetesWorkerBackend:
                         if due:
                             self._wait_for_worker_setup(*due.pop())
                     finally:
-                        # Under the lock a start publishes its wait in, so this never forgets a newer start's wait.
-                        with self._worker_locks.for_key(spec.worker_key):
-                            if self._setup_waits.get(spec.worker_key) is setup:
-                                del self._setup_waits[spec.worker_key]
-                            if time.monotonic() - started_at >= _SETUP_POLL_INTERVAL_SECONDS:
-                                handle = self._use_after_setup_wait(spec.worker_key) or handle
+                        waited = time.monotonic() - started_at >= _SETUP_POLL_INTERVAL_SECONDS
+                        handle = self._end_setup_wait(spec.worker_key, setup, record_use=waited) or handle
             return handle
 
-    def _use_after_setup_wait(self, worker_key: str) -> WorkerHandle | None:
-        """Record a worker as used now that its setup wait hands it to a caller, so its idle time starts here."""
+    def _end_setup_wait(self, worker_key: str, setup: object, *, record_use: bool) -> WorkerHandle | None:
+        """Record a worker as used now that its setup wait hands it to a caller, then forget the wait."""
         try:
-            return self._touch_worker_locked(worker_key, time.time())
+            return self.touch_worker(worker_key) if record_use else None
         except self._resources.api_exception as exc:
             # A start records no use after the worker is ready, so a cluster that refuses this one changes nothing.
             logger.warning("Worker %s was not recorded as used after its setup: %s", worker_log_id(worker_key), exc)
             return None
+        finally:
+            # Under the lock a start publishes its wait in, so this never forgets a newer start's wait.
+            with self._worker_locks.for_key(worker_key):
+                if self._setup_waits.get(worker_key) is setup:
+                    del self._setup_waits[worker_key]
 
     def _provision_worker_locked(  # noqa: C901, PLR0912, PLR0915
         self,
@@ -539,30 +540,27 @@ class KubernetesWorkerBackend:
         """Refresh last-used metadata for one existing worker."""
         timestamp = time.time() if now is None else now
         with self._worker_locks.for_key(worker_key):
-            return self._touch_worker_locked(worker_key, timestamp)
+            cached_handle = self._touch_cached_worker(worker_key, now=timestamp)
+            if cached_handle is not None:
+                return cached_handle
 
-    def _touch_worker_locked(self, worker_key: str, timestamp: float) -> WorkerHandle | None:
-        """Record a use at ``timestamp``, which never moves the worker's last use back."""
-        cached_handle = self._touch_cached_worker(worker_key, now=timestamp)
-        if cached_handle is not None:
-            return cached_handle
+            worker_id = self._worker_id(worker_key)
+            deployment = self._resources.read_deployment(worker_id)
+            if deployment is None:
+                return None
 
-        worker_id = self._worker_id(worker_key)
-        deployment = self._resources.read_deployment(worker_id)
-        if deployment is None:
-            return None
-
-        annotations = resources.with_lifecycle_transition(
-            deployment.metadata.annotations or {},
-            lambda state: touch_worker_lifecycle(state, now=max(timestamp, state.last_used_at)),
-            now=timestamp,
-        )
-        self._resources.patch_deployment(worker_id, annotations=annotations)
-        return self._handle_from_deployment(
-            deployment,
-            now=timestamp,
-            annotations_override=annotations,
-        )
+            annotations = resources.with_lifecycle_transition(
+                deployment.metadata.annotations or {},
+                # A use never moves the worker's last use back.
+                lambda state: touch_worker_lifecycle(state, now=max(timestamp, state.last_used_at)),
+                now=timestamp,
+            )
+            self._resources.patch_deployment(worker_id, annotations=annotations)
+            return self._handle_from_deployment(
+                deployment,
+                now=timestamp,
+                annotations_override=annotations,
+            )
 
     def list_workers(self, *, include_idle: bool = True, now: float | None = None) -> list[WorkerHandle]:
         """List workers known to this backend."""
