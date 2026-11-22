@@ -557,7 +557,7 @@ class ResponseRunner:
 
         async with admitted_response_decision(
             gate,
-            self.deps.runtime.wait_for_admission_or_shutdown,
+            lambda: self.deps.runtime.wait_for_admission_or_shutdown(),
             on_deferred=lambda: self.deps.logger.info(
                 "response_deferred_during_replacement",
                 response_kind=response_kind,
