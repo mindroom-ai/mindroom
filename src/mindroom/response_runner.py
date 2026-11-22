@@ -750,8 +750,11 @@ class ResponseRunner:
     async def handoff_runtime_source(self, event: JournalEvent) -> None:
         """Hand a runtime source to a detached response owner; its reply, or that owner, settles it.
 
-        The dispatcher hands over only a source no live owner holds and ``runtime_source_parked`` does not park.
+        The dispatcher hands over only a source no live owner holds. One that parked while the dispatcher prepared
+        the handoff gets no owner here, so a stop never finds a task it registered after draining began.
         """
+        if self.runtime_source_parked(event):
+            return
         self.inbox.track_inbox_response(
             self._RUNTIME_SOURCE_HANDLERS[event.kind](self, event),
             name=f"{event.kind}:{event.event_id}",

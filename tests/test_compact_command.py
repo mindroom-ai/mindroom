@@ -9,7 +9,7 @@ import threading
 from dataclasses import replace
 from itertools import count
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import nio
 import pytest
@@ -972,7 +972,7 @@ async def test_restart_rejects_handoff_after_last_drain_snapshot(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("refused", ["at_handoff", "after_waiting"])
+@pytest.mark.parametrize("refused", ["at_handoff", "during_handoff", "after_waiting"])
 async def test_draining_parks_compaction_without_delaying_later_room_work(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -989,12 +989,27 @@ async def test_draining_parks_compaction_without_delaying_later_room_work(
     if refused == "after_waiting":
         runner.lifecycle_coordinator._hold_for_approval(PausedReply(store.principal_id, "held", ROOM, THREAD))
     await _dispatch_message(target, room, command)
+    registered = Mock(wraps=runner.inbox.track_inbox_response)
+    monkeypatch.setattr(runner.inbox, "track_inbox_response", registered)
     if refused == "after_waiting":
         waiting = await _start_fold(target)
         target._runtime_view.begin_draining()  # The dispatcher keeps running while the bot drains.
         with pytest.raises(ResponseAdmissionRefusedError):
             await asyncio.wait_for(waiting, 30)
         runner.lifecycle_coordinator._release_approval_hold("held")
+    elif refused == "during_handoff":
+        reading, read = asyncio.Event(), asyncio.Event()
+
+        async def held_settings_read(_room_id: str) -> None:
+            reading.set()
+            await read.wait()
+
+        dispatcher.callbacks = replace(dispatcher.callbacks, before_room_event=held_settings_read)
+        handoff = asyncio.create_task(dispatcher.drain_once())
+        await asyncio.wait_for(reading.wait(), 30)
+        target._runtime_view.begin_draining()  # The dispatcher already decided to hand the fold over.
+        read.set()
+        await asyncio.wait_for(handoff, 30)
     else:
         target._runtime_view.begin_draining()
     redaction = nio.RedactionEvent.from_dict(
@@ -1011,6 +1026,7 @@ async def test_draining_parks_compaction_without_delaying_later_room_work(
     await dispatcher.drain_once()
     stop_other_work.assert_awaited_once()
     assert not dispatcher._worker._room_retries
+    assert registered.call_count == (refused == "after_waiting")  # A draining bot registers no fold at all.
     assert not runner.inbox.has_live_inbox_response(_ROW_ID)
     assert await store.is_pending(_ROW_ID)
 
