@@ -7,6 +7,8 @@ A restart is the harness's `restart()`: the job runtime keeps the agents' jobs, 
 from __future__ import annotations
 
 import asyncio
+import json
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -16,6 +18,7 @@ from mindroom.approval import manager as approval_manager
 from mindroom.delegation import continuation
 from mindroom.delegation.background import delegation_child
 from mindroom.event_journal import BackgroundApprovalDecision
+from mindroom.script_runs import manager as manager_module
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.workflow_runs import agent_nodes
@@ -266,6 +269,33 @@ async def test_agent_of_a_run_that_was_cancelled_while_jobs_were_off_is_not_cont
 
     await wait_for_status(stack.jobs, job_id, "interrupted")
     assert (model.requests, stack.store.get_run(stack.run_id).state) == ([], WorkflowRunState.CANCELLED)
+
+
+@pytest.mark.asyncio
+async def test_agent_of_a_run_whose_job_was_stopped_is_not_continued(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Stop of the run's job wins over the restart: its agent is not continued before the run itself is cancelled."""
+    monkeypatch.setattr(manager_module, "background_script_supervision_supported", lambda: True)
+    handle = json.loads(await stack.call("start_workflow", source="def main(args):\n    return None\n"))
+    stack.run_id = handle["run_id"]
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING)
+    await _working(stack, after_append=False)
+    job_id = stack.node_job("@0").job_id
+
+    await stack.restart(kill=True)
+    # Arranged, not played: a primary that died with only the Stop of the run's job saved leaves that job cancelled
+    # at the next start, and the run and its call as they were until the run's own pass.
+    entry = stack.jobs._entries[handle["job_id"]]
+    entry.job = replace(entry.job, status="cancelled")
+    assert _node(stack).state is WorkflowNodeState.RUNNING
+    model = stack.child_script(calls(tool_call("append", "c1", line="after stop")), answer("must not be asked"))
+
+    await stack.continue_agents()
+
+    await wait_for_status(stack.jobs, job_id, "interrupted")
+    assert (model.requests, stack.counting_tool.lines) == ([], [])
 
 
 @pytest.mark.asyncio

@@ -91,6 +91,7 @@ _CHARGE_SECONDS = 60.0
 _INTERRUPTED: dict[str, object] = {"kind": "interrupted", "message": "The call was interrupted before its tool ran."}
 _NO_AGENTS = "A workflow runs agents as background tool jobs. Set background_tool_jobs.enabled: true."
 _NAME_LABELS = 'name="{name}" only labels the node. Use agent="{name}" to run that agent.'
+_STOPPED_JOB_STATUSES = frozenset({"cancel_requested", "cancelled", "denied"})
 _NOT_CONTINUED_YET = "The agent of this call has not been continued yet after a restart. Try again in a moment."
 _RUN_ENDED = "The run ended before the agent did."
 # How long a waiter sleeps before it reads the store again, with or without a wake.
@@ -838,6 +839,10 @@ class WorkflowEngine:
         """
         node = self.store.get_node(run_id, key) if key else None
         live = node is not None and node.generation == generation and node.state in _LIVE_NODE_STATES
+        if live and (runtime := self.agents()) is not None:
+            # A Stop of the run's own job ends the run at its next pass: until then nothing of the run goes on.
+            owner, jobs = self.store.get_run(run_id).job_id, runtime.jobs.retained_jobs()
+            live = not any(job.job_id == owner and job.status in _STOPPED_JOB_STATUSES for job in jobs)
         prompt = node.request.get("prompt") if node is not None and live else None
         return prompt if isinstance(prompt, str) else None
 
