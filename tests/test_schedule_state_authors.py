@@ -261,23 +261,38 @@ async def test_task_polls_read_one_state_event_and_never_full_room_state(tmp_pat
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("body", "detail"),
+    ("response", "expected"),
     [
-        (_pending_content(_workflow(created_by="@alice:server")), "no HTTP status"),
-        ({"errcode": "M_FORBIDDEN", "error": "You are not in this room"}, "M_FORBIDDEN"),
+        (
+            nio.RoomGetStateEventResponse(
+                _pending_content(_workflow(created_by="@alice:server")),
+                "com.mindroom.scheduled.task",
+                TASK_ID,
+                ROOM_ID,
+            ),
+            "was not returned as a full state event",
+        ),
+        (
+            nio.RoomGetStateEventError("You are not in this room", "M_FORBIDDEN", room_id=ROOM_ID, http_status=403),
+            "M_FORBIDDEN",
+        ),
+        (
+            nio.RoomGetStateEventError("Service unavailable", "M_NOT_FOUND", room_id=ROOM_ID, http_status=503),
+            "Service unavailable",
+        ),
     ],
 )
 async def test_non_event_task_state_response_is_a_read_error(
     tmp_path: Path,
-    body: dict[str, Any],
-    detail: str,
+    response: nio.Response,
+    expected: str,
 ) -> None:
-    """Content from a server that ignores format=event, or an error body, is never treated as a whole event."""
+    """Plain content from a server ignoring format=event, or any non-404 error, is a read error."""
     runtime_paths = schedule_runtime_paths(tmp_path)
     client = make_matrix_client_mock(user_id=SCHEDULE_WRITER_ID)
-    client._send.return_value = nio.RoomGetStateEventResponse(body, "com.mindroom.scheduled.task", TASK_ID, ROOM_ID)
+    client._send.return_value = response
 
-    with pytest.raises(ScheduledTaskStateReadError, match=rf"was not returned as a full state event \({detail}\)"):
+    with pytest.raises(ScheduledTaskStateReadError, match=expected):
         await scheduling.get_scheduled_task(client, ROOM_ID, TASK_ID, runtime_paths)
 
 

@@ -13,6 +13,7 @@ from mindroom.authorization import configured_responder_entities_for_room, get_a
 from mindroom.entity_resolution import prepared_entity_names_by_user_id
 from mindroom.logging_config import get_logger
 from mindroom.matrix.room_membership import ensure_room_membership_synced
+from mindroom.matrix.state_failures import StateFailure, state_failure
 from mindroom.room_settings import THREAD_MODE, refresh_room_setting, resolve_room_setting
 
 if TYPE_CHECKING:
@@ -94,7 +95,10 @@ async def reconcile_room_thread_mode(  # noqa: C901, PLR0911 - one outcome per c
                 content = {"mode": mode}
                 phase = "state_get"
                 current = await client.room_get_state_event(room_id, _THREAD_MODE_EVENT_TYPE, state_key="")
-                if isinstance(current, nio.RoomGetStateEventError) and current.status_code != "M_NOT_FOUND":
+                if (
+                    isinstance(current, nio.RoomGetStateEventError)
+                    and state_failure(current) is not StateFailure.MISSING
+                ):
                     level = failure_level(False)
                     logger.log(level, "room_thread_mode_reconcile_failed", room_id=room_id, error=str(current))
                     return False
@@ -105,7 +109,8 @@ async def reconcile_room_thread_mode(  # noqa: C901, PLR0911 - one outcome per c
                         # A room without a steward, or whose power levels keep it from sending this state, refuses it
                         # on every trigger.
                         refused = response is None or (
-                            isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
+                            isinstance(response, nio.RoomPutStateError)
+                            and state_failure(response) is StateFailure.REFUSED
                         )
                         level = logging.DEBUG if refused else failure_level(False)
                         logger.log(level, "room_thread_mode_reconcile_failed", room_id=room_id, error=str(response))
@@ -122,6 +127,6 @@ async def reconcile_room_thread_mode(  # noqa: C901, PLR0911 - one outcome per c
 
 async def _joined(client: nio.AsyncClient, room_id: str, user_id: str) -> bool:
     membership = await client.room_get_state_event(room_id, "m.room.member", user_id)
-    if isinstance(membership, nio.RoomGetStateEventError) and membership.status_code != "M_NOT_FOUND":
+    if isinstance(membership, nio.RoomGetStateEventError) and state_failure(membership) is not StateFailure.MISSING:
         raise RuntimeError(str(membership))
     return isinstance(membership, nio.RoomGetStateEventResponse) and membership.content.get("membership") == "join"

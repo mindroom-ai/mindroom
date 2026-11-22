@@ -43,6 +43,7 @@ from mindroom.matrix.conversation_hydration import ConversationReadError
 from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import parse_mentions_in_text
+from mindroom.matrix.state_failures import StateFailure, state_failure
 from mindroom.providers import registry as provider_registry
 from mindroom.scheduling.errors import (
     ScheduledTaskNotFoundError,
@@ -679,16 +680,14 @@ async def _read_scheduled_task_state(
     except Exception as exc:
         msg = f"{failure}: {type(exc).__name__}: {exc}"
         raise ScheduledTaskStateReadError(msg) from exc
-    if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+    if isinstance(response, nio.RoomGetStateEventError) and state_failure(response) is StateFailure.MISSING:
         return None
     if not isinstance(response, nio.RoomGetStateEventResponse):
         msg = f"{failure}: {response}"
         raise ScheduledTaskStateReadError(msg)
     event = response.content
     if not isinstance(event.get("sender"), str) or not isinstance(event.get("content"), dict):
-        transport = response.transport_response
-        error = event.get("errcode") or (f"HTTP {transport.status}" if transport is not None else "no HTTP status")
-        msg = f"Scheduled task `{task_id}` in room `{room_id}` was not returned as a full state event ({error})"
+        msg = f"Scheduled task `{task_id}` in room `{room_id}` was not returned as a full state event"
         raise ScheduledTaskStateReadError(msg)
     # A server that ignores format=event returns the state content itself, whose author can shape it like a
     # bot-written event, so only a server proven to return whole events names the sender.
@@ -756,7 +755,7 @@ async def _put_scheduled_task_state_content(
             outcome = f"{type(exc).__name__}: {exc!s}"
     if isinstance(outcome, nio.RoomPutStateResponse):
         return
-    if isinstance(outcome, nio.RoomPutStateError) and outcome.status_code == "M_FORBIDDEN":
+    if isinstance(outcome, nio.RoomPutStateError) and state_failure(outcome) is StateFailure.REFUSED:
         logger.warning("scheduled_task_state_refused", room_id=room_id, task_id=task_id, error=str(outcome))
         raise ScheduledTaskStateRefusedError(moderator_rights_message("save schedules"))
     msg = f"Failed to persist scheduled task state for task `{task_id}`: {outcome}."

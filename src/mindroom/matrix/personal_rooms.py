@@ -45,6 +45,7 @@ from mindroom.matrix.personal_room_store import (
 )
 from mindroom.matrix.room_power import privileged_creators, user_power_level
 from mindroom.matrix.state import resolve_room_aliases
+from mindroom.matrix.state_failures import StateFailure, state_failure
 from mindroom.matrix_identifiers import managed_room_alias
 from mindroom.requester_identity import (
     is_human_requester_id,
@@ -765,7 +766,7 @@ class PersonalRoomService:
         if isinstance(current, nio.RoomGetStateEventResponse):
             if current.content.get("url"):
                 return
-        elif not isinstance(current, nio.RoomGetStateEventError) or current.status_code != "M_NOT_FOUND":
+        elif not isinstance(current, nio.RoomGetStateEventError) or state_failure(current) is not StateFailure.MISSING:
             msg = "Personal-room avatar state unavailable"
             raise RuntimeError(msg)
         settings = self._current_settings(record.user_id, source_room_id)

@@ -14,6 +14,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.joined_members import read_joined_members
 from mindroom.matrix.message_builder import build_message_content
+from mindroom.matrix.state_failures import StateFailure, state_failure
 from mindroom.mcp_gateway.admission import OnboardingRateLimiter
 from mindroom.requester_identity import is_human_requester_id
 
@@ -82,7 +83,7 @@ class _Receiver:
         response = await self.client.room_get_state_event(room_id, "m.room.member", user_id)
         if isinstance(response, nio.RoomGetStateEventResponse):
             return response.content.get("membership")
-        if getattr(response, "status_code", None) == "M_NOT_FOUND":
+        if isinstance(response, nio.RoomGetStateEventError) and state_failure(response) is StateFailure.MISSING:
             return None
         raise _UnreadableError
 

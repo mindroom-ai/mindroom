@@ -26,6 +26,7 @@ from mindroom.matrix.joined_members import read_joined_members
 from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, has_privileged_creators, user_power_level
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_room_creators, read_state_event
 from mindroom.matrix.state import resolve_room_id
+from mindroom.matrix.state_failures import StateFailure, state_failure
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 
 if TYPE_CHECKING:
@@ -263,7 +264,7 @@ async def room_encryption_enabled(
     response = await read_state_event(client, room_id, _ROOM_ENCRYPTION_EVENT_TYPE, snapshot=snapshot)
     if isinstance(response, nio.RoomGetStateEventResponse):
         return True
-    if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+    if isinstance(response, nio.RoomGetStateEventError) and state_failure(response) is StateFailure.MISSING:
         return False
     logger.warning("matrix_room_encryption_state_unreadable", room_id=room_id, error=str(response))
     return None
@@ -313,7 +314,7 @@ async def room_encryption_enable_failure(
         logger.info("matrix_room_encryption_enabled", room_id=room_id)
         return None
     # A refusal the homeserver states, such as an account without the power, is expected and told to the person.
-    refused = isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
+    refused = isinstance(response, nio.RoomPutStateError) and state_failure(response) is StateFailure.REFUSED
     log = logger.warning if refused else logger.error
     log("matrix_room_encryption_enable_failed", room_id=room_id, error=str(response))
     return "" if response is None else _describe_matrix_response_error(response)

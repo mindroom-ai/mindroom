@@ -29,6 +29,7 @@ from mindroom.config.agent import RoomReplyMode
 from mindroom.legacy_room_settings import drop_legacy_room_override, legacy_room_override
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
+from mindroom.matrix.state_failures import StateFailure, state_failure
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Container, Iterable, Mapping
@@ -179,8 +180,8 @@ def _drop_legacy_override(setting: RoomSetting[Any], runtime_paths: RuntimePaths
 async def state_event_content(response: object) -> dict[str, Any] | None:
     """Return the content of the state event a read found, None unless the homeserver answered with the event.
 
-    nio decodes every failure but a 404 as the event's own response, and a body that is no JSON, such as a proxy's
-    page, as `{}`, which a cleared setting is too. So the HTTP status decides, and for no content the body itself.
+    Only a 200 carries the event. nio decodes a body that is no JSON, such as a proxy's page, as `{}`, which a cleared
+    setting is too, so for no content the body itself decides.
     """
     import aiohttp  # noqa: PLC0415 - config reads the copy below without loading the Matrix client
     import nio  # noqa: PLC0415
@@ -224,7 +225,7 @@ async def read_room_text_setting(
         if not stripped:
             return None
         return stripped[:max_length] if max_length is not None else stripped
-    if not isinstance(response, nio.RoomGetStateEventError) or response.status_code != "M_NOT_FOUND":
+    if not isinstance(response, nio.RoomGetStateEventError) or state_failure(response) is not StateFailure.MISSING:
         logger.warning("room_setting_read_failed", room_id=room_id, setting=key, error=str(response))
     return None
 
@@ -383,7 +384,7 @@ async def refresh_room_setting[T: str](  # noqa: PLR0911 - one outcome per answe
     content = await state_event_content(response)
     if content is not None:
         value = _value_from_content(setting, content)
-    elif isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+    elif isinstance(response, nio.RoomGetStateEventError) and state_failure(response) is StateFailure.MISSING:
         # A room without the setting takes the override an older runtime stored on disk, which then leaves the file.
         # While the room refuses the write, the stored override still applies and the next read tries again.
         try:
@@ -496,7 +497,7 @@ async def write_room_setting[T: str](
             return False
         if not isinstance(response, nio.RoomPutStateResponse):
             refused = response is None or (
-                isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"
+                isinstance(response, nio.RoomPutStateError) and state_failure(response) is StateFailure.REFUSED
             )
             # A refusal is the room's rule, which a command's answer names; any other failure is worth a warning.
             log = logger.debug if refused else logger.warning
