@@ -6931,19 +6931,29 @@ def test_kubernetes_backend_keeps_a_later_use_of_a_worker_when_its_setup_wait_en
     assert [worker.last_used_at for worker in backend.list_workers(now=20.0)] == [20.0]
 
 
+@pytest.mark.parametrize("failure", ["refused", "unreachable", "backend"])
 def test_kubernetes_backend_returns_the_ready_worker_when_recording_its_use_after_the_setup_wait_fails(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
+    failure: str,
 ) -> None:
-    """Recording the use is an extra; a cluster that refuses it leaves the ready worker to its caller, with a warning."""
+    """Recording the use is an extra; whatever keeps it from being written, the caller gets the ready worker."""
+    import urllib3  # noqa: PLC0415
+
     backend, apps_api, _core_api = _backend()
     clock = _run_on_one_clock(monkeypatch, wall_starts_at=10.0)
     _answer_worker_setup(backend, lambda: "ready" if clock.monotonic() >= 3.0 else "preparing")
     patch_deployment = apps_api.patch_namespaced_deployment
+    errors: dict[str, Exception] = {
+        "refused": _FakeApiError(503),
+        # What the client raises when it cannot reach the API server at all.
+        "unreachable": urllib3.exceptions.MaxRetryError(None, "/apis/apps/v1", OSError("Connection refused")),
+        "backend": WorkerBackendError("The cluster answered with something this backend cannot use."),
+    }
 
     def unavailable_after_the_wait(*args: object, **kwargs: object) -> object:
         if clock.monotonic() >= 3.0:
-            raise _FakeApiError(503)
+            raise errors[failure]
         return patch_deployment(*args, **kwargs)
 
     apps_api.patch_namespaced_deployment = unavailable_after_the_wait
