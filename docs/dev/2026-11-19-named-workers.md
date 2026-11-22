@@ -108,6 +108,9 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
   A plugin configured by a path under `~` is not listed, because the template resolves such a path under the worker's HOME and a call under its own.
   A path relative to the config file is listed, because the template and every call resolve it against the same config directory, whatever their HOME and working directory.
   A caller that only shows a worker, such as the Computer viewer, does not wait for the worker's setup, because it needs the worker to answer and not to run tools.
+  Neither does a streamed command (`workers run`), which the runner launches itself, without the forkserver or the shell supervisor that the setup prepares.
+  The setup wait runs outside the worker's provisioning lock, so such a caller goes on once the worker answers while a tool caller waits; a later tool caller waits behind the first one's wait and reads no health of its own.
+  Whether a caller waits is left out of what a worker spec compares, so it never makes a cached ready worker stale.
   A request whose plugins do not begin with what the template imported runs in a second, plain template that never imported them, started on the first such request: an import's global effects, such as a registered YAML constructor, cannot be undone in the process that ran it, and starting an interpreter per call would cost the whole tool import each time.
   So no request replaces a template another request is about to fork from, at the price of a second template's memory in a worker that serves both kinds of request.
   The runner chooses the template before it dispatches, so each request is dispatched once and keeps one deadline; a child that decided for itself needed a second dispatch.

@@ -176,6 +176,7 @@ Before selecting a RuntimeClass, verify that its handler is available on every e
 
 A worker that just started is ready as soon as it answers, and then prepares its Python environment, shell, and tool runtime in the background.
 The call that started it shows `worker <name>: preparing (<n>s)` while it waits for that, for at most the setup timeout; a preparation that fails or takes longer never fails the worker, and the call then prepares what is missing itself.
+A command that streams its output, as `workers run` does, and a viewer that only shows the worker do not wait for that: the worker launches such a command itself, without the tool runtime.
 The tool runtime imports the plugins that set [`worker_preload`](https://docs.mindroom.chat/plugins/#importing-once-per-worker) once for all the worker's calls.
 
 Each worker's `/tmp` is disk-backed, and exceeding its size limit evicts that worker pod rather than refusing writes.
