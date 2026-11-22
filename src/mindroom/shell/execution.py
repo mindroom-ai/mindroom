@@ -51,6 +51,8 @@ _MAX_OUTPUT_BYTES = 50 * 1024
 _STREAM_READ_CHUNK_BYTES = 8192
 # The most bytes of a streamed command's output handed on at once.
 _STREAM_CHUNK_BYTES = 32 * 1024
+# How long one chunk of a streamed command's stdin waits to leave before its sender is told to send it again.
+_STDIN_WRITE_SECONDS = 20.0
 _PROCESS_EXIT_POLL_INTERVAL_SECONDS = 0.05
 _POST_EXIT_READER_GRACE_SECONDS = 0.5
 # A running command reports the tail of its output at most this often, and only when it changed; replies show it live.
@@ -369,17 +371,19 @@ async def _start_command(
 
 
 class CommandStdin:
-    """The stdin of a command `stream_command` runs, written in chunks numbered from 0."""
+    """The stdin of a command `stream_command` runs, written in chunks numbered from 0, one at a time."""
 
     def __init__(self) -> None:
         self._writer: asyncio.StreamWriter | None = None
         self._next = 0
+        self._writing = False
 
     async def write(self, seq: int, data: bytes, *, eof: bool) -> bool:
         """Write chunk ``seq`` once, however often it arrives, and with ``eof`` close stdin after it.
 
         Return whether stdin takes a next chunk, once this one has left for the command: a command that reads
-        slowly slows its writer down.
+        slowly slows its writer down. One chunk at most waits to leave, and for a bounded time: TimeoutError says
+        this one has not left yet, or that the one before it still waits, and that it is to be sent again.
         """
         writer = self._writer
         if writer is None:
@@ -387,6 +391,9 @@ class CommandStdin:
         if seq > self._next:
             msg = f"stdin chunk {seq} arrived before chunk {self._next}"
             raise ValueError(msg)
+        if self._writing:
+            raise TimeoutError
+        self._writing = True
         try:
             if seq == self._next:
                 self._next += 1
@@ -395,10 +402,15 @@ class CommandStdin:
                     self._writer = None
                     writer.write_eof()
                     return False
-            await writer.drain()
+            async with asyncio.timeout(_STDIN_WRITE_SECONDS):
+                await writer.drain()
+        except TimeoutError:
+            raise
         except OSError:
             # The command closed its stdin or ended.
             self._writer = None
+        finally:
+            self._writing = False
         return self._writer is not None
 
 
@@ -429,18 +441,24 @@ async def stream_command(
     stdin: CommandStdin,
     on_start: Callable[[], Awaitable[None]],
     on_output: Callable[[Literal["out", "err"], bytes], Awaitable[None]],
-) -> tuple[int, bool]:
+    on_exit: Callable[[int, bool], Awaitable[None]],
+    on_stopped: Callable[[], None],
+) -> None:
     """Run one command on pipes of its own, handing ``on_output`` each read of its stdout and stderr unchanged.
 
     ``on_start`` is awaited once the command runs and ``stdin`` reaches it. A slow ``on_output`` slows the command
-    down instead of letting its output pile up. Return the exit code and whether the command was stopped at
-    ``timeout``, once both pipes ended; a pipe that only a process the command left behind keeps open is not
-    waited for. Cancellation stops the command's process group. A program that is missing or cannot be executed
-    ends as a shell ends it: the reason on stderr, exit code 127 or 126.
+    down instead of letting its output pile up. ``on_exit`` gets the exit code and whether ``timeout`` stopped the
+    command, once its leader and both pipes ended; a pipe only a silent process it left behind keeps open is not
+    waited for. ``timeout`` runs until then, and a stop, at ``timeout`` or by cancellation, kills the whole process
+    group, also once its leader ended; ``on_stopped`` is called when a cancelled command's group is gone. A program
+    that is missing or cannot be executed ends as a shell ends it: the reason on stderr, exit code 127 or 126.
     """
     process = await _start_streamed_command(argv, env, cwd, on_start, on_output)
     if isinstance(process, int):
-        return process, False
+        await on_exit(process, False)
+        return
+    loop = asyncio.get_running_loop()
+    deadline = None if timeout is None else loop.time() + timeout
     moved = 0
     idle: set[str] = set()
 
@@ -457,30 +475,34 @@ async def stream_command(
             moved += 1
 
     readers = {asyncio.create_task(read(process.stdout, "out")), asyncio.create_task(read(process.stderr, "err"))}
-    timed_out = False
+    ended = timed_out = False
     try:
         stdin._writer = process.stdin
         await on_start()
         try:
-            await _await_process_exit(process, timeout_seconds=timeout)
+            await _await_process_exit(process, timeout_seconds=None if deadline is None else deadline - loop.time())
+            pending = readers
+            while pending:
+                seen = moved
+                async with asyncio.timeout_at(deadline):
+                    _, pending = await asyncio.wait(pending, timeout=_POST_EXIT_READER_GRACE_SECONDS)
+                # Pipes that stay silent after the command ended are held open by a process it left behind.
+                if moved == seen and len(idle) == len(pending):
+                    break
         except TimeoutError:
             timed_out = True
-            await _terminate_process_group(process)
-        pending = readers
-        while pending:
-            seen = moved
-            _, pending = await asyncio.wait(pending, timeout=_POST_EXIT_READER_GRACE_SECONDS)
-            # Pipes that stay silent after the command ended are held open by a process it left behind.
-            if moved == seen and len(idle) == len(pending):
-                break
+            await _terminate_process_group(process, whole_group=True)
+            # What the stopped processes had written is still read.
+            await asyncio.wait(readers, timeout=_POST_EXIT_READER_GRACE_SECONDS)
+        await on_exit(-signal.SIGKILL if process.returncode is None else process.returncode, timed_out)
+        ended = True
     finally:
         stdin._writer = None
-        if process.returncode is None:
-            await _terminate_process_group(process)
+        if not ended and await _terminate_process_group(process, whole_group=True):
+            on_stopped()
         await _cancel_pending_tasks(*readers)
         if process.stdin is not None:
             process.stdin.close()
-    return await process.wait(), timed_out
 
 
 async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
@@ -994,7 +1016,8 @@ def _launch_failure_exit(
     if (
         not isinstance(exc, OSError)
         or not argv
-        or exc.filename != argv[0]
+        # uvloop, which sandbox runners serve on, names no file in a spawn error.
+        or exc.filename not in (argv[0], None)
         or (cwd is not None and not (Path(cwd).is_dir() and os.access(cwd, os.X_OK)))
     ):
         return None
@@ -1083,14 +1106,16 @@ async def _terminate_process_group(
     process: asyncio.subprocess.Process,
     *,
     grace_period: float = 0.5,
-) -> None:
+    whole_group: bool = False,
+) -> bool:
     """Stop a running command's process group: SIGTERM, then SIGKILL every member left after the grace.
 
     Members that outlive the leader are killed too, so a child that ignores SIGTERM cannot survive the stop.
-    A command whose leader already exited ended on its own, and its detached children keep running.
+    A command whose leader already exited ended on its own, and its detached children keep running, unless
+    ``whole_group`` stops them too; return whether the group is then gone.
     """
-    if process.returncode is not None:
-        return
+    if process.returncode is not None and not whole_group:
+        return False
 
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.killpg(process.pid, signal.SIGTERM)
@@ -1105,6 +1130,10 @@ async def _terminate_process_group(
         _kill_process_group(process.pid)
     with contextlib.suppress(TimeoutError):
         await asyncio.wait_for(process.wait(), timeout=grace_period)
+    deadline = loop.time() + grace_period
+    while whole_group and _process_group_exists(process.pid) and loop.time() < deadline:  # noqa: ASYNC110 - as above
+        await asyncio.sleep(_PROCESS_EXIT_POLL_INTERVAL_SECONDS)
+    return not _process_group_exists(process.pid)
 
 
 async def _monitor_process(

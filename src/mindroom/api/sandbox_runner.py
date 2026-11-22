@@ -1205,16 +1205,25 @@ async def _execute_streamed(call: _ExecuteCall, frames: asyncio.Queue[bytes]) ->
         return json.dumps(frame).encode() + b"\n"
 
     async def on_start() -> None:
-        if request.request_id is not None:
-            _command_stdins[request.request_id] = stdin
+        _command_stdins[request.request_id or ""] = stdin
         await frames.put(line(t="started"))
 
     async def on_output(kind: str, chunk: bytes) -> None:
         sent[kind] += len(chunk)
         await frames.put(line(t=kind, b=base64.b64encode(chunk).decode("ascii")))
 
+    async def on_exit(code: int, timed_out: bool) -> None:
+        await frames.put(line(t="exit", code=code, timed_out=timed_out))
+        sent.update(code=code, timed_out=timed_out)
+
+    def on_stopped() -> None:
+        # The command's processes are gone. That takes the place of the output its caller no longer reads.
+        while not frames.empty():
+            frames.get_nowait()
+        frames.put_nowait(line(t="exit", cancelled=True))
+
     try:
-        code, timed_out = await stream_command(
+        await stream_command(
             list(launch.argv),
             launch.env,
             launch.cwd,
@@ -1222,22 +1231,16 @@ async def _execute_streamed(call: _ExecuteCall, frames: asyncio.Queue[bytes]) ->
             stdin=stdin,
             on_start=on_start,
             on_output=on_output,
+            on_exit=on_exit,
+            on_stopped=on_stopped,
         )
     except OSError as exc:
         return ExecuteResponse(ok=False, error=f"Error: {exc}", failure_kind="tool")
-    except asyncio.CancelledError:
-        # The command's processes are gone. That takes the place of the output its caller no longer reads.
-        while not frames.empty():
-            frames.get_nowait()
-        frames.put_nowait(line(t="exit", cancelled=True))
-        raise
     finally:
-        if request.request_id is not None:
-            _command_stdins.pop(request.request_id, None)
-    await frames.put(line(t="exit", code=code, timed_out=timed_out))
-    ended = f"Stopped after {stop_after:g}s." if timed_out and stop_after is not None else f"Exit code {code}"
+        _command_stdins.pop(request.request_id or "", None)
+    result = f"Stopped after {stop_after:g}s." if sent["timed_out"] else f"Exit code {sent['code']}"
     streamed = f"Streamed {sent['out']} bytes of stdout and {sent['err']} bytes of stderr to the caller."
-    return ExecuteResponse(ok=True, result=f"{ended}\n{streamed}" if timed_out or code else streamed)
+    return ExecuteResponse(ok=True, result=f"{result}\n{streamed}" if sent["timed_out"] or sent["code"] else streamed)
 
 
 def _cancelled_response() -> ExecuteResponse:
@@ -1919,7 +1922,10 @@ async def cancel_tool_call(payload: CancelRequest) -> CancelResponse | WorkerFai
 
 @router.post("/execute/{request_id}/stdin")
 async def write_command_stdin(request_id: str, payload: StdinRequest) -> StdinResponse | WorkerFailure:
-    """Write the next chunk of a streamed command's stdin, answering once it has left for the command."""
+    """Write the next chunk of a streamed command's stdin, answering once it has left for the command.
+
+    504 says the chunk, or the one before it, has not left yet, and that it is to be sent again.
+    """
     if (failure := _protocol_failure(payload.protocol)) is not None:
         return failure
     stdin = _command_stdins.get(request_id)
@@ -1927,6 +1933,8 @@ async def write_command_stdin(request_id: str, payload: StdinRequest) -> StdinRe
         return StdinResponse(open=False)
     try:
         return StdinResponse(open=await stdin.write(payload.seq, base64.b64decode(payload.b), eof=payload.eof))
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="The command has not read its stdin yet") from None
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from None
 
