@@ -532,7 +532,24 @@ THREAD_SUMMARY_CURRENT_TITLE_TEMPLATE = """The thread's current title:
 </current_title>"""
 THREAD_SUMMARY_KEEP_INSTRUCTIONS = """CURRENT TITLE:
 The thread already has a title, shown after the thread messages.
-Keep it unless the thread's main topic has clearly changed; a new detail, a new step, progress or a status change is not a topic change.
+Strongly default to keeping the current title. Replace it ONLY when the conversation abandoned that subject and spent a large part of the thread on a completely unrelated subject, so the current title no longer describes most of the thread.
+On long threads, the middle messages are an evenly spaced sample with omitted-message markers between gaps; judge the whole thread's arc, not just the last few messages.
+
+NOT a topic change (KEEP — set keep_current to true and repeat the current title verbatim):
+- A long thread moving through steps of one overarching topic: a follow-up PR, a code review, a deploy, a cleanup or simplification pass, a related refactor, or a bug or design question found along the way.
+- A new PR, ticket, or issue number appearing later in the same line of work. Never retitle just to update or swap a PR or issue number.
+- A title that is slightly narrower than later sub-tasks in the same area. Never retitle just to broaden, refine, or rephrase a title that still fits the overarching effort.
+- Any borderline case: when unsure, keep the current title.
+
+IS a topic change (CHANGE — set keep_current to false and write a new title):
+- After the early messages, the thread moved to an unrelated subject and spent a large portion of the thread on that new subject.
+
+KEEP vs CHANGE EXAMPLES:
+- Current: "🔧 Billing webhook retries" — later messages review follow-up PR #812, fix a related bug, and deploy → KEEP (keep_current: true).
+- Current: "📊 Export CSV PR #104" — later messages open follow-up PR #129 and refactor related formatting helpers → KEEP (keep_current: true).
+- Current: "🎨 Dashboard chart layout" — later messages adjust legends, fix a tooltip bug, and extract a shared styling package → KEEP (keep_current: true).
+- Current: "📦 Docker image size" — after the opening messages, most of the thread switches to choosing a home espresso machine → CHANGE (keep_current: false).
+
 To keep it, set keep_current to true and repeat the current title; this is not a copied message.
 Otherwise set keep_current to false and write a new title by the rules above."""
 THREAD_SUMMARY_REJECTED_TITLE_TEMPLATE = """Your previous answer was rejected:

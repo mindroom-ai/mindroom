@@ -32,7 +32,9 @@ if TYPE_CHECKING:
 
 _MAX_INITIAL_TAGS = 3
 _MAX_MESSAGES_BEFORE_TRUNCATION = 50
-_TRUNCATION_SAMPLE_SIZE = 3
+_TRUNCATION_EDGE_COUNT = 5
+_TRUNCATION_MIDDLE_COUNT = 12
+_MAX_MESSAGE_CHARS = 600
 _ROOM_INSTRUCTIONS_MAX_LENGTH = 2000
 # A new generated title over these after normalization goes back to the model; a person's pin may use
 # ``THREAD_SUMMARY_MAX_LENGTH``.
@@ -129,22 +131,42 @@ def resolve_thread_summary_model_name(
 def _conversation_text(messages: Sequence[ResolvedVisibleMessage]) -> str:
     """Render a thread's ordinary messages as the summarizer reads them.
 
-    For threads exceeding ``_MAX_MESSAGES_BEFORE_TRUNCATION`` messages, samples
-    the first and last few messages with an omission note in between.
+    Clips each message body to ``_MAX_MESSAGE_CHARS`` characters. For threads
+    exceeding ``_MAX_MESSAGES_BEFORE_TRUNCATION`` messages, samples the first
+    and last ``_TRUNCATION_EDGE_COUNT`` messages plus ``_TRUNCATION_MIDDLE_COUNT``
+    evenly spaced messages from the middle, with omission notes for each gap.
     """
     lines: list[str] = []
     for message in messages:
         sender = message.sender or "unknown"
-        body = body_without_tool_markers(message.body, message.content)
-        if body:
-            lines.append(f"{sender}: {body}")
+        body = body_without_tool_markers(message.body, message.content).strip()
+        if not body:
+            continue
+        if len(body) > _MAX_MESSAGE_CHARS:
+            body = f"{body[: _MAX_MESSAGE_CHARS - 3].rstrip()}..."
+        lines.append(f"{sender}: {body}")
 
-    if len(lines) > _MAX_MESSAGES_BEFORE_TRUNCATION:
-        n = _TRUNCATION_SAMPLE_SIZE
-        omitted = len(lines) - 2 * n
-        lines = [*lines[:n], f"[... {omitted} messages omitted ...]", *lines[-n:]]
+    total = len(lines)
+    if total <= _MAX_MESSAGES_BEFORE_TRUNCATION:
+        return "\n".join(lines)
 
-    return "\n".join(lines)
+    edge = _TRUNCATION_EDGE_COUNT
+    span = total - 2 * edge + 1
+    middle_indices = [
+        edge - 1 + round(step * span / (_TRUNCATION_MIDDLE_COUNT + 1))
+        for step in range(1, _TRUNCATION_MIDDLE_COUNT + 1)
+    ]
+    selected = sorted({*range(edge), *middle_indices, *range(total - edge, total)})
+    sampled: list[str] = []
+    prev = -1
+    for index in selected:
+        omitted = index - prev - 1
+        if omitted > 0:
+            unit = "message" if omitted == 1 else "messages"
+            sampled.append(f"[... {omitted} {unit} omitted ...]")
+        sampled.append(lines[index])
+        prev = index
+    return "\n".join(sampled)
 
 
 async def room_summary_instructions(client: nio.AsyncClient, room_id: str) -> str | None:

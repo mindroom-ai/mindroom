@@ -40,14 +40,16 @@ from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
-from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS
+from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS, THREAD_SUMMARY_KEEP_INSTRUCTIONS
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.thread_summary import automatic
 from mindroom.thread_summary.automatic import maybe_generate_thread_summary
 from mindroom.thread_summary.generation import (
+    _MAX_MESSAGE_CHARS,
     _MAX_MESSAGES_BEFORE_TRUNCATION,
-    _TRUNCATION_SAMPLE_SIZE,
+    _TRUNCATION_EDGE_COUNT,
+    _TRUNCATION_MIDDLE_COUNT,
     GENERATED_TITLE_MAX_LENGTH,
     GeneratedSummary,
     _ThreadEnrichment,
@@ -2576,21 +2578,46 @@ class TestConversationText:
         assert text.count("\n") == 4  # 5 messages, 4 newlines
 
     async def test_long_thread_truncated(self) -> None:
-        """Threads above the truncation threshold are sampled with an omission note."""
-        count = _MAX_MESSAGES_BEFORE_TRUNCATION + 10
+        """Threads above the truncation threshold sample start, evenly spaced middle, and end with gap markers."""
+        count = 100
 
         text = await self._conversation(_make_thread_history(count))
 
-        omitted = count - 2 * _TRUNCATION_SAMPLE_SIZE
-        assert text.splitlines() == [
-            "@user0:localhost: Message 0",
-            "@user1:localhost: Message 1",
-            "@user2:localhost: Message 2",
-            f"[... {omitted} messages omitted ...]",
-            f"@user{count - 3}:localhost: Message {count - 3}",
-            f"@user{count - 2}:localhost: Message {count - 2}",
-            f"@user{count - 1}:localhost: Message {count - 1}",
+        lines = text.splitlines()
+        message_lines = [line for line in lines if not line.startswith("[...")]
+        marker_lines = [line for line in lines if line.startswith("[...")]
+        expected_kept = 2 * _TRUNCATION_EDGE_COUNT + _TRUNCATION_MIDDLE_COUNT
+        assert len(message_lines) == expected_kept
+        assert message_lines[:_TRUNCATION_EDGE_COUNT] == [
+            f"@user{i}:localhost: Message {i}" for i in range(_TRUNCATION_EDGE_COUNT)
         ]
+        assert message_lines[-_TRUNCATION_EDGE_COUNT:] == [
+            f"@user{i}:localhost: Message {i}" for i in range(count - _TRUNCATION_EDGE_COUNT, count)
+        ]
+        indices = [int(line.rsplit(" ", 1)[1]) for line in message_lines]
+        assert indices == sorted(set(indices))
+        assert len(marker_lines) == _TRUNCATION_MIDDLE_COUNT + 1
+        omitted_counts = [int(marker.split()[1]) for marker in marker_lines]
+        assert sum(omitted_counts) + len(message_lines) == count
+        # Even spacing for 100 messages with 5 + 12 + 5 -> 13 gaps of 6 omitted each.
+        assert marker_lines == ["[... 6 messages omitted ...]"] * (_TRUNCATION_MIDDLE_COUNT + 1)
+
+    async def test_long_message_bodies_are_clipped(self) -> None:
+        """Rendered message bodies exceeding the cap are clipped with an ellipsis."""
+        exact = "a" * _MAX_MESSAGE_CHARS
+        overlong = "  " + ("b" * (_MAX_MESSAGE_CHARS + 200)) + "  "
+        history = [
+            ResolvedVisibleMessage.synthetic(sender="@alice:localhost", body=exact, event_id="$m1"),
+            ResolvedVisibleMessage.synthetic(sender="@bob:localhost", body=overlong, event_id="$m2"),
+        ]
+
+        text = await self._conversation(history)
+
+        first, second = text.splitlines()
+        assert first == f"@alice:localhost: {exact}"
+        clipped_body = second.removeprefix("@bob:localhost: ")
+        assert clipped_body.endswith("...")
+        assert len(clipped_body) == _MAX_MESSAGE_CHARS
 
     async def test_exactly_at_threshold_not_truncated(self) -> None:
         """Exactly at the threshold boundary, no truncation occurs."""
@@ -2760,7 +2787,7 @@ class TestGenerateSummary:
                 f"{THREAD_SUMMARY_INSTRUCTIONS.strip()}\n\nCURRENT TITLE:\n",
             )
         )
-        assert "Keep it unless the thread's main topic has clearly changed" in request.messages[0].get_content_string()
+        assert THREAD_SUMMARY_KEEP_INSTRUCTIONS in request.messages[0].get_content_string()
 
     async def test_initial_enrichment_reuses_summary_model_call_and_escapes_input(
         self,
