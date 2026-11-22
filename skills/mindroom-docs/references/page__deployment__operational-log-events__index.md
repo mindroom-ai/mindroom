@@ -292,11 +292,12 @@ A worker that was to import plugins ahead of its calls gives that up too, and al
 
 Alert on any record.
 Check the worker's storage and its CPU limit, and how many workers started at once.
+A worker image without `uv`, or whose Python lacks a bundled pip wheel, logs this on every start, because only `uv` creates the Python environment within a time limit; the first call then creates it, as before.
 
 ### `sandbox_forkserver_plugin_preload_failed`
 
 Logged by a Kubernetes worker, in its own pod's log, once, when it gives up importing the plugins that set [`worker_preload`](https://docs.mindroom.chat/plugins/#importing-once-per-worker) ahead of its calls.
-The import raised, took longer than 60 seconds, or left a thread or an open file behind, the worker's setup failed or took too long, or the process that held the imported plugins ended later.
+The import raised, took longer than 60 seconds, or left a thread or an open file behind, the worker's own copy of a plugin does not set `worker_preload`, the worker's setup failed or took too long, or the process that held the imported plugins ended later.
 Calls still work, and each imports its plugins itself until the worker restarts.
 
 | Field | Meaning |
