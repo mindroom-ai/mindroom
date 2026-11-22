@@ -48,6 +48,7 @@ _REREAD_AFTER_SECONDS = 600.0
 # A turn waits for the read and a command for the write, so a stalled homeserver costs them a few seconds at most.
 # It bounds each request: a read that also moves an older runtime's override into the room can take twice as long.
 _REQUEST_TIMEOUT_SECONDS = 5.0
+ROOM_TEXT_SETTING_MAX_LENGTH = 2000
 _UNCONFIRMED = float("-inf")
 _order = itertools.count(1)
 
@@ -194,6 +195,27 @@ async def state_event_content(response: object) -> dict[str, Any] | None:
             except ValueError:
                 return None
     return content if isinstance(content, dict) else None
+
+
+async def read_room_text_setting(client: nio.AsyncClient, room_id: str, key: str) -> str | None:
+    """Read one free-text ``io.mindroom.room_settings`` key from the room; unset or unreadable is None."""
+    import nio  # noqa: PLC0415 - config reads the copy above without loading the Matrix client
+
+    try:
+        async with asyncio.timeout(_REQUEST_TIMEOUT_SECONDS):
+            response = await client.room_get_state_event(room_id, ROOM_SETTINGS_EVENT_TYPE, key)
+    except Exception:
+        logger.warning("room_setting_read_failed", room_id=room_id, setting=key, exc_info=True)
+        return None
+    if (content := await state_event_content(response)) is not None:
+        value = content.get("value")
+        if not isinstance(value, str):
+            return None
+        stripped = value.strip()
+        return stripped[:ROOM_TEXT_SETTING_MAX_LENGTH] if stripped else None
+    if not isinstance(response, nio.RoomGetStateEventError) or response.status_code != "M_NOT_FOUND":
+        logger.warning("room_setting_read_failed", room_id=room_id, setting=key, error=str(response))
+    return None
 
 
 def on_thread_mode_change(runtime_paths: RuntimePaths, changed: Callable[[str], object]) -> None:
