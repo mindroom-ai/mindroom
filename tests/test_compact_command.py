@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import nio
 import pytest
 
+from mindroom import pending_event_worker
 from mindroom import response_runner as runner_module
 from mindroom.commands.compact_commands import handle_compact_command
 from mindroom.commands.handler import handle_command
@@ -967,6 +968,59 @@ async def test_restart_rejects_handoff_after_last_drain_snapshot(
         released.set()
         await asyncio.wait_for(stopping, 30)
     assert {_ROW_ID, late_id} <= set(await target.journal_principal().unsettled_event_ids())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refused", ["at_handoff", "after_waiting"])
+async def test_draining_parks_compaction_without_delaying_later_room_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    refused: str,
+) -> None:
+    """A fold the draining bot will not start stays the dispatcher's parked source, not a lost one that cools its room."""
+    monkeypatch.setattr(pending_event_worker, "_INITIAL_RETRY_DELAY_SECONDS", 0.01)
+    config, paths = _config(tmp_path)
+    _, target, room, command = _compact_pair(config, paths)
+    await _hydrate(target)
+    dispatcher, runner, store = target._journal_dispatcher, target._response_runner, target.journal_principal()
+    stop_other_work = AsyncMock()
+    dispatcher.callbacks = replace(dispatcher.callbacks, on_redaction=stop_other_work)
+    if refused == "after_waiting":
+        runner.lifecycle_coordinator._hold_for_approval(PausedReply(store.principal_id, "held", ROOM, THREAD))
+    await _dispatch_message(target, room, command)
+    if refused == "after_waiting":
+        waiting = await _start_fold(target)
+        target._runtime_view.begin_draining()  # The dispatcher keeps running while the bot drains.
+        with pytest.raises(ResponseAdmissionRefusedError):
+            await asyncio.wait_for(waiting, 30)
+        runner.lifecycle_coordinator._release_approval_hold("held")
+    else:
+        target._runtime_view.begin_draining()
+    redaction = nio.RedactionEvent.from_dict(
+        {
+            "event_id": "$redaction",
+            "sender": ALICE,
+            "origin_server_ts": 2,
+            "type": "m.room.redaction",
+            "redacts": "$elsewhere",
+            "content": {},
+        },
+    )
+    await admit_dispatch_event(dispatcher, room, redaction, EventKind.REDACTION, EventClass.ACTIONABLE)
+    await dispatcher.drain_once()
+    stop_other_work.assert_awaited_once()
+    assert not dispatcher._worker._room_retries
+    assert not runner.inbox.has_live_inbox_response(_ROW_ID)
+    assert await store.is_pending(_ROW_ID)
+
+    assert target._runtime_view.resume()
+    model = summary_model("resumed fold", model_id="test-model", provider="openai")
+    install_model_providers(monkeypatch, {"default": model})
+    async with asyncio.timeout(30):
+        while await store.is_pending(_ROW_ID):
+            await dispatcher.drain_once()
+            await asyncio.sleep(0.02)
+    assert _summaries(config, paths, "code")
 
 
 @pytest.mark.asyncio

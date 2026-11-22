@@ -750,10 +750,8 @@ class ResponseRunner:
     async def handoff_runtime_source(self, event: JournalEvent) -> None:
         """Hand a runtime source to a detached response owner; its reply, or that owner, settles it.
 
-        The dispatcher hands over only a source no live owner holds.
+        The dispatcher hands over only a source no live owner holds and ``runtime_source_parked`` does not park.
         """
-        if event.kind is EventKind.COMPACTION and self.deps.runtime.phase is not RunPhase.ACCEPTING:
-            return
         self.inbox.track_inbox_response(
             self._RUNTIME_SOURCE_HANDLERS[event.kind](self, event),
             name=f"{event.kind}:{event.event_id}",
@@ -761,6 +759,10 @@ class ResponseRunner:
             source_event_ids=(event.event_id,),
             recovery_proof_ready=lambda: True,
         )
+
+    def runtime_source_parked(self, event: JournalEvent) -> bool:
+        """Return whether a runtime source waits for this runtime to accept work again: a fold starts in no drain."""
+        return event.kind is EventKind.COMPACTION and self.deps.runtime.phase is not RunPhase.ACCEPTING
 
     async def _run_job_follow_up(self, event: JournalEvent) -> None:
         """Run the turn a follow-up asks for, then settle a follow-up no reply took."""
