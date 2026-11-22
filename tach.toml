@@ -7421,7 +7421,6 @@ expose = [
     "_module_name",
     "_outside_other_plugins",
     "_package_parts",
-    "_parse_python_plugin_spec",
     "_plugin_package_name",
     "_prepare_module",
     "_reject_duplicate_plugin_manifest_names",
