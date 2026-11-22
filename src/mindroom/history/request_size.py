@@ -85,14 +85,10 @@ class RequestSizer:
         """
         prefixes = request_prefixes(self.model, request)
         route = request.native_compaction.route if request.native_compaction is not None else None
-        boundary = native_replay(
-            request.messages,
-            route,
-            reset_scope=self.model.capabilities.replay_reset_scope,
-            stripped=request.strip_encrypted_replay,
-        ).boundary
+        scope = self.model.capabilities.replay_reset_scope
+        replay = native_replay(request.messages, route, reset_scope=scope, stripped=request.strip_encrypted_replay)
         identity = self.model.identity
-        for index in range(len(request.messages) - 1, boundary, -1):
+        for index in range(len(request.messages) - 1, replay.boundary, -1):
             message = request.messages[index]
             recorded = (message.provider_data or {}).get(REQUEST_IDENTITY_KEY)
             if message.role != "assistant" or recorded is None or recorded != prefixes[index]:

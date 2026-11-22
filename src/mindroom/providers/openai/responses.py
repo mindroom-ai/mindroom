@@ -52,10 +52,33 @@ if TYPE_CHECKING:
     from mindroom.providers.openai.settings import ResponsesSettings
     from mindroom.token_counting.requests import RequestParts
 
-__all__ = ["ResponsesAdapter"]
+__all__ = ["ResponsesAdapter", "recover_sticky_replay"]
 
 # OpenRouter's rejection of encrypted replay items that its routing keeps from the upstream that created them.
 _STICKY_PROVIDER_ERROR = "can only be processed by the provider that created it"
+
+
+def recover_sticky_replay(
+    wire: ResponsesWire,
+    settings: ResponsesSettings,
+    request: ModelRequest,
+    error: ProviderError,
+) -> ModelRequest | None:
+    """Return ``request`` without encrypted replay state after an OpenRouter sticky-upstream failure, else None.
+
+    That failure is a rejection of the encrypted items, or a rate limit left after the transient retries, of a
+    request that replayed such items. The resend keeps the request's routing preferences. An authored ``input``
+    the body sends in place of the replay would go unchanged, so such a request is not resent.
+    """
+    params = settings.request_params or {}
+    # ``request_params.extra_body`` replaces the settings' ``extra_body`` (``responses_request_kwargs``).
+    extra_body = params.get("extra_body", settings.extra_body)
+    sticky = error.code == ENCRYPTED_REPLAY_REJECTED or isinstance(error, RateLimited)
+    if not sticky or "input" in params or "input" in (extra_body or {}):
+        return None
+    if not replays_encrypted_state(request_replay(wire, request)):
+        return None
+    return replace(request, strip_encrypted_replay=True)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -85,23 +108,6 @@ class ResponsesAdapter:
             self.identity,
             local_encoder=self.identity.endpoint == OPENAI_BASE_URL_DEFAULT or self.wire.route == "codex",
         )
-
-    def recover_sticky_replay(self, request: ModelRequest, error: ProviderError) -> ModelRequest | None:
-        """Return ``request`` without encrypted replay state after an OpenRouter sticky-upstream failure, else None.
-
-        That failure is a rejection of the encrypted items, or a rate limit left after the transient retries, of a
-        request that replayed such items. The resend keeps the request's routing preferences. An authored ``input``
-        the body sends in place of the replay would go unchanged, so such a request is not resent.
-        """
-        params = self.settings.request_params or {}
-        # ``request_params.extra_body`` replaces the settings' ``extra_body`` (``responses_request_kwargs``).
-        extra_body = params.get("extra_body", self.settings.extra_body)
-        sticky = error.code == ENCRYPTED_REPLAY_REJECTED or isinstance(error, RateLimited)
-        if not sticky or "input" in params or "input" in (extra_body or {}):
-            return None
-        if not replays_encrypted_state(request_replay(self.wire, request)):
-            return None
-        return replace(request, strip_encrypted_replay=True)
 
     def native_compaction_settings(
         self,

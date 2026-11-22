@@ -177,12 +177,8 @@ def route_request_tokens(
     """
     parts = RequestParts(counter)
     route = request.native_compaction.route if request.native_compaction is not None else None
-    sent = native_replay(
-        request.messages[start:],
-        route,
-        reset_scope=reset_scope,
-        stripped=request.strip_encrypted_replay,
-    ).messages
+    stripped = request.strip_encrypted_replay
+    sent = native_replay(request.messages[start:], route, reset_scope=reset_scope, stripped=stripped).messages
     parts.cost(_media_tokens(counter, sent, keep_images=keep_images))
     parts_of(replace(request, messages=_without_media(request.messages, keep_images=keep_images)), start, parts)
     return parts.counted()

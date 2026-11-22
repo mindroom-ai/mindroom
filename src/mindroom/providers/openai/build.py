@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.constants import PROVIDER_ENV_KEYS
@@ -39,7 +40,7 @@ from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.chat_wire import ChatWire, deepseek_request_thinks
 from mindroom.providers.openai.codex_auth import CODEX_BASE_URL, CodexAuthError, borrow_codex_key
 from mindroom.providers.openai.kimi_auth import KIMI_BASE_URL, KimiAuthError, borrow_kimi_token
-from mindroom.providers.openai.responses import ResponsesAdapter
+from mindroom.providers.openai.responses import ResponsesAdapter, recover_sticky_replay
 from mindroom.providers.openai.responses_wire import ResponsesWire
 from mindroom.providers.openai.settings import (
     CEREBRAS_FIELDS,
@@ -573,16 +574,10 @@ def _build_responses(
                 runtime=runtime,
             ),
         )
-    adapter = ResponsesAdapter(
-        identity=identity,
-        capabilities=capabilities,
-        wire=wire,
-        settings=settings,
-        clients=clients,
-    )
-    if not openrouter:
-        return adapter
-    return replace(adapter, capabilities=replace(capabilities, sticky_replay_recovery=adapter.recover_sticky_replay))
+    if openrouter:
+        recover = partial(recover_sticky_replay, wire, settings)
+        capabilities = replace(capabilities, sticky_replay_recovery=recover)
+    return ResponsesAdapter(identity=identity, capabilities=capabilities, wire=wire, settings=settings, clients=clients)
 
 
 def _responses_route(model_config: ModelConfig, runtime_paths: RuntimePaths) -> Literal["openai", "codex"] | None:
