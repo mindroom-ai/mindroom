@@ -52,8 +52,6 @@ _SANDBOX_PROXY_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
 _EXECUTE_CANCEL_TIMEOUT_SECONDS = 10.0
 # How long a cancelled streamed command is waited for to confirm it stopped; the runner kills it within about a second.
 STOP_CONFIRMATION_SECONDS = 3.0
-# How long one chunk of a streamed command's stdin may wait for the command to read; its sender then repeats it.
-_EXECUTE_STDIN_TIMEOUT_SECONDS = 25.0
 # The runner streams at least one line this often while a call runs; a longer silence means the runner is gone.
 EXECUTE_KEEPALIVE_SECONDS = 5.0
 
@@ -382,16 +380,23 @@ def _post_execute_cancel(
         logger.warning("worker_execute_cancel_failed", url=url, exc_info=True)
 
 
-async def _post_execute_stdin(url: str, headers: dict[str, str], seq: int, data: str, eof: bool) -> bool:
-    """Write one chunk to the stdin of a streamed call's command, and return whether its stdin takes more."""
+async def _post_execute_stdin(post: Callable[..., _WorkerProxyResponse], seq: int, data: str, eof: bool) -> bool:
+    """Write one chunk to the stdin of a streamed call's command, and return whether its stdin takes more.
+
+    ``post`` sends through the call's own client, which keeps one connection for the chunks. TimeoutError says the
+    command has not read what it was sent, which the runner answers within its own limit; the sender repeats it.
+    """
     request = StdinRequest(protocol=WORKER_PROTOCOL_VERSION, seq=seq, b=data, eof=eof)
     try:
-        async with httpx.AsyncClient(timeout=_EXECUTE_STDIN_TIMEOUT_SECONDS) as client:
-            response = await client.post(url, json=request.model_dump(mode="json"), headers=headers)
+        response = await asyncio.to_thread(post, json=request.model_dump(mode="json"))
     except httpx.TimeoutException:
-        # The command has not read what it was sent; its sender repeats the chunk.
         raise TimeoutError from None
-    if response.is_client_error:
+    except (httpx.HTTPError, RuntimeError):
+        # The call ended and closed its client.
+        return False
+    if response.status_code == httpx.codes.GATEWAY_TIMEOUT:
+        raise TimeoutError
+    if httpx.codes.is_client_error(response.status_code):
         raise ValueError(_proxy_http_error_message(response))
     response.raise_for_status()
     return StdinResponse.model_validate(response.json()).open
@@ -427,6 +432,8 @@ def _read_execute_stream(
     effect; its output is dropped meanwhile.
     """
     stop_reading: float | None = None
+    # Time spent handing frames to a slow reader is not time waited for the runner.
+    handed_on = 0.0
     for line in _ndjson_lines(response.iter_bytes()):
         if not line:
             continue
@@ -441,13 +448,15 @@ def _read_execute_stream(
                 continue
             on_frame(frame)
             raise asyncio.CancelledError
-        if deadline is not None and time.monotonic() >= deadline:
+        if deadline is not None and time.monotonic() - handed_on >= deadline:
             msg = "Worker call exceeded its time limit."
             raise httpx.ReadTimeout(msg)
         if "progress" in frame:
             report_tool_progress(str(frame["progress"]))
         elif "t" in frame and on_frame is not None:
+            started = time.monotonic()
             on_frame(frame)
+            handed_on += time.monotonic() - started
     msg = "Sandbox proxy stream ended without a result."
     raise RuntimeError(msg)
 
@@ -509,7 +518,8 @@ def execute_worker_proxy_request(
                 )
                 if stream is not None:
                     stdin_url = f"{cancel_url.removesuffix('/cancel')}/{cancellation.request_id}/stdin"
-                    stream.write_stdin = functools.partial(_post_execute_stdin, stdin_url, headers)
+                    post_stdin = functools.partial(client.post, stdin_url, headers=headers)
+                    stream.write_stdin = functools.partial(_post_execute_stdin, post_stdin)
             lease_id = _create_credential_lease(
                 client,
                 config=config,
@@ -559,6 +569,10 @@ def execute_worker_proxy_request(
             worker_manager=worker_manager,
         )
         raise
+    finally:
+        if stream is not None:
+            # The client that reached the command's stdin is closed.
+            stream.write_stdin = None
 
     answer = _checked_worker_answer(
         data,
