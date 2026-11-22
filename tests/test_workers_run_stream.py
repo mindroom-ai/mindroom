@@ -53,6 +53,8 @@ if TYPE_CHECKING:
 
     from mindroom.agent_cli.turn import LiveTurnTools
 
+pytestmark = pytest.mark.asyncio
+
 _WINDOW = "outer-1"
 _CLI = "import sys; from mindroom.agent_cli.main import main; raise SystemExit(main(sys.argv[1:]))"
 _RUNNER_MODES = pytest.mark.parametrize("mode", ["forkserver", "subprocess"])
@@ -510,7 +512,7 @@ async def test_a_call_that_does_not_stream_answers_as_it_did(tmp_path: Path, mod
 
 
 @_CANNOT_START
-def test_a_program_that_cannot_start_exits_as_a_shell_reports_it_on_the_runners_event_loop(
+async def test_a_program_that_cannot_start_exits_as_a_shell_reports_it_on_the_runners_event_loop(
     tmp_path: Path,
     program: str,
     exit_code: int,
@@ -522,8 +524,12 @@ def test_a_program_that_cannot_start_exits_as_a_shell_reports_it_on_the_runners_
         async with _stack(tmp_path) as stack:
             return await stack.run("--", program)
 
-    with asyncio.Runner(loop_factory=uvloop.new_event_loop) as runner:
-        assert runner.run(run()) == (exit_code, b"", said.encode())
+    def on_uvloop() -> tuple[int | None, bytes, bytes]:
+        with asyncio.Runner(loop_factory=uvloop.new_event_loop) as runner:
+            return runner.run(run())
+
+    # The test's own loop is not uvloop, so the stack runs on one of its own, in a thread.
+    assert await asyncio.to_thread(on_uvloop) == (exit_code, b"", said.encode())
 
 
 def _background_ticks(child: Path) -> tuple[str, ...]:
