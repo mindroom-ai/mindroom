@@ -6320,7 +6320,6 @@ depends_on = [
     "mindroom.thread_tag_vocabulary",
     "mindroom.thread_tags",
     "mindroom.tool_system.events",
-    "mindroom.matrix.state_failures",
 ]
 
 [[modules]]
