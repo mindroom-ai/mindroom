@@ -431,6 +431,23 @@ async def test_a_turn_decides_by_its_own_read_whatever_arrives_meanwhile(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_a_turn_that_finds_no_setting_decides_by_that_whatever_arrives_meanwhile(tmp_path: Path) -> None:
+    """A read that finds the room without the setting returns that, not a live event's value the copy took meanwhile."""
+    config = _config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    homeserver = _GatedHomeserver()
+    client = homeserver.client()
+
+    turn_read = await _started(_refresh(client, runtime_paths, ROOM_ID))
+    observe_room_settings_event(runtime_paths, ROOM_ID, _setting_event({"value": "mentions"}))
+    read = await _released(homeserver, 0, turn_read)
+
+    assert read == SettingRead(ok=True, value=None)
+    assert config.get_room_reply_mode(runtime_paths, ROOM_ID, read) == "auto"
+    assert resolve_room_reply_mode_override(runtime_paths, ROOM_ID) == "mentions"
+
+
+@pytest.mark.asyncio
 async def test_bots_reading_the_room_at_once_all_settle_the_copy(tmp_path: Path) -> None:
     """Every bot in a room reads the setting for the same message; their reads leave the copy fresh for the next one."""
     runtime_paths = test_runtime_paths(tmp_path)

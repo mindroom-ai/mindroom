@@ -141,8 +141,23 @@ def _take(key: _Key, value: str | None, order: int, *, confirmed: bool) -> None:
         _known[key] = _Copy(value, order, time.monotonic() if confirmed else _UNCONFIRMED)
 
 
-def _legacy_override[T: str](setting: RoomSetting[T], runtime_paths: RuntimePaths, room_id: str) -> T | None:
-    return setting.parse(legacy_room_override(runtime_paths, room_id, setting.legacy_filename, setting.legacy_field))
+def _legacy_override[T: str](
+    setting: RoomSetting[T],
+    runtime_paths: RuntimePaths,
+    room_id: str,
+    *,
+    must_read: bool = False,
+) -> T | None:
+    """Return the override an older runtime stored; with ``must_read``, OSError when its file cannot be read."""
+    return setting.parse(
+        legacy_room_override(
+            runtime_paths,
+            room_id,
+            setting.legacy_filename,
+            setting.legacy_field,
+            must_read=must_read,
+        ),
+    )
 
 
 def _drop_legacy_override(setting: RoomSetting[Any], runtime_paths: RuntimePaths, room_id: str) -> None:
@@ -240,7 +255,7 @@ def seed_room_settings(runtime_paths: RuntimePaths, room_id: str, events: Iterab
         _drop_legacy_override(setting, runtime_paths, room_id)
 
 
-async def refresh_room_setting[T: str](
+async def refresh_room_setting[T: str](  # noqa: PLR0911 - one outcome per answer the room and the file give
     setting: RoomSetting[T],
     client: nio.AsyncClient,
     runtime_paths: RuntimePaths,
@@ -261,6 +276,8 @@ async def refresh_room_setting[T: str](
     known = _known.get(key)
     if not force and known is not None and time.monotonic() - known.confirmed_at < _REREAD_AFTER_SECONDS:
         return SettingRead(ok=True, value=cast("T | None", known.value))
+    # Whether an older runtime's override is there for this read to move, should the room have no setting.
+    moves = put_state is not None and _legacy_override(setting, runtime_paths, room_id) is not None
     started = next(_order)
     try:
         async with asyncio.timeout(_REQUEST_TIMEOUT_SECONDS):
@@ -275,13 +292,19 @@ async def refresh_room_setting[T: str](
     elif isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
         # A room without the setting takes the override an older runtime stored on disk, which then leaves the file.
         # While the room refuses the write, the stored override still applies and the next read tries again.
-        value = _legacy_override(setting, runtime_paths, room_id)
+        try:
+            value = _legacy_override(setting, runtime_paths, room_id, must_read=True)
+        except OSError:
+            # A file that cannot be read is not a room without an override: the copy stays, and the next read retries.
+            logger.warning("room_setting_legacy_override_unread", room_id=room_id, setting=setting.key, exc_info=True)
+            return SettingRead(ok=False, value=resolve_room_setting(setting, runtime_paths, room_id))
         move = None if value is None or put_state is None else write_room_setting
         if move and await move(setting, client, runtime_paths, room_id, value, put_state=put_state, moves_read=started):
             return SettingRead(ok=True, value=value)
-        # A write, a move or a change that came in meanwhile is the room's setting: this answer is older than it.
+        # A write or another read's move that the room took meanwhile is its setting, not the override this read had
+        # to move. With none to move, the caller decides by what its own read found, and the copy keeps the newer.
         newer = _known.get(key, _NEVER_READ)
-        if newer.order > started:
+        if (move or moves) and newer.order > started:
             return SettingRead(ok=True, value=cast("T | None", newer.value))
     else:
         logger.warning("room_setting_read_failed", room_id=room_id, setting=setting.key, error=str(response))

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from types import SimpleNamespace
@@ -146,6 +147,45 @@ async def test_an_override_file_that_cannot_be_rewritten_keeps_its_record_for_a_
     await refresh_room_setting(THREAD_MODE, client, runtime_paths, ROOM_ID, force=True, put_state=None)
 
     assert json.loads(legacy.read_text()) == {}
+
+
+@pytest.mark.asyncio
+@_SETTINGS
+async def test_an_override_file_that_cannot_be_read_is_not_a_room_without_an_override(
+    tmp_path: Path,
+    setting: RoomSetting[Any],
+) -> None:
+    """While the file cannot be read, a room that refused the move keeps its override, which applies again after."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    value = _VALUES[setting.key]
+    legacy = _write_legacy_overrides(runtime_paths, setting, (ROOM_ID,))
+    client = RoomStateHomeserver().client()
+    client.room_put_state.side_effect = None
+    client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+
+    async def read() -> SettingRead[Any]:
+        return await refresh_room_setting(
+            setting,
+            client,
+            runtime_paths,
+            ROOM_ID,
+            force=True,
+            put_state=client.room_put_state,
+        )
+
+    assert await read() == SettingRead(ok=True, value=value)
+    # Reading a directory fails as a file without permission does, for any user; its time is not the file's.
+    aside = legacy.rename(legacy.with_suffix(".aside"))
+    legacy.mkdir()
+    os.utime(legacy, ns=(0, 0))
+
+    assert await read() == SettingRead(ok=False, value=value)
+    assert resolve_room_setting(setting, runtime_paths, ROOM_ID) == value
+
+    legacy.rmdir()
+    aside.rename(legacy)
+    assert await read() == SettingRead(ok=True, value=value)
+    assert set(json.loads(legacy.read_text())) == {ROOM_ID}
 
 
 @pytest.mark.asyncio
