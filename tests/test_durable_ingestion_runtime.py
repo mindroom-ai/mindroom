@@ -1017,6 +1017,9 @@ async def test_entity_removal_leaves_with_retained_input_before_closing_stores(
     async with _owned_session(bot) as session:
         assert bot.client is not None
         monkeypatch.setattr(bot.client, "joined_rooms", AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[ROOM])))
+        # The room's settings are read as the client, not through the transport, before an event of it is handled.
+        no_setting = nio.RoomGetStateEventError("Not found", "M_NOT_FOUND")
+        monkeypatch.setattr(bot.client, "room_get_state_event", AsyncMock(return_value=no_setting))
         session._transport.request = request
         skip_crypto_maintenance(session)
         orchestrator = cast("ReadyRuntime", bot.orchestrator)

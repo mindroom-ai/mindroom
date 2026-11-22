@@ -274,6 +274,17 @@ def seed_room_settings(runtime_paths: RuntimePaths, room_id: str, events: Iterab
         _drop_legacy_override(setting, runtime_paths, room_id)
 
 
+def _noting_no_writer(put_state: _PutState, no_writer: list[bool]) -> _PutState:
+    """Return ``put_state`` noting each None it answers: no steward to write as yet, not the room refusing the write."""
+
+    async def put(*args: Any, **kwargs: Any) -> nio.RoomPutStateResponse | nio.RoomPutStateError | None:  # noqa: ANN401
+        response = await put_state(*args, **kwargs)
+        no_writer.append(response is None)
+        return response
+
+    return put
+
+
 async def refresh_room_setting[T: str](  # noqa: PLR0911 - one outcome per answer the room and the file give
     setting: RoomSetting[T],
     client: nio.AsyncClient,
@@ -301,6 +312,7 @@ async def refresh_room_setting[T: str](  # noqa: PLR0911 - one outcome per answe
         return SettingRead(ok=True, value=cast("T | None", known.value))
     # Whether an older runtime's override is there for this read to move, should the room have no setting.
     moves = put_state is not None and _legacy_override(setting, runtime_paths, room_id) is not None
+    no_writer: list[bool] = []
     started = next(_order)
     try:
         async with asyncio.timeout(_REQUEST_TIMEOUT_SECONDS):
@@ -322,7 +334,8 @@ async def refresh_room_setting[T: str](  # noqa: PLR0911 - one outcome per answe
             logger.warning("room_setting_legacy_override_unread", room_id=room_id, setting=setting.key, exc_info=True)
             return SettingRead(ok=False, value=resolve_room_setting(setting, runtime_paths, room_id))
         move = None if value is None or put_state is None else write_room_setting
-        if move and await move(setting, client, runtime_paths, room_id, value, put_state=put_state, moves_read=started):
+        put = put_state and _noting_no_writer(put_state, no_writer)
+        if move and await move(setting, client, runtime_paths, room_id, value, put_state=put, moves_read=started):
             return SettingRead(ok=True, value=value)
         # A write or another read's move that the room took meanwhile is its setting, not the override this read had
         # to move. With none to move, the caller decides by what its own read found, and the copy keeps the newer.
@@ -335,7 +348,8 @@ async def refresh_room_setting[T: str](  # noqa: PLR0911 - one outcome per answe
     held = _known.get(key)
     # An override this read could not try to move, for want of a writer, is not the room's setting: the next read
     # that has a writer moves it.
-    _take(key, value, started, confirmed=content is not None or value is None or put_state is not None)
+    has_writer = put_state is not None and not any(no_writer)
+    _take(key, value, started, confirmed=content is not None or value is None or has_writer)
     if content is not None:
         # The room's own event, even an empty one, decides over the override an older runtime stored.
         _drop_legacy_override(setting, runtime_paths, room_id)

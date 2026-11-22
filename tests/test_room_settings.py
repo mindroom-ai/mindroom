@@ -100,19 +100,24 @@ async def test_an_older_runtimes_override_applies_until_it_moves_into_the_room(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("no_writer", [None, AsyncMock(return_value=None)], ids=["no-write-asked", "no-steward-yet"])
 @_SETTINGS
 async def test_an_override_a_read_without_a_writer_applies_moves_on_the_next_read_with_one(
     tmp_path: Path,
     setting: RoomSetting[Any],
+    no_writer: AsyncMock | None,
 ) -> None:
-    """A read that cannot write applies the stored override without confirming it, so the next read moves it."""
+    """A read that cannot write applies the stored override without confirming it, so the next read moves it.
+
+    That is a read asked to write nothing, and one whose room has no steward to write as yet, while the runtime starts.
+    """
     runtime_paths = test_runtime_paths(tmp_path)
     value = _VALUES[setting.key]
     legacy = _write_legacy_overrides(runtime_paths, setting, (ROOM_ID,))
     homeserver = RoomStateHomeserver()
     client = homeserver.client()
 
-    assert await refresh_room_setting(setting, client, runtime_paths, ROOM_ID, put_state=None) == (True, value)
+    assert await refresh_room_setting(setting, client, runtime_paths, ROOM_ID, put_state=no_writer) == (True, value)
     assert (ROOM_SETTINGS_EVENT_TYPE, setting.key) not in homeserver.events
 
     read = await refresh_room_setting(setting, client, runtime_paths, ROOM_ID, put_state=client.room_put_state)
