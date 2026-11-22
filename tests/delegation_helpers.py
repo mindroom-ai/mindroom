@@ -7,12 +7,14 @@ team replies through ``respond_team``, and continue their pauses through ``resum
 
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 from agno.tools import Toolkit
 
@@ -25,6 +27,7 @@ from mindroom.approval.execution import AgentApprovalExecution
 from mindroom.approval.resume import ResumeRunner
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.delegation.cost import receive_subagent_cost, received_subagent_cost_usd
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.storage import new_scope_session
@@ -581,6 +584,33 @@ class ReportTools(Toolkit):
         """Write the report."""
         type(self).written.append("written")
         return "report written"
+
+
+class CostProbeTools(Toolkit):
+    """The ``restart_cost_probe`` toolkit: its calls receive a subagent's cost, ask for an approval, or stall for a restart."""
+
+    stalled: ClassVar[asyncio.Event]
+    # What the turn that last ran ``checked`` had received by then.
+    received_when_checked: ClassVar[float | None] = None
+
+    def __init__(self) -> None:
+        super().__init__(name="restart_cost_probe", tools=[self.charge_subagent, self.checked, self.stall])
+
+    async def charge_subagent(self, usd: float, child: str = "") -> str:
+        """Receive subagent turn ``child``, a new one when unnamed, which cost ``usd``."""
+        receive_subagent_cost(child or f"probe-{uuid4().hex}", usd)
+        return f"charged {usd}"
+
+    async def checked(self) -> str:
+        """Do work that asks for an approval first."""
+        type(self).received_when_checked = received_subagent_cost_usd()
+        return "checked"
+
+    async def stall(self) -> str:
+        """Block until the turn is cancelled by a simulated process shutdown."""
+        self.stalled.set()
+        await asyncio.Event().wait()
+        raise AssertionError
 
 
 class MetadataProbeTools(Toolkit):

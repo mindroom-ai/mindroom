@@ -17,7 +17,7 @@ from mindroom.session_storage.store import watch_session_row
 from mindroom.tool_system.runtime_context import scope_hook_context_kwargs
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Collection, Sequence
+    from collections.abc import AsyncIterator, Collection, Mapping, Sequence
 
     import structlog
 
@@ -144,13 +144,13 @@ class ConversationStateWriter:
         session_id: str,
         event_ids: Collection[str],
         natively: bool,
-        uncollected: Collection[str],
+        jobs: Mapping[str, str | None],
     ) -> dict[str, Any]:
         """Recover the runs a restart cut short while they answered ``event_ids`` (``recover_interrupted_turn``).
 
         Returns the run metadata their replay's runs carry, off-loop in the session target's FIFO lane.
         """
-        recover = partial(recover_interrupted_turn, natively=natively, uncollected=uncollected)
+        recover = partial(recover_interrupted_turn, natively=natively, jobs=jobs)
         return await run_session_storage_operation(
             partial(self.create_storage, execution_identity, scope=scope),
             lambda storage: recover(storage, session_id, scope, event_ids),

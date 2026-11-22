@@ -31,12 +31,15 @@ def stored_by_id(metadata: Mapping[str, Any] | None, key: str, sum_key: str) -> 
     """Return what a run's ``metadata`` stores under ``key`` by id; a run that stored only its sum holds one entry."""
     # LEGACY_COMPAT: Run metadata stored with what its turn spent or received before it only as a sum.
     # Legacy format: a run's metadata holds ``mindroom_subagent_cost_usd`` or ``mindroom_prior_usage`` without the map
-    # by id beside it (``mindroom_subagent_receipts``, ``mindroom_prior_usage_by_run``).
+    # by id beside it (``mindroom_subagent_receipts``, ``mindroom_prior_usage_by_run``), or, once such a release
+    # resumed the run after a rollback, a ``mindroom_subagent_cost_usd`` larger than its map's total.
     # Last legacy release: v2026.11.512; the next, still unreleased, release writes each map beside its sum.
-    # Handling: the sum reads as one entry under ``LEGACY_COST_ID``, so a resume of that run reports it as those
-    # releases did; restart recovery and a job's continuation drop that entry, which may cover what they read by id.
+    # Handling: the sum, or what it exceeds its map by (``stored_receipts``), reads as one entry under
+    # ``LEGACY_COST_ID``, so a resume of that run reports it as those releases did; restart recovery and a job's
+    # continuation drop that entry, which may cover what they read by id.
     # Coverage: tests/test_restart_turn_cost.py::test_values_stored_as_sums_resume_as_one_entry_that_restart_recovery_drops,
-    # tests/test_restart_turn_cost.py::test_a_continuation_leaves_out_what_its_cut_short_turn_stored_as_a_sum.
+    # tests/test_restart_turn_cost.py::test_a_continuation_leaves_out_what_its_cut_short_turn_stored_as_a_sum,
+    # tests/test_restart_turn_cost.py::test_a_sum_an_earlier_release_advanced_past_its_map_resumes_with_the_difference.
     metadata = metadata or {}
     if isinstance(stored := metadata.get(key), dict):
         return dict(stored)
@@ -88,9 +91,12 @@ def received_subagent_cost_usd() -> float | None:
 def stored_receipts(metadata: Mapping[str, Any] | None) -> dict[str, float]:
     """Return the receipts a run's ``metadata`` stores, as ``receipts_metadata`` wrote them; only a number is a cost."""
     stored = stored_by_id(metadata, SUBAGENT_RECEIPTS_RUN_METADATA_KEY, SUBAGENT_COST_RUN_METADATA_KEY)
-    return {
-        key: float(usd) for key, usd in stored.items() if isinstance(usd, int | float) and not isinstance(usd, bool)
-    }
+    # A bool is no cost, though it is an int.
+    receipts = {key: float(usd) for key, usd in stored.items() if type(usd) in (int, float)}
+    total = (metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY)
+    if type(total) in (int, float) and (unkeyed := total - sum(receipts.values())) > 1e-9:
+        receipts[LEGACY_COST_ID] = receipts.get(LEGACY_COST_ID, 0.0) + unkeyed
+    return receipts
 
 
 def receipts_metadata(*views: Mapping[str, float]) -> dict[str, Any]:
@@ -105,12 +111,7 @@ def subagent_cost_metadata(stored: Mapping[str, Any] | None = None) -> dict[str,
 
     They merge what the ``stored`` metadata holds with what the turn in this context received, so with nothing
     received here, as in recovery's saves, they keep the stored cost. A turn that resumes the run after a pause goes
-    on from it (``resumed_subagent_cost``).
+    on from it (``stored_receipts``).
     """
     cost = _RECEIVING.get()
     return receipts_metadata(stored_receipts(stored), cost.receipts if cost is not None else {})
-
-
-def resumed_subagent_cost(metadata: Mapping[str, Any] | None) -> SubagentCost:
-    """Return the holder of a turn that resumes a stored run, starting from what the run's turn had received."""
-    return SubagentCost(stored_receipts(metadata))

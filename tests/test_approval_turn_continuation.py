@@ -15,7 +15,7 @@ import pytest
 import mindroom.approval.execution as approval_execution_module
 from mindroom.agents import create_agent
 from mindroom.ai import ai_response, stream_agent_response
-from mindroom.ai_run_metadata import prior_usage_by_run, prior_usage_of, with_prior_usage
+from mindroom.ai_run_metadata import prior_usage_by_run, with_prior_usage
 from mindroom.approval.execution import (
     AgentApprovalExecution,
     _collect_agent_continuation,
@@ -28,6 +28,7 @@ from mindroom.approval.tool_owners import required_approval_tool_names
 from mindroom.config.main import Config
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
+    PRIOR_USAGE_BY_RUN_METADATA_KEY,
     PRIOR_USAGE_RUN_METADATA_KEY,
     SUBAGENT_COST_RUN_METADATA_KEY,
     resolve_runtime_paths,
@@ -1042,11 +1043,12 @@ def test_a_run_s_record_keeps_the_summed_usage_its_turn_spent_before_it() -> Non
     assert with_prior_usage(None, {}) is None
     assert with_prior_usage(_REQUESTER, {}) == _REQUESTER
     stored = with_prior_usage(_REQUESTER, {"run-1": first, "run-2": second})
-    [spent] = prior_usage_of(RunRecord(run_id="run", metadata=stored))
+    # The summed usage an earlier release reads stays beside it.
+    spent = RunMetrics.from_dict(stored[PRIOR_USAGE_RUN_METADATA_KEY])
     # The record also names each attempt by its run id, in order, so a replay that reads several runs counts each once.
     assert prior_usage_by_run(stored) == {"run-1": first, "run-2": second}
     assert (spent.tokens.input_tokens, spent.tokens.output_tokens, spent.time_to_first_token) == (120, 7, 1.5)
-    assert prior_usage_of(RunRecord(run_id="run", metadata=_REQUESTER)) == ()
+    assert prior_usage_by_run(_REQUESTER) == {}
 
 
 def test_a_run_seeded_from_another_run_s_metadata_keeps_none_of_that_run_s_usage() -> None:
@@ -1089,7 +1091,10 @@ async def test_a_stopped_attempt_after_an_approved_run_records_none_of_the_pause
 
     [stopped] = [run for run in stored_runs(config, paths, identity.session_id) if is_interrupted_replay_run(run)]
     assert stopped.run_id != paused.run_id
-    assert [(usage.tokens.input_tokens, usage.tokens.output_tokens) for usage in prior_usage_of(stopped)] in (
+    assert [
+        (usage.tokens.input_tokens, usage.tokens.output_tokens)
+        for usage in prior_usage_by_run(stopped.metadata).values()
+    ] in (
         [],
         [(130, 8)],
     )
@@ -1505,7 +1510,8 @@ async def test_a_pause_stored_without_its_turn_s_earlier_usage_resumes_publishin
     assert stored is not None
     assert stored.metadata is not None
     assert PRIOR_USAGE_RUN_METADATA_KEY in stored.metadata
-    stored.metadata = {key: value for key, value in stored.metadata.items() if key != PRIOR_USAGE_RUN_METADATA_KEY}
+    prior_usage_keys = {PRIOR_USAGE_RUN_METADATA_KEY, PRIOR_USAGE_BY_RUN_METADATA_KEY}
+    stored.metadata = {key: value for key, value in stored.metadata.items() if key not in prior_usage_keys}
     assert storage.save_run(session, stored, record_usage=False) == "written"
 
     result = await _approve_add(tmp_path, config, paths, identity, paused, "approved")

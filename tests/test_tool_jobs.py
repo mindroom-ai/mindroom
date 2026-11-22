@@ -28,6 +28,7 @@ from tests.tool_job_helpers import (
     backdate_job,
     cancel_settled,
     intercept_job_saves,
+    job_child,
     job_owner,
     lookup,
     pending_outcome,
@@ -566,6 +567,46 @@ async def test_finalize_acknowledges_only_claims_whose_call_the_parent_run_saved
         assert (saved.consumed, unsaved.consumed) == (True, False)
     finally:
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_job_keeps_the_run_that_first_acknowledged_its_outcome(tmp_path: Path) -> None:
+    """The run whose saved result first acknowledged a subagent job stays its acknowledger, over a restart and a reread.
+
+    A tool's job keeps the adapter it was admitted with, which a call that reattaches to it must match.
+    """
+    runtime = await tool_job_runtime(tmp_path)
+    child = {"child": asdict(job_child())}
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved")
+
+    for job_id, kind, adapter in (("subagent", "delegation", child), ("tool", "tool", {"own": 1})):
+        await start_job(
+            runtime,
+            job_id,
+            tool_name="worker",
+            depth=0,
+            kind=kind,
+            adapter=adapter,
+            owner=job_owner(),
+            operation=operation,
+        )
+        waited = await runtime.wait(job_id, owner=job_owner(), depth=0)
+        assert waited.job.acknowledged_by is None
+        await runtime.acknowledge_wait(job_id, waited.claim, run_id="first-run")
+    await runtime.shutdown()
+    restored = await tool_job_runtime(tmp_path)
+    try:
+        await restored.recover()
+        reread = await restored.wait("subagent", owner=job_owner(), depth=0)
+        await restored.acknowledge_wait("subagent", reread.claim, run_id="a-later-reader")
+        jobs = {job.job_id: job for job in restored.retained_jobs()}
+        assert (jobs["subagent"].consumed, jobs["subagent"].acknowledged_by) == (True, "first-run")
+        assert jobs["subagent"].adapter["child"] == child["child"]
+        assert (jobs["tool"].consumed, jobs["tool"].adapter) == (True, {"own": 1})
+    finally:
+        await restored.shutdown()
 
 
 @pytest.mark.asyncio

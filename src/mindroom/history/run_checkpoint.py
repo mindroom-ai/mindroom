@@ -224,7 +224,7 @@ def recover_interrupted_turn(
     event_ids: Collection[str],
     *,
     natively: bool,
-    uncollected: Collection[str] = (),
+    jobs: Mapping[str, str | None],
 ) -> dict[str, Any]:
     """Recover the runs of ``scope`` cut short while they answered ``event_ids``; return what their replay's runs carry.
 
@@ -238,8 +238,8 @@ def recover_interrupted_turn(
 
     The metadata also holds what those attempts spent, which the replay's reply reports with its own: their usage by
     run id and their subagent receipts by delegation id, each merged by id over the attempts' rows, a team run's
-    member rows, and the earlier attempts the rows name. A sum stored without ids is left out, and so is each
-    ``uncollected`` delegation, a subagent job no turn has acknowledged, which the turn that collects it receives.
+    member rows, and the earlier attempts the rows name. A sum stored without ids is left out, and so is the receipt
+    of a subagent job none of those rows' runs acknowledged (``jobs``, as ``job_acknowledgers`` returns them).
     """
     session = store.load_session(session_id)
     if session is None:
@@ -268,7 +268,8 @@ def recover_interrupted_turn(
             receipts += [stored_receipts(record.metadata) for record in (run, *members)]
     if not attempts:
         return {}
-    spent, left_out = merge_usage(*usage), {LEGACY_COST_ID, *uncollected}
+    ran = {*attempts, *(run.run_id for run in runs if run.parent_run_id in attempts)}
+    spent, left_out = merge_usage(*usage), {LEGACY_COST_ID, *(key for key, by in jobs.items() if by not in ran)}
     spent.pop(LEGACY_COST_ID, None)
     received = {key: usd for key, usd in merge_by_key(receipts, float).items() if key not in left_out}
     carried = {CONTINUED_RUNS_METADATA_KEY: attempts, **receipts_metadata(received)}

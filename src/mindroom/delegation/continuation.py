@@ -6,9 +6,10 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.ai import run_delegated_child_response
+from mindroom.ai_run_metadata import prior_usage_by_run
 from mindroom.constants import LEGACY_COST_ID
-from mindroom.delegation.background import delegation_child
-from mindroom.delegation.cost import merge_by_key, stored_receipts
+from mindroom.delegation.background import delegation_child, job_acknowledgers
+from mindroom.delegation.cost import SubagentCost, merge_by_key, stored_receipts
 from mindroom.delegation.execution import delegation_call_job
 from mindroom.delegation.lifecycle import authorize_delegation, child_own_usage, delegation_grant, prepare_child_turn
 from mindroom.delegation.personas import follow_up_refusal
@@ -23,8 +24,6 @@ from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import require_tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
@@ -100,14 +99,16 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
         parent_tool_call_id=child.parent_tool_call_id,
     )
     # The continuation starts from what the turns restarts cut short before it cost, by delegation id: what the job's
-    # earlier continuation started from, what the cut-short turn received, and that turn's own cost.
-    views: list[Mapping[str, float]] = [job.adapter.get(_RECEIPTS_KEY) or {}]
+    # earlier continuation started from, that turn's own cost, and what its runs received, without a sum stored
+    # without ids and without a nested job none of them acknowledged, as a restart's replay leaves both out.
+    receipts = job.adapter.get(_RECEIPTS_KEY) or {}
     if run is not None:
-        own_usd = child_own_usage(run, config)[1]
-        views += [stored_receipts(run.metadata), {} if own_usd is None else {child.delegation_id: own_usd}]
-    receipts = merge_by_key(views, float)
-    receipts.pop(LEGACY_COST_ID, None)
-    follow_up.cost_usd = follow_up.subagents_cost_usd = sum(receipts.values()) if receipts else None
+        own_usd, ran = child_own_usage(run, config)[1], {run.run_id, *prior_usage_by_run(run.metadata)}
+        jobs = job_acknowledgers(runtime.retained_jobs(), child.session_id)
+        left_out = {LEGACY_COST_ID, *(key for key, by in jobs.items() if by not in ran)}
+        received = {key: usd for key, usd in stored_receipts(run.metadata).items() if key not in left_out}
+        receipts = merge_by_key((receipts, received, {} if own_usd is None else {child.delegation_id: own_usd}), float)
+    follow_up.cost_usd = follow_up.subagents_cost_usd = SubagentCost(receipts).usd
     arguments = {"subagent_id": child.subagent_id, "message": child.task}
     if OUTPUT_PATH_ARGUMENT in job.adapter:
         arguments[OUTPUT_PATH_ARGUMENT] = job.adapter[OUTPUT_PATH_ARGUMENT]

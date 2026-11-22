@@ -14,7 +14,7 @@ from mindroom.agent_cli.cli_approval_recovery import CliFollowUpTurn, continue_c
 from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agents import create_agent
 from mindroom.ai import agent_run_metadata_content, run_delegated_child_response, stream_agent_response
-from mindroom.ai_run_metadata import prior_usage_by_run, prior_usage_of
+from mindroom.ai_run_metadata import prior_usage_by_run
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import ResumeRunner
 from mindroom.approval.tool_owners import (
@@ -22,7 +22,7 @@ from mindroom.approval.tool_owners import (
     required_approval_tool_names,
     validate_approval_tool_owners,
 )
-from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost, resumed_subagent_cost
+from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost, stored_receipts
 from mindroom.delegation.execution import answered_delegation_calls, drive_delegation_stream, resume_from_approval
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.session_context import ScopeSessionContext
@@ -246,7 +246,7 @@ async def _continue_persisted_agent(
         # call: nothing can resume it, so the resume fails naming that call, as a live turn does.
         raise pause_without_approval_error(response, entity_label="agent")
     # The usage of the turn's attempts before the paused run, which its record carries across the pause.
-    prior_usage, spent = prior_usage_of(persisted), prior_usage_by_run(persisted.metadata)
+    spent = prior_usage_by_run(persisted.metadata)
     attempt = CompletedAttempt(
         response_text=collected.terminal_content
         or ("" if presentation.final_text() else "Tool approval continuation completed"),
@@ -269,7 +269,7 @@ async def _continue_persisted_agent(
             status=response.status,
             # An approval resume prepares no history of its own.
             prepared_history=None,
-            prior_usage=prior_usage,
+            prior_usage=tuple(spent.values()),
         ),
     )
     return await _stream_continuation_turn(
@@ -509,7 +509,7 @@ class AgentApprovalExecution:
         )
         storage = scope_run_storage(scope_context)
         # The resumed turn goes on from what its subagents had cost before the pause.
-        subagent_cost = resumed_subagent_cost(persisted.metadata)
+        subagent_cost = SubagentCost(stored_receipts(persisted.metadata))
         try:
             with helper_usage_context(scope_context):
                 if cli_call is not None:

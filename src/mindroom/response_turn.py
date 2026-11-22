@@ -952,8 +952,9 @@ def _drop_spent_attempt(run: TurnRunState, resolution: CompletedAttempt) -> None
     if not resolution.is_empty:
         run.turn_input = NO_TURN_INPUT
     if resolution.usage is not None:
-        run_id = resolution.attempt_run_id or resolution.run_id or uuid4().hex
-        run.prior_usage = {**run.prior_usage, run_id: resolution.usage}
+        run_id = resolution.attempt_run_id or resolution.run_id
+        assert run_id is not None, "an attempt that reported usage ran a run"
+        run.prior_usage[run_id] = resolution.usage
     run.attempt = None
 
 

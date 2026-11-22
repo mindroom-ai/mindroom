@@ -284,7 +284,7 @@ def with_prior_usage(metadata: dict[str, Any] | None, prior_usage: Mapping[str, 
     """Return the metadata a run's record stores: ``metadata``, with ``prior_usage``, what its turn spent before it.
 
     The record keeps that usage summed (``turn_usage``), so whichever resume continues the run after a pause, even
-    after a restart, reports it with the run's own (``prior_usage_of``), and by the run id of each attempt, so a replay
+    after a restart, reports it with the run's own (``prior_usage_by_run``), and by the run id of each attempt, so a replay
     that reads several of the turn's runs counts each attempt once. A turn's first run keeps none. ``metadata`` is
     the turn's, which holds no other run's usage (``without_run_usage``).
     """
@@ -297,17 +297,6 @@ def with_prior_usage(metadata: dict[str, Any] | None, prior_usage: Mapping[str, 
 
 def prior_usage_by_run(metadata: Mapping[str, Any] | None) -> dict[str, RunMetrics]:
     """Return the usage the turn of a run with ``metadata`` spent before it, by the run id of each attempt, in order."""
-    stored = stored_by_id(metadata, PRIOR_USAGE_BY_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY)
-    return {run_id: RunMetrics.from_dict(usage) for run_id, usage in stored.items()}
-
-
-def merge_usage(*views: Mapping[str, RunMetrics]) -> dict[str, RunMetrics]:
-    """Merge views of one turn's attempts by run id, keeping the larger of two records of one attempt."""
-    return merge_by_key(views, lambda usage: usage.tokens.input_tokens + usage.tokens.output_tokens)
-
-
-def prior_usage_of(record: AnyRunRecord) -> tuple[RunMetrics, ...]:
-    """Return the usage the turn of ``record``'s run spent on attempts before it, as ``with_prior_usage`` stored it."""
     # LEGACY_COMPAT: a run stored without the usage its turn spent before it.
     # Legacy format: a run record whose metadata has no ``mindroom_prior_usage`` key though its turn spent attempts
     # before it, such as an empty answer the turn retried or a run a model switch continued; it matters for a run that
@@ -317,8 +306,13 @@ def prior_usage_of(record: AnyRunRecord) -> tuple[RunMetrics, ...]:
     # Handling: such a run reads as its turn's first, so its resume reports the paused run and what follows, as those
     # releases did; the usage ledger counts the earlier attempts either way.
     # Coverage: tests/test_approval_turn_continuation.py::test_a_pause_stored_without_its_turn_s_earlier_usage_resumes_publishing_the_paused_run_s.
-    stored = (record.metadata or {}).get(PRIOR_USAGE_RUN_METADATA_KEY)
-    return (RunMetrics.from_dict(stored),) if isinstance(stored, dict) else ()
+    stored = stored_by_id(metadata, PRIOR_USAGE_BY_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY)
+    return {run_id: RunMetrics.from_dict(usage) for run_id, usage in stored.items() if isinstance(usage, dict)}
+
+
+def merge_usage(*views: Mapping[str, RunMetrics]) -> dict[str, RunMetrics]:
+    """Merge views of one turn's attempts by run id, keeping the record of an attempt that counted more tokens."""
+    return merge_by_key(views, lambda usage: sum(usage.tokens.to_dict().values()))
 
 
 def model_payload(

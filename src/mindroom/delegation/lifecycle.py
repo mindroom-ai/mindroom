@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from mindroom.agent_cli.session import CONFIG_RELOAD_CALL
 from mindroom.agent_loop.model_loop import SendRequest
-from mindroom.ai_run_metadata import model_payload, prior_usage_of, prompt_input_tokens, turn_usage
+from mindroom.ai_run_metadata import model_payload, prior_usage_by_run, prompt_input_tokens, turn_usage
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.budgets.pricing import model_prices, run_cost_usd
@@ -245,7 +245,7 @@ async def settle_child_response(
     A finished run's result is what it hands over (``handover_content``), so a failed run's is why it failed, a run
     recovery cancelled hands over why, and a resumed run's is what it wrote before its pause and since, else the
     completion note. A finished turn's usage is the run's with that of the turn's earlier runs, which its record
-    carries (``prior_usage_of``), however many pauses and restarts lay between them. The child's cost prices that
+    carries (``prior_usage_by_run``), however many pauses and restarts lay between them. The child's cost prices that
     usage and adds what the subagent turns whose results the turn received cost (``price_child``), so settling the
     same run again sets the same cost.
     """
@@ -289,7 +289,7 @@ async def settle_child_response(
             child,
             config=config,
             runtime_paths=runtime_paths,
-            usage=child_response_usage(response, prior_usage_of(response)),
+            usage=child_response_usage(response, tuple(prior_usage_by_run(response.metadata).values())),
         )
 
 
@@ -324,8 +324,7 @@ def price_child(child: DelegationChild, response: RunRecord, own_usd: float | No
 
     That is the larger of what the handle kept and what run ``response``'s row stores: a crash leaves either behind.
     """
-    received = stored_receipts(response.metadata)
-    costs = (child.subagents_cost_usd, sum(received.values()) if received else None)
+    costs = (child.subagents_cost_usd, SubagentCost(stored_receipts(response.metadata)).usd)
     child.subagents_cost_usd = max((usd for usd in costs if usd is not None), default=None)
     known = [usd for usd in (own_usd, child.subagents_cost_usd) if usd is not None]
     child.cost_usd = sum(known) if known else None
@@ -338,7 +337,7 @@ def child_own_usage(record: RunRecord, config: Config) -> tuple[tuple[int, int] 
     differently compare; the tokens are None for a record without usage. The cost is at ``config``'s prices, None
     when none of the usage is of a priced model, and leaves out what the turn's subagents cost.
     """
-    usage = turn_usage(prior_usage_of(record), record.metrics)
+    usage = turn_usage(tuple(prior_usage_by_run(record.metadata).values()), record.metrics)
     provider, model_id = record.model_provider, record.model
     cost = run_cost_usd(usage, model_provider=provider, model_id=model_id, prices=model_prices(config))
     if usage is None:

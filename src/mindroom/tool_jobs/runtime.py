@@ -145,6 +145,11 @@ class BackgroundJob:
     # The latest progress its running tool reported, as of this snapshot; live state that is never saved.
     progress: str | None = None
 
+    @property
+    def acknowledged_by(self) -> str | None:
+        """The run whose saved result first acknowledged a subagent job; an adapter entry, which older releases ignore."""
+        return self.adapter.get("acknowledged_by_run") if self.consumed else None
+
 
 @dataclass(frozen=True)
 class JobClaim:
@@ -940,10 +945,18 @@ class ToolJobRuntime:
 
         await run_coroutine_until_complete(release())
 
-    async def acknowledge_wait(self, job_id: str, claim: JobClaim | None, *, returned_inline: bool = False) -> None:
+    async def acknowledge_wait(
+        self,
+        job_id: str,
+        claim: JobClaim | None,
+        *,
+        run_id: str | None = None,
+        returned_inline: bool = False,
+    ) -> None:
         """Mark the claimed outcome consumed, only after the exact parent tool result has been durably saved.
 
-        ``returned_inline`` says that tool result belongs to the call that started the job.
+        ``run_id`` names the parent run that saved it, which a subagent job keeps from its first acknowledgement
+        (``acknowledged_by``), and ``returned_inline`` says that tool result belongs to the call that started the job.
         """
         async with self._lock:
             self._ensure_open()
@@ -953,6 +966,9 @@ class ToolJobRuntime:
                 raise ValueError(msg)
             # A later reread of an inline call's result does not make it a job.
             returned_inline = entry.job.returned_inline or returned_inline
+            if entry.job.kind == "delegation" and not entry.job.consumed:
+                # A tool's job keeps the adapter it was admitted with, which a call that reattaches to it must match.
+                entry.job.adapter["acknowledged_by_run"] = run_id
             await self._publish(entry, _updated(entry.job, consumed=True, returned_inline=returned_inline))
             entry.claim = None
 

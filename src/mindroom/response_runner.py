@@ -31,7 +31,7 @@ from mindroom.constants import (
 )
 from mindroom.contacts.turns import contact_room, contact_turn_instructions, contact_turn_tools
 from mindroom.conversation_state_writer import ReplySession
-from mindroom.delegation.background import delegation_child
+from mindroom.delegation.background import job_acknowledgers
 from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.final_delivery import (
@@ -1159,16 +1159,14 @@ class ResponseRunner:
         restarts = await handle.runtime.restart_interruptions(handle)
         recovered: dict[str, Any] = {}
         if restarts and history_scope is not None:
-            jobs = get_background_runtime(self.deps.runtime_paths)
-            held = () if jobs is None else jobs.retained_jobs()
-            uncollected = {delegation_child(j).delegation_id for j in held if j.kind == "delegation" and not j.consumed}
+            runtime = get_background_runtime(self.deps.runtime_paths)
             recovered = await self.deps.state_writer.recover_interrupted_turn(
                 execution_identity=execution_identity,
                 scope=history_scope,
                 session_id=session_id,
                 event_ids={*request.sources.pending_event_ids, *request.sources.logical_source_event_ids},
                 natively=restarts <= _NATIVE_RECOVERY_LIMIT,
-                uncollected=uncollected,
+                jobs={} if runtime is None else job_acknowledgers(runtime.retained_jobs(), session_id),
             )
         if recovered:
             # The turn's runs name the recovered runs they continue, which its answer links and whose cost it reports.

@@ -342,7 +342,7 @@ async def test_a_team_turn_a_restart_cut_short_carries_its_members_usage_and_rec
     assert team.storage.patch_run_metadata(SESSION_ID, leader.run_id, cleared)
     spent = [run.metrics.tokens.input_tokens for run in (leader, *members) if run.metrics is not None]
 
-    recovered = recover_interrupted_turn(team.storage, SESSION_ID, team.scope, {EVENT_ID}, natively=True)
+    recovered = recover_interrupted_turn(team.storage, SESSION_ID, team.scope, {EVENT_ID}, natively=True, jobs={})
 
     assert recovered[CONTINUED_RUNS_METADATA_KEY] == [leader.run_id]
     assert stored_receipts(recovered) == {"member-job": 0.6}
@@ -387,7 +387,7 @@ async def test_a_leader_cut_short_mid_delegation_recovers_as_a_turn_of_its_own_c
     with suppress(asyncio.CancelledError):
         await turn
 
-    assert recover_interrupted_turn(team.storage, SESSION_ID, team.scope, {EVENT_ID}, natively=True)
+    assert recover_interrupted_turn(team.storage, SESSION_ID, team.scope, {EVENT_ID}, natively=True, jobs={})
     text = await team.respond(message="Next question", ctx=team.ctx(run_id="run-2"))
 
     assert text.endswith("Next answer.")

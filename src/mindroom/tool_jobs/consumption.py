@@ -124,6 +124,7 @@ class ConsumptionOwner:
                     await consumption.runtime.acknowledge_wait(
                         consumption.job_id,
                         consumption.claim,
+                        run_id=consumption.run_id,
                         returned_inline=consumption.returned_inline,
                     )
             except Exception:

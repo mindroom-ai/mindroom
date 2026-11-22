@@ -25,7 +25,7 @@ from mindroom.delegation.cost import (
     SubagentCost,
     receipts_metadata,
     receiving_subagent_cost,
-    resumed_subagent_cost,
+    stored_receipts,
 )
 from mindroom.delegation.recovery import interrupt_child, read_child_run
 from mindroom.delegation.state import DelegationChild
@@ -756,4 +756,4 @@ def test_a_child_snapshot_keeps_its_cost_and_one_saved_without_it_reads_as_unkno
 @pytest.mark.parametrize(("stored", "usd"), [(0.25, 0.25), (1, 1.0), (True, None), ("0.25", None)])
 def test_a_resumed_turn_goes_on_from_the_stored_cost_of_any_number(stored: object, usd: float | None) -> None:
     """A stored cost reads back as a number however JSON spelled it; anything else reads as unknown."""
-    assert resumed_subagent_cost({SUBAGENT_COST_RUN_METADATA_KEY: stored}).usd == usd
+    assert SubagentCost(stored_receipts({SUBAGENT_COST_RUN_METADATA_KEY: stored})).usd == usd

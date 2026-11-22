@@ -12,7 +12,7 @@ from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
 from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, JobRecoveryBlockedError, JobSpec
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterable
 
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationTerminalStatus
@@ -29,6 +29,16 @@ def delegation_child(job: BackgroundJob) -> DelegationChild:
         msg = "Job does not represent a native delegation."
         raise SubagentSessionError(msg)
     return DelegationChild.from_dict(job.adapter["child"])
+
+
+def job_acknowledgers(jobs: Iterable[BackgroundJob], session_id: str | None) -> dict[str, str | None]:
+    """Return the run that acknowledged each subagent job of conversation ``session_id``, by its child's delegation id.
+
+    None stands for a job no run acknowledged yet, and for one a release that kept no such record acknowledged. The
+    turn whose run acknowledges a job reports its cost, though a crash can store its result on another turn's run.
+    """
+    owned = (job for job in jobs if job.kind == "delegation" and job.owner.session_id == session_id)
+    return {delegation_child(job).delegation_id: job.acknowledged_by for job in owned}
 
 
 def delegation_outcome(status: DelegationTerminalStatus, text: str) -> BackgroundOutcome:
