@@ -248,10 +248,16 @@ class CollectedStreamPresentation:
     def show_text(self, content: str) -> None:
         """Apply one text chunk: it replaces the collected text in a stream of whole documents, else continues it."""
         if self.replaces_text:
-            self.response_text = content
-            self.separate_next_text = False
+            self._replace_text(content)
             return
         self.append_text(content)
+
+    def _replace_text(self, content: str) -> None:
+        """Replace the collected text; a paragraph break stays pending only where the new text ends at its tool call."""
+        last_line = content.rstrip("\r\n").rsplit("\n", maxsplit=1)[-1]
+        at_marker = self.show_tool_calls and last_line in _trace_marker_lines(self.tool_trace)
+        self.separate_next_text = at_marker or (self.separate_next_text and content == self.response_text)
+        self.response_text = content
 
     def append_text(self, content: object | None) -> None:
         """Append one provider content delta when it is non-empty."""
@@ -306,10 +312,9 @@ class CollectedStreamPresentation:
 
     def show_document(self, chunk: StructuredStreamChunk) -> None:
         """Replace the collected presentation with a document the stream sent whole; one without a trace keeps it."""
-        self.response_text = chunk.content
-        self.separate_next_text = False
         if chunk.tool_trace is not None:
             self.tool_trace = list(chunk.tool_trace)
+        self._replace_text(chunk.content)
         self.document_state = chunk.presentation_state
 
     def final_text(self) -> str:
@@ -943,14 +948,18 @@ def append_stream_text(
     return f"{existing_text}{'\n' if existing_text.endswith('\n') else '\n\n'}{delta}"
 
 
-def tool_markers_match_trace(text: str, tool_trace: Sequence[ToolTraceEntry]) -> bool:
-    """Return whether visible marker lines exactly match the ordered trace slots."""
-    visible_markers = tuple(line.strip() for line in text.splitlines() if is_visible_tool_marker_line(line))
-    expected_markers = tuple(
+def _trace_marker_lines(tool_trace: Sequence[ToolTraceEntry]) -> tuple[str, ...]:
+    """Return the marker line of each trace slot, in order."""
+    return tuple(
         _tool_marker_line(entry.tool_name, index, pending=entry.type == "tool_call_started")
         for index, entry in enumerate(tool_trace, start=1)
     )
-    return visible_markers == expected_markers
+
+
+def tool_markers_match_trace(text: str, tool_trace: Sequence[ToolTraceEntry]) -> bool:
+    """Return whether visible marker lines exactly match the ordered trace slots."""
+    visible_markers = tuple(line.strip() for line in text.splitlines() if is_visible_tool_marker_line(line))
+    return visible_markers == _trace_marker_lines(tool_trace)
 
 
 def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
