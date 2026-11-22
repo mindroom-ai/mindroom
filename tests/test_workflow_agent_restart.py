@@ -151,8 +151,8 @@ async def test_restart_before_the_first_tool_call_continues_with_the_full_prompt
     child = delegation_child(job)
     assert (len(child.task), child.depth, _node(stack).generation) == (80, 1, 1)
     assert prompt in _sent(stack)
-    # The run keeps the prompt; the job, whose every snapshot repeats its adapter, does not get a copy.
-    assert "continuation_prompt" not in job.adapter
+    # The run keeps the prompt; the job, whose every snapshot repeats its adapter, gets a mark for it and no copy.
+    assert "x" * 100 not in json.dumps(job.adapter)
 
 
 @pytest.mark.asyncio
@@ -166,10 +166,18 @@ async def test_continuation_after_a_tool_call_is_sent_the_whole_prompt_however_l
     await stack.submit("@0", "agent", {"prompt": prompt})
     await stack.until(lambda: len(model.requests) == 2)
 
+    await _restarted(stack, calls(tool_call("append", "c2", line="b")), [Await(asyncio.Event().wait), *answer("never")])
+    await stack.until(lambda: len(stack.models["watcher"].requests) == 2)
+
+    assert f"<interrupted_task>\n{prompt}\n</interrupted_task>" in _sent(stack, 0)
+    # The run keeps the prompt: the job, whose every snapshot repeats its adapter, keeps only what was put around it.
+    assert "x" * 100 not in json.dumps(stack.node_job("@0").adapter)
+
     await _restarted(stack, answer("tide"))
 
+    # A second restart puts the same prompt, whole, into what the agent is sent then.
     assert await stack.result("@0", "agent", {"prompt": prompt}) == "tide"
-    assert f"<interrupted_task>\n{prompt}\n</interrupted_task>" in _sent(stack)
+    assert (prompt in _sent(stack), stack.counting_tool.lines) == (True, ["a", "b"])
 
 
 @pytest.mark.asyncio

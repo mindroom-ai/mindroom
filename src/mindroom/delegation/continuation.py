@@ -37,6 +37,8 @@ if TYPE_CHECKING:
 _CONTINUATIONS_KEY = "restart_continuations"
 # What the job's latest continuation was sent in place of its task, saved with the job and nowhere a room reads.
 _PROMPT_KEY = "continuation_prompt"
+# What stands in a saved continuation prompt for the prompt of the workflow run's call, which the run keeps.
+_CALL_PROMPT_MARK = "<<mindroom:workflow-call-prompt>>"
 # How many restarts may cut one subagent job short before the next one ends it, in case continuing is what stops it.
 _RESTART_CONTINUATION_LIMIT = 2
 # How much of what the cut-short turn was sent the continuation prompt repeats.
@@ -128,9 +130,10 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
             # The job stays the call of its workflow run, which reads what each run of the call used and did.
             spec.adapter.update({key: job.adapter[key] for key in ("workflow", "node", "generation")})
             spec.adapter[SPENT_RUNS_KEY] = [*dict.fromkeys([*job.adapter.get(SPENT_RUNS_KEY, ()), child.run_id])]
-            if prompt == workflow_call_prompt(child):
-                # The run keeps the call's prompt, so the job, whose every snapshot repeats its adapter, needs no copy.
-                del spec.adapter[_PROMPT_KEY]
+            # The run keeps the call's prompt, so the job, whose every snapshot repeats its adapter, keeps a mark
+            # in its place.
+            asked = workflow_call_prompt(child) or _CALL_PROMPT_MARK
+            spec.adapter[_PROMPT_KEY] = prompt.replace(asked, _CALL_PROMPT_MARK)
     return spec
 
 
@@ -175,6 +178,8 @@ async def _continuation_prompt(
     recovered run as to any turn, and may leave out both.
     """
     sent = job.adapter.get(_PROMPT_KEY) or original_prompt(child)
+    if child.workflow_run_id is not None:
+        sent = sent.replace(_CALL_PROMPT_MARK, original_prompt(child))
     if child.delegation_id != delegation_child(job).delegation_id:
         return sent
     run = await read_child_run(child, config, runtime_paths)
