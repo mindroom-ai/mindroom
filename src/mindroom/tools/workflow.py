@@ -52,10 +52,10 @@ def _limit(name: str, label: str, default: float | None, minimum: float = 1) -> 
         _limit("large_run_notice_usd", "Large Run Notice (USD)", 10, minimum=0),
     ],
     managed_init_args=(
-        ToolManagedInitArg.RUNTIME_CONFIG,
-        ToolManagedInitArg.AGENT_NAME,
-        ToolManagedInitArg.CURRENT_ROOM_ID,
         ToolManagedInitArg.RUNTIME_PATHS,
+        ToolManagedInitArg.RUNTIME_CONFIG,
+        ToolManagedInitArg.CURRENT_ROOM_ID,
+        ToolManagedInitArg.AGENT_NAME,
     ),
     requires_room_context=True,
     function_names=("start_workflow", "get_workflow", "cancel_workflow", "resume_workflow"),
