@@ -479,21 +479,23 @@ class KubernetesWorkerBackend:
         """
         reporter.preparing()
         deadline = time.monotonic() + self.config.setup_timeout_seconds
-        while (setup := _reported_setup(health)) == "preparing":
-            time.sleep(min(_SETUP_POLL_INTERVAL_SECONDS, max(deadline - time.monotonic(), 0.0)))
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                health = self._resources.read_worker_health(
-                    worker_id,
-                    timeout_seconds=min(_SETUP_HEALTH_TIMEOUT_SECONDS, remaining),
-                )
-            except WorkerBackendError:
-                break
-        if setup is not None and setup != "ready":
-            logger.warning("Worker %s did not finish its setup (%s); its first call prepares it", worker_id, setup)
-        reporter.finish(None)
+        try:
+            while (setup := _reported_setup(health)) == "preparing":
+                time.sleep(min(_SETUP_POLL_INTERVAL_SECONDS, max(deadline - time.monotonic(), 0.0)))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    health = self._resources.read_worker_health(
+                        worker_id,
+                        timeout_seconds=min(_SETUP_HEALTH_TIMEOUT_SECONDS, remaining),
+                    )
+                except WorkerBackendError:
+                    break
+            if setup is not None and setup != "ready":
+                logger.warning("Worker %s did not finish its setup (%s); its first call prepares it", worker_id, setup)
+        finally:
+            reporter.finish(None)
 
     def _compatible_worker_health(self, worker_id: str, *, is_replacement: bool) -> httpx.Response | None:
         """Return the ready worker's health answer, or None when it speaks another protocol and gets replaced.
