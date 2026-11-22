@@ -172,3 +172,26 @@ def test_failed_uv_seed_is_retried_without_losing_existing_worker_files(
     local_workers.ensure_local_worker_state_locked(paths)
     _assert_seeded_worker_environment(paths)
     assert retained.read_text() == "keep"
+
+
+@_requires_uv_seed
+def test_stuck_venv_creation_fails_and_the_next_request_retries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A venv creation that hangs ends at its time limit, so it holds neither the worker's lock nor its setup forever."""
+    paths = local_workers.local_worker_state_paths_for_root(tmp_path / "worker")
+    stuck_uv = tmp_path / "stuck-uv"
+    stuck_uv.write_text('#!/bin/sh\nfor last; do :; done\nmkdir -p "$last/bin"\ntouch "$last/bin/python"\nexec sleep 30\n')
+    stuck_uv.chmod(0o755)
+    original_which = shutil.which
+    monkeypatch.setattr(shutil, "which", lambda _command: str(stuck_uv))
+    monkeypatch.setattr(local_workers, "_VENV_CREATE_TIMEOUT_SECONDS", 0.5, raising=False)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        local_workers.ensure_local_worker_state_locked(paths)
+    assert not (paths.venv_dir / "bin" / "python").exists()
+
+    monkeypatch.setattr(shutil, "which", original_which)
+    local_workers.ensure_local_worker_state_locked(paths)
+    _assert_seeded_worker_environment(paths)

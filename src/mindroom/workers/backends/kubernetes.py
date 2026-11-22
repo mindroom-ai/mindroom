@@ -463,7 +463,7 @@ class KubernetesWorkerBackend:
                 health = self._resources.read_worker_health(worker_id, timeout_seconds=_SETUP_HEALTH_TIMEOUT_SECONDS)
             except WorkerBackendError:
                 break
-        if setup not in {None, "ready"}:
+        if setup is not None and setup != "ready":
             logger.warning("Worker %s did not finish its setup (%s); its first call prepares it", worker_id, setup)
 
     def _compatible_worker_health(self, worker_id: str, *, is_replacement: bool) -> httpx.Response | None:
