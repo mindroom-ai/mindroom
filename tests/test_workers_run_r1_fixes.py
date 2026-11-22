@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import errno
+import io
 import os
 import signal
 import sys
@@ -19,7 +21,7 @@ from mindroom.agent_cli.main import main
 from mindroom.agent_cli.protocol import ToolCallOperation
 from mindroom.agent_cli.turn import ToolKey
 from mindroom.constants import resolve_primary_runtime_paths
-from mindroom.shell.execution import ShellRunResult, run_command
+from mindroom.shell.execution import ShellRunResult, _launch_failure, run_command
 from mindroom.shell.output_capture import ShellOutputDestination, format_shell_completion
 from mindroom.tool_system.catalog import builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import WorkerStandIns
@@ -232,28 +234,127 @@ async def test_r3_bare_name_missing_from_a_path_with_a_file_entry_is_command_not
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("mode", "reason"),
+    ("first_line", "mode", "bare", "exit_code", "reason"),
     [
-        (0o755, "/nonexistent/interp: bad interpreter: No such file or directory"),
-        (0o644, "Permission denied"),
+        ("#!/nonexistent/interp -x\n", 0o755, True, 127, "cannot execute: required file not found"),
+        ("#!/nonexistent/interp -x\n", 0o755, False, 127, "No such file or directory"),
+        ("#!/bin/sh\r\n", 0o755, True, 127, "cannot execute: required file not found"),
+        ("#!/bin/sh\n", 0o644, True, 126, "Permission denied"),
+        ("#!/bin/sh\n", 0o644, False, 126, "Permission denied"),
     ],
 )
-@pytest.mark.parametrize("bare", [True, False])
-async def test_r3_program_that_is_found_but_cannot_run_is_reported_as_bash_reports_it(
+async def test_r3_program_that_is_found_but_cannot_run_is_reported_by_its_spawn_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    first_line: str,
     mode: int,
-    reason: str,
     bare: bool,
+    exit_code: int,
+    reason: str,
 ) -> None:
-    """A script with a missing interpreter, or without the execute bit, exits 126 with bash's words, by name or by path."""
+    """A script whose interpreter is missing, or without the execute bit, is reported from its spawn error alone."""
     # Where the idle policy is refused, a command starts directly, so its spawn error is the one that is reported.
     monkeypatch.setattr("mindroom.shell.execution._idle_launcher", lambda: None)
     script = tmp_path / "script-xyz"
-    script.write_text("#!/nonexistent/interp -x\necho hi\n")
+    script.write_text(f"{first_line}echo hi\n")
     script.chmod(mode)
     result = await _launch(["script-xyz" if bare else str(script)], path=tmp_path, cwd=tmp_path)
-    assert result == ShellRunResult(message=f"Exit code 126\nStderr:\n{script}: {reason}")
+    assert result == ShellRunResult(message=f"Exit code {exit_code}\nStderr:\n{script}: {reason}")
+
+
+@pytest.mark.asyncio
+async def test_r4_path_entry_that_loops_stays_an_execution_error(tmp_path: Path) -> None:
+    """An error outside the listed ones, here a PATH entry that is a symlink to itself, is no missing program."""
+    loop = tmp_path / "loop"
+    loop.symlink_to(loop)
+    result = await _launch(["missing-program-xyz"], path=loop, cwd=tmp_path)
+    assert result.execution_error is True
+    assert result.message.startswith(f"Error: [Errno {errno.ELOOP}]")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fifo", [False, True])
+async def test_r4_program_with_a_trailing_slash_keeps_it_and_is_never_opened(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fifo: bool,
+) -> None:
+    """A file named as a directory is reported under the name it was given, and what it holds is never read."""
+    monkeypatch.setattr("mindroom.shell.execution._idle_launcher", lambda: None)
+    program = tmp_path / "script-xyz"
+    line = b"#!/bin/sh\n"
+    if fifo:
+        os.mkfifo(program, 0o755)
+        # A reader of a FIFO waits for its writer; this end makes any read return at once and shows whether one happened.
+        writer = os.open(program, os.O_RDWR | os.O_NONBLOCK)
+        os.write(writer, line)
+    else:
+        program.write_bytes(line)
+        program.chmod(0o755)
+    try:
+        result = await _launch(["./script-xyz/"], path=tmp_path, cwd=tmp_path)
+        assert result == ShellRunResult(message="Exit code 126\nStderr:\n./script-xyz/: Not a directory")
+        if fifo:
+            assert os.read(writer, 64) == line
+    finally:
+        if fifo:
+            os.close(writer)
+
+
+_FOUND = "{found}"
+
+
+@pytest.mark.parametrize(
+    ("program", "on_path", "error", "expected"),
+    [
+        ("name-xyz", False, errno.ENOENT, "Exit code 127\nStderr:\nname-xyz: command not found"),
+        ("name-xyz", False, errno.ENOTDIR, "Exit code 127\nStderr:\nname-xyz: command not found"),
+        ("name-xyz", False, errno.EACCES, None),
+        ("name-xyz", False, errno.ELOOP, None),
+        ("name-xyz", True, errno.EACCES, f"Exit code 126\nStderr:\n{_FOUND}: Permission denied"),
+        ("name-xyz", True, errno.ENOENT, f"Exit code 127\nStderr:\n{_FOUND}: cannot execute: required file not found"),
+        ("name-xyz", True, errno.ENOTDIR, f"Exit code 127\nStderr:\n{_FOUND}: cannot execute: required file not found"),
+        ("name-xyz", True, errno.ENOEXEC, None),
+        ("name-xyz", True, errno.ELOOP, None),
+        ("name-xyz", True, None, None),
+        ("./name-xyz/", True, errno.ENOENT, "Exit code 127\nStderr:\n./name-xyz/: No such file or directory"),
+        ("./name-xyz/", True, errno.ENOTDIR, "Exit code 126\nStderr:\n./name-xyz/: Not a directory"),
+        ("./name-xyz/", True, errno.EACCES, "Exit code 126\nStderr:\n./name-xyz/: Permission denied"),
+        ("./name-xyz/", True, errno.ELOOP, None),
+        ("./name-xyz/", True, errno.ENAMETOOLONG, None),
+        ("./name-xyz/", True, errno.ENOEXEC, None),
+        ("./name-xyz/", True, errno.EISDIR, None),
+        ("./name-xyz/", True, None, None),
+    ],
+)
+def test_r4_launch_failure_is_classified_by_errno_and_the_given_name_alone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    program: str,
+    on_path: bool,
+    error: int | None,
+    expected: str | None,
+) -> None:
+    """Only the listed errors are a shell's exit; the program file is never opened, and its name is never rewritten."""
+    if on_path:
+        (tmp_path / "name-xyz").write_text("#!/nonexistent/interp\n")
+
+    def opened(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("the program file was opened")
+
+    with monkeypatch.context() as patched:
+        for owner, name in ((io, "open"), (os, "open"), (builtins, "open")):
+            patched.setattr(owner, name, opened)
+        result = _launch_failure(
+            [program],
+            {"PATH": str(tmp_path)},
+            str(tmp_path),
+            OSError(error, "spawn failed", program),
+            None,
+        )
+
+    message = expected.format(found=tmp_path / "name-xyz") if expected is not None else None
+    assert (result.message if result is not None else None) == message
 
 
 @pytest.mark.asyncio
