@@ -834,15 +834,20 @@ def _find_program(program: str, env: dict[str, str], cwd: str | None, mode: int 
     return shutil.which(program, mode=mode, path=os.pathsep.join(search))
 
 
-def _interpreter(script: str) -> str | None:
-    """Return the interpreter the first line of *script* names, or None for a file that is no readable script."""
-    try:
-        with Path(script).open("rb") as file:
-            line = file.readline(256)
-    except OSError:
-        return None
-    words = line[2:].split() if line.startswith(b"#!") else []
-    return os.fsdecode(words[0]) if words else None
+# Bash's exit code and words for the spawn errors that are a shell's own exit: of a program named by a path, of a bare
+# name no PATH entry holds, and of a bare name found on PATH. Every other error stays a failed call.
+_PATH_LAUNCH_FAILURES = {
+    errno.ENOENT: (127, "No such file or directory"),
+    errno.ENOTDIR: (126, "Not a directory"),
+    errno.EACCES: (126, "Permission denied"),
+}
+_MISSING_NAME_LAUNCH_FAILURES = dict.fromkeys((errno.ENOENT, errno.ENOTDIR), (127, "command not found"))
+_FOUND_NAME_LAUNCH_FAILURES = {
+    # A file the program needs to start, such as its interpreter, is missing.
+    errno.ENOENT: (127, "cannot execute: required file not found"),
+    errno.ENOTDIR: (127, "cannot execute: required file not found"),
+    errno.EACCES: (126, "Permission denied"),
+}
 
 
 def _launch_failure(
@@ -856,6 +861,7 @@ def _launch_failure(
 
     The result is the one of a command that exited 127 or 126 with Bash's words on stderr, so everything that reads a
     failed command's result reads this one. A working directory the command cannot enter fails before any program.
+    The error number and the program's name as given decide alone: the program file is never opened.
     """
     if (
         not isinstance(exc, OSError)
@@ -864,20 +870,17 @@ def _launch_failure(
         or (cwd is not None and not (Path(cwd).is_dir() and os.access(cwd, os.X_OK)))
     ):
         return None
-    program, bare = argv[0], os.sep not in argv[0]
-    file = _find_program(program, env, cwd, os.F_OK)
-    return_code, reason = 126, os.strerror(exc.errno)
-    if bare and file is None:
-        # No PATH entry holds the name, whatever error the last entry gave.
-        return_code, reason = 127, "command not found"
-    elif exc.errno in {errno.ENOENT, errno.ENOTDIR} and file and (interpreter := _interpreter(file)):
-        reason = f"{interpreter}: bad interpreter: {reason}"
-    elif exc.errno == errno.ENOENT:
-        return_code = 127
-    elif exc.errno not in {errno.EACCES, errno.EISDIR, errno.ENOTDIR, errno.ENOEXEC}:
+    program = argv[0]
+    if os.sep in program:
+        failures = _PATH_LAUNCH_FAILURES
+    elif (found := _find_program(program, env, cwd, os.F_OK)) is None:
+        failures = _MISSING_NAME_LAUNCH_FAILURES
+    else:
+        # Bash names a program it found on PATH by where it found it.
+        program, failures = found, _FOUND_NAME_LAUNCH_FAILURES
+    if (failure := failures.get(exc.errno or 0)) is None:
         return None
-    # Bash names a program it found on PATH by where it found it.
-    said = f"{file if bare and file else program}: {reason}"
+    return_code, said = failure[0], f"{program}: {failure[1]}"
     if capture is None:
         return ShellRunResult(message=format_shell_completion("", said, return_code=return_code))
     capture.stderr.append(f"{said}\n")

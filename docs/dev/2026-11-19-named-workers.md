@@ -61,7 +61,7 @@ Neither lets an agent's own shell run a command on a pod it chooses, which is wh
   It reads the exit code and the stop at the time limit from the words the shell leads its result with, which tests build with the shell's own formatters; a receipt field for the exit status would be a second contract through the runner, the proxy, and the receipt for the same fact.
   A program the worker cannot find or execute completes as the result of a command that exited `127` or `126` with a shell's words on stderr, so output saving, an output path, and every CLI version treat it as any failed command.
   A receipt field for it was rejected: the runner's output saving replaced the result that carried it, and a CLI that predates the field exited `0`.
-  Other launch failures remain failed tool calls.
+  The runner decides this from the spawn error's number and the program's name as given alone, never by opening the program file, so every error outside its list remains a failed tool call.
   When the runner saves the output, the worker header and the shell’s exit line are in the preview.
   It submits once and retries only receipt reads, even when the submission response is lost, because a second submission could run the command twice.
 - **Maintenance retries a failed removal from the worker's files.**
