@@ -270,3 +270,200 @@ async def test_read_fresh_thread_history_handles_room_mode_normal_and_strict_deg
     runner.deps.resolver.fetch_thread_history = AsyncMock(side_effect=RuntimeError("boom"))
     fallback = await runner.locked.refresh_model_history(_plain_request(thread_target))
     assert fallback.requires_model_history_refresh is True
+
+
+@pytest.mark.asyncio
+async def test_exclusive_conversation_waits_for_approval_without_admission_or_reply_signal(tmp_path: Path) -> None:
+    """Lock-only exclusive_conversation waits out approvals without admission and does not look like a reply."""
+    import asyncio
+
+    from mindroom.bot_runtime_view import BotRuntimeState
+    from mindroom.event_journal import EventJournalStore, approval_signals
+    from mindroom.event_journal.approval_signals import PausedReply
+    from mindroom.message_target import MessageTarget
+    from mindroom.response_lifecycle import ResponseLifecycleCoordinator
+    from tests.conftest import request_envelope
+
+    bot = _bot(tmp_path)
+    runtime = BotRuntimeState(orchestrator=bot.orchestrator)
+    gate = runtime.response_admission_gate
+    coordinator = ResponseLifecycleCoordinator()
+    store = EventJournalStore.open_sqlite(tmp_path / "journal.db")
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$src")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    reply_ran = asyncio.Event()
+    order: list[str] = []
+
+    try:
+        coordinator.follow_approval_holds(store.approval_signals, "agent@general", lambda _room_id: None)
+        await store.backend.write(
+            lambda tx: approval_signals.paused(tx, PausedReply("agent@general", "appr-1", "!room:localhost", "$thread")),
+        )
+
+        async def run_exclusive() -> None:
+            async with coordinator.exclusive_conversation(
+                target,
+                admit=runtime.admission_fence,
+                wait_for_approval_release=runtime.wait_for_admission_or_shutdown,
+            ):
+                order.append("exclusive_enter")
+                entered.set()
+                await release.wait()
+                order.append("exclusive_exit")
+
+        task = asyncio.create_task(run_exclusive())
+        await asyncio.sleep(0)
+        assert not entered.is_set()
+        # No admission slot is held while waiting for approval, so replacement can close idle admission.
+        assert gate.in_flight_response_count == 0
+        assert gate.close_if_idle() is True
+        gate.reopen()
+
+        # Release the approval; exclusive work now acquires admission and the lock.
+        await store.backend.write(lambda tx: approval_signals.ended(tx, "agent@general", "appr-1", None))
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        assert gate.in_flight_response_count == 1
+        assert coordinator.has_active_response_for_target(target) is False
+
+        # A normal reply queues behind the exclusive holder on the same FIFO lock.
+        envelope = request_envelope(target=target, prompt="follow", user_id="@user:localhost")
+
+        async def locked_reply(_target: MessageTarget) -> str:
+            order.append("reply")
+            reply_ran.set()
+            return "ok"
+
+        reply_task = asyncio.create_task(
+            coordinator.run_locked_response(
+                target=target,
+                response_envelope=envelope,
+                pipeline_timing=None,
+                locked_operation=locked_reply,
+            ),
+        )
+        await asyncio.sleep(0)
+        assert not reply_ran.is_set()
+        assert not coordinator._get_or_create_queued_signal(target).has_pending_human_messages()
+
+        release.set()
+        await asyncio.wait_for(task, timeout=2)
+        assert await asyncio.wait_for(reply_task, timeout=2) == "ok"
+        assert order == ["exclusive_enter", "exclusive_exit", "reply"]
+        assert gate.in_flight_response_count == 0
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_exclusive_conversation_rewaits_when_hold_appears_while_queued_and_stops_on_drain(
+    tmp_path: Path,
+) -> None:
+    """A hold appearing while queued releases both lock and admission; draining refuses the wait."""
+    import asyncio
+
+    from mindroom.bot_runtime_view import BotRuntimeState
+    from mindroom.event_journal import EventJournalStore, approval_signals
+    from mindroom.event_journal.approval_signals import PausedReply
+    from mindroom.message_target import MessageTarget
+    from mindroom.response_admission import ResponseAdmissionRefusedError
+    from mindroom.response_lifecycle import ResponseLifecycleCoordinator
+    from tests.conftest import request_envelope
+
+    bot = _bot(tmp_path)
+    runtime = BotRuntimeState(orchestrator=bot.orchestrator)
+    gate = runtime.response_admission_gate
+    coordinator = ResponseLifecycleCoordinator()
+    store = EventJournalStore.open_sqlite(tmp_path / "journal.db")
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$src")
+    reply_locked = asyncio.Event()
+    reply_release = asyncio.Event()
+    exclusive_entered = asyncio.Event()
+
+    try:
+        coordinator.follow_approval_holds(store.approval_signals, "agent@general", lambda _room_id: None)
+        envelope = request_envelope(target=target, prompt="hi", user_id="@user:localhost")
+
+        async def pausing_reply(_target: MessageTarget) -> None:
+            reply_locked.set()
+            await reply_release.wait()
+            await store.backend.write(
+                lambda tx: approval_signals.paused(
+                    tx,
+                    PausedReply("agent@general", "appr-2", "!room:localhost", "$thread"),
+                ),
+            )
+
+        reply_task = asyncio.create_task(
+            coordinator.run_locked_response(
+                target=target,
+                response_envelope=envelope,
+                pipeline_timing=None,
+                locked_operation=pausing_reply,
+            ),
+        )
+        await asyncio.wait_for(reply_locked.wait(), timeout=2)
+
+        async def run_exclusive() -> None:
+            async with coordinator.exclusive_conversation(
+                target,
+                admit=runtime.admission_fence,
+                wait_for_approval_release=runtime.wait_for_admission_or_shutdown,
+            ):
+                exclusive_entered.set()
+
+        exclusive_task = asyncio.create_task(run_exclusive())
+        await asyncio.sleep(0)
+        reply_release.set()
+        await asyncio.wait_for(reply_task, timeout=2)
+        await asyncio.sleep(0)
+
+        # The preceding reply paused for approval, so exclusive_conversation released admission and re-waited.
+        assert not exclusive_entered.is_set()
+        assert gate.in_flight_response_count == 0
+
+        # Draining the runtime while parked refuses admission cleanly.
+        runtime.begin_draining()
+        with pytest.raises(ResponseAdmissionRefusedError):
+            await asyncio.wait_for(exclusive_task, timeout=2)
+        assert target.lifecycle_key not in coordinator._exclusive_users
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_reply_admission_fence_logs_deferred_and_refused_events(tmp_path: Path) -> None:
+    """Reply lifecycle admission logs deferral and refusal through the shared admission_fence."""
+    import asyncio
+    from unittest.mock import MagicMock
+
+    from mindroom.response_admission import ResponseAdmissionRefusedError
+    from mindroom.response_sources import Owned
+
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    logger_spy = MagicMock()
+    runner.locked.deps = replace(runner.deps, logger=logger_spy)
+    gate = runner.deps.runtime.response_admission_gate
+    assert gate.close_if_idle() is True
+
+    task = asyncio.create_task(
+        runner._run_locked_response_lifecycle(
+            _plain_request(_target()),
+            response_kind="ai",
+            locked_operation=AsyncMock(return_value=Owned()),
+        ),
+    )
+    await asyncio.sleep(0)
+    logger_spy.info.assert_called_once()
+    assert logger_spy.info.call_args.args == ("response_deferred_during_replacement",)
+    assert logger_spy.info.call_args.kwargs["response_kind"] == "ai"
+
+    runner.deps.runtime.begin_draining()
+    with pytest.raises(ResponseAdmissionRefusedError):
+        await asyncio.wait_for(task, timeout=2)
+    logger_spy.warning.assert_called_once()
+    assert logger_spy.warning.call_args.args == ("response_refused_after_runtime_replacement",)
+    assert logger_spy.warning.call_args.kwargs["response_kind"] == "ai"
+    assert runner.in_flight_response_count == 0
+    assert gate.in_flight_response_count == 0

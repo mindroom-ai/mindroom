@@ -3622,6 +3622,7 @@ visibility = [
     "mindroom.orchestrator",
     "mindroom.plugin_http",
     "mindroom.reply_turn.inbox",
+    "mindroom.response_lifecycle",
     "mindroom.response_runner",
     "mindroom.slack.delivery",
     "mindroom.slack.turns",
@@ -3639,6 +3640,7 @@ depends_on = [
     "mindroom.ai_runtime",
     "mindroom.hooks",
     "mindroom.post_response_effects",
+    "mindroom.response_admission",
     "mindroom.streaming",
 ]
 visibility = [

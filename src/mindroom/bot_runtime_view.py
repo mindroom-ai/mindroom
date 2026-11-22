@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Protocol
 from mindroom.response_admission import admitted_response_decision
 
 if TYPE_CHECKING:
+    from collections.abc import Coroutine
     from contextlib import AbstractAsyncContextManager
 
     import nio
@@ -61,9 +62,11 @@ class BotRuntimeView(Protocol):
     @property
     def phase(self) -> RunPhase: ...  # noqa: D102
 
-    def admission_fence(self) -> AbstractAsyncContextManager[None]: ...  # noqa: D102
+    def admission_fence(
+        self, *, on_deferred: Callable[[], None] | None = None, on_refused: Callable[[], None] | None = None
+    ) -> AbstractAsyncContextManager[None]: ...  # noqa: D102
 
-    async def wait_for_admission_or_shutdown(self) -> bool: ...  # noqa: D102
+    async def wait_for_admission_or_shutdown(self, ready: Coroutine[None, None, object] | None = None) -> bool: ...  # noqa: D102
 
 
 @dataclass
@@ -128,18 +131,18 @@ class BotRuntimeState:
         self._stopping.clear()
         return True
 
-    async def wait_for_admission_or_shutdown(self) -> bool:
-        """Return whether the runtime reopened response admission before this generation stopped accepting work."""
-        admission_opened = asyncio.create_task(self.response_admission_gate.wait_until_open())
+    async def wait_for_admission_or_shutdown(self, ready: Coroutine[None, None, object] | None = None) -> bool:
+        """Wait for admission (or its prerequisite) unless this generation stops accepting work."""
+        ready_task = asyncio.create_task(ready if ready is not None else self.response_admission_gate.wait_until_open())
         stopping = asyncio.create_task(self._stopping.wait())
         try:
-            await asyncio.wait((admission_opened, stopping), return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait((ready_task, stopping), return_when=asyncio.FIRST_COMPLETED)
             return self.phase is RunPhase.ACCEPTING
         finally:
-            for task in (admission_opened, stopping):
+            for task in (ready_task, stopping):
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(admission_opened, stopping, return_exceptions=True)
+            await asyncio.gather(ready_task, stopping, return_exceptions=True)
 
     def admission_fence(self) -> AbstractAsyncContextManager[None]:
         """Reserve runtime-replacement admission around one authorization decision and the effects it permits."""
