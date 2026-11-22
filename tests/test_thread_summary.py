@@ -54,7 +54,6 @@ from mindroom.thread_summary.generation import (
     _ThreadSummary,
     generate_summary,
     resolve_thread_summary_model_name,
-    room_summary_instructions,
     room_title_settings,
     title_error,
 )
@@ -1246,7 +1245,7 @@ class TestMaybeGenerateThreadSummary:
         """A room setting over 2,000 characters is cut to 2,000."""
         self.room_state.title_rules = {"value": " " + "x" * 2500}
 
-        assert await room_summary_instructions(self.client, _ROOM) == "x" * 2000
+        assert await room_title_settings(self.client, _mock_config(), _ROOM) == (None, "x" * 2000)
 
     @pytest.mark.parametrize("case", ["automatic", "manual", "pinned", "more_messages", "wrong_prompt", "resolved"])
     async def test_provisional_title_skips_existing_threads(self, case: str) -> None:

@@ -166,30 +166,22 @@ async def _room_title_setting(client: nio.AsyncClient, room_id: str, key: str) -
     return None
 
 
-async def room_summary_instructions(client: nio.AsyncClient, room_id: str) -> str | None:
-    """Return the room admins' extra title rules, or None when unset; a failed read logs and counts as unset."""
-    instructions = await _room_title_setting(client, room_id, "thread_summary_instructions")
-    return instructions and instructions[:_ROOM_INSTRUCTIONS_MAX_LENGTH]
-
-
-async def room_summary_model(client: nio.AsyncClient, config: Config, room_id: str) -> str | None:
-    """Return the model the room's `thread_summary_model` setting names, `name` or `name@level`.
-
-    None when it is unset or unreadable, or names no configured model, which is logged once; the configured summary
-    model then applies.
-    """
-    model_name = await _room_title_setting(client, room_id, "thread_summary_model")
-    if model_name is None or model_name in config.models:
-        return model_name
-    if (room_id, model_name) not in _unknown_room_models_logged:
-        _unknown_room_models_logged.add((room_id, model_name))
-        logger.warning("Room thread summary model ignored", room_id=room_id, model=model_name)
-    return None
-
-
 async def room_title_settings(client: nio.AsyncClient, config: Config, room_id: str) -> tuple[str | None, str | None]:
-    """Return the room's title model and its admins' extra title rules, read at once."""
-    return await asyncio.gather(room_summary_model(client, config, room_id), room_summary_instructions(client, room_id))
+    """Return the room's title model, `name` or `name@level`, and its admins' extra title rules, read at once.
+
+    Each is None when unset or unreadable; a failed read logs. A `thread_summary_model` that names no configured model
+    is None too, logged once, so the configured summary model applies.
+    """
+    model_name, instructions = await asyncio.gather(
+        _room_title_setting(client, room_id, "thread_summary_model"),
+        _room_title_setting(client, room_id, "thread_summary_instructions"),
+    )
+    if model_name is not None and model_name not in config.models:
+        if (room_id, model_name) not in _unknown_room_models_logged:
+            _unknown_room_models_logged.add((room_id, model_name))
+            logger.warning("Room thread summary model ignored", room_id=room_id, model=model_name)
+        model_name = None
+    return model_name, instructions and instructions[:_ROOM_INSTRUCTIONS_MAX_LENGTH]
 
 
 @timed("thread_summary_generation")

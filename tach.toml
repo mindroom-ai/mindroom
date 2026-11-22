@@ -6257,6 +6257,7 @@ depends_on = [
     "mindroom.providers.registry",
     "mindroom.agent_loop.helper",
     "mindroom.llm",
+    "mindroom.room_settings",
     "mindroom.thread_tag_vocabulary",
     "mindroom.thread_tags",
     "mindroom.tool_system.events",
