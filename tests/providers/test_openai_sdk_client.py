@@ -85,6 +85,13 @@ async def test_requests_with_files_a_form_or_no_body_send_what_the_sdk_builds() 
         await client.request(httpx2.Response, both)
 
     upload, form, files, listing, configured_form = sent
+    sent_to = [(request.method, request.url.path) for request in sent]
+    assert sent_to == [
+        ("POST", "/v1/files"),
+        *[("POST", "/v1/uploads")] * 2,
+        ("GET", "/v1/models"),
+        ("POST", "/v1/uploads"),
+    ]
     assert upload.headers["content-type"].startswith("multipart/form-data; boundary=")
     assert b'name="purpose"\r\n\r\nassistants' in upload.content
     assert b'filename="notes.txt"' in upload.content
@@ -92,7 +99,6 @@ async def test_requests_with_files_a_form_or_no_body_send_what_the_sdk_builds() 
     assert form.headers["content-type"].startswith("multipart/form-data; boundary=")
     assert b'name="purpose"\r\n\r\nassistants' in form.content
     assert b'name="file"; filename="upload"\r\nContent-Type: application/octet-stream\r\n\r\nhi\r\n' in files.content
-    assert listing.method == "GET"
     assert listing.content == b""
     assert configured_form.headers["content-type"].startswith("multipart/form-data; boundary=")
     assert b'name="purpose"\r\n\r\nassistants' in configured_form.content

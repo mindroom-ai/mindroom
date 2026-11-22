@@ -298,13 +298,18 @@ async def test_the_history_is_encoded_off_the_event_loop_one_message_at_a_time(
     built = _Built(tmp_path, model_config, reply)
 
     await _adapter_turn(
-        built, ModelRequest(messages=[_user("first marker"), Message(role="assistant", content="second marker")])
+        built,
+        ModelRequest(messages=[_user("first marker"), Message(role="assistant", content="second marker")]),
     )
 
     history = [(on_loop, text) for on_loop, text in encoded if "marker" in text]
     assert history
     assert not [text for on_loop, text in history if on_loop]
     assert not [text for _, text in history if "first marker" in text and "second marker" in text]
+    # The SDK's encoder writes no space after a key, which tells its pieces from the digest's.
+    body = [text for _, text in history if '": "' not in text]
+    assert [text for text in body if "first marker" in text]
+    assert [text for text in body if "second marker" in text]
     sent = built.requests[0].content.decode()
     assert "first marker" in sent
     assert "second marker" in sent
