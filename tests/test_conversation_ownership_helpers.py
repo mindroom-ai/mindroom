@@ -999,6 +999,85 @@ def test_exclusive_conversation_requires_admission_approval_wait_and_accepting_t
 
 
 @pytest.mark.asyncio
+async def test_exclusive_conversation_pins_its_lock_against_eviction_while_waiting_for_admission(
+    tmp_path: Path,
+) -> None:
+    """A lock-only caller waiting for admission keeps its lock entry, so a reply for the target shares that lock."""
+    bot = _bot(tmp_path)
+    runtime = BotRuntimeState(orchestrator=bot.orchestrator)
+    gate = runtime.response_admission_gate
+    coordinator = ResponseLifecycleCoordinator()
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$src")
+    key = target.lifecycle_key
+    reply_locks: list[asyncio.Lock] = []
+    reply_locked = asyncio.Event()
+    reply_release = asyncio.Event()
+    admitted = asyncio.Event()
+    body_locks: list[asyncio.Lock] = []
+    body_entered = asyncio.Event()
+
+    @asynccontextmanager
+    async def fence() -> AsyncIterator[None]:
+        async with runtime.admission_fence():
+            admitted.set()
+            yield
+
+    async def run_exclusive() -> None:
+        async with coordinator.exclusive_conversation(
+            target,
+            admit=fence,
+            wait_for_approval_release=runtime.wait_for_admission_or_shutdown,
+            accepting=lambda: runtime.phase is RunPhase.ACCEPTING,
+        ):
+            body_locks.append(coordinator._response_lifecycle_locks[key])
+            body_entered.set()
+
+    async def holding_reply(_target: MessageTarget) -> None:
+        reply_locks.append(coordinator._response_lifecycle_locks[key])
+        reply_locked.set()
+        await reply_release.wait()
+
+    assert gate.close_if_idle() is True
+    exclusive_task = asyncio.create_task(run_exclusive())
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    # The caller waits for admission: its entry is unlocked and nothing but the pin refers to it.
+    waiting_lock = coordinator._response_lifecycle_locks[key]
+    assert not waiting_lock.locked()
+    assert gate.in_flight_response_count == 0
+    assert key not in coordinator._thread_queued_signals
+
+    for index in range(105):
+        coordinator._response_lifecycle_lock(MessageTarget.resolve("!room:localhost", f"$other{index}", f"$o{index}"))
+    assert len(coordinator._response_lifecycle_locks) == 100
+    assert coordinator._response_lifecycle_locks.get(key) is waiting_lock
+
+    reply_task = asyncio.create_task(
+        coordinator.run_locked_response(
+            target=target,
+            response_envelope=request_envelope(target=target, prompt="hi", user_id="@user:localhost"),
+            pipeline_timing=None,
+            locked_operation=holding_reply,
+        ),
+    )
+    await asyncio.wait_for(reply_locked.wait(), timeout=2)
+    assert reply_locks == [waiting_lock]
+
+    gate.reopen()
+    await asyncio.wait_for(admitted.wait(), timeout=2)
+    await asyncio.sleep(0)
+    # Admitted, but queued behind the reply on the one lock instead of running beside it on a second.
+    assert gate.in_flight_response_count == 1
+    assert not body_entered.is_set()
+
+    reply_release.set()
+    await asyncio.wait_for(reply_task, timeout=2)
+    await asyncio.wait_for(exclusive_task, timeout=2)
+    assert body_locks == [waiting_lock]
+    assert key not in coordinator._exclusive_users
+
+
+@pytest.mark.asyncio
 async def test_edit_cut_opens_its_store_before_its_first_suspension(tmp_path: Path) -> None:
     """Edit regeneration opens its store synchronously, so a failed open surfaces before a pending cancellation runs."""
     target = MessageTarget.resolve("!room:example.org", "$thread", "$edited")
