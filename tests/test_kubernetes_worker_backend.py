@@ -6754,6 +6754,85 @@ def test_kubernetes_backend_lets_a_caller_that_only_shows_a_worker_pass_a_tool_c
     assert reads.count("ready") == 1
 
 
+def test_kubernetes_idle_cleanup_leaves_a_worker_whose_tool_caller_waits_for_its_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A setup that outlasts the idle timeout is use, and the worker's idle time starts when its caller gets it."""
+    backend, _apps_api, _core_api = _backend(idle_timeout_seconds=60.0)
+    clock = _run_on_one_clock(monkeypatch)
+    cleaned_during_the_wait: list[list[str]] = []
+
+    def setup() -> str:
+        if clock.monotonic() >= 90.0:
+            return "ready"
+        if clock.monotonic() >= 70.0 and not cleaned_during_the_wait:
+            # Idle cleanup runs 70 s after the worker started, which is longer than the idle timeout.
+            cleaned = backend.cleanup_idle_workers(now=10.0 + clock.monotonic())
+            cleaned_during_the_wait.append([handle.worker_key for handle in cleaned])
+        return "preparing"
+
+    _answer_worker_setup(backend, setup)
+
+    handle = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert cleaned_during_the_wait == [[]]
+    assert handle.status == "ready"
+    assert handle.last_used_at == pytest.approx(100.0)
+    assert [worker.status for worker in backend.list_workers(now=100.0)] == ["ready"]
+    # The worker is idle 60 s after the wait handed it to its caller, not 60 s after it started.
+    assert backend.cleanup_idle_workers(now=159.0) == []
+    assert [worker.worker_key for worker in backend.cleanup_idle_workers(now=161.0)] == [_TEST_SCOPED_WORKER_KEY_A]
+
+
+@pytest.mark.parametrize("newer_start", [False, True])
+def test_kubernetes_backend_forgets_a_setup_wait_that_ended_but_not_the_wait_of_a_newer_start(
+    monkeypatch: pytest.MonkeyPatch,
+    newer_start: bool,
+) -> None:
+    """A wait that ended is no longer use; a start of the same worker that began meanwhile keeps its own wait."""
+    backend, _apps_api, _core_api = _backend()
+    clock = _run_on_one_clock(monkeypatch)
+    newer_wait = (threading.Lock(), [])
+
+    def setup() -> str:
+        if clock.monotonic() >= 3.0:
+            return "ready"
+        if newer_start and clock.monotonic() > 0.0:
+            backend._setup_waits[_TEST_SCOPED_WORKER_KEY_A] = newer_wait
+        return "preparing"
+
+    _answer_worker_setup(backend, setup)
+
+    backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert backend._setup_waits == ({_TEST_SCOPED_WORKER_KEY_A: newer_wait} if newer_start else {})
+
+
+def test_kubernetes_backend_ends_the_report_of_a_start_whose_setup_wait_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whatever ends the setup wait, the start is reported and logged as over, and the wait is no longer use."""
+    backend, _apps_api, _core_api = _backend()
+    _run_on_one_clock(monkeypatch)
+    reads: list[float] = []
+
+    def _read(_self: object, _worker_id: str, *, timeout_seconds: float) -> httpx.Response:
+        reads.append(timeout_seconds)
+        if len(reads) > 1:
+            msg = "The health read broke."
+            raise RuntimeError(msg)
+        payload = {"status": "ok", "mindroom_version": "test", "worker_protocol": WORKER_PROTOCOL_VERSION}
+        return httpx.Response(200, json={**payload, "setup": "preparing"})
+
+    backend._resources.read_worker_health = MethodType(_read, backend._resources)
+
+    with capture_logs() as logs, pytest.raises(RuntimeError, match="The health read broke"):
+        backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert len(_cold_start_records(logs)) == 1
+    assert backend._setup_waits == {}
+
+
 def test_kubernetes_backend_reuses_a_ready_worker_whether_or_not_its_caller_waits_for_the_setup() -> None:
     """Whether a caller waits for the setup says nothing about the worker, so it never makes a ready worker stale."""
     backend, apps_api, _core_api = _backend()
