@@ -2329,23 +2329,8 @@ async def test_get_thread_tag_content_raises_on_other_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_thread_tag_content_raises_on_503_m_not_found() -> None:
-    """A 503 whose body says M_NOT_FOUND raises ThreadTagsError instead of returning None."""
-    client = AsyncMock()
-    client.room_get_state_event.return_value = nio.RoomGetStateEventError(
-        "unavailable",
-        status_code="M_NOT_FOUND",
-        room_id="!room:localhost",
-        http_status=503,
-    )
-
-    with pytest.raises(ThreadTagsError, match="unavailable"):
-        await get_thread_tag_content(client, "!room:localhost", "$root", "snoozed")
-
-
-@pytest.mark.asyncio
 async def test_get_thread_tag_content_raises_on_a_server_error_body() -> None:
-    """A non-404 error body, which nio passes through as content, fails the read with its status."""
+    """A non-404 answer fails the read, even one whose body says M_NOT_FOUND; only a 404 means the tag is unset."""
     answers = {
         '["$root","snoozed"]': (500, {"errcode": "M_UNKNOWN", "error": "boom"}),
         '["$proxy","snoozed"]': (503, {"errcode": "M_NOT_FOUND", "error": "upstream down"}),

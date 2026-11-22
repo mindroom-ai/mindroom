@@ -177,8 +177,8 @@ def _drop_legacy_override(setting: RoomSetting[Any], runtime_paths: RuntimePaths
 async def state_event_content(response: object) -> dict[str, Any] | None:
     """Return the content of the state event a read found, None unless the homeserver answered with the event.
 
-    nio decodes a 200 body that is no JSON, such as a proxy's page, as `{}`, which a cleared setting is too.
-    So for empty content, check that the body itself is valid JSON.
+    Only a 200 carries the event. nio decodes a body that is no JSON, such as a proxy's page, as `{}`, which a cleared
+    setting is too, so for no content the body itself decides.
     """
     import aiohttp  # noqa: PLC0415 - config reads the copy below without loading the Matrix client
     import nio  # noqa: PLC0415
@@ -186,11 +186,14 @@ async def state_event_content(response: object) -> dict[str, Any] | None:
     if not isinstance(response, nio.RoomGetStateEventResponse):
         return None
     content, transport = response.content, response.transport_response
-    if isinstance(transport, aiohttp.ClientResponse) and not content:
-        try:
-            content = json.loads(await transport.text())
-        except ValueError:
+    if isinstance(transport, aiohttp.ClientResponse):
+        if transport.status != 200:
             return None
+        if not content:
+            try:
+                content = json.loads(await transport.text())
+            except ValueError:
+                return None
     return content if isinstance(content, dict) else None
 
 
