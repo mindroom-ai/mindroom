@@ -383,8 +383,8 @@ def _fan_out(
     """Run *calls* each in a lane of its own, at most `max_concurrent` at a time, and return their results in order.
 
     The group node comes first and names every lane, so a resume sees which items came, went or moved. Every call
-    ends before a failure is raised, as one PartialFailure. An attempt that MindRoom told to exit, or a run that was
-    cancelled as a whole, is no failure of an item: it stops the fan-out and leaves it as it is.
+    ends before a failure is raised, as one PartialFailure. An attempt that MindRoom told to exit, as it does when
+    the run was cancelled or moved on, is no failure of an item: it stops the fan-out and leaves it as it is.
     """
     if max_concurrent is not None and (type(max_concurrent) is not int or max_concurrent < 1):
         raise WorkflowError(_BAD_LIMIT)
@@ -430,9 +430,6 @@ class _Lanes:
         except SystemExit as error:
             self.stopped.append(error)
         except BaseException as error:
-            if type(error) is WorkflowError and error.kind == "cancelled":
-                self.stopped.append(error)
-                return
             # Every other failure is the item's, a bug of the script included.
             self.errors[position] = error
             if not isinstance(error, (AgentError, ToolError, PartialFailure)):

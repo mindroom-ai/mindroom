@@ -41,7 +41,7 @@ background_tool_jobs:
 |--------|---------|---------|
 | `max_concurrent_runs` | `8` | Unfinished top-level runs one requester may have with one agent; a run inside another run does not count |
 | `max_runtime_hours` | `72` | Working time one run may use, `0` for no limit; see [Working time](#working-time) |
-| `max_tool_calls_per_minute` | `600` | New `tool()` and `shell()` calls per minute for one run |
+| `max_tool_calls_per_minute` | `600` | New `tool()` and `shell()` calls per minute for one run; a call above the rate waits for the minute to have room, it does not fail |
 | `max_concurrent_agents` | none | Ceiling for the `max_concurrent` a call asks for; not used yet |
 | `large_run_notice_usd` | `10` | Projected cost at which a run is marked as large; not used yet |
 
@@ -174,7 +174,10 @@ def main(args):
   `parallel([agent(a), agent(b)])` is refused with `parallel() takes functions. Write parallel([lambda: agent(a), lambda: agent(b)]) or use foreach(items, fn).`
 - A function may make several calls, one after the other, and may itself call `foreach` or `parallel`.
 - There is no limit on the number of items.
-  The run's `max_concurrent`, 16 unless `start_workflow` was given another number, is how many agent and tool calls of the run work at the same time; the others wait `queued`.
+  The run's `max_concurrent`, 16 unless `start_workflow` was given another number, is how many agent and tool calls of the run work at the same time; the others wait `queued` and start in the order they were made.
+  A call that waits for an approval holds no place, so the next queued call starts, and it takes a place again when its decision is in.
+  A queued call has started nothing: when the run is cancelled it never starts, and after a restart the next attempt runs it.
+  An agent that kept working over a restart goes on at once, so for that time the run may work on more calls than its limit.
   `foreach(items, fn, max_concurrent=4)` and `parallel(fns, max_concurrent=4)` hold one fan-out to fewer.
   The script itself works on at most 256 items of one fan-out at a time, whatever the limit.
 - When calls fail, the others still finish, and then the fan-out raises `PartialFailure`.

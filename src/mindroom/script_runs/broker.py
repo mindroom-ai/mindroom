@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+import sys
 from contextlib import nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
@@ -243,7 +244,8 @@ class ScriptToolBroker:
     _tasks: dict[tuple[str, str], asyncio.Task[ScriptCallRecord]] = field(default_factory=dict, init=False)
     _preparing: dict[tuple[str, str], int] = field(default_factory=dict, init=False)
     _preparation_changed: asyncio.Event = field(default_factory=asyncio.Event, init=False)
-    _run_locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
+    # How many calls of each run execute at one time: one of a script, and any number of a workflow attempt.
+    _run_locks: dict[str, asyncio.Semaphore] = field(default_factory=dict, init=False)
     _cleanups: RetainedToolkitCleanups = field(
         default_factory=lambda: RetainedToolkitCleanups(failure_event="script_tool_cleanup_failed"),
         init=False,
@@ -449,8 +451,11 @@ class ScriptToolBroker:
 
         The stored receipt holds the tool's whole result, whatever its size, so the node can be settled from it later.
         *waits* is told `approval` when the call starts to wait for a person's decision, and None when it has one.
+        The attempt's calls execute side by side: its run's engine holds them to the run's limit, and it alone knows
+        which of them wait for a person and so hold no place.
         """
         request = ScriptToolCallRequest(run.run_id, call_id, grant, arguments)
+        self._run_locks.setdefault(run.run_id, asyncio.Semaphore(sys.maxsize))
         # The call's task is created in here and keeps the context it is created in.
         token = _APPROVAL_WAIT.set(waits)
         try:
@@ -502,7 +507,7 @@ class ScriptToolBroker:
             await self.cancel_run(run_id)
 
     async def _execute_claimed_call(self, call: ScriptCallRecord, arguments: dict[str, object]) -> ScriptCallRecord:
-        run_lock = self._run_locks.setdefault(call.run_id, asyncio.Lock())
+        run_lock = self._run_locks.setdefault(call.run_id, asyncio.Semaphore(1))
         async with run_lock:
             try:
                 durable_run = await asyncio.to_thread(self.store.require_call_dispatch_allowed, call.run_id)

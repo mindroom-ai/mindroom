@@ -56,6 +56,7 @@ _NOT_READABLE_YET = "The agent of this call cannot be read yet. Try again in a m
 _NARROWS_WITH_SYSTEM = "tools, skills and knowledge narrow a copy only together with system=."
 _INTERRUPTED = "The agent was stopped before it started a tool call. A resume runs it again."
 _NO_ANSWER = "The agent's turn left no record of how it ended."
+_NODE_ENDED = "The call ended before its agent started."
 # How long a wait for a job that cannot be read yet, while its requester's access resolves, sleeps before it asks again.
 _RECHECK_SECONDS = 1.0
 
@@ -95,13 +96,15 @@ async def launch_child(
     store: WorkflowRunStore,
     jobs: ToolJobRuntime,
     timeout: float | None = None,  # noqa: ASYNC109 - the seconds of work the turn gets, not a deadline of this call.
+    queued: bool = False,
 ) -> WorkflowNode:
     """Start the job of one agent turn of *run* in its owner's *context*, and return the node as saved with its handle.
 
     The one launch path: the target is resolved and authorized as a subagent's is, under the `workflow` grant, at
     the depth of the run's owner. The node is saved with the handle of its job before the job is started, once, and
     the handle says so afterwards. The child's task is the node's label; the job is sent the whole prompt. A turn
-    that may not start raises `AgentNodeError` and saves nothing.
+    that may not start raises `AgentNodeError` and saves nothing. A *queued* node is saved already, as waiting for a
+    place among its run's working calls, and gets its handle here.
     """
     owner = parse_tool_execution_identity_payload(run.execution_identity)
     config, paths, caller = context.current_config, context.runtime_paths, run.agent_name
@@ -190,7 +193,12 @@ async def launch_child(
         # And what the call resolved to, which its arguments need not name.
         links |= {"agent": target.agent_name, "model": child.model_name}
         node = replace(node, state=WorkflowNodeState.RUNNING, handle=handle, links=links)
-        node = await asyncio.to_thread(partial(store.put_node, node, epoch, dirty_after=True))
+        stamp = partial(store.update_node, run.run_id, node.key, node.generation, epoch)
+        if not queued:
+            node = await asyncio.to_thread(partial(store.put_node, node, epoch, dirty_after=True))
+        elif not await asyncio.to_thread(partial(stamp, state=node.state, handle=handle, links=links)):
+            # The node that waited for its place has an end by now: its run ended.
+            raise AgentNodeError(_NODE_ENDED)
         try:
             # In the owner's context, which the job's task keeps: the child runs in the run's conversation.
             _, claim = await jobs.start(
@@ -207,7 +215,6 @@ async def launch_child(
             raise AgentNodeError(str(exc)) from exc
     await jobs.release_wait(job_id, claim)
     node = replace(node, handle=replace(handle, dispatched=True))
-    stamp = partial(store.update_node, run.run_id, node.key, node.generation, epoch)
     await asyncio.to_thread(partial(stamp, handle=node.handle))
     return node
 

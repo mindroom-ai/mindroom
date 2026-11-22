@@ -549,8 +549,18 @@ def test_max_concurrent_of_a_fan_out_holds_its_lanes_to_that_many(
     sdk: ModuleType,
 ) -> None:
     """`max_concurrent` of the call itself starts the next lane only when one has ended."""
+    pair = threading.Barrier(2, timeout=20)
+
+    def respond(request: dict[str, object]) -> dict[str, object]:
+        if request["kind"] == "tool":
+            # Two calls are open together, and never a third: twenty lanes without the limit would be.
+            pair.wait()
+        return completed(None)
+
+    gateway.respond = respond
+
     assert sdk.foreach(range(20), lambda n: sdk.tool("files", "stat", n=n), max_concurrent=2) == [None] * 20
-    assert gateway.peak_open <= 2
+    assert gateway.peak_open == 2
     with pytest.raises(sdk.WorkflowError, match="max_concurrent must be a whole number of at least 1"):
         sdk.foreach([1], str, max_concurrent=0)
 

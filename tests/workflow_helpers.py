@@ -898,6 +898,8 @@ class WorkflowStack:
         it continues as they are saved, in both cases.
         """
         if kill:
+            # A dead process starts nothing more, whatever its stopping tasks would make room for.
+            self.engine._closed = True
             tasks = [*self.broker._tasks.values(), *(task for owned in self.engine._tasks.values() for task in owned)]
             for task in tasks:
                 task.cancel()
@@ -926,6 +928,7 @@ class WorkflowStack:
         saved = self.tmp_path / "killed"
         for path in durable:
             _copy_saved(path, saved / path.name)
+        self.engine._closed = True
         tasks = [*self.broker._tasks.values(), *(task for owned in self.engine._tasks.values() for task in owned)]
         for task in tasks:
             task.cancel()

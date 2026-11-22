@@ -1747,6 +1747,33 @@ async def test_lifecycle_shutdown_bounds_and_preserves_cancelled_sync_cleanup(
 
 
 @pytest.mark.asyncio
+async def test_plain_script_calls_stay_serialized(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The calls of a plain script run one at a time, as before a workflow's calls ran side by side."""
+    release = asyncio.Event()
+    entered: list[int] = []
+
+    class SerialToolkit(_Calculator):
+        async def add(self, a: int, b: int) -> int:
+            del a
+            entered.append(b)
+            await release.wait()
+            return b
+
+    _replace_calculator_toolkit(monkeypatch, SerialToolkit)
+    broker, token = _broker(tmp_path, events=[])
+    for call_id, b in (("first", 2), ("second", 3), ("third", 4)):
+        await broker.accept_authenticated(_request(call_id=call_id, b=b), f"Bearer {token}")
+    tasks = list(broker._tasks.values())
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+
+    assert entered == [2]
+    release.set()
+    assert [(await task).state for task in tasks] == [ScriptCallState.COMPLETED] * 3
+    assert entered == [2, 3, 4]
+
+
+@pytest.mark.asyncio
 async def test_queued_script_call_rechecks_durable_revocation_after_run_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
