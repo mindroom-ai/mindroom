@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from contextlib import closing
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import pytest_asyncio
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.workflow_runs.models import NodeReceipt, WorkflowNode, WorkflowRun
+    from tests.fakes.scripted_model import ScriptedModel
 
 _PROMPT = {"prompt": "Run the nested workflow."}
 _SOURCE = "def main(args):\n    return 'nested'\n"
@@ -40,6 +41,8 @@ _RUNNING, _COMPLETED, _CANCELLED = WorkflowNodeState.RUNNING, WorkflowNodeState.
 async def _opened(stack: WorkflowStack, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[WorkflowStack]:
     monkeypatch.setattr(engine_module, "_RECHECK_SECONDS", 0.05)
     monkeypatch.setattr(agent_nodes, "_RECHECK_SECONDS", 0.05)
+    # As the job coordinator rules in production: a restart keeps the jobs of agents to continue them.
+    stack.continues = lambda job: job.kind == "delegation"
     await stack.open_jobs()
     stack.script_agents(monkeypatch)
     yield stack
@@ -240,33 +243,192 @@ async def test_other_arguments_and_a_rerun_of_the_call_start_runs_of_their_own(s
     assert len({run.origin_job_id for run in stack.store.child_runs(parent)}) == 3
 
 
-@pytest.mark.asyncio
-async def test_restart_during_a_nested_run_leaves_it_running_and_starts_no_second_one(stack: WorkflowStack) -> None:
-    """A restart leaves the nested run to go on by itself, as the one run it is, and its report is saved.
+async def _cut_short(
+    stack: WorkflowStack,
+    *made: dict[str, Any],
+    kill: bool = False,
+    before: tuple[dict[str, Any], ...] = (),
+) -> tuple[str, WorkflowRun]:
+    """Start a run whose agent makes the calls *made* in one turn, and stop MindRoom once a run inside it runs.
 
-    The agent that was inside its `start_workflow` call is not continued, as an agent inside any call is not: its
-    own call ends indeterminate, and the nested run stays under it for whoever reads the run.
+    The agent makes the calls *before* first, each in a turn of its own that ends.
     """
     await stack.start()
     parent = stack.run_id
-    stack.child_script(calls(_START), answer("never"))
+    stack.child_script(*(calls(call) for call in before), calls(*made), answer("never"))
     await stack.submit("@0", "agent", _PROMPT)
     child = await _nested(stack, parent)
+    await (stack.kill() if kill else stack.restart())
+    return parent, child
 
-    await stack.restart()
+
+def _sent(model: ScriptedModel) -> str:
+    """Return what the agent was sent as the user's message of its latest model request."""
+    return str([message.content for message in model.requests[-1].messages if message.role == "user"][-1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kill", [False, True])
+async def test_restart_during_a_nested_run_continues_the_agent_with_that_runs_report(
+    stack: WorkflowStack,
+    kill: bool,
+) -> None:
+    """An agent that a restart cut short inside `start_workflow` goes on with the report of the run that call started.
+
+    The agent is not asked to make the call again. The call was saved with its run when it reserved it, so the
+    agent's job waits for that run, which went on by itself, and the agent's next turn is sent the report as the
+    result of its call.
+    """
+    parent, child = await _cut_short(stack, _START, kill=kill)
+    model = stack.child_script(answer("done"))
+    await stack.continue_agents()
+    assert parent in await stack.recover()
+    # The run inside gets its next attempt from the starting primary, or from the agent's job that waits for it.
+    running = [(WorkflowRunState.RUNNING, 2)]
+    await stack.until(lambda: [(run.state, run.attempt) for run in stack.store.child_runs(parent)] == running)
+    await asyncio.sleep(0.3)
+
+    # The job waits for the run, and asks no model while it does.
+    assert model.requests == []
+    await _report(stack, child.run_id, "the nested report")
+    stack.run_id = parent
+    assert await stack.result("@0", "agent", _PROMPT) == "done"
+    assert "<start_workflow_result>\nthe nested report\n</start_workflow_result>" in _sent(model)
+    assert "still running" not in _sent(model)
+    assert ([run.run_id for run in stack.store.child_runs(parent)], len(model.requests)) == ([child.run_id], 1)
+    assert _group(stack, child).state is _COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_restarts_while_the_continued_agent_waits_for_the_run_wait_for_it_again(stack: WorkflowStack) -> None:
+    """The job that waits for the run inside is cut short like any job: continued again, it waits for the same run.
+
+    Its turn had not begun, so it is sent the same prompt, and a wait is not what stops a job: the limit on
+    restarts in a row does not end it.
+    """
+    parent, child = await _cut_short(stack, _START)
+    model = stack.child_script(answer("done"))
+    for attempt in (2, 3, 4, 5):
+        await stack.continue_agents()
+        assert parent in await stack.recover()
+        await stack.until(lambda: stack.engine.attended(child.owner))
+        running = [(WorkflowRunState.RUNNING, attempt)]
+        await stack.until(lambda: [(run.state, run.attempt) for run in stack.store.child_runs(parent)] == running)  # noqa: B023
+        stack.run_id = parent
+        if attempt == 2:
+            # As for an agent whose turn restarts had cut short twice already, the most that is continued.
+            assert stack.node_job("@0").adapter["restart_continuations"] == 1
+            await stack.jobs.save_adapter(stack.node_job("@0").job_id, restart_continuations=2)
+        if attempt < 5:
+            await stack.restart()
+    assert model.requests == []
+    # The restarts that cut the agent's turn short count toward the limit, and the ones that cut a wait short do not.
+    assert stack.node_job("@0").adapter["restart_continuations"] == 2
+    # Only a run inside the call the agent is of is waited for, whatever a prompt names.
+    assert await stack.engine.nested_report(("wf-" + "0" * 32, "@0", 1), child.run_id) is None
+    await _report(stack, child.run_id, "the nested report")
+
+    stack.run_id = parent
+    assert await stack.result("@0", "agent", _PROMPT) == "done"
+    assert "<start_workflow_result>\nthe nested report\n</start_workflow_result>" in _sent(model)
+    assert ([run.run_id for run in stack.store.child_runs(parent)], len(model.requests)) == ([child.run_id], 1)
+
+
+@pytest.mark.asyncio
+async def test_stop_of_the_continued_agent_that_waits_for_the_run_cancels_that_run(stack: WorkflowStack) -> None:
+    """The job waits as the call that started the run did: when it is stopped, nobody is left to read the report."""
+    parent, child = await _cut_short(stack, _START)
     model = stack.child_script(answer("never"))
+    await stack.continue_agents()
+    assert parent in await stack.recover()
+    await stack.until(lambda: stack.engine.attended(child.owner))
+    stack.run_id = parent
+
+    await stack.jobs.cancel(stack.node_job("@0").job_id, owner=stack.context.execution_identity, depth=0)
+
+    await stack.until(lambda: stack.store.get_run(child.run_id).state is WorkflowRunState.CANCELLED)
+    assert model.requests == []
+
+
+@pytest.mark.asyncio
+async def test_nested_run_that_ended_before_its_agent_went_on_gives_the_agent_its_stored_report(
+    stack: WorkflowStack,
+) -> None:
+    """A run inside a run that has ended by the time its agent is continued is not waited for: its report is there.
+
+    The account of the agent's calls names the one it had finished, and not the call whose result it is given.
+    """
+    parent, child = await _cut_short(stack, _START, before=(tool_call("append", "c0", line="a"),))
+    assert set(await stack.recover()) == {parent, child.run_id}
+    await _report(stack, child.run_id, "the nested report")
+    model = stack.child_script(answer("done"))
+
+    await stack.continue_agents()
+
+    stack.run_id = parent
+    assert await stack.result("@0", "agent", _PROMPT) == "done"
+    assert "<start_workflow_result>\nthe nested report\n</start_workflow_result>" in _sent(model)
+    assert ("`append` tool" in _sent(model), "still running" in _sent(model)) == (True, False)
+    assert [run.run_id for run in stack.store.child_runs(parent)] == [child.run_id]
+    # The wait is over: the job no longer says that it waits for a run.
+    assert (stack.node_job("@0").adapter.get("wait"), stack.counting_tool.lines) == (None, ["a"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["changed file", "no binding", "another call"])
+async def test_agent_whose_cut_short_calls_are_not_all_proven_starts_of_runs_is_not_continued(
+    stack: WorkflowStack,
+    case: str,
+) -> None:
+    """Without proof for every call that was cut short, nobody can say what the turn did: its call is indeterminate.
+
+    The proof is the call saved with its run, for the script and the arguments the call still names. A script file
+    that changed since is another script, a call that reserved no run has none, and a call of any other tool beside
+    it may have done anything.
+    """
+    workspace = stack.context.agent_workspace_root(create=True)
+    (workspace / "nested.py").write_text(_SOURCE, encoding="utf-8")
+    start = tool_call("start_workflow", "c1", path="nested.py")
+    stack.counting_tool.after_effect = asyncio.Event().wait
+    made = (start, tool_call("append", "c2", line="a")) if case == "another call" else (start,)
+    parent, child = await _cut_short(stack, *made)
+    stack.counting_tool.after_effect = None
+    if case == "changed file":
+        (workspace / "nested.py").write_text(_SOURCE + "# edited\n", encoding="utf-8")
+    if case == "no binding":
+        with closing(sqlite3.connect(stack.store.database_path)) as records:
+            records.execute("DELETE FROM workflow_calls")
+            records.commit()
+    model = stack.child_script(answer("never"))
+
     await stack.continue_agents()
     assert set(await stack.recover()) == {parent, child.run_id}
 
-    inside = [(run.run_id, run.state, run.attempt) for run in stack.store.child_runs(parent)]
-    assert inside == [(child.run_id, WorkflowRunState.RUNNING, 2)]
     stack.run_id = parent
     with pytest.raises(NodeFailed) as cut_short:
         await stack.result("@0", "agent", _PROMPT)
     assert (cut_short.value.kind, model.requests) == ("indeterminate", [])
-    await _report(stack, child.run_id, "the nested report")
-    assert stack.store.get_run(child.run_id).outcome_text() == "the nested report"
-    assert _group(stack, child).state is _COMPLETED
+    assert [run.run_id for run in stack.store.child_runs(parent)] == [child.run_id]
+
+
+@pytest.mark.asyncio
+async def test_agent_cut_short_inside_a_call_that_starts_no_run_goes_on_as_before(stack: WorkflowStack) -> None:
+    """The rule above is for calls that start runs: an agent inside any other call is continued and told to check."""
+    await stack.start()
+    stack.counting_tool.after_effect = asyncio.Event().wait
+    stack.child_script(calls(tool_call("append", "c1", line="a")), answer("never"))
+    await stack.submit("@0", "agent", _PROMPT)
+    await stack.until(lambda: stack.counting_tool.lines == ["a"])
+    await stack.restart()
+    stack.counting_tool.after_effect = None
+    model = stack.child_script(answer("done"))
+
+    await stack.continue_agents()
+    assert await stack.recover() == [stack.run_id]
+
+    assert await stack.result("@0", "agent", _PROMPT) == "done"
+    assert "check before repeating it" in _sent(model)
+    assert stack.counting_tool.lines == ["a"]
 
 
 def _delegate(**arguments: object) -> dict[str, object]:

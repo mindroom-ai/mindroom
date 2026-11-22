@@ -326,9 +326,14 @@ A run whose script had already returned its report ends with that report and get
 - A run with no job, which is one that `start_workflow` waited for inside a subagent, is resumed in the same way, under the agent and requester it was started for.
   When the call that waited for it is gone, nothing delivers the report; `get_workflow(run_id)` returns it in `result`.
 - A run inside a run goes on by itself after a restart, as the same run.
-  The agent that was inside its `start_workflow` call when MindRoom stopped is not continued, as an agent inside any tool call is not: its call ends `indeterminate`.
-  The run it started stays under that call, its report is in `get_workflow` of that run, and cancelling the outer run cancels it.
-  A script's own `tool("workflow", "start_workflow", ...)` call ends `indeterminate` in the same way.
+  The agent that was inside its `start_workflow` call when MindRoom stopped is continued, and it is not asked to make the call again.
+  The call was saved with the run it started, in the same write, so the agent's job waits for that run and then sends the agent the run's report as the result of its call.
+  A run that ended meanwhile gives its stored report at once.
+  This holds for an orderly restart and for a killed process alike, and however many restarts the wait lasts.
+  Stopping the agent while its job waits cancels the run inside.
+- The agent is not continued when that cannot be proven: the call reserved no run before MindRoom stopped, the script file it named has changed since, or a call of another tool was cut short in the same turn.
+  Its call then ends `indeterminate`, the run inside stays under that call with its report in `get_workflow` of that run, and cancelling the outer run cancels it.
+  A script's own `tool("workflow", "start_workflow", ...)` call that a restart cut short ends `indeterminate` too.
 - A run that MindRoom stopped while its script process was starting stays `starting`, and the next start launches it.
 - A run whose job was stopped gets no further attempt, and `resume_workflow` continues it.
   After a Stop the run ends `cancelled`; when the job was stopped because the requester's access is gone, the run ends `interrupted` with `The requester no longer has access.`

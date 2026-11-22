@@ -28,7 +28,7 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.tool_system.tool_hooks import dispatch_external_tool_hooks
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
-from mindroom.workflow_runs.engine import WorkflowLimits, calling_node
+from mindroom.workflow_runs.engine import WorkflowLimits, calling_node, nested_key
 from mindroom.workflow_runs.models import (
     TERMINAL_RUN_STATES,
     WorkflowNodeState,
@@ -109,8 +109,7 @@ _ONE_SOURCE = "Give exactly one of source or path."
 _AT_MOST_ONE_SOURCE = "Give at most one of source or path."
 _NEEDS_JOBS = "Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow."
 
-# How many failed calls the first line of a report names; `get_workflow` lists them all.
-_MAX_FAILED_NAMED = 10
+
 _ACTIVE = frozenset({WorkflowNodeState.QUEUED, WorkflowNodeState.RUNNING, WorkflowNodeState.WAITING})
 _FAILED = frozenset({WorkflowNodeState.FAILED, WorkflowNodeState.INDETERMINATE})
 _JOB_STATUS: dict[WorkflowRunState, Literal["completed", "failed", "cancelled", "interrupted"]] = {
@@ -195,9 +194,11 @@ class WorkflowTools(Toolkit):
         }
         engine, context = _waiting_runtime()
         outer = _outer_call()
-        origin = _inline_origin(context) if outer is None else await _nested_origin(engine, context, outer, arguments)
-        reserve = partial(self._reserve, engine, context, origin, arguments, outer=outer)
-        return await _delivery(engine, await engine.attend(origin, reserve, context, self.limits))
+        # A run inside a run is found by its script, which is read once, here, for its key and for the run.
+        text = None if outer is None else await _source(engine, context, arguments)
+        origin = _inline_origin(context) if text is None else nested_key(outer, text, arguments.get("args"))
+        reserve = partial(self._reserve, engine, context, origin, arguments, outer=outer, source=text)
+        return await engine.delivery(await engine.attend(origin, reserve, context, self.limits))
 
     async def get_workflow(self, run_id: str, nodes: Literal["active", "failed", "all"] = "active") -> str:
         """Return a run's status, cost, open questions, failed calls and nodes. nodes is "active" (default), "failed" or "all".
@@ -278,7 +279,7 @@ class WorkflowTools(Toolkit):
             return report
         # The call owns the run it takes, as an inline start owns the run it reserves: its leaving stops that run.
         reopen = partial(engine.reopen, run.run_id, context, limits=self.limits, owner=origin, **request)
-        return await _delivery(engine, await engine.attend(origin, reopen, context, self.limits))
+        return await engine.delivery(await engine.attend(origin, reopen, context, self.limits))
 
     async def managed_job(
         self,
@@ -363,23 +364,23 @@ class WorkflowTools(Toolkit):
         arguments: Mapping[str, Any],
         job_id: str | None = None,
         outer: tuple[str, str, int] | None = None,
+        source: bytes | None = None,
     ) -> tuple[WorkflowRun, bool]:
         """Check one start and write its intent, or return the run *origin* reserved before; a refusal raises.
 
         *job_id* names the job the run is reserved for, which no call that waits for its run itself has. *outer* is
-        the call of a run that this start is made in: the new run is a run inside that one, under that call.
+        the call of a run that this start is made in: the new run is a run inside that one, under that call, and
+        *source* is its script as its key was made from. The tool call of an agent that reserves such a run is
+        saved with the run in the same write, so a restart can prove which run that call started.
         """
-        source, path, title = arguments.get("source"), arguments.get("path"), arguments.get("title")
-        max_concurrent = arguments.get("max_concurrent", 16)
-        if (source is None) == (path is None):
-            raise WorkflowRunStoreError(_ONE_SOURCE)
+        title, max_concurrent = arguments.get("title"), arguments.get("max_concurrent", 16)
         if not isinstance(max_concurrent, int) or max_concurrent < 1:
             msg = "max_concurrent must be a whole number of at least 1."
             raise WorkflowRunStoreError(msg)
         placement = workflow_placement(context.config, context.runtime_paths)
         if placement not in ("worker", "local"):
             raise WorkflowRunStoreError(placement)
-        text = (await engine.scripts.resolve_source(context, source=source, path=path)).decode()
+        text = (source or await _source(engine, context, arguments)).decode()
         hours = self.limits.max_runtime_hours
         intent = WorkflowRun(
             run_id=new_workflow_run_id(),
@@ -420,7 +421,11 @@ class WorkflowTools(Toolkit):
 
         # On a thread, where it waits for the store's writer. A call cancelled meanwhile takes back the intent it
         # wrote; the engine keeps an inline caller's cancellation away from here and ends the run itself.
-        reserve = partial(store.reserve_run, intent, max_active=self.limits.max_concurrent_runs)
+        made = current_tool_call() if outer is not None and running_child_run() is not None else None
+        call = (
+            (*outer, made.context.call_id) if outer is not None and made is not None and made.context.call_id else None
+        )
+        reserve = partial(store.reserve_run, intent, max_active=self.limits.max_concurrent_runs, call=call)
         reserved = await run_blocking_or_compensate(reserve, take_back)
         if outer is not None and reserved[1]:
             await engine.nest(reserved[0])
@@ -566,26 +571,9 @@ def workflow_limits(config: Config, agent_name: str) -> WorkflowLimits:
     return WorkflowLimits(**limits)
 
 
-async def _delivery(engine: WorkflowEngine, run: WorkflowRun) -> str:
-    """Return what an ended run delivers to whoever started it: its report, or why it did not finish.
-
-    A run that completed although calls of it failed, which its script caught, says so in a first line.
-    """
-    text = run.outcome_text()
-    if run.state is not WorkflowRunState.COMPLETED:
-        return text
-    nodes = await asyncio.to_thread(engine.store.nodes, run.run_id)
-    failed = [f"n{node.seq}" for node in nodes if node.state in _FAILED]
-    if not failed:
-        return text
-    named = ", ".join(failed[:_MAX_FAILED_NAMED]) + (", ..." if len(failed) > _MAX_FAILED_NAMED else "")
-    calls = "call" if len(failed) == 1 else "calls"
-    return f'{len(failed)} {calls} failed ({named}); get_workflow(run_id, nodes="failed") shows them.\n\n{text}'
-
-
 async def _workflow_job_outcome(engine: WorkflowEngine, run: WorkflowRun) -> BackgroundOutcome:
     """Return how the job of an ended run ends: with what the run delivers."""
-    text = await _delivery(engine, run)
+    text = await engine.delivery(run)
     return BackgroundOutcome(_JOB_STATUS[run.state], text, encode_result_payload(ToolResultPayload(value=text)))
 
 
@@ -637,26 +625,12 @@ def _outer_call() -> tuple[str, str, int] | None:
     return child.child.workflow_run_id, str(child.child.workflow_node_key), child.child.workflow_generation or 1
 
 
-async def _nested_origin(
-    engine: WorkflowEngine,
-    context: ToolRuntimeContext,
-    outer: tuple[str, str, int],
-    arguments: Mapping[str, Any],
-) -> str:
-    """Return the key of a run inside a run: the call it is made in, its script and its arguments, and no call ID.
-
-    An agent that a restart cut short makes its call again under a new ID, and finds the run it started by this key:
-    it waits for a run that still runs, and gets the report of one that ended.
-    """
+async def _source(engine: WorkflowEngine, context: ToolRuntimeContext, arguments: Mapping[str, Any]) -> bytes:
+    """Return the script a start names, read once: its inline source, or its file in the agent's workspace."""
     source, path = arguments.get("source"), arguments.get("path")
-    # A call that names no one script is refused where its run is reserved.
-    text = (
-        b""
-        if (source is None) == (path is None)
-        else await engine.scripts.resolve_source(context, source=source, path=path)
-    )
-    identity = [*outer, hashlib.sha256(text).hexdigest(), arguments.get("args")]
-    return "nested:" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    if (source is None) == (path is None):
+        raise WorkflowRunStoreError(_ONE_SOURCE)
+    return await engine.scripts.resolve_source(context, source=source, path=path)
 
 
 def _inline_origin(context: ToolRuntimeContext) -> str:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import secrets
 import time
 from collections import Counter, deque
@@ -61,7 +62,7 @@ from mindroom.workflow_runs.replay import DirtyLanes, decide, node_digest, resul
 from mindroom.workflow_runs.store import SupersededAttemptError, WorkflowRunStoreError
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Sequence
+    from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 
     from mindroom.script_runs.broker import ScriptToolBroker
     from mindroom.script_runs.manager import ScriptResourceProfileName, ScriptRunManager
@@ -74,6 +75,8 @@ logger = get_logger(__name__)
 
 _UNSETTLED_NODE_STATES = frozenset({WorkflowNodeState.QUEUED, WorkflowNodeState.RUNNING})
 _LIVE_NODE_STATES = _UNSETTLED_NODE_STATES | {WorkflowNodeState.WAITING}
+# How many failed calls the first line of a report names; `get_workflow` lists them all.
+_MAX_FAILED_NAMED = 10
 # The states in which a run's attempt may submit calls: a run that is starting names no attempt that may.
 _SERVED_RUN_STATES = frozenset({WorkflowRunState.RUNNING, WorkflowRunState.WAITING})
 _SHELL_COMMAND = ScriptToolGrant("shell", "run_shell_command")
@@ -112,6 +115,16 @@ _CALLING_NODE: ContextVar[tuple[str, str, int] | None] = ContextVar("workflow_ca
 def calling_node() -> tuple[str, str, int] | None:
     """Return the run, the key and the generation of the script's tool call this context runs in, if it runs in one."""
     return _CALLING_NODE.get()
+
+
+def nested_key(outer: tuple[str, str, int], source: bytes, args: object) -> str:
+    """Return the key of a run inside a run: the call it is made in, its script and its arguments, and no call ID.
+
+    A call that is made again under another ID, in the same turn or in a continued one, finds the run it started
+    by this key: it waits for a run that still runs, and gets the report of one that ended.
+    """
+    identity = [*outer, hashlib.sha256(source).hexdigest(), args]
+    return "nested:" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
 
 # How long a waiter sleeps before it reads the store again, with or without a wake.
@@ -833,6 +846,68 @@ class WorkflowEngine:
         )
         with suppress(SupersededAttemptError):
             await asyncio.to_thread(self.store.put_node, group, outer.epoch)
+
+    async def nested_call(
+        self,
+        context: ToolRuntimeContext,
+        outer: tuple[str, str, int],
+        call_id: str,
+        arguments: Mapping[str, Any],
+    ) -> str | None:
+        """Return the run inside a run that the `start_workflow` call *call_id* of an agent's turn provably started.
+
+        The proof is the call as it was saved with its run when it reserved it, for the script and the arguments
+        the call names now: a provider may use one call ID twice in a turn, and a script file may have changed
+        since. Without it the answer is None, and nobody can say what the call did.
+        """
+        try:
+            text = await self.scripts.resolve_source(
+                context,
+                source=arguments.get("source"),
+                path=arguments.get("path"),
+            )
+        except ValueError:
+            return None
+        key = nested_key(outer, text, arguments.get("args"))
+        runs = await asyncio.to_thread(self.store.bound_runs, *outer, call_id)
+        return next((run.run_id for run in runs if run.origin_job_id == key), None)
+
+    async def nested_report(self, outer: tuple[str, str, int], run_id: str) -> str | None:
+        """Wait for a run inside the call *outer* as the call that started it did, and return what it delivers.
+
+        The wait is one more call of the run's owner: it starts the run's attempts while it waits, and when it is
+        cancelled and no other call is left, the run is cancelled with it. None for a run that is not inside that call.
+        """
+        run = self.store.get_run(run_id)
+        if (run.parent_run_id, run.parent_node_key) != outer[:2]:
+            return None
+
+        async def found() -> tuple[WorkflowRun, bool]:
+            return run, False
+
+        access = self.owner_access(run)
+        attended = self.attend(str(run.owner), found, *access) if isinstance(access, tuple) else self.wait(run_id)
+        return await self.delivery(await attended)
+
+    async def delivery(self, run: WorkflowRun) -> str:
+        """Return what an ended run delivers to whoever started it: its report, or why it did not finish.
+
+        A run that completed although calls of it failed, which its script caught, says so in a first line.
+        """
+        text = run.outcome_text()
+        if run.state is not WorkflowRunState.COMPLETED:
+            return text
+        nodes = await asyncio.to_thread(self.store.nodes, run.run_id)
+        failed = [
+            f"n{node.seq}"
+            for node in nodes
+            if node.state in (WorkflowNodeState.FAILED, WorkflowNodeState.INDETERMINATE)
+        ]
+        if not failed:
+            return text
+        named = ", ".join(failed[:_MAX_FAILED_NAMED]) + (", ..." if len(failed) > _MAX_FAILED_NAMED else "")
+        calls = "call" if len(failed) == 1 else "calls"
+        return f'{len(failed)} {calls} failed ({named}); get_workflow(run_id, nodes="failed") shows them.\n\n{text}'
 
     async def _dispatch_tool(
         self,

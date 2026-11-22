@@ -94,34 +94,52 @@ class WorkflowRunStore:
         self._enter_wal()
         self._migrate()
 
-    def reserve_run(self, run: WorkflowRun, *, max_active: int | None = None) -> tuple[WorkflowRun, bool]:
+    def reserve_run(
+        self,
+        run: WorkflowRun,
+        *,
+        max_active: int | None = None,
+        call: tuple[str, str, int, str] | None = None,
+    ) -> tuple[WorkflowRun, bool]:
         """Store *run*, or return the run its `origin_job_id` already reserved and `False`.
 
         A new top-level run is refused once its agent and owner have *max_active* live ones, counted in the write
-        that would store it, so racing starts never exceed the limit and a refused one leaves no row.
+        that would store it, so racing starts never exceed the limit and a refused one leaves no row. *call* is the
+        tool call of an agent's turn that reserves a run inside a run: that run, the node and the generation the
+        agent is of, and the call's ID. The same write saves it with the run it gets, new or found, so a restart at
+        any moment finds either both or neither.
         """
         validated_workflow_run_id(run.run_id)
         values = {**_row_values(run, _RUN_JSON_FIELDS), "reservation_digest": _reservation_digest(run)}
         with self._write_transaction() as connection:
+            row = None
             if run.origin_job_id is not None:
                 row = connection.execute(
                     "SELECT * FROM workflow_runs WHERE origin_job_id = ?",
                     (run.origin_job_id,),
                 ).fetchone()
-                if row is not None:
-                    same_owner = all(row[column] == values[column] for column in _OWNER_COLUMNS)
-                    if not same_owner or row["reservation_digest"] != values["reservation_digest"]:
-                        # Nothing of the run it hit, its ID included, is told to a caller that may not own it.
-                        msg = "This call already started a workflow run with another owner, script or arguments."
-                        raise WorkflowRunConflictError(msg)
-                    return _run_from_row(row), False
-            _require_slot(connection, run, max_active)
-            try:
-                _insert(connection, "INSERT INTO workflow_runs", values)
-            except sqlite3.IntegrityError as exc:
-                msg = f"Workflow run {run.run_id} already exists."
-                raise WorkflowRunConflictError(msg) from exc
-        return run, True
+            if row is not None:
+                same_owner = all(row[column] == values[column] for column in _OWNER_COLUMNS)
+                if not same_owner or row["reservation_digest"] != values["reservation_digest"]:
+                    # Nothing of the run it hit, its ID included, is told to a caller that may not own it.
+                    msg = "This call already started a workflow run with another owner, script or arguments."
+                    raise WorkflowRunConflictError(msg)
+                run = _run_from_row(row)
+            else:
+                _require_slot(connection, run, max_active)
+                try:
+                    _insert(connection, "INSERT INTO workflow_runs", values)
+                except sqlite3.IntegrityError as exc:
+                    msg = f"Workflow run {run.run_id} already exists."
+                    raise WorkflowRunConflictError(msg) from exc
+            if call is not None:
+                connection.execute("INSERT OR IGNORE INTO workflow_calls VALUES (?, ?, ?, ?, ?)", (*call, run.run_id))
+        return run, row is None
+
+    def bound_runs(self, run_id: str, key: str, generation: int, call_id: str) -> list[WorkflowRun]:
+        """Return the runs that the tool call *call_id* of the agent of one generation of a node was saved with."""
+        where = "run_id IN (SELECT child_run_id FROM workflow_calls WHERE run_id = ? AND key = ? AND generation = ? AND call_id = ?)"
+        return self._select_runs(where, [run_id, key, generation, call_id])
 
     def delete_intent(self, run_id: str, owner: str | None, epoch: int) -> bool:
         """Delete a run that never got an attempt and is still *owner*'s at *epoch*; return whether one was deleted."""
@@ -753,10 +771,24 @@ def _add_claims_and_depth(connection: sqlite3.Connection) -> None:
     connection.execute("ALTER TABLE workflow_runs ADD COLUMN depth INTEGER NOT NULL DEFAULT 0")
 
 
+def _add_calls(connection: sqlite3.Connection) -> None:
+    """Add the tool calls of agents that reserved runs inside their runs, each with the run it got."""
+    connection.execute(
+        """
+        CREATE TABLE workflow_calls (
+            run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+            key TEXT NOT NULL, generation INTEGER NOT NULL, call_id TEXT NOT NULL, child_run_id TEXT NOT NULL,
+            PRIMARY KEY (run_id, key, generation, call_id, child_run_id)
+        )
+        """,
+    )
+
+
 # Each entry upgrades the database by one schema version; the stored version is how many have run.
 _MIGRATIONS: tuple[Callable[[sqlite3.Connection], None], ...] = (
     _create_schema,
     _add_epoch_and_owner,
     _add_claims_and_depth,
+    _add_calls,
 )
 SCHEMA_VERSION = len(_MIGRATIONS)
