@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import nio
 import pytest
@@ -19,7 +19,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths, tracking_dir
 from mindroom.message_target import MessageTarget
-from mindroom.room_settings import THREAD_MODE, resolve_room_setting
+from mindroom.room_settings import THREAD_MODE, on_thread_mode_change, refresh_room_settings, resolve_room_setting
 from tests.authorization_helpers import (
     make_test_command_handler_context,
 )
@@ -259,6 +259,36 @@ async def test_thread_mode_show_reports_the_room_override(tmp_path: Path) -> Non
     context.client.room_get_state_event.side_effect = None
     context.client.room_get_state_event.return_value = nio.RoomGetStateEventError("unavailable", "M_UNKNOWN")
     assert await show() == "❌ Could not read this room's thread mode setting. Try again."
+
+
+@pytest.mark.asyncio
+async def test_a_changed_thread_mode_that_show_finds_first_is_still_republished(tmp_path: Path) -> None:
+    """`!thread_mode show` that finds a change no sync showed tells the runtime, though the next turn finds none."""
+    homeserver = _homeserver()
+    homeserver.events[SETTING] = {"value": "thread"}
+    context = _thread_mode_context(tmp_path, homeserver.client())
+    changed = Mock()
+    on_thread_mode_change(context.runtime_paths, changed)
+    command = Command(type=CommandType.THREAD_MODE, args={"args_text": "show"}, raw_text="!thread_mode show")
+
+    async def show() -> None:
+        await handle_command(
+            context=context,
+            room=SimpleNamespace(room_id=ROOM_ID),
+            event=_thread_mode_event("@user:localhost", "!thread_mode show"),
+            command=command,
+            requester_user_id="@user:localhost",
+        )
+
+    await show()
+    changed.assert_not_called()
+    homeserver.events[SETTING] = {"value": "room"}
+    await show()
+    await refresh_room_settings(context.client, context.runtime_paths, ROOM_ID, put_state=None)
+
+    changed.assert_called_once_with(ROOM_ID)
+    # The turn's read found the copy fresh: only the two commands read the setting.
+    assert [read.args[1:] for read in context.client.room_get_state_event.await_args_list].count(SETTING) == 2
 
 
 @pytest.mark.asyncio

@@ -11,7 +11,7 @@ import re
 import time
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import nio
 import pytest
@@ -26,6 +26,7 @@ from mindroom.room_settings import (
     RoomSetting,
     SettingRead,
     observe_room_settings_event,
+    on_thread_mode_change,
     refresh_room_setting,
     refresh_room_settings,
     resolve_room_setting,
@@ -133,13 +134,7 @@ async def test_an_override_file_that_cannot_be_rewritten_keeps_its_record_for_a_
     client = homeserver.client()
     with monkeypatch.context() as patched:
         patched.setattr("mindroom.legacy_room_settings.write_override_records", Mock(side_effect=OSError("read-only")))
-        await refresh_room_settings(
-            client,
-            runtime_paths,
-            ROOM_ID,
-            put_state=client.room_put_state,
-            thread_mode_changed=Mock(),
-        )
+        await refresh_room_settings(client, runtime_paths, ROOM_ID, put_state=client.room_put_state)
 
     assert resolve_room_setting(THREAD_MODE, runtime_paths, ROOM_ID) is None
     assert set(json.loads(legacy.read_text())) == {ROOM_ID}
@@ -343,13 +338,7 @@ async def test_a_turn_refreshes_every_setting_at_once(tmp_path: Path) -> None:
     client = homeserver.client()
 
     for _ in range(2):
-        read = await refresh_room_settings(
-            client,
-            runtime_paths,
-            ROOM_ID,
-            put_state=client.room_put_state,
-            thread_mode_changed=Mock(),
-        )
+        read = await refresh_room_settings(client, runtime_paths, ROOM_ID, put_state=client.room_put_state)
         assert read == SettingRead(ok=True, value="mentions")
         assert client.room_get_state_event.await_count == 3
     for setting in (REPLY_MODE, MODEL, THREAD_MODE):
@@ -385,18 +374,22 @@ async def test_a_live_setting_change_is_read_again_once(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("held", [None, "thread", "room"], ids=["unset", "as-known", "changed"])
-async def test_a_turn_that_finds_a_changed_thread_mode_tells_the_steward(tmp_path: Path, held: str | None) -> None:
-    """A change no sync showed reaches the room's steward when a turn's read finds it, so clients see the new mode."""
+async def test_a_read_that_finds_the_thread_mode_changed_tells_the_runtime(tmp_path: Path, held: str | None) -> None:
+    """A change no sync showed is told when a read finds it; a room's first read and an unchanged one tell nothing."""
     runtime_paths = test_runtime_paths(tmp_path)
     homeserver = RoomStateHomeserver()
     homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "thread_mode"] = {"value": "thread"}
+    homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "reply_mode"] = {"value": "auto"}
     client = homeserver.client()
     changed = Mock()
-    await refresh_room_setting(THREAD_MODE, client, runtime_paths, ROOM_ID, put_state=None)
+    on_thread_mode_change(runtime_paths, changed)
+    await refresh_room_settings(client, runtime_paths, ROOM_ID, put_state=None)
+    changed.assert_not_called()
     homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "thread_mode"] = {} if held is None else {"value": held}
+    homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "reply_mode"] = {"value": "mentions"}
 
     with patch("mindroom.room_settings.time.monotonic", return_value=time.monotonic() + 3600):
-        await refresh_room_settings(client, runtime_paths, ROOM_ID, put_state=None, thread_mode_changed=changed)
+        await refresh_room_settings(client, runtime_paths, ROOM_ID, put_state=None)
 
-    assert changed.call_count == (held != "thread")
+    assert changed.call_args_list == ([] if held == "thread" else [call(ROOM_ID)])
     assert resolve_room_setting(THREAD_MODE, runtime_paths, ROOM_ID) == held

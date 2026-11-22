@@ -118,6 +118,8 @@ _NEVER_READ = _Copy(None, 0, _UNCONFIRMED)
 _writes: WeakValueDictionary[_Key, asyncio.Lock] = WeakValueDictionary()
 # Each model setting that names no configured model, which is logged once.
 _stale_models_logged: set[_Key] = set()
+# What a runtime has tell a room's steward that a read found the room's `thread_mode` changed.
+_thread_mode_changed: dict[Path, Callable[[str], object]] = {}
 
 
 def _key(setting: RoomSetting[Any], runtime_paths: RuntimePaths, room_id: str) -> _Key:
@@ -189,6 +191,15 @@ async def state_event_content(response: object) -> dict[str, Any] | None:
             except ValueError:
                 return None
     return content if isinstance(content, dict) else None
+
+
+def on_thread_mode_change(runtime_paths: RuntimePaths, changed: Callable[[str], object]) -> None:
+    """Have ``changed`` called with each room whose `thread_mode` a read finds changed, whoever reads it.
+
+    That is a change no bot's sync showed, so nothing republished the mode clients see. A room's first read calls
+    nothing: its steward publishes the mode when it starts or joins.
+    """
+    _thread_mode_changed[runtime_paths.storage_root] = changed
 
 
 def resolve_room_setting[T: str](setting: RoomSetting[T], runtime_paths: RuntimePaths, room_id: str | None) -> T | None:
@@ -309,10 +320,14 @@ async def refresh_room_setting[T: str](  # noqa: PLR0911 - one outcome per answe
     else:
         logger.warning("room_setting_read_failed", room_id=room_id, setting=setting.key, error=str(response))
         return SettingRead(ok=False, value=resolve_room_setting(setting, runtime_paths, room_id))
+    held = _known.get(key)
     _take(key, value, started, confirmed=True)
     if content is not None:
         # The room's own event, even an empty one, decides over the override an older runtime stored.
         _drop_legacy_override(setting, runtime_paths, room_id)
+    changed = held is not None and held.order < started and held.value != value
+    if changed and setting is THREAD_MODE and (tell := _thread_mode_changed.get(key[0])) is not None:
+        tell(room_id)
     return SettingRead(ok=True, value=value)
 
 
@@ -322,21 +337,13 @@ async def refresh_room_settings(
     room_id: str,
     *,
     put_state: _PutState | None,
-    thread_mode_changed: Callable[[], object],
 ) -> SettingRead[RoomReplyMode]:
-    """Refresh every setting a turn uses, at once, and return what the reply mode's read found.
-
-    ``thread_mode_changed`` is called when the read finds a thread mode the runtime did not know, a change no bot's
-    sync showed, so the caller has the room's steward republish the mode clients see.
-    """
-    known_thread_mode = resolve_room_setting(THREAD_MODE, runtime_paths, room_id)
-    reply_mode, _model, thread_mode = await asyncio.gather(
+    """Refresh every setting a turn uses, at once, and return what the reply mode's read found."""
+    reply_mode, _model, _thread_mode = await asyncio.gather(
         refresh_room_setting(REPLY_MODE, client, runtime_paths, room_id, put_state=put_state),
         refresh_room_setting(MODEL, client, runtime_paths, room_id, put_state=put_state),
         refresh_room_setting(THREAD_MODE, client, runtime_paths, room_id, put_state=put_state),
     )
-    if thread_mode.ok and thread_mode.value != known_thread_mode:
-        thread_mode_changed()
     return reply_mode
 
 

@@ -35,6 +35,7 @@ from mindroom.matrix.room_member_joins import (
     room_member_left_from_event,
 )
 from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
+from mindroom.room_settings import on_thread_mode_change
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
@@ -129,7 +130,7 @@ async def put_room_state_as_steward(
     return isinstance(response, nio.RoomPutStateResponse)
 
 
-def republish_thread_mode_as_steward(room_steward: Callable[[str], AgentBot | None], room_id: str) -> None:
+def _republish_thread_mode_as_steward(room_steward: Callable[[str], AgentBot | None], room_id: str) -> None:
     """Have the room's steward republish the thread mode clients see, after a read found its setting changed."""
     if (steward := room_steward(room_id)) is not None:
         steward.steward_duties.thread_mode_setting_changed(room_id)
@@ -192,7 +193,13 @@ class StewardDuties:
         return steward is not None and steward.agent_name == self.deps.hook_context.agent_name
 
     async def started(self, client: nio.AsyncClient) -> None:
-        """Remove managed accounts the config no longer has from the rooms the owner account can see."""
+        """Have reads that find a room's thread mode changed tell its steward, and clean up as the owner account.
+
+        The owner account removes managed accounts the config no longer has from the rooms it can see.
+        """
+        runtime = self.deps.runtime
+        republish = partial(_republish_thread_mode_as_steward, runtime.orchestrator.room_steward)
+        on_thread_mode_change(runtime.runtime_paths, republish)
         if not self._is_owner:
             return
         try:

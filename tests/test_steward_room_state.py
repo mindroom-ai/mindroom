@@ -29,7 +29,12 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration import rooms as rooms_module
 from mindroom.orchestration.rooms import RoomSetup
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.room_settings import THREAD_MODE, observe_room_settings_event, resolve_room_setting
+from mindroom.room_settings import (
+    THREAD_MODE,
+    observe_room_settings_event,
+    refresh_room_setting,
+    resolve_room_setting,
+)
 from mindroom.runtime_shutdown import ShutdownBudget
 from mindroom.steward_duties import StewardDuties, StewardDutiesDeps, reconcile_held_room_states
 from tests.access_schema_support import member_event
@@ -1368,6 +1373,31 @@ async def test_only_the_steward_republishes_a_changed_thread_mode_setting(room_s
         assert [call.args[1] for call in client.room_get_state_event.await_args_list].count(SETTING[0]) == 1
     else:
         client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_read_that_finds_the_thread_mode_changed_has_the_steward_republish_it(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whoever reads the room, a `thread_mode` change no sync showed is republished for clients by the room's steward."""
+    monkeypatch.setattr("mindroom.steward_duties.cleanup_all_orphaned_bots", AsyncMock())
+    _, paths, _, events, client = room_state
+    events[SETTING] = {"value": "thread"}
+    duties = _router_duties(room_state)
+    duties.deps.runtime.orchestrator.room_steward.return_value = MagicMock(
+        agent_name=ROUTER_AGENT_NAME,
+        steward_duties=duties,
+    )
+    await duties.started(client)
+
+    await refresh_room_setting(THREAD_MODE, client, paths, ROOM_ID, put_state=None)
+    assert not duties._room_state_publishes
+    events[SETTING] = {"value": "room"}
+    await refresh_room_setting(THREAD_MODE, client, paths, ROOM_ID, force=True, put_state=None)
+    await asyncio.gather(*duties._room_state_publishes)
+
+    assert [call.args[1:3] for call in client.room_put_state.await_args_list] == [(EVENT_TYPE, {"mode": "room"})]
 
 
 @pytest.mark.asyncio
