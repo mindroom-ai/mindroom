@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
@@ -58,7 +59,8 @@ from tests.response_runner_helpers import _bot, _plain_request, _target
 from tests.test_turn_store import _redact_through, _store_with_storage
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+    from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
 
@@ -419,6 +421,7 @@ async def test_exclusive_conversation_waits_for_approval_without_admission_or_re
                 target,
                 admit=runtime.admission_fence,
                 wait_for_approval_release=runtime.wait_for_admission_or_shutdown,
+                accepting=lambda: runtime.phase is RunPhase.ACCEPTING,
             ):
                 order.append("exclusive_enter")
                 entered.set()
@@ -509,6 +512,7 @@ async def test_exclusive_conversation_rewaits_when_hold_appears_while_queued_and
                 target,
                 admit=runtime.admission_fence,
                 wait_for_approval_release=runtime.wait_for_admission_or_shutdown,
+                accepting=lambda: runtime.phase is RunPhase.ACCEPTING,
             ):
                 exclusive_entered.set()
 
@@ -675,6 +679,7 @@ async def test_exclusive_conversation_holds_canonical_lock_across_retry(tmp_path
                 target,
                 admit=runtime.admission_fence,
                 wait_for_approval_release=runtime.wait_for_admission_or_shutdown,
+                accepting=lambda: runtime.phase is RunPhase.ACCEPTING,
             ):
                 lock_held_in_body.append(coordinator._response_lifecycle_lock(target).locked())
                 first_entered.set()
@@ -685,6 +690,7 @@ async def test_exclusive_conversation_holds_canonical_lock_across_retry(tmp_path
                 target,
                 admit=runtime.admission_fence,
                 wait_for_approval_release=runtime.wait_for_admission_or_shutdown,
+                accepting=lambda: runtime.phase is RunPhase.ACCEPTING,
             ):
                 second_entered.set()
 
@@ -849,3 +855,125 @@ async def test_exclusive_conversation_refuses_when_runtime_stops_while_queued_fo
 def test_runtime_source_kinds_matches_runner_handler_table() -> None:
     """The journal dispatcher's RUNTIME_SOURCE_KINDS stays in lockstep with ResponseRunner's handler table."""
     assert set(ResponseRunner._RUNTIME_SOURCE_HANDLERS) == set(RUNTIME_SOURCE_KINDS)
+
+
+def _suppressing_fence(
+    runtime: BotRuntimeState,
+    suppressed: type[Exception],
+    admissions: list[None],
+) -> Callable[[], AbstractAsyncContextManager[None]]:
+    """Return the runtime's admission fence wrapped to swallow one exception type raised while it is held."""
+
+    @asynccontextmanager
+    async def fence() -> AsyncIterator[None]:
+        admissions.append(None)
+        async with runtime.admission_fence():
+            with suppress(suppressed):
+                yield
+
+    return fence
+
+
+@pytest.mark.asyncio
+async def test_exclusive_conversation_ends_after_one_admission_when_admit_suppresses_a_body_exception(
+    tmp_path: Path,
+) -> None:
+    """A body exception the ``admit`` context suppresses ends the helper cleanly instead of admitting again."""
+    bot = _bot(tmp_path)
+    runtime = BotRuntimeState(orchestrator=bot.orchestrator)
+    gate = runtime.response_admission_gate
+    coordinator = ResponseLifecycleCoordinator()
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$src")
+    admissions: list[None] = []
+    bodies = 0
+
+    async with coordinator.exclusive_conversation(
+        target,
+        admit=_suppressing_fence(runtime, ValueError, admissions),
+        wait_for_approval_release=runtime.wait_for_admission_or_shutdown,
+        accepting=lambda: runtime.phase is RunPhase.ACCEPTING,
+    ):
+        bodies += 1
+        msg = "handled by the fence"
+        raise ValueError(msg)
+
+    assert bodies == 1
+    assert len(admissions) == 1
+    assert gate.in_flight_response_count == 0
+    assert not coordinator._response_lifecycle_lock(target).locked()
+    assert target.lifecycle_key not in coordinator._lock_only_owners
+    assert target.lifecycle_key not in coordinator._exclusive_users
+
+
+@pytest.mark.asyncio
+async def test_exclusive_conversation_still_refuses_when_admit_suppresses_the_refusal_under_the_lock(
+    tmp_path: Path,
+) -> None:
+    """A refusal raised under the lock, before the body, still reaches the caller when ``admit`` suppresses it."""
+    bot = _bot(tmp_path)
+    runtime = BotRuntimeState(orchestrator=bot.orchestrator)
+    gate = runtime.response_admission_gate
+    coordinator = ResponseLifecycleCoordinator()
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$src")
+    envelope = request_envelope(target=target, prompt="hi", user_id="@user:localhost")
+    reply_locked = asyncio.Event()
+    reply_release = asyncio.Event()
+    admissions: list[None] = []
+    body_ran = False
+
+    async def holding_reply(_target: MessageTarget) -> None:
+        reply_locked.set()
+        await reply_release.wait()
+
+    reply_task = asyncio.create_task(
+        coordinator.run_locked_response(
+            target=target,
+            response_envelope=envelope,
+            pipeline_timing=None,
+            locked_operation=holding_reply,
+        ),
+    )
+    await asyncio.wait_for(reply_locked.wait(), timeout=2)
+
+    async def run_exclusive() -> None:
+        nonlocal body_ran
+        async with coordinator.exclusive_conversation(
+            target,
+            admit=_suppressing_fence(runtime, ResponseAdmissionRefusedError, admissions),
+            wait_for_approval_release=runtime.wait_for_admission_or_shutdown,
+            accepting=lambda: runtime.phase is RunPhase.ACCEPTING,
+        ):
+            body_ran = True
+
+    exclusive_task = asyncio.create_task(run_exclusive())
+    await asyncio.sleep(0)
+    assert gate.in_flight_response_count == 1
+
+    runtime.begin_draining()
+    reply_release.set()
+    await asyncio.wait_for(reply_task, timeout=2)
+    with pytest.raises(ResponseAdmissionRefusedError):
+        await asyncio.wait_for(exclusive_task, timeout=2)
+
+    assert body_ran is False
+    assert len(admissions) == 1
+    assert gate.in_flight_response_count == 0
+    assert not coordinator._response_lifecycle_lock(target).locked()
+    assert target.lifecycle_key not in coordinator._lock_only_owners
+    assert target.lifecycle_key not in coordinator._exclusive_users
+
+
+@pytest.mark.parametrize("omitted", ["admit", "wait_for_approval_release", "accepting"])
+def test_exclusive_conversation_requires_admission_approval_wait_and_accepting_together(omitted: str) -> None:
+    """A caller cannot wire admission without the accepting check, or leave out any other runtime callable."""
+    coordinator = ResponseLifecycleCoordinator()
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$src")
+    wiring: dict[str, Any] = {
+        "admit": MagicMock(),
+        "wait_for_approval_release": AsyncMock(),
+        "accepting": lambda: True,
+    }
+    del wiring[omitted]
+
+    with pytest.raises(TypeError, match=omitted):
+        coordinator.exclusive_conversation(target, **wiring)
