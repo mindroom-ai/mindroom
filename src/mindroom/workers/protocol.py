@@ -24,8 +24,10 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerSco
 # 7: a call's arguments arrive as the model sent them, and the worker validates and coerces them.
 # 8: a worker pinned to one subagent (`subagent=<id>` in its key) serves its normal worker's workspaces and credentials.
 # 9: so does a worker a reply's calls name (`named=<id>` in its key).
+# 10: a shell call with `stream_io` streams its command's raw output as frames before its result line, and
+#     /execute/{request_id}/stdin writes the command's stdin.
 # A wire model change bumps this; `tests/test_worker_protocol_schema.py` pins each version's schema.
-WORKER_PROTOCOL_VERSION = 9
+WORKER_PROTOCOL_VERSION = 10
 
 FailureKind = Literal["tool", "worker"]
 
@@ -97,6 +99,8 @@ class ExecuteRequest(WorkerRoute):
     request_id: str | None = Field(default=None, max_length=64)
     # A background job's call runs as long as its tool does, and its tools know they run as part of a job.
     run_as_job: bool = False
+    # A shell call whose command's stdout and stderr stream as raw bytes while it runs, for `workers run`.
+    stream_io: bool = False
 
 
 class SaveAttachmentRequest(WorkerRoute):
@@ -131,6 +135,24 @@ class CancelRequest(_WireModel):
 
     protocol: int
     request_id: str = Field(max_length=64)
+
+
+class StdinRequest(_WireModel):
+    """The next bytes, base64, for the stdin of a streamed execute request's command; ``eof`` closes it after them.
+
+    ``seq`` counts a command's chunks from 0, so a chunk sent twice is written once.
+    """
+
+    protocol: int
+    seq: int = Field(ge=0)
+    b: str = ""
+    eof: bool = False
+
+
+class StdinResponse(_WireModel):
+    """Whether the command still takes stdin, answered once the chunk has left for it."""
+
+    open: bool
 
 
 class WorkerFailure(_WireModel):

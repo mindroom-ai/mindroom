@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from mindroom.api import config_lifecycle
 from mindroom.api.computers import active_computer_worker_keys
+from mindroom.api.tailnet_ssh_gateway import active_tailnet_ssh_worker_keys
 from mindroom.api.worker_responses import (
     SandboxWorkerCleanupResponse,
     SandboxWorkerListResponse,
@@ -62,14 +63,15 @@ def maintain_leased_workers(
     manager: WorkerBackend,
     *,
     touch_live_workers: Callable[[WorkerBackend], None],
-    computer_worker_keys: frozenset[str],
+    held_worker_keys: frozenset[str],
 ) -> WorkerMaintenanceResult:
     """Mark every worker still in use as active, then run the backend's maintenance pass on a leased manager.
 
+    ``held_worker_keys`` are the workers a Computer viewer or an SSH connection holds open.
     The pass cleans idle workers and, on Kubernetes, reconciles drifted pod templates.
     """
     touch_live_workers(manager)
-    for worker_key in computer_worker_keys:
+    for worker_key in held_worker_keys:
         manager.touch_worker(worker_key)
     touch_workers_in_flight(manager)
     return maintain_workers(manager)
@@ -79,15 +81,15 @@ def maintain_leased_workers(
 async def cleanup_idle_workers(request: Request) -> SandboxWorkerCleanupResponse:
     """Run one worker maintenance pass on the configured backend, like the background cleanup does."""
     touch_live_workers = config_lifecycle.app_state(request.app).runtime.script_worker_keepalive
-    # Computer sessions live on the app's event loop, so their keys are read here before the pass leaves it.
-    computer_worker_keys = active_computer_worker_keys(request.app)
+    # Computer sessions live on the app's event loop, so the held keys are read here before the pass leaves it.
+    held_worker_keys = active_computer_worker_keys(request.app) | active_tailnet_ssh_worker_keys(request.app)
 
     def run_pass() -> SandboxWorkerCleanupResponse:
         with _worker_manager_lease(request) as worker_manager:
             maintenance = maintain_leased_workers(
                 worker_manager,
                 touch_live_workers=touch_live_workers,
-                computer_worker_keys=computer_worker_keys,
+                held_worker_keys=held_worker_keys,
             )
         return SandboxWorkerCleanupResponse(
             idle_timeout_seconds=worker_manager.idle_timeout_seconds,

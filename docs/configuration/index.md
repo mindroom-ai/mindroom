@@ -83,6 +83,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `tool_approval` | Human approval for tool calls | [Tool Approval](../tool-approval.md#tool-approval) |
 | `email_invites` | Chat link, expiry, and approvers of invites to a room by email | [Email Invites](#email-invites) |
 | `egress_broker` | Agent Keys: services whose API keys and connected accounts are added to worker requests without the worker seeing them | [Agent Keys](../deployment/egress-broker.md) |
+| `tailnet_ssh` | Tailnet logins and SSH public keys for access to dedicated agent workers | [Tailnet SSH](../tailnet-ssh.md) |
 | `background_tool_jobs` | Background execution of tool calls, on by default | [Background Jobs](../tools/agent-orchestration.md#background-jobs) |
 | `personal_rooms` | One private room per onboarded user | [Personal Rooms](../personal-rooms.md#personal-rooms) |
 | `personal_agents` | Templates that give each onboarded user their own agent | [Personal Agents](../personal-agents.md#personal-agents) |

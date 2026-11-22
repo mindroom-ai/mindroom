@@ -31,7 +31,6 @@ from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.response_payload_preparation import _STEER_CONTINUATION_LINE, _steered_follow_up_prompt
 from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.turn_record import TurnRecord
-from mindroom.turns.queued_notice import queued_notice_reservation_if_busy
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
     handle_card_response_for_test,
@@ -150,7 +149,11 @@ def _arrival(turn: _Turn, *, mode: MidTurnMode) -> tuple[list[QueuedHumanNoticeR
             body=_STEER_TEXT,
             origin=message_origin(sender_id=_REQUESTER, requester_id=_REQUESTER),
         )
-        notice = queued_notice_reservation_if_busy(turn.runner, target=target, envelope=envelope, mode=mode)
+        notice = turn.runner.lifecycle_coordinator.reserve_waiting_human_message(
+            target=target,
+            response_envelope=envelope,
+            mode=mode,
+        )
         assert notice is not None
         notices.append(notice)
 

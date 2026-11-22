@@ -16,7 +16,8 @@ from mindroom import constants
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.event_journal import turn_rows
 from mindroom.event_journal.legacy_turn_rows import import_legacy_ledger_file, legacy_summary_sources
-from mindroom.history.storage import remove_history_of_redacted_events, remove_runs_answering
+from mindroom.history.session_context import load_scope_session_from_storage, load_scrubbed_scope_session
+from mindroom.history.storage import remove_runs_answering
 from mindroom.logging_config import get_logger
 from mindroom.turn_record import (
     PreparedVoiceSource,
@@ -690,13 +691,13 @@ class TurnStore:
         scope = turn_record.history_scope
         if target is None or scope is None:
             return
+        # Opened before the first suspension, so a failed open surfaces ahead of any pending cancellation.
         storage = self.deps.state_writer.create_storage(
             self.deps.tool_runtime.build_execution_identity(target=target, user_id=requester_user_id),
             scope=scope,
         )
-        session = await run_blocking_until_complete(storage.load_session, target.session_id)
-        if session is not None:
-            await remove_history_of_redacted_events(storage, session, partial(self.redacted_history_events, target))
+        load_scope = partial(load_scope_session_from_storage, scope, target.session_id, lambda: storage)
+        await load_scrubbed_scope_session(load_scope, partial(self.redacted_history_events, target))
         removed_any = await run_blocking_until_complete(
             _remove_runs_for_sources,
             storage,

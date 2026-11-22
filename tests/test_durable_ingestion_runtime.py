@@ -31,11 +31,13 @@ from mindroom.event_journal import DeliveryStage, EventClass, EventKind, RoomMem
 from mindroom.hooks import EVENT_BOT_READY, HookRegistry, hook
 from mindroom.matrix._owned_session import MatrixCredentials, open_owned_matrix_session
 from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch
+from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 from mindroom.matrix.personal_rooms import PersonalRoomService
 from mindroom.matrix.state import MatrixState
 from mindroom.orchestration import entity_fleet
 from mindroom.orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoordinator
 from mindroom.personal_room_lifecycle import PersonalRoomTarget
+from mindroom.room_settings import MODEL, resolve_room_setting
 from mindroom.runtime_shutdown import ShutdownBudget
 from mindroom.scheduling.runtime import ScheduledTaskRuntime
 from tests.access_schema_support import refresh_memberships
@@ -44,6 +46,7 @@ from tests.conftest import SETTLE_TIMEOUT_SECONDS, legacy_default_store_client, 
 from tests.durable_sync_helpers import skip_crypto_maintenance
 from tests.journal_helpers import admit_dispatch_event, membership_position
 from tests.matrix_state_helpers import save_matrix_state
+from tests.room_settings_helpers import set_room_model_override
 from tests.test_bot_ready_hook import _agent_bot
 from tests.test_durable_ingestion_admission import ROOM, Session, message
 from tests.test_event_journal_store import admit, interactive_edit, interactive_prompt, projection
@@ -168,7 +171,7 @@ async def test_slow_first_frame_side_effect_does_not_delay_a_stewards_dispatch( 
         entered.set()
         await release.wait()
 
-    async def slow_reconcile(_room_id: str) -> set[str]:
+    async def slow_reconcile(_room_id: str, _only: set[str] | None) -> set[str]:
         entered.set()
         await release.wait()
         return set()
@@ -1017,6 +1020,9 @@ async def test_entity_removal_leaves_with_retained_input_before_closing_stores(
     async with _owned_session(bot) as session:
         assert bot.client is not None
         monkeypatch.setattr(bot.client, "joined_rooms", AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[ROOM])))
+        # The room's settings are read as the client, not through the transport, before an event of it is handled.
+        no_setting = nio.RoomGetStateEventError("Not found", "M_NOT_FOUND")
+        monkeypatch.setattr(bot.client, "room_get_state_event", AsyncMock(return_value=no_setting))
         session._transport.request = request
         skip_crypto_maintenance(session)
         orchestrator = cast("ReadyRuntime", bot.orchestrator)
@@ -1046,6 +1052,49 @@ async def test_entity_removal_leaves_with_retained_input_before_closing_stores(
             for task in sync_tasks:
                 task.cancel()
             await asyncio.gather(*sync_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_setting_event_in_the_sync_that_shows_the_bot_left_is_not_taken(tmp_path: Path) -> None:
+    """A room's last sync can hold an older setting event before the bot's own leave.
+
+    The source hands the setting on before the journal has the leave, when only its client knows the bot left. The
+    bot takes no setting then and does not read the room, which it would see as it left it.
+    """
+    bot = _agent_bot(tmp_path)
+    set_room_model_override(bot.runtime_paths, room_id=ROOM, model_name="new")
+    user_id = bot.agent_user.user_id
+    older = {
+        "type": ROOM_SETTINGS_EVENT_TYPE,
+        "state_key": "model",
+        "event_id": "$older",
+        "sender": "@admin:localhost",
+        "origin_server_ts": 1,
+        "content": {"value": "old"},
+    }
+    leave = {
+        "type": "m.room.member",
+        "state_key": user_id,
+        "event_id": "$leave",
+        "sender": user_id,
+        "origin_server_ts": 2,
+        "content": {"membership": "leave"},
+    }
+    left = {"state": {"events": []}, "timeline": {"limited": False, "events": [older, leave]}}
+    last_sync = json.dumps({"next_batch": "left", "rooms": {"leave": {ROOM: left}}}).encode()
+    async with _owned_session(bot) as session:
+        assert bot.client is not None
+        bot.client.add_event_callback(bot._on_room_state_event, nio.UnknownEvent)
+        as_it_left = nio.RoomGetStateEventResponse({"value": "old"}, ROOM_SETTINGS_EVENT_TYPE, "model", ROOM)
+        bot.client.room_get_state_event = AsyncMock(return_value=as_it_left)
+        await _consume_frame(bot, session, _joined_frame([]))
+
+        await _consume_frame(bot, session, last_sync)
+        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
+
+        assert await bot.journal_principal().ingestion_membership_position(ROOM) == RoomMembershipPosition("leave", 1)
+        bot.client.room_get_state_event.assert_not_awaited()
+    assert resolve_room_setting(MODEL, bot.runtime_paths, ROOM) == "new"
 
 
 @pytest.mark.asyncio

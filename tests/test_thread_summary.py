@@ -40,21 +40,26 @@ from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
-from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS
+from mindroom.prompts import THREAD_SUMMARY_INSTRUCTIONS, THREAD_SUMMARY_KEEP_INSTRUCTIONS
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.thread_summary import automatic
 from mindroom.thread_summary.automatic import maybe_generate_thread_summary
 from mindroom.thread_summary.generation import (
+    _CLIP_SEPARATOR,
+    _CLIP_TAIL_CHARS,
+    _MAX_MESSAGE_CHARS,
     _MAX_MESSAGES_BEFORE_TRUNCATION,
-    _TRUNCATION_SAMPLE_SIZE,
+    _TRUNCATION_EDGE_COUNT,
+    _TRUNCATION_MIDDLE_COUNT,
     GENERATED_TITLE_MAX_LENGTH,
     GeneratedSummary,
+    _conversation_text,
     _ThreadEnrichment,
     _ThreadSummary,
     generate_summary,
     resolve_thread_summary_model_name,
-    room_summary_instructions,
+    room_title_settings,
     title_error,
 )
 from mindroom.thread_summary.notices import (
@@ -287,6 +292,8 @@ class _RoomState:
     reads: int = 0
     # The room's thread_summary_instructions setting: its content, a read failure, or None for M_NOT_FOUND.
     title_rules: dict[str, object] | Exception | nio.RoomGetStateEventError | None = None
+    # The room's thread_summary_model setting, served the same way.
+    title_model: dict[str, object] | Exception | nio.RoomGetStateEventError | None = None
 
     def serve(self, client: AsyncMock) -> None:
         client.room_get_state.side_effect = self.room_get_state
@@ -332,8 +339,8 @@ class _RoomState:
         state_key: str = "",
     ) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
         if event_type == ROOM_SETTINGS_EVENT_TYPE:
-            assert state_key == "thread_summary_instructions"
-            rules = self.title_rules
+            settings = {"thread_summary_instructions": self.title_rules, "thread_summary_model": self.title_model}
+            rules = settings[state_key]
             if isinstance(rules, Exception):
                 raise rules
             if rules is None:
@@ -984,6 +991,9 @@ class TestMaybeGenerateThreadSummary:
         assert sent["message_count"] == 0
         # An untitled parent's fork, and one whose parent title is over the limits, title their prompt.
         assert len(model.requests) == (parent_title is None or len(parent_title) > GENERATED_TITLE_MAX_LENGTH)
+        # Only a title a model writes reads the room's title settings, both at once.
+        state_reads = [call.args[1] for call in self.client.room_get_state_event.await_args_list]
+        assert state_reads.count(ROOM_SETTINGS_EVENT_TYPE) == 2 * len(model.requests)
 
     @pytest.mark.parametrize("parent_title", ["Trip plan", None], ids=["parent-title", "untitled-parent"])
     async def test_a_batch_starting_a_fork_gets_only_its_parents_title(self, parent_title: str | None) -> None:
@@ -1143,6 +1153,54 @@ class TestMaybeGenerateThreadSummary:
             assert "ROOM RULES:" in instructions
             assert "\n\nUse at most 4 words" in instructions
 
+    async def test_the_rooms_title_model_writes_every_automatic_title(self) -> None:
+        """The room's `thread_summary_model` setting titles each pass, over the model the config gives the room."""
+        self.room_state.title_model = {"value": " room_titles "}
+        configured = self._summarizer()
+        room_model = self._summarizer(
+            _title("Trip plan"),
+            _title("Trip answer"),
+            _title("Trip retitle"),
+            model_name="room_titles",
+        )
+        self._history(_make_thread_history(1))
+        config = _mock_config(first_threshold=2)
+        config.models["room_titles"] = ModelConfig(provider="openai", id="titles")
+        config.room_thread_summary_models[_ROOM] = "default"
+
+        await self._provisional(config=config)
+        self._history([*_make_thread_history(2), _make_summary_notice_message(_THREAD, message_count=0)])
+        await self._maybe_generate(config)
+        await self._maybe_generate(config, retitle=True)
+
+        assert (len(room_model.requests), len(configured.requests)) == (3, 0)
+
+    @pytest.mark.parametrize(
+        "setting",
+        [{"value": "gone"}, {}, nio.RoomGetStateEventError("forbidden", status_code="M_FORBIDDEN")],
+        ids=["unknown-model", "cleared", "unreadable"],
+    )
+    async def test_a_room_title_model_that_names_no_model_leaves_the_configured_one(
+        self,
+        setting: dict[str, object] | nio.RoomGetStateEventError,
+    ) -> None:
+        """A setting that names no configured model, is cleared, or cannot be read titles with the configured model.
+
+        A name this runtime does not configure is logged once per room and name.
+        """
+        self.room_state.title_model = setting
+        model = self._summarizer(_title("Trip plan"))
+        self._history(_make_thread_history(1))
+
+        with capture_logs() as logs:
+            await self._provisional()
+            await room_title_settings(self.client, _mock_config(), self.rp, _ROOM)
+
+        assert len(model.requests) == 1
+        assert _sent_summaries(self.client)[0]["summary"] == "Trip plan"
+        ignored = [log["model"] for log in logs if log["event"] == "Room thread summary model ignored"]
+        assert ignored == (["gone"] if setting == {"value": "gone"} else [])
+
     @pytest.mark.parametrize(
         "rules",
         [
@@ -1190,7 +1248,7 @@ class TestMaybeGenerateThreadSummary:
         """A room setting over 2,000 characters is cut to 2,000."""
         self.room_state.title_rules = {"value": " " + "x" * 2500}
 
-        assert await room_summary_instructions(self.client, _ROOM) == "x" * 2000
+        assert await room_title_settings(self.client, _mock_config(), self.rp, _ROOM) == (None, "x" * 2000)
 
     @pytest.mark.parametrize("case", ["automatic", "manual", "pinned", "more_messages", "wrong_prompt", "resolved"])
     async def test_provisional_title_skips_existing_threads(self, case: str) -> None:
@@ -2575,22 +2633,110 @@ class TestConversationText:
         assert "omitted" not in text
         assert text.count("\n") == 4  # 5 messages, 4 newlines
 
-    async def test_long_thread_truncated(self) -> None:
-        """Threads above the truncation threshold are sampled with an omission note."""
-        count = _MAX_MESSAGES_BEFORE_TRUNCATION + 10
-
+    @pytest.mark.parametrize("count", [51, 52, 100, 1000])
+    async def test_long_thread_truncated(self, count: int) -> None:
+        """Threads above the truncation threshold sample start, evenly spaced middle, and end with exact gap markers."""
         text = await self._conversation(_make_thread_history(count))
 
-        omitted = count - 2 * _TRUNCATION_SAMPLE_SIZE
-        assert text.splitlines() == [
-            "@user0:localhost: Message 0",
-            "@user1:localhost: Message 1",
-            "@user2:localhost: Message 2",
-            f"[... {omitted} messages omitted ...]",
-            f"@user{count - 3}:localhost: Message {count - 3}",
-            f"@user{count - 2}:localhost: Message {count - 2}",
-            f"@user{count - 1}:localhost: Message {count - 1}",
+        lines = text.splitlines()
+        message_lines = [line for line in lines if not line.startswith("[...")]
+        marker_lines = [line for line in lines if line.startswith("[...")]
+        expected_kept = 2 * _TRUNCATION_EDGE_COUNT + _TRUNCATION_MIDDLE_COUNT
+        assert len(message_lines) == expected_kept
+        assert message_lines[:_TRUNCATION_EDGE_COUNT] == [
+            f"@user{i}:localhost: Message {i}" for i in range(_TRUNCATION_EDGE_COUNT)
         ]
+        assert message_lines[-_TRUNCATION_EDGE_COUNT:] == [
+            f"@user{i}:localhost: Message {i}" for i in range(count - _TRUNCATION_EDGE_COUNT, count)
+        ]
+        indices = [int(line.rsplit(" ", 1)[1]) for line in message_lines]
+        assert indices == sorted(set(indices))
+        assert len(marker_lines) == _TRUNCATION_MIDDLE_COUNT + 1
+        # Verify every omission marker matches the gap between its adjacent sampled message indices.
+        prev_index: int | None = None
+        pending_omitted: int | None = None
+        omitted_total = 0
+        for line in lines:
+            if line.startswith("[..."):
+                assert pending_omitted is None
+                pending_omitted = int(line.split()[1])
+                omitted_total += pending_omitted
+            else:
+                cur_index = int(line.rsplit(" ", 1)[1])
+                if prev_index is not None:
+                    expected_gap = cur_index - prev_index - 1
+                    assert (pending_omitted or 0) == expected_gap
+                pending_omitted = None
+                prev_index = cur_index
+        assert pending_omitted is None
+        assert omitted_total + len(message_lines) == count
+        if count == 100:
+            # Even spacing for 100 messages with 5 + 12 + 5 -> 13 gaps of 6 omitted each.
+            assert marker_lines == ["[... 6 messages omitted ...]"] * (_TRUNCATION_MIDDLE_COUNT + 1)
+
+    async def test_long_thread_clips_head_and_tail_with_whitespace_only(self) -> None:
+        """Long-thread sampling keeps head and tail of overlong bodies and renders whitespace-only bodies empty."""
+        exact = "a" * _MAX_MESSAGE_CHARS
+        head_chars = _MAX_MESSAGE_CHARS - _CLIP_TAIL_CHARS - len(_CLIP_SEPARATOR)
+        head_part = "H" * head_chars
+        middle_part = "M" * 200
+        tail_part = "T" * _CLIP_TAIL_CHARS
+        overlong = f"  {head_part}{middle_part}{tail_part}  "
+        history = [
+            ResolvedVisibleMessage.synthetic(sender="@alice:localhost", body=exact, event_id="$m0"),
+            ResolvedVisibleMessage.synthetic(sender="@bob:localhost", body=overlong, event_id="$m1"),
+            ResolvedVisibleMessage.synthetic(sender="@blank:localhost", body="   \n\t  ", event_id="$m2"),
+            *_make_thread_history(58),
+        ]
+
+        text = await self._conversation(history)
+
+        lines = text.splitlines()
+        assert lines[0] == f"@alice:localhost: {exact}"
+        clipped_body = lines[1].removeprefix("@bob:localhost: ")
+        assert clipped_body == f"{head_part}{_CLIP_SEPARATOR}{tail_part}"
+        assert len(clipped_body) == _MAX_MESSAGE_CHARS
+        assert lines[2] == "@blank:localhost: "
+
+    async def test_long_thread_at_51_with_whitespace_only_stays_sampled_and_clipped(self) -> None:
+        """A 51-message thread with a whitespace-only body stays sampled and clips every rendered body."""
+        long_paste = f"START {'x' * (_MAX_MESSAGE_CHARS * 4)} END_QUESTION?"
+        history = [
+            ResolvedVisibleMessage.synthetic(sender="@blank:localhost", body="   \n  ", event_id="$m0"),
+            ResolvedVisibleMessage.synthetic(sender="@alice:localhost", body=long_paste, event_id="$m1"),
+            *(
+                ResolvedVisibleMessage.synthetic(
+                    sender=f"@user{i}:localhost",
+                    body=long_paste if i % 5 == 0 else f"Message {i}",
+                    event_id=f"$m{i}",
+                )
+                for i in range(2, _MAX_MESSAGES_BEFORE_TRUNCATION + 1)
+            ),
+        ]
+        assert len(history) == _MAX_MESSAGES_BEFORE_TRUNCATION + 1
+
+        text = await self._conversation(history)
+
+        lines = text.splitlines()
+        message_lines = [line for line in lines if not line.startswith("[...")]
+        marker_lines = [line for line in lines if line.startswith("[...")]
+        assert len(message_lines) == 2 * _TRUNCATION_EDGE_COUNT + _TRUNCATION_MIDDLE_COUNT
+        assert len(marker_lines) == _TRUNCATION_MIDDLE_COUNT + 1
+        assert message_lines[0] == "@blank:localhost: "
+        for line in message_lines:
+            _sender, body = line.split(": ", 1)
+            assert len(body) <= _MAX_MESSAGE_CHARS
+
+    async def test_short_thread_long_body_not_clipped(self) -> None:
+        """Threads at or below the truncation threshold render bodies byte-for-byte verbatim, unclipped."""
+        overlong = f"  HEAD_START\r\n{'b' * (_MAX_MESSAGE_CHARS + 400)}\r\nREAL_TAIL_QUESTION?  "
+        history = [
+            ResolvedVisibleMessage.synthetic(sender="@alice:localhost", body=overlong, event_id="$m0"),
+            ResolvedVisibleMessage.synthetic(sender="@bob:localhost", body="  line 1\r\nline 2  ", event_id="$m1"),
+        ]
+
+        expected = "\n".join(f"{message.sender}: {message.body}" for message in history)
+        assert _conversation_text(history) == expected
 
     async def test_exactly_at_threshold_not_truncated(self) -> None:
         """Exactly at the threshold boundary, no truncation occurs."""
@@ -2760,7 +2906,7 @@ class TestGenerateSummary:
                 f"{THREAD_SUMMARY_INSTRUCTIONS.strip()}\n\nCURRENT TITLE:\n",
             )
         )
-        assert "Keep it unless the thread's main topic has clearly changed" in request.messages[0].get_content_string()
+        assert THREAD_SUMMARY_KEEP_INSTRUCTIONS in request.messages[0].get_content_string()
 
     async def test_initial_enrichment_reuses_summary_model_call_and_escapes_input(
         self,

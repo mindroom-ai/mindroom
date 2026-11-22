@@ -7,7 +7,11 @@ from typing import TYPE_CHECKING
 
 from mindroom.config.models import EffectiveToolConfig
 from mindroom.config.resolution import agent_policy, agent_tool_facts, expanded_tool_names
-from mindroom.tool_system.metadata import validate_authored_tool_entry_overrides
+from mindroom.tool_system.metadata import (
+    offered_functions,
+    resolve_tool_settings,
+    validate_authored_tool_entry_overrides,
+)
 from mindroom.tool_system.registry import builtin_tool_registry
 
 if TYPE_CHECKING:
@@ -15,9 +19,10 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.config.resolution import AgentToolFacts
+    from mindroom.constants import RuntimePaths
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.sandbox_proxy import ToolPlacement
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
 # The functions of a toolkit that needs a room which work without one, all a turn without a room offers of it.
 _ROOMLESS_FUNCTIONS = {"attachments": frozenset({"view_file"})}
@@ -187,6 +192,26 @@ class AgentTools:
             if (entry.name != "delegate" or depth < MAX_DELEGATION_DEPTH)
             and (room_tools or not self._needs_room(entry.name))
         )
+
+    def functions_for(
+        self,
+        entry: EffectiveToolConfig,
+        paths: RuntimePaths,
+        target: ResolvedWorkerTarget,
+        *,
+        validate_filters: bool = False,
+    ) -> tuple[frozenset[str] | None, bool]:
+        """Return a candidate's configured functions and write access without building the toolkit."""
+        allowed = self.config.get_worker_grantable_credentials() if target.worker_scope is not None else None
+        settings = resolve_tool_settings(
+            entry.name,
+            paths,
+            tools=self.tools,
+            worker_target=target,
+            allowed_shared_services=allowed,
+            tool_config_overrides=entry.tool_config_overrides,
+        )
+        return offered_functions(self.tools.entries[entry.name], settings.values, validate_filters=validate_filters)
 
     def toolkit_names(self, candidates: Iterable[EffectiveToolConfig]) -> list[str]:
         """Return the toolkits ``candidates`` name for the agent CLI and subagent tool lists; a preset has no functions."""

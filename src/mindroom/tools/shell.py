@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
@@ -509,6 +510,28 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 cwd=_terminal_cwd(self.base_dir, cwd),
             )
 
+        def command_launch(
+            self,
+            *args: object,
+            process_environ: Mapping[str, str] | None,
+            **kwargs: object,
+        ) -> tuple[TerminalLaunch, float | None]:
+            """Return how a ``run_shell_command`` call with these arguments starts its command, and its time limit.
+
+            Not a function the agent calls: the sandbox runner starts the command of a call whose output it streams
+            as raw bytes (`mindroom-agent workers run`) on pipes of its own. ``process_environ`` is as for
+            ``terminal_launch``. Arguments the call cannot take raise ``ValueError`` or ``TypeError``.
+            """
+            call = inspect.signature(self.run_shell_command).bind(*args, **kwargs).arguments
+            timeout = call.get("timeout")
+            if timeout is not None and (not isinstance(timeout, int | float) or timeout <= 0):
+                msg = "timeout must be a positive number of seconds; omit it for the default limit."
+                raise ValueError(msg)
+            env = self._command_env(process_environ)
+            argv = _shell_subprocess_args(_normalize_shell_args(call["args"]), env)
+            launch = TerminalLaunch(argv=tuple(argv), env=env, cwd=str(self.base_dir) if self.base_dir else None)
+            return launch, shell_call_timeout(timeout)
+
         def _refusal(self, *, named_worker: bool) -> str | None:
             """Return why a call cannot run here, where ``named_worker`` says it names a worker of its own."""
             if self._refuse_commands:
@@ -608,6 +631,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                     on_timeout="kill",
                     on_progress=report_tool_progress,
                     output_destination=output_destination,
+                    launch_failure_exits=worker is not None,
                 )
             else:
                 result = await run_command(
@@ -623,6 +647,7 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                     on_timeout="kill",
                     on_progress=report_tool_progress,
                     output_destination=output_destination,
+                    launch_failure_exits=worker is not None,
                 )
             if worker is not None and result.execution_error:
                 raise ValueError(result.message)
