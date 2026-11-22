@@ -53,8 +53,6 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _WORKER_INITIALIZATION_LOCKS = WorkerLocks()
-# A venv takes seconds to create, so one that takes this long is stuck; failing it lets the next request retry.
-_VENV_CREATE_TIMEOUT_SECONDS = 120.0
 
 
 @dataclass(frozen=True)
@@ -141,14 +139,14 @@ def _ensure_local_worker_directories(paths: LocalWorkerStatePaths) -> None:
     paths.metadata_dir.mkdir(parents=True, exist_ok=True)
 
 
-def _ensure_local_worker_state(paths: LocalWorkerStatePaths) -> None:
+def _ensure_local_worker_state(paths: LocalWorkerStatePaths, venv_timeout_seconds: float | None = None) -> None:
     """Create the persistent directories and venv for one worker runtime root."""
     _ensure_local_worker_directories(paths)
     if (paths.venv_dir / "bin" / "python").exists():
         return
 
     try:
-        _create_local_worker_venv(paths.venv_dir)
+        _create_local_worker_venv(paths.venv_dir, venv_timeout_seconds)
     except Exception:
         # Creation writes the interpreter before seeding pip. A failed seed must
         # leave the next request able to retry without deleting user packages.
@@ -156,14 +154,14 @@ def _ensure_local_worker_state(paths: LocalWorkerStatePaths) -> None:
         raise
 
 
-def _create_local_worker_venv(venv_dir: Path) -> None:
+def _create_local_worker_venv(venv_dir: Path, timeout_seconds: float | None = None) -> None:
     """Seed pip from the interpreter's bundled wheel without index access."""
     uv_path = shutil.which("uv")
     bundled_pip_dir = Path(sysconfig.get_path("stdlib")) / "ensurepip" / "_bundled"
     if uv_path is None or not any(bundled_pip_dir.glob("pip-*.whl")):
         venv.EnvBuilder(with_pip=True, system_site_packages=True).create(venv_dir)
         return
-    _create_uv_worker_venv(venv_dir, uv_path=uv_path, bundled_pip_dir=bundled_pip_dir)
+    _create_uv_worker_venv(venv_dir, uv_path=uv_path, bundled_pip_dir=bundled_pip_dir, timeout_seconds=timeout_seconds)
 
 
 def _ensure_local_script_worker_state(paths: LocalWorkerStatePaths) -> None:
@@ -184,6 +182,7 @@ def _create_uv_worker_venv(
     *,
     uv_path: str,
     bundled_pip_dir: Path | None = None,
+    timeout_seconds: float | None = None,
 ) -> None:
     """Create a worker environment with optional offline pip seeding."""
     env = dict(os.environ)
@@ -218,14 +217,17 @@ def _create_uv_worker_venv(
         ],
         check=True,
         env=env,
-        timeout=_VENV_CREATE_TIMEOUT_SECONDS,
+        timeout=timeout_seconds,
     )
 
 
-def ensure_local_worker_state_locked(paths: LocalWorkerStatePaths) -> None:
-    """Create one worker runtime root under a shared per-worker initialization lock."""
+def ensure_local_worker_state_locked(paths: LocalWorkerStatePaths, venv_timeout_seconds: float | None = None) -> None:
+    """Create one worker runtime root under a shared per-worker initialization lock.
+
+    ``venv_timeout_seconds`` ends a venv creation that is stuck, so that a later request creates it again.
+    """
     with _worker_initialization_lock(paths):
-        _ensure_local_worker_state(paths)
+        _ensure_local_worker_state(paths, venv_timeout_seconds)
 
 
 def ensure_local_script_worker_state_locked(paths: LocalWorkerStatePaths) -> None:
