@@ -6664,15 +6664,22 @@ def _answer_worker_setup(backend: KubernetesWorkerBackend, setup: Callable[[], s
     backend._resources.read_worker_health = MethodType(_read, backend._resources)
 
 
-def _run_on_one_clock(monkeypatch: pytest.MonkeyPatch) -> _ControlledMonotonicClock:
-    """Make the setup wait and its progress reports read one clock, which a sleep advances at once."""
+def _run_on_one_clock(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    wall_starts_at: float | None = None,
+) -> _ControlledMonotonicClock:
+    """Make the setup wait and its progress reports read one clock, which a sleep advances at once.
+
+    With ``wall_starts_at``, the backend's wall clock reads that time plus what the clock advanced.
+    """
     clock = _ControlledMonotonicClock()
     monkeypatch.setattr(progress_module, "time", SimpleNamespace(monotonic=clock.monotonic))
     monkeypatch.setattr(
         kubernetes_backend_module,
         "time",
         SimpleNamespace(
-            time=time.time,
+            time=time.time if wall_starts_at is None else lambda: wall_starts_at + clock.monotonic(),
             monotonic=clock.monotonic,
             sleep=lambda seconds: clock.advance_to(clock.monotonic() + seconds),
         ),
@@ -6850,7 +6857,7 @@ def test_kubernetes_idle_cleanup_leaves_a_worker_whose_tool_caller_waits_for_its
 ) -> None:
     """A setup that outlasts the idle timeout is use, and the worker's idle time starts when its caller gets it."""
     backend, _apps_api, _core_api = _backend(idle_timeout_seconds=60.0)
-    clock = _run_on_one_clock(monkeypatch)
+    clock = _run_on_one_clock(monkeypatch, wall_starts_at=10.0)
     cleaned_during_the_wait: list[list[str]] = []
 
     def setup() -> str:
@@ -6873,6 +6880,136 @@ def test_kubernetes_idle_cleanup_leaves_a_worker_whose_tool_caller_waits_for_its
     # The worker is idle 60 s after the wait handed it to its caller, not 60 s after it started.
     assert backend.cleanup_idle_workers(now=159.0) == []
     assert [worker.worker_key for worker in backend.cleanup_idle_workers(now=161.0)] == [_TEST_SCOPED_WORKER_KEY_A]
+
+
+def test_kubernetes_backend_records_a_worker_as_used_at_the_time_its_setup_wait_hands_it_over(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worker's idle time starts when its caller gets it, however long the start before the wait took."""
+    backend, _apps_api, _core_api = _backend()
+    clock = _run_on_one_clock(monkeypatch, wall_starts_at=10.0)
+    _answer_worker_setup(backend, lambda: "ready" if clock.monotonic() >= 50.0 else "preparing")
+    apply_service = backend._resources.apply_service
+
+    def slow_apply_service(*args: object, **kwargs: object) -> object:
+        clock.advance_to(clock.monotonic() + 30.0)
+        return apply_service(*args, **kwargs)
+
+    backend._resources.apply_service = slow_apply_service
+
+    handle = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A))
+
+    # The start took 30 s and the setup wait 20 s more.
+    assert handle.last_used_at == pytest.approx(60.0)
+    assert [worker.last_used_at for worker in backend.list_workers(now=60.0)] == [pytest.approx(60.0)]
+
+
+def test_kubernetes_backend_keeps_a_later_use_of_a_worker_when_its_setup_wait_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The end of a setup wait never moves a worker's last use back, as behind a use a viewer recorded meanwhile."""
+    backend, _apps_api, _core_api = _backend()
+    clock = _run_on_one_clock(monkeypatch, wall_starts_at=10.0)
+    spec = _spec(_TEST_SCOPED_WORKER_KEY_A)
+    viewed: list[float] = []
+
+    def setup() -> str:
+        if clock.monotonic() >= 5.0:
+            return "ready"
+        if clock.monotonic() >= 2.0 and not viewed:
+            # The wait ends at 15.0 on the backend's clock; the viewer's clock is ahead of it.
+            viewed.append(20.0)
+            assert backend.ensure_worker(replace(spec, wait_for_setup=False), now=20.0).last_used_at == 20.0
+        return "preparing"
+
+    _answer_worker_setup(backend, setup)
+
+    handle = backend.ensure_worker(spec)
+
+    assert viewed == [20.0]
+    assert handle.last_used_at == 20.0
+    assert [worker.last_used_at for worker in backend.list_workers(now=20.0)] == [20.0]
+
+
+def test_kubernetes_backend_returns_the_ready_worker_when_recording_its_use_after_the_setup_wait_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Recording the use is an extra; a cluster that refuses it leaves the ready worker to its caller, with a warning."""
+    backend, apps_api, _core_api = _backend()
+    clock = _run_on_one_clock(monkeypatch, wall_starts_at=10.0)
+    _answer_worker_setup(backend, lambda: "ready" if clock.monotonic() >= 3.0 else "preparing")
+    patch_deployment = apps_api.patch_namespaced_deployment
+
+    def unavailable_after_the_wait(*args: object, **kwargs: object) -> object:
+        if clock.monotonic() >= 3.0:
+            raise _FakeApiError(503)
+        return patch_deployment(*args, **kwargs)
+
+    apps_api.patch_namespaced_deployment = unavailable_after_the_wait
+
+    with caplog.at_level("WARNING", logger=kubernetes_backend_module.__name__):
+        handle = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A))
+
+    assert handle.status == "ready"
+    assert backend._setup_waits == {}
+    assert ["was not recorded as used after its setup" in message for message in caplog.messages] == [True]
+
+
+def test_kubernetes_cleanup_ends_a_named_worker_at_its_maximum_age_while_a_tool_caller_waits_for_its_setup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A caller that waits for the setup uses the worker, which spares it the idle timeout and not its maximum age."""
+    backend, _apps_api, _core_api = _named_backend(
+        tmp_path,
+        named_worker_idle_timeout_seconds=20.0,
+        named_worker_max_age_seconds=50.0,
+    )
+    clock = _run_on_one_clock(monkeypatch, wall_starts_at=10.0)
+    spec = _named_spec()
+    cleaned: dict[float, list[str]] = {}
+
+    def setup() -> str:
+        if clock.monotonic() >= 70.0:
+            return "ready"
+        for at in (30.0, 60.0):
+            if clock.monotonic() >= at and at not in cleaned:
+                handles = backend.cleanup_idle_workers(now=10.0 + clock.monotonic())
+                cleaned[at] = [handle.worker_key for handle in handles]
+        return "preparing"
+
+    _answer_worker_setup(backend, setup)
+
+    backend.ensure_worker(spec, now=10.0)
+
+    # After 30 s the worker is past its idle timeout only; after 60 s it is past its maximum age.
+    assert cleaned == {30.0: [], 60.0: [spec.worker_key]}
+
+
+def test_kubernetes_backend_publishes_and_forgets_a_setup_wait_under_the_workers_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A start publishes its wait under the worker's lock, so a wait that ends there never forgets a newer start's."""
+    backend, _apps_api, _core_api = _backend()
+    clock = _run_on_one_clock(monkeypatch)
+    changes: list[tuple[str, bool]] = []
+
+    class _RecordedWaits(dict[str, object]):
+        def __setitem__(self, key: str, value: object) -> None:
+            changes.append(("published", backend._worker_locks.for_key(key).locked()))
+            super().__setitem__(key, value)
+
+        def __delitem__(self, key: str) -> None:
+            changes.append(("forgotten", backend._worker_locks.for_key(key).locked()))
+            super().__delitem__(key)
+
+    backend._setup_waits = _RecordedWaits()
+    _answer_worker_setup(backend, lambda: "ready" if clock.monotonic() >= 3.0 else "preparing")
+
+    backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert changes == [("published", True), ("forgotten", True)]
 
 
 @pytest.mark.parametrize("newer_start", [False, True])
