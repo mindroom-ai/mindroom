@@ -45,6 +45,7 @@ from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
+    RUNTIME_SOURCE_KINDS,
     TURN_BACKED_KINDS,
     EventKind,
     SemanticConsumer,
@@ -84,7 +85,7 @@ def _needs_turn_replay(event: JournalEvent) -> bool:
     """Return whether replay needs responders and turn recovery semantics."""
     return (
         event.kind in TURN_BACKED_KINDS
-        or event.kind is EventKind.JOB_FOLLOW_UP
+        or event.kind in RUNTIME_SOURCE_KINDS
         or (event.kind is EventKind.REACTION and event.semantic_consumer is SemanticConsumer.INTERACTIVE_REACTION)
     )
 
@@ -115,8 +116,8 @@ class JournalCallbacks:
     turn_has_live_claim: Callable[[str], bool]
     # Delivers what replies left waiting to replay a settled source owe Matrix.
     replies_ended: Callable[[tuple[str, ...]], None]
-    # Hands a follow-up to its response owner, which settles it.
-    on_job_follow_up: Callable[[JournalEvent], Awaitable[None]]
+    # Hands a runtime source to its response owner, which settles it.
+    on_runtime_source: Callable[[JournalEvent], Awaitable[None]]
     on_job_cancel: _JobCancelCallback
     on_rtc: _RtcCallback | None = None
     # Awaited with the room of every event whose callback may use what it reads, before that callback runs.
@@ -267,9 +268,9 @@ class JournalDispatcher:
             return approval_settled
         if self.callbacks.before_room_event is not None and event.kind not in _KINDS_THAT_ONLY_STOP_WORK:
             await self.callbacks.before_room_event(event.room_id)
-        if event.kind is EventKind.JOB_FOLLOW_UP:
+        if event.kind in RUNTIME_SOURCE_KINDS:
             # A runtime source, not a Matrix event: nothing for ingress to parse.
-            await self.callbacks.on_job_follow_up(event)
+            await self.callbacks.on_runtime_source(event)
             return False
         return await self._parse_and_invoke(event, needs_turn_replay=needs_turn_replay)
 

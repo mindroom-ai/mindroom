@@ -795,14 +795,14 @@ class TestRoomModeThreadDecision:
         async def on_stop(_room: nio.MatrixRoom, event: nio.Event) -> None:
             sees(event.source["type"])
 
-        async def on_job_follow_up(_event: object) -> None:
+        async def on_runtime_source(_event: object) -> None:
             sees("follow-up")
 
         bot._journal_dispatcher.callbacks = replace(
             bot._journal_dispatcher.callbacks,
             on_redaction=on_stop,
             on_job_cancel=on_stop,
-            on_job_follow_up=on_job_follow_up,
+            on_runtime_source=on_runtime_source,
         )
         room = _matrix_room(room_id, name="Test Room")
         stops = (

@@ -391,7 +391,7 @@ class TurnDispatcher:
                 plan = await self.deps.turn_policy.plan_turn(
                     turn.room,
                     prepared.dispatch,
-                    has_active_response_for_target=self.deps.response_runner.has_active_response_for_target,
+                    has_active_response_for_target=self.deps.response_runner.lifecycle_coordinator.has_active_response_for_target,
                 )
                 if dispatch_timing is not None:
                     dispatch_timing.mark("dispatch_plan_ready")

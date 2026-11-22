@@ -1075,10 +1075,9 @@ class TestAgentBot(AgentBotTestBase):
             _request: ResponseRequest,
             *,
             team: object,
-            resolved_target: MessageTarget,
             participation: object,
         ) -> SourceFate:
-            del team, resolved_target, participation
+            del team, participation
             older_entered.set()
             await release_older.wait()
             return Owned()
@@ -1137,10 +1136,10 @@ class TestAgentBot(AgentBotTestBase):
         )
         await _start_selection_response(bot, prepare_forever, target=target)
         await asyncio.wait_for(preparation_started.wait(), timeout=1.0)
-        assert bot._response_runner.has_active_response_for_target(target)
+        assert bot._response_runner.lifecycle_coordinator.has_active_response_for_target(target)
 
         assert await bot._response_runner.inbox.drain_inbox_responses(cancel_after_seconds=0.01) is False
-        assert not bot._response_runner.has_active_response_for_target(target)
+        assert not bot._response_runner.lifecycle_coordinator.has_active_response_for_target(target)
 
     @pytest.mark.asyncio
     async def test_interactive_postresponse_settlement_failure_does_not_run_prestart_cleanup(
@@ -1687,9 +1686,10 @@ class TestAgentBot(AgentBotTestBase):
         async def response() -> None:
             response_entered.set()
 
-        lifecycle_lock = unwrap_extracted_collaborator(
+        conversation = unwrap_extracted_collaborator(
             bot._response_runner,
-        ).lifecycle_coordinator._response_lifecycle_lock(target)
+        ).lifecycle_coordinator._conversation_for(target)
+        lifecycle_lock = conversation.lock
         lock_owned_by_test = False
         if failure_stage == "acquire":
             acquisition_error = RuntimeError("simulated lifecycle acquisition failure")
@@ -1699,6 +1699,7 @@ class TestAgentBot(AgentBotTestBase):
 
             acquire_patch = patch.object(lifecycle_lock, "acquire", new=fail_acquire)
         else:
+            conversation.begin_response_turn()
             await lifecycle_lock.acquire()
             lock_owned_by_test = True
             acquire_patch = nullcontext()
@@ -1717,11 +1718,13 @@ class TestAgentBot(AgentBotTestBase):
             retry_dispatch_sources.assert_called_with(target.room_id, ("$reaction",))
             if lock_owned_by_test:
                 lifecycle_lock.release()
+                conversation.finish_response_turn()
                 lock_owned_by_test = False
-            assert not bot._response_runner.has_active_response_for_target(target)
+            assert not bot._response_runner.lifecycle_coordinator.has_active_response_for_target(target)
         finally:
             if lock_owned_by_test:
                 lifecycle_lock.release()
+                conversation.finish_response_turn()
             await bot._response_runner.inbox.drain_inbox_responses()
 
     @pytest.mark.asyncio
@@ -1753,9 +1756,13 @@ class TestAgentBot(AgentBotTestBase):
             newer_lock_attempted,
             newer_entered,
         ) = (asyncio.Event() for _ in range(6))
-        lifecycle_lock = unwrap_extracted_collaborator(
-            bot._response_runner,
-        ).lifecycle_coordinator._response_lifecycle_lock(target)
+        lifecycle_lock = (
+            unwrap_extracted_collaborator(
+                bot._response_runner,
+            )
+            .lifecycle_coordinator._conversation_for(target)
+            .lock
+        )
         acquire_lifecycle_lock = lifecycle_lock.acquire
 
         async def tracked_acquire() -> bool:
@@ -1779,10 +1786,9 @@ class TestAgentBot(AgentBotTestBase):
             request: ResponseRequest,
             *,
             team: object,
-            resolved_target: MessageTarget,
             participation: object,
         ) -> SourceFate:
-            del team, resolved_target, participation
+            del team, participation
             if request.prompt == "interactive":
                 interactive_entered.set()
                 await release_interactive.wait()
@@ -1858,11 +1864,10 @@ class TestAgentBot(AgentBotTestBase):
             request: ResponseRequest,
             *,
             team: object,
-            resolved_target: MessageTarget,
             participation: object,
         ) -> SourceFate:
             del team, participation
-            resolved_targets.append(resolved_target)
+            resolved_targets.append(request.response_envelope.target)
             await record_turn_answered(bot, request)
             return Owned()
 
@@ -1916,10 +1921,9 @@ class TestAgentBot(AgentBotTestBase):
             request: ResponseRequest,
             *,
             team: object,
-            resolved_target: MessageTarget,
             participation: object,
         ) -> SourceFate:
-            del team, resolved_target, participation
+            del team, participation
             captured_requests.append(request)
             return Owned()
 

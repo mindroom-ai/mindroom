@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
 from functools import partial
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
@@ -44,7 +44,7 @@ from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.mid_turn import MID_TURN_MODE_KEY, MidTurnGate, MidTurnMode
-from mindroom.response_runner import ResponseRunner
+from mindroom.response_lifecycle import ResponseLifecycleCoordinator
 from mindroom.room_settings import (
     REPLY_MODE,
     SettingRead,
@@ -86,7 +86,7 @@ if TYPE_CHECKING:
     from mindroom.config.agent import RoomReplyMode
     from mindroom.constants import RuntimePaths
     from mindroom.judgment.state import JudgmentRequest
-    from mindroom.response_lifecycle import _QueuedMessageState
+    from mindroom.response_lifecycle import _Conversation
     from mindroom.turn_policy import TurnPolicy
 
 refresh_room_reply_mode = partial(refresh_room_setting, REPLY_MODE)
@@ -1450,10 +1450,25 @@ async def _general_nudged_and_shown_waiting(
 
     Return whether the message asked general's running response to wrap up, and whether general reacted ⏳ to it.
     """
+    reserve_for_real = ResponseLifecycleCoordinator.reserve_waiting_human_message
+    nudged: list[str] = []
+
+    def reserve(conversations: ResponseLifecycleCoordinator, **request: Any) -> None:  # noqa: ANN401
+        """Let the coordinator decide the notice while a reply runs on the message's conversation; queue none."""
+        conversation = conversations._conversation_for(request["target"])
+        conversation.begin_response_turn()
+        try:
+            notice = reserve_for_real(conversations, **request)
+        finally:
+            conversation.finish_response_turn()
+        if notice is not None:
+            notice.release()
+            nudged.append(request["response_envelope"].agent_name)
+
     with (
-        patch.object(ResponseRunner, "has_active_response_for_target", return_value=True),
-        patch.object(ResponseRunner, "reserve_waiting_human_message", autospec=True, return_value=None) as reserve,
-        patch.object(ResponseRunner, "is_held_for_approval", return_value=True),
+        patch.object(ResponseLifecycleCoordinator, "has_active_response_for_target", return_value=True),
+        patch.object(ResponseLifecycleCoordinator, "reserve_waiting_human_message", autospec=True, side_effect=reserve),
+        patch.object(ResponseLifecycleCoordinator, "approval_holds", return_value=("approval",)),
     ):
         _acted, bots = await _who_acts(
             tmp_path,
@@ -1467,13 +1482,12 @@ async def _general_nudged_and_shown_waiting(
         general = bots["general"]
         assert await wait_for_background_tasks(5.0, owner=general._runtime_view)
 
-    nudged = [call for call in reserve.call_args_list if call.kwargs["response_envelope"].agent_name == "general"]
     reactions = [
         call.kwargs["content"]["m.relates_to"]["key"]
         for call in general.client.room_send.await_args_list
         if call.kwargs["message_type"] == "m.reaction"
     ]
-    return bool(nudged), "⏳" in reactions
+    return "general" in nudged, "⏳" in reactions
 
 
 @pytest.mark.asyncio
@@ -1583,7 +1597,7 @@ async def _general_answering_in_its_thread(
     *,
     voice: bool = False,
     **agents: AgentConfig,
-) -> AsyncIterator[tuple[AgentBot, nio.MatrixRoom, RuntimePaths, _QueuedMessageState]]:
+) -> AsyncIterator[tuple[AgentBot, nio.MatrixRoom, RuntimePaths, _Conversation]]:
     """Run general's response in THREAD_ID, held by an approval, while the body sends messages to general's ingress.
 
     Yield general's bot, the room, the runtime paths, and the running response's queue of waiting messages. A message
@@ -1602,7 +1616,7 @@ async def _general_answering_in_its_thread(
     room = nio.MatrixRoom(ROOM_ID, bot.client.user_id)
     for member in (SENDER, *(current_entity_id(name, paths).full_id for name in config.agents)):
         room.add_member(member, member, None)
-    running = bot._response_runner.lifecycle_coordinator._get_or_create_queued_signal(
+    running = bot._response_runner.lifecycle_coordinator._conversation_for(
         MessageTarget.resolve(ROOM_ID, THREAD_ID, "$running"),
     )
     running.begin_response_turn()
@@ -1610,7 +1624,7 @@ async def _general_answering_in_its_thread(
         with (
             _reading_general_thread(paths),
             patch.object(bot._turn_ingress, "_adaptive_text_debounce_seconds", AsyncMock(return_value=60.0)),
-            patch.object(bot._response_runner, "is_held_for_approval", return_value=True),
+            patch.object(bot._response_runner.lifecycle_coordinator, "approval_holds", return_value=("approval",)),
         ):
             yield bot, room, paths, running
     finally:

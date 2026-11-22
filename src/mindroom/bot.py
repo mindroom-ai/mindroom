@@ -538,7 +538,7 @@ class AgentBot:
                 ),
                 turn_has_live_claim=lambda event_id: self._turn_store.has_live_turn_claim(event_id),
                 replies_ended=self._replies_ended,
-                on_job_follow_up=lambda event: self._response_runner.handoff_job_follow_up(event),
+                on_runtime_source=lambda event: self._response_runner.handoff_runtime_source(event),
                 before_room_event=self._refresh_room_settings,
             ),
             room_for_id=self._room_for_journal_event,
@@ -770,9 +770,9 @@ class AgentBot:
             dispatch_turn=self._turn_dispatcher.handle_prepared_turn,
             debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
             is_shutting_down=lambda: not self._accepting_work,
-            wait_for_thread_response_idle=self._response_runner.wait_for_thread_response_idle,
+            wait_for_thread_response_idle=self._response_runner.lifecycle_coordinator.wait_for_thread_idle,
             room_scope_is_single_conversation=self._conversation_resolver.room_is_one_conversation,
-            active_thread_ids_for_room=self._response_runner.active_thread_ids_for_room,
+            active_thread_ids_for_room=self._response_runner.lifecycle_coordinator.active_thread_ids_for_room,
             timestamp_formatter=format_local_timestamp,
             on_dispatch_failure=self._journal_dispatcher.retry_turn_sources,
             on_undelivered_source=self._journal_dispatcher.retry_turn_source,
@@ -1013,11 +1013,11 @@ class AgentBot:
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target currently has an active turn."""
-        return self._response_runner.has_active_response_for_target(target)
+        return self._response_runner.lifecycle_coordinator.has_active_response_for_target(target)
 
     def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:
         """Return the threads of one room in which this bot holds an active reply."""
-        return self._response_runner.active_thread_ids_for_room(room_id)
+        return self._response_runner.lifecycle_coordinator.active_thread_ids_for_room(room_id)
 
     async def admit_job_follow_up(self, key: ConversationKey, follow_up_id: str) -> None:
         """Admit a follow-up for jobs that ended in one of this bot's conversations, and wake the journal worker."""
@@ -1651,8 +1651,10 @@ class AgentBot:
 
         Both happen before journal replay, so a message to a held conversation waits for its approval after a restart.
         """
-        self._response_runner.note_continued_sources(await self._reply_runtime.start())
-        self._response_runner.follow_approval_holds(
+        conversations = self._response_runner.lifecycle_coordinator
+        # The sources of the replies an older instance left to continue: their replays are no news.
+        conversations.continued_sources = await self._reply_runtime.start()
+        conversations.follow_approval_holds(
             self._journal_store.approval_signals,
             self._journal_principal_id,
             freed=lambda room_id: self._journal_dispatcher.retry_turn_sources(room_id, ()),
@@ -1919,7 +1921,7 @@ class AgentBot:
         """Release resources after every response owner is terminal."""
         try:
             # Its replacement follows this principal's approvals from here on.
-            self._response_runner.stop_following_approval_holds()
+            self._response_runner.lifecycle_coordinator.stop_following_approval_holds()
             # Each of these owns a resource this bot alone holds, and none of them
             # may skip the others: a lane that already faulted makes the dispatcher's
             # stop raise, which must not leave the ingestion session or the client
