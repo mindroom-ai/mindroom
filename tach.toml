@@ -828,6 +828,7 @@ visibility = [
 [[modules]]
 path = "mindroom.response_turn"
 depends_on = [
+    "mindroom.ai_run_metadata",
     "mindroom.ai_runtime",
     "mindroom.agent_cli.lifetime",
     "mindroom.cancellation",
@@ -3507,6 +3508,7 @@ depends_on = [
     "mindroom.ai_runtime",
     "mindroom.automations.steps",
     "mindroom.config.resolution",
+    "mindroom.constants",
     "mindroom.contacts.turns",
     "mindroom.conversation_state_writer",
     "mindroom.delivery_gateway",
@@ -3554,6 +3556,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.contacts.turns",
     "mindroom.conversation_state_writer",
+    "mindroom.delegation.background",
     "mindroom.delivery_gateway",
     "mindroom.history.reply_compactions",
     "mindroom.history.storage",
@@ -9279,6 +9282,7 @@ visibility = [
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.tool_jobs.consumption",
     "mindroom.delegation.continuation",
+    "mindroom.response_runner",
 ]
 
 [[modules]]
@@ -9377,6 +9381,7 @@ visibility = [
 path = "mindroom.delegation.continuation"
 depends_on = [
     "mindroom.ai",
+    "mindroom.constants",
     "mindroom.delegation.background",
     "mindroom.delegation.cost",
     "mindroom.delegation.execution",

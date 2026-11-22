@@ -23,7 +23,6 @@ from mindroom.config.resolution import cheap_model as agent_cheap_model
 from mindroom.config.resolution import entity_timezone, show_reasoning, show_tool_calls
 from mindroom.constants import (
     COMPACTIONS_CONTENT_KEY,
-    CONTINUED_RUNS_METADATA_KEY,
     HOOK_SOURCE_RUN_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     STREAM_STATUS_KEY,
@@ -32,6 +31,7 @@ from mindroom.constants import (
 )
 from mindroom.contacts.turns import contact_room, contact_turn_instructions, contact_turn_tools
 from mindroom.conversation_state_writer import ReplySession
+from mindroom.delegation.background import delegation_child
 from mindroom.dispatch_source import is_automation_source_kind
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.final_delivery import (
@@ -106,7 +106,6 @@ from mindroom.response_turn import (
     PausedAttempt,
     ResponsePausedForApproval,
     ResponseTurnContext,
-    TurnResume,
     TurnSinks,
     collect_streamed_response_content,
 )
@@ -863,6 +862,7 @@ class ResponseRunner:
             sources=ResponseSources((follow_up_id,), (follow_up_id,)),
             follow_up_key=key,
             user_id=key.requester_id,
+            # The follow-up's runs name it as their source, so the replay of one a restart cut short continues them.
             matrix_run_metadata={MATRIX_SOURCE_EVENT_IDS_METADATA_KEY: [follow_up_id]},
         )
 
@@ -1157,27 +1157,22 @@ class ResponseRunner:
             return request
         recorded = await handle.runtime.interrupted_tool_calls(handle)
         restarts = await handle.runtime.restart_interruptions(handle)
-        recovered = None
+        recovered: dict[str, Any] = {}
         if restarts and history_scope is not None:
+            jobs = get_background_runtime(self.deps.runtime_paths)
+            held = () if jobs is None else jobs.retained_jobs()
+            uncollected = {delegation_child(j).delegation_id for j in held if j.kind == "delegation" and not j.consumed}
             recovered = await self.deps.state_writer.recover_interrupted_turn(
                 execution_identity=execution_identity,
                 scope=history_scope,
                 session_id=session_id,
                 event_ids={*request.sources.pending_event_ids, *request.sources.logical_source_event_ids},
                 natively=restarts <= _NATIVE_RECOVERY_LIMIT,
+                uncollected=uncollected,
             )
-        if recovered is not None and recovered.run_ids:
-            # The turn's runs name the recovered runs they continue, so the message that answers the turn links them.
-            continued = {**(request.matrix_run_metadata or {}), CONTINUED_RUNS_METADATA_KEY: list(recovered.run_ids)}
-            resume = (
-                TurnResume(
-                    prior_usage=recovered.prior_usage,
-                    prior_subagent_cost_usd=recovered.subagent_cost_usd,
-                )
-                if recovered.prior_usage or recovered.subagent_cost_usd is not None
-                else None
-            )
-            request = replace(request, matrix_run_metadata=continued, resume=resume)
+        if recovered:
+            # The turn's runs name the recovered runs they continue, which its answer links and whose cost it reports.
+            request = replace(request, matrix_run_metadata={**(request.matrix_run_metadata or {}), **recovered})
         return self._with_recorded_interrupted_attempt(request, handle, recorded)
 
     def _with_recorded_interrupted_attempt(
@@ -1799,7 +1794,6 @@ class ResponseRunner:
                     compaction_lifecycle=compaction_lifecycle,
                 ),
                 sinks=sinks,
-                resume=request.resume,
             )
 
         # A configured team keeps the conversations it answers in its members' shared memory.
@@ -2436,13 +2430,7 @@ class ResponseRunner:
                 agent_user_id=self.deps.matrix_full_id,
             )
             ctx = replace(ctx, transient_enrichment_items=transient_items)
-            response_stream = stream_agent_response(
-                ctx,
-                self.deps.runtime_paths,
-                self.deps.runtime.config,
-                sinks=sinks,
-                resume=normalized_request.resume,
-            )
+            response_stream = stream_agent_response(ctx, self.deps.runtime_paths, self.deps.runtime.config, sinks=sinks)
             async with closing_async_stream(response_stream):
                 async for chunk in response_stream:
                     yield chunk

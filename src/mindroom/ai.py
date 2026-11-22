@@ -486,7 +486,7 @@ def _begin_attempt(
         run_input=prepared_run.run_input(media),
         run_id=continuation.active_run_id or str(uuid4()),
         stream_state=stream_state,
-        metadata=with_prior_usage(run_context.metadata, run.prior_usage, run.unstored_prior_usage),
+        metadata=with_prior_usage(run_context.metadata, run.prior_usage),
     )
     return storage, attempt
 
@@ -1072,14 +1072,14 @@ async def run_delegated_child_response(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     supports_native_tool_approval: bool = True,
     approval_config: Config | None = None,
-    prior_usage: Sequence[RunMetrics] = (),
+    prior_usage: Mapping[str, RunMetrics] | None = None,
 ) -> str:
     """Execute the normal response envelope for a prepared child owned by either adapter.
 
     The native delegation driver resumes a child that pauses for approval; the direct delegate tool, which cannot,
     passes ``supports_native_tool_approval=False``. A minimal child cannot pause for approval: approval-gated tools
     stay hidden from it, so no adapter ever has to resume it natively. ``prior_usage`` is the usage of the child's turn
-    before this envelope: a resumed run a model switch continued, whose continuation this envelope runs.
+    before this envelope, by run id: a resumed run a model switch continued, whose continuation this envelope runs.
     """
     identity = child_execution_identity(child)
     authorized_config = authorize_delegation(
@@ -1153,7 +1153,7 @@ async def run_delegated_child_response(
             runtime_paths,
             active_config,
             sinks=sinks,
-            resume=TurnResume(prior_usage=tuple(prior_usage)),
+            resume=TurnResume(prior_usage=prior_usage or {}),
         )
     record = None if observation is None else observation.current_record()
     # A child a config reload stopped hands its caller what its settlement records, not its unfinished text.
@@ -1430,7 +1430,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                             record,
                             RunStatus.error,
                             run_id=attempt.run_id,
-                            prior_usage=run.prior_usage,
+                            prior_usage=tuple(run.prior_usage.values()),
                         ),
                     ),
                 )
@@ -1492,7 +1492,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                     record,
                     final_status,
                     run_id=record.run_id,
-                    prior_usage=run.prior_usage,
+                    prior_usage=tuple(run.prior_usage.values()),
                 ),
             ),
         )

@@ -9,34 +9,50 @@ from contextlib import suppress
 from dataclasses import asdict, replace
 from typing import TYPE_CHECKING, Any, ClassVar
 from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 from agno.tools import Toolkit
 
 from mindroom import reply_lifecycle as rl
+from mindroom.ai_run_metadata import prior_usage_by_run, with_prior_usage
+from mindroom.approval import manager as approval_manager
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.agent import AgentConfig
+from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import (
     AI_RUN_METADATA_KEY,
     CONTINUED_RUNS_METADATA_KEY,
+    LEGACY_COST_ID,
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
-    PRIOR_SUBAGENT_COST_RUN_METADATA_KEY,
+    PRIOR_USAGE_BY_RUN_METADATA_KEY,
+    PRIOR_USAGE_RUN_METADATA_KEY,
     SUBAGENT_COST_RUN_METADATA_KEY,
+    SUBAGENT_RECEIPTS_RUN_METADATA_KEY,
 )
+from mindroom.delegation import hooks as delegation_hooks
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.cost import (
+    merge_by_key,
+    receipts_metadata,
     receive_subagent_cost,
     received_subagent_cost_usd,
     receiving_subagent_cost,
     resumed_subagent_cost,
+    stored_receipts,
     subagent_cost_metadata,
 )
-from mindroom.delegation.state import DelegationChild
+from mindroom.delegation.state import CONTINUE_SUBAGENT, DelegationChild
+from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.event_journal.models import EventClass, EventKind, InboundEvent
-from mindroom.history.run_checkpoint import is_recovered_run
+from mindroom.history.run_checkpoint import is_recovered_run, recover_interrupted_turn
+from mindroom.history.storage import new_scope_session
+from mindroom.history.types import HistoryScope
+from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration import tool_job_runtime as tool_job_coordinator
@@ -46,6 +62,7 @@ from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import build_matrix_run_metadata
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.schema import quote_identifier
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import follow_up_event
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
@@ -63,11 +80,12 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
-from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
+from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
 from tests.response_attempt_helpers import install_direct_response_admission
 from tests.response_runner_helpers import _envelope, _noop_typing, _target
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.tool_job_helpers import (
+    JobApprovalCards,
     continue_stopped_jobs,
     job_owner,
     lookup,
@@ -78,14 +96,18 @@ from tests.tool_job_helpers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Coroutine, Iterator
+    from collections.abc import Callable, Coroutine, Iterator
     from pathlib import Path
 
     from mindroom.bot import AgentBot
     from mindroom.response_runner import ResponseRunner
     from mindroom.tool_jobs.runtime import ToolJobRuntime
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _COST_PROBE_TOOL = "restart_cost_probe"
+_SESSION = "stored-session"
+_SCOPE = HistoryScope(kind="agent", scope_id="general")
+_TURN = "$stored-turn"
 # Priced at $10 / 1M input and $20 / 1M output -> 100k input + 10k output = $1.00 + $0.20 = $1.20 per request.
 _REQ_USAGE = usage(100_000, 10_000)
 
@@ -94,14 +116,21 @@ class _CostProbeTools(Toolkit):
     """Test toolkit that charges subagent cost and can stall so a restart can cut the turn short."""
 
     stalled: ClassVar[asyncio.Event]
+    # What the turn that last ran ``checked`` had received by then.
+    received_when_checked: ClassVar[float | None] = None
 
     def __init__(self) -> None:
-        super().__init__(name=_COST_PROBE_TOOL, tools=[self.charge_subagent, self.stall])
+        super().__init__(name=_COST_PROBE_TOOL, tools=[self.charge_subagent, self.checked, self.stall])
 
-    async def charge_subagent(self, usd: float) -> str:
-        """Record ``usd`` of received subagent cost for this attempt."""
-        receive_subagent_cost(usd)
+    async def charge_subagent(self, usd: float, child: str = "") -> str:
+        """Receive subagent turn ``child``, a new one when unnamed, which cost ``usd``."""
+        receive_subagent_cost(child or f"probe-{uuid4().hex}", usd)
         return f"charged {usd}"
+
+    async def checked(self) -> str:
+        """Do work that asks for an approval first."""
+        type(self).received_when_checked = received_subagent_cost_usd()
+        return "checked"
 
     async def stall(self) -> str:
         """Block until the turn is cancelled by a simulated process shutdown."""
@@ -127,6 +156,7 @@ def _priced_bot(
     background_jobs: bool = False,
     with_worker: bool = False,
     extra_tools: tuple[str, ...] = (),
+    worker_tools: tuple[str, ...] = (),
 ) -> AgentBot:
     agents: dict[str, AgentConfig] = {
         "general": AgentConfig(
@@ -144,14 +174,28 @@ def _priced_bot(
         ),
     }
     if with_worker:
-        agents["worker"] = AgentConfig(display_name="Worker", model="worker_model", tools=[_COST_PROBE_TOOL])
+        agents["worker"] = AgentConfig(
+            display_name="Worker",
+            model="worker_model",
+            tools=[_COST_PROBE_TOOL, *worker_tools],
+        )
         models["worker_model"] = ModelConfig(
             provider="openai",
             id="priced-worker",
             pricing=ModelPricing(input=10, output=20),
         )
     config = bind_runtime_paths(
-        with_current_room_member_access(Config(agents=agents, teams={}, models=models, memory={"backend": "none"})),
+        with_current_room_member_access(
+            Config(
+                agents=agents,
+                teams={},
+                models=models,
+                memory={"backend": "none"},
+                tool_approval=ToolApprovalConfig(
+                    rules=[ApprovalRuleConfig(match="checked", action="require_approval")],
+                ),
+            ),
+        ),
         test_runtime_paths(tmp_path),
     )
     config.background_tool_jobs.enabled = background_jobs
@@ -244,10 +288,22 @@ def _stored_runs(runner: ResponseRunner, session_id: str) -> list[RunRecord]:
     return [run for run in storage.list_runs(session_id) if isinstance(run, RunRecord)]
 
 
+def _receipts(run: RunRecord) -> dict[str, float]:
+    """Return the subagent receipts ``run``'s row stores by delegation id."""
+    return (run.metadata or {}).get(SUBAGENT_RECEIPTS_RUN_METADATA_KEY, {})
+
+
+def _stored_sums(runs: list[RunRecord]) -> list[object]:
+    """Return the summed subagent cost each run's row stores, None for a row that stores none."""
+    return [(run.metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY) for run in runs]
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [True, False], ids=["streamed replay", "replay delivered whole"])
 async def test_restart_recovered_turn_includes_prior_attempt_own_and_subagent_cost(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    streamed: bool,
 ) -> None:
     """A reply that continues a restart-interrupted attempt reports both attempts' own and subagent costs."""
     bot = _priced_bot(tmp_path)
@@ -279,7 +335,10 @@ async def test_restart_recovered_turn_includes_prior_attempt_own_and_subagent_co
         ],
     )
     install_model_providers(monkeypatch, {"default": model_attempt_2})
-    with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=True), typing_indicator=_noop_typing):
+    with patch_response_runner_module(
+        should_use_streaming=AsyncMock(return_value=streamed),
+        typing_indicator=_noop_typing,
+    ):
         await runner.generate_response(request)
 
     _, ai_run = _final_ai_run_metadata(bot)
@@ -290,8 +349,10 @@ async def test_restart_recovered_turn_includes_prior_attempt_own_and_subagent_co
     assert len(runs) == 2
     run_1, run_2 = runs
     assert is_recovered_run(run_1)
-    assert (run_1.metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY) == pytest.approx(0.5)
-    assert (run_2.metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY) == pytest.approx(0.25)
+    # Each row holds what the turn received so far by delegation id, with the sum earlier releases read.
+    assert _stored_sums([run_1, run_2]) == [pytest.approx(0.5), pytest.approx(0.75)]
+    assert [len(_receipts(run)) for run in (run_1, run_2)] == [1, 2]
+    assert _receipts(run_1).items() <= _receipts(run_2).items()
     assert (run_2.metadata or {}).get(CONTINUED_RUNS_METADATA_KEY) == [run_1.run_id]
     reply_id_1 = (run_1.metadata or {}).get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
     reply_id_2 = (run_2.metadata or {}).get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
@@ -308,7 +369,7 @@ async def test_two_restarts_in_one_turn_sum_every_attempt_once_without_double_co
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two restarts in one turn count A, B, and C each once and keep stored per-run subagent costs disjoint."""
+    """Two restarts in one turn count A, B, and C each once, whatever each row repeats of the rows before it."""
     bot = _priced_bot(tmp_path)
     await bot._take_over_replies()
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -352,9 +413,9 @@ async def test_two_restarts_in_one_turn_sum_every_attempt_once_without_double_co
 
     runs_after_b = _stored_runs(runner, session_id)
     assert len(runs_after_b) == 2
-    # Run B must store ONLY its own received subagent cost (0.3), not A+B (0.7).
-    assert (runs_after_b[0].metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY) == pytest.approx(0.4)
-    assert (runs_after_b[1].metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY) == pytest.approx(0.3)
+    # Run B's row repeats A's receipt under the same id beside its own, so merging the two rows counts it once.
+    assert _stored_sums(runs_after_b) == [pytest.approx(0.4), pytest.approx(0.7)]
+    assert _receipts(runs_after_b[0]).items() <= _receipts(runs_after_b[1]).items()
 
     await _simulate_restart(bot, "gen-3")
 
@@ -380,22 +441,20 @@ async def test_two_restarts_in_one_turn_sum_every_attempt_once_without_double_co
 
     runs = _stored_runs(runner, session_id)
     assert len(runs) == 3
-    assert [(run.metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY) for run in runs] == [
-        pytest.approx(0.4),
-        pytest.approx(0.3),
-        pytest.approx(0.1),
-    ]
+    assert _stored_sums(runs) == [pytest.approx(0.4), pytest.approx(0.7), pytest.approx(0.8)]
+    # C's row names A and B by run id, so a third restart would count each attempt once more.
+    assert list((runs[2].metadata or {})[PRIOR_USAGE_BY_RUN_METADATA_KEY]) == [runs[0].run_id, runs[1].run_id]
     assert (runs[2].metadata or {}).get(CONTINUED_RUNS_METADATA_KEY) == [runs[0].run_id, runs[1].run_id]
     ledger = _recorded_usage_tokens(bot)
     assert [(inp, out) for _, inp, out in ledger] == [(200_000, 20_000)] * 3
 
 
 @pytest.mark.asyncio
-async def test_restart_with_only_prior_subagent_cost_publishes_it_and_keeps_continuing_run_disjoint(
+async def test_restart_with_only_prior_subagent_cost_publishes_it_from_the_continuing_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When only the interrupted attempt received subagent cost, the reply publishes it and the new run stores none."""
+    """When only the interrupted attempt received subagent cost, the reply publishes it and the new run carries it."""
     bot = _priced_bot(tmp_path)
     await bot._take_over_replies()
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -428,8 +487,8 @@ async def test_restart_with_only_prior_subagent_cost_publishes_it_and_keeps_cont
     assert ai_run["cost"] == {"usd": "3.6", "subagents_usd": "1.25"}
     runs = _stored_runs(runner, session_id)
     assert len(runs) == 2
-    assert (runs[0].metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY) == pytest.approx(1.25)
-    assert SUBAGENT_COST_RUN_METADATA_KEY not in (runs[1].metadata or {})
+    assert _stored_sums(runs) == [pytest.approx(1.25), pytest.approx(1.25)]
+    assert _receipts(runs[0]) == _receipts(runs[1])
 
 
 @pytest.mark.asyncio
@@ -545,12 +604,68 @@ async def test_restart_past_native_recovery_limit_still_counts_all_unlinked_atte
     assert (runs[3].metadata or {}).get(CONTINUED_RUNS_METADATA_KEY) == [r.run_id for r in runs[:3]]
 
 
+async def _completed_research_job(runtime: ToolJobRuntime, owner: ToolExecutionIdentity) -> str:
+    """Start a subagent job of ``owner`` that completes at once with a child that cost $0.60; return its id."""
+    child = DelegationChild(
+        delegation_id="deleg-1",
+        parent_tool_call_id="call-deleg-1",
+        caller_agent_name="general",
+        child_agent_name="worker",
+        task="Research",
+        session_id="child-session",
+        run_id="child-run",
+        model_name="default",
+        requested_model_name="default",
+        depth=1,
+        execution_identity={},
+        subagent_id="a" * 32,
+        agent_mode="standard",
+        persona=None,
+        cost_usd=0.6,
+    )
+
+    async def finish() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "Research complete.")
+
+    job = await start_job(
+        runtime,
+        "deleg-1",
+        tool_name="worker",
+        depth=0,
+        owner=owner,
+        kind="delegation",
+        adapter={"child": asdict(child)},
+        operation=finish,
+    )
+    await wait_for_status(runtime, job.job_id, "completed")
+    return job.job_id
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("acknowledged", "collects_again", "expected_cost"),
+    [
+        # 2 requests in attempt 1 + 1 in attempt 2 = 3 * $1.20; the job's $0.60 reaches the replay's reply.
+        (True, False, {"usd": "3.6", "subagents_usd": "0.6"}),
+        # Sol fresh 1: the crash left the job unacknowledged and the replay collects it again: $0.60 once, not twice.
+        (False, True, {"usd": "4.8", "subagents_usd": "0.6"}),
+        # Opus B1: the replay does not collect it again, so the job stays for the turn that will, which receives it.
+        (False, False, {"usd": "3.6"}),
+    ],
+    ids=["acknowledged", "unacknowledged and collected again", "unacknowledged and left for a later turn"],
+)
 async def test_restart_interrupted_job_follow_up_continues_natively_and_carries_both_attempts_cost(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    acknowledged: bool,
+    collects_again: bool,
+    expected_cost: dict[str, str],
 ) -> None:
-    """A job follow-up cut short by a restart is continued natively by its replay with both attempts' costs."""
+    """A job follow-up cut short by a restart is continued natively by its replay with both attempts' costs.
+
+    The cut-short attempt's row holds the job's cost. Its replay carries it only once a turn acknowledged the job: a
+    job a crash left unacknowledged is still collected by some turn, this replay or a later one, which receives it.
+    """
     bot = _priced_bot(tmp_path, background_jobs=True)
     await bot._take_over_replies()
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -576,41 +691,12 @@ async def test_restart_interrupted_job_follow_up_continues_natively_and_carries_
 
     follow_up_id = "job-follow-up:conv1:jobs1:1"
     try:
-        # Seed a completed delegation job with cost_usd = 0.60 so the follow-up turn consumes it.
-        child = DelegationChild(
-            delegation_id="deleg-1",
-            parent_tool_call_id="call-deleg-1",
-            caller_agent_name="general",
-            child_agent_name="worker",
-            task="Research",
-            session_id="child-session",
-            run_id="child-run",
-            model_name="default",
-            requested_model_name="default",
-            depth=1,
-            execution_identity={},
-            subagent_id="a" * 32,
-            agent_mode="standard",
-            persona=None,
-            cost_usd=0.6,
-        )
+        job_id = await _completed_research_job(runtime, owner)
 
-        async def _finish() -> BackgroundOutcome:
-            return BackgroundOutcome("completed", "Research complete.")
-
-        job = await start_job(
-            runtime,
-            "deleg-1",
-            tool_name="worker",
-            depth=0,
-            owner=owner,
-            kind="delegation",
-            adapter={"child": asdict(child)},
-            operation=_finish,
-        )
-        job_id = job.job_id
-        await wait_for_status(runtime, job_id, "completed")
-
+        acknowledge = runtime.acknowledge_wait
+        if not acknowledged:
+            # A crash between the checkpoint that saved the result and the acknowledgement at the attempt's end.
+            monkeypatch.setattr(runtime, "acknowledge_wait", AsyncMock())
         await bot.journal_principal().admit(
             follow_up_event(key, follow_up_id, sender_id="@mindroom_general:localhost", now_ms=1),
         )
@@ -636,13 +722,18 @@ async def test_restart_interrupted_job_follow_up_continues_natively_and_carries_
         ):
             await _run_until_stall_and_shutdown(runner._run_job_follow_up(event))
 
-        # The job was consumed by attempt 1 before the restart.
-        assert await runtime.ended_jobs(key) == ()
+        # Attempt 1 acknowledged the job before the restart, unless the crash came first.
+        assert [ended.job_id for ended in await runtime.ended_jobs(key)] == ([] if acknowledged else [job_id])
+        monkeypatch.setattr(runtime, "acknowledge_wait", acknowledge)
 
         await _simulate_restart(bot, "gen-2")
 
         # Attempt 2: replays the follow-up; must natively continue attempt 1 and report both attempts' costs.
-        model_attempt_2 = _scripted_model(bot, [answer("Reported research.", metrics=_REQ_USAGE)])
+        collect_again = [calls(tool_call("job", "collect-2", action="collect"), metrics=_REQ_USAGE)]
+        model_attempt_2 = _scripted_model(
+            bot,
+            [*(collect_again if collects_again else []), answer("Reported research.", metrics=_REQ_USAGE)],
+        )
         install_model_providers(monkeypatch, {"default": model_attempt_2})
         with patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=True),
@@ -651,8 +742,10 @@ async def test_restart_interrupted_job_follow_up_continues_natively_and_carries_
             await runner._run_job_follow_up(event)
 
         _, ai_run = _final_ai_run_metadata(bot)
-        # 2 requests in attempt 1 + 1 request in attempt 2 = 3 * $1.20 = $3.60; subagent cost = $0.60.
-        assert ai_run["cost"] == {"usd": "3.6", "subagents_usd": "0.6"}
+        assert ai_run["cost"] == expected_cost
+        # A job no turn acknowledged is still there for the turn that collects it.
+        left = [] if acknowledged or collects_again else [job_id]
+        assert [ended.job_id for ended in await runtime.ended_jobs(key)] == left
 
         session_id = MessageTarget.resolve(key.room_id, key.thread_id, None).session_id
         runs = _stored_runs(runner, session_id)
@@ -733,21 +826,27 @@ async def test_restart_with_stored_then_lost_attempt_counts_stored_and_final(
     assert ai_run["cost"] == {"usd": "3.6", "subagents_usd": "0.5"}
 
 
-def test_resumed_subagent_cost_with_continued_runs_keeps_per_run_metadata_disjoint() -> None:
-    """An approval resume of a restart-continuing run restores both own and prior cost while keeping keys separate."""
-    run_b_meta = {
-        SUBAGENT_COST_RUN_METADATA_KEY: 0.3,
-        PRIOR_SUBAGENT_COST_RUN_METADATA_KEY: 0.4,
-    }
-    cost = resumed_subagent_cost(run_b_meta)
+def test_every_view_of_a_turn_s_receipts_merges_to_the_same_total() -> None:
+    """Saving a row twice, merging two rows, and resuming from a row each count one delegation once."""
+    with receiving_subagent_cost(resumed_subagent_cost(None)):
+        receive_subagent_cost("d1", 0.4)
+        receive_subagent_cost("d1", 0.4)
+        first = subagent_cost_metadata()
+        receive_subagent_cost("d2", 0.3)
+        second = subagent_cost_metadata(first)
+    assert first == {SUBAGENT_RECEIPTS_RUN_METADATA_KEY: {"d1": 0.4}, SUBAGENT_COST_RUN_METADATA_KEY: 0.4}
+    assert second[SUBAGENT_RECEIPTS_RUN_METADATA_KEY] == {"d1": 0.4, "d2": 0.3}
+    assert second[SUBAGENT_COST_RUN_METADATA_KEY] == pytest.approx(0.7)
+    # A save with nothing received keeps the row's; a resume goes on from it; two rows merge by id.
+    assert subagent_cost_metadata(second) == second
+    cost = resumed_subagent_cost(second)
     with receiving_subagent_cost(cost):
-        receive_subagent_cost(0.2)
-        # Reply publishes total (0.4 + 0.3 + 0.2 = 0.9), while stored metadata keeps own (0.5) separate from prior (0.4).
+        receive_subagent_cost("d3", 0.2)
         assert received_subagent_cost_usd() == pytest.approx(0.9)
-        assert subagent_cost_metadata() == {
-            SUBAGENT_COST_RUN_METADATA_KEY: pytest.approx(0.5),
-            PRIOR_SUBAGENT_COST_RUN_METADATA_KEY: pytest.approx(0.4),
-        }
+        assert subagent_cost_metadata(first)[SUBAGENT_RECEIPTS_RUN_METADATA_KEY] == {"d1": 0.4, "d2": 0.3, "d3": 0.2}
+    assert receipts_metadata(stored_receipts(first), stored_receipts(second)) == second
+    # An older view of one id holds less, never more.
+    assert merge_by_key(({"d1": 0.1}, {"d1": 0.4}, {"d1": 0.2}), float) == {"d1": 0.4}
 
 
 async def _run_subagent_job_with_restarts(
@@ -759,9 +858,18 @@ async def _run_subagent_job_with_restarts(
     expected_status: str,
     start_source: str,
     collect_source: str,
+    worker_tools: tuple[str, ...] = (),
+    while_stopped: Callable[[AgentBot], None] | None = None,
 ) -> tuple[AgentBot, Any, dict[str, Any]]:
-    """Run one background subagent job through ``restarts`` restarts, wait for ``expected_status``, and collect it."""
-    bot = _priced_bot(tmp_path, background_jobs=True, with_worker=True)
+    """Run one background subagent job through ``restarts`` restarts, wait for ``expected_status``, and collect it.
+
+    Every approval the worker's calls ask for is granted, and ``while_stopped`` runs between each restart's shutdown
+    and its recovery.
+    """
+    bot = _priced_bot(tmp_path, background_jobs=True, with_worker=True, worker_tools=worker_tools)
+    cards = JobApprovalCards(asyncio.get_running_loop().create_future())
+    cards.decision.set_result(BackgroundApprovalDecision("approved", None))
+    monkeypatch.setattr(approval_manager, "get_approval_store", lambda: cards)
     await bot._take_over_replies()
     runner = unwrap_extracted_collaborator(bot._response_runner)
 
@@ -801,6 +909,8 @@ async def _run_subagent_job_with_restarts(
             await asyncio.wait_for(_CostProbeTools.stalled.wait(), 10)
             _CostProbeTools.stalled = asyncio.Event()
             await runtime.shutdown()
+            if while_stopped is not None:
+                while_stopped(bot)
             runtime = await start_runtime()
             await runtime.recover()
             tool_ctx = runner.deps.tool_runtime.build_turn_context(
@@ -823,14 +933,16 @@ async def _run_subagent_job_with_restarts(
         [job_info] = await runtime.list_jobs(owner=leader_owner, depth=0)
         await wait_for_status(runtime, job_info.job_id, expected_status)
         settled_job = await lookup(runtime, job_info.job_id, owner=leader_owner, depth=0)
-        leader_model_2 = _scripted_model(
-            bot,
-            [
-                calls(tool_call("job", "collect-worker", action="collect"), metrics=_REQ_USAGE),
-                answer("Worker reported back.", metrics=_REQ_USAGE),
-            ],
-        )
-        install_model_providers(monkeypatch, {"default": leader_model_2, "worker_model": worker_model})
+        collect_turns = [
+            calls(tool_call("job", "collect-worker", action="collect"), metrics=_REQ_USAGE),
+            answer("Worker reported back.", metrics=_REQ_USAGE),
+        ]
+        # The worker has ended, and one that switched the thread's model leaves the leader on its own, priced alike.
+        collectors = {
+            name: ScriptedModel(list(collect_turns), identity=model_identity(model))
+            for name, model in bot.config.models.items()
+        }
+        install_model_providers(monkeypatch, collectors)
         await _admit_user_message(bot, source_event_id=collect_source)
         with patch_response_runner_module(
             should_use_streaming=AsyncMock(return_value=True),
@@ -867,14 +979,16 @@ async def test_restart_continued_subagent_job_carries_pre_restart_own_and_nested
     child_done = delegation_child(done)
     assert child_done.cost_usd == pytest.approx(6.8)
     assert ai_run["cost"] == {"usd": "2.4", "subagents_usd": "6.8"}
-    # Astra #3: worker's stored per-run subagent costs stay disjoint ([0.5, 0.3, None]).
+    # Astra #3: each worker row holds what its turn received by delegation id: its own receipts, and for a
+    # continuation the turns before it, each under its own id with its own cost ($2.40).
     worker_storage = create_session_storage("worker", bot.config, bot.runtime_paths, execution_identity=None)
     worker_runs = [r for r in worker_storage.list_runs(child_done.session_id) if isinstance(r, RunRecord)]
-    assert [(r.metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY) for r in worker_runs] == [
-        pytest.approx(0.5),
-        pytest.approx(0.3),
-        None,
-    ]
+    first, second, third = (_receipts(run) for run in worker_runs)
+    assert sorted(first.values()) == [pytest.approx(0.5)]
+    assert sorted(second.values()) == [pytest.approx(0.3), pytest.approx(0.5), pytest.approx(2.4)]
+    assert sorted(third.values()) == [pytest.approx(0.3), pytest.approx(0.5), pytest.approx(2.4), pytest.approx(2.4)]
+    assert first.items() <= second.items() <= third.items()
+    assert _stored_sums(worker_runs) == [pytest.approx(0.5), pytest.approx(3.2), pytest.approx(5.6)]
     # Opus minor 3: final delegation record's run.json usage keeps only its own attempt (100k in, 10k out).
     deleg_glob = "agents/worker/workspace/.mindroom/delegations/*/*/run.json"
     record_files = list(bot.runtime_paths.storage_root.glob(deleg_glob))
@@ -893,9 +1007,9 @@ async def test_restart_continued_subagent_job_carries_pre_restart_own_and_nested
     ("second_sub", "replay_sub", "expected_sub", "expected_own", "expected_stored"),
     [
         # Astra #1: A receives 0.5 + switches, B receives nothing + stalls, C receives 0.25.
-        (None, 0.25, "0.75", "6", [pytest.approx(0.5), None, pytest.approx(0.25)]),
+        (None, 0.25, "0.75", "6", [pytest.approx(0.5), pytest.approx(0.5), pytest.approx(0.75)]),
         # Sol #1: A receives 0.5 + switches, B receives 0.25 + stalls, C receives 0.125.
-        (0.25, 0.125, "0.875", "7.2", [pytest.approx(0.5), pytest.approx(0.25), pytest.approx(0.125)]),
+        (0.25, 0.125, "0.875", "7.2", [pytest.approx(0.5), pytest.approx(0.75), pytest.approx(0.875)]),
     ],
     ids=["astra-no-b-receipt", "sol-with-b-receipt"],
 )
@@ -908,7 +1022,7 @@ async def test_model_switch_before_restart_does_not_double_count_subagent_cost(
     expected_own: str,
     expected_stored: list[object],
 ) -> None:
-    """Switching models inside a turn resets per-run subagent receipts so a later restart never double-counts."""
+    """A receipt the run after a model switch repeats is the same delegation, so a later restart counts it once."""
     bot = _priced_bot(tmp_path, extra_tools=("thread_model",))
     await bot._take_over_replies()
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -952,7 +1066,7 @@ async def test_model_switch_before_restart_does_not_double_count_subagent_cost(
     _, ai_run = _final_ai_run_metadata(bot)
     assert ai_run["cost"] == {"usd": expected_own, "subagents_usd": expected_sub}
     runs = _stored_runs(runner, session_id)
-    assert [(r.metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY) for r in runs] == expected_stored
+    assert _stored_sums(runs) == expected_stored
 
 
 @pytest.mark.asyncio
@@ -1118,3 +1232,256 @@ async def test_subagent_job_refused_at_continuation_cap_still_reports_known_cost
     )
     assert delegation_child(stopped).cost_usd == pytest.approx(6.8)
     assert ai_run["cost"] == {"usd": "2.4", "subagents_usd": "6.8"}
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_restarted_after_a_model_switch_and_an_approval_counts_what_it_received_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child that switched models, paused for an approval and was cut short after it counts each receipt once.
+
+    Its turn's runs each store what the turn had received, the run the approval resumed too, so the continuation
+    after the restart reads the same two receipts from whichever of them it finds.
+    """
+    switch = tool_call("switch_thread_model", "sw", model_name="worker_model", when="after-toolcall")
+    bot, done, ai_run = await _run_subagent_job_with_restarts(
+        tmp_path,
+        monkeypatch,
+        worker_tools=("thread_model",),
+        worker_turns=[
+            calls(tool_call("charge_subagent", "w1", usd=0.5), metrics=_REQ_USAGE),
+            calls(switch, metrics=_REQ_USAGE),
+            calls(tool_call("charge_subagent", "w2", usd=0.25), metrics=_REQ_USAGE),
+            calls(tool_call("checked", "approve"), metrics=_REQ_USAGE),
+            calls(tool_call("stall", "ws1"), metrics=_REQ_USAGE),
+            answer("Worker finished.", metrics=_REQ_USAGE),
+        ],
+        restarts=1,
+        expected_status="completed",
+        start_source="$start-approved-subagent",
+        collect_source="$collect-approved-subagent",
+    )
+    assert [tool_name for _, _, tool_name in approval_manager.get_approval_store().requested] == ["checked"]
+    # The attempt that resumed the paused run ran the approved call, having received what the run had before its pause.
+    assert _CostProbeTools.received_when_checked == pytest.approx(0.75)
+    # The worker's six requests ($7.20) and its two receipts ($0.75).
+    child = delegation_child(done)
+    assert child.cost_usd == pytest.approx(7.95)
+    assert ai_run["cost"] == {"usd": "2.4", "subagents_usd": "7.95"}
+    # The run before the switch, the run the approval paused and resumed, and the continuation, which starts from
+    # the two receipts and the five requests ($6.00) of the turn the restart cut short.
+    worker_storage = create_session_storage("worker", bot.config, bot.runtime_paths, execution_identity=None)
+    assert _stored_sums(worker_storage.list_runs(child.session_id)) == pytest.approx([0.5, 0.75, 6.75])
+
+
+@pytest.mark.asyncio
+async def test_a_continuation_cut_short_before_its_first_checkpoint_hands_on_what_it_started_from(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A continuation killed during its first request stored no run, and the next one starts from what it started from."""
+    restarts = []
+
+    async def never_answers() -> None:
+        _CostProbeTools.stalled.set()
+        await asyncio.Event().wait()
+
+    def killed_before_its_first_checkpoint(bot: AgentBot) -> None:
+        restarts.append(bot)
+        if len(restarts) == 2:
+            # The shutdown stored the continuation's run as interrupted; a killed process stores nothing.
+            store = create_session_storage("worker", bot.config, bot.runtime_paths, execution_identity=None)
+            runs = quote_identifier(store.names.log_runs)
+            with store.transaction(write=True) as connection:
+                connection.execute(f"DELETE FROM {runs} WHERE seq = (SELECT MAX(seq) FROM {runs})")  # noqa: S608
+
+    bot, done, ai_run = await _run_subagent_job_with_restarts(
+        tmp_path,
+        monkeypatch,
+        worker_turns=[
+            calls(tool_call("charge_subagent", "w1", usd=0.5), metrics=_REQ_USAGE),
+            calls(tool_call("stall", "ws1"), metrics=_REQ_USAGE),
+            [Await(never_answers)],
+            answer("Worker finished.", metrics=_REQ_USAGE),
+        ],
+        restarts=2,
+        expected_status="completed",
+        start_source="$start-rowless-continuation",
+        collect_source="$collect-rowless-continuation",
+        while_stopped=killed_before_its_first_checkpoint,
+    )
+    child = delegation_child(done)
+    worker_storage = create_session_storage("worker", bot.config, bot.runtime_paths, execution_identity=None)
+    # The first turn's run and the last continuation's: the continuation between them left none.
+    assert len(worker_storage.list_runs(child.session_id)) == 2
+    # The first turn's two requests ($2.40) and its receipt ($0.50), and the last continuation's request ($1.20).
+    assert child.cost_usd == pytest.approx(4.1)
+    assert ai_run["cost"] == {"usd": "2.4", "subagents_usd": "4.1"}
+
+
+@pytest.mark.asyncio
+async def test_a_continuation_leaves_out_what_its_cut_short_turn_stored_as_a_sum(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A subagent turn an earlier release cut short stored what it received as a sum, which its continuation drops.
+
+    The sum may cover receipts the continuation also reads by id, so it starts from the turn's own cost alone.
+    """
+
+    def as_an_earlier_release_stored_them(bot: AgentBot) -> None:
+        store = create_session_storage("worker", bot.config, bot.runtime_paths, execution_identity=None)
+        with store.transaction(write=True) as connection:
+            connection.execute(
+                f"UPDATE {quote_identifier(store.names.log_runs)} SET metadata = json_remove(metadata, ?)",  # noqa: S608
+                (f"$.{SUBAGENT_RECEIPTS_RUN_METADATA_KEY}",),
+            )
+
+    bot, done, ai_run = await _run_subagent_job_with_restarts(
+        tmp_path,
+        monkeypatch,
+        worker_turns=[
+            calls(tool_call("charge_subagent", "w1", usd=0.5), metrics=_REQ_USAGE),
+            calls(tool_call("stall", "ws1"), metrics=_REQ_USAGE),
+            answer("Worker finished.", metrics=_REQ_USAGE),
+        ],
+        restarts=1,
+        expected_status="completed",
+        start_source="$start-summed-subagent",
+        collect_source="$collect-summed-subagent",
+        while_stopped=as_an_earlier_release_stored_them,
+    )
+    child = delegation_child(done)
+    worker_storage = create_session_storage("worker", bot.config, bot.runtime_paths, execution_identity=None)
+    cut_short, _continuation = worker_storage.list_runs(child.session_id)
+    assert _receipts(cut_short) == {}
+    assert _stored_sums([cut_short]) == [0.5]
+    # The cut-short turn's two requests ($2.40) and the continuation's one ($1.20), without the summed $0.50.
+    assert child.cost_usd == pytest.approx(3.6)
+    assert ai_run["cost"] == {"usd": "2.4", "subagents_usd": "3.6"}
+
+
+@pytest.mark.asyncio
+async def test_a_continuation_a_hook_refuses_still_reports_the_cut_short_turn_s_cost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A continuation that ends before its first run hands its caller what the turn the restart cut short cost."""
+    dispatch = delegation_hooks.dispatch_external_tool_hooks
+
+    async def refuse_continuations(**kwargs: Any) -> str | None:  # noqa: ANN401
+        if kwargs["tool_name"] == CONTINUE_SUBAGENT and kwargs["before"]:
+            return "A hook refused the continuation."
+        return await dispatch(**kwargs)
+
+    monkeypatch.setattr(delegation_hooks, "dispatch_external_tool_hooks", refuse_continuations)
+    _, failed, ai_run = await _run_subagent_job_with_restarts(
+        tmp_path,
+        monkeypatch,
+        worker_turns=[
+            calls(tool_call("charge_subagent", "w1", usd=0.5), metrics=_REQ_USAGE),
+            calls(tool_call("stall", "ws1"), metrics=_REQ_USAGE),
+        ],
+        restarts=1,
+        expected_status="failed",
+        start_source="$start-refused-subagent",
+        collect_source="$collect-refused-subagent",
+    )
+    # The cut-short turn's two requests ($2.40) and what it received ($0.50).
+    assert delegation_child(failed).cost_usd == pytest.approx(2.9)
+    assert ai_run["cost"] == {"usd": "2.4", "subagents_usd": "2.9"}
+
+
+def _attempt(run_id: str, *, tokens: int, **metadata: Any) -> RunRecord:  # noqa: ANN401
+    """Return a cut-short attempt at ``_TURN``'s turn that used ``tokens`` input tokens, with ``metadata``."""
+    return RunRecord(
+        run_id=run_id,
+        session_id=_SESSION,
+        agent_id="general",
+        status=RunStatus.cancelled,
+        metrics=RunMetrics(tokens=TokenCounts(input_tokens=tokens)),
+        metadata=build_matrix_run_metadata(_TURN, [], extra_metadata=metadata),
+        messages=[Message(role="user", content="do work")],
+    )
+
+
+def _recovered(bot: AgentBot, *attempts: RunRecord, uncollected: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Store ``attempts`` and return the run metadata the replay of their turn carries."""
+    store = unwrap_extracted_collaborator(bot._response_runner).deps.state_writer.create_storage(None)
+    session = new_scope_session(session_id=_SESSION, scope=_SCOPE)
+    for attempt in attempts:
+        store.save_run(session, attempt, record_usage=False)
+    return recover_interrupted_turn(store, _SESSION, _SCOPE, {_TURN}, natively=False, uncollected=uncollected)
+
+
+def _input_tokens(recovered: dict[str, Any]) -> dict[str, int]:
+    return {run_id: usage.tokens.input_tokens for run_id, usage in prior_usage_by_run(recovered).items()}
+
+
+def test_recovery_merges_what_the_attempts_rows_hold_by_id_and_leaves_uncollected_jobs_out(tmp_path: Path) -> None:
+    """Rows that repeat each other, as after a model switch or an earlier restart, count each attempt and receipt once."""
+    bot = _priced_bot(tmp_path)
+    empty = RunMetrics(tokens=TokenCounts(input_tokens=7))
+    first = _attempt("run-a", tokens=100, **receipts_metadata({"d1": 0.5}))
+    # The second run follows a retried empty reply, which stored no row, and the first run, whose receipt it repeats.
+    carried = with_prior_usage(receipts_metadata({"d1": 0.5, "job": 0.6}), {"empty": empty, "run-a": first.metrics})
+    second = _attempt("run-b", tokens=200, **carried)
+
+    recovered = _recovered(bot, first, second, uncollected=("job",))
+
+    assert recovered[CONTINUED_RUNS_METADATA_KEY] == ["run-a", "run-b"]
+    assert _input_tokens(recovered) == {"empty": 7, "run-a": 100, "run-b": 200}
+    assert recovered[PRIOR_USAGE_RUN_METADATA_KEY]["input_tokens"] == 307
+    # The job no turn acknowledged is left for the turn that collects it; an acknowledged one is carried.
+    assert stored_receipts(recovered) == {"d1": 0.5}
+    assert recovered[SUBAGENT_COST_RUN_METADATA_KEY] == 0.5
+    assert stored_receipts(_recovered(bot)) == {"d1": 0.5, "job": 0.6}
+
+
+def test_values_stored_as_sums_resume_as_one_entry_that_restart_recovery_drops(tmp_path: Path) -> None:
+    """Rows an earlier release wrote hold sums without ids: a resume goes on from them, a restart's replay does not.
+
+    That release's holder outlived a model switch, so the second run's sum covers the first run's receipt, and its
+    summed prior usage covers the first run. Adding either to what the rows hold by id would count it twice.
+    """
+    bot = _priced_bot(tmp_path)
+    first = _attempt("run-a", tokens=100, **{SUBAGENT_COST_RUN_METADATA_KEY: 0.5})
+    spent = {PRIOR_USAGE_RUN_METADATA_KEY: RunMetrics(tokens=TokenCounts(input_tokens=100)).to_dict()}
+    second = _attempt("run-b", tokens=200, **{SUBAGENT_COST_RUN_METADATA_KEY: 0.75}, **spent)
+
+    # A resume of the second run reports what that release would have: its sums, each as one entry.
+    assert resumed_subagent_cost(second.metadata).receipts == {LEGACY_COST_ID: 0.75}
+    assert _input_tokens(second.metadata or {}) == {LEGACY_COST_ID: 100}
+    with receiving_subagent_cost(resumed_subagent_cost(second.metadata)):
+        receive_subagent_cost("d2", 0.25)
+        assert subagent_cost_metadata(second.metadata) == {
+            SUBAGENT_RECEIPTS_RUN_METADATA_KEY: {LEGACY_COST_ID: 0.75, "d2": 0.25},
+            SUBAGENT_COST_RUN_METADATA_KEY: 1.0,
+        }
+
+    recovered = _recovered(bot, first, second)
+
+    # The replay reports each run's own usage, which is exact, and no receipt, as that release's replay did.
+    assert _input_tokens(recovered) == {"run-a": 100, "run-b": 200}
+    assert stored_receipts(recovered) == {}
+    assert SUBAGENT_COST_RUN_METADATA_KEY not in recovered
+
+
+def test_a_patch_that_carries_receipts_merges_them_into_the_row_s(tmp_path: Path) -> None:
+    """A delegation state's patch stores what its turn received: a holder that knows less never shrinks the row."""
+    bot = _priced_bot(tmp_path)
+    store = unwrap_extracted_collaborator(bot._response_runner).deps.state_writer.create_storage(None)
+    session = new_scope_session(session_id=_SESSION, scope=_SCOPE)
+    store.save_run(
+        session,
+        _attempt("run-a", tokens=1, **receipts_metadata({"d1": 0.5, "d2": 0.25})),
+        record_usage=False,
+    )
+
+    assert store.patch_run_metadata(_SESSION, "run-a", {"other": True, **receipts_metadata({"d2": 0.25, "d3": 0.125})})
+
+    run = store.get_run("run-a")
+    assert run is not None
+    assert stored_receipts(run.metadata) == {"d1": 0.5, "d2": 0.25, "d3": 0.125}
+    assert (run.metadata or {})[SUBAGENT_COST_RUN_METADATA_KEY] == 0.875

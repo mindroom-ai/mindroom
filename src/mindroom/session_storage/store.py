@@ -34,7 +34,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
-from mindroom.delegation.cost import subagent_cost_metadata
+from mindroom.delegation.cost import receipts_metadata, stored_receipts, subagent_cost_metadata
 from mindroom.history.types import HistoryScope, ScopeSummary, owner_scope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunStatus, TeamRunRecord, ToolExecution
@@ -382,7 +382,10 @@ class ConversationStore:
             if row is None:
                 return False
             parent_run_id, scope_key, status, seq, stored = row
+            # A patch that carries receipts, as a delegation state's does, merges them into the row's.
             metadata = {**(decoded_mapping(stored) or {}), **changes}
+            if patched := stored_receipts(changes):
+                metadata.update(receipts_metadata(stored_receipts(decoded_mapping(stored)), patched))
             connection.execute(f"UPDATE {runs} SET metadata = ? WHERE run_id = ?", (json.dumps(metadata), run_id))  # noqa: S608
             if parent_run_id is None and status not in _NON_VISIBLE:
                 _join_covering_row(connection, self.names, session_id, scope_key, seq, metadata)

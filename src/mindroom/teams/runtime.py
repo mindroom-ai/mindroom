@@ -172,7 +172,7 @@ def team_usage_runs(record: TeamRunRecord) -> list[tuple[AnyRunRecord, RunMetric
 
 
 def team_usage(record: TeamRunRecord) -> RunMetrics | None:
-    """Return the turn's usage, the sum over ``team_usage_runs``, within the leader's duration."""
+    """Return the turn's usage, the sum over ``team_usage_runs``, within the leader's duration (``team_run_usage``)."""
     return team_run_usage(record.metrics, (member.metrics for member in record.ended_member_runs))
 
 

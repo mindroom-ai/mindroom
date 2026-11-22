@@ -280,8 +280,8 @@ class RunMetrics(_Counts):
 
 
 def team_run_usage(leader: RunMetrics | None, members: Iterable[RunMetrics | None]) -> RunMetrics | None:
-    """Return a team run's combined usage: ``leader`` plus ``members``, clamped to ``leader``'s wall-clock duration."""
-    metrics = [part for part in (leader, *members) if part is not None]
+    """Return a team run's usage: ``leader``'s and ``members``' summed, in the leader's duration, which spans theirs."""
+    metrics = [usage for usage in (leader, *members) if usage is not None]
     if not metrics:
         return None
     total = sum(metrics[1:], metrics[0])

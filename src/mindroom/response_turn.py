@@ -30,6 +30,7 @@ from uuid import uuid4
 
 from mindroom import ai_runtime
 from mindroom.agent_cli.lifetime import CliTurnLifetime
+from mindroom.ai_run_metadata import merge_usage, prior_usage_by_run
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.cancellation import current_task_is_process_shutdown
 from mindroom.constants import (
@@ -39,7 +40,7 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
-from mindroom.delegation.cost import SubagentCost, advance_subagent_cost, receiving_subagent_cost
+from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost, stored_receipts
 from mindroom.delegation.state import DelegationState
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.interrupted_replay import NO_TURN_INPUT, TurnInput, persist_interrupted_replay_snapshot
@@ -468,14 +469,13 @@ class TurnSinks:
 class TurnResume:
     """Where a resumed turn starts: the restored attempt to settle first, if any, and the same-turn attempts spent.
 
-    ``prior_usage`` is the usage of the turn's attempts before the first one the resume settles or runs, which the
-    reply's usage adds (``TurnRunState.prior_usage``).
+    ``prior_usage`` is the usage of the turn's attempts before the first one the resume settles or runs, by the run
+    id of each, which the reply's usage adds (``TurnRunState.prior_usage``).
     """
 
     attempt: CompletedAttempt | None = None
     continuation_count: int = 0
-    prior_usage: tuple[RunMetrics, ...] = ()
-    prior_subagent_cost_usd: float | None = None
+    prior_usage: Mapping[str, RunMetrics] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -522,11 +522,10 @@ class TurnRunState:
     # interrupted record keeps it until the attempt's run stores its own (``TurnPartialSnapshot.turn_input``), as the
     # run of an attempt that completes does.
     turn_input: TurnInput = NO_TURN_INPUT
-    # The calls the turn's spent attempts finished, and their usage, before a retry or a continuation started another.
+    # The calls the turn's spent attempts finished, and their usage by run id, before a retry or a continuation started
+    # another; a replay's holds the attempts a restart cut short too.
     prior_completed_tools: tuple[ToolTraceEntry, ...] = ()
-    prior_usage: tuple[RunMetrics, ...] = ()
-    # Immediately preceding rowless attempts (such as retried empty replies) that no stored run row owns yet.
-    unstored_prior_usage: tuple[RunMetrics, ...] = ()
+    prior_usage: dict[str, RunMetrics] = field(default_factory=dict)
     empty_response_retried: bool = False
     attempt: _LiveAttempt | None = None
 
@@ -950,16 +949,11 @@ def _drop_spent_attempt(run: TurnRunState, resolution: CompletedAttempt) -> None
     interrupted record; an empty run is no turn, so its retry still does.
     """
     run.prior_completed_tools = (*run.prior_completed_tools, *resolution.completed_tools)
-    advance_subagent_cost()
-    if resolution.is_empty:
-        if resolution.usage is not None:
-            run.unstored_prior_usage = (*run.unstored_prior_usage, resolution.usage)
-    else:
+    if not resolution.is_empty:
         run.turn_input = NO_TURN_INPUT
-        # The completed run is stored and already carries any earlier unstored attempts; reset so the next run does not repeat them.
-        run.unstored_prior_usage = ()
     if resolution.usage is not None:
-        run.prior_usage = (*run.prior_usage, resolution.usage)
+        run_id = resolution.attempt_run_id or resolution.run_id or uuid4().hex
+        run.prior_usage = {**run.prior_usage, run_id: resolution.usage}
     run.attempt = None
 
 
@@ -1153,12 +1147,9 @@ async def stream_response_turn[ChunkT](
 ) -> AsyncGenerator[ChunkT | FailedReply]:
     """Own the whole response while binding context only during pulls and close; a failed turn ends with its reply."""
     lifetime = CliTurnLifetime()
-    resolved_resume = resume or TurnResume()
-    subagent_cost = (
-        SubagentCost(prior_usd=resolved_resume.prior_subagent_cost_usd)
-        if sinks.subagent_cost is None
-        else sinks.subagent_cost
-    )
+    subagent_cost = SubagentCost() if sinks.subagent_cost is None else sinks.subagent_cost
+    # The turn goes on from what its run metadata holds: a replay's, what the attempts a restart cut short received.
+    subagent_cost.add(stored_receipts(ctx.matrix_run_metadata))
 
     @contextmanager
     def bind() -> Iterator[None]:
@@ -1173,7 +1164,7 @@ async def stream_response_turn[ChunkT](
             sinks,
             continuation=continuation,
             cli_lifetime=lifetime,
-            resume=resolved_resume,
+            resume=resume or TurnResume(),
         ),
     )
     try:
@@ -1199,7 +1190,9 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     turn, so a consumer that closes the stream right after cannot leave it unsettled, and a consumer that closes it
     earlier (a Stop that lands in the streamer, a delivery failure) leaves the turn recorded as stopped.
     """
-    run = TurnRunState(record=sinks.turn_recorder or TurnRecorder(), prior_usage=resume.prior_usage)
+    # A replay's run metadata holds what the attempts a restart cut short spent, as a resume names its paused run's.
+    prior_usage = merge_usage(prior_usage_by_run(ctx.matrix_run_metadata), resume.prior_usage)
+    run = TurnRunState(record=sinks.turn_recorder or TurnRecorder(), prior_usage=prior_usage)
     run.record.start(
         user_message=adapter.user_message,
         user_message_is_structured=ctx.current_prompt_is_structured,

@@ -8,32 +8,55 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from mindroom.constants import PRIOR_SUBAGENT_COST_RUN_METADATA_KEY, SUBAGENT_COST_RUN_METADATA_KEY
+from mindroom.constants import LEGACY_COST_ID, SUBAGENT_COST_RUN_METADATA_KEY, SUBAGENT_RECEIPTS_RUN_METADATA_KEY
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping
+    from collections.abc import Callable, Iterable, Iterator, Mapping
+
+
+def merge_by_key[T](views: Iterable[Mapping[str, T]], size: Callable[[T], float]) -> dict[str, T]:
+    """Return every key of ``views`` with its largest value by ``size``: an older view of a turn holds less, never more."""
+    merged: dict[str, T] = {}
+    for view in views:
+        for key, value in view.items():
+            if key not in merged or size(value) > size(merged[key]):
+                merged[key] = value
+    return merged
+
+
+def stored_by_id(metadata: Mapping[str, Any] | None, key: str, sum_key: str) -> dict[str, Any]:
+    """Return what a run's ``metadata`` stores under ``key`` by id; a run that stored only its sum holds one entry."""
+    # LEGACY_COMPAT: Run metadata stored with what its turn spent or received before it only as a sum.
+    # Legacy format: a run's metadata holds ``mindroom_subagent_cost_usd`` or ``mindroom_prior_usage`` without the map
+    # by id beside it (``mindroom_subagent_receipts``, ``mindroom_prior_usage_by_run``).
+    # Last legacy release: v2026.11.512; the next, still unreleased, release writes each map beside its sum.
+    # Handling: the sum reads as one entry under ``LEGACY_COST_ID``, so a resume of that run reports it as those
+    # releases did; restart recovery and a job's continuation drop that entry, which may cover what they read by id.
+    # Coverage: tests/test_restart_turn_cost.py::test_values_stored_as_sums_resume_as_one_entry_that_restart_recovery_drops,
+    # tests/test_restart_turn_cost.py::test_a_continuation_leaves_out_what_its_cut_short_turn_stored_as_a_sum.
+    metadata = metadata or {}
+    if isinstance(stored := metadata.get(key), dict):
+        return dict(stored)
+    return {} if metadata.get(sum_key) is None else {LEGACY_COST_ID: metadata[sum_key]}
 
 
 @dataclass
 class SubagentCost:
-    """Per-run (``usd``) and carried prior-attempt (``prior_usd``) subagent costs; ``total_usd`` adds them for replies."""
+    """The priced cost of the subagent turns one turn received, by delegation id, so a receipt it holds twice counts once."""
 
-    usd: float | None = None
-    prior_usd: float | None = None
+    receipts: dict[str, float] = field(default_factory=dict)
 
     @property
-    def total_usd(self) -> float | None:
-        """Return combined prior and current subagent cost, or None when none of known cost arrived."""
-        return sum_subagent_cost_usd((self.prior_usd, self.usd))
+    def usd(self) -> float | None:
+        """Return what they cost together, None while the turn received none of known cost."""
+        return sum(self.receipts.values()) if self.receipts else None
 
-    def advance_run(self) -> None:
-        """Roll this run's receipts into ``prior_usd`` and reset ``usd`` for the next run id."""
-        if self.usd is not None:
-            self.prior_usd = (self.prior_usd or 0.0) + self.usd
-            self.usd = None
+    def add(self, receipts: Mapping[str, float]) -> None:
+        """Merge another view of what the turn received into this one."""
+        self.receipts.update(merge_by_key((self.receipts, receipts), float))
 
 
 _RECEIVING: ContextVar[SubagentCost | None] = ContextVar("received_subagent_cost", default=None)
@@ -49,48 +72,45 @@ def receiving_subagent_cost(cost: SubagentCost) -> Iterator[None]:
         _RECEIVING.reset(token)
 
 
-def receive_subagent_cost(usd: float | None) -> None:
-    """Add a settled child turn's cost to the turn receiving its result; a child of unknown cost adds nothing."""
+def receive_subagent_cost(delegation_id: str, usd: float | None) -> None:
+    """Add settled child turn ``delegation_id``'s cost to the turn receiving its result; an unknown cost adds nothing."""
     cost = _RECEIVING.get()
     if cost is not None and usd is not None:
-        cost.usd = (cost.usd or 0.0) + usd
-
-
-def advance_subagent_cost() -> None:
-    """Move this run's subagent receipts into ``prior_usd`` before the turn starts a new run id."""
-    if (cost := _RECEIVING.get()) is not None:
-        cost.advance_run()
+        cost.add({delegation_id: usd})
 
 
 def received_subagent_cost_usd() -> float | None:
     """Return what the subagent turns the turn running in this context received cost, None for none of known cost."""
     cost = _RECEIVING.get()
-    return None if cost is None else cost.total_usd
+    return None if cost is None else cost.usd
 
 
-def _float_entry(metadata: Mapping[str, Any] | None, key: str) -> float | None:
-    stored = (metadata or {}).get(key)
-    return float(stored) if isinstance(stored, int | float) and not isinstance(stored, bool) else None
+def stored_receipts(metadata: Mapping[str, Any] | None) -> dict[str, float]:
+    """Return the receipts a run's ``metadata`` stores, as ``receipts_metadata`` wrote them; only a number is a cost."""
+    stored = stored_by_id(metadata, SUBAGENT_RECEIPTS_RUN_METADATA_KEY, SUBAGENT_COST_RUN_METADATA_KEY)
+    return {
+        key: float(usd) for key, usd in stored.items() if isinstance(usd, int | float) and not isinstance(usd, bool)
+    }
 
 
-def sum_subagent_cost_usd(costs: Iterable[float | None]) -> float | None:
-    """Sum known subagent costs, returning None when every entry is None."""
-    known = [usd for usd in costs if usd is not None]
-    return sum(known) if known else None
+def receipts_metadata(*views: Mapping[str, float]) -> dict[str, Any]:
+    """Return the entries that store ``views`` of a turn's receipts merged, with the sum earlier releases read."""
+    receipts = merge_by_key(views, float)
+    total = {SUBAGENT_COST_RUN_METADATA_KEY: sum(receipts.values())}
+    return {SUBAGENT_RECEIPTS_RUN_METADATA_KEY: receipts, **total} if receipts else {}
 
 
 def subagent_cost_metadata(stored: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    """Return the separate per-run and prior-attempt subagent cost entries a run save stores."""
-    cost, base = _RECEIVING.get(), resumed_subagent_cost(stored)
-    usd = base.usd if cost is None or cost.usd is None else cost.usd
-    prior = base.prior_usd if cost is None or cost.prior_usd is None else cost.prior_usd
-    pairs = ((SUBAGENT_COST_RUN_METADATA_KEY, usd), (PRIOR_SUBAGENT_COST_RUN_METADATA_KEY, prior))
-    return {k: v for k, v in pairs if v is not None}
+    """Return the metadata entries a run's save stores of what its turn received so far, empty for nothing received.
+
+    They merge what the ``stored`` metadata holds with what the turn in this context received, so with nothing
+    received here, as in recovery's saves, they keep the stored cost. A turn that resumes the run after a pause goes
+    on from it (``resumed_subagent_cost``).
+    """
+    cost = _RECEIVING.get()
+    return receipts_metadata(stored_receipts(stored), cost.receipts if cost is not None else {})
 
 
 def resumed_subagent_cost(metadata: Mapping[str, Any] | None) -> SubagentCost:
-    """Return the holder of a turn that resumes a stored run, restoring its own receipts and any carried prior cost."""
-    return SubagentCost(
-        _float_entry(metadata, SUBAGENT_COST_RUN_METADATA_KEY),
-        prior_usd=_float_entry(metadata, PRIOR_SUBAGENT_COST_RUN_METADATA_KEY),
-    )
+    """Return the holder of a turn that resumes a stored run, starting from what the run's turn had received."""
+    return SubagentCost(stored_receipts(metadata))

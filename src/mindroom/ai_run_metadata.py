@@ -6,12 +6,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.budgets.pricing import format_cost_usd, run_cost_usd
-from mindroom.constants import (
-    AI_RUN_METADATA_KEY,
-    PRIOR_USAGE_RUN_METADATA_KEY,
-    UNSTORED_PRIOR_USAGE_RUN_METADATA_KEY,
-)
-from mindroom.delegation.cost import received_subagent_cost_usd
+from mindroom.constants import AI_RUN_METADATA_KEY, PRIOR_USAGE_BY_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY
+from mindroom.delegation.cost import merge_by_key, received_subagent_cost_usd, stored_by_id
 from mindroom.llm.messages import is_own_model_message
 from mindroom.llm.usage import RunMetrics
 from mindroom.model_usage import (
@@ -284,18 +280,30 @@ def turn_usage(prior_usage: Sequence[RunMetrics], metrics: RunMetrics | None) ->
     return total
 
 
-def with_prior_usage(
-    metadata: dict[str, Any] | None,
-    prior_usage: Sequence[RunMetrics],
-    unstored_prior_usage: Sequence[RunMetrics] = (),
-) -> dict[str, Any] | None:
-    """Store ``prior_usage`` (for approval resumes) and rowless ``unstored_prior_usage`` (for restart recovery)."""
-    pairs = (
-        (PRIOR_USAGE_RUN_METADATA_KEY, turn_usage(prior_usage, None)),
-        (UNSTORED_PRIOR_USAGE_RUN_METADATA_KEY, turn_usage(unstored_prior_usage, None)),
-    )
-    entries = {k: u.to_dict() for k, u in pairs if u is not None}
-    return {**(metadata or {}), **entries} if entries else metadata
+def with_prior_usage(metadata: dict[str, Any] | None, prior_usage: Mapping[str, RunMetrics]) -> dict[str, Any] | None:
+    """Return the metadata a run's record stores: ``metadata``, with ``prior_usage``, what its turn spent before it.
+
+    The record keeps that usage summed (``turn_usage``), so whichever resume continues the run after a pause, even
+    after a restart, reports it with the run's own (``prior_usage_of``), and by the run id of each attempt, so a replay
+    that reads several of the turn's runs counts each attempt once. A turn's first run keeps none. ``metadata`` is
+    the turn's, which holds no other run's usage (``without_run_usage``).
+    """
+    usage = turn_usage(tuple(prior_usage.values()), None)
+    if usage is None:
+        return metadata
+    by_run = {run_id: attempt.to_dict() for run_id, attempt in prior_usage.items()}
+    return {**(metadata or {}), PRIOR_USAGE_RUN_METADATA_KEY: usage.to_dict(), PRIOR_USAGE_BY_RUN_METADATA_KEY: by_run}
+
+
+def prior_usage_by_run(metadata: Mapping[str, Any] | None) -> dict[str, RunMetrics]:
+    """Return the usage the turn of a run with ``metadata`` spent before it, by the run id of each attempt, in order."""
+    stored = stored_by_id(metadata, PRIOR_USAGE_BY_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY)
+    return {run_id: RunMetrics.from_dict(usage) for run_id, usage in stored.items()}
+
+
+def merge_usage(*views: Mapping[str, RunMetrics]) -> dict[str, RunMetrics]:
+    """Merge views of one turn's attempts by run id, keeping the larger of two records of one attempt."""
+    return merge_by_key(views, lambda usage: usage.tokens.input_tokens + usage.tokens.output_tokens)
 
 
 def prior_usage_of(record: AnyRunRecord) -> tuple[RunMetrics, ...]:
@@ -310,12 +318,6 @@ def prior_usage_of(record: AnyRunRecord) -> tuple[RunMetrics, ...]:
     # releases did; the usage ledger counts the earlier attempts either way.
     # Coverage: tests/test_approval_turn_continuation.py::test_a_pause_stored_without_its_turn_s_earlier_usage_resumes_publishing_the_paused_run_s.
     stored = (record.metadata or {}).get(PRIOR_USAGE_RUN_METADATA_KEY)
-    return (RunMetrics.from_dict(stored),) if isinstance(stored, dict) else ()
-
-
-def unstored_prior_usage_of(record: AnyRunRecord) -> tuple[RunMetrics, ...]:
-    """Return the usage of immediately preceding rowless attempts stored on ``record``, if any."""
-    stored = (record.metadata or {}).get(UNSTORED_PRIOR_USAGE_RUN_METADATA_KEY)
     return (RunMetrics.from_dict(stored),) if isinstance(stored, dict) else ()
 
 

@@ -30,7 +30,7 @@ from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, Mod
 from mindroom.constants import SUBAGENT_COST_RUN_METADATA_KEY
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation import execution, lifecycle
-from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost
+from mindroom.delegation.cost import SubagentCost, receipts_metadata, receiving_subagent_cost, stored_receipts
 from mindroom.delegation.lifecycle import authorize_delegation
 from mindroom.delegation.records import DelegationRecordLocator, DelegationRecordOwner
 from mindroom.delegation.recovery import cancel_approval_delegations
@@ -1473,19 +1473,30 @@ async def test_the_driver_saves_the_parent_as_it_was_handed_over(tmp_path: Path)
 
 @pytest.mark.asyncio
 async def test_a_parent_that_gets_only_its_delegation_key_keeps_what_its_subagents_cost(tmp_path: Path) -> None:
-    """A minimal-mode checkpoint, which an approval recovery resumes, gets only its key, and it carries the cost too."""
+    """A minimal-mode checkpoint, which an approval recovery resumes, gets only its key, and it carries the cost too.
+
+    The key's save stores what the run holds merged with what the turn in its context received, so a holder that
+    knows less than the run leaves the run's receipts in place, on the record and on its row.
+    """
     paths = _runtime_paths(tmp_path)
     store = create_session_storage("leader", _config(paths), paths, _leader_identity())
     session = new_scope_session(session_id="parent", scope=HistoryScope(kind="agent", scope_id="leader"))
-    checkpoint = RunRecord(run_id="parent-run", session_id="parent", status=RunStatus.cancelled)
+    checkpoint = RunRecord(
+        run_id="parent-run",
+        session_id="parent",
+        status=RunStatus.cancelled,
+        metadata=receipts_metadata({"earlier-child": 0.5}),
+    )
     await persist_to(store, session)(checkpoint)
 
-    with receiving_subagent_cost(SubagentCost(0.0022)):
+    with receiving_subagent_cost(SubagentCost({"child": 0.0022})):
         await execution.persist_delegation_state(store, session, checkpoint, DelegationState())
 
     stored = store.get_run("parent-run")
     assert stored is not None
-    assert (stored.metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY) == 0.0022
+    for metadata in (checkpoint.metadata, stored.metadata):
+        assert stored_receipts(metadata) == {"earlier-child": 0.5, "child": 0.0022}
+        assert (metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY) == 0.5022
 
 
 @pytest.mark.asyncio

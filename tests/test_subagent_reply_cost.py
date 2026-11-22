@@ -21,7 +21,12 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig, ModelPricing
 from mindroom.constants import AI_RUN_METADATA_KEY, SUBAGENT_COST_RUN_METADATA_KEY, subagent_sessions_dir
-from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost, resumed_subagent_cost
+from mindroom.delegation.cost import (
+    SubagentCost,
+    receipts_metadata,
+    receiving_subagent_cost,
+    resumed_subagent_cost,
+)
 from mindroom.delegation.recovery import interrupt_child, read_child_run
 from mindroom.delegation.state import DelegationChild
 from mindroom.event_journal import BackgroundApprovalDecision
@@ -142,10 +147,16 @@ class _Conversation:
         model_name = self.config.agents[agent_name].model or "default"
         return ScriptedModel(list(turns), identity=model_identity(self.config.models[model_name]))
 
-    async def reply(self, *steps: list, blocking: bool = False) -> dict[str, Any]:
+    async def reply(
+        self,
+        *steps: list,
+        blocking: bool = False,
+        run_metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Run one leader reply whose model takes ``steps`` and return the run metadata it publishes.
 
         A ``blocking`` reply is collected as API and headless replies are, and its metadata read once it ended.
+        ``run_metadata`` is what the reply's runs carry, as the replay of a turn a restart cut short hands it over.
         """
         self.turns += 1
         self.agents.models = {**self.agents.models, "leader": self._model("leader", list(steps))}
@@ -164,6 +175,7 @@ class _Conversation:
             prompt="Delegate",
             execution_identity=_IDENTITY,
             supports_native_tool_approval=self.mode == "native",
+            matrix_run_metadata=run_metadata,
         )
         collected: dict[str, Any] = {}
         with tool_runtime_context(context):
@@ -233,6 +245,29 @@ async def test_a_reply_reports_its_subagent_s_cost_beside_its_own(conversation: 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("conversation", ["direct"], indirect=True)
+@pytest.mark.parametrize("blocking", [False, True], ids=["streamed", "collected into its caller's holder"])
+async def test_a_reply_goes_on_from_the_receipts_its_run_metadata_holds(
+    conversation: _Conversation,
+    blocking: bool,
+) -> None:
+    """A replay's run metadata holds what the attempts a restart cut short received, which its reply reports too.
+
+    A collected reply's caller keeps the holder its metadata is read from, and that holder starts from them as well.
+    """
+    await conversation.open(mid=[answer("Mid answer", _CHILD_REQUEST)])
+
+    metadata = await conversation.reply(
+        _delegate("delegate", "mid"),
+        answer("Parent done", _LEADER_REQUEST),
+        blocking=blocking,
+        run_metadata=receipts_metadata({"received-before-the-restart": 0.5}),
+    )
+
+    assert metadata["cost"] == {"usd": _LEADER_USD, "subagents_usd": f"{0.5 + _CHILD_USD:g}"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("conversation", ["direct"], indirect=True)
 async def test_a_reply_read_after_it_ended_reports_its_subagent_s_cost(conversation: _Conversation) -> None:
     """A reply collected whole, as an API or headless reply is, reports its subagent's cost too."""
     await conversation.open(mid=[answer("Mid answer", _CHILD_REQUEST)])
@@ -296,22 +331,29 @@ async def test_a_background_subagent_counts_on_the_reply_that_waited_for_its_res
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("conversation", ["job"], indirect=True)
-@pytest.mark.parametrize("nested", ["before", "after"])
+@pytest.mark.parametrize("nested", ["before", "after", "before a new run"])
 async def test_a_subagent_that_waited_for_an_approval_counts_the_subagents_it_ran_before_and_after(
     conversation: _Conversation,
     monkeypatch: pytest.MonkeyPatch,
-    nested: Literal["before", "after"],
+    nested: Literal["before", "after", "before a new run"],
 ) -> None:
-    """A background subagent that waited for an approval counts the subagent it ran ``nested`` its pause."""
+    """A background subagent that waited for an approval counts the subagent it ran ``nested`` its pause.
+
+    After its pause the turn may go on in a new run, which a switch of its model starts, and that run's row holds
+    what the turn received before the pause too.
+    """
     report = calls(tool_call("write_report", "report"), metrics=_CHILD_REQUEST)
     delegate = calls(tool_call("run_subagent", "nested", agent_name="leaf", task="Dig"), metrics=_CHILD_REQUEST)
+    switch = tool_call("switch_thread_model", "switch", model_name="cheap", when="after-toolcall")
+    steps = {
+        "before": (delegate, report),
+        "after": (report, delegate),
+        "before a new run": (delegate, report, calls(switch, metrics=_CHILD_REQUEST)),
+    }[nested]
     with registered_report_tool():
         await conversation.open(
-            mid_tools=("report",),
-            mid=[
-                *((delegate, report) if nested == "before" else (report, delegate)),
-                answer("Mid answer", _CHILD_REQUEST),
-            ],
+            mid_tools=("report", "thread_model"),
+            mid=[*steps, answer("Mid answer", _CHILD_REQUEST)],
             leaf=[answer("Leaf answer", _CHILD_REQUEST)],
         )
         assert conversation.runtime is not None
@@ -334,9 +376,10 @@ async def test_a_subagent_that_waited_for_an_approval_counts_the_subagents_it_ra
             if not cards.decision.done():
                 cards.decision.cancel()
 
-    # Mid's three requests and leaf's one.
-    assert conversation.saved_costs() == pytest.approx({"mid": 4 * _CHILD_USD, "leaf": _CHILD_USD})
-    assert waited["cost"] == {"usd": _LEADER_USD, "subagents_usd": f"{4 * _CHILD_USD:g}"}
+    # Mid's requests, one for each step and one for its answer, and leaf's one.
+    mid_usd = (len(steps) + 2) * _CHILD_USD
+    assert conversation.saved_costs() == pytest.approx({"mid": mid_usd, "leaf": _CHILD_USD})
+    assert waited["cost"] == {"usd": _LEADER_USD, "subagents_usd": f"{mid_usd:g}"}
 
 
 @pytest.mark.asyncio
@@ -358,6 +401,37 @@ async def test_recovery_keeps_the_cost_a_settled_subagent_saved(conversation: _C
     await interrupt_child(snapshot, config=conversation.config, runtime_paths=conversation.paths, reason="Restarted")
 
     assert (snapshot.cost_usd, snapshot.subagents_cost_usd) == pytest.approx((3 * _CHILD_USD, _CHILD_USD))
+    assert conversation.saved_costs() == pytest.approx({"mid": 3 * _CHILD_USD, "leaf": _CHILD_USD})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("conversation", ["direct"], indirect=True)
+async def test_recovery_settles_a_completed_run_with_what_its_row_received(conversation: _Conversation) -> None:
+    """A crash after a child's run completed and before its handle settled leaves the handle behind the run's row.
+
+    Recovery settles the handle from the completed run, whose row holds what the turn received, so the child's cost
+    counts its own subagent though the handle never recorded it.
+    """
+    await conversation.open(
+        mid=[
+            calls(tool_call("run_subagent", "nested", agent_name="leaf", task="Dig"), metrics=_CHILD_REQUEST),
+            answer("Mid answer", _CHILD_REQUEST),
+        ],
+        leaf=[answer("Leaf answer", _CHILD_REQUEST)],
+    )
+    await conversation.reply(_delegate("delegate", "mid"), answer("Parent done", _LEADER_REQUEST))
+    [settled] = [child for child in conversation.saved_children() if child.child_agent_name == "mid"]
+    # The handle as the crash left it: still running, with nothing received and no cost.
+    stale = replace(settled, status="running", result=None, cost_usd=None, subagents_cost_usd=None)
+    [path] = [
+        path for path in subagent_sessions_dir(conversation.paths).glob("*.json") if settled.subagent_id in path.name
+    ]
+    path.write_text(json.dumps({**json.loads(path.read_text()), "child": asdict(stale)}))
+
+    await interrupt_child(stale, config=conversation.config, runtime_paths=conversation.paths, reason="Restarted")
+
+    assert stale.status == "completed"
+    assert (stale.cost_usd, stale.subagents_cost_usd) == pytest.approx((3 * _CHILD_USD, _CHILD_USD))
     assert conversation.saved_costs() == pytest.approx({"mid": 3 * _CHILD_USD, "leaf": _CHILD_USD})
 
 
@@ -505,7 +579,7 @@ async def test_a_child_cancelled_in_its_parent_s_turn_keeps_its_own_subagent_cos
         )
 
     before = leaf()
-    with receiving_subagent_cost(SubagentCost(0.5)):
+    with receiving_subagent_cost(SubagentCost({"other": 0.5})):
         await interrupt_child(before, config=config, runtime_paths=paths, reason="Stopped")
 
     run = await read_child_run(before, config, paths)

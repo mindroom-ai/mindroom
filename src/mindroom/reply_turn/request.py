@@ -28,7 +28,6 @@ if TYPE_CHECKING:
     from mindroom.media_inputs import MediaInputs
     from mindroom.participation import ParticipationGate
     from mindroom.response_payload_preparation import ResponsePayloadPreparation
-    from mindroom.response_turn import TurnResume
     from mindroom.skill_learning.capture import SkillReviewCapture
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.tool_jobs.conversation import ConversationKey
@@ -89,8 +88,6 @@ class ResponseRequest:
     # The turn's own ID, which its hooks and tool calls carry; unlike the correlation ID, no other turn shares it.
     turn_id: str = field(default_factory=lambda: uuid4().hex)
     matrix_run_metadata: Mapping[str, Any] | None = None
-    # Carried prior usage and subagent cost of restart-interrupted attempts this turn continues.
-    resume: TurnResume | None = None
     participating_agent_names: tuple[str, ...] = ()
     transient_enrichment_items: tuple[EnrichmentItem, ...] = ()
     system_enrichment_items: tuple[EnrichmentItem, ...] = ()

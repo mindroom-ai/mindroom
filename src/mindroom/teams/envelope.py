@@ -93,7 +93,7 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import AnyRunRecord, TeamRunRecord
     from mindroom.llm.usage import RunMetrics
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.response_turn import TurnResume, TurnRunState
+    from mindroom.response_turn import TurnRunState
     from mindroom.run_storage import RunStorage
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.teams.members import BuiltTeam
@@ -499,7 +499,7 @@ class _TeamTurn:
                 run_id=attempt.run_id,
                 user_id=self.ctx.requester_id,
                 # The team run's record keeps the usage of the attempts the turn spent before it.
-                metadata=with_prior_usage(prepared.run_metadata, run.prior_usage, run.unstored_prior_usage),
+                metadata=with_prior_usage(prepared.run_metadata, run.prior_usage),
                 records=attempt.records,
             )
         events = drive_team_delegations(
@@ -525,6 +525,7 @@ class _TeamTurn:
     ) -> AsyncGenerator[TeamStreamChunk | AttemptResolved]:
         """Stream one team attempt as its document grows, ending with its ``AttemptResolved`` sentinel."""
         attempt, events = await self.start_attempt(run, continuation_state)
+        prior_usage = tuple(run.prior_usage.values())
         shown: str | None = None
         try:
             async with closing_async_stream(events):
@@ -540,7 +541,7 @@ class _TeamTurn:
             yield AttemptResolved(
                 HandledAttempt(
                     FailedReply(self.error_text(error), error),
-                    build_run_metadata=self.run_metadata_builder(attempt, RunStatus.error, run.prior_usage),
+                    build_run_metadata=self.run_metadata_builder(attempt, RunStatus.error, prior_usage),
                 ),
             )
             return
@@ -581,7 +582,7 @@ class _TeamTurn:
             self.resolve_completed(
                 attempt,
                 record,
-                run.prior_usage,
+                prior_usage,
                 shown=shown is not None,
                 silent_answer=silent_answer,
             ),
@@ -755,7 +756,6 @@ async def team_response_stream(
     ctx: ResponseTurnContext,
     *,
     sinks: TurnSinks,
-    resume: TurnResume | None = None,
 ) -> AsyncIterator[TeamStreamChunk]:
     """Stream one team turn as a live document: a header, one section per member, and the leader's consensus.
 
@@ -781,7 +781,6 @@ async def team_response_stream(
         adapter,
         sinks,
         continuation=turn.initial_continuation(),
-        resume=resume,
     )
     # Close the driver generator deterministically when this wrapper unwinds so
     # its cleanup does not wait for event-loop async-generator finalization.

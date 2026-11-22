@@ -14,7 +14,7 @@ from mindroom.agent_cli.cli_approval_recovery import CliFollowUpTurn, continue_c
 from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agents import create_agent
 from mindroom.ai import agent_run_metadata_content, run_delegated_child_response, stream_agent_response
-from mindroom.ai_run_metadata import prior_usage_of
+from mindroom.ai_run_metadata import prior_usage_by_run, prior_usage_of
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import ResumeRunner
 from mindroom.approval.tool_owners import (
@@ -246,7 +246,7 @@ async def _continue_persisted_agent(
         # call: nothing can resume it, so the resume fails naming that call, as a live turn does.
         raise pause_without_approval_error(response, entity_label="agent")
     # The usage of the turn's attempts before the paused run, which its record carries across the pause.
-    prior_usage = prior_usage_of(persisted)
+    prior_usage, spent = prior_usage_of(persisted), prior_usage_by_run(persisted.metadata)
     attempt = CompletedAttempt(
         response_text=collected.terminal_content
         or ("" if presentation.final_text() else "Tool approval continuation completed"),
@@ -276,7 +276,7 @@ async def _continue_persisted_agent(
         _continuation_turn_context(continuation, model_name=model_name, metadata=response.metadata),
         presentation,
         prompt=continuation.request_body,
-        resume=TurnResume(attempt, continuation_count=continuation.continuation_count, prior_usage=prior_usage),
+        resume=TurnResume(attempt, continuation_count=continuation.continuation_count, prior_usage=spent),
         config=config,
         runtime_paths=runtime_paths,
         knowledge=knowledge,
@@ -540,7 +540,7 @@ class AgentApprovalExecution:
                             reusable_build=recovered.reusable_build,
                             resume=TurnResume(
                                 continuation_count=recovered.initial_continuation_count,
-                                prior_usage=prior_usage_of(persisted),
+                                prior_usage=prior_usage_by_run(persisted.metadata),
                             ),
                             delegation_depth=recovered.delegation_depth,
                             media=recovered.media,

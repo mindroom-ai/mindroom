@@ -10,7 +10,7 @@ from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping, Sequence
+    from collections.abc import Collection, Mapping
 
     from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
@@ -172,10 +172,8 @@ class DelegationChild:
     # What the settled turn cost: its own priced usage plus that of the subagent turns it received, None while unsettled
     # or when none of it used a priced model. The turn that receives the child's result adds it to its reply's.
     cost_usd: float | None = None
-    # What the subagent turns whose results this turn itself received cost so far, across its pauses, None for none of known cost.
+    # What the subagent turns whose results the turn received cost so far, across its pauses, None for none of known cost.
     subagents_cost_usd: float | None = None
-    # Priced cost (own + nested subagents) of earlier restart-interrupted attempts of this job before this turn.
-    prior_cost_usd: float | None = None
     # LEGACY_COMPAT: Delegation child snapshots stored before a child kept when its running tool calls started.
     # Legacy format: A child snapshot in a subagent session file, a run's `mindroom_delegation` metadata, or a
     # background job's adapter that lacks `tool_started_at`.
@@ -387,10 +385,10 @@ class ChildResponseRunner(Protocol):
         config: Config,
         runtime_paths: RuntimePaths,
         refresh_scheduler: KnowledgeRefreshScheduler | None,
-        prior_usage: Sequence[RunMetrics] = (),
+        prior_usage: Mapping[str, RunMetrics] | None = None,
     ) -> str:
         """Execute a child response in its retained scope, reporting exact run IDs.
 
-        ``prior_usage`` is the usage of the child's turn before this response, which its runs' records carry.
+        ``prior_usage`` is the usage of the child's turn before this response, by run id, which its runs' records carry.
         """
         ...

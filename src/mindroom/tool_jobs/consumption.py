@@ -245,7 +245,8 @@ async def consume_tool_job(
             value = _merge_session_state(value, job, payload, call)
         if job.kind == "delegation" and not job.consumed:
             # The turn that reads a subagent job's result first receives what its child cost.
-            receive_subagent_cost(delegation_child(job).cost_usd)
+            child = delegation_child(job)
+            receive_subagent_cost(child.delegation_id, child.cost_usd)
     except BaseException:
         await runtime.release_wait(job.job_id, claim)
         raise

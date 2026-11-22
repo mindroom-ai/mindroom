@@ -10,6 +10,7 @@ runtime seam (``tests/team_turn_helpers.py``).
 from __future__ import annotations
 
 import asyncio
+import functools
 import time
 from contextlib import suppress
 from typing import TYPE_CHECKING, Any
@@ -19,11 +20,19 @@ import pytest
 
 from mindroom import ai_runtime
 from mindroom.agents import create_agent
+from mindroom.ai_run_metadata import prior_usage_by_run
 from mindroom.budgets.pricing import format_cost_usd
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.models import ModelPricing
-from mindroom.constants import AI_RUN_METADATA_KEY, SILENT_SCHEDULE_NO_REPLY_TOKEN
+from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
+    CONTINUED_RUNS_METADATA_KEY,
+    SILENT_SCHEDULE_NO_REPLY_TOKEN,
+    SUBAGENT_COST_RUN_METADATA_KEY,
+    SUBAGENT_RECEIPTS_RUN_METADATA_KEY,
+)
+from mindroom.delegation.cost import receive_subagent_cost, stored_receipts
 from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT, recover_interrupted_turn
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.messages import Message
@@ -287,6 +296,75 @@ async def test_a_crash_after_an_empty_team_attempt_leaves_nothing_the_next_promp
 
 
 @pytest.mark.asyncio
+async def test_a_team_turn_a_restart_cut_short_carries_its_members_usage_and_receipts_to_its_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[ProbeToolkit],
+) -> None:
+    """A member's row holds what the member used and received, which the leader's last checkpoint may predate.
+
+    The replay starts from the leader's run and its stored member runs: one usage for the team run, under the
+    leader's run id, as the turn's own usage counts them, and every receipt a member's row holds.
+    """
+    request = usage(100, 10)
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            delegate("call-1", "general", "Help"),
+            delegate("call-2", "general", "Dig"),
+            answer("Team answer.", request),
+        ],
+        general=[
+            calls(tool_call("touch", "call-paid", label="paid"), metrics=request),
+            answer("Helped.", request),
+            calls(tool_call("touch", "call-touch", label="dig", wait=True), metrics=request),
+            answer("Dug.", request),
+        ],
+    )
+    touch = ProbeToolkit.touch
+
+    @functools.wraps(touch)
+    async def paid_touch(self: ProbeToolkit, label: str, wait: bool = False) -> str:
+        if label == "paid":
+            receive_subagent_cost("member-job", 0.6)
+        return await touch(self, label, wait)
+
+    monkeypatch.setattr(ProbeToolkit, "touch", paid_touch)
+    turn = asyncio.create_task(team.respond(ctx=team.ctx(matrix_run_metadata=build_matrix_run_metadata(EVENT_ID, []))))
+    await asyncio.wait_for(probe.waiting.wait(), 10)
+    request_task_cancel(turn, process_shutdown=True)
+    with suppress(asyncio.CancelledError):
+        await turn
+    leader, members = team.stored_runs()
+    # The crash came before the leader's next checkpoint: its row never stored what the first member received.
+    cleared = {SUBAGENT_RECEIPTS_RUN_METADATA_KEY: None, SUBAGENT_COST_RUN_METADATA_KEY: None}
+    assert team.storage.patch_run_metadata(SESSION_ID, leader.run_id, cleared)
+    spent = [run.metrics.tokens.input_tokens for run in (leader, *members) if run.metrics is not None]
+
+    recovered = recover_interrupted_turn(team.storage, SESSION_ID, team.scope, {EVENT_ID}, natively=True)
+
+    assert recovered[CONTINUED_RUNS_METADATA_KEY] == [leader.run_id]
+    assert stored_receipts(recovered) == {"member-job": 0.6}
+    [(run_id, carried)] = prior_usage_by_run(recovered).items()
+    assert run_id == leader.run_id
+    # The leader's two requests and the members' three: no member row is left out, and none counts twice.
+    assert carried.tokens.input_tokens == sum(spent) == 2 * 40 + 3 * 100
+    assert carried.duration == (leader.metrics.duration if leader.metrics is not None else None)
+
+    # The replay's reply reports the cut-short attempt's usage with its own, and its runs hold what it received.
+    run_metadata: dict[str, Any] = {}
+    continued = {**build_matrix_run_metadata(EVENT_ID, []), **recovered}
+    text = await team.respond(
+        ctx=team.ctx(run_id="run-2", matrix_run_metadata=continued),
+        run_metadata_collector=run_metadata,
+    )
+    assert text.endswith("Team answer.")
+    assert run_metadata[AI_RUN_METADATA_KEY]["usage"]["input_tokens"] == sum(spent) + 100
+    assert stored_receipts(team.stored_runs(run_id="run-2")[0].metadata) == {"member-job": 0.6}
+
+
+@pytest.mark.asyncio
 async def test_a_leader_cut_short_mid_delegation_recovers_as_a_turn_of_its_own_calls(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -309,7 +387,7 @@ async def test_a_leader_cut_short_mid_delegation_recovers_as_a_turn_of_its_own_c
     with suppress(asyncio.CancelledError):
         await turn
 
-    assert recover_interrupted_turn(team.storage, SESSION_ID, team.scope, {EVENT_ID}, natively=True).run_ids
+    assert recover_interrupted_turn(team.storage, SESSION_ID, team.scope, {EVENT_ID}, natively=True)
     text = await team.respond(message="Next question", ctx=team.ctx(run_id="run-2"))
 
     assert text.endswith("Next answer.")

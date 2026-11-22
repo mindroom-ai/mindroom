@@ -17,12 +17,7 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom.agent_loop.model_loop import SendRequest
-from mindroom.constants import (
-    AI_RUN_METADATA_KEY,
-    PRIOR_SUBAGENT_COST_RUN_METADATA_KEY,
-    PRIOR_USAGE_RUN_METADATA_KEY,
-    UNSTORED_PRIOR_USAGE_RUN_METADATA_KEY,
-)
+from mindroom.constants import AI_RUN_METADATA_KEY, PRIOR_USAGE_BY_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY
 from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history.conversation_text import is_own_thread_message
 from mindroom.history.policy import context_budget_after_reserve
@@ -78,14 +73,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # Run metadata keys holding usage that belongs to the run whose record holds them, which a run seeded from it drops.
-_RUN_USAGE_METADATA_KEYS = frozenset(
-    {
-        COMPACTED_REQUESTS_METADATA_KEY,
-        PRIOR_SUBAGENT_COST_RUN_METADATA_KEY,
-        PRIOR_USAGE_RUN_METADATA_KEY,
-        UNSTORED_PRIOR_USAGE_RUN_METADATA_KEY,
-    },
-)
+_PRIOR_USAGE_KEYS = (PRIOR_USAGE_RUN_METADATA_KEY, PRIOR_USAGE_BY_RUN_METADATA_KEY)
+_RUN_USAGE_METADATA_KEYS = frozenset({COMPACTED_REQUESTS_METADATA_KEY, *_PRIOR_USAGE_KEYS})
 
 
 @dataclass

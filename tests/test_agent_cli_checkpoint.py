@@ -160,7 +160,7 @@ async def test_an_approval_checkpoint_keeps_what_the_turn_s_subagents_cost(tmp_p
     catalog = await _stored_catalog(tmp_path)
     checkpoint = BatchCheckpoint(catalog)
     await _capture(checkpoint, _record(), [_assistant("bash-1")])
-    with receiving_subagent_cost(SubagentCost(0.0022)):
+    with receiving_subagent_cost(SubagentCost({"child": 0.0022})):
         await checkpoint.persist_approval("bash-1")
     assert catalog.store is not None
     saved = catalog.store.get_run("run")

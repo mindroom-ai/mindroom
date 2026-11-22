@@ -6,13 +6,14 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.ai import run_delegated_child_response
-from mindroom.delegation.background import child_snapshot, delegation_child
-from mindroom.delegation.cost import resumed_subagent_cost, sum_subagent_cost_usd
+from mindroom.constants import LEGACY_COST_ID
+from mindroom.delegation.background import delegation_child
+from mindroom.delegation.cost import merge_by_key, stored_receipts
 from mindroom.delegation.execution import delegation_call_job
 from mindroom.delegation.lifecycle import authorize_delegation, child_own_usage, delegation_grant, prepare_child_turn
 from mindroom.delegation.personas import follow_up_refusal
 from mindroom.delegation.recovery import read_child_run, settled_subagent
-from mindroom.delegation.sessions import SubagentSessionError, update_subagent_turn
+from mindroom.delegation.sessions import SubagentSessionError
 from mindroom.delegation.state import CONTINUE_SUBAGENT, interrupted_by_restart
 from mindroom.history.interrupted_replay import render_stopped_attempt
 from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT, is_recovered_run
@@ -22,6 +23,8 @@ from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import require_tool_runtime_context
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
@@ -32,8 +35,8 @@ if TYPE_CHECKING:
 _CONTINUATIONS_KEY = "restart_continuations"
 # What the job's latest continuation was sent in place of its task, saved with the job and nowhere a room reads.
 _PROMPT_KEY = "continuation_prompt"
-# Priced cost (USD) of earlier restart-interrupted attempts of this job, kept in case a continuation dies early.
-_PRIOR_COST_KEY = "continuation_prior_cost_usd"
+# What the job's latest continuation started from having received, in case a restart stops it before its run's first row.
+_RECEIPTS_KEY = "continuation_receipts"
 # How many restarts may cut one subagent job short before the next one ends it, in case continuing is what stops it.
 _RESTART_CONTINUATION_LIMIT = 2
 # How much of what the cut-short turn was sent the continuation prompt repeats.
@@ -54,45 +57,20 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
     first call sends it again.
     """
     context = require_tool_runtime_context()
-    config, runtime_paths = context.current_config, context.runtime_paths
-    continuations = job.adapter.get(_CONTINUATIONS_KEY, 0)
-    child = await _stopped_turn(job, config, runtime_paths)
-    if isinstance(child, str):
-        return (
-            f"restarts already cut it short {continuations + 1} times"
-            if continuations >= _RESTART_CONTINUATION_LIMIT
-            else child
-        )
-    run = await read_child_run(child, config, runtime_paths)
-    carried_cost = _carried_job_cost_usd(job, child, run, config)
-    result = _build_continuation_spec(job, runtime, child, run, continuations=continuations, carried_cost=carried_cost)
-    if isinstance(result, str) and carried_cost is not None:
-        child.cost_usd = carried_cost
-        await update_subagent_turn(child, runtime_paths)
-        await runtime.save_adapter(job.job_id, child=child_snapshot(child))
-    return result
-
-
-def _build_continuation_spec(
-    job: BackgroundJob,
-    runtime: ToolJobRuntime,
-    child: DelegationChild,
-    run: RunRecord | None,
-    *,
-    continuations: int,
-    carried_cost: float | None,
-) -> JobSpec | str:
-    context = require_tool_runtime_context()
     config, runtime_paths, owner = context.current_config, context.runtime_paths, job.owner
+    continuations = job.adapter.get(_CONTINUATIONS_KEY, 0)
     if continuations >= _RESTART_CONTINUATION_LIMIT:
         return f"restarts already cut it short {continuations + 1} times"
+    child = await _stopped_turn(job, config, runtime_paths)
+    if isinstance(child, str):
+        return child
+    run = await read_child_run(child, config, runtime_paths)
     prompt = _continuation_prompt(job, child, run, config)
     if prompt is None:
         return "its turn's run holds calls recovery could not finish, as a run paused for a decision or a subagent does"
     tools = config_plugins(config, runtime_paths).tools
-    if (
-        refusal := follow_up_refusal(child.persona, owner.agent_name, config, tools, delegation_depth=job.depth)
-    ) is not None:
+    refusal = follow_up_refusal(child.persona, owner.agent_name, config, tools, delegation_depth=job.depth)
+    if refusal is not None:
         return refusal
     authorized = authorize_delegation(
         owner.agent_name,
@@ -121,7 +99,15 @@ def _build_continuation_spec(
         persona=child.persona,
         parent_tool_call_id=child.parent_tool_call_id,
     )
-    follow_up.prior_cost_usd = carried_cost
+    # The continuation starts from what the turns restarts cut short before it cost, by delegation id: what the job's
+    # earlier continuation started from, what the cut-short turn received, and that turn's own cost.
+    views: list[Mapping[str, float]] = [job.adapter.get(_RECEIPTS_KEY) or {}]
+    if run is not None:
+        own_usd = child_own_usage(run, config)[1]
+        views += [stored_receipts(run.metadata), {} if own_usd is None else {child.delegation_id: own_usd}]
+    receipts = merge_by_key(views, float)
+    receipts.pop(LEGACY_COST_ID, None)
+    follow_up.cost_usd = follow_up.subagents_cost_usd = sum(receipts.values()) if receipts else None
     arguments = {"subagent_id": child.subagent_id, "message": child.task}
     if OUTPUT_PATH_ARGUMENT in job.adapter:
         arguments[OUTPUT_PATH_ARGUMENT] = job.adapter[OUTPUT_PATH_ARGUMENT]
@@ -139,11 +125,10 @@ def _build_continuation_spec(
         config=authorized,
         runtime_paths=runtime_paths,
         refresh_scheduler=None if orchestrator is None else orchestrator.knowledge_refresh_scheduler,
+        receipts=receipts,
     )
     if not isinstance(spec, str):
-        spec.adapter.update({_CONTINUATIONS_KEY: continuations + 1, _PROMPT_KEY: prompt})
-        if carried_cost is not None:
-            spec.adapter[_PRIOR_COST_KEY] = carried_cost
+        spec.adapter.update({_CONTINUATIONS_KEY: continuations + 1, _PROMPT_KEY: prompt, _RECEIPTS_KEY: receipts})
     return spec
 
 
@@ -167,24 +152,6 @@ async def _stopped_turn(job: BackgroundJob, config: Config, runtime_paths: Runti
     if child.delegation_id not in (saved.delegation_id, saved.previous_delegation_id if continued else None):
         return "its subagent is on another turn than the one the job ran"
     return child if interrupted_by_restart(child) else f"its turn ended {child.status} before the restart settled it"
-
-
-def _carried_job_cost_usd(
-    job: BackgroundJob,
-    child: DelegationChild,
-    run: RunRecord | None,
-    config: Config,
-) -> float | None:
-    """Return the priced cost of all cut-short attempts of ``job`` so far, keeping per-run records disjoint."""
-    raw = job.adapter.get(_PRIOR_COST_KEY)
-    saved_prior = float(raw) if isinstance(raw, int | float) and not isinstance(raw, bool) else None
-    if child.delegation_id != delegation_child(job).delegation_id:
-        return saved_prior
-    prior_before = child.prior_cost_usd if child.prior_cost_usd is not None else saved_prior
-    own_usd = None if run is None else child_own_usage(run, config)[1]
-    run_nested = None if run is None else resumed_subagent_cost(run.metadata).total_usd
-    nested_usd = max((usd for usd in (run_nested, child.subagents_cost_usd) if usd is not None), default=None)
-    return sum_subagent_cost_usd((prior_before, own_usd, nested_usd))
 
 
 def _continuation_prompt(
