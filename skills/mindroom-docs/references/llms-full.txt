@@ -9981,11 +9981,11 @@ The options are those of `run_subagent` under shorter names.
 | Option | Meaning |
 |--------|---------|
 | `agent` | Run that configured agent, with its own tools, instead of a copy of the run's agent |
-| `name` | A label for the call; it does not pick an agent. Without it the label is the first line of the prompt, at most 80 characters, with secrets redacted |
+| `name` | A label for the call; it does not pick an agent. Without it the label is the first line of the prompt. Every label is redacted and then cut to 80 characters; one that was cut ends in `... [truncated]` |
 | `model` | Any configured model name, such as `haiku` or `opus@high` |
 | `system`, `tools`, `skills`, `knowledge`, `profile` | Shape a copy of the run's agent, as the same arguments of `run_subagent` do. `tools`, `skills` and `knowledge` narrow the copy only together with `system`, and an empty list gives it none |
 | `minimal` | Run the turn in minimal mode |
-| `timeout` | Seconds of work, after which the turn is cancelled and the call raises with kind `timeout`. Time spent waiting for an approval does not count, and the work before an approval or a restart does |
+| `timeout` | Seconds of work, after which the turn is cancelled and the call raises with kind `timeout`. Time spent waiting for an approval does not count, and the work before an approval or a restart does. The turn is stopped on time also between two attempts of the run; the time MindRoom itself is down counts as work |
 | `output_path` | Also write the answer to this workspace file |
 | `dedicated_worker`, `resource_profile` | Those of `run_subagent` |
 
@@ -9993,7 +9993,9 @@ A run may name itself, every agent in its agent's `delegate_to`, and every other
 So an agent with `workflow` can run the agents of its room without a `delegate_to` entry for them.
 The description of `start_workflow` lists the `delegate_to` agents and the agents configured for the room.
 That list is read from the configuration alone; whether a listed agent's bot is in the room and may reply to the requester is checked when the call starts.
-While the bot of a room's agent has not finished starting, for example right after a restart, the call is not refused: it waits and starts once the bot knows its rooms.
+While the bot of a room's agent has not finished starting, for example right after a restart, or the requester's access to that agent is still loading, the call is not refused: it waits and starts once both are known.
+An agent whose bot failed to start for good is waited for in the same way, until the run is stopped or its working time ends.
+A run that a member of a configured team started while it answered in that team is the team's: the team's bot must be in the room, and the requester's access to the team is what counts.
 
 A turn that fails raises `AgentError`, whose `kind` says how: `failed`, `cancelled`, `timeout`, `refused`, `interrupted`, or `indeterminate`.
 A turn that may not start, for example because the model name is unknown or the agent may not reply to the requester, is `refused` with the sentence `run_subagent` gives.
@@ -10065,7 +10067,9 @@ A run whose script had already returned its report ends with that report and get
 - An agent that cannot be continued, for example after three restarts in a row or because its session is gone, ends its call.
   When it had started no tool call, the call fails with kind `interrupted` and the next attempt runs it again as a new agent.
   When it had, the call is `indeterminate` and is never run again on its own.
-  A call whose record of tool calls cannot be read is `indeterminate` too.
+  A call whose record of tool calls cannot be read, or is not there, is `indeterminate` too: after a crash before the turn saved anything, nothing shows that it called no tool.
+  So is a call whose ended agent the requester may no longer read.
+- An agent of a run whose own job was stopped is not continued.
 - An agent that was waiting for an approval when MindRoom stopped ends in the same two ways, and its card is closed.
   A tool call that was still waiting for its decision counts as not started.
 - A `tool()` or `shell()` call of the script that was waiting for an approval when MindRoom stopped never ran: the next attempt asks again with a new card.

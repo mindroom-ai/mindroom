@@ -261,7 +261,8 @@ Matrix sync callback
 | `workflow_runs/models.py` | Workflow run and node records, their states, dispatch handles, and the run ID |
 | `workflow_runs/store.py` | The SQLite store of workflow runs, nodes, usage entries, and log lines, with versioned migrations, spilled large results, and the epoch that every write of an attempt must name |
 | `workflow_runs/replay.py` | Pure replay rules: a call's digest, lane keys, what a submitted call does with the node saved at its key, dirty lanes, and stale nodes |
-| `workflow_runs/engine.py` | The workflow engine: a run's attempts on the script runtime and the one check that admits each, replay of saved calls on resume, tool nodes with their dispatch handles, settling a node from its broker receipt, working time, and the run's state from its attempt |
+| `workflow_runs/engine.py` | The workflow engine: a run's attempts on the script runtime and the one check that admits each, replay of saved calls on resume, tool and agent nodes with their dispatch handles, settling a node from its broker receipt or its agent's job, the waits for agents and for approvals, working time, and the run's state from its attempt |
+| `workflow_runs/agent_nodes.py` | The agents of a workflow run: an `agent()` call started as a subagent job under the rules of `run_subagent`, the wait for that job with the turn's working time, and how its turn ended as read from the child's own runs |
 | `workflow_runs/recovery.py` | Which interruptions of an attempt resume its run on its own, and the pass that deletes intents no job holds, records how ended attempts left their runs, and replays the runs that no unfinished job owns |
 | `workflow_runs/faults.py` | Named barriers at which a tool call of a workflow waits while a crash test holds them |
 | `api/sandbox_runner_scripts.py` | Worker routes that launch, poll, and signal a run under the worker's supervisor |
