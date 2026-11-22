@@ -1616,7 +1616,7 @@ it('does not render a card for workflow content from a person', () => { /* fromM
 - Consumes: `WorkflowRunGraph`, `WorkflowRunNode`, `WorkflowRunGroup`, `WorkflowRunEdge`, `WorkflowRunOmitted` (Task 25). No React, no Matrix, no DOM.
 - Produces:
   - `WorkflowGraphItem = { type: 'node'; node: WorkflowRunNode } | { type: 'group'; group: WorkflowRunGroup; items: WorkflowGraphItem[] }`.
-  - `WorkflowGraphBand = { phase: string | null; items: WorkflowGraphItem[] }` and `WorkflowGraphLayout = { bands: WorkflowGraphBand[]; omitted: WorkflowRunOmitted }`; 
+  - `WorkflowGraphBand = { phase: string | null; items: WorkflowGraphItem[] }` and `WorkflowGraphLayout = { bands: WorkflowGraphBand[]; omitted: WorkflowRunOmitted }`;
   - `layoutWorkflowRunGraph(graph: WorkflowRunGraph): WorkflowGraphLayout`.
     Start order is the number in the ID (`n17` is 17), and every list is in start order.
     A node sits in the box of its `group`, and a group in the box of its `parent`; one whose container is not in the graph sits at the top level of its band, never dropped.

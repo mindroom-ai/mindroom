@@ -321,22 +321,24 @@ async def _continuation_prompt(
     clip = len(sent) > _MAX_TASK_CHARACTERS and child.workflow_run_id is None
     task = f"{sent[:_MAX_TASK_CHARACTERS]}…" if clip else sent
     note = config.get_prompt("SUBAGENT_RESTART_CONTINUATION_PROMPT")
-    account = _calls_account(run, nested) if len(run.tools or ()) > len(nested) else ""
+    of_run = child.workflow_run_id is not None
+    account = _calls_account(run, nested, of_run=of_run) if len(run.tools or ()) > len(nested) else ""
     results = [_NESTED_RESULT.format(_RUN_REPORT_MARK.format(run_id)) for run_id in dict.fromkeys(nested.values())]
     parts = (note, f"<interrupted_task>\n{task}\n</interrupted_task>", account, *results)
     return "\n\n".join(part for part in parts if part)
 
 
-def _calls_account(run: RunRecord, nested: dict[str, str]) -> str:
+def _calls_account(run: RunRecord, nested: dict[str, str], *, of_run: bool) -> str:
     """Render the cut-short run's calls as the bounded account a replayed reply's prompt gets of its stopped attempt.
 
     The child's history replays the recovered run like any other turn, so its limits may leave the run's calls out;
     the account names each call from its preview either way, and which ones were cut short. The calls in *nested*
-    started runs whose reports the prompt gives, so they are no calls to check.
+    started runs whose reports the prompt gives, so they are no calls to check. Only the turn of a workflow run's
+    agent (*of_run*) goes on from a wait for approvals, whose calls it leaves out.
     """
     finished, cut_short = [], []
     for tool in run.tools or ():
-        if tool.result == RESTART_INTERRUPTION_REASON or tool.tool_call_id in nested:
+        if (of_run and tool.result == RESTART_INTERRUPTION_REASON) or tool.tool_call_id in nested:
             # A call that still waited for its approval never ran: the turn that goes on asks for it again.
             continue
         entry = replace(format_tool_completed_event(tool.call), call=None)

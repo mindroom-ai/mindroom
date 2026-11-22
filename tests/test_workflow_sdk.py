@@ -388,7 +388,9 @@ def test_foreach_lanes_are_keyed_by_item_value(gateway: FakeWorkflowGateway, sdk
 @pytest.mark.usefixtures("in_main")
 @pytest.mark.parametrize("fan_out", ["foreach", "parallel"])
 def test_a_fan_out_whose_group_was_refused_opens_no_lane(
-    gateway: FakeWorkflowGateway, sdk: ModuleType, fan_out: str
+    gateway: FakeWorkflowGateway,
+    sdk: ModuleType,
+    fan_out: str,
 ) -> None:
     """The key of the group holds a call that may have run: the refusal is raised, and no item's call is submitted."""
     refused = failed("indeterminate", "This call may already have run (attempt 1).")
@@ -542,8 +544,16 @@ def test_parallel_given_results_says_to_pass_functions(gateway: FakeWorkflowGate
 
 
 @pytest.mark.usefixtures("in_main")
-def test_foreach_of_1000_items_opens_at_most_256_requests(gateway: FakeWorkflowGateway, sdk: ModuleType) -> None:
-    """Items are fed to at most 256 lanes at a time, however many there are, and every result comes back in order."""
+@pytest.mark.parametrize("asked", [None, 5000])
+def test_foreach_of_1000_items_opens_at_most_256_requests(
+    gateway: FakeWorkflowGateway,
+    sdk: ModuleType,
+    asked: int | None,
+) -> None:
+    """Items are fed to at most 256 lanes at a time, however many there are, and every result comes back in order.
+
+    A `max_concurrent` above that asks for no more threads than the 256.
+    """
     barrier = threading.Barrier(256, timeout=20)
 
     def respond(request: dict[str, object]) -> dict[str, object]:
@@ -557,7 +567,8 @@ def test_foreach_of_1000_items_opens_at_most_256_requests(gateway: FakeWorkflowG
 
     gateway.respond = respond
 
-    assert sdk.foreach(range(1000), lambda n: sdk.tool("files", "stat", n=n)) == list(range(1000))
+    options = {} if asked is None else {"max_concurrent": asked}
+    assert sdk.foreach(range(1000), lambda n: sdk.tool("files", "stat", n=n), **options) == list(range(1000))
 
     assert gateway.peak_open == 256
     assert len(gateway.nodes_of_kind("group")[0]["meta"]["members"]) == 1000  # type: ignore[arg-type]

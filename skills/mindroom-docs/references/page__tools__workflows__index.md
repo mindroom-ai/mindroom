@@ -38,7 +38,7 @@ background_tool_jobs:
 | `max_concurrent_runs` | `8` | Unfinished top-level runs one requester may have with one agent; a run inside another run does not count |
 | `max_runtime_hours` | `72` | Working time one run may use, `0` for no limit; see [Working time](#working-time) |
 | `max_tool_calls_per_minute` | `600` | New `tool()` and `shell()` calls per minute for one run; a call above the rate waits for the minute to have room, it does not fail |
-| `max_concurrent_agents` | none | Ceiling for the `max_concurrent` a call asks for; not used yet |
+| `max_concurrent_agents` | none | Ceiling for the `max_concurrent` a call asks for: a start that asks for more gets this many |
 | `large_run_notice_usd` | `10` | Projected cost at which a run is marked as large; not used yet |
 
 A run is a background job, so `start_workflow` needs `background_tool_jobs.enabled: true` and `workflow` must not be in `background_tool_jobs.exclude_toolkits`.
@@ -64,6 +64,8 @@ resume_workflow(run_id, source=None, path=None, rerun=None)
   See [Cost](#cost) for `usage`.
 - `cancel_workflow` stops the run's script and ends the run `cancelled`; its finished calls stay saved.
   Cancelling the run's job, for example with `!cancel_job`, does the same.
+  A call of a run, its script's or one of its agents', cannot cancel that run or a run it is inside: it is refused with `A call of a run cannot cancel that run or one it is inside. Return from main() or raise to end the script.`
+  The plain `script` tool's `list_scripts`, `get_script` and `cancel_script` neither list nor stop a run's script.
 - `resume_workflow` starts the next attempt of a run that has ended and returns the same handle, with the ID of a new job; see [Resume A Run](#resume-a-run).
 
 A run belongs to the agent and the requester that started it.
@@ -100,6 +102,9 @@ def main(args):
 
 The script calls the tools the agent has at the time of each call, with the same hooks, approval rules, worker routing, and audit trail as a call from a reply.
 A run that a subagent with a narrowed tool list started has only the tools on that list, checked at every call, and never the rest of its agent's tools.
+A run that such a run's script starts has no more than that run, and a resume by a subagent with a shorter list leaves the run only what both lists hold; a later resume never gives tools back.
+A turn that is limited to some of its agent's tools in another way, such as a listening turn, starts and resumes no run: `A turn that is limited to some of its agent's tools cannot start or resume a workflow.`
+A plain script of the `script` tool cannot call the `workflow` tool.
 `compact_context`, `dynamic_tools`, `slack`, and functions that stop the agent's current model step are never available to a script.
 Do writes (files, git, HTTP) through `shell()`, `tool()` or an agent, never with plain Python: those calls are saved with their results, and the Python between them is not.
 A call whose tool was started and whose end is unknown, for example because MindRoom stopped in between, ends `indeterminate` and is never run again on its own.
@@ -138,6 +143,8 @@ A turn that fails raises `AgentError`, whose `kind` says how: `failed`, `cancell
 A turn that may not start, for example because the model name is unknown or the agent may not reply to the requester, is `refused` with the sentence `run_subagent` gives.
 `tools`, `skills` or `knowledge` without `system` is refused with `tools, skills and knowledge narrow a copy only together with system=.`
 Stopping one agent from the Sub-agents panel fails only that call with kind `cancelled`; the run goes on.
+An agent that had called a tool when it was stopped, alone or with its run, ends `indeterminate` instead, so no resume runs it again without `rerun`.
+A Stop of the run waits up to 30 seconds for each agent to end before it reads what the agent did.
 
 While an agent's tool call waits for an approval, the agent's call shows `waiting`, and so does the run when no other call of it is working.
 Time the run spends `waiting` is not charged to its [working time](#working-time).
@@ -184,11 +191,14 @@ A script can start agents and runs through `tool()` as well.
 - `cost_usd` is what the run cost so far, over every attempt, and `attempt_cost_usd` is what the current attempt cost.
   After a resume the second number shows what the resume itself spent.
 - Every model turn is counted once, however often MindRoom restarted while it ran.
+  What an agent spent before a restart that it was continued after is counted for the attempt before that restart, not for the one that followed.
 - A call that runs again is paid again, and the run keeps what its earlier turn cost.
 - A saved answer that a resume reuses adds nothing.
 - What the subagents of a run's agent cost is counted beside the agent's own turn, once, as cost only: their tokens are not in the token counts.
 - A run inside the run is in both sums, once, and it is part of the attempt it was started in.
+  It is kept for as long as the run around it, so that run's sums never shrink.
 - A turn on a model without a price in the configuration adds its tokens and sets `cost_unknown`; `cost_usd` is then a lower bound.
+  So does an agent's subagent whose cost is not known, when the agent received no subagent cost at all.
 - Each call that asked a model shows its own `usage` in `nodes`.
 
 ## Fan-Out
@@ -260,7 +270,7 @@ A run that has not ended is refused with `Run <id> is still running. Cancel it f
 The next attempt runs the script from the top, and each call gets its saved result instead of running again.
 
 - A call that completed with the same arguments returns its saved result at once.
-- A call that failed or was cancelled runs again.
+- A call that failed or was cancelled runs again; a stopped agent that had called a tool is `indeterminate`, not cancelled.
 - In each sequence of calls, the first call that runs again makes every call after it run again too, because it may have changed what they see.
   Each item of a `foreach` and each function of a `parallel` is a sequence of its own, so one item that runs again leaves the other items alone; the calls after that fan-out run again.
 - A `cached=False` call always runs again; the calls after it are reused when it returns the same result as before, compared whole and as JSON, so `1` and `1.0` differ.
@@ -325,6 +335,7 @@ A run whose script had already returned its report ends with that report and get
   The agent that was inside its `start_workflow` call when MindRoom stopped is continued, and it is not asked to make the call again.
   The call was saved with the run it started, in the same write, so the agent's job waits for that run and then sends the agent the run's report as the result of its call.
   A run that ended meanwhile gives its stored report at once.
+  A run that another call resumed meanwhile gives the report its own attempt ended with, and is left to that other call.
   This holds for an orderly restart and for a killed process alike, and however many restarts the wait lasts.
   Stopping the agent while its job waits cancels the run inside.
 - The agent is not continued when that cannot be proven: the call reserved no run before MindRoom stopped, the script file it named has changed since, or a call of another tool was cut short in the same turn.

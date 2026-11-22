@@ -399,7 +399,8 @@ def _fan_out(
     if group["state"] != "completed":
         # The key holds a call that may have run, which no lane of a fan-out there may run again unasked.
         raise _failure(group, ToolError)
-    lanes = _Lanes(threading.Semaphore(min(len(calls), max_concurrent or _MAX_ACTIVE_LANES) or 1), [None] * len(calls))
+    active = min(len(calls), max_concurrent or _MAX_ACTIVE_LANES, _MAX_ACTIVE_LANES) or 1
+    lanes = _Lanes(threading.Semaphore(active), [None] * len(calls))
     threads: list[threading.Thread] = []
     for position, call in enumerate(calls):
         # Waits for a lane to end, or to wait for a person, so 1,000 items are never 1,000 threads at work.

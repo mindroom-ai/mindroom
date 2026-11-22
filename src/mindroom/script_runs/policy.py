@@ -43,6 +43,8 @@ _SCRIPT_RESTRICTED_TOOLKITS = frozenset(
         "skill_manage",
         # A script's calls rebuild the tool context without the turn's hook source, which Slack's write guard reads.
         "slack",
+        # A run is started by a turn, whose tool ceiling it keeps, or inside a run: a plain script is neither.
+        "workflow",
     },
 )
 
