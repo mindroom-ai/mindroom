@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from mindroom.llm.messages import tool_result_view
+from mindroom.llm.messages import media_items, tool_result_view
 from mindroom.llm.provider import (
     ReasoningDelta,
     StopReason,
@@ -136,8 +136,8 @@ def conversation_digest(messages: Sequence[Message]) -> str:
 
     It covers what a request sends of each message, the system text and the turn context (``add_to_agent_memory=False``)
     included, and leaves out what only storage reads: ids, replay flags, usage, a reply's provider data and reasoning,
-    and inline media bytes, which a media item's id and source stand for. Each message is encoded alone, which hashes
-    the bytes of the list encoded in one call, so a worker thread computing it lets the event loop take the GIL
+    and inline media bytes, which a media item's id and source stand for. Each message is encoded alone, which gives
+    the digest of the list encoded in one call, so a worker thread computing it lets the event loop take the GIL
     between messages.
     """
     digest = hashlib.sha256(b"[")
@@ -148,15 +148,7 @@ def conversation_digest(messages: Sequence[Message]) -> str:
             "tool_call_id": message.tool_call_id,
             "tool_call_error": message.tool_call_error,
             "tool_calls": message.tool_calls,
-            "media": [
-                item.to_dict(include_content=False)
-                for item in (
-                    *(message.images or ()),
-                    *(message.audio or ()),
-                    *(message.videos or ()),
-                    *(message.files or ()),
-                )
-            ],
+            "media": [item.to_dict(include_content=False) for _, item in media_items(message)],
         }
         encoded = json.dumps(sent, ensure_ascii=False, sort_keys=True, default=str)
         digest.update(f"{', ' if index else ''}{encoded}".encode())
