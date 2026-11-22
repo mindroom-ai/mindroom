@@ -16,11 +16,18 @@ Each prints one result line on stdout and exits 0 when that line is the expected
 | `restart_mid_run.py` | Stops the backend with `SIGTERM` after three of six writes and starts it again. | `lines=6 nodes=6/6 attempt=2 run=completed deliveries=1 reports=1` |
 | `agents_restart.py` | Stops the backend with `SIGTERM` while the second of three agents is working, after that agent wrote its one line, and starts it again. The first two are copies of the Helper; the third is the lobby's second agent, `deckhand`. | `lines=1 agents=3/3 subagents=3 attempt=2 run=completed deliveries=1 reports=1` |
 | `large_result.py` | Reads a 9 MiB file through `tool("file", "read_file", ...)` and compares what the script got. | `chars=9437184 same=True spilled=True attempt=1 run=completed` |
+| `approval_restart.py` | One agent writes its one line and then calls `save_file`, which asks for an approval. While the card is open the script stops the backend with `SIGTERM`, starts it, kills it with `SIGKILL`, starts it again, and then approves the card. | `lines=1 cards=1 open=1 saved=1 agents=1/1 attempt=3 run=completed deliveries=1 reports=1` |
+| `diamond_restart.py` | A plan agent returns six lines, `foreach` runs one research agent per line, two at a time, and one agent joins their answers. The script stops the backend with `SIGTERM` after three research agents completed and starts it again. | `agents=8/8 subagents=8 turns=8 attempt_below_run=True attempt=2 run=completed deliveries=1 reports=1` |
 
 - `lines` is the number of lines in the file the run appends to, so a write that ran twice shows as one line too many.
 - `node` is the state of the write's call; `cached` means a later attempt read the saved result back without running the call.
 - `agents` counts the `agent()` calls that completed as the call they first were, so an agent that was started a second time shows as one too few; `subagents` is the number of subagents those calls ran as.
 - `attempt=2` shows that the run was replayed after the kill; a run that only ended `interrupted` would show `attempt=1`.
+  `approval_restart.py` restarts twice, so it shows `attempt=3`.
+- `cards` is the number of approval cards the agent's `save_file` call got, and `open` how many of them were still open after both restarts; a card that a restart closed and asked again shows as `cards=2`.
+  `saved` is the number of lines in the file the approved call wrote, so an approval that was not accepted shows as `saved=0`.
+- `turns` is the number of entries in the run's usage ledger, one per agent call, so an agent that was paid for twice shows as one too many.
+  `attempt_below_run` says that the attempt after the restart used less than the whole run, in USD when every turn has a price and in tokens otherwise.
 - `run` is the state the run ended in.
 - `deliveries` is the number of follow-up turns the journal admitted for the run's job, read from `journal_events` in the slot's `storage/tracking/event_journal.db`.
   It counts the delivery itself, whatever the model then wrote.
@@ -36,6 +43,7 @@ That failure is delivered once, no report is, and `resume_workflow(run_id, rerun
 
 Each script edits the slot's `config.yaml` once: the Helper gets the `workflow` and `file` toolkits, and `defaults.allow_shell_without_worker: true` unless the config routes tools to workers.
 `agents_restart.py` also adds the agent `deckhand` to the lobby, which the Helper may not delegate to: a run runs it because its bot is in the room.
+`approval_restart.py` also adds a `tool_approval` rule that makes `save_file` ask for an approval, and approves the card itself with an `io.mindroom.tool_approval_response` event of the test account.
 A running backend reloads a config edit some time later, so each script starts the backend again after an edit that changed the file, and only then sends its message.
 `agents_restart.py` also waits until the bot of `deckhand` has joined the lobby.
 Each script then asks the Helper to start a run from a file it saved in the Helper's workspace.
@@ -56,6 +64,8 @@ python3 -m tests.workflow_live.kill_after_write --barrier after-receipt --slot N
 python3 -m tests.workflow_live.restart_mid_run --slot N
 python3 -m tests.workflow_live.agents_restart --slot N
 python3 -m tests.workflow_live.large_result --slot N
+python3 -m tests.workflow_live.approval_restart --slot N
+python3 -m tests.workflow_live.diamond_restart --slot N
 cd ~/repos/dev
 just live down --slot N
 ```
@@ -90,6 +100,8 @@ python3 -m tests.workflow_live.kill_after_write --barrier after-receipt --slot "
 python3 -m tests.workflow_live.restart_mid_run --slot "$N" --send api
 python3 -m tests.workflow_live.agents_restart --slot "$N" --send api
 python3 -m tests.workflow_live.large_result --slot "$N" --send api
+python3 -m tests.workflow_live.approval_restart --slot "$N" --send api
+python3 -m tests.workflow_live.diamond_restart --slot "$N" --send api
 docker ps --all --filter "label=mindroom-client-e2e.slot=$N"        # the slot's workers, before the teardown
 cd "$CHAT"
 bash scripts/e2e-slot.sh "$N" down                                  # stops the agent stack, its workers and the homeserver
@@ -106,6 +118,8 @@ With `worker_tools` set, the scripts leave `allow_shell_without_worker` out, and
   Its first live run failed before the run started: the Helper got the message before the backend had reloaded the config edit, so it had no `workflow` toolkit yet.
   The script now starts the backend again after the edit, and its third call runs a room agent.
   It has not been run since that change.
+- `approval_restart.py` and `diamond_restart.py` were added with the approval restore, the fan-out and the usage ledger.
+  Neither has been run yet.
 - Without the gateway lines above, the Docker stack refuses every run with `Background-script workers require MINDROOM_SCRIPT_GATEWAY_URL or MINDROOM_PUBLIC_URL.`: the stack's `MINDROOM_PUBLIC_URL` is a loopback address, which workers may not use.
 
 ## What to check besides the result line
