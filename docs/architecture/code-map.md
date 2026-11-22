@@ -266,11 +266,12 @@ Matrix sync callback
 | `workflow_runs/agent_nodes.py` | The agents of a workflow run: an `agent()` call started as a subagent job under the rules of `run_subagent`, the wait for that job with the turn's working time, and how its turn ended as read from the child's own runs |
 | `workflow_runs/recovery.py` | Which interruptions of an attempt resume its run on its own, and the pass that deletes intents no job holds, records how ended attempts left their runs, and replays the runs that no unfinished job owns |
 | `workflow_runs/faults.py` | What live tests of workflow runs hold and read: named barriers at which a tool call waits while a crash test holds them, and the frames and cards a run showed, kept as JSON lines |
-| `workflow_runs/questions.py` | A run's question to its requester: the question ID, the card's content and text, posting it once under a transaction ID of the call, and editing it when it is answered or closed |
+| `workflow_runs/notices.py` | What a run posts in its thread: the one notice builder for its card and its questions, without floats so that a homeserver can sign it, measured as the edit it is or will get, and sent or edited with retries |
+| `workflow_runs/questions.py` | A run's question to its requester: the question ID, the card's content and text cut to one event, posting it once under a transaction ID of the call, and editing it when it is answered or closed |
 | `workflow_runs/answers.py` | A person's answer to a run's question: which answers count and why one does not, the client's answer event with its rejection, and `!answer` |
 | `workflow_runs/structured.py` | Structured agent output: checks a call's JSON Schema, builds the prompt that asks for a matching value, reads the value from an answer, and says what is wrong with it |
 | `workflow_runs/graph.py` | Pure graph model of a run for people: the `meta`, node, group and edge rows, the snapshot fitted to one event by priority, and the delta between two graphs |
-| `workflow_runs/view.py` | What people see of a run: follows the store's writes, builds the run's view from what is saved, queues its graph frames, and posts and edits its card |
+| `workflow_runs/view.py` | What people see of a run: follows the store's writes, builds the run's view from what is saved, queues its graph frames, posts and edits its card until it says how the run ended, and posts the questions whose card could not be sent |
 | `api/sandbox_runner_scripts.py` | Worker routes that launch, poll, and signal a run under the worker's supervisor |
 | `api/script_gateway.py` | Capability-authenticated HTTP gateway scripts call tools through, and the listener helper the second listeners beside the API share |
 | `api/workflow_gateway.py` | Capability-authenticated routes a workflow attempt's script calls for its run, nodes, results, log, and report, served on both listeners |

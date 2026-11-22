@@ -232,6 +232,11 @@ The run shows `waiting` once nothing else of it works, and that time is not char
   A call whose question or options changed asks again, and the old card shows `cancelled`.
 - A run that ends closes its open questions: their cards show `cancelled`, and a cancelled `ask_user` raises `WorkflowError` with kind `cancelled`.
 - Options that are not a list of non-empty strings fail in the script with `options must be a list of strings, such as ['Yes', 'No'].`
+- A question takes at most 20 options of at most 200 bytes each, since an answer is an option's own text and the card must be one event.
+  More, or longer ones, fail the call with `A question takes at most 20 options of at most 200 bytes each.` before anything waits.
+- The card shows the first 2,000 characters of a long question, or fewer if the card would not be one event, and the first 500 of a long answer, each ending in `... [truncated]`.
+  The script gets the whole answer.
+- A card that could not be posted is posted again when the script asks again, and every ten seconds by the run itself; the question of a [cost limit](#cost-limit) is posted the same way.
 
 ## Runs Inside Runs
 
@@ -306,10 +311,15 @@ A run inside a run has no card; it is a group in the graph of the run around it.
   `counts` has `queued`, `running`, `waiting`, `completed`, `failed`, `indeterminate` and `cached`; a cancelled call counts as failed, and `cached` counts the completed calls whose saved result this attempt reused.
   `usage` is that of [Cost](#cost) plus `projected_cost_usd`: what the run will have cost if every agent still to end costs what a finished turn cost on average.
   `error` is the last line of what a run that did not complete ended with.
+  Every cost on the card, in `usage` and in the rows of `graph`, is a decimal string such as `"0.12"`, with six decimal places at most: a homeserver signs the card, and what it signs holds no float.
+  The frames below carry the same costs as numbers.
 - The card is edited at once when the run's status, its list of phases, or whether a call waits for a person changes, and when the run is marked large.
   While only numbers change it is edited every ten minutes at most.
 - The last edit of an ended run adds `graph`: the run's calls, groups, phases and last log lines, cut down to what one event holds, with the counts of what was left out in `omitted`.
 - The card is posted once: a restart of MindRoom finds it again and edits it.
+- A card that could not be sent is sent again with the run's next view, every ten seconds while the run works.
+  The edit that says how the run ended is sent until the room took it, after 20 seconds, 40 seconds and so on up to every ten minutes, and again after a restart of MindRoom.
+- A row of a call whose agent still runs has no usage yet: its `run` names the sub-agent run whose own frames show what it used so far.
 
 While the run works, clients that show live updates get its graph as `io.mindroom.workflow` frames, see [Live Updates](../streaming.md#live-updates).
 A frame is `{v, run, sid, seq, meta, snapshot}` or `{v, run, sid, seq, meta, delta}`.

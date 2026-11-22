@@ -16,13 +16,9 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
-from mindroom.delegation.activity import ActivityFeed
 from mindroom.live_frames.workflow import publish_run
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client_delivery import build_edit_event_content, edit_message_result, send_message_result
 from mindroom.matrix.event_types import WORKFLOW_RUN_CONTENT_KEY
-from mindroom.matrix.large_messages import fits_one_event
-from mindroom.matrix.message_builder import build_message_content
 from mindroom.redaction import redact_sensitive_text
 from mindroom.workflow_runs.engine import WorkflowLimits
 from mindroom.workflow_runs.faults import capture
@@ -33,6 +29,7 @@ from mindroom.workflow_runs.models import (
     WorkflowNodeState,
     WorkflowRunState,
 )
+from mindroom.workflow_runs.notices import notice, notice_fits, send_notice
 from mindroom.workflow_runs.store import SupersededAttemptError, WorkflowRunNotFoundError
 
 if TYPE_CHECKING:
@@ -55,10 +52,13 @@ _LARGE_RUN_AGENTS = 25
 _LARGE = "Large run: {agents} agents, about ${projected:.2f} projected."
 _AGENT_KINDS = frozenset({"agent", "turn"})
 _ERROR_CHARS = 200
-# What stands for the card's event while a card that was not posted yet is measured as the edit it will get.
-_NO_EVENT = "$" + "0" * 43
 
 type _Built = tuple[WorkflowRun, list[WorkflowNode], dict[str, Any], Graph]
+
+
+def _unasked(node: WorkflowNode) -> bool:
+    """Return whether *node* is a question that waits and whose card could not be posted yet."""
+    return node.kind == "ask" and node.state is WorkflowNodeState.WAITING and "event_id" not in node.links
 
 
 def card_content(run: WorkflowRun, meta: dict[str, Any], phases: list[str]) -> dict[str, Any]:
@@ -125,19 +125,24 @@ class RunViews:
     homeserver_url: str
     live_frames: Callable[[], bool] = lambda: True
     clock: Callable[[], float] = time.monotonic
-    # What each run's card last said: what an edit follows at once, a digest of its content, and when it was sent.
+    # What the card of each run that has not ended last said: what an edit follows at once, a digest of its content,
+    # and when it was sent.
     _cards: dict[str, tuple[tuple[object, ...], str, float]] = field(default_factory=dict)
     _dirty: set[str] = field(default_factory=set)
-    # When the view of each run that has not ended was last built.
-    _live: dict[str, float] = field(default_factory=dict)
+    # When the view of each run is built next though nothing was written: for the numbers of a run that has not
+    # ended, and for the card of an ended one that could not be sent, each time after twice as long.
+    _due: dict[str, float] = field(default_factory=dict)
+    _unsent: dict[str, int] = field(default_factory=dict)
     _wake: asyncio.Event = field(default_factory=asyncio.Event)
     _task: asyncio.Task[None] | None = None
     _loop: asyncio.AbstractEventLoop | None = None
 
     def start(self) -> None:
-        """Follow the store's writes from now on."""
+        """Follow the store's writes from now on, and show each run whose card does not say how it ended."""
         self._loop = asyncio.get_running_loop()
         self.engine.store.on_change = self._changed
+        for run_id in self.engine.store.unshown_runs():
+            self._mark(run_id)
         self._task = asyncio.create_task(self._serve(), name="workflow_views")
 
     async def close(self) -> None:
@@ -159,12 +164,13 @@ class RunViews:
     async def _serve(self) -> None:
         while True:
             with suppress(TimeoutError):
-                async with asyncio.timeout(_REFRESH_SECONDS if self._live else None):
+                next_due = min(self._due.values(), default=None)
+                async with asyncio.timeout(None if next_due is None else max(0.0, next_due - time.monotonic())):
                     await self._wake.wait()
             await asyncio.sleep(_SETTLE_SECONDS)
             self._wake.clear()
-            stale = time.monotonic() - _REFRESH_SECONDS
-            due = self._dirty | {run_id for run_id, built in self._live.items() if built <= stale}
+            now = time.monotonic()
+            due = self._dirty | {run_id for run_id, at in self._due.items() if at <= now}
             self._dirty = set()
             for run_id in due:
                 try:
@@ -180,7 +186,7 @@ class RunViews:
         """
         built = await asyncio.to_thread(self._build, run_id)
         if built is None:
-            self._live.pop(run_id, None)
+            self._forget(run_id)
             return
         run, nodes, usage, graph = built
         agents = sum(node.kind in _AGENT_KINDS for node in nodes)
@@ -191,20 +197,31 @@ class RunViews:
             text = _LARGE.format(agents=agents, projected=usage["projected_cost_usd"])
             await asyncio.to_thread(self._mark_large, run, text)
         meta = graph_meta(run, nodes, usage, large=large)
-        if run.state in TERMINAL_RUN_STATES:
-            self._live.pop(run_id, None)
+        shown = False
+        if isinstance(access, tuple) and (bot := self.bot(run)) is not None:
+            # Else the run may not act now, or nobody can post for it: its next view tries again.
+            account, client = bot
+            if self.live_frames():
+                # By the account alone, as its sub-agent frames are sent: they share one publisher, which keeps the
+                # first lookup it gets, so a run that can no longer post must not end the account's other frames.
+                live, url = partial(self.client, account), self.homeserver_url
+                publish_run(account, run.room_id, run_id, meta, graph, client=live, homeserver_url=url)
+            shown = await self._card(run, meta, graph, client)
+            if any(_unasked(node) for node in nodes):
+                await self.engine.ask_again(run_id)
+        if run.state not in TERMINAL_RUN_STATES:
+            self._due[run_id] = time.monotonic() + _REFRESH_SECONDS
+        elif shown:
+            self._forget(run_id)
         else:
-            self._live[run_id] = time.monotonic()
-        if not isinstance(access, tuple) or (bot := self.bot(run)) is None:
-            # The run may not act now, or nobody can post for it: its next view tries again.
-            return
-        account, client = bot
-        if self.live_frames():
-            # By the account alone, as its sub-agent frames are sent: they share one publisher, which keeps the
-            # first lookup it gets, so a run that can no longer post must not end the account's other frames.
-            live, url = partial(self.client, account), self.homeserver_url
-            publish_run(account, run.room_id, run_id, meta, graph, client=live, homeserver_url=url)
-        await self._card(run, meta, graph, client)
+            # Nothing writes to an ended run again, so its card is sent again from here until it says the end.
+            tries = self._unsent[run_id] = self._unsent.get(run_id, 0) + 1
+            self._due[run_id] = time.monotonic() + min(_REFRESH_SECONDS * 2**tries, _CARD_SECONDS)
+
+    def _forget(self, run_id: str) -> None:
+        """Keep nothing of a run whose card says how it ended, or that is gone."""
+        for kept in (self._due, self._unsent, self._cards):
+            kept.pop(run_id, None)
 
     def _mark_large(self, run: WorkflowRun, text: str) -> None:
         """Mark the run as large, once, and say so in its log; a run that moved on is marked by its next view."""
@@ -226,13 +243,7 @@ class RunViews:
         if run.attempt == 0:
             return None
         nodes = store.nodes(run_id, light=True)
-        used: dict[str, dict[str, Any]] = {key: dict(totals) for key, totals in store.node_usage(run_id).items()}
-        for node in nodes:
-            running = node.state is WorkflowNodeState.RUNNING
-            # What a turn that still runs used so far is in no ledger yet: its sub-agent feed says it.
-            for name, value in ((running and ActivityFeed.used(node.links.get("delegation_id", ""))) or {}).items():
-                mine = used.setdefault(node.key, {})
-                mine[name] = mine.get(name, 0) + value
+        used = store.node_usage(run_id)
         usage = self.engine.run_usage(run_id)
         open_agents = sum(node.kind in _AGENT_KINDS and node.state in UNSETTLED_NODE_STATES for node in nodes)
         usage["projected_cost_usd"] = projected_cost_usd(store.turn_costs(run_id), open_agents, usage["cost_usd"])
@@ -245,49 +256,47 @@ class RunViews:
         graph = graph_rows(run, nodes, used, [], store.log(run_id, LOG_LINES), inside=inside)
         return run, nodes, usage, graph
 
-    async def _card(self, run: WorkflowRun, meta: dict[str, Any], graph: Graph, client: nio.AsyncClient) -> None:
-        """Post the run's card, once, or edit it: at once when the status, the phases or the waiting changed.
+    async def _card(self, run: WorkflowRun, meta: dict[str, Any], graph: Graph, client: nio.AsyncClient) -> bool:
+        """Post the run's card, once, or edit it; return whether the card now says what there is to say.
 
-        The card is sent under a transaction ID of the run, so a primary that stopped before it saved the card's
-        event sends again and gets the same event. While only numbers change it is edited every ten minutes at
-        most. The edit of an ended run carries the graph, fitted so that the whole edit is one event.
+        The card is posted under a transaction ID of the run, so a primary that stopped before it saved the card's
+        event sends again and gets the same event. It is edited at once when the status, the phases or the waiting
+        changed, and every ten minutes at most while only numbers change. The end of a run is always an edit,
+        which carries the graph, fitted so that the whole edit is one event: the event a post returned may be an
+        earlier post's. The run remembers that its card says the end, so the edit is sent until it landed.
         """
-        room = client.rooms.get(run.room_id)
-        encrypted = room is None or bool(room.encrypted)
+        final = run.state in TERMINAL_RUN_STATES
+        if final and run.card_status == run.state.value:
+            return True
 
         def message(content: dict[str, Any]) -> dict[str, Any]:
-            return build_message_content(
-                card_text(content),
-                thread_event_id=run.thread_root_event_id,
-                latest_thread_event_id=run.thread_root_event_id,
-                extra_content={"msgtype": "m.notice", WORKFLOW_RUN_CONTENT_KEY: content},
-            )
+            return notice(run, card_text(content), WORKFLOW_RUN_CONTENT_KEY, content)
 
         def fits(content: dict[str, Any]) -> bool:
-            # An edit carries its content twice: measured as the edit it is, or will be.
-            whole = message(content)
-            event_id = run.card_event_id or _NO_EVENT
-            edit = build_edit_event_content(event_id=event_id, new_content=whole, new_text=whole["body"])
-            return fits_one_event(client, run.room_id, edit, room_encrypted=encrypted)
+            return notice_fits(client, run, message(content), run.card_event_id)
 
-        final = run.state in TERMINAL_RUN_STATES
         content = await asyncio.to_thread(partial(_fitted_card, run, meta, graph, fits, final=final))
         follows = (meta["status"], tuple(content["phases"]), meta["counts"]["waiting"] > 0, meta["large"])
         digest = hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()
         shown, now, whole = self._cards.get(run.run_id), self.clock(), message(content)
-        if run.card_event_id is None:
-            sent = partial(send_message_result, client, run.room_id, whole, operation="send_workflow_card")
-            delivered = await sent(transaction_id=f"wfcard-{run.run_id}")
-            if delivered is None:
-                return
-            states = frozenset(WorkflowRunState)
-            save = partial(self.engine.store.update_run, run.run_id, run.epoch, when=states)
+        save = partial(self.engine.store.update_run, run.run_id, run.epoch, when=frozenset(WorkflowRunState))
+        # A send that fails is not tried again here: the run's next view is.
+        send = partial(send_notice, client, run, whole, retries=())
+        event_id = run.card_event_id
+        if event_id is None:
+            event_id = await send(transaction_id=f"wfcard-{run.run_id}")
+            if event_id is None:
+                return False
             with suppress(SupersededAttemptError):
-                await asyncio.to_thread(partial(save, card_event_id=delivered.event_id))
-        elif shown is None or shown[0] != follows or (shown[1] != digest and now - shown[2] >= _CARD_SECONDS):
-            if await edit_message_result(client, run.room_id, run.card_event_id, whole, whole["body"]) is None:
-                return
-        else:
-            return
-        capture("workflow_cards", content)
+                await asyncio.to_thread(partial(save, card_event_id=event_id))
+        elif not final and shown is not None and shown[0] == follows:
+            if shown[1] == digest or now - shown[2] < _CARD_SECONDS:
+                return True
+        if (final or run.card_event_id is not None) and await send(event_id=event_id) is None:
+            return False
+        capture("workflow_cards", whole[WORKFLOW_RUN_CONTENT_KEY])
         self._cards[run.run_id] = (follows, digest, now)
+        if final:
+            with suppress(SupersededAttemptError):
+                await asyncio.to_thread(partial(save, card_status=run.state.value))
+        return True

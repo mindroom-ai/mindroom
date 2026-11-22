@@ -86,9 +86,10 @@ async def test_card_has_exactly_the_pinned_content_and_a_text_for_other_clients(
             "input_tokens": 0,
             "output_tokens": 0,
             "tool_calls": 0,
-            "cost_usd": 0.0,
-            "attempt_cost_usd": 0.0,
-            "projected_cost_usd": 0.0,
+            # Decimal strings: a homeserver signs the card, and what it signs holds no float.
+            "cost_usd": "0",
+            "attempt_cost_usd": "0",
+            "projected_cost_usd": "0",
             "cost_unknown": False,
         },
         "phases": [],
@@ -302,8 +303,11 @@ async def test_large_run_is_marked_once_and_its_card_says_so(stack: WorkflowStac
 
 
 @pytest.mark.asyncio
-async def test_running_node_usage_is_live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """An agent that still runs shows what it used so far, though its turn is in no ledger yet."""
+async def test_running_node_names_the_sub_agent_run_that_shows_what_it_uses(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What an agent that still runs used is in no ledger yet: its row names the run whose own frames say it."""
     options = {"extra_tools": ("workflow",), "require_approval": (), "pricing": ModelPricing(input=1, output=2)}
     with workflow_stack(tmp_path, **options) as stack:
         stack.show()
@@ -327,11 +331,98 @@ async def test_running_node_usage_is_live(tmp_path: Path, monkeypatch: pytest.Mo
         meta = queued[-1][3]
 
         assert (row["status"], row["agent"]) == ("running", "watcher")
-        assert row["usage"] == {"input_tokens": 100_000, "output_tokens": 0, "tool_calls": 1, "cost_usd": 0.1}
+        assert row["usage"] == {"input_tokens": 0, "output_tokens": 0, "tool_calls": 0, "cost_usd": 0}
+        assert row["run"] == stack.store.get_node(stack.run_id, "@0").links["delegation_id"]
         assert meta["counts"]["running"] == 1
         gate.set()
         await stack.until(lambda: stack.store.get_node(stack.run_id, "@0").state is WorkflowNodeState.COMPLETED)
         await stack.close()
+
+
+def _floats(value: object) -> list[float]:
+    parts = value.values() if isinstance(value, dict) else value if isinstance(value, list) else ()
+    return [value] if isinstance(value, float) else [found for part in parts for found in _floats(part)]
+
+
+@pytest.mark.asyncio
+async def test_card_holds_no_float_so_that_a_homeserver_can_sign_it(stack: WorkflowStack) -> None:
+    """A room event is signed as canonical JSON, which has no float: the card says each cost as a decimal string."""
+    await stack.result("@0", "value", _NOW)
+    priced = {"input_tokens": 3, "output_tokens": 4, "tool_calls": 0, "cost_usd": 0.1234567}
+    stack.store.add_usage(stack.run_id, "@0", 1, 1, 1, priced)
+    await _shown(stack)
+    await stack.finish_attempt("done")
+    card = await _shown(stack)
+
+    assert (card["usage"]["cost_usd"], card["usage"]["input_tokens"]) == ("0.123457", 3)
+    assert card["graph"]["nodes"][0]["usage"] == {**priced, "cost_usd": "0.123457"}
+    assert [_floats(content) for _, _, content in _room(stack).events] == [[], []]
+
+
+@pytest.mark.asyncio
+async def test_final_card_edit_that_fails_is_sent_again_until_it_lands(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing writes to an ended run again, so the views send the card of its end until the room took it, once."""
+    monkeypatch.setattr(view_module, "_REFRESH_SECONDS", 0.02)
+    monkeypatch.setattr(view_module, "_SETTLE_SECONDS", 0.005)
+    stack.views.start()
+    await stack.result("@0", "value", _NOW)
+    await stack.until(lambda: len(_cards(stack)) == 1)
+    room, sends = _room(stack), _room(stack).client.room_send
+    room.refuse_sends = True
+    await stack.finish_attempt("done")
+    tried = sends.await_count
+    await stack.until(lambda: sends.await_count >= tried + 2)
+    assert stack.store.get_run(stack.run_id).card_status is None
+
+    room.refuse_sends = False
+    await stack.until(lambda: _cards(stack)[-1]["status"] == "completed")
+    await stack.until(lambda: stack.store.get_run(stack.run_id).card_status == "completed")
+    sent = sends.await_count
+    await asyncio.sleep(0.2)
+    await stack.views.close()
+
+    assert ("graph" in _cards(stack)[-1], len(_cards(stack)), sends.await_count) == (True, 2, sent)
+    assert (stack.views._due, stack.views._unsent, stack.views._cards) == ({}, {}, {})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("posted", [True, False], ids=["card posted", "never shown"])
+async def test_run_that_ended_while_nobody_showed_it_gets_the_card_of_its_end_at_the_next_start(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+    posted: bool,
+) -> None:
+    """A primary that stopped before it sent the end leaves a run whose card does not say it: the next one sends it."""
+    monkeypatch.setattr(view_module, "_SETTLE_SECONDS", 0.005)
+    await stack.result("@0", "value", _NOW)
+    if posted:
+        await _shown(stack)
+    await stack.finish_attempt("done")
+    assert stack.store.unshown_runs() == [stack.run_id]
+
+    stack.views.start()
+    await stack.until(lambda: stack.store.get_run(stack.run_id).card_status == "completed")
+    await stack.views.close()
+
+    assert (_cards(stack)[-1]["status"], "graph" in _cards(stack)[-1]) == ("completed", True)
+    assert stack.store.unshown_runs() == []
+
+
+@pytest.mark.asyncio
+async def test_card_whose_post_was_never_confirmed_is_edited_to_say_the_end(stack: WorkflowStack) -> None:
+    """A post sent again returns the event of the first send, whatever that says: the end of a run is an edit."""
+    await _shown(stack)
+    # The primary stopped after the room took the card and before it saved the card's event.
+    set_run(stack.store, stack.run_id, card_event_id=None)
+    await stack.finish_attempt("done")
+
+    assert (await _shown(stack))["status"] == "completed"
+
+    posts = [event_id for event_id, _, content in _room(stack).events if "m.new_content" not in content]
+    assert posts == [stack.store.get_run(stack.run_id).card_event_id]
 
 
 @pytest.mark.asyncio

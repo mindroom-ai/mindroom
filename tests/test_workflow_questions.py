@@ -16,6 +16,7 @@ from mindroom.matrix.event_types import (
 from mindroom.workflow_runs.answers import answer_command, answer_question, handle_workflow_answer
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
 from mindroom.workflow_runs.questions import question_id
+from mindroom.workflow_runs.store import WorkflowRunStoreError
 from tests.workflow_helpers import StackRoom, WorkflowStack, tool_args, workflow_stack
 
 if TYPE_CHECKING:
@@ -274,6 +275,40 @@ async def test_question_whose_card_was_not_posted_takes_no_answer(stack: Workflo
     assert not await stack.engine.answer(stack.run_id, "@0", node.generation, "Yes")
 
     assert _node_state(stack) == (WorkflowNodeState.WAITING, "user")
+
+
+@pytest.mark.asyncio
+async def test_question_and_answer_of_any_length_keep_the_card_one_event(tmp_path: Path) -> None:
+    """The card shows the start of a long question and of a long answer, so it can be sent; the call keeps both."""
+    long = {"question": "Why? " * 14_000, "options": None}
+    with workflow_stack(tmp_path, require_approval=()) as stack:
+        room = stack.show(encrypted=True) and _room(stack)
+        await stack.start()
+        card = await _ask(stack, "@0", long)
+        asked = _cards(stack)[-1]["text"]
+
+        assert await _answer(stack, card, text="X" * 26_000) == "accepted"
+
+        closed = _cards(stack)[-1]
+        assert (len(asked), asked[-15:], asked[:10]) == (2000, "... [truncated]", "Why? Why? ")
+        assert (closed["status"], len(closed["answer"]), closed["answer"][-15:]) == ("answered", 500, "... [truncated]")
+        assert all(room.encrypted_size(content) <= 65_536 for _, _, content in room.events)
+        assert await stack.result("@0", "ask", long) == "X" * 26_000
+        await stack.engine.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("options", [[f"Option {number}" for number in range(21)], ["Yes", "é" * 101]])
+async def test_options_that_a_card_cannot_show_whole_are_refused_before_the_call_waits(
+    stack: WorkflowStack,
+    options: list[str],
+) -> None:
+    """An answer is an option's own text, so a card cannot cut one short: such a question is not asked at all."""
+    with pytest.raises(WorkflowRunStoreError, match="at most 20 options of at most 200 bytes each"):
+        await stack.submit("@0", "ask", {"question": "Which?", "options": options})
+
+    assert (stack.store.get_node(stack.run_id, "@0"), _cards(stack)) == (None, [])
+    await _ask(stack, "@0", {"question": "Which?", "options": [f"Option {number}" for number in range(20)]})
 
 
 @pytest.mark.asyncio

@@ -110,6 +110,8 @@ class WorkflowRun:
     claims: dict[str, str | None] = field(default_factory=dict)
     """Each invocation that took the run when it had ended, with the report of a call that waited for it itself."""
     card_event_id: str | None = None
+    card_status: str | None = None
+    """The status the run's card showed when it was last sent: the card of an ended run is final once this is its state."""
     large: bool = False
     """Set once, when the run scheduled more agents or projects a higher cost than the notice of a large run allows."""
     result: object | None = None

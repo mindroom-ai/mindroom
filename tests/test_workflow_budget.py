@@ -15,6 +15,7 @@ from mindroom.script_runs import manager as manager_module
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
+from mindroom.workflow_runs import view as view_module
 from mindroom.workflow_runs.engine import WorkflowLimits
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
 from tests.fakes.scripted_model import Await, answer, usage
@@ -204,7 +205,32 @@ async def test_agent_that_a_tool_call_starts_after_a_resume_waits_at_the_limit(s
 
 
 @pytest.mark.asyncio
-async def test_stop_cancels_the_run_and_a_resume_asks_again_at_the_same_limit(stack: WorkflowStack) -> None:
+async def test_cost_question_whose_card_could_not_be_posted_is_posted_without_a_new_call(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing of a run that waits at its limit asks again, so the run's views post the question's card."""
+    monkeypatch.setattr(view_module, "_REFRESH_SECONDS", 0.02)
+    monkeypatch.setattr(view_module, "_SETTLE_SECONDS", 0.005)
+    await stack.start(max_cost_usd=1, max_concurrent=1)
+    gate = asyncio.Event()
+    stack.child_script([Await(gate.wait), *_turn(1.2)], _turn())
+    assert [await _agent(stack, index) for index in range(2)] == ["running", "queued"]
+    assert stack.room is not None
+    stack.room.refuse_sends = True
+    gate.set()
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.WAITING)
+    stack.views.start()
+    await asyncio.sleep(0.1)
+    assert _questions(stack) == []
+
+    stack.room.refuse_sends = False
+    await stack.until(lambda: bool(_questions(stack)))
+    await stack.views.close()
+
+    assert (_questions(stack)[-1]["status"], _states(stack)["@1"]) == ("open", "queued")
+    assert await _answer(stack, "$budget:1", _CONTINUE)
+    await _settled(stack, "@1")
     """Stop ends the run cancelled. Its limit is not raised: a resume that wants to work is asked again."""
     gate = await _over_the_limit(stack)
     gate.set()

@@ -62,7 +62,8 @@ from mindroom.workflow_runs.models import (
     WorkflowRun,
     WorkflowRunState,
 )
-from mindroom.workflow_runs.questions import close_question, post_question
+from mindroom.workflow_runs.notices import RETRY_SECONDS
+from mindroom.workflow_runs.questions import MAX_OPTION_BYTES, MAX_OPTIONS, show_question
 from mindroom.workflow_runs.recovery import AUTO_RESUME_REASONS, NO_ACCESS
 from mindroom.workflow_runs.replay import (
     DirtyLanes,
@@ -130,6 +131,7 @@ _BUDGET_CONTINUE = "Continue with ${amount:.2f} more"
 _BUDGET_STOP = "Stop"
 _OVER_BUDGET = "Stopped at the run's cost limit."
 _HELD = "The run waits at its cost limit. Try again in a moment."
+_TOO_MANY_OPTIONS = "A question takes at most 20 options of at most 200 bytes each."
 _NO_SESSIONS = 'A workflow script cannot call delegate.{function} yet. Start a fresh agent with agent() or tool("delegate", "run_subagent", ...).'
 _FILTERED_TURN = "A turn that is limited to some of its agent's tools cannot start or resume a workflow."
 # The node of the script's tool call that the current task runs, for a call of the `workflow` toolkit made in it.
@@ -803,6 +805,10 @@ class WorkflowEngine:
             start = partial(self._dispatch_tool, run, attempt, lanes=lanes, same_as=same_as)
             return await self._enter(run, node, start, dirty_after=same_as is None)
         elif kind == "ask":
+            options = [str(option) for option in request.args.get("options") or ()]
+            if len(options) > MAX_OPTIONS or any(len(option.encode()) > MAX_OPTION_BYTES for option in options):
+                # Refused before anything waits: a card cannot cut an option short, and must be one event.
+                raise WorkflowRunStoreError(_TOO_MANY_OPTIONS)
             # A question waits for its answer and holds no place. It is saved before its card is sent, so the card
             # names the call, and a card that could not be sent is sent when the script asks again.
             node = replace(node, state=WorkflowNodeState.WAITING, waiting_on="user")
@@ -838,7 +844,7 @@ class WorkflowEngine:
         if node.kind != "ask" or node.state is not WorkflowNodeState.WAITING or "event_id" in node.links:
             return node
         client = self.poster(run)
-        event_id = None if client is None else await post_question(client, run, node)
+        event_id = None if client is None else await show_question(client, run, node)
         if event_id is None:
             raise ScriptRuntimeUnavailableError(_NOT_ASKED)
         links = {**node.links, "event_id": event_id}
@@ -852,10 +858,24 @@ class WorkflowEngine:
         node: WorkflowNode,
         status: Literal["answered", "cancelled"],
         answer: str | None = None,
+        retries: tuple[float, ...] = (),
     ) -> None:
         """Show on a question's card that it was answered or that nobody can answer it any more; best effort."""
         if (client := self.poster(run)) is not None:
-            await close_question(client, run, node, status, answer)
+            await show_question(client, run, node, status, answer, retries)
+
+    async def ask_again(self, run_id: str) -> None:
+        """Post the card of each question of a run that waits without one: a card that could not be sent then.
+
+        Nothing else sends the card of the run's own question at its cost limit, and a script whose other calls
+        wait asks nothing again.
+        """
+        async with self._condition(run_id):
+            run = self.store.get_run(run_id)
+            for light in self.store.nodes(run_id, light=True) if run.state not in TERMINAL_RUN_STATES else ():
+                node = self.store.get_node(run_id, light.key) if light.kind == "ask" else None
+                with suppress(ScriptRuntimeUnavailableError, SupersededAttemptError):
+                    await self._asked(run, node or light, run.epoch)
 
     async def answer(self, run_id: str, key: str, generation: int, answer: str) -> bool:
         """Complete the question at *key* with a person's *answer*; false when that generation no longer waits.
@@ -873,7 +893,6 @@ class WorkflowEngine:
             settle = partial(self.store.settle_node, run_id, key, generation, run.epoch)
             if not await asyncio.to_thread(partial(settle, state=WorkflowNodeState.COMPLETED, result=answer)):
                 return False
-            await self._close_card(run, node, "answered", answer)
             if key.startswith(_BUDGET) and answer == _BUDGET_STOP:
                 self.cancel_as_task(run_id, reason=_OVER_BUDGET)
             elif key.startswith(_BUDGET) and not await self._over_budget(run):
@@ -881,6 +900,8 @@ class WorkflowEngine:
                 self._leave(run_id, None)
             await self._restate(run_id)
             condition.notify_all()
+        # Without the lock, which no send to the room holds up for long.
+        await self._close_card(run, node, "answered", answer, RETRY_SECONDS)
         return True
 
     async def _enter(

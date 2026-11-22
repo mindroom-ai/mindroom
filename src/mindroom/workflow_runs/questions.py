@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import hashlib
-from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.matrix.client_delivery import edit_message_result, send_message_result
 from mindroom.matrix.event_types import WORKFLOW_QUESTION_CONTENT_KEY
-from mindroom.matrix.message_builder import build_message_content
+from mindroom.workflow_runs.notices import clip, notice, notice_fits, send_notice
 
 if TYPE_CHECKING:
     import nio
 
     from mindroom.workflow_runs.models import WorkflowNode, WorkflowRun
+
+# What a question may offer, so that its card always is one event: a card cannot cut an option short, since the
+# answer is the option's own text.
+MAX_OPTIONS, MAX_OPTION_BYTES = 20, 200
+# How much of the question's text the card shows: the first that fits, with the options and an answer beside it.
+_TEXT_CHARS = (2000, 500, 100)
+_ANSWER_CHARS = 500
 
 
 def question_id(run_id: str, seq: int, generation: int) -> str:
@@ -26,19 +31,24 @@ def question_content(
     node: WorkflowNode,
     status: Literal["open", "answered", "cancelled"] = "open",
     answer: str | None = None,
+    chars: int = _TEXT_CHARS[0],
 ) -> dict[str, Any]:
-    """Return what the card of the `ask` call *node* says: the question, its options, and where it stands."""
+    """Return what the card of the `ask` call *node* says: the question, its options, and where it stands.
+
+    The card shows the first *chars* characters of the question and the start of a long answer; the call keeps
+    both whole.
+    """
     options = [str(option) for option in node.request.get("options") or ()]
     return {
         "run": run.run_id,
         "node": f"n{node.seq}",
         "question_id": question_id(run.run_id, node.seq, node.generation),
         "requester": run.owner_user_id,
-        "text": str(node.request.get("question")),
+        "text": clip(str(node.request.get("question")), chars),
         "options": options,
         "free_text": not options,
         "status": status,
-        "answer": answer,
+        "answer": None if answer is None else clip(answer, _ANSWER_CHARS),
     }
 
 
@@ -55,35 +65,29 @@ def _message(run: WorkflowRun, content: dict[str, Any]) -> dict[str, Any]:
         text += f"{options} Answer with !answer {qid} <{'number or text' if options else 'text'}>."
     else:
         text += f" Answered: {content['answer']}." if content["status"] == "answered" else " Cancelled."
-    return build_message_content(
-        text,
-        thread_event_id=run.thread_root_event_id,
-        latest_thread_event_id=run.thread_root_event_id,
-        extra_content={"msgtype": "m.notice", WORKFLOW_QUESTION_CONTENT_KEY: content},
-    )
+    return notice(run, text, WORKFLOW_QUESTION_CONTENT_KEY, content)
 
 
-async def post_question(client: nio.AsyncClient, run: WorkflowRun, node: WorkflowNode) -> str | None:
-    """Send the card of a question and return its event, None when it could not be sent.
-
-    The transaction ID is made from the run, the call and its generation, so a primary that stopped before it saved
-    the event sends again and gets the same event.
-    """
-    message = _message(run, question_content(run, node))
-    send = partial(send_message_result, client, run.room_id, message, operation="send_workflow_question")
-    delivered = await send(transaction_id=f"wfq-{run.run_id}-{node.seq}-{node.generation}")
-    return None if delivered is None else delivered.event_id
-
-
-async def close_question(
+async def show_question(
     client: nio.AsyncClient,
     run: WorkflowRun,
     node: WorkflowNode,
-    status: Literal["answered", "cancelled"],
+    status: Literal["open", "answered", "cancelled"] = "open",
     answer: str | None = None,
-) -> None:
-    """Edit the card of a question that was answered or that nobody can answer any more; best effort."""
-    event_id = node.links.get("event_id")
-    if isinstance(event_id, str):
-        message = _message(run, question_content(run, node, status, answer))
-        await edit_message_result(client, run.room_id, event_id, message, message["body"])
+    retries: tuple[float, ...] = (),
+) -> str | None:
+    """Post the card of a question, or edit it to say how the question ended; return its event, None when not sent.
+
+    The card is posted under a transaction ID made from the run, the call and its generation, so a primary that
+    stopped before it saved the event sends again and gets the same event. It shows as much of the question as
+    keeps it one event.
+    """
+    event_id = node.links.get("event_id") if status != "open" else None
+    if status != "open" and not isinstance(event_id, str):
+        return None
+    for chars in _TEXT_CHARS:
+        message = _message(run, question_content(run, node, status, answer, chars))
+        if notice_fits(client, run, message, event_id):
+            break
+    posted = f"wfq-{run.run_id}-{node.seq}-{node.generation}"
+    return await send_notice(client, run, message, event_id=event_id, transaction_id=posted, retries=retries)

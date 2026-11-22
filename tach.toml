@@ -2627,6 +2627,7 @@ depends_on = [
     "mindroom.workflow_runs.faults",
     "mindroom.workflow_runs.graph",
     "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.notices",
     "mindroom.workflow_runs.questions",
     "mindroom.workflow_runs.recovery",
     "mindroom.workflow_runs.structured",
@@ -2647,13 +2648,22 @@ expose = [
 ]
 
 [[modules]]
-path = "mindroom.workflow_runs.questions"
+path = "mindroom.workflow_runs.notices"
 depends_on = ["mindroom.matrix.client_delivery"]
+visibility = ["mindroom.workflow_runs.engine", "mindroom.workflow_runs.questions", "mindroom.workflow_runs.view"]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.notices"]
+expose = ["RETRY_SECONDS", "clip", "notice", "notice_fits", "send_notice"]
+
+[[modules]]
+path = "mindroom.workflow_runs.questions"
+depends_on = ["mindroom.workflow_runs.notices"]
 visibility = ["mindroom.workflow_runs.answers", "mindroom.workflow_runs.engine"]
 
 [[interfaces]]
 from = ["mindroom.workflow_runs.questions"]
-expose = ["close_question", "options_text", "post_question", "question_id"]
+expose = ["MAX_OPTIONS", "MAX_OPTION_BYTES", "options_text", "question_id", "show_question"]
 
 [[modules]]
 path = "mindroom.workflow_runs.answers"
@@ -2671,13 +2681,12 @@ expose = ["answer_command", "answer_question", "handle_workflow_answer"]
 [[modules]]
 path = "mindroom.workflow_runs.view"
 depends_on = [
-    "mindroom.delegation.activity",
     "mindroom.live_frames.workflow",
-    "mindroom.matrix.client_delivery",
     "mindroom.workflow_runs.engine",
     "mindroom.workflow_runs.faults",
     "mindroom.workflow_runs.graph",
     "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.notices",
     "mindroom.workflow_runs.store",
 ]
 
@@ -4516,8 +4525,7 @@ visibility = [
     "mindroom.custom_tools.matrix_user_writes",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.email_invites.receiver",
-    "mindroom.workflow_runs.view",
-    "mindroom.workflow_runs.questions",
+    "mindroom.workflow_runs.notices",
     "mindroom.workflow_runs.answers",
 ]
 
@@ -8514,7 +8522,7 @@ depends_on = [
     "mindroom.delegation.state",
     "mindroom.tool_system.events",
 ]
-visibility = ["mindroom.delegation.lifecycle", "mindroom.workflow_runs.view"]
+visibility = ["mindroom.delegation.lifecycle"]
 
 [[modules]]
 path = "mindroom.live_frames.subagents"
