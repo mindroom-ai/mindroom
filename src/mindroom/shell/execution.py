@@ -493,8 +493,9 @@ async def stream_command(
     command, once its leader and both pipes ended; a pipe only a silent process it left behind keeps open is not
     waited for. ``timeout`` runs until then, and a stop, at ``timeout`` or by cancellation, kills the whole process
     group, also once its leader ended. What the group wrote before ``timeout`` stopped it reaches ``on_output``
-    before ``on_exit``, however slowly it is taken; ``on_stopped`` is called when a cancelled command's group is
-    gone, after the last ``on_output``. A program that is missing or cannot be executed ends as a shell ends it: the
+    before ``on_exit``, however slowly it is taken, and what a process outside the group writes after that is not
+    waited for; ``on_stopped`` is called when a command that had not ended was cancelled and its group is gone,
+    after the last ``on_output``. A program that is missing or cannot be executed ends as a shell ends it: the
     reason on stderr, exit code 127 or 126.
     """
     process = await _start_streamed_command(argv, env, cwd, on_start, on_output)
@@ -515,11 +516,13 @@ async def stream_command(
             timed_out = True
             await _terminate_process_group(process, whole_group=True)
             # The killed group closed its pipes, so what it had written is all read, and then they end.
-            await readers.drain(None, _KILLED_GROUP_PIPE_BYTES)
+            readers.killed_at = loop.time()
+            await readers.drain(None)
+        # The command ended here: a cancel that comes while its exit waits to be taken stops nothing it left behind.
+        ended = True
         # Nothing follows the exit: a reader still at a pipe that a process left behind holds reads no more.
         await _cancel_pending_tasks(*readers.tasks)
         await on_exit(-signal.SIGKILL if process.returncode is None else process.returncode, timed_out)
-        ended = True
     finally:
         stdin._writer = None
         stopped = not ended and await _terminate_process_group(process, whole_group=True)
