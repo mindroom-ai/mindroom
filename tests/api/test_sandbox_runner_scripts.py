@@ -457,8 +457,8 @@ def test_worker_script_hook_sees_worker_resource_limits(
         runner_token=_TOKEN,
     )
     client, workspace = TestClient(sandbox_runner_app), prepared.paths.workspace
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_CPU_LIMIT", "4")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT", "8589934592")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_POD_CPU_LIMIT", "4")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES", "8589934592")
     for name in (
         "MINDROOM_WORKER_CPUS",
         "MINDROOM_WORKER_MEMORY_BYTES",

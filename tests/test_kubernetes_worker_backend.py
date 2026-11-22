@@ -1108,8 +1108,8 @@ def test_kubernetes_worker_exposes_container_resource_limits_via_downward_api(tm
             config_path=Path("config.yaml"),
             storage_path=tmp_path / "mindroom-test-storage",
             process_env={
-                "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT": "2",
-                "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT": "4Gi",
+                "MINDROOM_KUBERNETES_POD_CPU_LIMIT": "2",
+                "MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES": "4294967296",
             },
         ),
     )
@@ -1120,8 +1120,8 @@ def test_kubernetes_worker_exposes_container_resource_limits_via_downward_api(tm
     env_names = [entry["name"] for entry in env]
     assert len(env_names) == len(set(env_names))
     env_by_name = {entry["name"]: entry for entry in env}
-    assert env_by_name["MINDROOM_KUBERNETES_WORKER_CPU_LIMIT"] == {
-        "name": "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT",
+    assert env_by_name["MINDROOM_KUBERNETES_POD_CPU_LIMIT"] == {
+        "name": "MINDROOM_KUBERNETES_POD_CPU_LIMIT",
         "valueFrom": {
             "resourceFieldRef": {
                 "containerName": "sandbox-runner",
@@ -1130,8 +1130,8 @@ def test_kubernetes_worker_exposes_container_resource_limits_via_downward_api(tm
             },
         },
     }
-    assert env_by_name["MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT"] == {
-        "name": "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT",
+    assert env_by_name["MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES"] == {
+        "name": "MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES",
         "valueFrom": {
             "resourceFieldRef": {
                 "containerName": "sandbox-runner",
@@ -1153,8 +1153,8 @@ def test_kubernetes_worker_exposes_container_resource_limits_via_downward_api(tm
         _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)["runtime_paths"],
     )
     all_seven = (
-        "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT",
-        "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT",
+        "MINDROOM_KUBERNETES_POD_CPU_LIMIT",
+        "MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES",
         *tool_limit_names,
     )
     for name in all_seven:
@@ -1174,7 +1174,7 @@ def test_kubernetes_worker_extra_env_overrides_downward_api_resource_limits(tmp_
     override_backend, override_apps_api, _ = _backend(
         runtime_paths=runtime_paths,
         extra_env={
-            "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT": "99",
+            "MINDROOM_KUBERNETES_POD_CPU_LIMIT": "99",
             "MINDROOM_WORKER_CPUS": "2",
             "OMP_NUM_THREADS": "2",
         },
@@ -1182,9 +1182,9 @@ def test_kubernetes_worker_extra_env_overrides_downward_api_resource_limits(tmp_
     override_backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
     env = override_apps_api.created_bodies[0]["spec"]["template"]["spec"]["containers"][0]["env"]
-    assert [entry for entry in env if entry["name"] == "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT"] == [
+    assert [entry for entry in env if entry["name"] == "MINDROOM_KUBERNETES_POD_CPU_LIMIT"] == [
         {
-            "name": "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT",
+            "name": "MINDROOM_KUBERNETES_POD_CPU_LIMIT",
             "valueFrom": {
                 "resourceFieldRef": {
                     "containerName": "sandbox-runner",
@@ -1201,8 +1201,8 @@ def test_kubernetes_worker_extra_env_overrides_downward_api_resource_limits(tmp_
         {"name": "OMP_NUM_THREADS", "value": "2"},
     ]
     env_by_name = {entry["name"]: entry for entry in env}
-    assert env_by_name["MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT"] == {
-        "name": "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT",
+    assert env_by_name["MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES"] == {
+        "name": "MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES",
         "valueFrom": {
             "resourceFieldRef": {
                 "containerName": "sandbox-runner",

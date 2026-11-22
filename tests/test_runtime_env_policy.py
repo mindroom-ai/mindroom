@@ -522,6 +522,23 @@ def test_sandbox_subprocess_system_env_excludes_host_cpu_thread_hints() -> None:
     assert runtime_env_policy.worker_extra_env(limit_env) == limit_env
 
 
+def test_kubernetes_pod_limit_markers_never_leak_from_primary() -> None:
+    """Kubernetes pod downward-API markers stay excluded from startup manifests, isolated env, passthrough, and extraEnv."""
+    markers = {
+        runtime_env_policy.KUBERNETES_POD_CPU_LIMIT_ENV: "4",
+        runtime_env_policy.KUBERNETES_POD_MEMORY_LIMIT_BYTES_ENV: "8589934592",
+    }
+
+    assert runtime_env_policy.public_worker_startup_env(markers) == {}
+    assert runtime_env_policy.isolated_worker_runtime_env(markers) == {}
+    assert runtime_env_policy.sandbox_subprocess_system_env(markers) == {}
+    assert runtime_env_policy.sandbox_shell_system_env(markers) == {}
+    assert runtime_env_policy.shell_passthrough_env(markers, patterns=("*",)) == {}
+    assert runtime_env_policy.worker_extra_env(markers) == {}
+    assert not any(runtime_env_policy.is_trusted_tool_runtime_env_file_name(name) for name in markers)
+    assert not any(runtime_env_policy.is_trusted_tool_runtime_process_env_name(name) for name in markers)
+
+
 def test_worker_runtime_state_can_reintroduce_storage_subpath_after_backend_filtering() -> None:
     """Storage subpath is backend config when inherited, but explicit worker runtime state when re-added."""
     env = {

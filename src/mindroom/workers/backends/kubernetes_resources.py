@@ -34,6 +34,8 @@ from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
+    KUBERNETES_POD_CPU_LIMIT_ENV,
+    KUBERNETES_POD_MEMORY_LIMIT_BYTES_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
     VENDOR_TELEMETRY_ENV_VALUES,
@@ -124,8 +126,8 @@ _CONTAINER_NAME = SANDBOX_RUNNER_CONTAINER_NAME
 # PYTHON_CPU_COUNT, PYTEST_XDIST_AUTO_NUM_WORKERS) are derived only for worker subprocesses
 # and hooks so the runner process keeps its own default thread pool budget.
 _WORKER_RESOURCE_LIMIT_ENV_SPECS: tuple[tuple[str, str, str], ...] = (
-    (KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["cpu_limit"], "limits.cpu", "1"),
-    (KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["memory_limit"], "limits.memory", "1"),
+    (KUBERNETES_POD_CPU_LIMIT_ENV, "limits.cpu", "1"),
+    (KUBERNETES_POD_MEMORY_LIMIT_BYTES_ENV, "limits.memory", "1"),
 )
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
 _WORKER_TOKEN_PURPOSE = b"mindroom-kubernetes-worker-token-v1"

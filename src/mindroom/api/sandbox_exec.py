@@ -24,6 +24,8 @@ from mindroom.egress_broker.env import (
 )
 from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import (
+    KUBERNETES_POD_CPU_LIMIT_ENV,
+    KUBERNETES_POD_MEMORY_LIMIT_BYTES_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SHARED_CREDENTIALS_PATH_ENV,
@@ -49,8 +51,8 @@ _WORKSPACE_ENV_HOOK_MAX_OUTPUT_BYTES = 256 * 1024
 _WORKSPACE_ENV_HOOK_MAX_VALUE_BYTES = 32 * 1024
 _WORKSPACE_ENV_HOOK_MAX_OVERLAY_BYTES = 128 * 1024
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
-_KUBERNETES_CPU_LIMIT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["cpu_limit"]
-_KUBERNETES_MEMORY_LIMIT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["memory_limit"]
+_KUBERNETES_CPU_LIMIT_ENV = KUBERNETES_POD_CPU_LIMIT_ENV
+_KUBERNETES_MEMORY_LIMIT_ENV = KUBERNETES_POD_MEMORY_LIMIT_BYTES_ENV
 _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX = "workers"
 _WORKER_CPUS_ENV = "MINDROOM_WORKER_CPUS"
 _WORKER_MEMORY_BYTES_ENV = "MINDROOM_WORKER_MEMORY_BYTES"
@@ -315,7 +317,7 @@ def _positive_int_env_value(value: str | None) -> str | None:
 def worker_resource_limit_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     """Return worker CPU/memory limit vars derived from a Kubernetes worker container's env.
 
-    Active only when the runner process has a positive integer ``MINDROOM_KUBERNETES_WORKER_CPU_LIMIT``
+    Active only when the runner process has a positive integer ``MINDROOM_KUBERNETES_POD_CPU_LIMIT``
     from the downward API. Operator overrides in the runner env win by key presence (even when empty).
     Local, Docker, and in-process runners return an empty mapping.
     """

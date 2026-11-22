@@ -2685,10 +2685,10 @@ def test_worker_subprocess_env_forwards_worker_resource_limit_vars(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Kubernetes worker subprocesses derive tool hints from MINDROOM_KUBERNETES_WORKER_CPU_LIMIT and honor empty overrides."""
+    """Kubernetes worker subprocesses derive tool hints from MINDROOM_KUBERNETES_POD_CPU_LIMIT and honor empty overrides."""
     paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_CPU_LIMIT", "4")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT", "8589934592")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_POD_CPU_LIMIT", "4")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES", "8589934592")
     for name in (
         "MINDROOM_WORKER_CPUS",
         "MINDROOM_WORKER_MEMORY_BYTES",
@@ -2719,10 +2719,10 @@ def test_worker_subprocess_env_forwards_worker_resource_limit_vars(
     [
         {"MINDROOM_WORKER_CPUS": "500m", "OMP_NUM_THREADS": "1", "PYTHON_CPU_COUNT": "1"},
         {"MINDROOM_WORKER_CPUS": "4", "MINDROOM_WORKER_MEMORY_BYTES": "8589934592", "OMP_NUM_THREADS": "1"},
-        {"MINDROOM_KUBERNETES_WORKER_CPU_LIMIT": "0", "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT": "8589934592"},
-        {"MINDROOM_KUBERNETES_WORKER_CPU_LIMIT": "500m"},
-        {"MINDROOM_KUBERNETES_WORKER_CPU_LIMIT": "0.5"},
-        {"MINDROOM_KUBERNETES_WORKER_CPU_LIMIT": "garbage"},
+        {"MINDROOM_KUBERNETES_POD_CPU_LIMIT": "0", "MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES": "8589934592"},
+        {"MINDROOM_KUBERNETES_POD_CPU_LIMIT": "500m"},
+        {"MINDROOM_KUBERNETES_POD_CPU_LIMIT": "0.5"},
+        {"MINDROOM_KUBERNETES_POD_CPU_LIMIT": "garbage"},
     ],
 )
 def test_worker_subprocess_env_ignores_host_cpu_env_without_worker_cpus(
@@ -2733,8 +2733,8 @@ def test_worker_subprocess_env_ignores_host_cpu_env_without_worker_cpus(
     """Non-Kubernetes runners (even with MINDROOM_WORKER_CPUS=500m or =4) and invalid K8s CPU limits derive nothing."""
     paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker")
     for name in (
-        "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT",
-        "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT",
+        "MINDROOM_KUBERNETES_POD_CPU_LIMIT",
+        "MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES",
         "MINDROOM_WORKER_CPUS",
         "MINDROOM_WORKER_MEMORY_BYTES",
         "OMP_NUM_THREADS",
@@ -5706,11 +5706,11 @@ def test_local_worker_shell_does_not_inherit_host_omp_num_threads(
     tmp_path: Path,
     worker_cpus: str,
 ) -> None:
-    """Local/Docker runners without MINDROOM_KUBERNETES_WORKER_CPU_LIMIT derive nothing even with MINDROOM_WORKER_CPUS set."""
+    """Local/Docker runners without MINDROOM_KUBERNETES_POD_CPU_LIMIT derive nothing even with MINDROOM_WORKER_CPUS set."""
     _set_sandbox_token(monkeypatch)
     storage_root = tmp_path / "storage"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
-    monkeypatch.delenv("MINDROOM_KUBERNETES_WORKER_CPU_LIMIT", raising=False)
+    monkeypatch.delenv("MINDROOM_KUBERNETES_POD_CPU_LIMIT", raising=False)
     monkeypatch.setenv("MINDROOM_WORKER_CPUS", worker_cpus)
     monkeypatch.setenv("OMP_NUM_THREADS", "1")
     _refresh_runner_app_from_env()
@@ -5742,7 +5742,7 @@ def test_sandbox_runner_worker_shell_receives_resource_limit_env_and_allows_hook
     tmp_path: Path,
     execution_mode: str,
 ) -> None:
-    """Dedicated Kubernetes workers derive all 5 vars from MINDROOM_KUBERNETES_WORKER_CPU_LIMIT; extraEnv and hook win."""
+    """Dedicated Kubernetes workers derive all 5 vars from MINDROOM_KUBERNETES_POD_CPU_LIMIT; extraEnv and hook win."""
     _set_sandbox_token(monkeypatch)
     worker_key = "v1:tenant-123:shared:general"
     worker_root = tmp_path / "workers" / worker_dir_name(worker_key)
@@ -5751,8 +5751,8 @@ def test_sandbox_runner_worker_shell_receives_resource_limit_env_and_allows_hook
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
     monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(tmp_path))
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_CPU_LIMIT", "4")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT", "8589934592")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_POD_CPU_LIMIT", "4")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES", "8589934592")
     for name in (
         "MINDROOM_WORKER_CPUS",
         "MINDROOM_WORKER_MEMORY_BYTES",
@@ -5823,8 +5823,8 @@ def test_dedicated_worker_python_tool_hook_sees_worker_resource_limits(
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
     monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(tmp_path))
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_CPU_LIMIT", "4")
-    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT", "8589934592")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_POD_CPU_LIMIT", "4")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES", "8589934592")
     for name in (
         "MINDROOM_WORKER_CPUS",
         "MINDROOM_WORKER_MEMORY_BYTES",
@@ -5921,6 +5921,27 @@ def test_local_isolated_worker_python_tool_keeps_main_dotenv_behavior(
 
     assert response.ok is True
     assert ast.literal_eval(str(response.result)) == {"cpus": "4", "omp": None}
+
+
+def test_primary_pod_limit_markers_do_not_leak_into_request_execution_env(tmp_path: Path) -> None:
+    """Primary-side MINDROOM_KUBERNETES_POD_* markers never leak into shell or python request execution env."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_KUBERNETES_POD_CPU_LIMIT": "8",
+            "MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES": "17179869184",
+        },
+    )
+    for tool_name in ("shell", "python"):
+        env = sandbox_runner_module.constants.build_execution_tool_env(
+            tool_name,
+            runtime_paths,
+            extra_env_passthrough="*",
+            shell_process_env=runtime_paths.process_env,
+        )
+        assert "MINDROOM_KUBERNETES_POD_CPU_LIMIT" not in env
+        assert "MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES" not in env
 
 
 @requires_linux(reason=LINUX_LOCAL_WORKER_REASON, timeout=LINUX_LOCAL_WORKER_TIMEOUT_SECONDS)
