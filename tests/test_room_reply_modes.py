@@ -9,7 +9,7 @@ import time
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
@@ -1310,14 +1310,24 @@ async def _general_nudged_and_shown_waiting(
 
     Return whether the message asked general's running response to wrap up, and whether general reacted ⏳ to it.
     """
+    reserve_for_real = ResponseLifecycleCoordinator.reserve_waiting_human_message
+    nudged: list[str] = []
+
+    def reserve(conversations: ResponseLifecycleCoordinator, **request: Any) -> None:  # noqa: ANN401
+        """Let the coordinator decide the notice while a reply runs on the message's conversation; queue none."""
+        conversation = conversations._conversation_for(request["target"])
+        conversation.begin_response_turn()
+        try:
+            notice = reserve_for_real(conversations, **request)
+        finally:
+            conversation.finish_response_turn()
+        if notice is not None:
+            notice.release()
+            nudged.append(request["response_envelope"].agent_name)
+
     with (
         patch.object(ResponseLifecycleCoordinator, "has_active_response_for_target", return_value=True),
-        patch.object(
-            ResponseLifecycleCoordinator,
-            "reserve_waiting_human_message",
-            autospec=True,
-            return_value=None,
-        ) as reserve,
+        patch.object(ResponseLifecycleCoordinator, "reserve_waiting_human_message", autospec=True, side_effect=reserve),
         patch.object(ResponseLifecycleCoordinator, "approval_holds", return_value=("approval",)),
     ):
         _acted, bots = await _who_acts(
@@ -1332,13 +1342,12 @@ async def _general_nudged_and_shown_waiting(
         general = bots["general"]
         assert await wait_for_background_tasks(5.0, owner=general._runtime_view)
 
-    nudged = [call for call in reserve.call_args_list if call.kwargs["response_envelope"].agent_name == "general"]
     reactions = [
         call.kwargs["content"]["m.relates_to"]["key"]
         for call in general.client.room_send.await_args_list
         if call.kwargs["message_type"] == "m.reaction"
     ]
-    return bool(nudged), "⏳" in reactions
+    return "general" in nudged, "⏳" in reactions
 
 
 @pytest.mark.asyncio
