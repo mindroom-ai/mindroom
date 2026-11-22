@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -63,10 +64,11 @@ class _ReportTool(Toolkit):
 
     @tool
     def report(self) -> str:
-        """Return the data read at import, the plugin modules, the preload variable, and a leaked global of this process."""
+        """Return the data read at import, the plugin modules, the preload variable, and two globals of this process."""
         modules = sorted(name for name in sys.modules if name.startswith("mindroom_plugin_"))
         leaked = "!left-by-import" in yaml.SafeLoader.yaml_constructors
-        return f"{{DATA}}|{{','.join(modules)}}|{{os.environ.get({preload_env!r})}}|{{leaked}}"
+        shared = yaml.SafeLoader.yaml_constructors.get("!shared")
+        return f"{{DATA}}|{{','.join(modules)}}|{{os.environ.get({preload_env!r})}}|{{leaked}}|{{shared}}"
 
 
 @register_tool_with_metadata(
@@ -215,6 +217,9 @@ def manager(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[_Sandbo
         for pid in _started_processes(tmp_path):
             with suppress(OSError):
                 os.kill(pid, signal.SIGKILL)
+        # This process plays the runner, which imports a request's plugins itself.
+        for tag in ("!left-by-import", "!shared"):
+            yaml.SafeLoader.yaml_constructors.pop(tag, None)
 
 
 def _call(
@@ -334,7 +339,7 @@ def test_a_changed_file_of_a_preloaded_plugin_takes_effect_when_the_worker_resta
     assert _report(runtime_paths, [opted], "opted")[0] == "v2"
 
 
-def test_the_runner_sends_a_request_to_the_preloaded_template_only_for_exactly_its_plugins(
+def test_the_runner_sends_a_request_to_the_preloaded_template_only_when_its_plugins_start_with_the_preloaded_ones(
     manager: _SandboxForkserver,
     tmp_path: Path,
 ) -> None:
@@ -350,13 +355,14 @@ def test_the_runner_sends_a_request_to_the_preloaded_template_only_for_exactly_i
 
     with_opted = _report(runtime_paths, [opted, plain], "plain")[1]
     without_opted = _report(runtime_paths, [plain], "plain")[1]
+    # A plugin after the preloaded ones is imported by the call, as every plugin was, whether it opts in or not.
     _report(runtime_paths, [opted, other], "opted")
     _report(runtime_paths, [alias], "opted")
     _report(runtime_paths, [PluginEntryConfig(path=opted.path, enabled=False), plain], "plain")
-    _report(runtime_paths, [opted], "opted")
+    _report(runtime_paths, [PluginEntryConfig(path=plain.path, enabled=False), opted], "opted")
 
     # One dispatch per request, so each has the one deadline it started with.
-    assert manager.dispatched == [True, False, False, False, False, True]
+    assert manager.dispatched == [True, False, True, False, False, True]
     assert "opted" in with_opted
     assert "opted" not in without_opted
     assert "plain" in without_opted
@@ -365,9 +371,54 @@ def test_the_runner_sends_a_request_to_the_preloaded_template_only_for_exactly_i
     assert all(template.process.poll() is None for template in manager.spawned)
     preloading_template, plain_template = (template.process.pid for template in manager.spawned)
     # No process forked from the preloading template ran a request the preload did not suit.
-    assert _import_parents(tmp_path, "opted") == [os.getpid(), plain_template, plain_template]
-    assert _import_parents(tmp_path, "other") == [plain_template]
+    assert _import_parents(tmp_path, "opted") == [os.getpid(), plain_template]
+    assert _import_parents(tmp_path, "other") == [preloading_template]
     assert preloading_template not in _import_parents(tmp_path, "plain")[1:]
+
+
+def test_a_request_that_imports_another_plugin_first_keeps_that_order(
+    manager: _SandboxForkserver,
+    tmp_path: Path,
+) -> None:
+    """Plugins import in config order, so the preload serves only requests whose first plugins are the preloaded ones."""
+    runtime_paths = _runtime(tmp_path)
+    # Both plugins set the same global key at import, so the one imported last owns it.
+    plain = _write_plugin(tmp_path, "plain", at_import="yaml.SafeLoader.yaml_constructors['!shared'] = 'plain'")
+    opted = _write_plugin(
+        tmp_path,
+        "opted",
+        worker_preload=True,
+        at_import="yaml.SafeLoader.yaml_constructors['!shared'] = 'opted'",
+    )
+    _serve_preload(runtime_paths, [opted])
+
+    assert _report(runtime_paths, [plain, opted], "plain")[4] == "opted"
+    assert _report(runtime_paths, [opted, plain], "plain")[4] == "plain"
+
+    assert manager.dispatched == [False, True]
+
+
+def test_a_preloading_template_that_cannot_be_reached_hands_its_request_to_the_plain_one(
+    manager: _SandboxForkserver,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A request that could not even connect to the preloading template was not sent, so the plain one runs it."""
+    runtime_paths = _runtime(tmp_path)
+    opted = _write_plugin(tmp_path, "opted", worker_preload=True)
+    warnings: list[str] = []
+    monkeypatch.setattr(sandbox_forkserver_module.logger, "warning", lambda event, **_fields: warnings.append(event))
+    _serve_preload(runtime_paths, [opted])
+    # The template still runs, so the runner finds out only when it connects.
+    Path(manager.spawned[0].socket_path).unlink()
+
+    for _ in range(2):
+        assert _report(runtime_paths, [opted], "opted")[0] == "v1"
+
+    assert manager.dispatched == [True, False, False]
+    assert len(manager.spawned) == 2
+    assert manager.spawned[0].process.poll() is not None
+    assert warnings.count("sandbox_forkserver_plugin_preload_failed") == 1
 
 
 def test_no_request_runs_in_the_preloading_template_before_the_setup_succeeded(
@@ -721,6 +772,74 @@ def test_a_setup_that_outlasts_its_budget_ends_the_preload_and_calls_run(
         assert _started_processes(tmp_path)
         assert not any(_runs(pid) for pid in _started_processes(tmp_path))
     assert (tmp_path / "tried.log").read_text(encoding="utf-8") == "tried\n"
+
+
+@pytest.mark.parametrize("worker_copy", ["does-not-opt-in", "missing"])
+def test_a_worker_imports_nothing_ahead_unless_its_own_manifests_opt_in(
+    manager: _SandboxForkserver,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    worker_copy: str,
+) -> None:
+    """The primary names the plugins to preload, and the worker's own copies decide before any of them is imported."""
+    opted = _write_plugin(tmp_path, "opted", worker_preload=True)
+    plain = _write_plugin(tmp_path, "plain")
+    listed = plain.path if worker_copy == "does-not-opt-in" else str(tmp_path / "missing")
+    app, _worker_root = _dedicated_worker_app(monkeypatch, tmp_path, eager_setup_plugins=[opted.path, listed])
+    warnings: list[str] = []
+    monkeypatch.setattr(sandbox_forkserver_module.logger, "warning", lambda event, **_fields: warnings.append(event))
+
+    with TestClient(app) as client:
+        _wait_for_setup(client, "ready")
+        # Not even the plugin that does opt in was imported.
+        assert _imports(tmp_path, "opted") == []
+        assert _imports(tmp_path, "plain") == []
+
+        for _ in range(2):
+            assert _http_report(client, [opted, plain], "opted")["ok"] is True
+        assert manager.dispatched == [False, False]
+
+    tried, serving = manager.spawned
+    assert tried.process.poll() is not None
+    assert (
+        len({pid for pid, _cwd, _data in _imports(tmp_path, "opted")} - {tried.process.pid, serving.process.pid}) == 2
+    )
+    assert warnings.count("sandbox_forkserver_plugin_preload_failed") == 1
+
+
+def test_a_call_that_arrives_during_the_setup_leaves_the_health_check_answering(
+    manager: _SandboxForkserver,  # noqa: ARG001
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A call waits for the venv the setup is still creating without holding up what else the worker answers."""
+    app, _worker_root = _dedicated_worker_app(monkeypatch, tmp_path, eager_setup_plugins=[])
+    venv_may_start = threading.Event()
+    ensure_state = local_worker_module._ensure_local_worker_state
+
+    def slow_ensure_state(*args: object) -> None:
+        venv_may_start.wait(timeout=3)
+        ensure_state(*args)
+
+    monkeypatch.setattr(local_worker_module, "_ensure_local_worker_state", slow_ensure_state)
+
+    with TestClient(app) as client:
+        assert client.get("/healthz").json()["setup"] == "preparing"
+        answers: list[dict[str, object]] = []
+        call = threading.Thread(target=lambda: answers.append(_http_call(client, [], "calculator", "add", 1, 2)))
+        call.start()
+        # Long enough for the call to reach the lock that the setup holds.
+        time.sleep(0.5)
+
+        started_at = time.monotonic()
+        health = client.get("/healthz").json()
+        answered_in = time.monotonic() - started_at
+        venv_may_start.set()
+        call.join(timeout=60)
+
+    assert health["status"] == "ok"
+    assert answered_in < 1.5
+    assert answers[0]["ok"] is True, answers
 
 
 def test_a_failed_eager_setup_leaves_the_worker_healthy_and_its_first_call_reports_the_real_error(

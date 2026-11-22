@@ -6371,21 +6371,21 @@ def test_kubernetes_worker_health_read_allows_a_slower_handshake_on_each_retry(
 @pytest.mark.parametrize(
     ("budget_seconds", "handshake_seconds", "expected_connect_timeouts"),
     [
-        # Too short to try twice: the one attempt gets the whole budget.
-        (0.6, 0.55, [0.6]),
-        # No time for another attempt after this one: it gets all the time that is left, and no more.
+        # A budget shorter than the first step: the attempt gets what there is.
+        (0.4, 0.35, [0.4]),
         (6.0, 1.8, [0.5, 1.0, 2.0]),
+        # An attempt never gets more than the time that is left.
         (7.0, 2.5, [0.5, 1.0, 2.0, pytest.approx(2.9)]),
     ],
-    ids=["short-budget", "escalated", "last-attempt"],
+    ids=["short-budget", "escalated", "capped-by-time-left"],
 )
-def test_kubernetes_worker_health_read_gives_its_last_attempt_all_the_time_left(
+def test_kubernetes_worker_health_read_gives_each_attempt_its_step_or_the_time_left(
     monkeypatch: pytest.MonkeyPatch,
     budget_seconds: float,
     handshake_seconds: float,
     expected_connect_timeouts: list[float],
 ) -> None:
-    """Short first tries end in one that may use the whole rest of the budget, so the read never outlasts it."""
+    """Each try may take its step, which doubles, or the time that is left when that is less."""
     backend, _apps_api, _core_api = _backend()
     clock = _ControlledMonotonicClock()
     connect_timeouts: list[float] = []
@@ -6430,6 +6430,91 @@ def test_kubernetes_worker_health_read_gives_its_last_attempt_all_the_time_left(
     assert response.status_code == 200
     assert connect_timeouts == expected_connect_timeouts
     assert clock.monotonic() <= budget_seconds
+
+
+def _health_read_on_a_clock(
+    monkeypatch: pytest.MonkeyPatch,
+    answer: Callable[[float], httpx.Response | httpx.HTTPError],
+    *,
+    sleep_overshoot_seconds: float = 0.0,
+) -> tuple[_ControlledMonotonicClock, list[float]]:
+    """Answer each health-check try at once with ``answer(now)``, on a clock that only sleeps advance."""
+    clock = _ControlledMonotonicClock()
+    attempts: list[float] = []
+
+    class _InstantClient:
+        def __init__(self, *, timeout: float | httpx.Timeout) -> None:
+            self.timeout = httpx.Timeout(timeout)
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, _url: str, *, timeout: httpx.Timeout | None = None) -> httpx.Response:
+            timeout = timeout or self.timeout
+            # A socket refuses a timeout that is not positive.
+            assert min(timeout.connect or 0.0, timeout.read or 0.0, timeout.write or 0.0, timeout.pool or 0.0) > 0
+            attempts.append(clock.monotonic())
+            answered = answer(clock.monotonic())
+            if isinstance(answered, httpx.HTTPError):
+                raise answered
+            return answered
+
+    def sleep(seconds: float) -> None:
+        clock.advance_to(clock.monotonic() + seconds + sleep_overshoot_seconds)
+
+    monkeypatch.setattr(kubernetes_resources_module.httpx, "Client", _InstantClient)
+    monkeypatch.setattr(kubernetes_resources_module, "time", SimpleNamespace(time=clock.monotonic, sleep=sleep))
+    return clock, attempts
+
+
+def test_kubernetes_worker_health_read_retries_fast_failures_until_its_budget_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Service that refuses or answers 503 at once is asked again for the whole budget, not for a few tries."""
+    backend, _apps_api, _core_api = _backend()
+
+    def answer(now: float) -> httpx.Response | httpx.HTTPError:
+        if now >= 1.95:
+            return httpx.Response(200, json={"status": "ok"})
+        return httpx.ConnectError("connection refused") if int(now * 10) % 2 else httpx.Response(503)
+
+    clock, attempts = _health_read_on_a_clock(monkeypatch, answer)
+
+    response = kubernetes_resources_module.KubernetesResourceManager.read_worker_health(
+        backend._resources,
+        "mindroom-worker-abc",
+        timeout_seconds=5.0,
+    )
+
+    assert response.status_code == 200
+    assert clock.monotonic() == pytest.approx(2.0)
+    assert len(attempts) == 11
+
+
+def test_kubernetes_worker_health_read_fails_cleanly_when_a_pause_outlasts_its_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read whose time ran out while it paused fails as a timeout, without one more try on less than no time."""
+    backend, _apps_api, _core_api = _backend()
+    # A primary that stalls sleeps far longer than it asked to.
+    clock, attempts = _health_read_on_a_clock(
+        monkeypatch,
+        lambda _now: httpx.ConnectError("connection refused"),
+        sleep_overshoot_seconds=0.9,
+    )
+
+    with pytest.raises(WorkerStartTimeoutError, match="did not answer its health check"):
+        kubernetes_resources_module.KubernetesResourceManager.read_worker_health(
+            backend._resources,
+            "mindroom-worker-abc",
+            timeout_seconds=1.0,
+        )
+
+    assert attempts == [0.0]
+    assert clock.monotonic() >= 1.0
 
 
 def test_kubernetes_worker_health_read_fails_when_its_budget_ends(monkeypatch: pytest.MonkeyPatch) -> None:
