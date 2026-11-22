@@ -4982,6 +4982,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.room_settings"
 depends_on = [
+    "mindroom.hooks.types",
     "mindroom.legacy_room_settings",
 ]
 
@@ -5060,6 +5061,7 @@ depends_on = [
     "mindroom.agent_run_context",
     "mindroom.agents",
     "mindroom.ai",
+    "mindroom.custom_tools.attachment_helpers",
     "mindroom.helper_usage",
     "mindroom.history.interrupted_replay",
     "mindroom.history.turn_recorder",
@@ -5074,6 +5076,7 @@ depends_on = [
     "mindroom.tool_system.tool_function",
     "mindroom.matrix_rtc.voice_agent",
     "mindroom.response_turn",
+    "mindroom.room_settings",
     "mindroom.session_storage.types",
     "mindroom.tool_jobs.execution",
     "mindroom.tool_system.agent_tools",
@@ -6405,6 +6408,7 @@ depends_on = [
     "mindroom.inbound_turn_normalizer",
     "mindroom.matrix.thread_history_result",
     "mindroom.reply_turn.request",
+    "mindroom.room_settings",
 ]
 visibility = [
     "mindroom.bot",
