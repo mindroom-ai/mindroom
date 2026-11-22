@@ -368,7 +368,9 @@ def worker_route(
     # too.
     worker_handle = None
     if spec is not None:
-        spec = _placed_worker_spec(spec, worker_target, named)
+        # The runner launches a streamed command itself, without the runtime that a worker's setup prepares.
+        streamed = tool_name == "shell" and get_call_output_stream() is not None
+        spec = replace(_placed_worker_spec(spec, worker_target, named), wait_for_setup=not streamed)
         if named is not None:
             worker_handle = ensure_named_worker(worker_manager, spec, named, progress_sink=progress_sink)
         elif start or not worker_backend_kind(runtime_paths).dedicated:
