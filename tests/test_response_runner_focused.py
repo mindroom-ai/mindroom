@@ -242,7 +242,7 @@ from tests.test_response_turn import (
 from tests.tool_approval_helpers import gated_functions
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine, Iterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Mapping, Sequence
     from pathlib import Path
     from typing import Literal
 
@@ -6370,6 +6370,48 @@ async def test_a_message_arriving_as_a_reply_returns_waits_only_behind_an_early_
 
     assert [notice is not None for notice in notices] == [reserved_early]
     assert not coordinator.has_active_response_for_target(envelope.target)
+
+
+@pytest.mark.asyncio
+async def test_a_source_dispatched_again_while_it_is_answered_does_not_wait_for_the_next_reply() -> None:
+    """A reply that ends withdraws its source's notice once more, so a second dispatch of it is not news to the next."""
+    coordinator = ResponseLifecycleCoordinator()
+    first, second, third = (_queued_envelope(event_id) for event_id in ("$first", "$second", "$third"))
+    release_first = asyncio.Event()
+    second_running = asyncio.Event()
+    release_second = asyncio.Event()
+    waiting_during_third: list[bool] = []
+
+    def respond(envelope: MessageEnvelope, reply: Callable[[], Awaitable[object]]) -> asyncio.Task[object]:
+        return asyncio.create_task(
+            coordinator.run_locked_response(
+                target=envelope.target,
+                response_envelope=envelope,
+                pipeline_timing=None,
+                locked_operation=reply,
+            ),
+        )
+
+    async def second_reply() -> None:
+        second_running.set()
+        await release_second.wait()
+
+    async def third_reply() -> None:
+        waiting_during_third.append(coordinator.has_waiting_messages_from(third.target, third.requester_id))
+
+    replies = [respond(first, release_first.wait)]
+    await asyncio.sleep(0)
+    replies += [respond(second, second_reply), respond(third, third_reply)]
+    await asyncio.sleep(0)
+    release_first.set()
+    await second_running.wait()
+    replies.append(respond(second, lambda: asyncio.sleep(0)))
+    await asyncio.sleep(0)
+    assert coordinator.has_waiting_messages_from(second.target, second.requester_id)
+    release_second.set()
+    await asyncio.gather(*replies)
+
+    assert waiting_during_third == [False]
 
 
 @pytest.mark.asyncio

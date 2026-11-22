@@ -132,7 +132,10 @@ class _ResponseLifecycleReservation:
         if self._notice is None:
             return
         self._queued_signal.consume_waiting_human_message(self._notice)
-        self._notice = None
+        # A place taken where the reply runs withdraws the notice again as it ends: its source may be dispatched
+        # a second time while it is answered, and that is no news to the next reply.
+        if self._acquire_task is not None:
+            self._notice = None
 
     async def _release(self) -> None:
         acquire_task = self._acquire_task
