@@ -603,16 +603,15 @@ def worker_preload_plugin_paths(config: Config, runtime_paths: RuntimePaths) -> 
     """Return the configured paths of ``config``'s leading enabled plugins whose manifests set ``worker_preload``.
 
     Plugins import in config order, so one that follows an enabled plugin that does not opt in is not preloaded.
-    Neither is one whose path could name another directory in a call than when the worker started: only an absolute
-    path and an explicit package, such as ``python:my_plugin``, name the same plugin whatever HOME and the config are.
+    Neither is one under ``~``, which a call with another HOME reads as another directory than the worker did when it
+    started; every other path is read against the config's directory or the installed packages, the same in each call.
     """
     opted: list[str] = []
     for entry in config.plugins:
         if not entry.enabled:
             continue
         try:
-            package = plugin_imports._parse_python_plugin_spec(entry.path)
-            if not (entry.path.startswith("/") or (package is not None and package[2])):
+            if Path(entry.path).as_posix().startswith("~"):  # As ``expanduser`` reads it: ``./~/x`` is ``~/x`` too.
                 break
             root = plugin_imports._resolve_plugin_root(entry.path, runtime_paths)
             if not plugin_imports._load_plugin_base(root).worker_preload:
