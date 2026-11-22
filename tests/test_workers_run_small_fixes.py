@@ -9,7 +9,6 @@ import signal
 import sys
 import threading
 from contextlib import contextmanager
-from dataclasses import asdict
 from io import StringIO
 from typing import TYPE_CHECKING, Self
 from uuid import uuid4
@@ -22,13 +21,14 @@ from mindroom.agent_cli.main import main
 from mindroom.agent_cli.shell_contract import AGENT_CLI_WINDOW_HEADER
 from mindroom.agent_cli.turn import ToolKey
 from mindroom.constants import resolve_primary_runtime_paths
-from mindroom.shell.execution import ProcessRecord, run_command
+from mindroom.shell.execution import ShellRunResult
 from mindroom.shell.output_capture import format_shell_completion
-from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, _parse_supervisor_response
+from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, run_command_via_supervisor
 from mindroom.tool_system.catalog import builtin_tool_registry, get_tool_by_name
 from mindroom.tool_system.sandbox_proxy import WorkerStandIns
 from mindroom.workers.models import WorkerHandle
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteRequest
+from tests.test_shell_supervisor import _running_server
 from tests.test_workers_run_control import (
     SETTLE_TIMEOUT_SECONDS,
     _make_app,
@@ -93,94 +93,33 @@ def _cli_with_completed(
 
 
 @pytest.mark.asyncio
-async def test_item7_missing_absolute_binary_completes_as_127_on_stderr(
+@pytest.mark.parametrize(
+    ("program", "exit_code", "reason"),
+    [
+        ("/nonexistent-binary-xyz", 127, "No such file or directory"),
+        ("__missing_bare_cmd_xyz__", 127, "command not found"),
+        ("{tmp_path}/not-executable.txt", 126, "Permission denied"),
+    ],
+)
+async def test_item7_program_that_cannot_start_exits_as_a_shell_reports_it(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
+    program: str,
+    exit_code: int,
+    reason: str,
 ) -> None:
-    """Running a missing absolute binary completes and exits 127 with a clean stderr message and no call id."""
-    run_shell = _shell_entrypoint(tmp_path, monkeypatch)
-    shell_result = await run_shell(["/nonexistent-binary-xyz"], worker="w1")
-    assert isinstance(shell_result, dict)
-    launch = shell_result["mindroom_shell_launch_error"]
-    assert isinstance(launch, dict)
+    """A missing or non-executable program ends as a command that failed with a shell's exit code and words."""
+    (tmp_path / "not-executable.txt").write_text("hello\n")
+    program = program.format(tmp_path=tmp_path)
+    shell_result = await _shell_entrypoint(tmp_path, monkeypatch)([program], worker="w1")
+    assert shell_result == format_shell_completion("", f"{program}: {reason}", return_code=exit_code)
 
-    submitted = _cli_with_completed(
-        monkeypatch,
-        f"[worker: w1]\n{launch['message']}",
-        launch_exit_code=launch["exit_code"],
-        launch_error=launch["message"],
-    )
-    exit_code = main(["workers", "run", "w1", "--", "/nonexistent-binary-xyz"])
+    _cli_with_completed(monkeypatch, f"[worker: w1]\n{shell_result}")
+    assert main(["workers", "run", "w1", "--", program]) == exit_code
     output = capsys.readouterr()
-
-    assert exit_code == 127
-    assert output.out == ""
-    assert output.err == "mindroom-agent: /nonexistent-binary-xyz: No such file or directory\n"
-    assert submitted[0] not in output.err
-    assert "ValueError" not in output.err
-
-
-@pytest.mark.asyncio
-async def test_item7_missing_bare_command_completes_as_127_on_stderr(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Running a missing bare command completes and exits 127 with command not found on stderr."""
-    run_shell = _shell_entrypoint(tmp_path, monkeypatch)
-    shell_result = await run_shell(["__missing_bare_cmd_xyz__"], worker="w1")
-    assert isinstance(shell_result, dict)
-    launch = shell_result["mindroom_shell_launch_error"]
-    assert isinstance(launch, dict)
-
-    submitted = _cli_with_completed(
-        monkeypatch,
-        f"[worker: w1, started]\n{launch['message']}",
-        launch_exit_code=launch["exit_code"],
-        launch_error=launch["message"],
-    )
-    exit_code = main(["workers", "run", "w1", "--", "__missing_bare_cmd_xyz__"])
-    output = capsys.readouterr()
-
-    assert exit_code == 127
-    assert output.out == ""
-    assert output.err == (
-        "mindroom-agent: started worker w1\nmindroom-agent: __missing_bare_cmd_xyz__: command not found\n"
-    )
-    assert submitted[0] not in output.err
-
-
-@pytest.mark.asyncio
-async def test_item7_non_executable_file_completes_as_126_on_stderr(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Running a non-executable file completes and exits 126 with Permission denied on stderr."""
-    nonexec = tmp_path / "not-executable.txt"
-    nonexec.write_text("hello\n")
-    nonexec.chmod(0o644)
-
-    run_shell = _shell_entrypoint(tmp_path, monkeypatch)
-    shell_result = await run_shell([str(nonexec)], worker="w1")
-    assert isinstance(shell_result, dict)
-    launch = shell_result["mindroom_shell_launch_error"]
-    assert isinstance(launch, dict)
-
-    submitted = _cli_with_completed(
-        monkeypatch,
-        f"[worker: w1]\n{launch['message']}",
-        launch_exit_code=launch["exit_code"],
-        launch_error=launch["message"],
-    )
-    exit_code = main(["workers", "run", "w1", "--", str(nonexec)])
-    output = capsys.readouterr()
-
-    assert exit_code == 126
-    assert output.out == ""
-    assert output.err == f"mindroom-agent: {nonexec}: Permission denied\n"
-    assert submitted[0] not in output.err
+    assert output.out == f"Stderr:\n{program}: {reason}\n"
+    assert output.err == ""
 
 
 @pytest.mark.asyncio
@@ -196,21 +135,28 @@ async def test_item7_missing_cwd_still_fails_as_execution_error(
 
 
 @pytest.mark.asyncio
-async def test_item7_supervisor_response_preserves_launch_exit_code(tmp_path: Path) -> None:
-    """Supervisor JSON serialization preserves launch_exit_code and launch_error across the boundary."""
-    registry: dict[str, ProcessRecord] = {}
-    result = await run_command(
-        registry,
-        namespace="test",
-        argv=["/nonexistent-binary-xyz"],
-        env={},
-        cwd=str(tmp_path),
-        tail=10,
-        timeout=5.0,
-    )
-    parsed = _parse_supervisor_response(json.dumps(asdict(result)).encode("utf-8") + b"\n")
-    assert parsed.launch_exit_code == 127
-    assert parsed.launch_error == "/nonexistent-binary-xyz: No such file or directory"
+async def test_item7_supervised_launch_failure_exits_only_when_asked(tmp_path: Path) -> None:
+    """The supervisor ends a launch failure as a failed command for a caller that asks, and as an error otherwise."""
+
+    async def run(**asked: bool) -> ShellRunResult:
+        return await run_command_via_supervisor(
+            socket_path,
+            namespace="test",
+            argv=["/nonexistent-binary-xyz"],
+            env={},
+            cwd=str(tmp_path),
+            tail=10,
+            timeout=5.0,
+            on_timeout="kill",
+            **asked,
+        )
+
+    async with _running_server({}) as socket_path:
+        asked, unasked = await run(launch_failure_exits=True), await run()
+
+    assert asked == ShellRunResult(message="Exit code 127\nStderr:\n/nonexistent-binary-xyz: No such file or directory")
+    assert unasked.execution_error
+    assert unasked.message.startswith("Error: [Errno 2]")
 
 
 # ---------------------------------------------------------------------------

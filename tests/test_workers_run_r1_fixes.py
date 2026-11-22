@@ -3,17 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import signal
 import sys
 import threading
 from contextlib import contextmanager
 from io import StringIO
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
-import httpx
 import pytest
 
 from mindroom.agent_cli.main import main
@@ -183,134 +181,8 @@ def test_r1_successful_command_printing_launch_failure_text_exits_0(
 
 
 @pytest.mark.asyncio
-async def test_r1_launch_error_travels_through_sandbox_proxy_into_receipt(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A structured launch error from the worker populates receipt launch_exit_code and launch_error via sandbox_proxy."""
-    handle = WorkerHandle(
-        worker_id="worker-f2",
-        worker_key="agent:test:named=f2",
-        endpoint="http://worker/api/sandbox-runner/execute",
-        auth_token=_TEST_TOKEN,
-        status="ready",
-        backend_name="kubernetes",
-        last_used_at=0.0,
-        created_at=0.0,
-    )
-
-    class _LaunchErrorHttpClient:
-        def __init__(self, *, timeout: float) -> None:
-            del timeout
-
-        def __enter__(self) -> Self:
-            return self
-
-        def __exit__(self, *_exc: object) -> None:
-            return
-
-        @contextmanager
-        def stream(self, method: str, url: str, **_kwargs: object) -> Iterator[httpx.Response]:
-            body = json.dumps(
-                {
-                    "ok": True,
-                    "result": {
-                        "mindroom_shell_launch_error": {
-                            "exit_code": 127,
-                            "message": "/nonexistent: No such file or directory",
-                        },
-                    },
-                },
-            ).encode()
-            yield httpx.Response(200, content=body, request=httpx.Request(method, url))
-
-    runtime_paths = resolve_primary_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "storage",
-        process_env={"MINDROOM_WORKER_BACKEND": "kubernetes"},
-    )
-
-    @contextmanager
-    def fake_lease(_rp: object, _pc: object) -> Iterator[_FakeWorkerManager]:
-        yield _FakeWorkerManager(handle)
-
-    class _FakeNamed:
-        name = "f2"
-
-        def header(self, _handle: object) -> str:
-            return "[worker: f2]"
-
-    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.lease_worker_manager", fake_lease)
-    monkeypatch.setattr(
-        "mindroom.tool_system.sandbox_proxy._build_execute_request",
-        lambda *_args, **_kwargs: (
-            ExecuteRequest(
-                protocol=WORKER_PROTOCOL_VERSION,
-                tool_name="shell",
-                function_name="run_shell_command",
-                args=[],
-                kwargs={"args": ["/nonexistent"], "worker": "f2"},
-            ),
-            handle,
-        ),
-    )
-    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy._named_worker_call", lambda *_a, **_k: _FakeNamed())
-    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _LaunchErrorHttpClient)
-
-    async def local_placeholder(args: str) -> str:
-        return args
-
-    proxied_shell = WorkerStandIns(
-        tool_name="shell",
-        runtime_paths=runtime_paths,
-        credentials_manager=None,
-        tools=builtin_tool_registry(),
-    )("run_shell_command", local_placeholder)
-
-    outer_entered = asyncio.Event()
-    release_outer = asyncio.Event()
-
-    async def run_shell_command(args: str) -> str:
-        if args == "outer":
-            outer_entered.set()
-            await release_outer.wait()
-            return "outer done"
-        return str(await proxied_shell(args))
-
-    owner, _token = await _make_owner(tmp_path, run_shell_command)
-    try:
-        async with response_cli_lifetime():
-            await capture_bash_batch(owner, ("outer-1", {"command": "outer"}))
-            bash_task = asyncio.create_task(
-                owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "outer"}, "outer-1"),
-            )
-            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-                await outer_entered.wait()
-                call_id = uuid4()
-                await owner.operation(
-                    window="outer-1",
-                    operation=ToolCallOperation(
-                        operation="tools.call",
-                        call_id=call_id,
-                        toolkit="shell",
-                        function="run_shell_command",
-                        arguments={"args": "/nonexistent"},
-                    ),
-                )
-                receipt = await owner.get_call(str(call_id), wait=5.0)
-                assert receipt["status"] == "completed"
-                assert receipt["launch_exit_code"] == 127
-                assert receipt["launch_error"] == "/nonexistent: No such file or directory"
-                assert receipt["outcome"] == "[worker: f2]\n/nonexistent: No such file or directory"
-                release_outer.set()
-                await bash_task
-    finally:
-        await owner.close()
-
-
-@pytest.mark.asyncio
 async def test_r1_output_capture_eacces_stays_execution_error(tmp_path: Path) -> None:
-    """EACCES from ShellOutputCapture temp-file creation stays an execution error, not launch exit 126."""
+    """EACCES from ShellOutputCapture temp-file creation stays an execution error, not a command that exited 126."""
     ro_dir = tmp_path / "readonly"
     ro_dir.mkdir()
     ro_dir.chmod(0o555)
@@ -329,10 +201,10 @@ async def test_r1_output_capture_eacces_stays_execution_error(tmp_path: Path) ->
                 path="out.txt",
                 max_bytes=1024,
             ),
+            launch_failure_exits=True,
         )
         assert result.execution_error is True
-        assert result.launch_exit_code is None
-        assert result.launch_error is None
+        assert result.message.startswith("Error: [Errno 13]")
     finally:
         ro_dir.chmod(0o755)
 
