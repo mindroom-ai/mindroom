@@ -35,6 +35,7 @@ from mindroom.matrix.room_member_joins import (
     room_member_left_from_event,
 )
 from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
+from mindroom.matrix.state_failures import StateFailure, state_failure
 from mindroom.room_settings import on_thread_mode_change
 
 if TYPE_CHECKING:
@@ -125,7 +126,9 @@ async def put_room_state_as_steward(
     None means refused: the room has no steward, or it lacks the power, which only moderator rights can fix.
     """
     response = await room_state_response_as_steward(room_steward, room_id, event_type, content, state_key=state_key)
-    if response is None or (isinstance(response, nio.RoomPutStateError) and response.status_code == "M_FORBIDDEN"):
+    if response is None or (
+        isinstance(response, nio.RoomPutStateError) and state_failure(response) is StateFailure.REFUSED
+    ):
         return None
     return isinstance(response, nio.RoomPutStateResponse)
 

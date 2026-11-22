@@ -2330,9 +2330,10 @@ async def test_get_thread_tag_content_raises_on_other_errors() -> None:
 
 @pytest.mark.asyncio
 async def test_get_thread_tag_content_raises_on_a_server_error_body() -> None:
-    """A non-404 error body, which nio passes through as content, fails the read with its status."""
+    """A non-404 answer fails the read, even one whose body says M_NOT_FOUND; only a 404 M_NOT_FOUND means unset."""
     answers = {
         '["$root","snoozed"]': (500, {"errcode": "M_UNKNOWN", "error": "boom"}),
+        '["$proxy","snoozed"]': (503, {"errcode": "M_NOT_FOUND", "error": "upstream down"}),
         '["$gone","snoozed"]': (404, {"errcode": "M_NOT_FOUND", "error": "Event not found."}),
         '["$set","snoozed"]': (200, _tag_record_content()),
     }
@@ -2347,8 +2348,10 @@ async def test_get_thread_tag_content_raises_on_a_server_error_body() -> None:
         client = MindRoomAsyncClient(str(server.make_url("")), "@bot:localhost")
         client.access_token = "token"  # noqa: S105
         try:
-            with pytest.raises(ThreadTagsError, match="HTTP 500"):
+            with pytest.raises(ThreadTagsError, match="M_UNKNOWN boom"):
                 await get_thread_tag_content(client, "!room:localhost", "$root", "snoozed")
+            with pytest.raises(ThreadTagsError, match="upstream down"):
+                await get_thread_tag_content(client, "!room:localhost", "$proxy", "snoozed")
             assert await get_thread_tag_content(client, "!room:localhost", "$gone", "snoozed") is None
             assert await get_thread_tag_content(client, "!room:localhost", "$set", "snoozed") == _tag_record_content()
         finally:

@@ -227,6 +227,26 @@ async def test_a_room_without_state_rights_is_not_a_warning() -> None:
     ]
 
 
+@pytest.mark.asyncio
+async def test_503_with_m_forbidden_or_m_not_found_is_transient() -> None:
+    """A 503 GET M_NOT_FOUND does not skip clearing, and a 503 PUT M_FORBIDDEN logs a warning, not debug."""
+    client = _client(
+        nio.RoomGetStateEventError("unavailable", status_code="M_NOT_FOUND", room_id=ROOM, http_status=503),
+    )
+    client.room_put_state.return_value = nio.RoomPutStateError(
+        "unavailable",
+        status_code="M_FORBIDDEN",
+        room_id=ROOM,
+        http_status=503,
+    )
+    with capture_logs() as logs:
+        await publish_server_state(client, ROOM, {})
+    client.room_put_state.assert_awaited_once_with(ROOM, MINDROOM_SERVER_EVENT_TYPE, {}, state_key=AGENT)
+    assert [(log["event"], log["log_level"]) for log in logs] == [
+        ("MindRoom server state was refused", "warning"),
+    ]
+
+
 def test_managed_rooms_let_every_entity_publish_its_server() -> None:
     """Matrix accepts a state key starting with @ only from that user, so level 0 lets each entity write only its own."""
     client = MagicMock(spec=nio.AsyncClient)

@@ -313,6 +313,33 @@ async def test_room_encryption_resolution_names_each_refusal(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("errcode", "http_status"),
+    [("M_NOT_FOUND", 503), ("M_UNRECOGNIZED", 404), (None, 404)],
+    ids=["503-m-not-found", "404-m-unrecognized", "404-no-errcode"],
+)
+async def test_room_encryption_resolution_treats_unproven_absence_as_unknown(
+    errcode: str | None,
+    http_status: int,
+) -> None:
+    """Only a 404 M_NOT_FOUND proves a room unencrypted; a 503 body or a proxy's 404 never does."""
+    client = _cache_bypass_client(encrypted=None)
+    client.room_get_state_event.return_value = nio.RoomGetStateEventError(
+        "Service unavailable",
+        status_code=errcode,
+        room_id="!room:localhost",
+        http_status=http_status,
+    )
+
+    outcome = await resolve_room_encryption_outcome(client, "!room:localhost", operation="op")
+
+    assert outcome == MatrixDeliveryFailure(
+        MatrixDeliveryFailureKind.UNKNOWN_ENCRYPTION_STATE,
+        "room encryption state unknown without a synced room cache",
+    )
+
+
+@pytest.mark.asyncio
 async def test_send_message_outcome_maps_encryption_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     """A missing local E2EE support maps to the encryption-guard failure kind."""
     monkeypatch.setattr(crypto, "ENCRYPTION_ENABLED", False)

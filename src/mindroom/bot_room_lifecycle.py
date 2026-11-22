@@ -744,8 +744,8 @@ class BotRoomLifecycle:
         if not invite_is_current():
             await self._clear_join_decrypt_notice_fence(room_id)
             return False
-        # False includes stale position and exhausted HTTP retries;
-        # neither proves a terminal rejection of this invitation.
+        # False covers HTTP failures (logged by change_local_membership), stale positions,
+        # and lost room readiness; none proves a terminal rejection of this invitation.
         self._logger().error("Failed to join room", room_id=room_id)
         msg = f"Failed to join invited room {room_id}"
         raise RuntimeError(msg)
