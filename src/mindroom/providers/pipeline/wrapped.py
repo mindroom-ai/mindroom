@@ -160,7 +160,7 @@ async def attempts(
     ``retry`` sees only the failures of attempts that committed nothing, and returns how to reissue the request, or
     None to let the failure propagate; ``next_event`` reads each event, so a stage can bound the wait for it. A failed
     attempt's partial usage is settled before the retry, and the finished turn carries the failed attempts' usage.
-    A reissue after the failure of a request resent without provider-encrypted replay state goes without it too.
+    Once an attempt went without provider-encrypted replay state, every reissue goes without it too.
     An attempt whose stream ends without ``TurnCompleted`` ended before the provider finished the turn, on every
     route, and fails with the retryable ``incomplete_stream_error``.
     """
@@ -192,7 +192,7 @@ async def attempts(
         except ProviderError as error:
             if committed or (reissue := retry(error)) is None:
                 raise
-            reissue = _keeping_replay_stripped(reissue, error)
+            reissue = _keeping_replay_stripped(reissue, request, error)
         if (report := usage.settle()) is not None:
             yield _with_carried_usage(report, carried)
         if reissue.delay_seconds:
@@ -201,9 +201,12 @@ async def attempts(
         request = reissue.request
 
 
-def _keeping_replay_stripped(reissue: Retry, error: ProviderError) -> Retry:
-    """Return ``reissue`` without provider-encrypted replay state when the attempt ``error`` failed went without it."""
-    if not error.replay_stripped:
+def _keeping_replay_stripped(reissue: Retry, failed: ModelRequest, error: ProviderError) -> Retry:
+    """Return ``reissue`` without provider-encrypted replay state once an attempt went without it.
+
+    That attempt is ``failed``, or the request the retry stage resent in its place before ``error``.
+    """
+    if not (failed.strip_encrypted_replay or error.replay_stripped):
         return reissue
     return replace(reissue, request=replace(reissue.request, strip_encrypted_replay=True))
 
