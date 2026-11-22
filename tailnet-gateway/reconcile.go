@@ -100,7 +100,7 @@ func (g *Gateway) Reconcile(ctx context.Context) error {
 		}
 		node, err := g.factory(filepath.Join(g.stateDir, id), link.Hostname)
 		if err != nil {
-			log.Printf("link %s: starting node: %v", id, err)
+			log.Printf("link %s (%s): starting node: %v", id, link.Hostname, err)
 			continue
 		}
 		live := &linkNode{Node: node, logins: append([]string{}, link.AllowedLogins...), open: map[net.Conn]time.Time{}}
