@@ -37,6 +37,7 @@ from mindroom.tool_system.runtime_context import (
     get_call_progress_sink,
     get_tool_runtime_context,
     get_worker_progress_pump,
+    note_call_cancelled_never_ran,
     note_call_refusal,
 )
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
@@ -1070,7 +1071,8 @@ class WorkerStandIns:
                 raise
             except asyncio.CancelledError:
                 # The blocking request keeps running after this await is cancelled; stop it at the worker too.
-                cancellation.cancel()
+                if cancellation.cancel():
+                    note_call_cancelled_never_ran()
                 raise
 
         return proxy_entrypoint
