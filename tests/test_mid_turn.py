@@ -1822,7 +1822,7 @@ async def test_a_verdict_after_a_tool_batch_marks_the_waiting_message(*, verdict
     hook = queued_notice_after_tool_batch(_NOTICE)
     notices = []
 
-    async def turn(_target: MessageTarget) -> list[Message]:
+    async def turn() -> list[Message]:
         follow_up = request_envelope(
             target=MessageTarget.resolve("!room:localhost", "$thread", "$stop"),
             reply_to_event_id="$stop",
@@ -1869,7 +1869,7 @@ async def test_a_message_arriving_during_the_judgment_keeps_the_judged_mark() ->
         queue("$more", "and use the new file")
         return False
 
-    async def turn(_target: MessageTarget) -> list[Message]:
+    async def turn() -> list[Message]:
         queue("$stop", "Stop, wrong file")
         messages = _resumed_messages()
         await hook(messages, ())
@@ -2011,7 +2011,7 @@ class _JobReply:
             return create_session_storage("leader", self.config, self.paths, self.owner)
 
         @owned_tool_execution(enabled=always_owned)
-        async def turn(_target: MessageTarget) -> RunRecord:
+        async def turn() -> RunRecord:
             # The reply saves its run, so a result it read stays read.
             set_consumption_storage(storage)
             return await run_job_turn(

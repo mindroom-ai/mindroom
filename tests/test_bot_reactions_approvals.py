@@ -1075,10 +1075,9 @@ class TestAgentBot(AgentBotTestBase):
             _request: ResponseRequest,
             *,
             team: object,
-            resolved_target: MessageTarget,
             participation: object,
         ) -> SourceFate:
-            del team, resolved_target, participation
+            del team, participation
             older_entered.set()
             await release_older.wait()
             return Owned()
@@ -1787,10 +1786,9 @@ class TestAgentBot(AgentBotTestBase):
             request: ResponseRequest,
             *,
             team: object,
-            resolved_target: MessageTarget,
             participation: object,
         ) -> SourceFate:
-            del team, resolved_target, participation
+            del team, participation
             if request.prompt == "interactive":
                 interactive_entered.set()
                 await release_interactive.wait()
@@ -1866,11 +1864,10 @@ class TestAgentBot(AgentBotTestBase):
             request: ResponseRequest,
             *,
             team: object,
-            resolved_target: MessageTarget,
             participation: object,
         ) -> SourceFate:
             del team, participation
-            resolved_targets.append(resolved_target)
+            resolved_targets.append(request.response_envelope.target)
             await record_turn_answered(bot, request)
             return Owned()
 
@@ -1924,10 +1921,9 @@ class TestAgentBot(AgentBotTestBase):
             request: ResponseRequest,
             *,
             team: object,
-            resolved_target: MessageTarget,
             participation: object,
         ) -> SourceFate:
-            del team, resolved_target, participation
+            del team, participation
             captured_requests.append(request)
             return Owned()
 

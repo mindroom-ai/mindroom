@@ -167,7 +167,7 @@ async def _run_follow_up(
     dispatched: asyncio.Event,
     order: list[str],
 ) -> SourceFate:
-    async def answer(_target: MessageTarget) -> SourceFate:
+    async def answer() -> SourceFate:
         order.append("follow-up")
         return Owned()
 
@@ -223,7 +223,8 @@ async def test_automatic_checkpoint_keeps_foreground_until_handoff(  # noqa: PLR
             metadata_content={},
         )
 
-    async def initial_model(resolved_target: MessageTarget) -> SourceFate:
+    async def initial_model() -> SourceFate:
+        resolved_target = request.response_envelope.target
         assert checkpoint == "initial"
         # The turn claims its reply, as the locked generation does before the model runs.
         history_scope = runner.deps.state_writer.history_scope()

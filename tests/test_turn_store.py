@@ -2202,7 +2202,7 @@ async def test_deleted_edit_cannot_enter_reopened_model_history(  # noqa: PLR091
         async def prepare_locked() -> ResponseRequest | SourceFate:
             waiting.set()
             async with lifecycle_lock:
-                return await runner._begin_locked_turn(request, resolved_target=target, history_scope=scope)
+                return await runner._begin_locked_turn(request, history_scope=scope)
 
         async def claim_without_reply(claimed: ResponseRequest, **_kwargs: object) -> ResponseRequest:
             # No reply record backs this preparation: the turn proceeds as one whose claim took.

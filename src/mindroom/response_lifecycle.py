@@ -633,7 +633,7 @@ class ResponseLifecycleCoordinator:
         target: MessageTarget,
         response_envelope: MessageEnvelope,
         pipeline_timing: DispatchPipelineTiming | None,
-        locked_operation: Callable[[MessageTarget], Awaitable[_LockedResponseResult]],
+        locked_operation: Callable[[], Awaitable[_LockedResponseResult]],
         signal_queued_message: bool = True,
         mid_turn_gate: MidTurnGate | None = None,
     ) -> _LockedResponseResult:
@@ -667,7 +667,7 @@ class ResponseLifecycleCoordinator:
                 queued_message_signal_context(queued_signal, mid_turn_gate=mid_turn_gate),
             ):
                 try:
-                    return await locked_operation(target)
+                    return await locked_operation()
                 finally:
                     queued_signal.mid_turn_gate = None
                     # The Steers it latched keep their reason for their own follow-ups.

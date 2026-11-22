@@ -531,14 +531,11 @@ async def _ended_with_its_note(runner: ResponseRunner, request: ResponseRequest)
 async def _begin_locked_turn_in_span(
     runner: ResponseRunner,
     request: ResponseRequest,
-    *,
-    resolved_target: MessageTarget,
 ) -> ResponseRequest | SourceFate:
     """Admit and prepare ``request`` inside a span scope, as its locked lifecycle does."""
     async with runner.deps.replies.span_scope():
         return await runner._begin_locked_turn(
             request,
-            resolved_target=resolved_target,
             history_scope=runner.deps.state_writer.history_scope(),
         )
 
@@ -1612,7 +1609,7 @@ async def test_final_source_gate_uses_refreshed_history_without_repeating_lifecy
         prepare_source_turn=prepare,
         on_lifecycle_lock_acquired=acquired,
     )
-    prepared = await _begin_locked_turn_in_span(runner, request, resolved_target=target)
+    prepared = await _begin_locked_turn_in_span(runner, request)
     assert [item.args[0] for item in prepare.await_args_list] == [[], history]
     acquired.assert_called_once_with()
     if final_result is True:
@@ -1648,7 +1645,7 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
         prepare_source_turn=prepare_source_turn,
     )
     preparation_task = asyncio.create_task(
-        _begin_locked_turn_in_span(runner, request, resolved_target=target),
+        _begin_locked_turn_in_span(runner, request),
     )
     await asyncio.wait_for(preparation_started.wait(), timeout=2)
 
@@ -2259,7 +2256,6 @@ async def test_final_recovery_error_fences_current_claim(tmp_path: Path, *, canc
             with pytest.raises(asyncio.CancelledError):
                 await runner._run_owned_or_locked_response(
                     _plain_request(_target(thread_id="$thread"), source_event_id="$source"),
-                    target=_target(thread_id="$thread"),
                     locked_operation=AsyncMock(),
                 )
         else:
@@ -2267,7 +2263,6 @@ async def test_final_recovery_error_fences_current_claim(tmp_path: Path, *, canc
             assert (
                 await runner._run_owned_or_locked_response(
                     _plain_request(_target(thread_id="$thread"), source_event_id="$source"),
-                    target=_target(thread_id="$thread"),
                     locked_operation=AsyncMock(),
                 )
                 == Owned()
@@ -2296,7 +2291,6 @@ async def test_a_placeholder_its_reply_refuses_is_not_sent_and_the_turn_goes_on(
             )
             placeholder_event_id = await runner._send_placeholder(
                 request,
-                resolved_target=target,
                 history_scope=runner.deps.state_writer.history_scope(),
                 execution_identity=runner.deps.tool_runtime.build_execution_identity(
                     target=target,
@@ -2358,11 +2352,10 @@ async def test_claimed_request_preparation_excludes_early_placeholder_from_refre
     # The locked turn claims its reply span in the scope every response opens.
     async with runner.deps.replies.span_scope():
         history_scope = runner.deps.state_writer.history_scope()
-        admitted = await runner._admit_locked_turn(request, resolved_target=target, history_scope=history_scope)
+        admitted = await runner._admit_locked_turn(request, history_scope=history_scope)
         assert isinstance(admitted, ResponseRequest)
         placeholder_event_id = await runner._send_placeholder(
             admitted,
-            resolved_target=target,
             history_scope=history_scope,
             execution_identity=runner.deps.tool_runtime.build_execution_identity(
                 target=target,
@@ -2373,7 +2366,6 @@ async def test_claimed_request_preparation_excludes_early_placeholder_from_refre
         assert placeholder_event_id == "$placeholder"
         prepared_request = await runner._prepare_claimed_request(
             admitted,
-            resolved_target=target,
             placeholder_event_id=placeholder_event_id,
         )
 
@@ -2576,7 +2568,6 @@ async def test_replayed_source_adopts_journal_owned_approval_continuation(tmp_pa
     assert (
         await runner._run_owned_or_locked_response(
             request,
-            target=request.response_envelope.target,
             locked_operation=locked_operation,
         )
         == Owned()
@@ -2602,7 +2593,7 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
     follow_up_started = asyncio.Event()
     release_follow_up = asyncio.Event()
 
-    async def active_follow_up(_target: MessageTarget) -> SourceFate:
+    async def active_follow_up() -> SourceFate:
         follow_up_started.set()
         await release_follow_up.wait()
         return Owned()
@@ -2744,7 +2735,6 @@ async def test_ready_approval_replay_rechecks_current_authorization(
             with pytest.raises(ReplyMembershipPendingError):
                 await runner._run_owned_or_locked_response(
                     request,
-                    target=request.response_envelope.target,
                     locked_operation=AsyncMock(side_effect=AssertionError("approval source regenerated")),
                 )
             assert await runner.deps.approval_store.approval_continuation(continuation.approval_id) == continuation
@@ -2760,7 +2750,6 @@ async def test_ready_approval_replay_rechecks_current_authorization(
             )
         fate = await runner._run_owned_or_locked_response(
             request,
-            target=request.response_envelope.target,
             locked_operation=AsyncMock(return_value=Unclaimed(UnclaimedReason.NOTHING_TO_RUN)),
         )
 
@@ -2822,7 +2811,6 @@ async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Pat
     ):
         fate = await runner._run_owned_or_locked_response(
             request,
-            target=request.response_envelope.target,
             locked_operation=AsyncMock(return_value=Unclaimed(UnclaimedReason.NOTHING_TO_RUN)),
         )
 
@@ -2864,7 +2852,6 @@ async def test_incomplete_resume_failure_keeps_the_source_unhandled(tmp_path: Pa
     ):
         fate = await runner._run_owned_or_locked_response(
             request,
-            target=request.response_envelope.target,
             locked_operation=AsyncMock(return_value=Unclaimed(UnclaimedReason.NOTHING_TO_RUN)),
         )
 
@@ -4793,7 +4780,6 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
     ):
         fate = await runner._run_owned_or_locked_response(
             request,
-            target=request.response_envelope.target,
             locked_operation=AsyncMock(return_value=Unclaimed(UnclaimedReason.NOTHING_TO_RUN)),
         )
 
@@ -6212,7 +6198,7 @@ async def test_response_lifecycle_reservation_is_not_its_own_queued_human_turn()
     observed_pending: list[int] = []
     observed_active_turns: list[int] = []
 
-    async def locked_operation(_target: MessageTarget) -> str:
+    async def locked_operation() -> str:
         queued_signal = coordinator._get_or_create_queued_signal(envelope.target)
         observed_pending.append(queued_signal.pending_human_messages)
         observed_active_turns.append(queued_signal._active_response_turns)
@@ -6241,7 +6227,7 @@ async def test_queued_lifecycle_reservation_preserves_notice_for_older_active_re
     first_entered = asyncio.Event()
     release_first = asyncio.Event()
 
-    async def first_operation(_target: MessageTarget) -> str:
+    async def first_operation() -> str:
         first_entered.set()
         await release_first.wait()
         return "first"
@@ -6265,7 +6251,7 @@ async def test_queued_lifecycle_reservation_preserves_notice_for_older_active_re
                 target=second_envelope.target,
                 response_envelope=second_envelope,
                 pipeline_timing=None,
-                locked_operation=lambda _target: asyncio.sleep(0, result="second"),
+                locked_operation=lambda: asyncio.sleep(0, result="second"),
             ),
         )
 
@@ -6296,7 +6282,7 @@ async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_
                     target=envelope.target,
                     response_envelope=envelope,
                     pipeline_timing=None,
-                    locked_operation=lambda _target: asyncio.sleep(0, result="cancelled"),
+                    locked_operation=lambda: asyncio.sleep(0, result="cancelled"),
                 ),
             )
         await asyncio.sleep(0)
@@ -6318,7 +6304,7 @@ async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_
                 target=envelope.target,
                 response_envelope=envelope,
                 pipeline_timing=None,
-                locked_operation=lambda _target: asyncio.sleep(0, result="next"),
+                locked_operation=lambda: asyncio.sleep(0, result="next"),
             ),
             timeout=1.0,
         )
@@ -6336,7 +6322,7 @@ async def test_a_cancelled_unreserved_response_frees_its_lock_before_it_returns(
         target=envelope.target,
         response_envelope=envelope,
         pipeline_timing=None,
-        locked_operation=lambda _target: asyncio.Event().wait(),
+        locked_operation=lambda: asyncio.Event().wait(),
     )
     # Stepped by hand, so nothing but the response itself runs between its cancellation and its return.
     response.send(None)
@@ -6388,21 +6374,21 @@ async def test_response_lifecycle_reservation_rejects_wrong_target_and_coordinat
                     target=envelope.target,
                     response_envelope=envelope,
                     pipeline_timing=None,
-                    locked_operation=lambda _target: asyncio.sleep(0),
+                    locked_operation=lambda: asyncio.sleep(0),
                 )
             with pytest.raises(ValueError, match="target does not match"):
                 await coordinator.run_locked_response(
                     target=other_target,
                     response_envelope=replace(envelope, target=other_target),
                     pipeline_timing=None,
-                    locked_operation=lambda _target: asyncio.sleep(0),
+                    locked_operation=lambda: asyncio.sleep(0),
                 )
             assert (
                 await coordinator.run_locked_response(
                     target=envelope.target,
                     response_envelope=envelope,
                     pipeline_timing=None,
-                    locked_operation=lambda _target: asyncio.sleep(0, result="owned"),
+                    locked_operation=lambda: asyncio.sleep(0, result="owned"),
                 )
                 == "owned"
             )
@@ -6411,7 +6397,7 @@ async def test_response_lifecycle_reservation_rejects_wrong_target_and_coordinat
                 target=envelope.target,
                 response_envelope=envelope,
                 pipeline_timing=None,
-                locked_operation=lambda _target: asyncio.sleep(0),
+                locked_operation=lambda: asyncio.sleep(0),
             )
     finally:
         await reservation.release()
@@ -6427,7 +6413,7 @@ async def test_queued_human_notice_is_registered_exactly_once() -> None:
     in_first_turn = asyncio.Event()
     pending_during_second_turn: list[int] = []
 
-    async def first_turn(_target: MessageTarget) -> str:
+    async def first_turn() -> str:
         in_first_turn.set()
         await gate.wait()
         return "first"
@@ -6461,7 +6447,7 @@ async def test_queued_human_notice_is_registered_exactly_once() -> None:
     reservation.release()
     assert queued_signal.pending_human_messages == 0
 
-    async def second_turn(_target: MessageTarget) -> str:
+    async def second_turn() -> str:
         pending_during_second_turn.append(queued_signal.pending_human_messages)
         return "second"
 
@@ -6496,12 +6482,12 @@ async def test_duplicate_queued_request_without_reservation_registers_one_notice
     gate = asyncio.Event()
     in_first_turn = asyncio.Event()
 
-    async def first_turn(_target: MessageTarget) -> str:
+    async def first_turn() -> str:
         in_first_turn.set()
         await gate.wait()
         return "first"
 
-    async def queued_turn(_target: MessageTarget) -> str:
+    async def queued_turn() -> str:
         return "queued"
 
     def run_queued() -> asyncio.Task[str]:
