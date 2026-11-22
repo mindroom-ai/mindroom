@@ -792,7 +792,7 @@ class WorkflowEngine:
     ) -> None:
         """Start the agent of a call the broker let pass, in its turn among the run's calls; a refusal is its end."""
         try:
-            outcome = _call_outcome(node, await gate())
+            outcome = _call_outcome(node, await _within_rate(gate))
         except (ScriptRunStoreError, ScriptRuntimeUnavailableError) as exc:
             outcome = WorkflowNodeState.FAILED, None, {"kind": "failed", "message": str(exc)}
         async with self._condition(run.run_id):
@@ -1208,23 +1208,17 @@ class WorkflowEngine:
         lanes: DirtyLanes,
     ) -> None:
         """Run one tool call and settle its node; *kept* is the tool list of the narrowed agent that started the run."""
-        outcome: _Outcome | None = None
+        outcome: _Outcome
         # A `start_workflow` this call makes starts a run inside this one, under this node.
         _CALLING_NODE.set((node.run_id, node.key, node.generation))
         try:
             _require_kept(kept, grant)
-            while outcome is None:
-                try:
-                    outcome = _call_outcome(node, await call())
-                except ScriptCallRateLimitError:
-                    # Nothing was claimed: the call waits until its attempt's minute has room for it.
-                    await asyncio.sleep(_RATE_WAIT_SECONDS)
+            outcome = _call_outcome(node, await _within_rate(call))
         except (ScriptRunStoreError, ScriptRuntimeUnavailableError) as exc:
             # Refused before any claim: a revoked attempt, a broker that takes no calls now.
             outcome = WorkflowNodeState.FAILED, None, {"kind": "failed", "message": str(exc)}
         finally:
             self._leave(node.run_id, node.key)
-        assert outcome is not None
         if dirty := _changed(node, outcome):
             # Before the node shows its end, so the script's next call already finds the lane dirty.
             lanes.mark(node.key)
@@ -1357,6 +1351,15 @@ class WorkflowEngine:
             key = f"{child.parent_node_key}/{child.run_id}"
             settle = partial(self.store.settle_node, outer.run_id, key, 1, outer.epoch, state=end, error=error)
             await asyncio.to_thread(settle)
+
+
+async def _within_rate(call: Callable[[], Awaitable[ScriptCallRecord]]) -> ScriptCallRecord:
+    """Make a call of the broker, again each moment while its attempt's minute has no room for it: nothing was claimed."""
+    while True:
+        try:
+            return await call()
+        except ScriptCallRateLimitError:
+            await asyncio.sleep(_RATE_WAIT_SECONDS)
 
 
 def _changed(node: WorkflowNode, outcome: _Outcome) -> bool:

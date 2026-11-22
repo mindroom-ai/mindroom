@@ -6,6 +6,8 @@ Level: engine harness (`WorkflowStack`) with the real broker, the real job runti
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+from contextlib import closing
 from typing import TYPE_CHECKING
 
 import pytest
@@ -18,6 +20,7 @@ from mindroom.script_runs.models import ScriptRunState
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
+from mindroom.workflow_runs.engine import WorkflowLimits
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.workflow_helpers import NodeFailed, WorkflowStack, tool_args, workflow_stack
@@ -439,3 +442,26 @@ async def test_restart_during_a_scripts_nested_run_ends_its_call_indeterminate(s
     assert cut_short.value.kind == "indeterminate"
     inside = [(run.run_id, run.state) for run in stack.store.child_runs(parent)]
     assert inside == [(child.run_id, WorkflowRunState.RUNNING)]
+
+
+@pytest.mark.asyncio
+async def test_script_tool_delegate_above_the_rate_limit_waits_and_then_runs(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate of a delegated call is a tool call of the script: above the calls per minute it waits, as they do."""
+    monkeypatch.setattr(engine_module, "_RATE_WAIT_SECONDS", 0.02)
+    stack.limits = WorkflowLimits(max_tool_calls_per_minute=1)
+    await stack.start()
+    assert await stack.result("@0", "tool", tool_args("counter", "text", size=1)) == "x"
+    model = stack.child_script(answer("helped"))
+
+    receipt = await stack.submit("@1", "tool", _delegate(system_prompt="You help."))
+    await asyncio.sleep(0.1)
+    assert (receipt.state, model.requests) == ("queued", [])
+    # A minute later, as the attempt's records tell it: the earlier call is old enough.
+    with closing(sqlite3.connect(stack.script_store.database_path)) as records:
+        records.execute("UPDATE script_calls SET created_at = '2000-01-01T00:00:00+00:00'")
+        records.commit()
+
+    assert (await _settled(stack, receipt)).result == "helped"
