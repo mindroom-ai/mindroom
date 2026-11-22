@@ -85,7 +85,7 @@ class LiveFunction:
 class _LiveTools:
     """The functions one agent's run offers and how the run calls them.
 
-    ``middleware`` is the run's tool-call policy without the step that binds these, and ``context`` is the run's
+    ``middleware`` is the run's tool-call policy, without the step that binds these, and ``context`` is the run's
     context for the call that is running, so a stored call runs exactly as the model's own call of it would.
     """
 
@@ -104,13 +104,13 @@ def bind_live_tools(
     """Return ``middleware`` behind a first step that shows each call the run's functions, for scheduled calls.
 
     ``functions`` are the ones the run offers, by name; a generated function names no toolkit, so no stored call can
-    name it; a stored call runs under the returned policy, this step included. A run that offers no scheduler
-    function reading them gets ``middleware`` as it is.
+    name it. A stored call runs under ``middleware`` alone, inside the call that runs it, which this step already
+    shows the same functions. A run that offers no scheduler function reading them gets ``middleware`` as it is.
     """
     if _LIVE_FUNCTION_READERS.isdisjoint(functions):
         return tuple(middleware)
-    # The bound tools keep the policy without this step, which a stored call adds again: a step holding the policy that
-    # holds it would be a reference cycle, which only a full garbage collection frees, with all of the run's functions.
+    # A step holding the policy that holds it would be a reference cycle, which only a full garbage collection frees,
+    # together with all of the run's functions.
     rest = tuple(middleware)
 
     async def bind_live_functions(call: ToolCall, call_next: ToolNext) -> object:
@@ -220,7 +220,7 @@ async def run_scheduled_call(  # noqa: PLR0911 - one refusal per broken conditio
                 function,
                 json.loads(arguments_text),
                 replace(live.context, call_id=f"scheduled-{task_id}"),
-                middleware=bind_live_tools(live.functions, live.middleware),
+                middleware=live.middleware,
             )
     await manager.record_scheduled_call_outcome(task_id, "completed" if result.succeeded else "failed")
     if result.error is not None:

@@ -18,6 +18,7 @@ from mindroom.agent_cli.lifetime import response_cli_lifetime
 from mindroom.agent_cli.protocol import ToolCallOperation, ToolCallReceipt, parse_operation
 from mindroom.agent_cli.response_owner import bind_response_owner
 from mindroom.agent_cli.session import (
+    CONFIG_RELOAD_CALL,
     CliAuthenticationError,
     TurnToolBridge,
     cli_turn_owner,
@@ -109,10 +110,15 @@ def test_owner_factory_binds_exact_runtime_and_turn_identity(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("agent_cli_api")
+@pytest.mark.parametrize("reload_ends_run", [False, True], ids=["standard", "minimal"])
 async def test_a_reload_that_changed_the_agents_tools_refuses_a_cli_call_before_binding_its_toolkit(
     tmp_path: Path,
+    reload_ends_run: bool,
 ) -> None:
-    """A catalog a reload invalidated builds no toolkit for a CLI call; the call fails as unavailable."""
+    """A catalog a reload invalidated builds no toolkit for a CLI call; the call fails as unavailable.
+
+    Only a minimal turn's refusal also stops its run.
+    """
     runtime = _runtime_context(tmp_path)
     current = runtime.config.model_copy(deep=True)
     current.agents["helper"].tools = ["calculator"]
@@ -139,7 +145,7 @@ async def test_a_reload_that_changed_the_agents_tools_refuses_a_cli_call_before_
             output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
             delegation_depth=0,
             refresh_scheduler=None,
-            reload_ends_run=False,
+            reload_ends_run=reload_ends_run,
         )
         async with owner._window("bash"):
             receipt = await owner.operation(
@@ -156,8 +162,8 @@ async def test_a_reload_that_changed_the_agents_tools_refuses_a_cli_call_before_
     assert receipt["status"] == "failed"
     assert "This MindRoom call did not run: the configuration was reloaded" in receipt["outcome"]
     # A standard turn's own tools still run: the refusal neither stops its run nor says the turn stopped.
-    assert "turn stopped" not in receipt["outcome"]
-    assert not owner.control_calls
+    assert reload_ends_run or "turn stopped" not in receipt["outcome"]
+    assert [call.tool_name for call in owner.control_calls] == ([CONFIG_RELOAD_CALL] if reload_ends_run else [])
     catalog.bind.assert_not_awaited()
 
 
