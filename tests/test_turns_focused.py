@@ -250,6 +250,8 @@ class _RecordingResponseRunner:
     held_for_approval: bool = False
     # The queued messages whose edits ingress applied, which a restart's continued reply no longer covers.
     edited_sources: list[str] = field(default_factory=list)
+    # The messages ingress asked to have told to a running reply.
+    notice_requests: list[str] = field(default_factory=list)
 
     @property
     def inbox(self) -> _RecordingResponseRunner:
@@ -273,8 +275,18 @@ class _RecordingResponseRunner:
     async def reserve_response_lifecycle(self, response_envelope: MessageEnvelope) -> _ImmediateLifecycleReservation:  # noqa: ARG002
         return _ImmediateLifecycleReservation()
 
-    def reserve_waiting_human_message(self, **_kwargs: object) -> QueuedHumanNoticeReservation | None:
-        """Reserve nothing, as a conversation with no running reply does."""
+    def reserve_waiting_human_message(
+        self,
+        *,
+        target: MessageTarget,
+        response_envelope: MessageEnvelope,
+        mentions_nobody: bool = False,  # noqa: ARG002
+        transcript: str | None = None,  # noqa: ARG002
+        mode: MidTurnMode = MidTurnMode.AUTO,  # noqa: ARG002
+    ) -> QueuedHumanNoticeReservation | None:
+        """Reserve nothing, as a conversation with no running reply does, for a call the coordinator would accept."""
+        assert target.lifecycle_key == response_envelope.target.lifecycle_key
+        self.notice_requests.append(response_envelope.source_event_id)
         return None
 
     def track_inbox_response(
@@ -3084,6 +3096,8 @@ async def test_a_message_waiting_for_a_pending_approval_gets_an_hourglass(
 
     waits = held and mention in {None, "general"}
     assert harness.gateway.reactions == ([(event.event_id, "⏳", "approval_wait")] if waits else [])
+    # A message for another participant never asks to be told to this agent's running reply.
+    assert harness.runner.notice_requests == ([event.event_id] if mention in {None, "general"} else [])
     await harness.gate.drain_all()
     assert [batch.event.for_another_participant for batch in harness.gate_batches] == [
         {None: None, "general": False}.get(mention, True),
