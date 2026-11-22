@@ -60,7 +60,8 @@ class WorkerSpec:
 
     A dedicated backend provisions it from the applied launch it reads inside the worker's lock.
     ``mirror_grantable_credentials`` mirrors the launch's grantable credentials into the worker; scripts mirror none.
-    ``wait_for_setup`` is False for a caller that only shows the worker and so needs it to answer, not to run tools.
+    ``wait_for_setup`` is False for a caller that needs the worker to answer and not its tool runtime: one that only
+    shows the worker, or a streamed command. It says nothing about the worker, so it is left out of comparisons.
     """
 
     worker_key: str
@@ -68,7 +69,7 @@ class WorkerSpec:
     mirror_grantable_credentials: bool = True
     state_scope_worker_key: str | None = None
     resource_profile: ScriptResourceProfileName | None = None
-    wait_for_setup: bool = True
+    wait_for_setup: bool = field(default=True, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
