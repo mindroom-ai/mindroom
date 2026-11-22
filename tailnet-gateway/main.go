@@ -25,7 +25,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	token := os.Getenv("TAILNET_SSH_GATEWAY_TOKEN")
+	// Trim like the primary does, so a Secret written with a trailing newline still matches.
+	token := strings.TrimSpace(os.Getenv("TAILNET_SSH_GATEWAY_TOKEN"))
 	if token == "" {
 		log.Fatal("TAILNET_SSH_GATEWAY_TOKEN is not set")
 	}
