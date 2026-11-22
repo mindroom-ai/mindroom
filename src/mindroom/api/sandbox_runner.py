@@ -688,6 +688,16 @@ def prepare_route(app: FastAPI, route: WorkerRoute) -> _PreparedRoute | WorkerFa
     )
 
 
+async def _prepare_route_beside_setup(app: FastAPI, route: WorkerRoute) -> _PreparedRoute | WorkerFailure:
+    """Prepare a route as ``prepare_route`` does, without holding up what else the worker answers.
+
+    A worker that is still preparing itself may hold the lock this waits for, so the wait then happens in a thread.
+    """
+    if getattr(app.state, "worker_setup", None) == "preparing":
+        return await asyncio.to_thread(prepare_route, app, route)
+    return prepare_route(app, route)
+
+
 def _prepare_route_with_config(
     route: WorkerRoute,
     *,
@@ -1796,7 +1806,7 @@ async def save_attachment_to_worker(  # noqa: PLR0911
     payload: SaveAttachmentRequest,
 ) -> SaveAttachmentResponse | WorkerFailure:
     """Save one context-authorized attachment into the request's workspace."""
-    route = prepare_route(request.app, payload)
+    route = await _prepare_route_beside_setup(request.app, payload)
     if isinstance(route, WorkerFailure):
         return route
     if route.workspace is None:
@@ -1836,7 +1846,7 @@ async def save_attachment_to_worker(  # noqa: PLR0911
 @router.post("/view-file")
 async def view_file_in_worker(request: Request, payload: ViewFileRequest) -> ViewFileResponse | WorkerFailure:
     """View an image only after resolving the request's workspace."""
-    route = prepare_route(request.app, payload)
+    route = await _prepare_route_beside_setup(request.app, payload)
     if isinstance(route, WorkerFailure):
         return route
     if route.workspace is None:
@@ -2004,7 +2014,7 @@ async def execute_tool_call(request: Request, payload: ExecuteRequest) -> Respon
     A request the runner refuses before the call starts answers at once. The primary stops the call through
     /execute/cancel or by hanging up.
     """
-    route = prepare_route(request.app, payload)
+    route = await _prepare_route_beside_setup(request.app, payload)
     if isinstance(route, WorkerFailure):
         return JSONResponse(route.model_dump(mode="json"))
     call = _prepare_tool_call(request.app, payload, route)
