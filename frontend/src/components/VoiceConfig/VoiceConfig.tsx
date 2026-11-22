@@ -270,9 +270,7 @@ export function VoiceConfig() {
                 </span>
               </div>
               <div className="flex items-start justify-between gap-4">
-                <span className="text-muted-foreground">
-                  Visible Router Echo:
-                </span>
+                <span className="text-muted-foreground">Voice Transcript:</span>
                 <span className="font-mono text-right text-foreground">
                   {voiceConfig.visible_router_echo ? "Enabled" : "Disabled"}
                 </span>
@@ -287,7 +285,7 @@ export function VoiceConfig() {
                   htmlFor="visible-router-echo"
                   className="text-base font-semibold"
                 >
-                  Visible Router Echo
+                  Voice Transcript
                 </Label>
                 <p className="text-sm text-muted-foreground">
                   Post the transcript of a voice message before the reply.
