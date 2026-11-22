@@ -271,6 +271,12 @@ def _worker_signal_handlers() -> Iterator[_WorkerSignals]:
             signal.signal(signum, handler)
 
 
+def _note(message: str) -> None:
+    """Print one of `workers run`'s own lines on stderr, or nothing if stderr is closed: `print` would use stdout."""
+    if sys.stderr is not None:
+        print(message, file=sys.stderr, flush=True)
+
+
 def _emit_progress(
     receipt: dict[str, object] | None,
     last_progress: str | None,
@@ -283,7 +289,7 @@ def _emit_progress(
     next_revision = rev if isinstance(rev, int) and rev > last_revision else last_revision
     progress = receipt.get("progress")
     if isinstance(progress, str) and progress and (progress != last_progress or next_revision > last_revision):
-        print(f"mindroom-agent: {progress}", file=sys.stderr, flush=True)
+        _note(f"mindroom-agent: {progress}")
         return progress, next_revision
     return last_progress, next_revision
 
@@ -362,10 +368,9 @@ def _run_in_worker(args: argparse.Namespace) -> int:
     started with.
     """
     if os.environ.get(RUN_ID_ENV):
-        print(
+        _note(
             "mindroom-agent: A named worker belongs to a reply in a conversation; "
             "it cannot run from a background script.",
-            file=sys.stderr,
         )
         return _EXIT_NOT_RUN
     arguments: dict[str, object] = {
@@ -412,17 +417,14 @@ def _run_in_worker(args: argparse.Namespace) -> int:
                     result = client.cancel(call_id, timeout=_CANCEL_TIMEOUT_SECONDS)
     # From here on the CLI prints under the signal handlers it started with.
     if signum is not None and (result is None or result.get("status") != "completed"):
-        print(_cancel_notice(args.name, call_id, signum, result), file=sys.stderr)
+        _note(_cancel_notice(args.name, call_id, signum, result))
         return 128 + signum
     if error is None and result is not None:
         return _print_worker_result(args, result, call_id=call_id)
     if client is None:
-        print(f"mindroom-agent: {error}", file=sys.stderr)
+        _note(f"mindroom-agent: {error}")
         return _EXIT_NOT_RUN
-    print(
-        f"mindroom-agent: {error}; the command may still be running in worker {args.name} (call {call_id})",
-        file=sys.stderr,
-    )
+    _note(f"mindroom-agent: {error}; the command may still be running in worker {args.name} (call {call_id})")
     return _EXIT_UNKNOWN
 
 
@@ -434,10 +436,7 @@ def _print_worker_result(args: argparse.Namespace, result: dict[str, object], *,
     if isinstance(saved, dict):
         receipt = cast("dict[str, object]", saved)
         if receipt.get("status") == "error":
-            print(
-                f"mindroom-agent: {receipt.get('error', 'Could not save command output')} (call {call_id})",
-                file=sys.stderr,
-            )
+            _note(f"mindroom-agent: {receipt.get('error', 'Could not save command output')} (call {call_id})")
             return _EXIT_UNKNOWN
         # A long result arrives as its start and the workspace file that holds all of it.
         outcome, saved_path = receipt.get("preview"), receipt.get("path")
@@ -448,12 +447,12 @@ def _print_worker_result(args: argparse.Namespace, result: dict[str, object], *,
     if status != "completed" or header not in (f"[worker: {args.name}]", started_header):
         # Reserve 125 for typed named-worker refusals; everything else after submit is 255 with call id.
         if status == "failed" and result.get("error_kind") == "named_worker_refusal":
-            print(f"mindroom-agent: {text}", file=sys.stderr)
+            _note(f"mindroom-agent: {text}")
             return _EXIT_NOT_RUN
-        print(f"mindroom-agent: {text} (call {call_id})", file=sys.stderr)
+        _note(f"mindroom-agent: {text} (call {call_id})")
         return _EXIT_UNKNOWN
     if header == started_header:
-        print(f"mindroom-agent: started worker {args.name}", file=sys.stderr)
+        _note(f"mindroom-agent: started worker {args.name}")
     failed = _FAILED_COMMAND.match(body)
     # `format_shell_timeout` gives an exact line, then only output and stderr sections if present.
     first_line, newline, streams = body.partition("\n")
@@ -466,13 +465,13 @@ def _print_worker_result(args: argparse.Namespace, result: dict[str, object], *,
     if output:
         print(output)
     if saved_path is not None:
-        print(f"mindroom-agent: full output saved to {saved_path}", file=sys.stderr)
+        _note(f"mindroom-agent: full output saved to {saved_path}")
     if failed is not None:
         code = int(failed[1])
         # A command a signal killed exits as a shell reports it: 128 plus the signal.
         return code if code >= 0 else 128 - code
     if stopped:
-        print(f"mindroom-agent: stopped after {args.timeout:g}s", file=sys.stderr)
+        _note(f"mindroom-agent: stopped after {args.timeout:g}s")
         return _EXIT_TIMED_OUT
     return 0
 

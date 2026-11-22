@@ -393,9 +393,10 @@ class LiveTurnTools(TurnToolBridge):
                     update={"status": "cancelled", "outcome": "Call cancelled before dispatch"},
                 )
                 call.notify()
-            if call.awaiting_approval:
+            # Only the request that cancels the task waits for it, so repeats hold no waiters.
+            if call.awaiting_approval or not first:
                 return call.receipt.model_dump(mode="json")
-            if first and call.task is not None and not call.task.done():
+            if call.task is not None and not call.task.done():
                 request_task_cancel(call.task, process_shutdown=self._is_shutdown())
             if call.task is not None and call.receipt.status not in _TERMINAL_STATUSES:
                 await self._wait_for_call(

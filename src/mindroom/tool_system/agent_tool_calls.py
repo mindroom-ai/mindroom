@@ -336,7 +336,7 @@ def _invalid_arguments_reason(binding: PreparedAgentToolBinding, arguments: dict
     """Explain an explicitly requested but unavailable named worker without opening the shell's schema."""
     if (
         binding.key == ToolKey("shell", SHELL_FUNCTION)
-        and "worker" in arguments
+        and not {"worker", "resource_profile"}.isdisjoint(arguments)
         and "worker" not in binding.function.parameters.get("properties", {})
     ):
         context = binding.catalog.runtime_context
