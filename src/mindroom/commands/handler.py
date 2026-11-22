@@ -61,6 +61,7 @@ from mindroom.tool_jobs.client_cancel import (
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.plugins import config_plugins
+from mindroom.workflow_runs.answers import answer_command
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -80,6 +81,7 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.runtime import BackgroundJob
     from mindroom.tool_system.plugins import PluginReloadResult
     from mindroom.tool_system.registry import ToolRegistry
+    from mindroom.workflow_runs.engine import WorkflowEngine
 
 logger = get_logger(__name__)
 
@@ -192,6 +194,8 @@ class CommandHandlerContext:
     # Whether the room's steward holds the power to write one state event type: (room_id, event_type).
     steward_may_write_state: Callable[[str, str], bool]
     budget_monitor: BudgetMonitor | None = None
+    # Takes `!answer` for the questions of workflow runs.
+    workflow_engine: WorkflowEngine | None = None
 
 
 def _format_agent_description(agent_name: str, config: Config, tools: ToolRegistry) -> str:
@@ -464,6 +468,17 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         # A command sent outside any thread speaks for the whole room, though its reply opens a thread.
         thread_id = context.stable_target.source_thread_id
         response_text = await _background_jobs_command(context, room, command, requester_user_id, thread_id)
+
+    elif command.type == CommandType.ANSWER:
+        response_text = "Workflows are not running here."
+        if context.workflow_engine is not None:
+            response_text = await answer_command(
+                context.workflow_engine,
+                room_id=room.room_id,
+                thread_id=context.stable_target.source_thread_id,
+                sender=requester_user_id,
+                text=command.args["text"],
+            )
 
     elif command.type == CommandType.CONFIG:
         authorization = context.config.authorization

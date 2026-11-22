@@ -21,6 +21,7 @@ This page lists every command and fully covers `/help`, `/hi`, and `/config`; th
 | `/edit_schedule <id> <task>` | Edit an existing scheduled task | [Scheduling](scheduling.md#edit_schedule) |
 | `/jobs` | List the background jobs running in this thread, or in the whole room when sent outside any thread | [Background jobs](tools/agent-orchestration.md#background-jobs) |
 | `/cancel_job <id\|all>` | Cancel a background job by the short ID `/jobs` shows, or all of them in this thread, or in the whole room when sent outside any thread | [Background jobs](tools/agent-orchestration.md#background-jobs) |
+| `/answer [id] <answer>` | Answer a question a workflow run asked you in this thread, with an option's number or text; the ID is needed only when several questions are open | [Questions](tools/workflows.md#questions) |
 | `/desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one agent | [Desktop](tools/desktop.md#desktop) |
 | `/mode <agent> minimal\|standard\|show\|reset` | Switch one agent between standard tools and a Bash-only interface | [Minimal Agent Mode](tools/agent-cli.md#mode) |
 | `/compact [agent_or_team]` | Compact context before the next reply in this conversation (bare `/compact` applies to every agent or configured team you may address that has a conversation here) | [History](configuration/history.md#manual-compaction) |

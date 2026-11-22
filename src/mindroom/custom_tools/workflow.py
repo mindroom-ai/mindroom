@@ -16,6 +16,7 @@ from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contr
 from mindroom.config.resolution import authored_tool_entries
 from mindroom.constants import RuntimePaths  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.delegation.lifecycle import running_child_id, running_child_run
+from mindroom.matrix.event_types import WORKFLOW_ANSWER_EVENT_TYPE
 from mindroom.matrix.state import resolve_room_aliases
 from mindroom.script_runs.manager import workflow_placement
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
@@ -34,6 +35,7 @@ from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_
 from mindroom.tool_system.tool_hooks import dispatch_external_tool_hooks
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
+from mindroom.workflow_runs.answers import handle_workflow_answer
 from mindroom.workflow_runs.engine import WorkflowLimits, calling_node, ceiling, nested_key
 from mindroom.workflow_runs.models import (
     LIVE_NODE_STATES,
@@ -67,7 +69,7 @@ Use it when a task needs many agents, the same step over many items, an independ
 Give exactly one of `source` (inline Python) or `path` (a file in your workspace).
 The script defines `def main(args):` and returns the final report, a string or a JSON value. MindRoom calls `main`; do not call it yourself.
 
-    from mindroom.workflow import agent, foreach, parallel, shell, tool, phase, log, now, random, PartialFailure
+    from mindroom.workflow import agent, foreach, parallel, ask_user, shell, tool, phase, log, now, random, PartialFailure
 
     def main(args):
         phase("Research")                        # the same step over many items, in parallel
@@ -101,6 +103,8 @@ The script defines `def main(args):` and returns the final report, a string or a
   If any call fails, both wait for the others and then raise PartialFailure: .ok holds the results that succeeded,
   .results every position, .errors the failures by position. Not caught, it fails the run.
   fn may make several calls and may itself call foreach or parallel. At most max_concurrent agents and tools run at once.
+- ask_user(question, options=None) asks the user in the thread and returns the answer: one of options (a list of strings),
+  or free text without options. Only that branch waits, for as long as it takes; parallel branches keep running.
 - shell(command) runs a command with your shell tool and returns .ok, .exit_code and .output. tool(toolkit, function, **arguments) calls any other tool of yours.
   shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.
 - phase(title) groups the calls that follow; log(text) shows a progress line.
@@ -457,6 +461,18 @@ async def _resumption(
     outer = _outer_call()
     persona = ceiling(context, engine.store.get_run(outer[0]).persona if outer else None)
     return run, {"source": text, "rerun": list(rerun), "epoch": run.epoch, "persona": persona}
+
+
+async def handle_workflow_event(
+    room: nio.MatrixRoom,
+    event: nio.UnknownEvent,
+    *,
+    agent_name: str,
+    engine: Callable[[], WorkflowEngine],
+) -> None:
+    """Act on a person's workflow event for the bot of *agent_name*: an answer to a question, or a Resume."""
+    handle = handle_workflow_answer if event.type == WORKFLOW_ANSWER_EVENT_TYPE else handle_workflow_control
+    await handle(room, event, agent_name=agent_name, engine=engine)
 
 
 async def handle_workflow_control(

@@ -195,6 +195,37 @@ def test_log_shows_a_progress_line_and_sends_the_capability(gateway: FakeWorkflo
         sdk.log("unauthorized")
 
 
+@pytest.mark.usefixtures("in_main")
+def test_ask_user_sends_the_question_and_returns_the_answer(gateway: FakeWorkflowGateway, sdk: ModuleType) -> None:
+    """`ask_user` is one call of kind `ask`; a question that was closed raises a WorkflowError the script can catch."""
+    answers = iter([completed("Yes"), failed("cancelled", "The run ended before the question was answered.")])
+    gateway.respond = lambda _request: next(answers)
+
+    assert sdk.ask_user("Deploy?", ["Yes", "No"]) == "Yes"
+    with pytest.raises(sdk.WorkflowError) as closed:
+        sdk.ask_user("When?")
+
+    assert (type(closed.value), closed.value.kind) == (sdk.WorkflowError, "cancelled")
+    first, second = gateway.nodes
+    assert (first["kind"], first["args"]) == ("ask", {"question": "Deploy?", "options": ["Yes", "No"]})
+    assert second["args"] == {"question": "When?", "options": None}
+
+
+@pytest.mark.parametrize("options", ["Yes", [], ["Yes", ""], ["Yes", 2], ("Yes", "No")])
+@pytest.mark.usefixtures("in_main")
+def test_sdk_refuses_options_that_are_not_strings(
+    gateway: FakeWorkflowGateway,
+    sdk: ModuleType,
+    options: object,
+) -> None:
+    """Options are a list of non-empty strings: anything else fails in the script, before any call is made."""
+    with pytest.raises(sdk.WorkflowError) as refused:
+        sdk.ask_user("Deploy?", options)
+
+    assert str(refused.value) == "options must be a list of strings, such as ['Yes', 'No']."
+    assert gateway.nodes == []
+
+
 def test_name_main_guard_is_harmless(gateway: FakeWorkflowGateway, run_source: Callable[[str], None]) -> None:
     """The script loads as `__workflow__`, so its `__main__` guard is false."""
     run_source('def main(args):\n    return "ok"\n\nif __name__ == "__main__":\n    main()\n')

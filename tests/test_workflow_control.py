@@ -12,10 +12,10 @@ import nio
 import pytest
 import pytest_asyncio
 
-from mindroom.custom_tools.workflow import handle_workflow_control
+from mindroom.custom_tools.workflow import handle_workflow_control, handle_workflow_event
 from mindroom.event_journal import EventKind
 from mindroom.journal_dispatch import _BINDINGS
-from mindroom.matrix.event_types import WORKFLOW_CONTROL_EVENT_TYPE
+from mindroom.matrix.event_types import WORKFLOW_ANSWER_EVENT_TYPE, WORKFLOW_CONTROL_EVENT_TYPE
 from mindroom.script_runs import manager as manager_module
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.tool_jobs.client_cancel import handle_job_cancel_event
@@ -106,6 +106,29 @@ async def test_journal_hands_a_workflow_event_to_the_bots_workflows_and_settles_
     assert await run(SimpleNamespace(callbacks=SimpleNamespace(on_workflow_event=callback)), room, event) is True
     assert await run(SimpleNamespace(callbacks=SimpleNamespace(on_workflow_event=None)), room, event) is True
     callback.assert_awaited_once_with(room, event)
+    assert _BINDINGS[EventKind.WORKFLOW_ANSWER].run is run
+
+
+@pytest.mark.asyncio
+async def test_bots_workflow_callback_takes_an_answer_and_a_resume(stack: WorkflowStack) -> None:
+    """The one callback of a bot hands an answer event to the questions and any other to the run's controls."""
+    job_id = await _fail(stack)
+    stack.show()
+    ours = {"agent_name": stack.context.agent_name, "engine": lambda: stack.engine}
+    room, names = nio.MatrixRoom(_ROOM, "@mindroom_watcher:example.test"), {"run": stack.run_id}
+    answer = _event(WORKFLOW_ANSWER_EVENT_TYPE, {**names, "node": "n9"}, sender=_ALICE, thread=_THREAD)
+    resume = _event(WORKFLOW_CONTROL_EVENT_TYPE, {**names, "action": "resume"}, sender=_ALICE, thread=_THREAD)
+
+    await handle_workflow_event(room, answer, **ours)
+    assert stack.room is not None
+    assert [(kind, content["reason"]) for _, kind, content in stack.room.events] == [
+        ("io.mindroom.workflow_answer_rejected", "no_longer_open"),
+    ]
+    assert stack.store.get_run(stack.run_id).attempt == 1
+    await handle_workflow_event(room, resume, **ours)
+    await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
+
+    assert stack.store.get_run(stack.run_id).job_id != job_id
 
 
 def _standing(stack: WorkflowStack) -> tuple[str, int, int, int]:

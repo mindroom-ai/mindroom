@@ -194,6 +194,7 @@ class CommandTurnExecutor:
             room_state_response=partial(room_state_response_as_steward, orchestrator.room_steward),
             steward_may_write_state=partial(steward_may_write_state, orchestrator.room_steward),
             budget_monitor=orchestrator.budgets,
+            workflow_engine=orchestrator.workflow_engine,
         )
         await handle_command(
             context=context,

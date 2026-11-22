@@ -83,7 +83,7 @@ A run that another call resumed since belongs to that call: the earlier one neit
 ## What The Script Can Call
 
 ```python
-from mindroom.workflow import agent, foreach, parallel, shell, tool, phase, log, now, random, PartialFailure
+from mindroom.workflow import agent, foreach, parallel, ask_user, shell, tool, phase, log, now, random, PartialFailure
 
 def main(args):
     phase("Test")
@@ -94,7 +94,8 @@ def main(args):
     return tool("file", "read_file", file_name="CHANGELOG.md")
 ```
 
-- `agent(prompt)` runs one agent turn and returns its answer as text; see [Agents](#agents).
+- `agent(prompt)` runs one agent turn and returns its answer as text, or as parsed JSON with `schema`; see [Agents](#agents).
+- `ask_user(question, options=None)` asks the run's requester in the thread and returns the answer; see [Questions](#questions).
 - `shell(command)` runs a command with the agent's `shell` tool and returns `.ok`, `.exit_code`, and `.output`.
   It returns at most the last 50 KiB of output; redirect to a file and read it for more.
 - `tool(toolkit, function, **arguments)` calls any other tool of the agent and returns its result.
@@ -195,6 +196,35 @@ It needs no special tool, so it works with every model, in standard and in minim
 - After 5 turns the call raises `AgentError` with kind `schema`: `Agent '<name>' did not return JSON matching the schema after 5 attempts. Last error: <error>.`
   A resume runs it again, unless one of its turns started a tool call: then the call is `indeterminate`, as any call that may have written.
 - The schema is part of what the call is, so a resume with another schema runs the call again.
+
+## Questions
+
+```python
+when = ask_user("When shall the report go out?")
+if ask_user("Deploy to production?", ["Yes", "No"]) == "Yes":
+    shell("make deploy")
+```
+
+`ask_user(question, options=None)` shows the question in the run's thread and returns the answer of the run's requester.
+With `options`, a list of strings, the answer is one of them; without, it is free text.
+Only the branch that asks waits: the other items of a `foreach` or `parallel` keep running, and the question holds none of the run's `max_concurrent` places.
+The run shows `waiting` once nothing else of it works, and that time is not charged to its [working time](#working-time).
+
+- The question is one card in the thread, a notice from the run's agent that carries `io.mindroom.workflow_question` with `run`, `node`, `question_id`, `requester`, `text`, `options`, `free_text`, `status` and `answer`.
+  `status` is `open`, `answered` or `cancelled`, and the card is edited when it changes.
+- Its text for other clients is `Question q3fa91c: <text> 1. Yes 2. No. Answer with !answer q3fa91c <number or text>.`
+- `!answer q3fa91c 2` answers with an option's number or its text, and `!answer q3fa91c after lunch` with free text.
+  Without the ID, `!answer` answers the requester's only open question in the thread; with several open it lists them and answers none.
+- MindRoom Chat answers with the event `io.mindroom.workflow_answer`, `{"run", "node", "option"}` or `{"run", "node", "text"}`, sent in the run's thread as a reply to the card.
+- An answer counts only from the run's requester, in the run's room and thread, for the card as it is now.
+  Any other answer event changes nothing and gets `io.mindroom.workflow_answer_rejected` with `{"run", "node", "reason"}` as a reply: `not_for_you`, `wrong_place`, `no_longer_open`, `already_answered` or `not_an_option`.
+- The ID is `q` and six hex characters made from the run, the call and how often the call was asked, so two runs in one thread never share one, and neither do a question and the question that replaced it.
+- The question waits as long as it takes.
+  It stays open across a restart of MindRoom, the card is posted once, and an answer that comes while the script is not running is saved and returned when it runs again.
+- The answer is saved as the call's result, so a resume does not ask again.
+  A call whose question or options changed asks again, and the old card shows `cancelled`.
+- A run that ends closes its open questions: their cards show `cancelled`, and a cancelled `ask_user` raises `WorkflowError` with kind `cancelled`.
+- Options that are not a list of non-empty strings fail in the script with `options must be a list of strings, such as ['Yes', 'No'].`
 
 ## Runs Inside Runs
 

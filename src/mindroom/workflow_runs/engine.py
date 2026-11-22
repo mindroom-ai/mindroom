@@ -62,6 +62,7 @@ from mindroom.workflow_runs.models import (
     WorkflowRun,
     WorkflowRunState,
 )
+from mindroom.workflow_runs.questions import close_question, post_question
 from mindroom.workflow_runs.recovery import AUTO_RESUME_REASONS, NO_ACCESS
 from mindroom.workflow_runs.replay import (
     DirtyLanes,
@@ -77,6 +78,8 @@ from mindroom.workflow_runs.structured import SCHEMA_TURNS, SchemaError, extract
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
+
+    import nio
 
     from mindroom.script_runs.broker import ScriptToolBroker
     from mindroom.script_runs.manager import ScriptResourceProfileName, ScriptRunManager
@@ -119,6 +122,8 @@ _RUN_ENDED = "The run ended before the agent did."
 _CORRECTION = "Your answer did not match the schema: {error}. Reply with only the corrected fenced json block."
 _NO_MATCH = "Agent '{name}' did not return JSON matching the schema after {turns} attempts. Last error: {error}."
 _CORRECTING = "The agent of this call is correcting its answer. Try again in a moment."
+_NOT_ASKED = "The question could not be posted in the run's thread yet. Try again in a moment."
+_NOT_ANSWERED = "The run ended before the question was answered."
 _NO_SESSIONS = 'A workflow script cannot call delegate.{function} yet. Start a fresh agent with agent() or tool("delegate", "run_subagent", ...).'
 _FILTERED_TURN = "A turn that is limited to some of its agent's tools cannot start or resume a workflow."
 # The node of the script's tool call that the current task runs, for a call of the `workflow` toolkit made in it.
@@ -700,13 +705,16 @@ class WorkflowEngine:
         action = decision(saved)
         if saved is not None and action == "return":
             # A request the script sent twice never repeats work, not even failed work.
-            return _receipt(saved)
+            return _receipt(await self._asked(run, saved, epoch))
         if saved is not None and action != "return" and saved.state in LIVE_NODE_STATES:
             # Left live by an attempt that ended: its handle says how it ended, or that its job still runs, before
             # any rule may run it again.
             live = await self._reconcile(run, saved, epoch)
             handle, saved = saved.handle, self.store.get_node(run.run_id, key)
             action = decision(saved, live=live)
+            if live and action == "run" and saved is not None and saved.kind == "ask":
+                # The question the call asked before is no longer the call's: nobody can answer its card.
+                await self._close_card(run, saved, "cancelled")
             if live and action == "run" and handle is not None:
                 # The call that replaces a node whose job still runs stops that job, and nothing waits for its end
                 # under the run's lock: the script's SDK asks again, and what the stopped turn did decides then. One
@@ -727,8 +735,12 @@ class WorkflowEngine:
                 return replace(_receipt(saved), state=WorkflowNodeState.FAILED)
             if action == "attach":
                 # The job an earlier attempt started still runs: this attempt waits for it, and starts none. The run
-                # waits for a person if that job does, which the attempt's start did not know.
-                self._wait_for_agent(run, saved, epoch)
+                # waits for a person if that job does, which the attempt's start did not know. A question an earlier
+                # attempt asked is still open, and is not asked again.
+                if saved.kind == "ask":
+                    await self._asked(run, saved, epoch)
+                else:
+                    self._wait_for_agent(run, saved, epoch)
                 await self._restate(run.run_id)
             return replace(_receipt(saved), cached=action == "hit")
         # The completed node this call replaces although no rule before it said so: the call itself changed, or it
@@ -779,6 +791,10 @@ class WorkflowEngine:
                 same_as = result_digest(await asyncio.to_thread(self.store.whole_result, previous))
             start = partial(self._dispatch_tool, run, attempt, lanes=lanes, same_as=same_as)
             return await self._enter(run, node, start, dirty_after=same_as is None)
+        elif kind == "ask":
+            # A question waits for its answer and holds no place. It is saved before its card is sent, so the card
+            # names the call, and a card that could not be sent is sent when the script asks again.
+            node = replace(node, state=WorkflowNodeState.WAITING, waiting_on="user")
         elif kind == "value":
             node = replace(node, result=_value(request.args))
         elif kind == "error":
@@ -791,8 +807,63 @@ class WorkflowEngine:
         # A value, a group and an error have ended when they are submitted, so no restart finds one half done. What earlier
         # attempts left after the call runs again in any attempt, which this one remembers and the same write saves.
         lanes.mark(key)
-        put = partial(self.store.put_node, replace(node, ended_at=node.started_at), epoch, dirty_after=True)
-        return _receipt(await asyncio.to_thread(put))
+        ended_at = None if kind == "ask" else node.started_at
+        put = partial(self.store.put_node, replace(node, ended_at=ended_at), epoch, dirty_after=True)
+        node = await asyncio.to_thread(put)
+        if kind == "ask":
+            await self._restate(run.run_id)
+        return _receipt(await self._asked(run, node, epoch))
+
+    def poster(self, run: WorkflowRun) -> nio.AsyncClient | None:
+        """Return the client of the bot that serves *run*, which posts for it, or None while the run may not act."""
+        access = self.authorize(run)
+        return access[0].client if isinstance(access, tuple) else None
+
+    async def _asked(self, run: WorkflowRun, node: WorkflowNode, epoch: int) -> WorkflowNode:
+        """Send the card of a question that waits and has none yet, and return the node with it.
+
+        While the card cannot be sent the request fails as a transport error does, which the script's SDK repeats.
+        """
+        if node.kind != "ask" or node.state is not WorkflowNodeState.WAITING or "event_id" in node.links:
+            return node
+        client = self.poster(run)
+        event_id = None if client is None else await post_question(client, run, node)
+        if event_id is None:
+            raise ScriptRuntimeUnavailableError(_NOT_ASKED)
+        links = {**node.links, "event_id": event_id}
+        stamp = partial(self.store.update_node, run.run_id, node.key, node.generation, epoch)
+        await asyncio.to_thread(partial(stamp, links=links))
+        return replace(node, links=links)
+
+    async def _close_card(
+        self,
+        run: WorkflowRun,
+        node: WorkflowNode,
+        status: Literal["answered", "cancelled"],
+        answer: str | None = None,
+    ) -> None:
+        """Show on a question's card that it was answered or that nobody can answer it any more; best effort."""
+        if (client := self.poster(run)) is not None:
+            await close_question(client, run, node, status, answer)
+
+    async def answer(self, run_id: str, key: str, generation: int, answer: str) -> bool:
+        """Complete the question at *key* with a person's *answer*; false when that generation no longer waits.
+
+        The answer is saved under the run's lock and epoch, as every write of the run is, also while no attempt
+        runs: the next attempt reads it back and does not ask again.
+        """
+        async with (condition := self._condition(run_id)):
+            run, node = self.store.get_run(run_id), self.store.get_node(run_id, key)
+            waits = node is not None and (node.state, node.waiting_on) == (WorkflowNodeState.WAITING, "user")
+            if run.state in TERMINAL_RUN_STATES or node is None or node.generation != generation or not waits:
+                return False
+            settle = partial(self.store.settle_node, run_id, key, generation, run.epoch)
+            if not await asyncio.to_thread(partial(settle, state=WorkflowNodeState.COMPLETED, result=answer)):
+                return False
+            await self._close_card(run, node, "answered", answer)
+            await self._restate(run_id)
+            condition.notify_all()
+        return True
 
     async def _enter(
         self,
@@ -1267,7 +1338,14 @@ class WorkflowEngine:
             places.working.add(node.key)
         await self._notify(node.run_id)
 
-    async def _reconcile(self, run: WorkflowRun, node: WorkflowNode, epoch: int, *, stop: bool = False) -> bool:
+    async def _reconcile(  # noqa: C901
+        self,
+        run: WorkflowRun,
+        node: WorkflowNode,
+        epoch: int,
+        *,
+        stop: bool = False,
+    ) -> bool:
         """Settle a node that an ended attempt left live from what its handle names; return whether its job still runs.
 
         A job that still runs is left as it is, for the attempt that reaches its node to wait for. With *stop* the
@@ -1275,6 +1353,14 @@ class WorkflowEngine:
         end in time. The caller holds the run's lock.
         """
         settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
+        if node.kind == "ask":
+            # A question outlives its attempt and not its run: nothing of it ran, and its card says it is closed.
+            if stop:
+                ended: _Outcome = WorkflowNodeState.CANCELLED, None, {"kind": "cancelled", "message": _NOT_ANSWERED}
+                state, _, error = _unless_proven(node, False, ended)
+                await asyncio.to_thread(partial(settle, state=state, error=error))
+                await self._close_card(run, node, "cancelled")
+            return not stop
         if node.handle is None or node.handle.kind == "run":
             # Still queued for a place when its attempt or its run ended: it started nothing. Or the group of a run
             # inside this one, which does not outlive it and is reached only as it ends: the end of that run
@@ -1594,8 +1680,10 @@ class WorkflowEngine:
                 current = self.store.get_run(run.run_id)
                 nodes = self.store.nodes(run.run_id, include_stale=True)
                 for node in nodes:
-                    # An agent's job outlives an attempt, and so does a nested run: neither outlives its run.
-                    waits_for_job = node.handle is not None and node.handle.kind in ("job", "run")
+                    # An agent's job outlives an attempt, and so do a nested run and a question: none outlives its run.
+                    waits_for_job = node.kind == "ask" or (
+                        node.handle is not None and node.handle.kind in ("job", "run")
+                    )
                     if node.state in LIVE_NODE_STATES and (ended or not waits_for_job):
                         await self._reconcile(current, node, run.epoch, stop=ended)
                 if state is WorkflowRunState.COMPLETED:

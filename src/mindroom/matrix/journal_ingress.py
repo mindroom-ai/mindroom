@@ -24,6 +24,7 @@ from mindroom.matrix.agent_authored import carries_agent_authored_marker
 from mindroom.matrix.event_types import (
     CALL_MEMBER_EVENT_TYPE,
     RTC_NOTIFICATION_EVENT_TYPE,
+    WORKFLOW_ANSWER_EVENT_TYPE,
     WORKFLOW_CONTROL_EVENT_TYPE,
 )
 from mindroom.matrix.media import (
@@ -54,6 +55,7 @@ _UNKNOWN_EVENT_KINDS = {
     _TOOL_APPROVAL_RESPONSE_EVENT_TYPE: EventKind.APPROVAL,
     _BACKGROUND_JOB_CANCEL_EVENT_TYPE: EventKind.JOB_CANCEL,
     WORKFLOW_CONTROL_EVENT_TYPE: EventKind.WORKFLOW_CONTROL,
+    WORKFLOW_ANSWER_EVENT_TYPE: EventKind.WORKFLOW_ANSWER,
 }
 # Kinds only an account MindRoom manages may send; anyone else's is settled without work.
 _MANAGED_SENDER_KINDS = frozenset({EventKind.SCHEDULE_TRIGGER, EventKind.ROUTE})
@@ -68,6 +70,7 @@ _AGENT_AUTHORED_MARKER_KINDS = frozenset(
         EventKind.APPROVAL,
         EventKind.JOB_CANCEL,
         EventKind.WORKFLOW_CONTROL,
+        EventKind.WORKFLOW_ANSWER,
     },
 )
 

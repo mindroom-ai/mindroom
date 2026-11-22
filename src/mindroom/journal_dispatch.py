@@ -636,6 +636,7 @@ _BINDINGS: dict[EventKind, _Binding] = {
     EventKind.APPROVAL: _Binding(nio.UnknownEvent, _completing(lambda c: c.on_approval)),
     EventKind.JOB_CANCEL: _Binding(nio.UnknownEvent, _completing(lambda c: c.on_job_cancel)),
     EventKind.WORKFLOW_CONTROL: _Binding(nio.UnknownEvent, _run_workflow_event),
+    EventKind.WORKFLOW_ANSWER: _Binding(nio.UnknownEvent, _run_workflow_event),
     EventKind.ROOM_LIFECYCLE: _Binding(nio.RoomMemberEvent, _completing(lambda c: c.on_room_lifecycle)),
     EventKind.RTC: _Binding(nio.UnknownEvent, _run_rtc_event),
     EventKind.REDACTION: _Binding(nio.RedactionEvent, _completing(lambda c: c.on_redaction)),

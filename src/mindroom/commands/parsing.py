@@ -24,6 +24,7 @@ class CommandType(Enum):
     EDIT_SCHEDULE = "edit_schedule"
     JOBS = "jobs"  # List the conversation's background jobs
     CANCEL_JOB = "cancel_job"  # Cancel background jobs
+    ANSWER = "answer"  # Answer a workflow run's question
     CONFIG = "config"  # Configuration command
     DESKTOP = "desktop"  # Requester-scoped Desktop pairing
     MODE = "mode"
@@ -55,6 +56,7 @@ _COMMAND_DOCS = {
     CommandType.EDIT_SCHEDULE: ("/edit_schedule <id> <task>", "Edit an existing scheduled task"),
     CommandType.JOBS: ("/jobs", "List the background jobs running here"),
     CommandType.CANCEL_JOB: ("/cancel_job <id|all>", "Cancel a background job, or all of them here"),
+    CommandType.ANSWER: ("/answer [id] <answer>", "Answer a question a workflow run asked you"),
     CommandType.HELP: ("/help [topic]", "Get help"),
     CommandType.RELOAD_PLUGINS: ("/reload-plugins", "Reload configured plugins (admin only)"),
     CommandType.CONFIG: ("/config <operation>", "Manage configuration"),
@@ -137,6 +139,7 @@ COMMAND_TYPES_WITH_SIDE_EFFECTS = frozenset(
         CommandType.CANCEL_SCHEDULE,
         CommandType.EDIT_SCHEDULE,
         CommandType.CANCEL_JOB,
+        CommandType.ANSWER,
         CommandType.DESKTOP,
         CommandType.MODEL,
         CommandType.MODE,
@@ -182,6 +185,7 @@ class _CommandParser:
     EDIT_SCHEDULE_PATTERN = re.compile(r"^!edit[_-]?schedule\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
     JOBS_PATTERN = re.compile(r"^!jobs$", re.IGNORECASE)
     CANCEL_JOB_PATTERN = re.compile(r"^!cancel[_-]?job\s+(\S+)$", re.IGNORECASE)
+    ANSWER_PATTERN = re.compile(r"^!answer\s+(.+)$", re.IGNORECASE | re.DOTALL)
     CONFIG_PATTERN = re.compile(r"^!config(?:\s+(.+))?$", re.IGNORECASE)
     DESKTOP_PATTERN = re.compile(r"^!desktop(?:\s+(.+))?$", re.IGNORECASE)
     MODE_PATTERN = re.compile(r"^!mode(?:\s+(.+))?$", re.IGNORECASE)
@@ -282,6 +286,10 @@ class _CommandParser:
                 args={"job_id": None if target.lower() == "all" else target},
                 raw_text=raw_text,
             )
+
+        match = self.ANSWER_PATTERN.match(message)
+        if match:
+            return Command(type=CommandType.ANSWER, args={"text": match.group(1).strip()}, raw_text=raw_text)
 
         match = self.EDIT_SCHEDULE_PATTERN.match(message)
         if match:

@@ -37,6 +37,7 @@ __all__ = [
     "ToolError",
     "WorkflowError",
     "agent",
+    "ask_user",
     "foreach",
     "log",
     "now",
@@ -62,6 +63,7 @@ _RAW_THREAD_CALL = (
     "Raw threads are not tracked, so resume could not match their calls."
 )
 _NO_MAIN = "Define def main(args): and return the report. MindRoom calls it."
+_BAD_OPTIONS = "options must be a list of strings, such as ['Yes', 'No']."
 # How many lanes of one foreach() or parallel() run at once in the script; the run's own limit is the gateway's.
 _MAX_ACTIVE_LANES = 256
 # How many failures a PartialFailure names in its message; `errors` holds them all.
@@ -257,7 +259,7 @@ def _call(
             receipt = gateway.poll(node_id)
     if receipt["state"] == "completed":
         return gateway.result(node_id) if receipt.get("result_ref") else receipt.get("result")
-    raise _failure(receipt, ToolError if kind == "tool" else AgentError)
+    raise _failure(receipt, {"tool": ToolError, "ask": WorkflowError}.get(kind, AgentError))
 
 
 def _failure(receipt: dict[str, object], error_type: type[WorkflowError]) -> WorkflowError:
@@ -448,6 +450,19 @@ class _Lanes:
                 _gateway().submit(_next_key(), "error", report, {"phase": lane.phase} if lane.phase else {})
         finally:
             self.places.release()
+
+
+def ask_user(question: str, options: list[str] | None = None) -> str:
+    """Show the question in the thread and return the answer; only the calling branch waits.
+
+    `options` is a list of strings; the answer is one of them. Without options the answer is free text.
+    The question waits as long as it takes, across restarts.
+    """
+    if options is not None and not (
+        isinstance(options, list) and options and all(isinstance(option, str) and option.strip() for option in options)
+    ):
+        raise WorkflowError(_BAD_OPTIONS)
+    return str(_call("ask", {"question": str(question), "options": options}))
 
 
 def shell(command: str, *, timeout: int = 3600, tail: int = 2000, cached: bool = True) -> ShellResult:

@@ -791,6 +791,11 @@ class TestAgentAuthoredMarker:
                 EventKind.WORKFLOW_CONTROL,
             ),
             (
+                "io.mindroom.workflow_answer",
+                {"run": "wf-1", "node": "n1", "option": "Yes", AGENT_AUTHORED_KEY: MARKING_AGENT},
+                EventKind.WORKFLOW_ANSWER,
+            ),
+            (
                 "m.room.message",
                 {
                     "msgtype": "m.text",
@@ -819,6 +824,7 @@ class TestAgentAuthoredMarker:
             "approval-response",
             "job-cancel",
             "workflow-control",
+            "workflow-answer",
             "edit-marked-in-new-content",
             "edit-marked-at-top-level",
         ],

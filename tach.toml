@@ -2627,6 +2627,7 @@ depends_on = [
     "mindroom.workflow_runs.faults",
     "mindroom.workflow_runs.graph",
     "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.questions",
     "mindroom.workflow_runs.recovery",
     "mindroom.workflow_runs.structured",
     "mindroom.workflow_runs.replay",
@@ -2644,6 +2645,28 @@ expose = [
     "ceiling",
     "nested_key",
 ]
+
+[[modules]]
+path = "mindroom.workflow_runs.questions"
+depends_on = ["mindroom.matrix.client_delivery"]
+visibility = ["mindroom.workflow_runs.answers", "mindroom.workflow_runs.engine"]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.questions"]
+expose = ["close_question", "options_text", "post_question", "question_id"]
+
+[[modules]]
+path = "mindroom.workflow_runs.answers"
+depends_on = [
+    "mindroom.matrix.client_delivery",
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.questions",
+    "mindroom.workflow_runs.store",
+]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.answers"]
+expose = ["answer_command", "answer_question", "handle_workflow_answer"]
 
 [[modules]]
 path = "mindroom.workflow_runs.view"
@@ -2692,6 +2715,7 @@ depends_on = [
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_routing",
+    "mindroom.workflow_runs.answers",
     "mindroom.workflow_runs.engine",
     "mindroom.workflow_runs.models",
     "mindroom.workflow_runs.store",
@@ -4492,6 +4516,8 @@ visibility = [
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.email_invites.receiver",
     "mindroom.workflow_runs.view",
+    "mindroom.workflow_runs.questions",
+    "mindroom.workflow_runs.answers",
 ]
 
 [[modules]]
@@ -5825,6 +5851,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.commands.handler"
 depends_on = [
+    "mindroom.workflow_runs.answers",
     "mindroom.tool_jobs.client_cancel",
     "mindroom.tool_jobs.runtime",
     "mindroom.commands.mode_commands",
