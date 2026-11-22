@@ -135,12 +135,17 @@ class BotRuntimeState:
         stopping = asyncio.create_task(self._stopping.wait())
         try:
             await asyncio.wait((ready_task, stopping), return_when=asyncio.FIRST_COMPLETED)
-            return self.phase is RunPhase.ACCEPTING
+            if ready is None:
+                return self.phase is RunPhase.ACCEPTING
         finally:
             for task in (ready_task, stopping):
                 if not task.done():
                     task.cancel()
             await asyncio.gather(ready_task, stopping, return_exceptions=True)
+        if (stopping.done() and not stopping.cancelled()) or self.phase is not RunPhase.ACCEPTING:
+            return False
+        ready_task.result()
+        return True
 
     def admission_fence(self) -> AbstractAsyncContextManager[None]:
         """Reserve runtime-replacement admission around one authorization decision and the effects it permits."""

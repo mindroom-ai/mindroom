@@ -603,3 +603,43 @@ async def test_exclusive_conversation_rejects_reservation_and_holds_canonical_lo
         assert second_entered.is_set()
     finally:
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_admission_or_shutdown_ready_refuses_drain_during_cleanup_and_propagates_errors(
+    tmp_path: Path,
+) -> None:
+    """wait_for_admission_or_shutdown(ready=) refuses drains started during cleanup and propagates ready errors."""
+    bot = _bot(tmp_path)
+    runtime = BotRuntimeState(orchestrator=bot.orchestrator)
+
+    # 1. A ready coroutine that raises must propagate its exception instead of reporting readiness.
+    async def failing_ready() -> None:
+        msg = "prerequisite failed"
+        raise ValueError(msg)
+
+    with pytest.raises(ValueError, match="prerequisite failed"):
+        await runtime.wait_for_admission_or_shutdown(failing_ready())
+
+    # 2. If draining starts during cleanup after ready completes, readiness must still be refused.
+    class _DrainOnCancelEvent:
+        def __init__(self, inner: asyncio.Event) -> None:
+            self._inner = inner
+
+        async def wait(self) -> bool:
+            try:
+                return await self._inner.wait()
+            except asyncio.CancelledError:
+                runtime.begin_draining()
+                raise
+
+        def set(self) -> None:
+            self._inner.set()
+
+        def clear(self) -> None:
+            self._inner.clear()
+
+    runtime._stopping = _DrainOnCancelEvent(asyncio.Event())  # type: ignore[assignment]
+    ready_event = asyncio.Event()
+    ready_event.set()
+    assert await runtime.wait_for_admission_or_shutdown(ready_event.wait()) is False
