@@ -544,7 +544,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 config=config,
                 runtime_paths=runtime_paths,
                 model_name=resolve_thread_summary_model_name(config, runtime_paths, room_id, entity_name=entity_name),
-                room_settings=partial(room_title_settings, client, config, room_id),
+                room_settings=partial(room_title_settings, client, config, runtime_paths, room_id),
             )
             if titled is None:
                 return
@@ -667,7 +667,7 @@ async def maybe_generate_thread_summary(  # noqa: C901, PLR0911
         # A long legacy title is rewritten once; a retitle asks for a new title outright.
         current_title = _keepable_title(state.summary, retitle=retitle)
         try:
-            room_model, room_instructions = await room_title_settings(client, config, room_id)
+            room_model, room_instructions = await room_title_settings(client, config, runtime_paths, room_id)
             model_name = room_model or resolve_thread_summary_model_name(
                 config,
                 runtime_paths,

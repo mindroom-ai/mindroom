@@ -1178,20 +1178,18 @@ class TestMaybeGenerateThreadSummary:
     async def test_a_room_title_model_that_names_no_model_leaves_the_configured_one(
         self,
         setting: dict[str, object] | nio.RoomGetStateEventError,
-        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A setting that names no configured model, is cleared, or cannot be read titles with the configured model.
 
         A name this runtime does not configure is logged once per room and name.
         """
-        monkeypatch.setattr("mindroom.thread_summary.generation._unknown_room_models_logged", set())
         self.room_state.title_model = setting
         model = self._summarizer(_title("Trip plan"))
         self._history(_make_thread_history(1))
 
         with capture_logs() as logs:
             await self._provisional()
-            await room_title_settings(self.client, _mock_config(), _ROOM)
+            await room_title_settings(self.client, _mock_config(), self.rp, _ROOM)
 
         assert len(model.requests) == 1
         assert _sent_summaries(self.client)[0]["summary"] == "Trip plan"
@@ -1245,7 +1243,7 @@ class TestMaybeGenerateThreadSummary:
         """A room setting over 2,000 characters is cut to 2,000."""
         self.room_state.title_rules = {"value": " " + "x" * 2500}
 
-        assert await room_title_settings(self.client, _mock_config(), _ROOM) == (None, "x" * 2000)
+        assert await room_title_settings(self.client, _mock_config(), self.rp, _ROOM) == (None, "x" * 2000)
 
     @pytest.mark.parametrize("case", ["automatic", "manual", "pinned", "more_messages", "wrong_prompt", "resolved"])
     async def test_provisional_title_skips_existing_threads(self, case: str) -> None:

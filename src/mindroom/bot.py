@@ -1093,7 +1093,8 @@ class AgentBot:
 
     async def _reread_room_setting(self, client: nio.AsyncClient, room_id: str, setting: RoomSetting[Any]) -> None:
         if setting is THREAD_MODE and self.steward_duties.is_steward(room_id):
-            # The steward's republish is its read of the setting.
+            # The steward's republish reads the setting. One that returns before that read, in a room without a
+            # joined responder or whose steward changed, leaves the live value unconfirmed until the next read.
             self.steward_duties.thread_mode_setting_changed(room_id)
             return
         put_state = partial(room_state_response_as_steward, self.orchestrator.room_steward)

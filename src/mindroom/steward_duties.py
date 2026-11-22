@@ -229,7 +229,7 @@ class StewardDuties:
 
         The republish reads the setting itself. It runs in the background, so no sync frame or turn waits for it.
         """
-        self._publish_in_background(self._publish_room_state(room_id, {"mode"}))
+        self._publish_in_background(self._publish_room_state(room_id, {"mode"}), "steward_thread_mode")
 
     async def power_levels_event(self, room: nio.MatrixRoom, _event: nio.PowerLevelsEvent) -> None:
         """Publish a room's state after its power levels changed, which can change its steward."""
@@ -246,10 +246,10 @@ class StewardDuties:
             self._joined_room_ids.update(room_id for room_id in client.rooms if self.is_steward(room_id))
         room_ids, self._joined_room_ids = self._joined_room_ids, set()
         if room_ids:
-            self._publish_in_background(self._publish_rooms(room_ids))
+            self._publish_in_background(self._publish_rooms(room_ids), "steward_joined_room_state")
 
-    def _publish_in_background(self, publish: Coroutine[Any, Any, None]) -> None:
-        task = create_background_task(publish, name="steward_joined_room_state", owner=self.deps.runtime)
+    def _publish_in_background(self, publish: Coroutine[Any, Any, None], name: str) -> None:
+        task = create_background_task(publish, name=name, owner=self.deps.runtime)
         self._room_state_publishes.add(task)
         task.add_done_callback(self._room_state_publishes.discard)
 
