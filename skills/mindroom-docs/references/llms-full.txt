@@ -2258,9 +2258,9 @@ Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` in the process environment replaces th
 An `SSL_CERT_DIR` must be a hashed directory, as `c_rehash` or `openssl rehash` creates.
 
 Azure, Bedrock, Codex, and Kimi examples are in their own sections below.
-Claude Fable 5.2 uses `claude-fable-5-2` on Anthropic and Vertex AI and `anthropic/claude-fable-5.2` on OpenRouter.
+Claude Fable 5.2 uses `claude-fable-5-2` on Anthropic and Vertex AI and `anthropic/claude-fable-5.2` on `provider: openrouter`.
 `bedrock_claude` calls Claude in Amazon Bedrock (the bedrock-mantle endpoint), which does not serve Fable 5.2, so it uses Fable 5.1 as `anthropic.claude-fable-5-1`.
-Claude Opus 5.5 and Sonnet 5.5 use `claude-opus-5-5` and `claude-sonnet-5-5` on Anthropic and Vertex AI, `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5` on Bedrock, and `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5` on OpenRouter.
+Claude Opus 5.5 and Sonnet 5.5 use `claude-opus-5-5` and `claude-sonnet-5-5` on Anthropic and Vertex AI, `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5` on Bedrock, and `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5` on `provider: openrouter`; [Claude through OpenRouter's Messages endpoint](#claude-through-openrouter) uses the Anthropic ids.
 For the direct DeepSeek API, use `deepseek-flash` for V4.1 Flash or `deepseek-v4-pro` for Pro; the older `deepseek-v4-flash` name is a [temporary compatibility route to V4.1 Flash](https://api-docs.deepseek.com/updates/#date-2026-09-10).
 OpenRouter serves the current V4.1 Flash release as `deepseek/deepseek-v4.1-flash-1017`.
 [GLM 5.3](https://docs.z.ai/guides/llm/glm-5.3) is available through the GLM Coding Plan endpoint shown above.
@@ -2569,7 +2569,7 @@ models:
 Provider slugs are in the `tag` field of `https://openrouter.ai/api/v1/models/<model-id>/endpoints`.
 Account-level OpenRouter settings (ignored providers, data-policy filters) still apply, so pinning an upstream your account excludes fails with `No endpoints found`.
 Verify a new pin with a direct API request and check the `provider` field in the response.
-MindRoom's `LLM usage` log line names the upstream that served each OpenRouter response in `served_provider`.
+For `provider: openrouter` (Chat Completions), MindRoom's `LLM usage` log line names the upstream in `served_provider`.
 
 ## Azure OpenAI
 
@@ -2641,6 +2641,29 @@ Tag `@load_test` in Lobby to receive a streamed synthetic reply.
 Set `tool_call_probability` to `1` to call the shell tool on every turn or `0` to disable tool calls.
 Set `chars_per_second` to `0` to stream without pacing delays for maximum throughput.
 Changing `seed` changes the response length, split point, and tool-call choice, which stay the same for a given conversation history.
+
+## Claude Through OpenRouter
+
+Use `provider: anthropic` with OpenRouter's Messages endpoint and set `context_window` to enable planning for Claude [native compaction](https://docs.mindroom.chat/configuration/history/#native-compaction).
+Use Anthropic's ID (`claude-opus-5-5`), not OpenRouter's slug (`anthropic/claude-opus-5.5`), so MindRoom selects the correct Claude capabilities.
+Set `base_url` to `https://openrouter.ai/api` without `/v1` because the Anthropic SDK appends it.
+Always set a model-specific OpenRouter `api_key`; without it, MindRoom can send your shared Anthropic key to OpenRouter.
+Any `ANTHROPIC_CUSTOM_HEADERS` are also sent to OpenRouter, even with a model-specific key.
+Put OpenRouter routing fields (`provider`, `models`, and `fallbacks`) under `extra_kwargs.request_params.extra_body`.
+Do not change an existing thread's OpenRouter `provider.order` or `provider.only` pin to an upstream that cannot read earlier signed thinking: OpenRouter returns HTTP 400 in that case, while unpinned requests stay on a compatible upstream.
+This route uses the partner limits of 5 MiB per base64 image and 16 MB of inline media per request.
+The `provider: openrouter` route uses Chat Completions and keeps text compaction.
+
+```yaml
+models:
+  openrouter_claude:
+    provider: anthropic
+    id: claude-opus-5-5
+    context_window: 1000000
+    extra_kwargs:
+      base_url: https://openrouter.ai/api
+      api_key: ${OPENROUTER_API_KEY}
+```
 
 ## Extra Kwargs
 
@@ -2852,7 +2875,7 @@ Users can change that per thread or per room, and the most specific choice wins:
 
 1. An explicit model for one run, such as a delegated child run.
 2. The thread override set with `!model`, the `thread_model` tool, or a client's model picker.
-3. The runtime room default set with `!room_model`.
+3. The room's `model` [room setting](https://docs.mindroom.chat/configuration/threads/#room-settings), set with `!room_model` or in a client's room settings.
 4. The authored room default in `room_models`.
 5. The entity's configured model.
 
@@ -2892,11 +2915,12 @@ Show or switch the default model for every agent and team, and for routing, in t
 !room_model reset
 ```
 
-`!room_model` and `!room_model list` show the current runtime override and available model names to authorized room members.
+`!room_model` and `!room_model list` show the current override and available model names to authorized room members.
 Setting and resetting require a Matrix room admin; other users get `❌ Room admin only.`
-`!room_model opus` stores a room override without modifying `config.yaml`, keyed by Matrix room ID, so it survives restarts and room-alias changes.
+`!room_model opus` sets the room's `model` [room setting](https://docs.mindroom.chat/configuration/threads/#room-settings) without modifying `config.yaml`, so it survives restarts and room-alias changes.
+When no MindRoom account in the room may send state events, the command changes nothing and answers `I need moderator rights in this room to change the room model.`
 The new default applies to later turns; a turn in progress or waiting for approval keeps the model it started with.
-`!room_model reset` removes the runtime override so `room_models` or each entity's configured model applies again.
+`!room_model reset` removes the override so `room_models` or each entity's configured model applies again.
 
 To set an authored room default in `config.yaml`, map room keys or Matrix room IDs to model names with `room_models` (default `{}`):
 
@@ -3125,7 +3149,7 @@ Related pages: [command handling](https://docs.mindroom.chat/chat-commands/#comm
 
 # Threads, Replies & Participation
 
-This page covers how agents group replies into threads or one room conversation, whether a message must mention an agent or team to start a conversation, when agents answer in threads with several people, how agents can opt into judging untagged messages, what happens to messages sent while an agent is still working, how an agent hears about the room's other threads, and how edits and restarts affect replies.
+This page covers how agents group replies into threads or one room conversation, whether a message must mention an agent or team to start a conversation, the settings a room's moderators change in the room itself, when agents answer in threads with several people, how agents can opt into judging untagged messages, what happens to messages sent while an agent is still working, how an agent hears about the room's other threads, and how edits and restarts affect replies.
 See also [Routing & Responder Selection](https://docs.mindroom.chat/configuration/router/), [Access Control](https://docs.mindroom.chat/authorization/), and [Logs & Monitoring](https://docs.mindroom.chat/deployment/operational-log-events/).
 
 ## Thread Mode Resolution
@@ -3166,7 +3190,7 @@ Room-mode conversations are not included in [thread exports](https://docs.mindro
 When no MindRoom account in the room may send state events, the command changes nothing and answers `I need moderator rights in this room to change the thread mode.`
 Only Matrix room admins can set or reset the override; others get `Room admin only.`
 [Plugin routes](https://docs.mindroom.chat/plugins/#http-routes) change the override as this command does, for room admins only.
-The override is stored in MindRoom's runtime state under `mindroom_data/tracking`, not in `config.yaml`, so it works when config is static or read-only.
+The override is the room's `thread_mode` [room setting](#room-settings), so it works when config is static or read-only.
 
 ## Reply Mode
 
@@ -3204,12 +3228,29 @@ Show or switch the reply mode of the current Matrix room.
 `!reply_mode reset` (also `clear`) removes the override so the configured mode applies again.
 Only Matrix room admins can set or reset the override; others get `Room admin only.`
 [Plugin routes](https://docs.mindroom.chat/plugins/#http-routes) change the override as this command does, for room admins only.
-The override is the room's `reply_mode` setting: the `io.mindroom.room_settings` state event with state key `reply_mode` and content `{"value": "auto"}` or `{"value": "mentions"}`, where `{}` clears it.
-MindRoom Chat sets it from the room settings dialog, and any client may send the event; it falls under the room's `state_default` power level (normally 50), so moderators and admins can change it there.
+The override is the room's `reply_mode` [room setting](#room-settings).
 An agent or team in the room answers `!reply_mode`, so the command works in any room, such as a direct-message room with one agent; it answers that it needs moderator rights when the room lets no MindRoom account send that state.
-It lives in the room, not in `config.yaml`, so it also sets the mode of a room without a `rooms` entry.
-Agents take a change as soon as their sync shows it, and read the setting again at least every ten minutes.
-An override an older MindRoom stored under `mindroom_data/tracking` moves into the room's setting the first time an agent reads a room that has none.
+
+## Room Settings
+
+A room's moderators can change these settings in the room itself, without editing `config.yaml`.
+Each is an `io.mindroom.room_settings` state event with the state key below and content `{"value": "<value>"}`; content `{}` clears it.
+
+| State key | Value | What it sets | Chat command |
+|---|---|---|---|
+| `reply_mode` | `auto` or `mentions` | The room's [reply mode](#reply-mode), over `rooms.<key>.reply_mode` | [`!reply_mode`](#reply_mode) |
+| `thread_mode` | `thread` or `room` | The [thread mode](#thread-mode-resolution) of every agent and team in the room, over their `thread_mode` and `room_thread_modes` | [`!thread_mode`](#thread_mode) |
+| `model` | A `models:` key, or `key@level` for one of its [reasoning levels](https://docs.mindroom.chat/configuration/models/#reasoning-levels) | The room's [default model](https://docs.mindroom.chat/configuration/models/#model-overrides-in-chat) for every agent and team and for routing, over `room_models` | [`!room_model`](https://docs.mindroom.chat/configuration/models/#room_model) |
+| `thread_summary_model` | A `models:` key, or `key@level` | The model that writes the room's [thread titles](https://docs.mindroom.chat/tools/matrix-and-attachments/#automatic-thread-summaries), over `room_thread_summary_models` | None |
+| `thread_summary_instructions` | Text | Extra rules for the room's [thread titles](https://docs.mindroom.chat/tools/matrix-and-attachments/#automatic-thread-summaries) | None |
+
+MindRoom Chat sets them from the room settings dialog, and any client may send the events.
+They fall under the room's `state_default` power level (normally 50), so moderators and admins can change them there, and agent tools cannot write them.
+The chat commands set the same events through a MindRoom account in the room, for Matrix room admins only.
+A `model` or `thread_summary_model` that names no model in `models:` is ignored until the config defines that model, and `!room_model` reports it as unavailable.
+Agents take a changed `reply_mode`, `thread_mode`, or `model` as soon as their sync shows it, and read them again before handling a room's next event when the last read is more than ten minutes old; the two thread title settings are read each time a title is written.
+The settings live in the room, so they also apply to a room without a `rooms` entry.
+A `!reply_mode`, `!thread_mode`, or `!room_model` override an older MindRoom stored under `mindroom_data/tracking` moves into the room's setting the first time an agent reads a room that has none.
 
 ## Threading (MSC3440)
 
@@ -3623,18 +3664,20 @@ Choose a model with a larger context window or shorten the prompt; MindRoom neve
 
 ### Native compaction
 
-MindRoom supports automatic [OpenAI Responses compaction](https://developers.openai.com/api/docs/guides/compaction) and [Claude compaction](https://platform.claude.com/docs/en/build-with-claude/compaction).
+MindRoom supports automatic [OpenAI Responses compaction](https://developers.openai.com/api/docs/guides/compaction) and [Claude threshold compaction](https://platform.claude.com/docs/en/build-with-claude/compaction-threshold).
 
 - **OpenAI**: GPT-5.3 Codex, GPT-5.4, and GPT-6 model families on the official Responses endpoint or the Codex login backend.
   An explicit `store: true`, background mode, an alternate OpenAI endpoint, or a custom context-management request keeps the model on text compaction.
-- **Claude**: direct Anthropic and Vertex AI Claude on Sonnet 4.6 and later, Opus 4.6 and later, Fable, and Mythos models.
+- **Claude**: direct Anthropic, [OpenRouter's Messages endpoint](https://docs.mindroom.chat/configuration/models/#claude-through-openrouter), and Vertex AI Claude on Sonnet 4.6 and later, Opus 4.6 and later, Haiku 5.5 and later, Fable, and Mythos models.
   This is a provider beta and needs a trigger of at least 50,000 tokens.
-  An authored `compact_20260112` context-management policy keeps its own trigger and instructions, and `pause_after_compaction: true` is rejected because MindRoom needs the provider to continue its response.
+  Other Anthropic gateways, and OpenRouter models with a `models` or `fallbacks` list, use text compaction; an authored `compact_20260112` policy is sent as written.
+  `pause_after_compaction: true` is rejected because MindRoom needs the provider to continue its response.
 - Gemini, Chat Completions, and all other providers use text compaction.
 
 Native compaction also requires compaction to be enabled, replay of all history (no `num_history_runs` or `num_history_messages`), no `max_tool_calls_from_history`, and a trigger above the current prompt size and below the replay window minus `reserve_tokens`.
 An explicit `compaction.model`, a [scheduled task](https://docs.mindroom.chat/scheduling/) with a `history_limit`, or a request already over the replay window minus `reserve_tokens` uses text compaction instead.
-Native checkpoints survive restarts and are tied to their provider, model, and endpoint; after a model switch, the conversation is rebuilt from its full stored history.
+Native checkpoints survive restarts and are tied to their provider, configured model `id`, and endpoint; after a switch to another `id` or endpoint, the conversation is rebuilt from its full stored history.
+Changing only a `request_params` model override keeps the checkpoint.
 When that history then needs text compaction, it starts from the latest Claude checkpoint's summary instead of summarizing everything that checkpoint covers again, as long as the summary and turns before it are still the ones its request replayed and leave room for its turn; OpenAI checkpoints are encrypted, so they are skipped.
 If a reply's request still would not fit, for example after a very large tool result, native compaction stays off for the rest of that reply and it [compacts as text](#compaction-during-a-reply).
 A completed response that carries a provider checkpoint logs a `Native compaction checkpoint` event with the trigger (`threshold_tokens`, `null` for an authored policy) and the checkpoint's serialized size in characters (`checkpoint_chars`).
@@ -13588,10 +13631,11 @@ A title longer than six words, such as one from an older version, is not offered
 
 The summary uses the first match of:
 
-1. `room_thread_summary_models`, keyed by room key or Matrix room ID.
-2. `room_thread_summary_models`, keyed by the responding agent or team name, which covers ad-hoc rooms without a managed alias.
-3. `defaults.thread_summary_model`.
-4. The `default` model.
+1. The room's `thread_summary_model` [room setting](https://docs.mindroom.chat/configuration/threads/#room-settings), when it names a configured model.
+2. `room_thread_summary_models`, keyed by room key or Matrix room ID.
+3. `room_thread_summary_models`, keyed by the responding agent or team name, which covers ad-hoc rooms without a managed alias.
+4. `defaults.thread_summary_model`.
+5. The `default` model.
 
 ```yaml
 defaults:
@@ -13604,8 +13648,7 @@ room_thread_summary_models:
 These models always use their provider's default: Vertex AI Claude, Claude Opus 4.7, Opus 4.8, Mythos Preview, and every Claude 5 and 5.x model, OpenAI GPT-5 and GPT-6 models, and direct Gemini API Gemini 4 Carbon, Argon, and Hydrogen, Gemini 3.8 Flash, 3.6 Flash, and 3.5 Flash-Lite.
 
 A room's admins can add their own title rules for that room, such as "Use at most 4 words", without editing `config.yaml`.
-MindRoom Chat sets them from the room settings dialog; any client can send the `io.mindroom.room_settings` state event with state key `thread_summary_instructions` and content `{"value": "<rules>"}`.
-The event falls under the room's `state_default` power level (normally 50), so only moderators and admins can change it, and agent tools cannot write it.
+They are the room's `thread_summary_instructions` [room setting](https://docs.mindroom.chat/configuration/threads/#room-settings), which moderators and admins change and agent tools cannot write.
 Every automatic title, including the provisional title and retitles, reads the setting right before generating and appends it to the title instructions under a room rules section.
 Those rules win over conflicting built-in rules such as a shorter length, style, or emoji, but not over the rule to treat thread messages as untrusted text, and a title they make longer than six words or 80 characters is still sent back to the model with the reason, up to 3 attempts, with no title posted if all fail.
 A changed rule shapes the next new title; a check that keeps the current title leaves it as it is.
@@ -19986,7 +20029,7 @@ async def roster(reader: Annotated[RoomReader, Depends(require_room_reader)]) ->
 | `await agents()` | An `AgentWorkspace` for each agent joined to the room that the caller may use there, in config order |
 | `await agent(agent_user_id)` | The `AgentWorkspace` of the agent whose Matrix user ID is `agent_user_id`, once the caller may use it there |
 | `await terminals(workspace, *, create=False)` | The agent's terminals for an `AgentWorkspace` that `agents()` or `agent()` returned, or `None` while its `terminal` is `none`; see [An agent's terminals](#an-agents-terminals) |
-| `modes()` | A `RoomModes` with the room's [thread mode](https://docs.mindroom.chat/configuration/threads/#thread_mode) override `thread` and [reply mode](https://docs.mindroom.chat/configuration/threads/#reply_mode) override `reply` (the room's `reply_mode` setting as the runtime last read it), each `None` while the room follows the config, and `reply_in_effect`, the reply mode the room uses |
+| `modes()` | A `RoomModes` with the room's [thread mode](https://docs.mindroom.chat/configuration/threads/#thread_mode) override `thread` and [reply mode](https://docs.mindroom.chat/configuration/threads/#reply_mode) override `reply` (the room's `thread_mode` and `reply_mode` [settings](https://docs.mindroom.chat/configuration/threads/#room-settings) as the runtime last read them), each `None` while the room follows the config, and `reply_in_effect`, the reply mode the room uses |
 | `await set_modes(*, thread=..., reply=...)` | Changes the room's overrides as `!thread_mode` and `!reply_mode` do |
 | `await history()` | A `RoomHistory` read at that moment: the room's history visibility and where the caller's view of its history begins |
 
@@ -20026,9 +20069,11 @@ The room's steward writes both modes, the reply mode first.
 When the room refuses the reply mode for lack of power, `set_modes()` answers 403 with `I need moderator rights in this room to change the reply mode.`.
 When the room does not take the reply mode for another reason, it answers 503 with `The room did not take its reply mode; nothing was changed.`.
 Both answers come before the thread mode is touched, so neither mode changes.
+A thread mode the room refuses for lack of power answers 403 with `I need moderator rights in this room to change the thread mode.`, and one it does not take for another reason 503 with `The room did not take its thread mode; try again.`; the thread mode stays as it was.
 As with `!thread_mode`, MindRoom then updates the room's [`io.mindroom.thread_mode`](https://docs.mindroom.chat/configuration/threads/#thread-mode-resolution) state, which clients choose the room's view by, before `set_modes()` returns.
-When the room refuses that update for lack of power, `set_modes()` answers 403 with `I need moderator rights in this room to change the thread mode.` and the thread mode stays as it was.
-When the update fails for another reason, as when the homeserver cannot be reached, `set_modes()` answers 503 with `The modes were saved, but the room's thread mode is not published yet; try again.`: the change stays saved, and calling it again retries the update.
+When the room refuses that update for lack of power, `set_modes()` answers 403 with `I need moderator rights in this room to show clients this room's thread mode.`
+When the update fails for another reason, as when the homeserver cannot be reached, it answers 503 with `The modes were saved, but the room's thread mode is not published yet; try again.`
+Either way the thread mode stays set, and calling `set_modes()` again retries the update.
 A reply mode given in the same call is already changed when the thread mode answers 403 or 503.
 
 ```python
@@ -21138,7 +21183,7 @@ Once read, whether a room is a direct message is kept for a few minutes, as runn
 MindRoom's environment lookups for the plugin, such as `runtime_paths.env_value`, read only a `.env` file in `tmp_dir`; plugin code that reads `os.environ` still sees the test's own environment.
 
 The kit does not run agent turns, models, conversation history, workers, tool approval, OAuth flows, MCP server tools, automations, the plugin's `lifespan`, the main app's middleware, such as its response security headers and request size limit, or more than one plugin at once.
-It fires no other built-in event, and hooks get no `matrix_admin` and cannot `put_room_state`; `RoomReader.set_modes` saves a thread mode but answers 503, as it cannot publish one.
+It fires no other built-in event, and hooks get no `matrix_admin` and cannot `put_room_state`; `RoomReader.set_modes` answers 503 and changes nothing, as the kit's rooms take no state writes.
 A call to the Matrix client other than its member and state reads raises `AttributeError` naming the call.
 
 # Hooks

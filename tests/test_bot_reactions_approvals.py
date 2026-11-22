@@ -53,7 +53,6 @@ from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import Owned, ResponseSources
 from mindroom.response_turn import PausedAttempt
-from mindroom.room_thread_modes import set_room_thread_mode_override
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -90,6 +89,7 @@ from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.journal_helpers import admit_dispatch_event
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
+from tests.room_settings_helpers import set_room_thread_mode_override
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator

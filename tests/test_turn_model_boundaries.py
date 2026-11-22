@@ -30,7 +30,6 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.config.models import ModelConfig, ModelPricing
-from mindroom.room_model_overrides import set_room_model_override
 from mindroom.thread_models import set_thread_model_override
 from mindroom.turn_model import (
     ModelScope,
@@ -41,6 +40,7 @@ from mindroom.turn_model import (
     resolve_turn_model,
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.room_settings_helpers import set_room_model_override
 
 if TYPE_CHECKING:
     from pathlib import Path

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import gc
 from contextlib import asynccontextmanager
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
@@ -15,8 +14,8 @@ import pytest
 from aiohttp import web
 from structlog.testing import capture_logs
 
-from mindroom import room_modes
 from mindroom.background_tasks import wait_for_background_tasks
+from mindroom.bot import AgentBot
 from mindroom.bot_runtime_view import RunPhase
 from mindroom.commands.thread_mode_commands import handle_thread_mode_command
 from mindroom.config.agent import AgentConfig, RoomConfig, TeamConfig
@@ -31,11 +30,11 @@ from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestration import rooms as rooms_module
 from mindroom.orchestration.rooms import RoomSetup
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.room_modes import change_room_thread_mode
-from mindroom.room_thread_modes import (
-    clear_room_thread_mode_override,
-    resolve_room_thread_mode_override,
-    set_room_thread_mode_override,
+from mindroom.room_settings import (
+    THREAD_MODE,
+    observe_room_settings_event,
+    refresh_room_setting,
+    resolve_room_setting,
 )
 from mindroom.runtime_shutdown import ShutdownBudget
 from mindroom.steward_duties import StewardDuties, StewardDutiesDeps, reconcile_held_room_states
@@ -62,6 +61,8 @@ if TYPE_CHECKING:
 EVENT_TYPE = "io.mindroom.thread_mode"
 ACCOUNTS_EVENT_TYPE = "io.mindroom.accounts"
 ROUTER_EVENT_TYPE = "io.mindroom.router"
+# The room's `thread_mode` setting, which the thread mode state is published from.
+SETTING = ("io.mindroom.room_settings", "thread_mode")
 ROOM_ID = "!room:localhost"
 
 type RoomState = tuple[Config, RuntimePaths, dict[str, MatrixID], dict[tuple[str, str], dict[str, str]], AsyncMock]
@@ -189,10 +190,10 @@ async def test_updates_after_reload_membership_and_runtime_overrides(room_state:
     config.agents["agent2"].room_thread_modes = {ROOM_ID: "room"}
     await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
     assert events[EVENT_TYPE, ""] == {"mode": "room"}
-    set_room_thread_mode_override(paths, room_id=ROOM_ID, mode="thread")
+    events[SETTING] = {"value": "thread"}
     await reconcile_room_thread_mode(client, config, paths, ROOM_ID)
     assert events[EVENT_TYPE, ""] == {"mode": "thread"}
-    clear_room_thread_mode_override(paths, ROOM_ID)
+    events[SETTING] = {}
     config.agents["agent2"].room_thread_modes = {}
     events["m.room.member", ids["agent2"].full_id] = {"membership": "leave"}
     _sync_live_room(room_state)
@@ -970,39 +971,92 @@ async def test_command_set_and_reset_publish_immediately(room_state: RoomState) 
             room_id=ROOM_ID,
             requester_user_id="@admin:localhost",
             sender_user_id="@admin:localhost",
+            put_state=client.room_put_state,
         )
         assert events[EVENT_TYPE, ""] == {"mode": expected}
 
 
 @pytest.mark.asyncio
-async def test_a_refused_mode_change_does_not_undo_one_made_meanwhile(room_state: RoomState) -> None:
-    """A refused change restores the override it replaced, and a change made while it waited still takes effect."""
+async def test_the_mode_is_published_from_the_rooms_setting_not_the_runtimes_copy(room_state: RoomState) -> None:
+    """A late copy of an older change, which the runtime took from sync, publishes nothing the room no longer holds."""
     config, paths, _, events, client = room_state
-    refusing, refused = asyncio.Event(), asyncio.Event()
+    events[SETTING] = {"value": "thread"}
+    observe_room_settings_event(
+        paths,
+        ROOM_ID,
+        {"type": SETTING[0], "state_key": SETTING[1], "content": {"value": "room"}},
+    )
 
-    async def refuse(*_args: object) -> None:
-        refusing.set()
-        await refused.wait()
+    assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is True
 
-    first = asyncio.create_task(change_room_thread_mode(client, config, paths, ROOM_ID, "room", put_state=refuse))
-    await refusing.wait()
-    second = asyncio.create_task(change_room_thread_mode(client, config, paths, ROOM_ID, "thread"))
-    await asyncio.sleep(0)
-    refused.set()
+    assert events[EVENT_TYPE, ""] == {"mode": "thread"}
+    assert resolve_room_setting(THREAD_MODE, paths, ROOM_ID) == "thread"
 
-    assert await first is None
-    assert await second is True
-    assert resolve_room_thread_mode_override(paths, ROOM_ID) == "thread"
+
+@pytest.mark.asyncio
+async def test_a_setting_changed_while_its_mode_is_published_is_published_next(room_state: RoomState) -> None:
+    """A change that arrives while the mode is written is read and published before the reconciliation ends."""
+    config, paths, _, events, client = room_state
+    events[SETTING] = {"value": "room"}
+    write = client.room_put_state.side_effect
+
+    async def changed_meanwhile(room_id: str, event_type: str, content: dict[str, Any], state_key: str = "") -> object:
+        if content == {"mode": "room"}:
+            events[SETTING] = {"value": "thread"}
+            observe_room_settings_event(paths, ROOM_ID, {"type": SETTING[0], "state_key": SETTING[1], "content": {}})
+        return await write(room_id, event_type, content, state_key)
+
+    client.room_put_state.side_effect = changed_meanwhile
+
+    assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is True
+
+    assert [call.args[2] for call in _writes(client, EVENT_TYPE)] == [{"mode": "room"}, {"mode": "thread"}]
     assert events[EVENT_TYPE, ""] == {"mode": "thread"}
 
 
 @pytest.mark.asyncio
-async def test_a_finished_thread_mode_change_keeps_no_lock_for_its_room(room_state: RoomState) -> None:
-    """A room's change lock lives only while a change holds it, so the locks do not grow with every room changed."""
+async def test_a_late_change_that_arrives_during_the_read_is_not_published(room_state: RoomState) -> None:
+    """An unset setting publishes the configured modes, whatever the runtime's copy holds while they are worked out."""
+    config, paths, _, events, client = room_state
+    events[SETTING] = {}
+    read, write = client.room_get_state_event.side_effect, client.room_put_state.side_effect
+
+    def live(content: dict[str, str]) -> None:
+        observe_room_settings_event(paths, ROOM_ID, {"type": SETTING[0], "state_key": SETTING[1], "content": content})
+
+    async def late_change_during_read(room_id: str, event_type: str, state_key: str = "") -> object:
+        if event_type == SETTING[0]:
+            live({"value": "thread"})
+        return await read(room_id, event_type, state_key)
+
+    async def copy_read_again_during_write(*args: Any, **kwargs: Any) -> object:  # noqa: ANN401
+        live({})
+        return await write(*args, **kwargs)
+
+    client.room_get_state_event.side_effect = late_change_during_read
+    client.room_put_state.side_effect = copy_read_again_during_write
+
+    assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is True
+
+    assert [call.args[2] for call in _writes(client, EVENT_TYPE)] == [{"mode": "mixed"}]
+    assert events[EVENT_TYPE, ""] == {"mode": "mixed"}
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_setting_publishes_nothing_and_is_retried(room_state: RoomState) -> None:
+    """While the room's setting cannot be read, no mode is published from what the runtime last knew."""
     config, paths, _, _, client = room_state
-    assert await change_room_thread_mode(client, config, paths, ROOM_ID, "thread") is True
-    gc.collect()
-    assert (str(paths.storage_root), ROOM_ID) not in room_modes._CHANGES
+    read = client.room_get_state_event.side_effect
+
+    async def setting_unreadable(room_id: str, event_type: str, state_key: str = "") -> object:
+        if event_type == SETTING[0]:
+            return nio.RoomGetStateEventError("unavailable", "M_UNKNOWN")
+        return await read(room_id, event_type, state_key)
+
+    client.room_get_state_event.side_effect = setting_unreadable
+
+    assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is False
+    client.room_put_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1240,10 +1294,11 @@ async def test_repeated_command_repairs_another_writers_mode(
             room_id=ROOM_ID,
             requester_user_id="@admin:localhost",
             sender_user_id="@admin:localhost",
+            put_state=client.room_put_state,
         )
         assert events[EVENT_TYPE, ""] == {"mode": expected}
         events[EVENT_TYPE, ""] = {"mode": "thread"}
-    assert client.room_put_state.await_count == 2
+    assert len(_writes(client, EVENT_TYPE)) == 2
 
 
 @pytest.mark.asyncio
@@ -1300,6 +1355,116 @@ def _router_duties(state: RoomState) -> StewardDuties:
     deps.personal_rooms.onboards_from.return_value = False
     deps.runtime.orchestrator.room_steward.return_value = MagicMock(agent_name=ROUTER_AGENT_NAME)
     return StewardDuties(deps)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("steward", [ROUTER_AGENT_NAME, "agent1"])
+async def test_only_the_steward_republishes_a_changed_thread_mode_setting(room_state: RoomState, steward: str) -> None:
+    """The room's steward publishes the mode a changed `thread_mode` setting gives, and nothing else of the room's."""
+    _, _, _, events, client = room_state
+    events[SETTING] = {"value": "room"}
+    duties = _router_duties(room_state)
+    duties.deps.runtime.orchestrator.room_steward.return_value = MagicMock(agent_name=steward)
+
+    duties._thread_mode_setting_changed(ROOM_ID)
+    await asyncio.gather(*duties._room_state_publishes)
+
+    if steward == ROUTER_AGENT_NAME:
+        assert [call.args[1:3] for call in client.room_put_state.await_args_list] == [(EVENT_TYPE, {"mode": "room"})]
+        assert [call.args[1] for call in client.room_get_state_event.await_args_list].count(SETTING[0]) == 1
+    else:
+        client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_read_that_finds_the_thread_mode_changed_has_the_steward_republish_it(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whoever reads the room, a `thread_mode` change no sync showed is republished for clients by the room's steward."""
+    monkeypatch.setattr("mindroom.steward_duties.cleanup_all_orphaned_bots", AsyncMock())
+    _, paths, _, events, client = room_state
+    events[SETTING] = {"value": "thread"}
+    duties = _router_duties(room_state)
+    duties.deps.runtime.orchestrator.room_steward.return_value = MagicMock(
+        agent_name=ROUTER_AGENT_NAME,
+        steward_duties=duties,
+    )
+    await duties.started(client)
+
+    await refresh_room_setting(THREAD_MODE, client, paths, ROOM_ID, put_state=None)
+    assert not duties._room_state_publishes
+    events[SETTING] = {"value": "room"}
+    await refresh_room_setting(THREAD_MODE, client, paths, ROOM_ID, force=True, put_state=None)
+    await asyncio.gather(*duties._room_state_publishes)
+
+    assert [call.args[1:3] for call in client.room_put_state.await_args_list] == [(EVENT_TYPE, {"mode": "room"})]
+
+
+@pytest.mark.asyncio
+async def test_a_thread_mode_change_only_another_bot_sees_is_republished_by_the_steward(room_state: RoomState) -> None:
+    """While the steward's sync shows nothing, the bot whose sync shows the event has the steward republish the mode."""
+    _, paths, _, events, client = room_state
+    duties = _router_duties(room_state)
+    events[SETTING] = {"value": "room"}
+    other_bot = MagicMock(runtime_paths=paths)
+    other_bot.orchestrator.room_steward.return_value = MagicMock(steward_duties=duties)
+    other_bot.steward_duties.is_steward.return_value = False
+
+    observe_room_settings_event(
+        paths,
+        ROOM_ID,
+        {"type": SETTING[0], "state_key": SETTING[1], "content": events[SETTING]},
+    )
+    await AgentBot._reread_room_setting(other_bot, client, ROOM_ID, THREAD_MODE)
+    await asyncio.gather(*duties._room_state_publishes)
+
+    assert events[EVENT_TYPE, ""] == {"mode": "room"}
+
+
+@pytest.mark.asyncio
+async def test_changes_told_while_a_thread_mode_republish_runs_share_it(room_state: RoomState) -> None:
+    """Each bot in the room tells the steward of the same change; one republish reads and publishes it."""
+    _, _, _, events, client = room_state
+    duties = _router_duties(room_state)
+    events[SETTING] = {"value": "room"}
+
+    for _ in range(3):
+        duties._thread_mode_setting_changed(ROOM_ID)
+        await asyncio.sleep(0)
+    await asyncio.gather(*duties._room_state_publishes)
+
+    assert [call.args[1] for call in client.room_get_state_event.await_args_list].count(SETTING[0]) == 1
+    assert events[EVENT_TYPE, ""] == {"mode": "room"}
+    # A republish cancelled before it ran serves no change either: the next one told starts another.
+    duties._thread_mode_setting_changed(ROOM_ID)
+    duties.stopping()
+    await asyncio.gather(*duties._room_state_publishes, return_exceptions=True)
+    duties._thread_mode_setting_changed(ROOM_ID)
+    await asyncio.gather(*duties._room_state_publishes)
+    assert [call.args[1] for call in client.room_get_state_event.await_args_list].count(SETTING[0]) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_thread_mode_republish_that_fails_is_retried_alone(
+    room_state: RoomState,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A republish the room did not take is retried like any room state, without the rest of the room's state."""
+    monkeypatch.setattr("mindroom.steward_duties.uniform", lambda _low, _high: 0)
+    _, _, _, events, client = room_state
+    events[SETTING] = {"value": "room"}
+    duties = _router_duties(room_state)
+    write = client.room_put_state.side_effect
+    client.room_put_state.side_effect = [nio.RoomPutStateError("Temporarily unavailable", "M_UNKNOWN")]
+
+    duties._thread_mode_setting_changed(ROOM_ID)
+    await asyncio.gather(*duties._room_state_publishes)
+    client.room_put_state.side_effect = write
+    await asyncio.wait_for(duties._room_state_retries[ROOM_ID], timeout=3)
+
+    assert events[EVENT_TYPE, ""] == {"mode": "room"}
+    assert {call.args[1] for call in client.room_put_state.await_args_list} == {EVENT_TYPE}
 
 
 def _publish_joined_rooms(duties: StewardDuties) -> asyncio.Task[None]:
@@ -1442,6 +1607,7 @@ async def test_show_does_not_publish(room_state: RoomState) -> None:
         room_id=ROOM_ID,
         requester_user_id="@admin:localhost",
         sender_user_id="@admin:localhost",
+        put_state=client.room_put_state,
     )
     client.room_put_state.assert_not_awaited()
 
@@ -1535,11 +1701,11 @@ async def test_joined_team_excludes_departed_configured_individual(room_state: R
 @pytest.mark.parametrize("override", [False, True])
 async def test_sweep_skips_rooms_without_joined_responders(room_state: RoomState, *, override: bool) -> None:
     """Spaces and other rooms without responders do not receive presentation state or warnings."""
-    _config, paths, ids, events, client = room_state
+    _config, _paths, ids, events, client = room_state
     for name in ("agent1", "agent2"):
         events["m.room.member", ids[name].full_id] = {"membership": "leave"}
     if override:
-        set_room_thread_mode_override(paths, room_id=ROOM_ID, mode="room")
+        events[SETTING] = {"value": "room"}
     _sync_live_room(room_state)
     with capture_logs() as logs:
         await _room_setup(room_state).publish_room_state()
@@ -1860,6 +2026,7 @@ async def test_thread_mode_command_times_out_while_a_frame_uses_the_room_lock(
             room_id=ROOM_ID,
             requester_user_id="@admin:localhost",
             sender_user_id="@admin:localhost",
+            put_state=client.room_put_state,
         ),
     )
     try:
@@ -2612,7 +2779,7 @@ async def test_slower_earlier_trigger_cannot_restore_a_replaced_thread_mode(room
     async def override_during_first_compare(room_id: str, event_type: str, state_key: str = "") -> object:
         if event_type == EVENT_TYPE:
             client.room_get_state_event.side_effect = read_event
-            set_room_thread_mode_override(paths, room_id=ROOM_ID, mode="room")
+            events[SETTING] = {"value": "room"}
             for _ in range(10):
                 await asyncio.sleep(0)
         return await read_event(room_id, event_type, state_key)
@@ -2626,8 +2793,8 @@ async def test_slower_earlier_trigger_cannot_restore_a_replaced_thread_mode(room
 @pytest.mark.parametrize("command", ["room", "reset"])
 async def test_command_reports_a_failed_publication(room_state: RoomState, command: str) -> None:
     """The command changes nothing and asks for moderator rights when the room refuses the state its clients read."""
-    config, paths, _, _, client = room_state
-    set_room_thread_mode_override(paths, room_id=ROOM_ID, mode="thread")
+    config, paths, _, events, client = room_state
+    events[SETTING] = {"value": "thread"}
     for _ in range(2):  # A second failure answers the same.
         reply = await handle_thread_mode_command(
             command,
@@ -2640,7 +2807,7 @@ async def test_command_reports_a_failed_publication(room_state: RoomState, comma
             put_state=AsyncMock(return_value=None),
         )
         assert reply == "I need moderator rights in this room to change the thread mode."
-        assert resolve_room_thread_mode_override(paths, ROOM_ID) == "thread"
+        assert resolve_room_setting(THREAD_MODE, paths, ROOM_ID) == "thread"
 
 
 async def _hang_a_room_state_retry(duties: StewardDuties, state: RoomState) -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -23,25 +25,34 @@ from mindroom.constants import (
     ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
     resolve_runtime_paths,
+    tracking_dir,
 )
 from mindroom.delivery_gateway import SendTextRequest
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_source import HOOK_DISPATCH_SOURCE_KIND, SCHEDULED_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.event_journal import EventClass, EventKind
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.conversation_hydration import HYDRATED_PROMPT_WINDOW_MESSAGES
 from mindroom.matrix.conversation_reads import ConversationReader
+from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 from mindroom.matrix.thread_history_result import ThreadHistoryResult, thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.room_settings import MODEL, THREAD_MODE, refresh_room_setting, resolve_room_setting
 from mindroom.router.relay import execute_router_relay
 from mindroom.routing_judgment import ResponderSelection
 from mindroom.session_ids import create_session_id
 from mindroom.streaming import StreamingResponse, send_streaming_response
+from mindroom.tool_jobs.conversation import ConversationKey
+from mindroom.tool_jobs.follow_ups import follow_up_event
 from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.bot_helpers import make_test_agent_bot
+from tests.journal_helpers import admit_dispatch_event
+from tests.journal_membership_helpers import admit_room_membership
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -62,6 +73,7 @@ from tests.conftest import (
     unwrap_extracted_collaborator,
     wrap_extracted_collaborators,
 )
+from tests.room_settings_helpers import RoomStateHomeserver, set_room_model_override
 from tests.streaming_helpers import FakeReplyRecords
 from tests.threading_helpers import seed_thread_history
 
@@ -681,6 +693,227 @@ class TestRoomModeThreadDecision:
         assert ctx.is_thread is False
         assert ctx.thread_id is None
         assert ctx.thread_history == ()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kept", ["room-state", "older-runtimes-files", "unreadable-room"])
+    async def test_the_first_events_after_a_restart_are_dispatched_after_the_rooms_settings_are_read(
+        self,
+        room_mode_config: Config,
+        coder_user: AgentMatrixUser,
+        monkeypatch: pytest.MonkeyPatch,
+        kept: str,
+    ) -> None:
+        """After a restart the runtime has no copy of a room's settings, and its restoration may still run.
+
+        Every event is dispatched after the room's settings were read, so the first message, the first edit and the
+        first command all see the room's thread mode and model. Overrides an older runtime stored in files move into
+        the room on that read, through the room's steward. A read that hangs is given up in time, and the events go
+        on by the configured mode as before.
+        """
+        monkeypatch.setattr("mindroom.room_settings._REQUEST_TIMEOUT_SECONDS", 0.05)
+        bot = _agent_bot(config=room_mode_config, agent_user=coder_user)
+        paths, room_id = bot.runtime_paths, "!room:localhost"
+        homeserver = RoomStateHomeserver()
+        bot.client = homeserver.client()
+        monkeypatch.setattr(bot.orchestrator, "room_steward", lambda _room_id: bot)
+        settings = {"thread_mode": "room", "model": "default"}
+        if kept == "older-runtimes-files":
+            for setting in (THREAD_MODE, MODEL):
+                record = {room_id: {setting.legacy_field: settings[setting.key]}}
+                (tracking_dir(paths) / setting.legacy_filename).write_text(json.dumps(record))
+        else:
+            homeserver.events.update(
+                {(ROOM_SETTINGS_EVENT_TYPE, key): {"value": value} for key, value in settings.items()},
+            )
+        never = asyncio.Event()
+
+        async def hangs(*_args: object, **_kwargs: object) -> None:
+            await never.wait()
+
+        if kept == "unreadable-room":
+            bot.client.room_get_state_event.side_effect = hangs
+        seen: list[tuple[bool, str | None]] = []
+
+        async def on_message(room: nio.MatrixRoom, _event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
+            seen.append(
+                (
+                    bot._conversation_resolver.room_is_one_conversation(room.room_id),
+                    resolve_room_setting(MODEL, paths, room.room_id),
+                ),
+            )
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+        bot._journal_dispatcher.callbacks = replace(bot._journal_dispatcher.callbacks, on_message=on_message)
+        room = _matrix_room(room_id, name="Test Room")
+        edit = {
+            "m.new_content": {"msgtype": "m.text", "body": "hi"},
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$0"},
+        }
+        for index, content in enumerate(({}, edit, {"body": "!compact"})):
+            event = nio.RoomMessageText.from_dict(
+                {
+                    "type": "m.room.message",
+                    "event_id": f"${index}:localhost",
+                    "sender": "@user:localhost",
+                    "origin_server_ts": index + 1,
+                    "content": {"msgtype": "m.text", "body": "hello"} | content,
+                },
+            )
+            await admit_dispatch_event(bot._journal_dispatcher, room, event, EventKind.MESSAGE, EventClass.ACTIONABLE)
+
+        async with asyncio.timeout(5):
+            await bot._journal_dispatcher.drain_once()
+
+        assert seen == [(False, None) if kept == "unreadable-room" else (True, "default")] * 3
+        if kept == "older-runtimes-files":
+            assert homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "thread_mode"] == {"value": "room"}
+            assert homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "model"] == {"value": "default"}
+
+    @pytest.mark.asyncio
+    async def test_a_follow_up_runs_after_the_rooms_settings_are_read_and_what_stops_work_waits_for_no_read(
+        self,
+        room_mode_config: Config,
+        coder_user: AgentMatrixUser,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A follow-up pending over a restart starts a model run, so it too finds the room's model read.
+
+        A redaction and a request to cancel jobs use no setting, so neither waits for the room to answer.
+        """
+        bot = _agent_bot(config=room_mode_config, agent_user=coder_user)
+        paths, room_id = bot.runtime_paths, "!room:localhost"
+        homeserver = RoomStateHomeserver()
+        bot.client = homeserver.client()
+        monkeypatch.setattr(bot.orchestrator, "room_steward", lambda _room_id: bot)
+        homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "model"] = {"value": "default"}
+        seen: list[tuple[str, int, str | None]] = []
+
+        def sees(what: str) -> None:
+            reads = bot.client.room_get_state_event.await_count
+            seen.append((what, reads, resolve_room_setting(MODEL, paths, room_id)))
+
+        async def on_stop(_room: nio.MatrixRoom, event: nio.Event) -> None:
+            sees(event.source["type"])
+
+        async def on_job_follow_up(_event: object) -> None:
+            sees("follow-up")
+
+        bot._journal_dispatcher.callbacks = replace(
+            bot._journal_dispatcher.callbacks,
+            on_redaction=on_stop,
+            on_job_cancel=on_stop,
+            on_job_follow_up=on_job_follow_up,
+        )
+        room = _matrix_room(room_id, name="Test Room")
+        stops = (
+            ("m.room.redaction", {"redacts": "$0"}, EventKind.REDACTION),
+            ("io.mindroom.background_job_cancel", {"content": {"all": True}}, EventKind.JOB_CANCEL),
+        )
+        for index, (event_type, fields, kind) in enumerate(stops):
+            source = {"type": event_type, "event_id": f"${index}:localhost", "sender": "@user:localhost"}
+            event = nio.Event.parse_event({"origin_server_ts": index + 1, "content": {}} | source | fields)
+            await admit_dispatch_event(bot._journal_dispatcher, room, event, kind, EventClass.ACTIONABLE)
+        async with asyncio.timeout(5):
+            await bot._journal_dispatcher.drain_once()
+        key = ConversationKey(bot.agent_name, room_id, None, "@user:localhost", silent=False)
+        await bot.journal_principal().admit(
+            follow_up_event(key, "job-follow-up:1", sender_id=bot.matrix_id.full_id, now_ms=3),
+        )
+        async with asyncio.timeout(5):
+            await bot._journal_dispatcher.drain_once()
+
+        assert seen == [
+            ("m.room.redaction", 0, None),
+            ("io.mindroom.background_job_cancel", 0, None),
+            ("follow-up", 3, "default"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_bot_that_left_a_room_reads_none_of_its_settings(
+        self,
+        room_mode_config: Config,
+        coder_user: AgentMatrixUser,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A bot that left is shown the room as it left it, without a setting a moderator made since.
+
+        So the reaction it still owes is handled by the override an older runtime stored, which stays in its file:
+        nothing is read, confirmed or moved into the room over the moderator's setting.
+        """
+        bot = _agent_bot(config=room_mode_config, agent_user=coder_user)
+        paths, room_id = bot.runtime_paths, "!room:localhost"
+        homeserver = RoomStateHomeserver()
+        bot.client = homeserver.client()
+        monkeypatch.setattr(bot.orchestrator, "room_steward", lambda _room_id: bot)
+        legacy = tracking_dir(paths) / THREAD_MODE.legacy_filename
+        legacy.write_text(json.dumps({room_id: {THREAD_MODE.legacy_field: "room"}}))
+        seen: list[str | None] = []
+
+        async def on_reaction(room: nio.MatrixRoom, _event: nio.ReactionEvent) -> TurnDispatchOutcome:
+            seen.append(resolve_room_setting(THREAD_MODE, paths, room.room_id))
+            return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+        bot._journal_dispatcher.callbacks = replace(bot._journal_dispatcher.callbacks, on_reaction=on_reaction)
+        await admit_room_membership(bot.journal_principal(), room_id, "join")
+        reaction = nio.Event.parse_event(
+            {
+                "type": "m.reaction",
+                "event_id": "$reaction:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+                "content": {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$0", "key": "OK"}},
+            },
+        )
+        room = _matrix_room(room_id, name="Test Room")
+        await admit_dispatch_event(bot._journal_dispatcher, room, reaction, EventKind.REACTION, EventClass.ACTIONABLE)
+        await admit_room_membership(bot.journal_principal(), room_id, "leave")
+
+        async with asyncio.timeout(5):
+            await bot._journal_dispatcher.drain_once()
+
+        assert seen == ["room"]
+        bot.client.room_get_state_event.assert_not_awaited()
+        bot.client.room_put_state.assert_not_awaited()
+        assert json.loads(legacy.read_text()) == {room_id: {THREAD_MODE.legacy_field: "room"}}
+
+    @pytest.mark.asyncio
+    async def test_a_bot_that_left_a_room_takes_none_of_its_setting_events(
+        self,
+        room_mode_config: Config,
+        coder_user: AgentMatrixUser,
+    ) -> None:
+        """The last events sync shows a bot that left can be older than what the room's other bots know.
+
+        It takes no setting from them and does not read the room, which it would see as it left it. So what a bot
+        in the room read stays the runtime's copy, confirmed, and that bot's next read asks the room nothing.
+        """
+        bot = _agent_bot(config=room_mode_config, agent_user=coder_user)
+        paths, room_id = bot.runtime_paths, "!room:localhost"
+        as_it_left = RoomStateHomeserver()
+        as_it_left.events[ROOM_SETTINGS_EVENT_TYPE, "model"] = {"value": "old"}
+        bot.client = as_it_left.client()
+        set_room_model_override(paths, room_id=room_id, model_name="new")
+        await admit_room_membership(bot.journal_principal(), room_id, "join")
+        await admit_room_membership(bot.journal_principal(), room_id, "leave")
+        older = nio.UnknownEvent.from_dict(
+            {
+                "type": ROOM_SETTINGS_EVENT_TYPE,
+                "state_key": "model",
+                "content": {"value": "old"},
+                "event_id": "$old:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1,
+            },
+        )
+
+        await bot._on_room_state_event(_matrix_room(room_id, name="Test Room"), older)
+        await asyncio.sleep(0)
+
+        assert resolve_room_setting(MODEL, paths, room_id) == "new"
+        bot.client.room_get_state_event.assert_not_awaited()
+        in_room = RoomStateHomeserver().client()
+        assert await refresh_room_setting(MODEL, in_room, paths, room_id, put_state=None) == (True, "new")
+        in_room.room_get_state_event.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_room_override_skips_derive_only_for_matching_room(

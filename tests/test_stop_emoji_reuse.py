@@ -115,6 +115,8 @@ async def test_stop_emoji_without_a_running_reply_is_an_interactive_reaction(tmp
     # Set up the bot with necessary mocks
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = agent_user.user_id
+    # A bot handles a room's events as one in the room, which its client lists.
+    bot.client.rooms = {"!test:example.com": None}
     bot.logger = MagicMock()
 
     # Create a room and reaction event
@@ -184,6 +186,8 @@ async def test_stop_emoji_from_agent_falls_through(tmp_path: Path, sender_entity
     # Set up the bot
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = agent_user.user_id
+    # A bot handles a room's events as one in the room, which its client lists.
+    bot.client.rooms = {"!test:example.com": None}
     bot.logger = MagicMock()
 
     room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=agent_user.user_id)
@@ -256,6 +260,8 @@ async def test_stop_emoji_from_agent_relaying_its_requester_stops_the_reply(tmp_
     )
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = agent_user.user_id
+    # A bot handles a room's events as one in the room, which its client lists.
+    bot.client.rooms = {"!test:example.com": None}
     bot.logger = MagicMock()
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id=agent_user.user_id)
 
@@ -297,6 +303,8 @@ async def test_stop_emoji_from_agent_relaying_a_requester_without_access_is_igno
     )
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = agent_user.user_id
+    # A bot handles a room's events as one in the room, which its client lists.
+    bot.client.rooms = {"!test:example.com": None}
     bot.logger = MagicMock()
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id=agent_user.user_id)
 
@@ -336,6 +344,8 @@ async def test_stop_reaction_blocked_by_reply_permissions(tmp_path: Path) -> Non
     )
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.user_id = agent_user.user_id
+    # A bot handles a room's events as one in the room, which its client lists.
+    bot.client.rooms = {"!test:example.com": None}
     bot.logger = MagicMock()
 
     room = nio.MatrixRoom(room_id="!test:example.com", own_user_id=agent_user.user_id)
