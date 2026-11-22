@@ -409,6 +409,56 @@ async def test_nested_run_that_ended_before_its_agent_went_on_gives_the_agent_it
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("later", ["ended", "still runs"])
+async def test_continued_agent_gets_the_report_of_its_own_call_and_not_that_of_a_later_resume(
+    stack: WorkflowStack,
+    later: str,
+) -> None:
+    """Another call resumed the run inside before its agent went on: the agent's call gets what its own run reported.
+
+    The run is that other call's by then, so the agent's wait neither starts an attempt of it nor stops it.
+    """
+    parent, child = await _cut_short(stack, _START)
+    assert set(await stack.recover()) == {parent, child.run_id}
+    await _report(stack, child.run_id, "the nested report")
+    stack.run_id = child.run_id
+    await stack.resume(child.run_id, owner="a later resume")
+    if later == "ended":
+        await stack.finish_attempt(result="a later report")
+    stack.run_id = parent
+    model = stack.child_script(answer("done"))
+
+    await stack.continue_agents()
+
+    assert await stack.result("@0", "agent", _PROMPT) == "done"
+    assert "<start_workflow_result>\nthe nested report\n</start_workflow_result>" in _sent(model)
+    assert "a later report" not in _sent(model)
+    resumed = stack.store.get_run(child.run_id)
+    expected = WorkflowRunState.COMPLETED if later == "ended" else WorkflowRunState.RUNNING
+    # The restart's attempt reported, and the resume's is the third: the agent's wait started none after it.
+    assert (resumed.state, resumed.owner, resumed.attempt) == (expected, "a later resume", 3)
+
+
+@pytest.mark.asyncio
+async def test_text_that_looks_like_the_mark_of_a_run_is_left_as_it_is(stack: WorkflowStack) -> None:
+    """Only a run inside the agent's own call is waited for: a mark the task itself holds names none, and stays."""
+    mark = f"<<mindroom:workflow-run-report:wf-{'0' * 32}>>"
+    prompt = {"prompt": f"Explain what {mark} stands for."}
+    await stack.start()
+    stack.child_script(calls(tool_call("append", "c1", line="a")), [Await(asyncio.Event().wait), *answer("never")])
+    await stack.submit("@0", "agent", prompt)
+    await stack.until(lambda: stack.counting_tool.lines == ["a"])
+    await stack.restart()
+    assert await stack.recover() == [stack.run_id]
+    model = stack.child_script(answer("done"))
+
+    await stack.continue_agents()
+
+    assert await stack.result("@0", "agent", prompt) == "done"
+    assert mark in _sent(model)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("case", ["changed file", "no binding", "another call"])
 async def test_agent_whose_cut_short_calls_are_not_all_proven_starts_of_runs_is_not_continued(
     stack: WorkflowStack,

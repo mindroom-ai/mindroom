@@ -221,8 +221,9 @@ def _after_nested_runs(
         if waited_for:
             await save(wait=_WAITS_FOR_RUN)
             for run_id in waited_for:
-                report = await engine.nested_report(outer, run_id)
-                prompt = prompt.replace(_RUN_REPORT_MARK.format(run_id), report or "")
+                # Text of the task that only looks like a mark names no run inside this call, and stays.
+                if (report := await engine.nested_report(outer, run_id)) is not None:
+                    prompt = prompt.replace(_RUN_REPORT_MARK.format(run_id), report)
             await save(wait=None)
         return await run_delegated_child_response(turn, prompt=prompt, **options)
 

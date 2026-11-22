@@ -1232,16 +1232,18 @@ def _of_workflow(run: ScriptRunRecord) -> bool:
 
 
 def _serving_entity(run: ScriptRunRecord, config: Config) -> str:
-    """Return whose bot and whose access answer for *run*: its agent, or the team its agent answered in.
+    """Return whose bot and whose access answer for *run*: its agent, or the one its agent's turn ran through.
 
-    Only for a workflow run, or an attempt of one, that a member of a configured team started in that team: the
-    requester reaches the member through the team there. A plain script is its agent's own.
+    Only for a workflow run, or an attempt of one. A member of a configured team that started it in that team is
+    reached through the team, and an agent that another agent ran as its child through that agent: the run saved
+    that bot as its transport, so the same bot rebuilds its context. A plain script is its agent's own.
     """
     if not _of_workflow(run):
         return run.agent_name
     recipient = _run_execution_identity(run).recipient
     team = config.teams.get(recipient)
-    return recipient if team is not None and run.agent_name in team.agents else run.agent_name
+    through = recipient in config.agents if team is None else run.agent_name in team.agents
+    return recipient if through else run.agent_name
 
 
 def _run_execution_identity(run: ScriptRunRecord) -> ToolExecutionIdentity:

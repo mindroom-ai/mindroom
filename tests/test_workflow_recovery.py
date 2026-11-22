@@ -39,7 +39,10 @@ from mindroom.script_runs.reasons import (
     RUNTIME_SHUTDOWN,
     WORKFLOW_TOOL_REMOVED,
 )
-from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
+from mindroom.tool_system.worker_routing import (
+    parse_tool_execution_identity_payload,
+    serialize_tool_execution_identity,
+)
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.engine import SupersededAttemptError
 from mindroom.workflow_runs.models import NodeRequest, WorkflowNodeState, WorkflowRunState
@@ -58,6 +61,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.script_runs.models import ScriptCallRecord, ScriptRunRecord
     from mindroom.tool_jobs.runtime import BackgroundJob
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.workflow_runs.models import WorkflowRun
 
 _A = tool_args("counter", "append", line="a")
@@ -1361,6 +1365,49 @@ async def test_run_that_a_teams_member_started_is_answered_for_by_the_team(stack
     attempt = replace(stack.attempt, execution_identity=served)
     assert resolver.is_authorized(attempt) is True
     assert resolver.is_authorized(replace(attempt, workflow_run_id=None)) is False
+
+
+@pytest.mark.asyncio
+async def test_run_that_a_named_child_started_is_served_by_the_bot_its_turn_ran_through(tmp_path: Path) -> None:
+    """Agent A ran agent B as a child and B started the run: the run is B's, and A's bot carries its calls.
+
+    The identity the run saved names A as its transport, so the context rebuilt for each call must too: B's own
+    bot would stamp itself, and the broker would refuse every call of the run.
+    """
+    with workflow_stack(tmp_path, extra_tools=("workflow",), other_agents=("helper",), require_approval=()) as stack:
+        # As `child_tool_runtime_context` leaves it: the child is the agent, and the caller's bot the transport.
+        caller = replace(stack.context, agent_name="helper", transport_agent_name="watcher")
+        built: list[str] = []
+
+        def bot(name: str) -> SimpleNamespace:
+            def build(target: object, *, user_id: str, agent_name: str, correlation_id: str) -> ToolRuntimeContext:
+                built.append(name)
+                moved = {"target": target, "requester_id": user_id, "agent_name": agent_name}
+                return replace(caller, transport_agent_name=name, correlation_id=correlation_id, **moved)
+
+            return SimpleNamespace(
+                running=True,
+                config=caller.config,
+                tool_runtime_support=SimpleNamespace(build_context=build),
+            )
+
+        bots = {name: bot(name) for name in ("watcher", "helper")}
+        resolver = _LiveScriptRuntimeResolver(caller.runtime_paths, bots.get, lambda _run: None)  # type: ignore[arg-type]
+        stack.context = caller
+        await stack.start()
+        try:
+            attempt = stack.attempt
+            saved = parse_tool_execution_identity_payload(attempt.execution_identity)
+
+            resolved = resolver.resolve(attempt, correlation_id="a-call")
+
+            assert (attempt.agent_name, saved.transport_agent_name, built) == ("helper", "watcher", ["watcher"])
+            assert resolved.execution_identity == saved
+            # A plain script of the child is its agent's own, as it was.
+            resolver.resolve(replace(attempt, workflow_run_id=None), correlation_id="a-call")
+            assert built == ["watcher", "helper"]
+        finally:
+            await stack.engine.close()
 
 
 _NOT_READY = "The run's agent is not ready in the run's room yet. Try again in a moment."

@@ -60,7 +60,7 @@ from mindroom.workflow_runs.models import (
 )
 from mindroom.workflow_runs.recovery import AUTO_RESUME_REASONS, NO_ACCESS
 from mindroom.workflow_runs.replay import DirtyLanes, decide, node_digest, result_digest, split_key, stale_keys
-from mindroom.workflow_runs.store import SupersededAttemptError, WorkflowRunStoreError
+from mindroom.workflow_runs.store import SupersededAttemptError, WorkflowRunNotFoundError, WorkflowRunStoreError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
@@ -926,11 +926,18 @@ class WorkflowEngine:
         """Wait for a run inside the call *outer* as the call that started it did, and return what it delivers.
 
         The wait is one more call of the run's owner: it starts the run's attempts while it waits, and when it is
-        cancelled and no other call is left, the run is cancelled with it. None for a run that is not inside that call.
+        cancelled and no other call is left, the run is cancelled with it. None for a run that is not inside that
+        call. A run that another call resumed since is that call's to wait for and to stop: the call that started
+        it gets the report its own attempt ended with, which the run kept.
         """
-        run = self.store.get_run(run_id)
+        try:
+            run = self.store.get_run(run_id)
+        except WorkflowRunNotFoundError:
+            return None
         if (run.parent_run_id, run.parent_node_key) != outer[:2]:
             return None
+        if run.owner != run.origin_job_id:
+            return run.claims.get(str(run.origin_job_id)) or _TAKEN.format(run_id)
 
         async def found() -> tuple[WorkflowRun, bool]:
             return run, False
