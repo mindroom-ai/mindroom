@@ -6,9 +6,11 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from mindroom.ai import run_delegated_child_response
-from mindroom.delegation.background import delegation_child
+from mindroom.ai_run_metadata import prior_usage_by_run
+from mindroom.delegation.background import delegation_child, job_acknowledgers
+from mindroom.delegation.cost import SubagentCost, carried_receipts, merge_by_key
 from mindroom.delegation.execution import delegation_call_job
-from mindroom.delegation.lifecycle import authorize_delegation, delegation_grant, prepare_child_turn
+from mindroom.delegation.lifecycle import authorize_delegation, child_own_usage, delegation_grant, prepare_child_turn
 from mindroom.delegation.personas import follow_up_refusal
 from mindroom.delegation.recovery import read_child_run, settled_subagent
 from mindroom.delegation.sessions import SubagentSessionError
@@ -31,6 +33,8 @@ if TYPE_CHECKING:
 _CONTINUATIONS_KEY = "restart_continuations"
 # What the job's latest continuation was sent in place of its task, saved with the job and nowhere a room reads.
 _PROMPT_KEY = "continuation_prompt"
+# What the job's latest continuation started from having received, in case a restart stops it before its run's first row.
+_RECEIPTS_KEY = "continuation_receipts"
 # How many restarts may cut one subagent job short before the next one ends it, in case continuing is what stops it.
 _RESTART_CONTINUATION_LIMIT = 2
 # How much of what the cut-short turn was sent the continuation prompt repeats.
@@ -58,7 +62,8 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
     child = await _stopped_turn(job, config, runtime_paths)
     if isinstance(child, str):
         return child
-    prompt = await _continuation_prompt(job, child, config, runtime_paths)
+    run = await read_child_run(child, config, runtime_paths)
+    prompt = _continuation_prompt(job, child, run, config)
     if prompt is None:
         return "its turn's run holds calls recovery could not finish, as a run paused for a decision or a subagent does"
     tools = config_plugins(config, runtime_paths).tools
@@ -92,6 +97,15 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
         persona=child.persona,
         parent_tool_call_id=child.parent_tool_call_id,
     )
+    # The continuation starts from what the turns restarts cut short before it cost, by delegation id: what the job's
+    # earlier continuation started from, that turn's own cost, and what its runs received, as a restart's replay carries it.
+    receipts = job.adapter.get(_RECEIPTS_KEY) or {}
+    if run is not None:
+        own_usd = child_own_usage(run, config)[1]
+        ran = {**dict.fromkeys(prior_usage_by_run(run.metadata)), run.run_id: run.metadata}
+        received = carried_receipts(ran, job_acknowledgers(runtime.retained_jobs()))
+        receipts = merge_by_key((receipts, received, {} if own_usd is None else {child.delegation_id: own_usd}), float)
+    follow_up.cost_usd = follow_up.subagents_cost_usd = SubagentCost(receipts).usd
     arguments = {"subagent_id": child.subagent_id, "message": child.task}
     if OUTPUT_PATH_ARGUMENT in job.adapter:
         arguments[OUTPUT_PATH_ARGUMENT] = job.adapter[OUTPUT_PATH_ARGUMENT]
@@ -109,9 +123,10 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
         config=authorized,
         runtime_paths=runtime_paths,
         refresh_scheduler=None if orchestrator is None else orchestrator.knowledge_refresh_scheduler,
+        receipts=receipts,
     )
     if not isinstance(spec, str):
-        spec.adapter.update({_CONTINUATIONS_KEY: continuations + 1, _PROMPT_KEY: prompt})
+        spec.adapter.update({_CONTINUATIONS_KEY: continuations + 1, _PROMPT_KEY: prompt, _RECEIPTS_KEY: receipts})
     return spec
 
 
@@ -137,11 +152,11 @@ async def _stopped_turn(job: BackgroundJob, config: Config, runtime_paths: Runti
     return child if interrupted_by_restart(child) else f"its turn ended {child.status} before the restart settled it"
 
 
-async def _continuation_prompt(
+def _continuation_prompt(
     job: BackgroundJob,
     child: DelegationChild,
+    run: RunRecord | None,
     config: Config,
-    runtime_paths: RuntimePaths,
 ) -> str | None:
     """Return what the child is sent to continue cut-short turn ``child``, or None for a run that cannot continue.
 
@@ -154,7 +169,6 @@ async def _continuation_prompt(
     sent = job.adapter.get(_PROMPT_KEY, child.task)
     if child.delegation_id != delegation_child(job).delegation_id:
         return sent
-    run = await read_child_run(child, config, runtime_paths)
     if run is None or not is_recovered_run(run):
         return None if run is not None and run.tools else sent
     task = f"{sent[:_MAX_TASK_CHARACTERS]}…" if len(sent) > _MAX_TASK_CHARACTERS else sent

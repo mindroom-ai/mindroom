@@ -390,7 +390,7 @@ async def test_a_recovered_call_s_follow_up_publishes_the_usage_its_turn_spent_b
             session_id=runtime.session_id,
             agent_id="helper",
             status=RunStatus.cancelled,
-            metadata=with_prior_usage({"agent_mode": "minimal"}, [spent]),
+            metadata=with_prior_usage({"agent_mode": "minimal"}, {"run-1": spent}),
             messages=[Message(role="user", content="Switch, then answer")],
         ),
     )

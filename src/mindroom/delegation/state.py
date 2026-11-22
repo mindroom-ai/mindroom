@@ -10,7 +10,7 @@ from mindroom.redaction import redact_sensitive_text
 from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping, Sequence
+    from collections.abc import Collection, Mapping
 
     from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
@@ -385,10 +385,10 @@ class ChildResponseRunner(Protocol):
         config: Config,
         runtime_paths: RuntimePaths,
         refresh_scheduler: KnowledgeRefreshScheduler | None,
-        prior_usage: Sequence[RunMetrics] = (),
+        prior_usage: Mapping[str, RunMetrics] | None = None,
     ) -> str:
         """Execute a child response in its retained scope, reporting exact run IDs.
 
-        ``prior_usage`` is the usage of the child's turn before this response, which its runs' records carry.
+        ``prior_usage`` is the usage of the child's turn before this response, by run id, which its runs' records carry.
         """
         ...

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
 import time
@@ -14,7 +15,7 @@ import pytest
 import mindroom.approval.execution as approval_execution_module
 from mindroom.agents import create_agent
 from mindroom.ai import ai_response, stream_agent_response
-from mindroom.ai_run_metadata import prior_usage_of, with_prior_usage
+from mindroom.ai_run_metadata import prior_usage_by_run, with_prior_usage
 from mindroom.approval.execution import (
     AgentApprovalExecution,
     _collect_agent_continuation,
@@ -25,10 +26,16 @@ from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.approval.response import continuation_target
 from mindroom.approval.tool_owners import required_approval_tool_names
 from mindroom.config.main import Config
-from mindroom.constants import AI_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY, resolve_runtime_paths
+from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
+    PRIOR_USAGE_BY_RUN_METADATA_KEY,
+    PRIOR_USAGE_RUN_METADATA_KEY,
+    SUBAGENT_COST_RUN_METADATA_KEY,
+    resolve_runtime_paths,
+)
 from mindroom.custom_tools.calculator import CalculatorTools
 from mindroom.custom_tools.sleep import SleepTools
-from mindroom.delegation.cost import SubagentCost
+from mindroom.delegation.cost import SubagentCost, receive_subagent_cost
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
 from mindroom.history.mid_turn_compaction import without_run_usage
@@ -1033,11 +1040,15 @@ def test_a_run_s_record_keeps_the_summed_usage_its_turn_spent_before_it() -> Non
     first = RunMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=5), time_to_first_token=1.5)
     second = RunMetrics(tokens=TokenCounts(input_tokens=20, output_tokens=2), time_to_first_token=0.5)
 
-    assert with_prior_usage(None, ()) is None
-    assert with_prior_usage(_REQUESTER, ()) == _REQUESTER
-    [spent] = prior_usage_of(RunRecord(run_id="run", metadata=with_prior_usage(_REQUESTER, [first, second])))
+    assert with_prior_usage(None, {}) is None
+    assert with_prior_usage(_REQUESTER, {}) == _REQUESTER
+    stored = with_prior_usage(_REQUESTER, {"run-1": first, "run-2": second})
+    # The summed usage an earlier release reads stays beside it.
+    spent = RunMetrics.from_dict(stored[PRIOR_USAGE_RUN_METADATA_KEY])
+    # The record also names each attempt by its run id, in order, so a replay that reads several runs counts each once.
+    assert prior_usage_by_run(stored) == {"run-1": first, "run-2": second}
     assert (spent.tokens.input_tokens, spent.tokens.output_tokens, spent.time_to_first_token) == (120, 7, 1.5)
-    assert prior_usage_of(RunRecord(run_id="run", metadata=_REQUESTER)) == ()
+    assert prior_usage_by_run(_REQUESTER) == {}
 
 
 def test_a_run_seeded_from_another_run_s_metadata_keeps_none_of_that_run_s_usage() -> None:
@@ -1047,7 +1058,7 @@ def test_a_run_seeded_from_another_run_s_metadata_keeps_none_of_that_run_s_usage
     """
     folded = [{"created_at": 1, "metrics": {"input_tokens": 3}, "message_id": "folded"}]
     spent = RunMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=5))
-    paused = with_prior_usage({**_REQUESTER, COMPACTED_REQUESTS_METADATA_KEY: folded}, [spent])
+    paused = with_prior_usage({**_REQUESTER, COMPACTED_REQUESTS_METADATA_KEY: folded}, {"run-1": spent})
 
     assert without_run_usage(paused) == _REQUESTER
     assert without_run_usage(None) is None
@@ -1080,7 +1091,10 @@ async def test_a_stopped_attempt_after_an_approved_run_records_none_of_the_pause
 
     [stopped] = [run for run in stored_runs(config, paths, identity.session_id) if is_interrupted_replay_run(run)]
     assert stopped.run_id != paused.run_id
-    assert [(usage.tokens.input_tokens, usage.tokens.output_tokens) for usage in prior_usage_of(stopped)] in (
+    assert [
+        (usage.tokens.input_tokens, usage.tokens.output_tokens)
+        for usage in prior_usage_by_run(stopped.metadata).values()
+    ] in (
         [],
         [(130, 8)],
     )
@@ -1118,6 +1132,63 @@ async def test_a_stopped_attempt_after_an_approved_run_is_stored_as_its_own_mess
 
     assert await remove_history_of_redacted_events(storage, session, redacted) == ["$reply"]
     assert [run.run_id for run in stored_runs(config, paths, identity.session_id)] == [paused.run_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stored_as_sum",
+    [False, True],
+    ids=["received by id", "stored as a sum by an earlier release"],
+)
+async def test_a_run_that_follows_an_approved_run_reports_what_the_paused_run_received_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stored_as_sum: bool,
+) -> None:
+    """A model switch after an approval starts a run that inherits the paused run's metadata; no restart is involved.
+
+    The new run holds the receipt the paused run held, under the same delegation id, so its own pause and resume
+    report $1 once, as they do for a paused row an earlier release stored with only the sum.
+    """
+    original_add = CalculatorTools.add
+    additions: list[float] = []
+
+    @functools.wraps(original_add)
+    def add(self: CalculatorTools, a: float, b: float) -> str:
+        additions.append(a)
+        if len(additions) == 1 and not stored_as_sum:
+            receive_subagent_cost("delegation-1", 1.0)
+        return original_add(self, a, b)
+
+    monkeypatch.setattr(CalculatorTools, "add", add)
+    paths, config = _usage_config(tmp_path)
+    identity = _identity("received-session")
+    turns = [
+        _add("first", 10, 1),
+        _add("second", 10, 1),
+        _continue_call("switch"),
+        _add("third", 5, 1),
+        answer("Done."),
+    ]
+    install_model_providers(monkeypatch, {"default": _CheckedModel(turns)})
+    paused = await _paused_turn(config, paths, identity, "Add them.", show_tool_calls=False)
+    storage = create_session_storage("general", config, paths, execution_identity=identity)
+    if stored_as_sum:
+        storage.patch_run_metadata(identity.session_id, paused.run_id, {SUBAGENT_COST_RUN_METADATA_KEY: 1.0})
+
+    second = await _approve_add(tmp_path, config, paths, identity, paused, "first")
+    assert isinstance(second, PausedAttempt)
+    third = await _approve_add(tmp_path, config, paths, identity, second, "second")
+    assert isinstance(third, PausedAttempt)
+    assert third.run_id != paused.run_id
+    result = await _approve_add(tmp_path, config, paths, identity, third, "third")
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert result.metadata_content[AI_RUN_METADATA_KEY]["cost"] == {"subagents_usd": "1"}
+    stored = [
+        (run.metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY) for run in storage.list_runs(identity.session_id)
+    ]
+    assert stored == [1.0, 1.0]
 
 
 def _usage_config(tmp_path: Path) -> tuple[RuntimePaths, Config]:
@@ -1439,7 +1510,8 @@ async def test_a_pause_stored_without_its_turn_s_earlier_usage_resumes_publishin
     assert stored is not None
     assert stored.metadata is not None
     assert PRIOR_USAGE_RUN_METADATA_KEY in stored.metadata
-    stored.metadata = {key: value for key, value in stored.metadata.items() if key != PRIOR_USAGE_RUN_METADATA_KEY}
+    prior_usage_keys = {PRIOR_USAGE_RUN_METADATA_KEY, PRIOR_USAGE_BY_RUN_METADATA_KEY}
+    stored.metadata = {key: value for key, value in stored.metadata.items() if key not in prior_usage_keys}
     assert storage.save_run(session, stored, record_usage=False) == "written"
 
     result = await _approve_add(tmp_path, config, paths, identity, paused, "approved")
