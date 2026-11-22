@@ -729,3 +729,100 @@ def test_prune_old_firings_only_deletes_old_finished_rows(tmp_path: Path) -> Non
         remaining = {row[0] for row in conn.execute("SELECT dedupe_key FROM trigger_firings").fetchall()}
 
     assert remaining == {"$old_pending", "$old_claimed", "$recent_delivered"}
+
+
+def test_firing_state_transition_guards(tmp_path: Path) -> None:
+    """State transition helpers reject invalid source states without mutating rows or triggers."""
+    store = ReactiveTriggerStore(_runtime_paths(tmp_path))
+    store.create_trigger(_make_record(trigger_id="guard_once", once=True))
+
+    # Pending firing: mark_delivered returns False; mark_delivery_retry raises without mutating row or once trigger
+    assert store.enqueue_firing("guard_once", "$p1", _make_event(event_id="$p1")) is True
+    pending = store.list_due_firings()[0]
+    assert store.mark_delivered(pending.id, "$sent_bad") is False
+    with pytest.raises(ReactiveTriggerStoreError, match="expected 'claimed'"):
+        store.mark_delivery_retry(pending.id, "should fail", now=1000.0)
+
+    still_pending = store.get_firing(pending.id)
+    assert still_pending is not None
+    assert still_pending.status == "pending"
+    assert still_pending.attempt_count == 0
+    assert still_pending.error_message is None
+    assert still_pending.matrix_event_id is None
+    trigger = store.get_trigger("guard_once")
+    assert trigger is not None
+    assert trigger.enabled is True
+    assert trigger.fire_count == 0
+
+    # Claimed firing: mark_triaged_no returns False and leaves row claimed
+    assert store.claim_firing(pending.id, now=1000.0) == "claimed"
+    assert store.mark_triaged_no(pending.id, reason="too late") is False
+    claimed = store.get_firing(pending.id)
+    assert claimed is not None
+    assert claimed.status == "claimed"
+    assert claimed.triage_reason is None
+
+    # Delivered firing: second mark_delivered, mark_triaged_no, mark_skipped return False; retry raises
+    assert store.mark_delivered(pending.id, "$sent_ok", now=1001.0) is True
+    assert store.mark_delivered(pending.id, "$sent_dup", now=1002.0) is False
+    assert store.mark_triaged_no(pending.id, reason="after delivery") is False
+    assert store.mark_skipped(pending.id, "after delivery", now=1003.0) is False
+    with pytest.raises(ReactiveTriggerStoreError, match="expected 'claimed'"):
+        store.mark_delivery_retry(pending.id, "after delivery", now=1004.0)
+
+    delivered = store.get_firing(pending.id)
+    assert delivered is not None
+    assert delivered.status == "delivered"
+    assert delivered.matrix_event_id == "$sent_ok"
+    assert delivered.error_message is None
+
+
+def test_mark_skipped_transition_guards(tmp_path: Path) -> None:
+    """mark_skipped applies to pending and claimed firings and rejects terminal states."""
+    store = ReactiveTriggerStore(_runtime_paths(tmp_path))
+    store.create_trigger(_make_record(trigger_id="skip_rule"))
+    store.enqueue_firing("skip_rule", "$s_pending", _make_event(event_id="$s_pending"))
+    store.enqueue_firing("skip_rule", "$s_claimed", _make_event(event_id="$s_claimed"))
+    store.enqueue_firing("skip_rule", "$s_triaged", _make_event(event_id="$s_triaged"))
+    f_pending, f_claimed, f_triaged = store.list_due_firings()
+
+    assert store.mark_skipped(f_pending.id, "owner unsubscribed") is True
+    assert store.mark_skipped(f_pending.id, "already skipped") is False
+
+    assert store.claim_firing(f_claimed.id, now=2000.0) == "claimed"
+    assert store.mark_skipped(f_claimed.id, "owner left room") is True
+    skipped_claimed = store.get_firing(f_claimed.id)
+    assert skipped_claimed is not None
+    assert skipped_claimed.status == "skipped"
+    assert skipped_claimed.error_message == "owner left room"
+
+    assert store.mark_triaged_no(f_triaged.id, reason="noise") is True
+    assert store.mark_skipped(f_triaged.id, "should not overwrite") is False
+    triaged = store.get_firing(f_triaged.id)
+    assert triaged is not None
+    assert triaged.status == "triaged_no"
+
+
+def test_advance_room_cursor_is_monotonic(tmp_path: Path) -> None:
+    """advance_room_cursor never regresses to an older (created_ts, logical_event_id)."""
+    store = ReactiveTriggerStore(_runtime_paths(tmp_path))
+    store.create_trigger(
+        _make_record(trigger_id="monotonic_cursor"),
+        initial_cursor=RoomCursor(created_ts=2000, logical_event_id="$e2"),
+    )
+
+    # Older timestamp does not regress
+    store.advance_room_cursor("monotonic_cursor", RoomCursor(created_ts=1500, logical_event_id="$e9"))
+    assert store.get_room_cursor("monotonic_cursor") == RoomCursor(created_ts=2000, logical_event_id="$e2")
+
+    # Same timestamp with smaller logical_event_id does not regress
+    store.advance_room_cursor("monotonic_cursor", RoomCursor(created_ts=2000, logical_event_id="$e1"))
+    assert store.get_room_cursor("monotonic_cursor") == RoomCursor(created_ts=2000, logical_event_id="$e2")
+
+    # Same timestamp with greater logical_event_id advances
+    store.advance_room_cursor("monotonic_cursor", RoomCursor(created_ts=2000, logical_event_id="$e3"))
+    assert store.get_room_cursor("monotonic_cursor") == RoomCursor(created_ts=2000, logical_event_id="$e3")
+
+    # Greater timestamp advances even with smaller logical_event_id
+    store.advance_room_cursor("monotonic_cursor", RoomCursor(created_ts=2001, logical_event_id="$e0"))
+    assert store.get_room_cursor("monotonic_cursor") == RoomCursor(created_ts=2001, logical_event_id="$e0")

@@ -398,21 +398,22 @@ class ReactiveTriggerStore:
             ).fetchone()
         return _firing_from_row(row) if row is not None else None
 
-    def mark_triaged_no(self, firing_id: int, reason: str | None = None) -> None:
-        """Mark a firing as rejected by triage without consuming once=True or rate limits."""
+    def mark_triaged_no(self, firing_id: int, reason: str | None = None) -> bool:
+        """Mark a pending firing as rejected by triage without consuming once=True or rate limits."""
         now = time.time()
         with self._write_transaction() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE trigger_firings
                 SET status = 'triaged_no',
                     triage_reason = ?,
                     next_retry_at = NULL,
                     updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND status = 'pending'
                 """,
                 (reason, now, firing_id),
             )
+            return cursor.rowcount > 0
 
     def claim_firing(
         self,
@@ -492,11 +493,11 @@ class ReactiveTriggerStore:
         matrix_event_id: str,
         *,
         now: float | None = None,
-    ) -> None:
+    ) -> bool:
         """Mark a claimed firing as delivered with the posted Matrix event ID."""
         current_time = time.time() if now is None else now
         with self._write_transaction() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE trigger_firings
                 SET status = 'delivered',
@@ -504,10 +505,11 @@ class ReactiveTriggerStore:
                     next_retry_at = NULL,
                     error_message = NULL,
                     updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND status = 'claimed'
                 """,
                 (matrix_event_id, current_time, firing_id),
             )
+            return cursor.rowcount > 0
 
     def mark_delivery_retry(
         self,
@@ -521,11 +523,15 @@ class ReactiveTriggerStore:
         current_time = time.time() if now is None else now
         with self._write_transaction() as conn:
             row = conn.execute(
-                "SELECT attempt_count FROM trigger_firings WHERE id = ?",
+                "SELECT status, attempt_count FROM trigger_firings WHERE id = ?",
                 (firing_id,),
             ).fetchone()
             if row is None:
                 msg = f"Reactive trigger firing not found: {firing_id}"
+                raise ReactiveTriggerStoreError(msg)
+            status = str(row["status"])
+            if status != "claimed":
+                msg = f"Cannot retry firing {firing_id} in status {status!r}; expected 'claimed'"
                 raise ReactiveTriggerStoreError(msg)
 
             attempt = int(row["attempt_count"]) + 1
@@ -538,7 +544,7 @@ class ReactiveTriggerStore:
                         next_retry_at = NULL,
                         error_message = ?,
                         updated_at = ?
-                    WHERE id = ?
+                    WHERE id = ? AND status = 'claimed'
                     """,
                     (attempt, error, current_time, firing_id),
                 )
@@ -554,27 +560,28 @@ class ReactiveTriggerStore:
                     next_retry_at = ?,
                     error_message = ?,
                     updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND status = 'claimed'
                 """,
                 (attempt, next_retry_at, error, current_time, firing_id),
             )
             return "retrying"
 
-    def mark_skipped(self, firing_id: int, reason: str, *, now: float | None = None) -> None:
-        """Mark a firing as skipped with an explanatory reason."""
+    def mark_skipped(self, firing_id: int, reason: str, *, now: float | None = None) -> bool:
+        """Mark a pending or claimed firing as skipped with an explanatory reason."""
         current_time = time.time() if now is None else now
         with self._write_transaction() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 UPDATE trigger_firings
                 SET status = 'skipped',
                     error_message = ?,
                     next_retry_at = NULL,
                     updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND status IN ('pending', 'claimed')
                 """,
                 (reason, current_time, firing_id),
             )
+            return cursor.rowcount > 0
 
     def list_due_firings(self, *, now: float | None = None, limit: int = 50) -> list[FiringRecord]:
         """Return pending firings and claimed firings whose retry backoff is due, ordered by id ASC."""
@@ -725,6 +732,11 @@ def _upsert_room_cursor(
             created_ts = excluded.created_ts,
             logical_event_id = excluded.logical_event_id,
             updated_at = excluded.updated_at
+        WHERE excluded.created_ts > room_cursors.created_ts
+           OR (
+               excluded.created_ts = room_cursors.created_ts
+               AND excluded.logical_event_id > room_cursors.logical_event_id
+           )
         """,
         (trigger_id, cursor.created_ts, cursor.logical_event_id, updated_at),
     )

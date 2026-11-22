@@ -29,7 +29,7 @@ class GitHubEventSourceConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["github"] = "github"
+    kind: Literal["github"] = Field(default="github", description="Event source type for GitHub webhooks")
     secret_env: str = Field(description="Environment variable name holding the GitHub webhook secret")
     allowed_repos: list[str] = Field(description="Allowlisted owner/repo repositories for this source")
     allowed_events: list[str] = Field(
@@ -102,7 +102,7 @@ class Ed25519EventSourceConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    kind: Literal["ed25519"] = "ed25519"
+    kind: Literal["ed25519"] = Field(default="ed25519", description="Event source type for Ed25519-signed events")
     public_key: str = Field(description="Ed25519 public key used to verify signed events")
     key_id: str = Field(
         default="default",

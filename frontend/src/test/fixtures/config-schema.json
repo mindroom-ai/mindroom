@@ -2005,6 +2005,71 @@
         "name"
       ]
     },
+    "Ed25519EventSourceConfig": {
+      "additionalProperties": false,
+      "description": "Shared Ed25519-signed external event source configuration.",
+      "properties": {
+        "kind": {
+          "const": "ed25519",
+          "default": "ed25519",
+          "description": "Event source type for Ed25519-signed events",
+          "title": "Kind",
+          "type": "string"
+        },
+        "public_key": {
+          "description": "Ed25519 public key used to verify signed events",
+          "title": "Public Key",
+          "type": "string"
+        },
+        "key_id": {
+          "default": "default",
+          "description": "Expected signing key identifier",
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Key Id",
+          "type": "string"
+        },
+        "allowed_kinds": {
+          "default": [],
+          "description": "Optional allowlist of accepted event kinds",
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Kinds",
+          "type": "array"
+        },
+        "subscribers": {
+          "default": [],
+          "description": "Matrix user IDs allowed to subscribe reactive triggers to this source",
+          "items": {
+            "type": "string"
+          },
+          "title": "Subscribers",
+          "type": "array"
+        },
+        "replay_window_seconds": {
+          "default": 300,
+          "description": "Maximum accepted signature age in seconds",
+          "maximum": 3600,
+          "minimum": 30,
+          "title": "Replay Window Seconds",
+          "type": "integer"
+        },
+        "max_body_bytes": {
+          "default": 65536,
+          "description": "Maximum accepted request body size in bytes",
+          "maximum": 262144,
+          "minimum": 1024,
+          "title": "Max Body Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "public_key"
+      ],
+      "title": "Ed25519EventSourceConfig",
+      "type": "object"
+    },
     "EgressAuth": {
       "additionalProperties": false,
       "description": "Authentication configuration for an egress rule.",
@@ -2629,9 +2694,119 @@
           },
           "title": "Admin Users",
           "type": "array"
+        },
+        "reactive_enabled": {
+          "default": true,
+          "description": "Whether reactive triggers are enabled",
+          "title": "Reactive Enabled",
+          "type": "boolean"
+        },
+        "max_reactive_triggers_per_owner": {
+          "default": 50,
+          "description": "Maximum reactive trigger records one owner may create",
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Max Reactive Triggers Per Owner",
+          "type": "integer"
+        },
+        "max_fires_per_hour": {
+          "default": 60,
+          "description": "Maximum allowed fires per hour cap for reactive triggers",
+          "maximum": 600,
+          "minimum": 1,
+          "title": "Max Fires Per Hour",
+          "type": "integer"
+        },
+        "event_sources": {
+          "additionalProperties": {
+            "discriminator": {
+              "mapping": {
+                "ed25519": "#/$defs/Ed25519EventSourceConfig",
+                "github": "#/$defs/GitHubEventSourceConfig"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/GitHubEventSourceConfig"
+              },
+              {
+                "$ref": "#/$defs/Ed25519EventSourceConfig"
+              }
+            ]
+          },
+          "default": {},
+          "description": "Named shared external event sources keyed by source_id",
+          "title": "Event Sources",
+          "type": "object"
         }
       },
       "title": "ExternalTriggerPolicyConfig",
+      "type": "object"
+    },
+    "GitHubEventSourceConfig": {
+      "additionalProperties": false,
+      "description": "Shared GitHub webhook event source configuration.",
+      "properties": {
+        "kind": {
+          "const": "github",
+          "default": "github",
+          "description": "Event source type for GitHub webhooks",
+          "title": "Kind",
+          "type": "string"
+        },
+        "secret_env": {
+          "description": "Environment variable name holding the GitHub webhook secret",
+          "title": "Secret Env",
+          "type": "string"
+        },
+        "allowed_repos": {
+          "description": "Allowlisted owner/repo repositories for this source",
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Repos",
+          "type": "array"
+        },
+        "allowed_events": {
+          "default": [
+            "pull_request",
+            "pull_request_review",
+            "check_suite",
+            "release",
+            "issues",
+            "push"
+          ],
+          "description": "Allowlisted GitHub X-GitHub-Event names",
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Events",
+          "type": "array"
+        },
+        "subscribers": {
+          "default": [],
+          "description": "Matrix user IDs allowed to subscribe reactive triggers to this source",
+          "items": {
+            "type": "string"
+          },
+          "title": "Subscribers",
+          "type": "array"
+        },
+        "max_body_bytes": {
+          "default": 262144,
+          "description": "Maximum accepted webhook body size in bytes",
+          "maximum": 1048576,
+          "minimum": 1024,
+          "title": "Max Body Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "secret_env",
+        "allowed_repos"
+      ],
+      "title": "GitHubEventSourceConfig",
       "type": "object"
     },
     "GitHubRepositoryAccess": {
@@ -6396,7 +6571,11 @@
         "default_max_body_bytes": 65536,
         "max_body_bytes": 262144,
         "max_triggers_per_owner": 20,
-        "admin_users": []
+        "admin_users": [],
+        "reactive_enabled": true,
+        "max_reactive_triggers_per_owner": 50,
+        "max_fires_per_hour": 60,
+        "event_sources": {}
       },
       "description": "Global policy for tool-managed signed external triggers"
     },
