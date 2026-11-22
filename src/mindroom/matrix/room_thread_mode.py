@@ -86,8 +86,12 @@ async def reconcile_room_thread_mode(  # noqa: C901, PLR0911 - one outcome per c
                     level = failure_level(False)
                     logger.log(level, "room_thread_mode_reconcile_failed", room_id=room_id, error="setting unread")
                     return False
-                modes = {config.get_entity_thread_mode(name, runtime_paths, room_id=room_id) for name in joined}
-                content = {"mode": read.value or ("mixed" if len(modes) > 1 else next(iter(modes)))}
+                mode: str | None = read.value
+                if mode is None:
+                    # Each responder's mode is its configured one: the runtime's copy may be a late change's by now.
+                    modes = {config.get_entity_thread_mode(name, runtime_paths, room_id, read=read) for name in joined}
+                    mode = "mixed" if len(modes) > 1 else next(iter(modes))
+                content = {"mode": mode}
                 phase = "state_get"
                 current = await client.room_get_state_event(room_id, _THREAD_MODE_EVENT_TYPE, state_key="")
                 if isinstance(current, nio.RoomGetStateEventError) and current.status_code != "M_NOT_FOUND":

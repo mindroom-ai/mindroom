@@ -199,7 +199,7 @@ async def test_a_failed_read_nio_decodes_as_an_event_keeps_the_copy_and_the_over
     state_url = re.compile(r"http://localhost:8008/_matrix/client/v3/rooms/.*/state/.*")
     aioresponse.get(state_url, status=status, repeat=True, **answer)
     client = nio.AsyncClient("http://localhost:8008", "@bot:localhost")
-    client.access_token = "token"
+    client.access_token = "token"  # noqa: S105
     put_state = AsyncMock()
     try:
         assert isinstance(

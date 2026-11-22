@@ -264,7 +264,7 @@ async def refresh_room_setting[T: str](
         move = None if value is None or put_state is None else write_room_setting
         if move and await move(setting, client, runtime_paths, room_id, value, put_state=put_state, moves_read=started):
             return SettingRead(ok=True, value=value)
-        # A write or another read's move that the room took meanwhile is its setting, and took the override off disk.
+        # A write, a move or a change that came in meanwhile is the room's setting: this answer is older than it.
         newer = _known.get(key, _NEVER_READ)
         if newer.order > started:
             return SettingRead(ok=True, value=cast("T | None", newer.value))

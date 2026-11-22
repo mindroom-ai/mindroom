@@ -1009,6 +1009,34 @@ async def test_a_setting_changed_while_its_mode_is_published_is_published_next(r
 
 
 @pytest.mark.asyncio
+async def test_a_late_change_that_arrives_during_the_read_is_not_published(room_state: RoomState) -> None:
+    """An unset setting publishes the configured modes, whatever the runtime's copy holds while they are worked out."""
+    config, paths, _, events, client = room_state
+    events[SETTING] = {}
+    read, write = client.room_get_state_event.side_effect, client.room_put_state.side_effect
+
+    def live(content: dict[str, str]) -> None:
+        observe_room_settings_event(paths, ROOM_ID, {"type": SETTING[0], "state_key": SETTING[1], "content": content})
+
+    async def late_change_during_read(room_id: str, event_type: str, state_key: str = "") -> object:
+        if event_type == SETTING[0]:
+            live({"value": "thread"})
+        return await read(room_id, event_type, state_key)
+
+    async def copy_read_again_during_write(*args: Any, **kwargs: Any) -> object:  # noqa: ANN401
+        live({})
+        return await write(*args, **kwargs)
+
+    client.room_get_state_event.side_effect = late_change_during_read
+    client.room_put_state.side_effect = copy_read_again_during_write
+
+    assert await reconcile_room_thread_mode(client, config, paths, ROOM_ID) is True
+
+    assert [call.args[2] for call in _writes(client, EVENT_TYPE)] == [{"mode": "mixed"}]
+    assert events[EVENT_TYPE, ""] == {"mode": "mixed"}
+
+
+@pytest.mark.asyncio
 async def test_an_unreadable_setting_publishes_nothing_and_is_retried(room_state: RoomState) -> None:
     """While the room's setting cannot be read, no mode is published from what the runtime last knew."""
     config, paths, _, _, client = room_state

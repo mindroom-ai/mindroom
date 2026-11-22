@@ -163,7 +163,7 @@ if TYPE_CHECKING:
     from mindroom.agent_policy import AgentPolicySeed, ResolvedAgentPolicy
     from mindroom.config.agent import RoomReplyMode
     from mindroom.config.personal_agents import PersonalAgentRoster
-    from mindroom.room_settings import SettingRead
+    from mindroom.room_settings import RoomThreadMode, SettingRead
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -1733,16 +1733,20 @@ class Config(BaseModel):
         entity_name: str,
         runtime_paths: RuntimePaths,
         room_id: str | None = None,
+        read: SettingRead[RoomThreadMode] | None = None,
     ) -> Literal["thread", "room"]:
         """Get effective thread mode for an agent, team, or router.
 
-        The room's `thread_mode` setting decides for every entity when set.
+        The room's `thread_mode` setting decides for every entity when set: ``read`` is the setting a refresh just
+        found, to decide by; without it, the runtime's copy of the setting.
         Otherwise agents use their explicit per-agent setting.
         Teams inherit a mode only when all member agents share it.
         Router inherits a mode only when all relevant configured agents share it.
         In ambiguous cases, default to "thread".
         """
-        runtime_room_override = resolve_room_setting(THREAD_MODE, runtime_paths, room_id)
+        runtime_room_override = (
+            resolve_room_setting(THREAD_MODE, runtime_paths, room_id) if read is None else read.value
+        )
         if runtime_room_override is not None:
             return runtime_room_override
 
