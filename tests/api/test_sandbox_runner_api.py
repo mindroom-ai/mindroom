@@ -2685,11 +2685,17 @@ def test_worker_subprocess_env_forwards_worker_resource_limit_vars(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Worker subprocesses derive CPU thread hints from MINDROOM_WORKER_CPUS and honor operator overrides."""
+    """Kubernetes worker subprocesses derive tool hints from MINDROOM_KUBERNETES_WORKER_CPU_LIMIT and honor empty overrides."""
     paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker")
-    monkeypatch.setenv("MINDROOM_WORKER_CPUS", "4")
-    monkeypatch.setenv("MINDROOM_WORKER_MEMORY_BYTES", "8589934592")
-    for name in ("OMP_NUM_THREADS", "PYTHON_CPU_COUNT", "PYTEST_XDIST_AUTO_NUM_WORKERS"):
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_CPU_LIMIT", "4")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT", "8589934592")
+    for name in (
+        "MINDROOM_WORKER_CPUS",
+        "MINDROOM_WORKER_MEMORY_BYTES",
+        "OMP_NUM_THREADS",
+        "PYTHON_CPU_COUNT",
+        "PYTEST_XDIST_AUTO_NUM_WORKERS",
+    ):
         monkeypatch.delenv(name, raising=False)
 
     env = sandbox_exec_module.worker_subprocess_env(paths)
@@ -2701,23 +2707,43 @@ def test_worker_subprocess_env_forwards_worker_resource_limit_vars(
     assert env["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "4"
 
     monkeypatch.setenv("OMP_NUM_THREADS", "2")
+    monkeypatch.setenv("PYTHON_CPU_COUNT", "")
     overridden = sandbox_exec_module.worker_subprocess_env(paths)
     assert overridden["OMP_NUM_THREADS"] == "2"
-    assert overridden["PYTHON_CPU_COUNT"] == "4"
+    assert overridden["PYTHON_CPU_COUNT"] == ""
     assert overridden["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "4"
 
 
+@pytest.mark.parametrize(
+    "runner_env",
+    [
+        {"MINDROOM_WORKER_CPUS": "500m", "OMP_NUM_THREADS": "1", "PYTHON_CPU_COUNT": "1"},
+        {"MINDROOM_WORKER_CPUS": "4", "MINDROOM_WORKER_MEMORY_BYTES": "8589934592", "OMP_NUM_THREADS": "1"},
+        {"MINDROOM_KUBERNETES_WORKER_CPU_LIMIT": "0", "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT": "8589934592"},
+        {"MINDROOM_KUBERNETES_WORKER_CPU_LIMIT": "500m"},
+        {"MINDROOM_KUBERNETES_WORKER_CPU_LIMIT": "0.5"},
+        {"MINDROOM_KUBERNETES_WORKER_CPU_LIMIT": "garbage"},
+    ],
+)
 def test_worker_subprocess_env_ignores_host_cpu_env_without_worker_cpus(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    runner_env: dict[str, str],
 ) -> None:
-    """Without MINDROOM_WORKER_CPUS (local/Docker runner), host CPU hints must not leak into tool subprocesses."""
+    """Non-Kubernetes runners (even with MINDROOM_WORKER_CPUS=500m or =4) and invalid K8s CPU limits derive nothing."""
     paths = local_workers_module.local_worker_state_paths_for_root(tmp_path / "worker")
-    monkeypatch.delenv("MINDROOM_WORKER_CPUS", raising=False)
-    monkeypatch.setenv("MINDROOM_WORKER_MEMORY_BYTES", "8589934592")
-    monkeypatch.setenv("OMP_NUM_THREADS", "1")
-    monkeypatch.setenv("PYTHON_CPU_COUNT", "1")
-    monkeypatch.setenv("PYTEST_XDIST_AUTO_NUM_WORKERS", "1")
+    for name in (
+        "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT",
+        "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT",
+        "MINDROOM_WORKER_CPUS",
+        "MINDROOM_WORKER_MEMORY_BYTES",
+        "OMP_NUM_THREADS",
+        "PYTHON_CPU_COUNT",
+        "PYTEST_XDIST_AUTO_NUM_WORKERS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in runner_env.items():
+        monkeypatch.setenv(name, value)
 
     env = sandbox_exec_module.worker_subprocess_env(paths)
 
@@ -5673,16 +5699,19 @@ def test_sandbox_runner_worker_shell_uses_workspace_home_and_worker_venv(
     assert _shell_command_output(data["result"]) == expected_result
 
 
+@pytest.mark.parametrize("worker_cpus", ["500m", "4"])
 def test_local_worker_shell_does_not_inherit_host_omp_num_threads(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    worker_cpus: str,
 ) -> None:
-    """A local runner without MINDROOM_WORKER_CPUS leaves host OMP_NUM_THREADS unset in shell commands."""
+    """Local/Docker runners without MINDROOM_KUBERNETES_WORKER_CPU_LIMIT derive nothing even with MINDROOM_WORKER_CPUS set."""
     _set_sandbox_token(monkeypatch)
     storage_root = tmp_path / "storage"
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
-    monkeypatch.delenv("MINDROOM_WORKER_CPUS", raising=False)
+    monkeypatch.delenv("MINDROOM_KUBERNETES_WORKER_CPU_LIMIT", raising=False)
+    monkeypatch.setenv("MINDROOM_WORKER_CPUS", worker_cpus)
     monkeypatch.setenv("OMP_NUM_THREADS", "1")
     _refresh_runner_app_from_env()
 
@@ -5694,7 +5723,7 @@ def test_local_worker_shell_does_not_inherit_host_omp_num_threads(
                 "protocol": WORKER_PROTOCOL_VERSION,
                 "tool_name": "shell",
                 "function_name": "run_shell_command",
-                "args": [["bash", "-c", 'printf "<%s>" "${OMP_NUM_THREADS:-}"']],
+                "args": [["bash", "-c", 'printf "<%s|%s>" "${OMP_NUM_THREADS:-}" "${PYTHON_CPU_COUNT:-}"']],
                 "kwargs": {},
                 "worker_key": "worker-a",
                 "execution_env": {"PATH": os.environ["PATH"]},
@@ -5703,25 +5732,34 @@ def test_local_worker_shell_does_not_inherit_host_omp_num_threads(
     assert response.status_code == 200
     data = response.json()
     assert data["ok"] is True, data
-    assert _shell_command_output(data["result"]) == "<>"
+    assert _shell_command_output(data["result"]) == "<|>"
 
 
+@pytest.mark.parametrize("execution_mode", ["subprocess", "forkserver"])
 def test_sandbox_runner_worker_shell_receives_resource_limit_env_and_allows_hook_override(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    execution_mode: str,
 ) -> None:
-    """Dedicated Kubernetes workers derive all 5 vars from MINDROOM_WORKER_CPUS; extraEnv and worker-env.sh win."""
+    """Dedicated Kubernetes workers derive all 5 vars from MINDROOM_KUBERNETES_WORKER_CPU_LIMIT; extraEnv and hook win."""
     _set_sandbox_token(monkeypatch)
     worker_key = "v1:tenant-123:shared:general"
     worker_root = tmp_path / "workers" / worker_dir_name(worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", execution_mode)
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
     monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(tmp_path))
-    monkeypatch.setenv("MINDROOM_WORKER_CPUS", "4")
-    monkeypatch.setenv("MINDROOM_WORKER_MEMORY_BYTES", "8589934592")
-    for name in ("OMP_NUM_THREADS", "PYTHON_CPU_COUNT", "PYTEST_XDIST_AUTO_NUM_WORKERS"):
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_CPU_LIMIT", "4")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT", "8589934592")
+    for name in (
+        "MINDROOM_WORKER_CPUS",
+        "MINDROOM_WORKER_MEMORY_BYTES",
+        "OMP_NUM_THREADS",
+        "PYTHON_CPU_COUNT",
+        "PYTEST_XDIST_AUTO_NUM_WORKERS",
+    ):
         monkeypatch.delenv(name, raising=False)
     _refresh_runner_app_from_env()
     assert sandbox_exec_module.runner_uses_dedicated_worker(
@@ -5769,22 +5807,31 @@ def test_sandbox_runner_worker_shell_receives_resource_limit_env_and_allows_hook
         assert _shell_command_output(override_data["result"]) == "4|8589934592|1|4|4"
 
 
+@pytest.mark.parametrize("execution_mode", ["subprocess", "forkserver"])
 def test_dedicated_worker_python_tool_hook_sees_worker_resource_limits(
     runner_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    execution_mode: str,
 ) -> None:
-    """`.mindroom/worker-env.sh` for python tool calls in a dedicated worker sees MINDROOM_WORKER_CPUS and may override."""
+    """Python tool in a dedicated Kubernetes worker beats primary OMP_NUM_THREADS=16; hook sees pod limits and wins."""
     _set_sandbox_token(monkeypatch)
     worker_key = "v1:tenant-123:shared:general"
     worker_root = tmp_path / "workers" / worker_dir_name(worker_key)
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", execution_mode)
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(worker_root))
     monkeypatch.setenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", str(tmp_path))
-    monkeypatch.setenv("MINDROOM_WORKER_CPUS", "4")
-    monkeypatch.setenv("MINDROOM_WORKER_MEMORY_BYTES", "8589934592")
-    for name in ("OMP_NUM_THREADS", "PYTHON_CPU_COUNT", "PYTEST_XDIST_AUTO_NUM_WORKERS"):
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_CPU_LIMIT", "4")
+    monkeypatch.setenv("MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT", "8589934592")
+    for name in (
+        "MINDROOM_WORKER_CPUS",
+        "MINDROOM_WORKER_MEMORY_BYTES",
+        "OMP_NUM_THREADS",
+        "PYTHON_CPU_COUNT",
+        "PYTEST_XDIST_AUTO_NUM_WORKERS",
+    ):
         monkeypatch.delenv(name, raising=False)
     workspace = agent_workspace_root_path(tmp_path, "general")
     _write_workspace_env_hook(
@@ -5814,6 +5861,11 @@ def test_dedicated_worker_python_tool_hook_sees_worker_resource_limits(
                 "kwargs": {},
                 "worker_key": worker_key,
                 "base_dir": "agents/general/workspace",
+                "execution_env": {
+                    "OMP_NUM_THREADS": "16",
+                    "MINDROOM_WORKER_CPUS": "12",
+                    "PYTHON_CPU_COUNT": "16",
+                },
             },
         )
     assert response.status_code == 200

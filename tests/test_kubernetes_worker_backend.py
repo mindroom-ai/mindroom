@@ -1102,15 +1102,15 @@ def test_kubernetes_worker_tmp_size_limit_also_sizes_container_ephemeral_storage
 
 
 def test_kubernetes_worker_exposes_container_resource_limits_via_downward_api(tmp_path: Path) -> None:
-    """Worker containers expose only MINDROOM_WORKER_CPUS and MINDROOM_WORKER_MEMORY_BYTES via downward API.
-
-    PYTHON_CPU_COUNT, OMP_NUM_THREADS, and PYTEST_XDIST_AUTO_NUM_WORKERS stay off the container so the
-    sandbox runner process keeps its own default ThreadPoolExecutor sizing.
-    """
+    """Worker containers carry only the two Kubernetes downward-API limit refs; startup manifests carry none of the seven."""
     backend, apps_api, _core_api = _backend(
         runtime_paths=resolve_primary_runtime_paths(
             config_path=Path("config.yaml"),
             storage_path=tmp_path / "mindroom-test-storage",
+            process_env={
+                "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT": "2",
+                "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT": "4Gi",
+            },
         ),
     )
 
@@ -1120,8 +1120,8 @@ def test_kubernetes_worker_exposes_container_resource_limits_via_downward_api(tm
     env_names = [entry["name"] for entry in env]
     assert len(env_names) == len(set(env_names))
     env_by_name = {entry["name"]: entry for entry in env}
-    assert env_by_name["MINDROOM_WORKER_CPUS"] == {
-        "name": "MINDROOM_WORKER_CPUS",
+    assert env_by_name["MINDROOM_KUBERNETES_WORKER_CPU_LIMIT"] == {
+        "name": "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT",
         "valueFrom": {
             "resourceFieldRef": {
                 "containerName": "sandbox-runner",
@@ -1130,8 +1130,8 @@ def test_kubernetes_worker_exposes_container_resource_limits_via_downward_api(tm
             },
         },
     }
-    assert env_by_name["MINDROOM_WORKER_MEMORY_BYTES"] == {
-        "name": "MINDROOM_WORKER_MEMORY_BYTES",
+    assert env_by_name["MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT"] == {
+        "name": "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT",
         "valueFrom": {
             "resourceFieldRef": {
                 "containerName": "sandbox-runner",
@@ -1140,12 +1140,30 @@ def test_kubernetes_worker_exposes_container_resource_limits_via_downward_api(tm
             },
         },
     }
-    for name in ("OMP_NUM_THREADS", "PYTHON_CPU_COUNT", "PYTEST_XDIST_AUTO_NUM_WORKERS"):
+    tool_limit_names = (
+        "MINDROOM_WORKER_CPUS",
+        "MINDROOM_WORKER_MEMORY_BYTES",
+        "OMP_NUM_THREADS",
+        "PYTHON_CPU_COUNT",
+        "PYTEST_XDIST_AUTO_NUM_WORKERS",
+    )
+    for name in tool_limit_names:
         assert name not in env_by_name
+    committed_runtime = deserialize_runtime_paths(
+        _load_startup_manifest(backend, worker_key=_TEST_SCOPED_WORKER_KEY_A)["runtime_paths"],
+    )
+    all_seven = (
+        "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT",
+        "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT",
+        *tool_limit_names,
+    )
+    for name in all_seven:
+        assert name not in committed_runtime.process_env
+        assert name not in committed_runtime.env_file_values
 
 
 def test_kubernetes_worker_extra_env_overrides_downward_api_resource_limits(tmp_path: Path) -> None:
-    """Operator extra-env overrides MINDROOM_WORKER_CPUS without duplicates and may set OMP_NUM_THREADS explicitly."""
+    """Operator extra-env may pass tool limit overrides alongside the two Kubernetes downward-API markers."""
     runtime_paths = resolve_primary_runtime_paths(
         config_path=Path("config.yaml"),
         storage_path=tmp_path / "mindroom-test-storage",
@@ -1155,11 +1173,27 @@ def test_kubernetes_worker_extra_env_overrides_downward_api_resource_limits(tmp_
 
     override_backend, override_apps_api, _ = _backend(
         runtime_paths=runtime_paths,
-        extra_env={"MINDROOM_WORKER_CPUS": "2", "OMP_NUM_THREADS": "2"},
+        extra_env={
+            "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT": "99",
+            "MINDROOM_WORKER_CPUS": "2",
+            "OMP_NUM_THREADS": "2",
+        },
     )
     override_backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
     env = override_apps_api.created_bodies[0]["spec"]["template"]["spec"]["containers"][0]["env"]
+    assert [entry for entry in env if entry["name"] == "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT"] == [
+        {
+            "name": "MINDROOM_KUBERNETES_WORKER_CPU_LIMIT",
+            "valueFrom": {
+                "resourceFieldRef": {
+                    "containerName": "sandbox-runner",
+                    "resource": "limits.cpu",
+                    "divisor": "1",
+                },
+            },
+        },
+    ]
     assert [entry for entry in env if entry["name"] == "MINDROOM_WORKER_CPUS"] == [
         {"name": "MINDROOM_WORKER_CPUS", "value": "2"},
     ]
@@ -1167,8 +1201,8 @@ def test_kubernetes_worker_extra_env_overrides_downward_api_resource_limits(tmp_
         {"name": "OMP_NUM_THREADS", "value": "2"},
     ]
     env_by_name = {entry["name"]: entry for entry in env}
-    assert env_by_name["MINDROOM_WORKER_MEMORY_BYTES"] == {
-        "name": "MINDROOM_WORKER_MEMORY_BYTES",
+    assert env_by_name["MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT"] == {
+        "name": "MINDROOM_KUBERNETES_WORKER_MEMORY_LIMIT",
         "valueFrom": {
             "resourceFieldRef": {
                 "containerName": "sandbox-runner",
@@ -1177,6 +1211,7 @@ def test_kubernetes_worker_extra_env_overrides_downward_api_resource_limits(tmp_
             },
         },
     }
+    assert "MINDROOM_WORKER_MEMORY_BYTES" not in env_by_name
     assert "PYTHON_CPU_COUNT" not in env_by_name
     assert "PYTEST_XDIST_AUTO_NUM_WORKERS" not in env_by_name
     assert (
