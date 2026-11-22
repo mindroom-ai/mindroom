@@ -35,9 +35,10 @@ from mindroom.matrix.room_member_joins import (
     room_member_left_from_event,
 )
 from mindroom.matrix.room_thread_mode import reconcile_room_thread_mode
+from mindroom.room_settings import on_thread_mode_change
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Coroutine
 
     import structlog
 
@@ -53,6 +54,13 @@ if TYPE_CHECKING:
 def moderator_rights_message(feature: str) -> str:
     """Return what an agent answers when a person's room refuses the state write a feature needs."""
     return f"I need moderator rights in this room to {feature}."
+
+
+def setting_write_failure_message(taken: bool | None, feature: str) -> str:
+    """Return what a command answers when the room did not take a setting: None is a refusal for lack of power."""
+    if taken is None:
+        return moderator_rights_message(feature)
+    return "❌ The room did not take the change. Run the command again to retry."
 
 
 async def runs_room_hooks(
@@ -122,6 +130,12 @@ async def put_room_state_as_steward(
     return isinstance(response, nio.RoomPutStateResponse)
 
 
+def republish_thread_mode_as_steward(room_steward: Callable[[str], AgentBot | None], room_id: str) -> None:
+    """Have the room's steward republish the thread mode clients see, after a read found its setting changed."""
+    if (steward := room_steward(room_id)) is not None:
+        steward.steward_duties._thread_mode_setting_changed(room_id)
+
+
 async def reconcile_held_room_states(runtime: OrchestratorRuntime) -> None:
     """Reconcile the thread mode, MindRoom accounts and binding of every room a bot holds, once, through its steward."""
     bots = runtime.agent_bots.values()
@@ -166,6 +180,8 @@ class StewardDuties:
     _room_state_retrying: set[str] = field(default_factory=set, init=False, repr=False)
     # Pending operations, including fresh failures that race an in-flight retry.
     _room_state_reruns: dict[str, set[str]] = field(default_factory=dict, init=False, repr=False)
+    # Each room's running republish of its thread mode after a change to the setting.
+    _thread_mode_republishes: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
 
     @property
     def _is_owner(self) -> bool:
@@ -179,7 +195,13 @@ class StewardDuties:
         return steward is not None and steward.agent_name == self.deps.hook_context.agent_name
 
     async def started(self, client: nio.AsyncClient) -> None:
-        """Remove managed accounts the config no longer has from the rooms the owner account can see."""
+        """Have reads that find a room's thread mode changed tell its steward, and clean up as the owner account.
+
+        The owner account removes managed accounts the config no longer has from the rooms it can see.
+        """
+        runtime = self.deps.runtime
+        republish = partial(republish_thread_mode_as_steward, runtime.orchestrator.room_steward)
+        on_thread_mode_change(runtime.runtime_paths, republish)
         if not self._is_owner:
             return
         try:
@@ -204,6 +226,25 @@ class StewardDuties:
         """Publish the state of a room this bot joined or left by any path, once a sync frame carries its members."""
         self._joined_room_ids.add(room_id)
 
+    def _thread_mode_setting_changed(self, room_id: str) -> None:
+        """Republish the thread mode of a room this bot stewards, alone, after its `thread_mode` setting changed.
+
+        Every bot that sees the change in sync tells the steward, whose own sync may not show it. The republish reads
+        the setting itself and writes only a mode that differs. It runs in the background, so no sync frame or turn
+        waits for it, and one republish serves every change told while it runs: it ends only once the mode it
+        published is the setting the runtime holds.
+        """
+        running = self._thread_mode_republishes.get(room_id)
+        # A republish that ended, or was cancelled before it ran, serves no later change.
+        if running is None or running.done():
+            republish = self._publish_in_background(self._publish_room_state(room_id, {"mode"}), "steward_thread_mode")
+            self._thread_mode_republishes[room_id] = republish
+            republish.add_done_callback(lambda done: self._forget_thread_mode_republish(room_id, done))
+
+    def _forget_thread_mode_republish(self, room_id: str, done: asyncio.Task[None]) -> None:
+        if self._thread_mode_republishes.get(room_id) is done:
+            del self._thread_mode_republishes[room_id]
+
     async def power_levels_event(self, room: nio.MatrixRoom, _event: nio.PowerLevelsEvent) -> None:
         """Publish a room's state after its power levels changed, which can change its steward."""
         self._joined_room_ids.add(room.room_id)
@@ -219,23 +260,23 @@ class StewardDuties:
             self._joined_room_ids.update(room_id for room_id in client.rooms if self.is_steward(room_id))
         room_ids, self._joined_room_ids = self._joined_room_ids, set()
         if room_ids:
-            task = create_background_task(
-                self._publish_rooms(room_ids),
-                name="steward_joined_room_state",
-                owner=self.deps.runtime,
-            )
-            self._room_state_publishes.add(task)
-            task.add_done_callback(self._room_state_publishes.discard)
+            self._publish_in_background(self._publish_rooms(room_ids), "steward_joined_room_state")
+
+    def _publish_in_background(self, publish: Coroutine[Any, Any, None], name: str) -> asyncio.Task[None]:
+        task = create_background_task(publish, name=name, owner=self.deps.runtime)
+        self._room_state_publishes.add(task)
+        task.add_done_callback(self._room_state_publishes.discard)
+        return task
 
     async def _publish_rooms(self, room_ids: set[str]) -> None:
         await asyncio.gather(*(self._publish_room_state(room_id) for room_id in room_ids))
 
-    async def _publish_room_state(self, room_id: str) -> None:
-        """Reconcile one held room and let transient failures retry without another trigger."""
+    async def _publish_room_state(self, room_id: str, only: set[str] | None = None) -> None:
+        """Reconcile one held room, or ``only`` some of its state, and let transient failures retry without another trigger."""
         queued = self._room_state_reruns.get(room_id)
-        failed = await self._reconcile_room_state(room_id)
-        # Supersede only the older work; concurrent failures replace the set.
-        if queued is not None and self._room_state_reruns.get(room_id) is queued:
+        failed = await self._reconcile_room_state(room_id, only)
+        # Supersede only the older work, which a publish of the whole state redid; concurrent failures replace the set.
+        if only is None and queued is not None and self._room_state_reruns.get(room_id) is queued:
             del self._room_state_reruns[room_id]
         if not failed:
             if room_id not in self._room_state_reruns and room_id not in self._room_state_retrying:

@@ -7,7 +7,7 @@ import random
 import time
 from contextvars import Context
 from functools import cached_property, partial
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 from uuid import uuid4
 
 import nio
@@ -102,6 +102,7 @@ from .matrix.client_room_admin import get_joined_rooms
 from .matrix.client_session import PermanentMatrixStartupError
 from .matrix.conversation_hydration import ConversationHydrator
 from .matrix.conversation_reads import ConversationReader
+from .matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 from .matrix.relation_lookup import RelationLookup
 from .reaction_dispatch import ReactionDispatcher, ReactionDispatcherDeps
 from .reply_scope import ReplyRuntime
@@ -111,8 +112,13 @@ from .response_lifecycle import ResponseHookService, ResponseLifecycleCoordinato
 from .response_payload_preparation import ResponsePayloadPreparer
 from .response_runner import ResponseRunner
 from .response_shutdown_diagnostics import DeferredStopPhase
-from .room_reply_modes import observe_room_settings_event, refresh_room_reply_mode
-from .steward_duties import StewardDuties, StewardDutiesDeps, room_state_response_as_steward
+from .room_settings import THREAD_MODE, observe_room_settings_event, refresh_room_setting, refresh_room_settings
+from .steward_duties import (
+    StewardDuties,
+    StewardDutiesDeps,
+    republish_thread_mode_as_steward,
+    room_state_response_as_steward,
+)
 from .thread_tags import THREAD_TAGS_EVENT_TYPE
 from .tool_jobs.client_cancel import cancel_room_jobs, cancel_stopped_reply_jobs, handle_job_cancel_event
 from .tool_jobs.follow_ups import follow_up_event
@@ -142,6 +148,7 @@ if TYPE_CHECKING:
     from mindroom.event_journal.approval_signals import EndedApproval
     from mindroom.matrix.identity import MatrixID
     from mindroom.matrix.media import MatrixMediaEvent
+    from mindroom.room_settings import RoomSetting
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.tool_jobs.conversation import ConversationKey
 
@@ -532,6 +539,7 @@ class AgentBot:
                 turn_has_live_claim=lambda event_id: self._turn_store.has_live_turn_claim(event_id),
                 replies_ended=self._replies_ended,
                 on_runtime_source=lambda event: self._response_runner.handoff_runtime_source(event),
+                before_room_event=self._refresh_room_settings,
             ),
             room_for_id=self._room_for_journal_event,
             # Resolved late: the ingress validator, which owns the trust rule, is built after the dispatcher.
@@ -1090,19 +1098,58 @@ class AgentBot:
         await self.orchestrator.scheduled_tasks.restore_room(self, room_id)
         await self.orchestrator.thread_snooze.restore_room(self, room_id)
 
-    async def _reread_reply_mode(self, client: nio.AsyncClient, room_id: str) -> None:
-        put_state = partial(room_state_response_as_steward, self.orchestrator.room_steward)
-        await refresh_room_reply_mode(client, self.runtime_paths, room_id, force=True, put_state=put_state)
+    async def _in_room(self, room_id: str) -> bool:
+        """Return whether this bot is in the room: its client lists the room and its journal has no leave of it.
 
-    def _on_room_state_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
-        """Take a live thread tag or room settings state event from sync; never raise into nio's callback loop."""
+        The client drops a room as soon as sync shows the bot left, which the journal learns a batch later, and the
+        journal knows after a restart. A journal that cannot be read counts as a room the bot is not in.
+        """
+        if self.client is None or room_id not in self.client.rooms:
+            return False
+        try:
+            position = await self.journal_principal().ingestion_membership_position(room_id)
+        except Exception:
+            self.logger.exception("room_membership_unread", room_id=room_id)
+            return False
+        return position is None or position.membership == "join"
+
+    async def _refresh_room_settings(self, room_id: str) -> None:
+        """Read the room's settings before one of its events is handled, unless this bot left the room.
+
+        A bot that left is answered with the room's state as it left it, which would replace a setting changed since.
+        The events it still owes go by what the runtime knows, or an older runtime's override, and move nothing.
+        """
+        if self.client is not None and await self._in_room(room_id):
+            put_state = partial(room_state_response_as_steward, self.orchestrator.room_steward)
+            await refresh_room_settings(self.client, self.runtime_paths, room_id, put_state=put_state)
+
+    async def _reread_room_setting(self, client: nio.AsyncClient, room_id: str, setting: RoomSetting[Any]) -> None:
+        if setting is THREAD_MODE:
+            # Every bot tells the room's steward, whose sync may not show the event. The steward's republish reads
+            # the setting. One that returns before that read, in a room without a joined responder or whose steward
+            # changed, leaves the live value unconfirmed until the next read.
+            republish_thread_mode_as_steward(self.orchestrator.room_steward, room_id)
+            if self.steward_duties.is_steward(room_id):
+                return
+        put_state = partial(room_state_response_as_steward, self.orchestrator.room_steward)
+        await refresh_room_setting(setting, client, self.runtime_paths, room_id, force=True, put_state=put_state)
+
+    async def _on_room_state_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
+        """Take a live thread tag or room settings state event from sync; never raise into nio's callback loop.
+
+        Each bot reads a changed setting again and has the room's steward republish a changed thread mode. A bot
+        that left takes none: its last events are older than what the room's other bots know, and it would read
+        the room as it left it.
+        """
         if "state_key" not in event.source or event.decrypted:
             return
-        if observe_room_settings_event(self.runtime_paths, room.room_id, event.source) and self.client is not None:
+        in_room = event.type == ROOM_SETTINGS_EVENT_TYPE and await self._in_room(room.room_id)
+        setting = observe_room_settings_event(self.runtime_paths, room.room_id, event.source) if in_room else None
+        if setting is not None and self.client is not None:
             # The event may be a late copy of an older change: the room's state decides, read at once.
             self.create_owned_task(
-                self._reread_reply_mode(self.client, room.room_id),
-                name=f"room_reply_mode_reread:{room.room_id}",
+                self._reread_room_setting(self.client, room.room_id, setting),
+                name=f"room_setting_reread:{setting.key}:{room.room_id}",
             )
         if event.type != THREAD_TAGS_EVENT_TYPE:
             return

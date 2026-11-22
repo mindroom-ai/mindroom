@@ -170,6 +170,7 @@ async def _handle_run(
             handle=handle_payload,
             handle_reservations=handle_reservations,
             output_destination=output_destination,
+            launch_failure_exits=payload.get("launch_failure_exits") is True,
         ),
     )
     # EOF before the run response means the client (a per-request tool
@@ -372,6 +373,7 @@ async def run_command_via_supervisor(
     handle: str | None = None,
     max_runtime_seconds: float | None = None,
     output_destination: ShellOutputDestination | None = None,
+    launch_failure_exits: bool = False,
 ) -> ShellRunResult:
     """Run one shell command and preserve its execution and output-file ownership; see ``run_command``."""
     request = {
@@ -383,6 +385,7 @@ async def run_command_via_supervisor(
         "tail": tail,
         "timeout": timeout,
         "on_timeout": on_timeout,
+        "launch_failure_exits": launch_failure_exits,
     }
     if handle is not None:
         request["handle"] = handle

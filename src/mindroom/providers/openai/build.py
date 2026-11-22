@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.constants import PROVIDER_ENV_KEYS
@@ -39,7 +40,7 @@ from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.chat_wire import ChatWire, deepseek_request_thinks
 from mindroom.providers.openai.codex_auth import CODEX_BASE_URL, CodexAuthError, borrow_codex_key
 from mindroom.providers.openai.kimi_auth import KIMI_BASE_URL, KimiAuthError, borrow_kimi_token
-from mindroom.providers.openai.responses import ResponsesAdapter
+from mindroom.providers.openai.responses import ResponsesAdapter, recover_sticky_replay
 from mindroom.providers.openai.responses_wire import ResponsesWire
 from mindroom.providers.openai.settings import (
     CEREBRAS_FIELDS,
@@ -78,8 +79,10 @@ logger = get_logger(__name__)
 _NATIVE_COMPACTION_ENDPOINTS = frozenset({OPENAI_BASE_URL_DEFAULT, CODEX_BASE_URL})
 _NATIVE_COMPACTION_MODEL_PREFIXES = ("gpt-5.3-codex", "gpt-5.4", "gpt-6")
 _NATIVE_COMPACTION_AUTHORED_KEYS = ("context_management", "previous_response_id", "background", "store")
+# Request fields that let OpenRouter answer with another model than the configured id names.
+_MODEL_REROUTING_KEYS = ("model", "models", "route", "preset")
 # Request fields that let OpenRouter answer with another model or upstream provider than the configured id names.
-_REROUTING_KEYS = ("model", "models", "route", "provider")
+_REROUTING_KEYS = (*_MODEL_REROUTING_KEYS, "provider")
 # Explicit prompt-cache breakpoints exist on the public API from GPT-5.6.
 _BREAKPOINT_MODEL = re.compile(r"gpt-(\d+)(?:\.(\d+))?(?:-|$)")
 
@@ -469,17 +472,31 @@ def _supports_explicit_breakpoint(model_id: str, endpoint: str) -> bool:
     return endpoint == OPENAI_BASE_URL_DEFAULT
 
 
-def _native_compaction_supported(model_id: str, endpoint: str, store: bool | None, settings: ResponsesSettings) -> bool:
-    """Native compaction needs explicit replay on a public route and no authored replay policy."""
+def _native_compaction_supported(
+    model_id: str,
+    endpoint: str,
+    store: bool | None,
+    settings: ResponsesSettings,
+    *,
+    openrouter: bool,
+) -> bool:
+    """Native compaction needs explicit replay on a public route and no authored replay policy.
+
+    ``openrouter`` is the ``openai`` route at OpenRouter's endpoint, which serves the same models under ``openai/``
+    ids unless a field the request sends lets it answer with another model; ``request_params.extra_body`` replaces
+    ``extra_body`` there.
+    """
     request_params = settings.request_params or {}
+    bodies = (request_params, settings.extra_body or {}, request_params.get("extra_body") or {})
+    sent = (request_params, request_params.get("extra_body", settings.extra_body) or {})
     return (
         store is not True
-        and model_id.startswith(_NATIVE_COMPACTION_MODEL_PREFIXES)
-        and endpoint in _NATIVE_COMPACTION_ENDPOINTS
-        and not any(
-            key in params
-            for params in (request_params, settings.extra_body or {}, request_params.get("extra_body") or {})
-            for key in _NATIVE_COMPACTION_AUTHORED_KEYS
+        and (model_id.removeprefix("openai/") if openrouter else model_id).startswith(_NATIVE_COMPACTION_MODEL_PREFIXES)
+        and (openrouter or endpoint in _NATIVE_COMPACTION_ENDPOINTS)
+        and not any(key in body for body in bodies for key in _NATIVE_COMPACTION_AUTHORED_KEYS)
+        and not (
+            openrouter
+            and ("@preset/" in model_id or any(key in body for body in sent for key in _MODEL_REROUTING_KEYS))
         )
     )
 
@@ -514,19 +531,27 @@ def _build_responses(
     endpoint = base_url.rstrip("/")
     identity = model_identity(model_config, endpoint=endpoint)
     model_id = identity.id
+    openrouter = route_key == "openai" and endpoint == OPENROUTER_BASE_URL_DEFAULT
+    if openrouter and store is None:
+        # OpenRouter's Responses endpoint stores no response and rejects ``store: true``, which an unset one sends.
+        store = False
+    # Only OpenRouter binds encrypted replay state to the upstream that created it, so only this route resets it.
+    reset_scope = f"{identity.provider}:{model_id}:{endpoint}" if openrouter else None
     capabilities = Capabilities(
         structured_output="native",
         omitted_media=frozenset({"audio", "video"}),
         url_media=frozenset({"file", "image"}),
         native_tool_search=openai_native_tool_search_supported(route_key, model_id, base_url=base_url),
-        native_compaction=_native_compaction_supported(model_id, endpoint, store, settings),
+        native_compaction=_native_compaction_supported(model_id, endpoint, store, settings, openrouter=openrouter),
         provider_default_sampling=_provider_default_sampling(model_id),
+        replay_reset_scope=reset_scope,
     )
     wire = ResponsesWire(
         route=route_key,
         store=store,
         explicit_breakpoint=route_key == "openai" and _supports_explicit_breakpoint(model_id, endpoint),
         default_instructions=settings.default_instructions or runtime.codex_default_instructions,
+        reset_scope=reset_scope,
     )
     http_client = runtime.http_client
     options = _client_options(settings, base_url=base_url)
@@ -554,6 +579,9 @@ def _build_responses(
                 runtime=runtime,
             ),
         )
+    if openrouter:
+        recover = partial(recover_sticky_replay, wire, settings)
+        capabilities = replace(capabilities, sticky_replay_recovery=recover)
     return ResponsesAdapter(identity=identity, capabilities=capabilities, wire=wire, settings=settings, clients=clients)
 
 

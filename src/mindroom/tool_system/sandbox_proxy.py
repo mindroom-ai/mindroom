@@ -34,8 +34,11 @@ from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
     WorkerProgressPump,
+    get_call_progress_sink,
     get_tool_runtime_context,
     get_worker_progress_pump,
+    note_call_cancelled_never_ran,
+    note_call_refusal,
 )
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
 from mindroom.tool_system.tool_function import ToolValue
@@ -64,7 +67,7 @@ from mindroom.workers.models import (
     normalize_sandbox_runner_api_root,
     worker_api_root,
 )
-from mindroom.workers.named import NamedWorkerCall, ensure_named_worker, named_worker_call
+from mindroom.workers.named import NamedWorkerCall, NamedWorkerError, ensure_named_worker, named_worker_call
 from mindroom.workers.placements import placement_for_session
 from mindroom.workers.protocol import (
     WORKER_PROTOCOL_VERSION,
@@ -599,16 +602,34 @@ def view_file_from_worker(
         return result
 
 
+def _format_worker_progress(progress: WorkerReadyProgress, *, worker_name: str | None) -> str | None:
+    """Format one worker warmup milestone for a CLI call receipt."""
+    target = f"worker {worker_name}" if worker_name else "worker"
+    if progress.phase == "cold_start":
+        return f"starting {target}..."
+    if progress.phase == "waiting":
+        return f"starting {target}... ({max(1, int(progress.elapsed_seconds))}s)"
+    if progress.phase == "ready":
+        return f"{target} ready ({max(1, int(progress.elapsed_seconds))}s)"
+    return None
+
+
 def _make_progress_sink(
     pump: WorkerProgressPump | None,
     *,
     reply_timing: ReplyTimingBinding | None,
     tool_name: str,
     function_name: str,
+    call_progress: Callable[[str], None] | None = None,
+    worker_name: str | None = None,
 ) -> ProgressSink:
     def sink(progress: WorkerReadyProgress) -> None:
         if reply_timing is not None and progress.phase in {"ready", "failed"}:
             reply_timing.note_worker_wait(progress.elapsed_seconds)
+        if call_progress is not None:
+            message = _format_worker_progress(progress, worker_name=worker_name)
+            if message is not None:
+                call_progress(message)
         if pump is None or pump.shutdown.is_set() or pump.loop.is_closed():
             return
         event = WorkerProgressEvent(
@@ -872,14 +893,17 @@ def _call_proxy_sync(
     # A streamed reply shows the worker's warmup; a streamed or collected reply keeps how long the call waited for it.
     pump = get_worker_progress_pump()
     reply_timing = reply_timing_binding()
+    call_progress = get_call_progress_sink()
     progress_sink = (
         _make_progress_sink(
             pump,
             reply_timing=reply_timing,
             tool_name=tool_name,
             function_name=function_name,
+            call_progress=call_progress,
+            worker_name=named.name if named is not None else None,
         )
-        if pump is not None or reply_timing is not None
+        if pump is not None or reply_timing is not None or call_progress is not None
         else None
     )
     with lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
@@ -1029,22 +1053,26 @@ class WorkerStandIns:
                     return await cast("Callable[..., Awaitable[object]]", local)(*args, **kwargs)
                 return await _run_sync_tool_call(functools.partial(local, *args, **kwargs))
             cancellation = WorkerCallCancellation()
-            call = functools.partial(
-                _call_proxy_sync,
-                stand_ins=self,
-                function_name=function_name,
-                args=args,
-                kwargs=dict(kwargs),
-                function_entrypoint=local,
-                cancellation=cancellation,
-                # Read here, in the call's own context, which names the reply that owns the worker.
-                named=_named_worker_call(self, local, args, kwargs),
-            )
             try:
+                call = functools.partial(
+                    _call_proxy_sync,
+                    stand_ins=self,
+                    function_name=function_name,
+                    args=args,
+                    kwargs=dict(kwargs),
+                    function_entrypoint=local,
+                    cancellation=cancellation,
+                    # Read here, in the call's own context, which names the reply that owns the worker.
+                    named=_named_worker_call(self, local, args, kwargs),
+                )
                 return await run_blocking(call)
+            except NamedWorkerError:
+                note_call_refusal()
+                raise
             except asyncio.CancelledError:
                 # The blocking request keeps running after this await is cancelled; stop it at the worker too.
-                cancellation.cancel()
+                if cancellation.cancel():
+                    note_call_cancelled_never_ran()
                 raise
 
         return proxy_entrypoint

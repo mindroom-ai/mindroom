@@ -112,11 +112,11 @@ def test_workers_run_handles_a_truncated_chunked_receipt_without_resubmitting(
     output = capsys.readouterr()
     if status == 200:
         assert exit_code == 0
-        assert polled == [f"/api/agent-cli/calls/{call_id}"] * 2
+        assert polled == [f"/api/agent-cli/calls/{call_id}?wait=25&after_progress=0"] * 2
         assert (output.out, output.err) == ("shard ok\n", "")
     else:
-        assert exit_code == 125
-        assert polled == [f"/api/agent-cli/calls/{call_id}"]
+        assert exit_code == 255
+        assert polled == [f"/api/agent-cli/calls/{call_id}?wait=25&after_progress=0"]
         assert "Agent CLI request was rejected" in output.err
 
 

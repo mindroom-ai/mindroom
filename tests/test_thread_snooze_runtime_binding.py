@@ -848,28 +848,31 @@ def test_thread_tag_state_event_parses_as_unknown_event() -> None:
     assert "state_key" in event.source
 
 
-def test_decrypted_thread_tag_event_is_ignored() -> None:
+@pytest.mark.asyncio
+async def test_decrypted_thread_tag_event_is_ignored() -> None:
     """Only clear state events count: a decrypted look-alike or a non-state event is not a snooze."""
     bot = MagicMock()
     room = nio.MatrixRoom(ROOM, "@mindroom_router:localhost")
     observe = bot.orchestrator.thread_snooze.observe_state_event
 
-    AgentBot._on_room_state_event(bot, room, _tag_event(_snooze_source(), decrypted=True))
+    await AgentBot._on_room_state_event(bot, room, _tag_event(_snooze_source(), decrypted=True))
     timeline_source = {key: value for key, value in _snooze_source().items() if key != "state_key"}
-    AgentBot._on_room_state_event(bot, room, _tag_event(timeline_source))
-    AgentBot._on_room_state_event(bot, room, _tag_event({**_snooze_source(), "type": "com.example.other"}))
+    await AgentBot._on_room_state_event(bot, room, _tag_event(timeline_source))
+    await AgentBot._on_room_state_event(bot, room, _tag_event({**_snooze_source(), "type": "com.example.other"}))
     observe.assert_not_called()
 
-    AgentBot._on_room_state_event(bot, room, _tag_event(_snooze_source()))
+    await AgentBot._on_room_state_event(bot, room, _tag_event(_snooze_source()))
     observe.assert_called_once_with(ROOM, _snooze_source())
 
 
-def test_thread_tag_callback_never_raises_into_nio() -> None:
+@pytest.mark.asyncio
+async def test_thread_tag_callback_never_raises_into_nio() -> None:
     """A failure while indexing a live tag event is logged, never raised into nio's callback loop."""
     bot = MagicMock()
     bot.orchestrator.thread_snooze.observe_state_event.side_effect = RuntimeError("boom")
 
-    AgentBot._on_room_state_event(bot, nio.MatrixRoom(ROOM, "@mindroom_router:localhost"), _tag_event(_snooze_source()))
+    room = nio.MatrixRoom(ROOM, "@mindroom_router:localhost")
+    await AgentBot._on_room_state_event(bot, room, _tag_event(_snooze_source()))
 
     bot.logger.exception.assert_called_once()
 
