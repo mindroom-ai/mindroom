@@ -1240,9 +1240,10 @@ class WorkflowEngine:
                 # The lock is not held while access resolves: the script's SDK asks again, and a Stop gets in.
                 raise ScriptRuntimeUnavailableError(str(exc)) from exc
             # A Stop waits for nobody's access and for no job runtime: the turn it may not read may have done
-            # anything, unless its job was never handed over.
+            # anything. A handle without the mark that its job was handed over proves nothing either, since the job
+            # starts before that mark is saved.
             cancelled: _Outcome = WorkflowNodeState.CANCELLED, None, {"kind": "cancelled", "message": _RUN_ENDED}
-            state, _, error = _unless_proven(node, None if node.handle.dispatched else False, cancelled)
+            state, _, error = _unless_proven(node, None, cancelled)
             await asyncio.to_thread(partial(settle, state=state, error=error))
         return False
 

@@ -127,15 +127,15 @@ async def test_write_whose_result_a_check_withheld_is_not_made_again(stack: Work
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("dispatched", "state"), [(True, "indeterminate"), (False, "cancelled")])
+@pytest.mark.parametrize("dispatched", [True, False])
 async def test_stop_without_a_job_runtime_does_not_make_a_started_agent_safe_to_run_again(
     stack: WorkflowStack,
     dispatched: bool,
-    state: str,
 ) -> None:
-    """Nobody can read the agent's job while background jobs are off: only a job never handed over ran nothing.
+    """Nobody can read the agent's job while background jobs are off, so a saved job handle may have run anything.
 
-    The reproducer of the second full review (Astra B3).
+    The reproducer of the second full review (Astra B3). The mark that the job was handed over changes nothing:
+    a job starts before that mark is saved.
     """
     left = WorkflowNode(
         run_id=stack.run_id,
@@ -154,7 +154,7 @@ async def test_stop_without_a_job_runtime_does_not_make_a_started_agent_safe_to_
 
     await stack.engine.cancel(stack.run_id, reason="Stopped while jobs were off.")
 
-    assert _node(stack, "@0").state.value == state
+    assert _node(stack, "@0").state is WorkflowNodeState.INDETERMINATE
 
 
 @pytest.mark.asyncio

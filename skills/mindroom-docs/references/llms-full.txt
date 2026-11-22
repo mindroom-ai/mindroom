@@ -10019,7 +10019,7 @@ Stopping one agent from the Sub-agents panel fails only that call with kind `can
 An agent that had started a tool call ends `indeterminate` instead, however its turn ended: it failed, it ran out of its `timeout`, or it was stopped, alone or with its run.
 No resume runs it again without `rerun`.
 A turn whose record shows that it started no tool call keeps its kind and runs again on resume.
-A Stop while background jobs are off cannot read an agent's turn, so an agent whose job had started ends `indeterminate` then too.
+A Stop while background jobs are off cannot read an agent's turn, so an agent that was given a job ends `indeterminate` then too.
 A Stop of the run asks all its agents to end at once and waits up to 30 seconds for them together, then reads what each agent did.
 
 While an agent's tool call waits for an approval, the agent's call shows `waiting`, and so does the run when no other call of it is working.

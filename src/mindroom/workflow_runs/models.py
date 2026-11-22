@@ -54,7 +54,8 @@ class DispatchHandle:
     """Where a node's work was handed over, so a restart reads the outcome and never repeats the work.
 
     `ref` is the broker call (`"<script run id>:<call id>"`), the job ID, or a child run ID.
-    `dispatched` turns true in the same transaction that hands the work over.
+    `dispatched` turns true once the work was handed over. A job starts before that is saved, so a job handle
+    without it proves that nothing ran only together with a job runtime that holds no such job.
     `same_as` is the digest of the result that a call which runs on every resume had before: what follows the call
     is reused only when it answers that again, also when its answer is read after its attempt died.
     """

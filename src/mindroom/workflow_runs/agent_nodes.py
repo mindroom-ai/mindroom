@@ -255,7 +255,8 @@ async def await_child(  # noqa: C901
     owner = parse_tool_execution_identity_payload(run.execution_identity)
     wait = partial(jobs.wait, job_id, owner=owner, depth=run.depth)
     if all(job.job_id != job_id for job in jobs.retained_jobs()):
-        # A job the runtime never admitted did nothing. One it has since deleted may have done anything.
+        # The one place where a handle without the mark proves something, since here the runtime can be read: a
+        # job it never admitted did nothing. One it has since deleted may have done anything.
         kind = "indeterminate" if may_have_written(None if node.handle.dispatched else False) else "interrupted"
         return (kind, _INTERRUPTED), {}, None
     # What the turn has left of its working time, as the node's handle says: an earlier wait may have used some.
@@ -269,9 +270,9 @@ async def await_child(  # noqa: C901
             times = {"approval_timeout": None if waiting else 0, "work_timeout": 0 if waiting else left}
             waited = await wait(**times) if on_waiting is not None else await wait(timeout=0)
         except JobAccessError as exc:
-            # A read that is denied says nothing of what the turn did, so its call is not one to run again.
-            unread = may_have_written(None if handle.dispatched else False)
-            return ("indeterminate" if unread else "denied", str(exc)), {}, None
+            # A read that is denied says nothing of what the turn did, so its call is not one to run again: the
+            # runtime holds the job, which may have started before its handle got the mark that it was handed over.
+            return ("indeterminate", str(exc)), {}, None
         job, claim = waited.job, waited.claim
         if left is not None and not waiting:
             left -= loop.time() - since

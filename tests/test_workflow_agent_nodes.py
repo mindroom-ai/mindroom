@@ -9,6 +9,7 @@ import asyncio
 import json
 import sqlite3
 from contextlib import suppress
+from dataclasses import replace
 from datetime import timedelta
 from functools import partial
 from types import SimpleNamespace
@@ -607,6 +608,45 @@ async def test_the_pass_that_ends_a_stopped_jobs_run_neither_cuts_that_end_short
 
 
 @pytest.mark.asyncio
+async def test_agent_whose_job_wrote_before_its_handle_was_stamped_is_not_run_again_by_a_stop_that_cannot_read_it(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job handle without the mark that it was handed over proves nothing: the job starts before the mark is saved.
+
+    The reproducer of the third verification (Astra B3): the job is admitted, writes and completes, and MindRoom
+    dies before the node's handle says `dispatched`. A Stop while no job runtime can read the job then ends the node.
+    """
+    real_start = stack.jobs.start
+
+    async def admitted(*args: Any, **kwargs: Any) -> object:  # noqa: ANN401
+        held = await real_start(*args, **kwargs)
+        await asyncio.Event().wait()
+        return held
+
+    monkeypatch.setattr(stack.jobs, "start", admitted)
+    request = {"prompt": "Record one line."}
+    stack.child_script(calls(tool_call("append", "one", line="once")), answer("recorded"))
+    submitting = asyncio.create_task(stack.submit("@0", "agent", request))
+    await stack.until(lambda: stack.counting_tool.lines == ["once"])
+    await stack.until(lambda: stack.node_job("@0").status == "completed")
+    assert _node(stack).handle.dispatched is False
+    await stack.kill()
+    await asyncio.gather(submitting, return_exceptions=True)
+    monkeypatch.setattr(stack.engine, "agents", lambda: None)
+
+    await stack.engine.cancel(stack.run_id, reason="Stopped while jobs were off.")
+
+    assert _node(stack).state is WorkflowNodeState.INDETERMINATE
+    monkeypatch.undo()
+    await stack.resume(stack.run_id)
+    stack.child_script(calls(tool_call("append", "two", line="once")), answer("recorded"))
+    with pytest.raises(NodeFailed):
+        await stack.result("@0", "agent", request)
+    assert stack.counting_tool.lines == ["once"]
+
+
+@pytest.mark.asyncio
 async def test_a_stop_of_several_agents_says_of_each_what_its_own_turn_did(
     stack: WorkflowStack,
     monkeypatch: pytest.MonkeyPatch,
@@ -1026,6 +1066,44 @@ async def test_answer_of_a_job_that_cannot_be_read_yet_is_not_taken(stack: Workf
             await stack.result("@0", "agent", _PROMPT)
         # The turn ended, whatever it did: a read that is denied does not say that it did nothing.
         assert (refused.value.kind, _node(stack).result) == ("indeterminate", None)
+
+
+@pytest.mark.asyncio
+async def test_agent_whose_handle_never_got_its_mark_is_not_run_again_when_its_answer_may_not_be_read(
+    stack: WorkflowStack,
+) -> None:
+    """A denied read of a job the runtime holds proves nothing, with or without the mark that it was handed over.
+
+    The primary died right after the job was admitted, so the saved handle has no mark, and the job wrote.
+    """
+    gate = asyncio.Event()
+    stack.child_script(calls(tool_call("append", "c1", line="a")), [Await(gate.wait), *answer("done")])
+    await stack.submit("@0", "agent", _PROMPT)
+    stack.admission = "pending"
+    gate.set()
+    await wait_for_status(stack.jobs, stack.node_job("@0").job_id, "completed")
+    node, epoch = _node(stack), stack.store.get_run(stack.run_id).epoch
+    assert stack.store.update_node(
+        stack.run_id, "@0", node.generation, epoch, handle=replace(node.handle, dispatched=False)
+    )
+    await stack.restart(kill=True)
+    stack.admission = "denied"
+    assert await stack.recover() == [stack.run_id]
+    stack.child_script(calls(tool_call("append", "c2", line="a")), answer("again"))
+
+    with pytest.raises(NodeFailed) as blocked:
+        await stack.result("@0", "agent", _PROMPT)
+
+    assert (blocked.value.kind, _node(stack).handle.dispatched, stack.counting_tool.lines) == (
+        "indeterminate",
+        False,
+        ["a"],
+    )
+    stack.admission = "allowed"
+    await _replayed(stack)
+    with pytest.raises(NodeFailed) as still:
+        await stack.result("@0", "agent", _PROMPT)
+    assert (still.value.kind, _node(stack).generation, stack.counting_tool.lines) == ("indeterminate", 1, ["a"])
 
 
 @pytest.mark.asyncio
