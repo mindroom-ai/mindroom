@@ -175,7 +175,7 @@ from mindroom.tool_system.approval_exemptions import register_tool_approval_exem
 from mindroom.tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
-    append_stream_text,
+    append_tool_marker,
     format_tool_started_event,
     tool_markers_in_text,
 )
@@ -582,7 +582,7 @@ def _ordered_pause(paused: PausedAttempt) -> PausedAttempt:
     for index, tool in enumerate(paused.tools, start=1):
         marker, entry = format_tool_started_event(tool.call, tool_index=index)
         assert entry is not None
-        body = append_stream_text(body, marker)
+        body = append_tool_marker(body, marker)
         trace.append(entry)
     return replace(paused, response_text=body.strip(), tool_trace=tuple(trace))
 

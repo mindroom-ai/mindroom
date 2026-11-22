@@ -23,6 +23,7 @@ from mindroom.tool_system.events import (
     StructuredStreamChunk,
     ToolTraceEntry,
     append_stream_text,
+    append_tool_marker,
     complete_pending_tool_block,
     is_visible_tool_marker_line,
     remap_visible_tool_marker_indices,
@@ -298,7 +299,7 @@ class TeamStreamPresentation:
             return
         self.tool_trace.append(trace_entry)
         if self.show_tool_calls:
-            self._set_slot_text(member_id, append_stream_text(self._slot_text(member_id), marker))
+            self._set_slot_text(member_id, append_tool_marker(self._slot_text(member_id), marker))
         elif self._slot_text(member_id):
             self.separate_next_slots.add(member_id)
         self._align_tool_trace_with_document()

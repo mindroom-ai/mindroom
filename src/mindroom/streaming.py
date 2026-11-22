@@ -50,6 +50,7 @@ from mindroom.tool_system.events import (
     StreamingToolTracker,
     StructuredStreamChunk,
     append_stream_text,
+    append_tool_marker,
     complete_pending_tool_block,
     remap_visible_tool_marker_indices,
     serialize_tool_trace,
@@ -761,14 +762,25 @@ class StreamingResponse:
             *_merge_tool_trace(self.tool_trace[resumed_count:], incoming),
         ]
 
+    def _record_appended_text(self, updated: str) -> None:
+        """Advance accumulated text and byte/time bookkeeping by the characters added."""
+        added = len(updated) - len(self.accumulated_text)
+        self.accumulated_text = updated
+        if added:
+            self.chars_since_last_update += added
+            self.last_delta_at = time.time()
+
     def _append_incremental_text(self, new_chunk: str) -> None:
         """Append additive streaming text regardless of snapshot replacement mode."""
         updated = append_stream_text(self.accumulated_text, new_chunk, separate=self._separate_next_text)
         if new_chunk.strip("\r\n"):
             self._separate_next_text = False
-        self.chars_since_last_update += len(updated) - len(self.accumulated_text)
-        self.accumulated_text = updated
-        self.last_delta_at = time.time()
+        self._record_appended_text(updated)
+
+    def _append_tool_marker(self, marker: str) -> None:
+        """Append one visible tool marker line regardless of snapshot replacement mode."""
+        self._separate_next_text = False
+        self._record_appended_text(append_tool_marker(self.accumulated_text, marker))
 
     def _mark_nonadditive_text_mutation(self) -> None:
         """Count a visible in-place text change that did not append characters as one received character."""
@@ -1652,9 +1664,11 @@ async def _apply_visible_text_chunk(
     prior_delta_at = streaming.last_delta_at
     apply_chunk(text_chunk)
     if replacement_suffixes and streaming.replaces_text:
+        lines = {line.rstrip("\r") for line in streaming.accumulated_text.split("\n")}
         for suffix in replacement_suffixes:
-            if suffix not in streaming.accumulated_text:
-                streaming._append_incremental_text(suffix)
+            if suffix not in lines:
+                streaming._append_tool_marker(suffix)
+                lines.add(suffix)
     completion = _queue_delivery_request(
         delivery_queue,
         force_refresh=force_refresh,
@@ -1735,7 +1749,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                     streaming,
                     delivery_queue,
                     text_chunk,
-                    apply_chunk=streaming._append_incremental_text,
+                    apply_chunk=streaming._append_tool_marker,
                     boundary_refresh=True,
                     wait_for_capture=(
                         streaming.replaces_text and streaming.matching_inflight_nonterminal_capture() is None
@@ -2420,7 +2434,7 @@ async def stream_progress_edits(
 
     def apply_presentation(text: str) -> None:
         if text.startswith(streaming.accumulated_text):
-            streaming._append_incremental_text(text[len(streaming.accumulated_text) :])
+            streaming._record_appended_text(text)
             return
         streaming.accumulated_text = text
         streaming._mark_nonadditive_text_mutation()

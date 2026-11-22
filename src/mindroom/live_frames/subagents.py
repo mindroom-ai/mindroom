@@ -30,6 +30,7 @@ from mindroom.llm.events import ReportedCall
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.events import (
     append_stream_text,
+    append_tool_marker,
     complete_pending_tool_block,
     format_tool_started_event,
     serialize_tool_trace,
@@ -91,7 +92,7 @@ def _run_docs(snapshot: SubagentSnapshot, *, previews: bool, text_cut: int = 0) 
         marker, _ = format_tool_started_event(call, len(entries))
         if item.state != "running":
             marker = complete_pending_tool_block(marker, item.tool.tool_name, len(entries))
-        md = append_stream_text(md, marker)
+        md = append_tool_marker(md, marker)
         after_text = False
     tools = serialize_tool_trace(entries)
     if not previews:

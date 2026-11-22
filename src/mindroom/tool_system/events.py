@@ -272,7 +272,7 @@ class CollectedStreamPresentation:
             return
         self.tool_trace.append(trace_entry)
         if self.show_tool_calls:
-            self.response_text = append_stream_text(self.response_text, text)
+            self.response_text = append_tool_marker(self.response_text, text)
         elif self.response_text:
             self.separate_next_text = True
 
@@ -920,13 +920,20 @@ def renumbered_tool_trace(body: str, trace: Sequence[ToolTraceEntry]) -> tuple[s
     return remap_visible_tool_marker_indices(body, index_map), entries
 
 
-def _newline_gap(existing_text: str, delta: str) -> str:
-    """Return the newlines needed so ``existing_text`` and ``delta`` have one blank line between them."""
-    double = ("\n\n", "\r\n\r\n", "\n\r\n", "\r\n\n")
-    single = ("\n", "\r")
-    trailing = 2 if existing_text.endswith(double) else (1 if existing_text.endswith(single) else 0)
-    leading = 2 if delta.startswith(double) else (1 if delta.startswith(single) else 0)
-    return "\n" * max(0, 2 - trailing - leading)
+def _blank_line_gap(existing_text: str) -> str:
+    """Return the newlines needed so ``existing_text`` ends with a blank line."""
+    if existing_text.endswith("\n\n"):
+        return ""
+    if existing_text.endswith("\n"):
+        return "\n"
+    return "\n\n"
+
+
+def append_tool_marker(existing_text: str, marker: str) -> str:
+    """Append one visible tool marker line separated from preceding text by a blank line."""
+    if not existing_text or not marker:
+        return existing_text or marker
+    return f"{existing_text}{_blank_line_gap(existing_text)}{marker}"
 
 
 def append_stream_text(existing_text: str, content: object | None, *, separate: bool = False) -> str:
@@ -934,13 +941,17 @@ def append_stream_text(existing_text: str, content: object | None, *, separate: 
     if not content:
         return existing_text
     delta = str(content)
-    if not existing_text or not delta.strip("\r\n"):
-        return f"{existing_text}{delta}"
-    last_line = existing_text.rstrip("\r\n").rsplit("\n", maxsplit=1)[-1]
-    first_line = delta.lstrip("\r\n").split("\n", maxsplit=1)[0]
-    needs_separator = separate or is_visible_tool_marker_line(last_line) or is_visible_tool_marker_line(first_line)
-    separator = _newline_gap(existing_text, delta) if needs_separator else ""
-    return f"{existing_text}{separator}{delta}"
+    if not existing_text:
+        return delta
+    last_line = existing_text.rsplit("\n", maxsplit=1)[-1].rstrip("\r")
+    after_marker = is_visible_tool_marker_line(last_line)
+    if after_marker or separate:
+        trimmed = delta.lstrip("\r\n")
+        if not trimmed:
+            return existing_text
+        gap = "\n\n" if after_marker else _blank_line_gap(existing_text)
+        return f"{existing_text}{gap}{trimmed}"
+    return f"{existing_text}{delta}"
 
 
 def tool_markers_match_trace(text: str, tool_trace: Sequence[ToolTraceEntry]) -> bool:
