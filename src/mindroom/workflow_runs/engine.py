@@ -584,10 +584,6 @@ class WorkflowEngine:
                 used["attempt_cost_usd"] += inner["cost_usd"]
         return used
 
-    def status(self, run_id: str) -> tuple[WorkflowRun, list[WorkflowNode]]:
-        """Return the run and its current nodes."""
-        return self.store.get_run(run_id), self.store.nodes(run_id)
-
     async def settle(self, run: WorkflowRun, *, replay: bool = False) -> WorkflowRun:
         """End the attempt of *run* if its process has ended, and return the run as that leaves it.
 
@@ -659,7 +655,7 @@ class WorkflowEngine:
             saved is not None and not saved.digest,
         )
         decision = partial(decide, digest=digest, attempt=run.attempt, dirty=dirty, rerun=rerun, cached=cached)
-        action = decision(saved).action
+        action = decision(saved)
         if saved is not None and action == "return":
             # A request the script sent twice never repeats work, not even failed work.
             return _receipt(saved)
@@ -668,12 +664,12 @@ class WorkflowEngine:
             # any rule may run it again. The call that replaces a node whose job still runs stops that job.
             live = await self._reconcile(run, saved, epoch)
             left, saved = saved, self.store.get_node(run.run_id, key)
-            action = decision(saved, live=live).action
+            action = decision(saved, live=live)
             if live and action == "run":
                 await self._reconcile(run, left, epoch, stop=True)
                 # The stopped turn may have called a tool: then its node is not replaced unasked either.
                 saved = self.store.get_node(run.run_id, key)
-                action = decision(saved).action
+                action = decision(saved)
         if saved is not None and action != "run":
             # Reused: the node is this attempt's now, and a fan-out whose items changed dirties what follows it.
             stamp: dict[str, object] = {"attempt": run.attempt, "stale": False}

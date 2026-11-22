@@ -65,6 +65,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.model_loop import BeforeRequestHook, LoopState
     from mindroom.agent_modes import AgentMode
+    from mindroom.bot import AgentBot
     from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -592,24 +593,29 @@ class DelegationPendingError(Exception):
     """Whether a workflow run may run an agent cannot be told yet: the question is to be asked again."""
 
 
-def _bot_in_room(context: ToolRuntimeContext | None, agent_name: str) -> bool | None:
-    """Return whether the agent's own bot is in the room of *context*, None while that bot does not know its rooms.
+def bot_in_room(bot: AgentBot | None, room_id: str | None) -> bool | None:
+    """Return whether *bot* is in the room, None while it does not know its rooms.
 
     A bot knows the rooms it is in once it has completed its first sync: one that is not built yet, or is still
-    logging in, is starting as well. Where no orchestrator holds the bots, nobody can say, which is no.
+    logging in, is starting as well.
     """
-    orchestrator = context.orchestrator if context is not None else None
-    if context is None or orchestrator is None:
-        return False
-    bot = orchestrator.agent_bots.get(agent_name)
     if bot is None or bot.client is None or not bot.first_sync_complete:
         return None
-    return context.room_id in bot.client.rooms
+    return room_id in bot.client.rooms
 
 
 def _run_runs_agent(caller_name: str, agent_name: str, config: Config, context: ToolRuntimeContext | None) -> bool:
-    """Return whether a workflow run of the caller may run the agent now; raise while its bot cannot say yet."""
-    runs = workflow_runs_agent(caller_name, agent_name, config, _bot_in_room(context, agent_name))
+    """Return whether a workflow run of the caller may run the agent now; raise while its bot cannot say yet.
+
+    Where no orchestrator holds the bots, nobody can say whether the agent's own bot is in the room, which is no.
+    """
+    orchestrator = context.orchestrator if context is not None else None
+    joined = (
+        bot_in_room(orchestrator.agent_bots.get(agent_name), context.room_id)
+        if context is not None and orchestrator is not None
+        else False
+    )
+    runs = workflow_runs_agent(caller_name, agent_name, config, joined)
     if runs is None:
         msg = f"The bot of '{agent_name}' is still starting. Try again in a moment."
         raise DelegationPendingError(msg)

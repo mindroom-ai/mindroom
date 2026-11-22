@@ -714,6 +714,10 @@ class WorkflowStack:
             joined=joined,
         )
 
+    def status(self, run_id: str) -> tuple[WorkflowRun, list[WorkflowNode]]:
+        """Return the run and its current nodes."""
+        return self.store.get_run(run_id), self.store.nodes(run_id)
+
     def node_job(self, key: str) -> BackgroundJob:
         """Return the job of the agent node at *key*, as the job runtime holds it."""
         node = self.store.get_node(self.run_id, key)

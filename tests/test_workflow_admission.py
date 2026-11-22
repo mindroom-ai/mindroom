@@ -337,7 +337,7 @@ async def test_resume_of_an_ended_run_needs_a_free_slot_of_its_owner(stack: Work
     await stack.result("@0", "tool", _A)
     await stack.finish_attempt(result="the report")
     await _ended_job(stack, first["job_id"])
-    ended = stack.engine.status(first["run_id"])
+    ended = stack.status(first["run_id"])
     for _ in range(8):
         await stack.call("start_workflow", source=SCRIPT)
     stack.run_id = first["run_id"]
@@ -347,7 +347,7 @@ async def test_resume_of_an_ended_run_needs_a_free_slot_of_its_owner(stack: Work
 
     limit = "You have 8 workflow runs in progress, the limit. Wait for one to end or cancel one."
     assert (job.status, await stack.collect(job)) == ("failed", limit)
-    assert stack.engine.status(first["run_id"]) == ended
+    assert stack.status(first["run_id"]) == ended
     assert len(stack.store.list_runs(include_finished=False)) == 8
 
 

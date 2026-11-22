@@ -385,7 +385,7 @@ async def test_removed_item_is_marked_stale_when_the_attempt_completes(stack: Wo
     await stack.submit("/0:a@0", "tool", _A)
     await stack.finish_attempt(result="done")
 
-    assert [node.key for node in stack.engine.status(stack.run_id)[1]] == ["@0", "/0:a@0"]
+    assert [node.key for node in stack.status(stack.run_id)[1]] == ["@0", "/0:a@0"]
     assert _node(stack, "/0:b@0").stale
 
     await _resume(stack)
@@ -411,13 +411,13 @@ async def test_resume_refuses_an_unknown_call_in_rerun_by_name(stack: WorkflowSt
     """Only the exact ID of a saved call names it: any other starts nothing and leaves the run and its calls as they ended."""
     await stack.result("@0", "tool", _A)
     await stack.end_attempt(ScriptRunState.FAILED)
-    before = stack.engine.status(stack.run_id)
+    before = stack.status(stack.run_id)
 
     with pytest.raises(WorkflowRunStoreError) as refusal:
         await stack.resume(stack.run_id, rerun=["n1", unknown])
 
     assert str(refusal.value) == f"Run {stack.run_id} has no call {unknown}."
-    assert stack.engine.status(stack.run_id) == before
+    assert stack.status(stack.run_id) == before
     assert len(stack.scripts.launched) == 1
 
 

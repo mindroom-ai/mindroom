@@ -254,7 +254,7 @@ async def test_inherited_attempt_is_refused_before_anything_recovers(stack: Work
             await client.post("finish", json={"result": "late"}),
         ]
     assert [answer.status_code for answer in answers] == [409, 409, 409, 409]
-    run, nodes = stack.engine.status(stack.run_id)
+    run, nodes = stack.status(stack.run_id)
     assert (nodes, stack.store.log(stack.run_id), run.finished_at, stack.counting_tool.calls) == ([], [], None, 0)
 
     await stack.recover()

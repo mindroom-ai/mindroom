@@ -19,6 +19,7 @@ from mindroom.delegation.continuation import continued_subagent_job
 from mindroom.delegation.lifecycle import (
     DelegationPendingError,
     active_delegation_edges,
+    bot_in_room,
     caller_grants_child,
     delegation_grant,
     workflow_runs_agent,
@@ -257,9 +258,7 @@ class ToolJobRuntimeCoordinator:
             if grant == "workflow":
                 # The agent of a run's call: one that is neither the caller nor in its `delegate_to` must be in the
                 # run's room, which its own bot knows once it has synced.
-                bot = self.bot_provider(child_name)
-                client = bot.client if bot is not None and bot.first_sync_complete else None
-                joined = owner.room_id in client.rooms if client is not None else None
+                joined = bot_in_room(self.bot_provider(child_name), owner.room_id)
                 runs = workflow_runs_agent(owner.agent_name, child_name, config, joined)
             if (
                 not caller_grants_child(owner.agent_name, child_name, config, grant)

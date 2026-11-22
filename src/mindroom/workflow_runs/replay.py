@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.workflow_runs.models import WorkflowNode, WorkflowNodeState
@@ -42,14 +41,6 @@ def parent_group(lane: str) -> str | None:
     return f"{parent_lane}@{segment.partition(':')[0]}"
 
 
-@dataclass(frozen=True, slots=True)
-class Decision:
-    """What to do with a submitted call, and whether running it replaces a saved node."""
-
-    action: _Action
-    next_generation: bool
-
-
 def decide(
     saved: WorkflowNode | None,
     digest: str,
@@ -59,7 +50,7 @@ def decide(
     rerun: bool,
     cached: bool,
     live: bool = False,
-) -> Decision:
+) -> _Action:
     """Decide what a submitted call does, given the node saved at its key.
 
     `reconcile` asks the caller to settle the saved node from its dispatch handle and decide
@@ -82,7 +73,7 @@ def decide(
         action = "hit"
     else:
         action = "run"
-    return Decision(action, next_generation=action == "run" and saved is not None)
+    return action
 
 
 class DirtyLanes:

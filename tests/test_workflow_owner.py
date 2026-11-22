@@ -87,11 +87,11 @@ async def test_resume_call_delivered_again_after_its_run_ended_returns_that_repo
     assert await stack.result("@0", "tool", _A) == "appended"
     await stack.finish_attempt(result="the second report")
     assert await call == "the second report"
-    ended = stack.engine.status(stack.run_id)
+    ended = stack.status(stack.run_id)
 
     assert await stack.call("resume_workflow", **resume) == "the second report"
 
-    assert stack.engine.status(stack.run_id) == ended
+    assert stack.status(stack.run_id) == ended
     assert (stack.counting_tool.lines, len(stack.scripts.launched)) == (["a", "a"], 2)
 
 
@@ -119,11 +119,11 @@ async def test_resume_call_delivered_again_after_a_later_resume_ended_returns_it
     assert (await stack.submit("@0", "tool", _A)).cached
     await stack.finish_attempt(result="the third report")
     assert await later == "the third report"
-    ended = stack.engine.status(stack.run_id)
+    ended = stack.status(stack.run_id)
 
     assert await stack.call("resume_workflow", **resume) == "the second report"
 
-    assert stack.engine.status(stack.run_id) == ended
+    assert stack.status(stack.run_id) == ended
     assert (stack.counting_tool.lines, len(stack.scripts.launched)) == (["a", "a"], 3)
     last = asyncio.create_task(stack.call("resume_workflow", depth=1, call_id="the-last-resume", run_id=stack.run_id))
     await stack.until(lambda: _run(stack).attempt == 4)
@@ -181,14 +181,14 @@ async def test_invocation_that_took_a_run_before_takes_it_no_second_time_and_mar
         await stack.engine.reopen(stack.run_id, stack.context, owner=owner, job_id=owner)
         await stack.engine.launch(stack.run_id, stack.context, owner=owner)
         await stack.finish_attempt(result=f"the report of {owner}")
-    ended = stack.engine.status(stack.run_id)
+    ended = stack.status(stack.run_id)
     # The job that started the run, which the first takeover found as its owner, and the two that took it.
     assert ended[0].claims == {first["job_id"]: None, "an-old-job": None, "a-later-job": None}
 
     with pytest.raises(WorkflowRunStoreError, match=_TAKEN.format(stack.run_id)):
         await stack.engine.reopen(stack.run_id, stack.context, owner="an-old-job", job_id="an-old-job", rerun=["n1"])
 
-    assert stack.engine.status(stack.run_id) == ended
+    assert stack.status(stack.run_id) == ended
     assert (await stack.resume(stack.run_id)).attempt == 4
     assert (await stack.submit("@0", "tool", _A)).cached
 

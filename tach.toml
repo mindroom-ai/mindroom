@@ -2590,6 +2590,7 @@ expose = [
 path = "mindroom.orchestration.workflow_runtime"
 depends_on = [
     "mindroom.custom_tools.workflow",
+    "mindroom.delegation.lifecycle",
     "mindroom.tool_jobs.runtime",
     "mindroom.workflow_runs.agent_nodes",
     "mindroom.workflow_runs.engine",
@@ -8699,6 +8700,7 @@ visibility = [
     "mindroom.delegation.recovery",
     "mindroom.tool_system.agent_tools",
     "mindroom.orchestration.tool_job_runtime",
+    "mindroom.orchestration.workflow_runtime",
     "mindroom.delegation.targets",
     "mindroom.delegation.continuation",
     "mindroom.loop_hooks",

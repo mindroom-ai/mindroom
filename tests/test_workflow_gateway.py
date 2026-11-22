@@ -95,7 +95,7 @@ async def test_node_request_over_one_mebibyte_is_413_with_the_byte_count(
     refused = await client.post("nodes", content=body, headers={"Content-Type": "application/json"})
 
     assert (refused.status_code, refused.json()) == (413, {"bytes": len(body), "limit": _MEBIBYTE})
-    assert stack.engine.status(stack.run_id)[1] == []
+    assert stack.status(stack.run_id)[1] == []
 
 
 @pytest.mark.asyncio
@@ -126,7 +126,7 @@ async def test_unknown_token_is_404(stack: WorkflowStack) -> None:
         assert (await client.get("nodes/n99")).status_code == 404
         assert (await client.get("nodes/not-a-node")).status_code == 404
 
-    assert stack.engine.status(stack.run_id)[1] == []
+    assert stack.status(stack.run_id)[1] == []
 
 
 @pytest.mark.asyncio
@@ -180,7 +180,7 @@ async def test_malformed_requests_are_422_and_save_nothing(stack: WorkflowStack,
 
     assert [answer.status_code for answer in answers] == [422] * 5
     assert "later" in answers[3].json()["detail"]
-    assert stack.engine.status(stack.run_id)[1] == []
+    assert stack.status(stack.run_id)[1] == []
 
 
 @pytest.mark.asyncio
@@ -193,7 +193,7 @@ async def test_poll_returns_when_the_node_changes_and_after_wait_otherwise(
     node_id = (await client.post("nodes", json=_NODE)).json()["id"]
     loop = asyncio.get_running_loop()
     # The call asks for its approval some time after it started, longer than the short poll when nothing is loaded yet.
-    await stack.until(lambda: stack.engine.status(stack.run_id)[1][0].state is WorkflowNodeState.WAITING)
+    await stack.until(lambda: stack.status(stack.run_id)[1][0].state is WorkflowNodeState.WAITING)
 
     started = loop.time()
     unchanged = await client.get(f"nodes/{node_id}", params={"wait": 0.2})

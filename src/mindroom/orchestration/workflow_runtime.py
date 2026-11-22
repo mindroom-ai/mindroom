@@ -14,6 +14,7 @@ from mindroom.custom_tools.workflow import (
     workflow_job_standing,
     workflow_limits,
 )
+from mindroom.delegation.lifecycle import bot_in_room
 from mindroom.logging_config import get_logger
 from mindroom.script_runs.models import utc_timestamp
 from mindroom.tool_jobs.runtime import get_background_runtime
@@ -89,13 +90,11 @@ class WorkflowRuntimeLifecycle:
             return "revoked"
         try:
             # The bot that answers for the run: its agent's, or the team's that its agent answered in.
-            bot = resolver.serving_bot(owner, config)
-            if bot is None or not bot.first_sync_complete or bot.client is None:
-                return "pending"
+            joined = bot_in_room(resolver.serving_bot(owner, config), run.room_id)
             authorized = resolver.is_authorized(owner, require_resolved_membership=True)
-            if authorized is None:
+            if joined is None or authorized is None:
                 return "pending"
-            if authorized and run.room_id in bot.client.rooms:
+            if authorized and joined:
                 context = resolver.resolve(owner, correlation_id=f"workflow:{run.run_id}")
                 return context, workflow_limits(context.config, run.agent_name)
         except ValueError:

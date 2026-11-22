@@ -384,7 +384,7 @@ async def test_node_kind_this_release_cannot_run_is_refused_by_name(stack: Workf
     with pytest.raises(WorkflowRunStoreError, match="cannot run a 'later' call"):
         await stack.submit("@0", "later", {"prompt": "Count the tides."})
 
-    assert stack.engine.status(stack.run_id)[1] == []
+    assert stack.status(stack.run_id)[1] == []
 
 
 @pytest.mark.asyncio
@@ -622,7 +622,7 @@ async def test_interrupted_attempt_interrupts_the_run_with_its_reason(stack: Wor
 
     await stack.end_attempt(ScriptRunState.INTERRUPTED, RUNTIME_RESTARTED)
 
-    run, nodes = stack.engine.status(stack.run_id)
+    run, nodes = stack.status(stack.run_id)
     assert (run.state, run.error) == (WorkflowRunState.INTERRUPTED, RUNTIME_RESTARTED)
     assert [(node.key, node.state) for node in nodes] == [
         ("@0", WorkflowNodeState.COMPLETED),
@@ -925,7 +925,7 @@ async def test_run_does_not_end_while_a_call_is_being_admitted(
     await ending
     await request
 
-    run, nodes = stack.engine.status(stack.run_id)
+    run, nodes = stack.status(stack.run_id)
     assert run.state is WorkflowRunState.INTERRUPTED
     assert [(node.key, node.state) for node in nodes] == [("@0", WorkflowNodeState.FAILED)]
     assert stack.counting_tool.lines == []
@@ -937,7 +937,7 @@ async def test_ended_run_admits_no_new_call(stack: WorkflowStack) -> None:
     attempt = stack.attempt
     first = await stack.engine.submit_node(attempt, NodeRequest("@0", "tool", _APPEND, {}))
     # Until the node has settled, not only until its effect shows: a cancel in between ends it indeterminate.
-    await stack.until(lambda: stack.engine.status(stack.run_id)[1][0].state is WorkflowNodeState.COMPLETED)
+    await stack.until(lambda: stack.status(stack.run_id)[1][0].state is WorkflowNodeState.COMPLETED)
     await stack.engine.cancel(stack.run_id, reason="Stopped by the user.")
 
     for key in ("@0", "@1"):
@@ -945,7 +945,7 @@ async def test_ended_run_admits_no_new_call(stack: WorkflowStack) -> None:
             await stack.engine.submit_node(attempt, NodeRequest(key, "tool", _APPEND, {}))
 
     assert (first.id, stack.counting_tool.calls) == ("n1", 1)
-    assert [node.key for node in stack.engine.status(stack.run_id)[1]] == ["@0"]
+    assert [node.key for node in stack.status(stack.run_id)[1]] == ["@0"]
 
 
 @pytest.mark.asyncio
@@ -964,7 +964,7 @@ async def test_cancel_revokes_attempt_and_keeps_completed_nodes(stack: WorkflowS
     assert (attempt.state, attempt.cancellation_reason) == (ScriptRunState.CANCELLED, "Stopped by the user.")
     with pytest.raises(ScriptBrokerAuthenticationError):
         stack.broker.authenticate(attempt.run_id, f"Bearer {token}")
-    _, nodes = stack.engine.status(stack.run_id)
+    _, nodes = stack.status(stack.run_id)
     assert [(node.key, node.state, node.result) for node in nodes] == [
         ("@0", WorkflowNodeState.COMPLETED, "appended"),
         ("@1", WorkflowNodeState.FAILED, None),

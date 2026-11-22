@@ -138,7 +138,7 @@ async def test_real_local_script_returns_its_report(local_stack: LocalWorkflowSt
     assert (done.state, done.result) == (WorkflowRunState.COMPLETED, {"n": 2, "code": 3, "appended": "appended"})
     assert local_stack.counting_tool.lines == ["a"]
     assert local_stack.store.log(run.run_id) == ["hi"]
-    _, nodes = local_stack.engine.status(run.run_id)
+    _, nodes = local_stack.status(run.run_id)
     assert [(node.label, node.state) for node in nodes] == [
         ("counter.append", WorkflowNodeState.COMPLETED),
         ("shell.run_shell_command", WorkflowNodeState.COMPLETED),
@@ -165,7 +165,7 @@ async def test_real_script_fans_out_in_parallel_and_a_resume_runs_only_what_fail
         "both": ["appended", "appended"],
     }
     assert sorted(local_stack.counting_tool.lines) == ["a", "b", "c", "x", "y"]
-    _, nodes = local_stack.engine.status(run.run_id)
+    _, nodes = local_stack.status(run.run_id)
     foreach_group, parallel_group = [node for node in nodes if node.kind == "group"]
     assert (foreach_group.key, len(foreach_group.members or ()), parallel_group.key) == ("@0", 4, "@1")
     assert parallel_group.members == ("/1:p0", "/1:p1")
@@ -176,7 +176,7 @@ async def test_real_script_fans_out_in_parallel_and_a_resume_runs_only_what_fail
     # The three finished items are reused. The failed one ran again, so what follows the fan-out did too.
     assert again.result == done.result
     assert sorted(local_stack.counting_tool.lines) == ["a", "b", "c", "x", "x", "y", "y"]
-    _, nodes = local_stack.engine.status(run.run_id)
+    _, nodes = local_stack.status(run.run_id)
     assert sorted(node.generation for node in nodes if node.kind == "tool") == [1, 1, 1, 2, 2, 2]
 
 
@@ -252,7 +252,7 @@ async def test_real_run_killed_after_the_receipt_resumes_writes_once_and_reports
     await wait_for_status(local_stack.jobs, handle["job_id"], "completed")
     [job] = local_stack.jobs.retained_jobs()
 
-    run, [node] = local_stack.engine.status(local_stack.run_id)
+    run, [node] = local_stack.status(local_stack.run_id)
     attempt = local_stack.script_store.get_run(first)
     assert (attempt.state, attempt.cancellation_reason) == (ScriptRunState.INTERRUPTED, RUNTIME_RESTARTED)
     assert local_stack.counting_tool.lines == ["a"]
@@ -281,7 +281,7 @@ async def test_real_run_killed_before_the_receipt_is_indeterminate_and_writes_on
     await wait_for_status(local_stack.jobs, handle["job_id"], "failed")
     [job] = local_stack.jobs.retained_jobs()
 
-    run, [node] = local_stack.engine.status(local_stack.run_id)
+    run, [node] = local_stack.status(local_stack.run_id)
     assert local_stack.counting_tool.lines == ["a"]
     assert (node.state, node.generation) == (WorkflowNodeState.INDETERMINATE, 1)
     # The second attempt ran and failed at the call: the failure is delivered once, and no report is.
