@@ -1205,7 +1205,8 @@ async def _execute_streamed(call: _ExecuteCall, frames: asyncio.Queue[bytes]) ->
         return json.dumps(frame).encode() + b"\n"
 
     async def on_start() -> None:
-        _command_stdins[request.request_id or ""] = stdin
+        if request.request_id:
+            _command_stdins[request.request_id] = stdin
         await frames.put(line(t="started"))
 
     async def on_output(kind: str, chunk: bytes) -> None:
