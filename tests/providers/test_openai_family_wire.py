@@ -55,6 +55,7 @@ from mindroom.providers.openai import build as openai_build
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.openai.chat_wire import ChatStream, ChatWire
+from mindroom.providers.openai.codex_auth import CODEX_BASE_URL
 from mindroom.providers.openai.errors import provider_error
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.providers.openai.responses import ResponsesAdapter
@@ -1805,6 +1806,8 @@ _OPENROUTER_RESPONSES = {
         ("openai/gpt-6.2-sol", "https://openrouter.ai/api/v1", {"store": True}, False),
         ("openai/gpt-6.2-sol", "https://api.openai.com/v1", {}, False),
         ("gpt-6.2-sol", "https://api.openai.com/v1", {}, True),
+        # As on main, the ``openai`` route stays eligible at the Codex endpoint.
+        ("gpt-6.2-sol", CODEX_BASE_URL, {}, True),
     ],
 )
 def test_openrouter_responses_native_compaction_eligibility(
@@ -1836,19 +1839,31 @@ def test_openrouter_responses_native_compaction_eligibility(
         assert adapter.capabilities.provider_default_sampling is True
 
 
-def test_codex_with_openrouter_base_url_does_not_enable_native_compaction(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("model_id", "base_url", "expected"),
+    [
+        ("openai/gpt-6.2-sol", "https://openrouter.ai/api/v1", False),
+        # The endpoint decides, not the id: a bare eligible id at OpenRouter stays off on the Codex route.
+        ("gpt-6.2-sol", "https://openrouter.ai/api/v1", False),
+        # As on main, the Codex route stays eligible at OpenAI's endpoint.
+        ("gpt-6.2-sol", "https://api.openai.com/v1", True),
+    ],
+)
+def test_codex_native_compaction_follows_the_endpoint_and_never_recovers_sticky_replay(
+    tmp_path: Path,
+    model_id: str,
+    base_url: str,
+    *,
+    expected: bool,
+) -> None:
     runtime = _runtime(tmp_path)
     adapter = build_provider(
-        ModelConfig(
-            provider="codex",
-            id="openai/gpt-6.2-sol",
-            extra_kwargs={"base_url": "https://openrouter.ai/api/v1"},
-        ),
+        ModelConfig(provider="codex", id=model_id, extra_kwargs={"base_url": base_url}),
         runtime,
     )
 
     assert isinstance(adapter, ResponsesAdapter)
-    assert adapter.capabilities.native_compaction is False
+    assert adapter.capabilities.native_compaction is expected
     assert adapter.capabilities.sticky_replay_recovery is None
 
 

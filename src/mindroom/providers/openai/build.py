@@ -75,10 +75,7 @@ __all__ = [
 logger = get_logger(__name__)
 
 # Routes whose public endpoint and model ids support Responses native compaction.
-_NATIVE_COMPACTION_ENDPOINTS: dict[Literal["openai", "codex"], frozenset[str]] = {
-    "openai": frozenset({OPENAI_BASE_URL_DEFAULT, OPENROUTER_BASE_URL_DEFAULT}),
-    "codex": frozenset({CODEX_BASE_URL}),
-}
+_NATIVE_COMPACTION_ENDPOINTS = frozenset({OPENAI_BASE_URL_DEFAULT, CODEX_BASE_URL})
 _NATIVE_COMPACTION_MODEL_PREFIXES = ("gpt-5.3-codex", "gpt-5.4", "gpt-6")
 _NATIVE_COMPACTION_AUTHORED_KEYS = ("context_management", "previous_response_id", "background", "store")
 # Request fields that let OpenRouter answer with another model than the configured id names.
@@ -475,21 +472,24 @@ def _supports_explicit_breakpoint(model_id: str, endpoint: str) -> bool:
 
 
 def _native_compaction_supported(
-    route_key: Literal["openai", "codex"],
     model_id: str,
     endpoint: str,
     store: bool | None,
     settings: ResponsesSettings,
+    *,
+    openrouter: bool,
 ) -> bool:
-    """Native compaction needs explicit replay on a public route and no authored replay policy."""
+    """Native compaction needs explicit replay on a public route and no authored replay policy.
+
+    ``openrouter`` is the ``openai`` route at OpenRouter's endpoint, which serves the same models under ``openai/``
+    ids unless a request field lets it answer with another model.
+    """
     request_params = settings.request_params or {}
     bodies = (request_params, settings.extra_body or {}, request_params.get("extra_body") or {})
-    openrouter = route_key == "openai" and endpoint == OPENROUTER_BASE_URL_DEFAULT
-    effective_id = model_id.removeprefix("openai/") if openrouter else model_id
     return (
         store is not True
-        and effective_id.startswith(_NATIVE_COMPACTION_MODEL_PREFIXES)
-        and endpoint in _NATIVE_COMPACTION_ENDPOINTS[route_key]
+        and (model_id.removeprefix("openai/") if openrouter else model_id).startswith(_NATIVE_COMPACTION_MODEL_PREFIXES)
+        and (openrouter or endpoint in _NATIVE_COMPACTION_ENDPOINTS)
         and not any(key in body for body in bodies for key in _NATIVE_COMPACTION_AUTHORED_KEYS)
         and not (
             openrouter
@@ -528,21 +528,21 @@ def _build_responses(
     endpoint = base_url.rstrip("/")
     identity = model_identity(model_config, endpoint=endpoint)
     model_id = identity.id
+    openrouter = route_key == "openai" and endpoint == OPENROUTER_BASE_URL_DEFAULT
     capabilities = Capabilities(
         structured_output="native",
         omitted_media=frozenset({"audio", "video"}),
         url_media=frozenset({"file", "image"}),
         native_tool_search=openai_native_tool_search_supported(route_key, model_id, base_url=base_url),
-        native_compaction=_native_compaction_supported(route_key, model_id, endpoint, store, settings),
+        native_compaction=_native_compaction_supported(model_id, endpoint, store, settings, openrouter=openrouter),
         provider_default_sampling=_provider_default_sampling(model_id),
     )
-    openrouter_responses = route_key == "openai" and endpoint == OPENROUTER_BASE_URL_DEFAULT
     wire = ResponsesWire(
         route=route_key,
         store=store,
         explicit_breakpoint=route_key == "openai" and _supports_explicit_breakpoint(model_id, endpoint),
         default_instructions=settings.default_instructions or runtime.codex_default_instructions,
-        reset_scope=f"{identity.provider}:{model_id}:{endpoint}" if openrouter_responses else None,
+        reset_scope=f"{identity.provider}:{model_id}:{endpoint}" if openrouter else None,
     )
     http_client = runtime.http_client
     options = _client_options(settings, base_url=base_url)
@@ -577,7 +577,7 @@ def _build_responses(
         settings=settings,
         clients=clients,
     )
-    if not openrouter_responses:
+    if not openrouter:
         return adapter
     return replace(adapter, capabilities=replace(capabilities, sticky_replay_recovery=adapter.recover_sticky_replay))
 
