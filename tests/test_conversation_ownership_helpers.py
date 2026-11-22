@@ -6,7 +6,7 @@ import asyncio
 import threading
 from dataclasses import replace
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -74,14 +74,23 @@ async def test_requester_remains_authorized_checks_resolved_membership_and_pendi
     request = _plain_request(_target())
     memberships = runner.deps.runtime.agent_reply_memberships
 
-    with pytest.raises(ReplyMembershipPendingError):
-        requester_remains_authorized(
+    with pytest.raises(TypeError):
+        cast("Any", requester_remains_authorized)(
             "@user:localhost",
             request.room_id,
             "general",
             bot.config,
             bot.runtime_paths,
             memberships,
+        )
+    with pytest.raises(ReplyMembershipPendingError):
+        requester_remains_authorized(
+            "@user:localhost",
+            request.room_id,
+            owner_entity_name="general",
+            config=bot.config,
+            runtime_paths=bot.runtime_paths,
+            membership_index=memberships,
         )
     with pytest.raises(ReplyMembershipPendingError):
         await runner.locked.request_remains_authorized(request)
@@ -98,10 +107,10 @@ async def test_requester_remains_authorized_checks_resolved_membership_and_pendi
         requester_remains_authorized(
             "@user:localhost",
             request.room_id,
-            "general",
-            bot.config,
-            bot.runtime_paths,
-            memberships,
+            owner_entity_name="general",
+            config=bot.config,
+            runtime_paths=bot.runtime_paths,
+            membership_index=memberships,
         )
         is True
     )
@@ -113,10 +122,10 @@ async def test_requester_remains_authorized_checks_resolved_membership_and_pendi
         requester_remains_authorized(
             "@user:localhost",
             request.room_id,
-            "general",
-            bot.config,
-            bot.runtime_paths,
-            memberships,
+            owner_entity_name="general",
+            config=bot.config,
+            runtime_paths=bot.runtime_paths,
+            membership_index=memberships,
         )
         is False
     )
@@ -145,10 +154,10 @@ async def test_requester_remains_authorized_uses_configured_team_policy(tmp_path
         requester_remains_authorized(
             "@alice:localhost",
             "!room:localhost",
-            "crew",
-            bot.config,
-            bot.runtime_paths,
-            memberships,
+            owner_entity_name="crew",
+            config=bot.config,
+            runtime_paths=bot.runtime_paths,
+            membership_index=memberships,
             reply_entity_names=("member",),
         )
         is True
@@ -157,10 +166,10 @@ async def test_requester_remains_authorized_uses_configured_team_policy(tmp_path
         requester_remains_authorized(
             "@only-member:localhost",
             "!room:localhost",
-            "crew",
-            bot.config,
-            bot.runtime_paths,
-            memberships,
+            owner_entity_name="crew",
+            config=bot.config,
+            runtime_paths=bot.runtime_paths,
+            membership_index=memberships,
             reply_entity_names=("member",),
         )
         is False
@@ -552,8 +561,11 @@ async def test_reply_admission_fence_logs_deferred_and_refused_events(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_runtime_source_handoff_dispatches_by_kind_and_settles_unclaimed(tmp_path: Path) -> None:
-    """Runtime sources dispatch via RUNTIME_SOURCE_KINDS and handoff_runtime_source's kind table."""
+async def test_runtime_source_handoff_dispatches_by_kind_and_settles_unclaimed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Runtime sources dispatch through the kind table via method lookup and fail loudly on unknown kinds."""
     assert EventKind.JOB_FOLLOW_UP in RUNTIME_SOURCE_KINDS
     bot = _bot(tmp_path)
     runner = unwrap_extracted_collaborator(bot._response_runner)
@@ -573,6 +585,17 @@ async def test_runtime_source_handoff_dispatches_by_kind_and_settles_unclaimed(t
     assert not await store.is_pending("job-follow-up:seam-1")
     await runner.inbox.drain_inbox_responses()
 
+    # Instance monkeypatches on _run_job_follow_up are observed by table dispatch.
+    patched = AsyncMock()
+    monkeypatch.setattr(runner, "_run_job_follow_up", patched)
+    await store.admit(follow_up_event(key, "job-follow-up:seam-2", sender_id=bot.matrix_id.full_id, now_ms=1_001))
+    second = await store.load_event("job-follow-up:seam-2")
+    assert second is not None
+    await runner.handoff_runtime_source(second)
+    await runner.inbox.drain_inbox_responses()
+    patched.assert_awaited_once_with(second)
+
+    # An unwired kind raises loudly rather than silently settling as ignored.
     await store.admit(
         InboundEvent(
             event_id="unknown-runtime:1",
@@ -581,21 +604,35 @@ async def test_runtime_source_handoff_dispatches_by_kind_and_settles_unclaimed(t
             kind=EventKind.OPAQUE_HISTORY,
             event_class=EventClass.ACTIONABLE,
             sender=bot.matrix_id.full_id,
-            origin_server_ts=1_001,
+            origin_server_ts=1_002,
             source={},
         ),
     )
     unknown = await store.load_event("unknown-runtime:1")
     assert unknown is not None
-    await runner.handoff_runtime_source(unknown)
-    assert not await store.is_pending("unknown-runtime:1")
+    with pytest.raises(KeyError):
+        await runner.handoff_runtime_source(unknown)
+    assert await store.is_pending("unknown-runtime:1")
 
 
 @pytest.mark.asyncio
-async def test_exclusive_conversation_rejects_reservation_and_holds_canonical_lock_across_retry(
-    tmp_path: Path,
-) -> None:
-    """Public exclusive_conversation never accepts a reservation and always holds the canonical lock on retry."""
+async def test_exclusive_conversation_rejects_reservation() -> None:
+    """Public exclusive_conversation never accepts a reply reservation."""
+    coordinator = ResponseLifecycleCoordinator()
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$src")
+    envelope = request_envelope(target=target, prompt="hi", user_id="@user:localhost")
+    reservation = await coordinator.reserve_response_lifecycle(envelope)
+    try:
+        with pytest.raises(TypeError):
+            async with cast("Any", coordinator.exclusive_conversation)(target, reservation=reservation):
+                pass
+    finally:
+        await reservation.release()
+
+
+@pytest.mark.asyncio
+async def test_exclusive_conversation_holds_canonical_lock_across_retry(tmp_path: Path) -> None:
+    """Retrying after an approval hold acquires and holds the canonical target lock exclusively."""
     bot = _bot(tmp_path)
     runtime = BotRuntimeState(orchestrator=bot.orchestrator)
     coordinator = ResponseLifecycleCoordinator()
@@ -604,15 +641,6 @@ async def test_exclusive_conversation_rejects_reservation_and_holds_canonical_lo
     envelope = request_envelope(target=target, prompt="hi", user_id="@user:localhost")
 
     try:
-        reservation = await coordinator.reserve_response_lifecycle(envelope)
-        try:
-            with pytest.raises(TypeError):
-                async with coordinator.exclusive_conversation(target, reservation=reservation):  # type: ignore[call-arg]
-                    pass
-        finally:
-            await reservation.release()
-
-        # Verify retry after an approval hold still acquires and holds the canonical target lock exclusively.
         coordinator.follow_approval_holds(store.approval_signals, "agent@general", lambda _room_id: None)
         reply_locked = asyncio.Event()
         reply_release = asyncio.Event()

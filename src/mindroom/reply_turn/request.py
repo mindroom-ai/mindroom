@@ -64,11 +64,11 @@ def reply_authorization_entity_names(
 def requester_remains_authorized(
     requester_id: str,
     room_id: str,
+    *,
     owner_entity_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
-    *,
     reply_entity_names: Sequence[str] = (),
 ) -> bool:
     """Recheck one requester under serialized ownership with resolved membership."""

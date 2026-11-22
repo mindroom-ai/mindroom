@@ -18,7 +18,7 @@ from mindroom.automations.steps import is_automation_hook_source
 from mindroom.background_tasks import create_background_task
 from mindroom.config.resolution import memory_backend
 from mindroom.contacts.turns import contact_room
-from mindroom.conversation_resolver import DegradedThreadHistoryError, read_fresh_thread_history
+from mindroom.conversation_resolver import read_fresh_thread_history
 from mindroom.conversation_state_writer import session_started_on_creation
 from mindroom.delivery_gateway import ResponseIdentity
 from mindroom.entity_resolution import current_internal_sender_ids
@@ -288,10 +288,10 @@ class LockedTurns:
         if requester_remains_authorized(
             requester_id,
             request.room_id,
-            deps.agent_name,
-            config,
-            deps.runtime_paths,
-            deps.runtime.agent_reply_memberships,
+            owner_entity_name=deps.agent_name,
+            config=config,
+            runtime_paths=deps.runtime_paths,
+            membership_index=deps.runtime.agent_reply_memberships,
             reply_entity_names=reply_entity_names,
         ):
             return True
@@ -335,10 +335,7 @@ class LockedTurns:
             refreshed_history = await read_fresh_thread_history(
                 self.deps.resolver,
                 request.response_envelope.target,
-                strict=True,
             )
-        except DegradedThreadHistoryError as degraded:
-            refreshed_history = degraded.history
         except Exception as exc:
             if request.requires_model_history_refresh:
                 raise

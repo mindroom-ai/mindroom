@@ -806,14 +806,15 @@ class ResponseRunner:
             signal_queued_message=False,
         )
 
+    _RUNTIME_SOURCE_HANDLERS: ClassVar[
+        dict[EventKind, tuple[str, Callable[[ResponseRunner, JournalEvent], Coroutine[Any, Any, None]]]]
+    ] = {
+        EventKind.JOB_FOLLOW_UP: ("job_follow_up", lambda self, event: self._run_job_follow_up(event)),
+    }
+
     async def handoff_runtime_source(self, event: JournalEvent) -> None:
         """Hand a runtime source to a detached owner; its reply, or that owner, settles it."""
-        handler = self._RUNTIME_SOURCE_HANDLERS.get(event.kind)
-        if handler is None:
-            self.deps.logger.warning("unknown_runtime_source_kind", kind=str(event.kind), source=event.event_id)
-            await self.deps.settle_ignored_sources((event.event_id,))
-            return
-        name_prefix, run_source = handler
+        name_prefix, run_source = self._RUNTIME_SOURCE_HANDLERS[event.kind]
         self.inbox.track_inbox_response(
             run_source(self, event),
             name=f"{name_prefix}:{event.event_id}",
@@ -833,10 +834,6 @@ class ResponseRunner:
             self._job_follow_up_request(follow_up_key(event, self.deps.agent_name), event.event_id),
         )
         await self._settle_if_unclaimed(event.event_id, fate)
-
-    _RUNTIME_SOURCE_HANDLERS: ClassVar[
-        dict[EventKind, tuple[str, Callable[[ResponseRunner, JournalEvent], Coroutine[Any, Any, None]]]]
-    ] = {EventKind.JOB_FOLLOW_UP: ("job_follow_up", _run_job_follow_up)}
 
     async def _follow_up_due(self, request: ResponseRequest) -> bool:
         """Decide under the conversation lock whether a follow-up still has jobs to report.
