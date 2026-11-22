@@ -4,7 +4,7 @@ icon: lucide/messages-square
 
 # Threads, Replies & Participation
 
-This page covers how agents group replies into threads or one room conversation, whether a message must mention an agent or team to start a conversation, when agents answer in threads with several people, how agents can opt into judging untagged messages, what happens to messages sent while an agent is still working, how an agent hears about the room's other threads, and how edits and restarts affect replies.
+This page covers how agents group replies into threads or one room conversation, whether a message must mention an agent or team to start a conversation, the settings a room's moderators change in the room itself, when agents answer in threads with several people, how agents can opt into judging untagged messages, what happens to messages sent while an agent is still working, how an agent hears about the room's other threads, and how edits and restarts affect replies.
 See also [Routing & Responder Selection](router.md), [Access Control](../authorization.md), and [Logs & Monitoring](../deployment/operational-log-events.md).
 
 ## Thread Mode Resolution
@@ -45,7 +45,7 @@ Room-mode conversations are not included in [thread exports](../thread-exports.m
 When no MindRoom account in the room may send state events, the command changes nothing and answers `I need moderator rights in this room to change the thread mode.`
 Only Matrix room admins can set or reset the override; others get `Room admin only.`
 [Plugin routes](../plugins.md#http-routes) change the override as this command does, for room admins only.
-The override is stored in MindRoom's runtime state under `mindroom_data/tracking`, not in `config.yaml`, so it works when config is static or read-only.
+The override is the room's `thread_mode` [room setting](#room-settings), so it works when config is static or read-only.
 
 ## Reply Mode
 
@@ -83,12 +83,29 @@ Show or switch the reply mode of the current Matrix room.
 `!reply_mode reset` (also `clear`) removes the override so the configured mode applies again.
 Only Matrix room admins can set or reset the override; others get `Room admin only.`
 [Plugin routes](../plugins.md#http-routes) change the override as this command does, for room admins only.
-The override is the room's `reply_mode` setting: the `io.mindroom.room_settings` state event with state key `reply_mode` and content `{"value": "auto"}` or `{"value": "mentions"}`, where `{}` clears it.
-MindRoom Chat sets it from the room settings dialog, and any client may send the event; it falls under the room's `state_default` power level (normally 50), so moderators and admins can change it there.
+The override is the room's `reply_mode` [room setting](#room-settings).
 An agent or team in the room answers `!reply_mode`, so the command works in any room, such as a direct-message room with one agent; it answers that it needs moderator rights when the room lets no MindRoom account send that state.
-It lives in the room, not in `config.yaml`, so it also sets the mode of a room without a `rooms` entry.
-Agents take a change as soon as their sync shows it, and read the setting again at least every ten minutes.
-An override an older MindRoom stored under `mindroom_data/tracking` moves into the room's setting the first time an agent reads a room that has none.
+
+## Room Settings
+
+A room's moderators can change these settings in the room itself, without editing `config.yaml`.
+Each is an `io.mindroom.room_settings` state event with the state key below and content `{"value": "<value>"}`; content `{}` clears it.
+
+| State key | Value | What it sets | Chat command |
+|---|---|---|---|
+| `reply_mode` | `auto` or `mentions` | The room's [reply mode](#reply-mode), over `rooms.<key>.reply_mode` | [`!reply_mode`](#reply_mode) |
+| `thread_mode` | `thread` or `room` | The [thread mode](#thread-mode-resolution) of every agent and team in the room, over their `thread_mode` and `room_thread_modes` | [`!thread_mode`](#thread_mode) |
+| `model` | A `models:` key, or `key@level` for one of its [reasoning levels](models.md#reasoning-levels) | The room's [default model](models.md#model-overrides-in-chat) for every agent and team and for routing, over `room_models` | [`!room_model`](models.md#room_model) |
+| `thread_summary_model` | A `models:` key, or `key@level` | The model that writes the room's [thread titles](../tools/matrix-and-attachments.md#automatic-thread-summaries), over `room_thread_summary_models` | None |
+| `thread_summary_instructions` | Text | Extra rules for the room's [thread titles](../tools/matrix-and-attachments.md#automatic-thread-summaries) | None |
+
+MindRoom Chat sets them from the room settings dialog, and any client may send the events.
+They fall under the room's `state_default` power level (normally 50), so moderators and admins can change them there, and agent tools cannot write them.
+The chat commands set the same events through a MindRoom account in the room, for Matrix room admins only.
+A `model` or `thread_summary_model` that names no model in `models:` is ignored until the config defines that model, and `!room_model` reports it as unavailable.
+Agents take a changed `reply_mode`, `thread_mode`, or `model` as soon as their sync shows it, and read them again at least every ten minutes; the two thread title settings are read each time a title is written.
+The settings live in the room, so they also apply to a room without a `rooms` entry.
+A `!reply_mode`, `!thread_mode`, or `!room_model` override an older MindRoom stored under `mindroom_data/tracking` moves into the room's setting the first time an agent reads a room that has none.
 
 ## Threading (MSC3440)
 
