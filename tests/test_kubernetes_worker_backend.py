@@ -6264,8 +6264,9 @@ def test_kubernetes_worker_health_read_waits_for_a_successful_answer(monkeypatch
     urls: list[str] = []
 
     class _HealthClient:
-        def __init__(self, *, timeout: float) -> None:
-            assert timeout > 0
+        def __init__(self, *, timeout: httpx.Timeout) -> None:
+            assert timeout.connect is not None
+            assert timeout.connect > 0
 
         def __enter__(self) -> Self:
             return self
@@ -6293,13 +6294,61 @@ def test_kubernetes_worker_health_read_waits_for_a_successful_answer(monkeypatch
     assert urls == ["http://mindroom-worker-abc.chat.svc.cluster.local:8766/healthz"] * 3
 
 
+def test_kubernetes_worker_health_read_uses_short_connect_timeout_and_fast_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Post-ready health checks use a short connect timeout and fast retries when a new Service refuses connections."""
+    backend, _apps_api, _core_api = _backend()
+    seen_timeouts: list[object] = []
+    sleeps: list[float] = []
+    attempts = 0
+
+    class _RefusingFirstClient:
+        def __init__(self, *, timeout: object) -> None:
+            seen_timeouts.append(timeout)
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, _url: str) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts <= 3:
+                msg = "connection refused"
+                raise httpx.ConnectError(msg)
+            return httpx.Response(200, json={"status": "ok"})
+
+    monkeypatch.setattr(kubernetes_resources_module.httpx, "Client", _RefusingFirstClient)
+    monkeypatch.setattr(kubernetes_resources_module.time, "sleep", sleeps.append)
+
+    response = kubernetes_resources_module.KubernetesResourceManager.read_worker_health(
+        backend._resources,
+        "mindroom-worker-abc",
+        timeout_seconds=30.0,
+    )
+
+    assert response.status_code == 200
+    assert attempts == 4
+    assert len(seen_timeouts) == 1
+    timeout = seen_timeouts[0]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.connect == pytest.approx(0.5)
+    assert timeout.read == pytest.approx(5.0)
+    assert len(sleeps) == 3
+    assert all(0 < delay <= 0.25 for delay in sleeps), sleeps
+
+
 def test_kubernetes_worker_health_read_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
     """A worker that never answers its health check fails the read instead of handing out its endpoint."""
     backend, _apps_api, _core_api = _backend()
 
     class _UnreachableClient:
-        def __init__(self, *, timeout: float) -> None:
-            assert timeout > 0
+        def __init__(self, *, timeout: httpx.Timeout) -> None:
+            assert timeout.connect is not None
+            assert timeout.connect > 0
 
         def __enter__(self) -> Self:
             return self

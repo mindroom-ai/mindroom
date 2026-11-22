@@ -84,6 +84,9 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _READY_POLL_INTERVAL_SECONDS = 1.0
+_HEALTHZ_CONNECT_TIMEOUT_SECONDS = 0.5
+_HEALTHZ_READ_TIMEOUT_SECONDS = 5.0
+_HEALTHZ_RETRY_INTERVAL_SECONDS = 0.2
 _DELETE_POLL_INTERVAL_SECONDS = 0.2
 _HOSTNAME_ENV = "HOSTNAME"
 
@@ -1030,7 +1033,13 @@ class KubernetesResourceManager:
         """Return the first successful ``/healthz`` answer from one worker through its Service."""
         healthz_url = f"{service_host(worker_id, self.config.namespace, self.config.worker_port)}/healthz"
         deadline = time.time() + timeout_seconds
-        with httpx.Client(timeout=min(5.0, timeout_seconds)) as client:
+        # A brand-new Service can drop SYN packets before Endpoints propagate, so fail connect fast and retry quickly.
+        healthz_timeout = httpx.Timeout(
+            min(_HEALTHZ_READ_TIMEOUT_SECONDS, timeout_seconds),
+            connect=min(_HEALTHZ_CONNECT_TIMEOUT_SECONDS, timeout_seconds),
+        )
+        retry_interval = min(_HEALTHZ_RETRY_INTERVAL_SECONDS, _READY_POLL_INTERVAL_SECONDS)
+        with httpx.Client(timeout=healthz_timeout) as client:
             while True:
                 # The Service can still route nowhere for a moment after its Deployment turns ready.
                 try:
@@ -1039,10 +1048,11 @@ class KubernetesResourceManager:
                     response = None
                 if response is not None and response.is_success:
                     return response
-                if time.time() >= deadline:
+                remaining = deadline - time.time()
+                if remaining <= 0:
                     msg = f"Kubernetes worker '{worker_id}' did not answer its health check within {timeout_seconds:.0f}s."
                     raise WorkerStartTimeoutError(msg)
-                time.sleep(_READY_POLL_INTERVAL_SECONDS)
+                time.sleep(min(retry_interval, remaining))
 
     def _apply_object(
         self,
