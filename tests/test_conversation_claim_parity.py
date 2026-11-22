@@ -11,6 +11,7 @@ import asyncio
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal, cast
+from unittest.mock import Mock
 
 import pytest
 
@@ -23,7 +24,7 @@ from tests.conftest import unwrap_extracted_collaborator
 from tests.response_runner_helpers import _bot, _envelope, _plain_request, _target
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine
+    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
     from pathlib import Path
 
     from mindroom.bot_runtime_view import BotRuntimeView, RunPhase
@@ -303,10 +304,12 @@ async def test_cancel_in_the_body_frees_the_conversation_at_once(kind: _Kind, tm
 
 @_both_kinds
 @pytest.mark.asyncio
-async def test_approval_hold_before_the_claim(kind: _Kind, tmp_path: Path) -> None:
+async def test_approval_hold_before_the_claim(kind: _Kind, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A pending approval keeps lock-only work out, off admission and off the lock, until the approval ends."""
     async with _conversation(kind, tmp_path) as scene:
         scene.hold_for_approval()
+        admit = Mock(wraps=scene.gate.admit)
+        monkeypatch.setattr(scene.gate, "admit", admit)
         body = scene.body("claim")
         claim = scene.claim(body)
         if kind.waits_out_approvals:
@@ -314,10 +317,12 @@ async def test_approval_hold_before_the_claim(kind: _Kind, tmp_path: Path) -> No
             assert body.runs == 0
             assert not claim.done()
             # A runtime replacement can still close admission, and the approval's own resume can still take the lock.
+            admit.assert_not_called()
             assert scene.gate.in_flight_response_count == 0
             assert not scene.record.lock.locked()
             scene.end_approval()
         await asyncio.wait_for(body.entered.wait(), 10)
+        admit.assert_called_once()
         assert scene.gate.in_flight_response_count == 1
         body.finish.set()
         await asyncio.wait_for(claim, 10)
@@ -480,7 +485,7 @@ class _SwallowingRuntime:
     def phase(self) -> RunPhase:
         return self.runtime.phase
 
-    async def wait_for_admission_or_shutdown(self, ready: Coroutine[None, None, object] | None = None) -> bool:
+    async def wait_for_admission_or_shutdown(self, ready: Awaitable[object] | None = None) -> bool:
         return await self.runtime.wait_for_admission_or_shutdown(ready)
 
     @asynccontextmanager

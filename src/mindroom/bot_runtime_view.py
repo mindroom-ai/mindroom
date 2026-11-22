@@ -131,7 +131,7 @@ class BotRuntimeState:
 
     async def wait_for_admission_or_shutdown(self, ready: Awaitable[object] | None = None) -> bool:
         """Wait for admission (or its prerequisite) unless this generation stops accepting work."""
-        ready_task = asyncio.ensure_future(ready or self.response_admission_gate.wait_until_open())
+        ready_task = asyncio.ensure_future(self.response_admission_gate.wait_until_open() if ready is None else ready)
         stopping = asyncio.create_task(self._stopping.wait())
         try:
             await asyncio.wait((ready_task, stopping), return_when=asyncio.FIRST_COMPLETED)

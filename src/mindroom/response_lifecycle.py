@@ -101,6 +101,10 @@ class _ResponseLifecycleReservation:
     # False for work that is no reply: it takes this place with a pin on the conversation instead of a begun turn.
     _turn: bool = True
 
+    def __post_init__(self) -> None:
+        if not self._turn:
+            self._conversation.pins += 1
+
     async def _acquire(self) -> None:
         try:
             if self._conversation.lock.locked():
@@ -569,7 +573,7 @@ class ResponseLifecycleCoordinator:
         if conversation is not None:
             return conversation
         # The table is capped softly: an entry stays while a turn is begun on it or a human message waits in it.
-        # A held lock always has a begun turn; checking it too keeps a mistake from making a second lock.
+        # A held lock always has a begun turn or a pin; checking it too keeps a mistake from making a second lock.
         if len(self._conversations) >= 100:
             for key, candidate in list(self._conversations.items()):
                 if not (
@@ -671,9 +675,7 @@ class ResponseLifecycleCoordinator:
         """
         key = target.lifecycle_key
         while True:
-            conversation = self._conversation_for(target)
-            conversation.pins += 1
-            claim = _ResponseLifecycleReservation(self, key, conversation, None, _turn=False)
+            claim = _ResponseLifecycleReservation(self, key, self._conversation_for(target), None, _turn=False)
             paused = False
             try:
                 while key in self._approval_holds.values():
@@ -688,6 +690,7 @@ class ResponseLifecycleCoordinator:
                 await claim.release()
             if not paused:  # The runtime stopped accepting, or its admission swallowed what ended this: admit once.
                 raise ResponseAdmissionRefusedError
+            await asyncio.sleep(0)  # Others run before this waits for the approval that appeared.
 
     async def run_locked_response(
         self,
