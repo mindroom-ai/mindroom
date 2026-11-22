@@ -333,8 +333,8 @@ class KubernetesWorkerBackend:
         """Record a worker as used now that its setup wait hands it to a caller, then forget the wait."""
         try:
             return self.touch_worker(worker_key) if waited_seconds >= _SETUP_POLL_INTERVAL_SECONDS else None
-        except self._resources.api_exception as exc:
-            # A start records no use after the worker is ready, so a cluster that refuses this one changes nothing.
+        except Exception as exc:
+            # A start records no use after the worker is ready, so whatever keeps this one unwritten changes nothing.
             logger.warning("Worker %s was not recorded as used after its setup: %s", worker_log_id(worker_key), exc)
             return None
         finally:
