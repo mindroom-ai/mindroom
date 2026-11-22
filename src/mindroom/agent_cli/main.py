@@ -272,9 +272,17 @@ def _worker_signal_handlers() -> Iterator[_WorkerSignals]:
 
 
 def _note(message: str) -> None:
-    """Print one of `workers run`'s own lines on stderr, or nothing if stderr is closed: `print` would use stdout."""
-    if sys.stderr is not None:
+    """Print one of `workers run`'s own lines on stderr if it can be; losing one changes nothing else.
+
+    With stderr closed, `print` would use stdout. A stderr that fails a write is dropped for the rest of the run:
+    flushing what it kept at exit would fail again and change the exit code.
+    """
+    if sys.stderr is None:
+        return
+    try:
         print(message, file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        sys.stderr = None
 
 
 def _emit_progress(
