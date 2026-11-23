@@ -56,6 +56,7 @@ __all__ = [
     "chat_stop_reason",
     "deepseek_request_thinks",
     "function_definition",
+    "openrouter_effective_model",
     "sdk_call_kwargs",
     "wraps_openrouter_gemini_tool_results",
 ]
@@ -170,21 +171,26 @@ def _wrap_gemini_tool_result(result: ToolResultView) -> str | list[Any]:
     return [first, *other_parts]
 
 
-def wraps_openrouter_gemini_tool_results(wire: ChatWire, params: Mapping[str, Any], model_id: str) -> bool:
-    """Return whether OpenRouter routes this request's requested ``model`` through its Gemini converter.
+def openrouter_effective_model(params: Mapping[str, Any], model_id: str) -> str | None:
+    """Return the ``model`` string an OpenRouter Chat request sends, or None when overridden to a non-string.
 
-    The requested model is the one the SDK sends (``sdk_request_body``): an authored ``extra_body`` ``model``, even
-    a null or empty one, then a ``request_params`` one, then ``model_id``. Server-selected fallback entries in
-    OpenRouter's ``models`` list are not inspected.
+    Precedence matches ``sdk_request_body``: an authored ``extra_body`` ``model`` (even null or empty), then a
+    ``request_params`` one, then ``model_id``. Server-selected fallback entries in ``models`` are not inspected.
     """
-    if wire.route != "openrouter":
-        return False
     extra_body = params.get("extra_body")
     if isinstance(extra_body, Mapping) and "model" in extra_body:
         effective_model = extra_body["model"]
     else:
         effective_model = params.get("model", model_id)
-    return isinstance(effective_model, str) and is_openrouter_gemini_model(effective_model)
+    return effective_model if isinstance(effective_model, str) else None
+
+
+def wraps_openrouter_gemini_tool_results(wire: ChatWire, params: Mapping[str, Any], model_id: str) -> bool:
+    """Return whether OpenRouter routes this request's requested ``model`` through its Gemini converter."""
+    if wire.route != "openrouter":
+        return False
+    effective_model = openrouter_effective_model(params, model_id)
+    return effective_model is not None and is_openrouter_gemini_model(effective_model)
 
 
 def _message_content(message: Message, *, wrap_gemini_tool_results: bool = False) -> str | list[Any] | None:
