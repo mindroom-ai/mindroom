@@ -131,9 +131,6 @@ class ResponseRequest:
     # This turn's own queued-human notices, held across pre-lock dispatch until the conversation lock is acquired
     # (or released on early failure/cancellation before lock acquisition).
     notices: tuple[QueuedHumanNoticeReservation, ...] = ()
-    # Queued-human notices of follow-ups held back behind this turn in the active_follow_up gate,
-    # released only once this turn acquires its conversation lock so they do not interrupt it.
-    queued_follow_up_notices: tuple[QueuedHumanNoticeReservation, ...] = ()
     # Which sources became terminal while the request waited for its lock: deleted, or answered elsewhere.
     prepare_source_turn: Callable[[Sequence[ResolvedVisibleMessage]], Coroutine[Any, Any, SourcePreparation]] | None = (
         None

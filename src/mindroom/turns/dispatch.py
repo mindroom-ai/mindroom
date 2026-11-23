@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast
@@ -257,27 +256,9 @@ def _attachment_parts(prepared: _PreparedTextDispatch) -> tuple[list[str], list[
     return message_attachment_ids, trusted_attachment_ids, extra_content
 
 
-@dataclass(slots=True)
-class _HeldNotices:
-    """Single-owner handle for one turn's own queued notices until lock acquisition."""
-
-    notices: tuple[QueuedHumanNoticeReservation, ...]
-
-    def take(self) -> tuple[QueuedHumanNoticeReservation, ...]:
-        """Transfer ownership of the held notices once."""
-        taken, self.notices = self.notices, ()
-        return taken
-
-    def release(self) -> None:
-        """Release any notices still owned by this handle."""
-        for notice in self.take():
-            notice.release()
-
-
-_active_turn_notices: ContextVar[tuple[PreparedTurn, _HeldNotices] | None] = ContextVar(
-    "active_turn_notices",
-    default=None,
-)
+def _release_notices(notices: Sequence[QueuedHumanNoticeReservation]) -> None:
+    for notice in notices:
+        notice.release()
 
 
 async def run_response_action(
@@ -291,21 +272,16 @@ async def run_response_action(
 
     ``team_mode`` replaces the team's resolved mode, as the mode chosen for an ad hoc team does.
     """
-    try:
-        if action.kind != "team":
-            return await runner.generate_response(request)
-        assert action.form_team is not None
-        mode = action.form_team.mode if team_mode is None else team_mode
-        assert mode is not None
-        return await runner.generate_team_response_helper(
-            request,
-            member_names=action.form_team.eligible_member_names,
-            team_mode=mode.value,
-        )
-    except BaseException:
-        for notice in request.notices:
-            notice.release()
-        raise
+    if action.kind != "team":
+        return await runner.generate_response(request)
+    assert action.form_team is not None
+    mode = action.form_team.mode if team_mode is None else team_mode
+    assert mode is not None
+    return await runner.generate_team_response_helper(
+        request,
+        member_names=action.form_team.eligible_member_names,
+        team_mode=mode.value,
+    )
 
 
 @dataclass(frozen=True)
@@ -349,28 +325,30 @@ class TurnDispatcher:
     async def handle_prepared_turn(self, turn: PreparedTurn) -> None:
         """Dispatch one logical turn emitted directly by the coalescing gate.
 
-        Holds ``turn.notices`` across pre-lock dispatch preparation until a
-        response task takes ownership and acquires the conversation lock. Any
-        early exit or failure before lock acquisition releases ``turn.notices``
-        while leaving ``turn.queued_follow_up_notices`` for the events waiting
-        behind this turn in the ``active_follow_up`` gate.
+        Releases ``turn.queued_follow_up_notices`` immediately on gate exit so
+        edits to held-back messages cannot re-arm them against this turn, and
+        holds ``turn.notices`` across pre-lock dispatch preparation until a
+        detached response task takes ownership (or releases them on early exit).
         """
-        held_notices = _HeldNotices(turn.notices)
+        if await self.deps.selections.dispatch_selection_turn(turn):
+            _release_notices(turn.notices)
+            return
+        _release_notices(turn.queued_follow_up_notices)
+        notices_to_release = turn.notices
+
+        def detach_notices() -> None:
+            nonlocal notices_to_release
+            turn.detach_notices()
+            notices_to_release = ()
+
         try:
-            if await self.deps.selections.dispatch_selection_turn(turn):
-                return
             timing_scope = event_timing_scope(turn.event.event_id)
             dispatch_timing = get_dispatch_pipeline_timing(turn.event.source)
             if dispatch_timing is not None:
                 dispatch_timing.mark("gate_exit")
             async with self.deps.resolver.turn_lookup_scope():
                 dispatch_start = time.monotonic()
-                token = _active_turn_notices.set((turn, held_notices))
-                try:
-                    dispatched = await self.dispatch_turn(turn)
-                finally:
-                    _active_turn_notices.reset(token)
-                if not dispatched:
+                if not await self.dispatch_turn(replace(turn, detach_notices=detach_notices)):
                     # Their callbacks deferred these sources to the gate, so they go back to the journal, whose ingress
                     # decides them one by one.
                     self.deps.retry_dispatch_sources(turn.room.room_id, turn.handled_turn.source_event_ids)
@@ -381,39 +359,53 @@ class TurnDispatcher:
                     timing_scope=timing_scope,
                 )
         finally:
-            held_notices.release()
+            _release_notices(notices_to_release)
 
     async def dispatch_turn(self, turn: PreparedTurn) -> bool:
         """Run the normal text or command dispatch pipeline for a prepared turn.
 
         The turn's per-event claims become one claim on the whole turn, which this
         dispatch owns until a response task takes it. ``turn.notices`` stay held
-        across pre-lock preparation under the same single-owner transfer and are
-        released on early exit/failure, while ``turn.queued_follow_up_notices``
-        are released only once the response acquires the conversation lock.
+        across pre-lock preparation until a detached response task takes ownership,
+        and are released on early exit or failure.
         A command that bypassed the coalescing gate arrives here too, under the
         claim its ingress handed over.
         Returns False when the claims cannot cover the turn, because another live
         owner shares an event or a completed turn answered an alias; the caller
         still owns the sources then.
         """
-        active = _active_turn_notices.get()
-        held_notices = active[1] if active is not None and active[0] is turn else _HeldNotices(turn.notices)
+        return await self._dispatch_turn(turn, turn.notices)
+
+    async def _dispatch_turn(
+        self,
+        turn: PreparedTurn,
+        held_notices: tuple[QueuedHumanNoticeReservation, ...],
+    ) -> bool:
+        notices_to_release = held_notices
+
+        def detach_notices() -> None:
+            nonlocal notices_to_release
+            turn.detach_notices()
+            notices_to_release = ()
+
         try:
             claim = await self.deps.turn_store.merge_claims(turn.claims, turn.handled_turn)
             if claim is None:
                 return False
-            await self._dispatch_claimed_text_turn(turn, claim, take_notices=held_notices.take)
+            await self._dispatch_claimed_text_turn(turn, claim, detach_notices=detach_notices)
             return True
         finally:
-            held_notices.release()
+            if notices_to_release:
+                held = notices_to_release
+                detach_notices()
+                _release_notices(held)
 
     async def _dispatch_claimed_text_turn(
         self,
         turn: PreparedTurn,
         claim: TurnClaim,
         *,
-        take_notices: Callable[[], tuple[QueuedHumanNoticeReservation, ...]],
+        detach_notices: Callable[[], None],
     ) -> None:
         """Run the dispatch pipeline under the turn's merged claim until a response task takes it."""
         held: TurnClaim | None = claim
@@ -457,7 +449,7 @@ class TurnDispatcher:
                 # Only a turn this agent or its team answers; a routed one gets its title from its responder.
                 if plan.response_action is not None and plan.response_action.kind in {"individual", "team"}:
                     self._queue_prompt_summary(prepared)
-                await self._apply_turn_plan(prepared, plan, take_claim=take_claim, take_notices=take_notices)
+                await self._apply_turn_plan(prepared, plan, take_claim=take_claim, detach_notices=detach_notices)
         finally:
             if held is not None:
                 held.release()
@@ -651,7 +643,7 @@ class TurnDispatcher:
         plan: DispatchPlan,
         *,
         take_claim: Callable[[], TurnClaim],
-        take_notices: Callable[[], tuple[QueuedHumanNoticeReservation, ...]],
+        detach_notices: Callable[[], None],
     ) -> None:
         room = prepared.turn.room
         visible_responses = self.deps.visible_responses
@@ -710,38 +702,38 @@ class TurnDispatcher:
 
         # The inbox handoff is complete once the runner takes the conversation's
         # response lock; the response itself keeps running on a runner-owned task.
+        own_notices = prepared.turn.notices
         response_started = asyncio.Event()
-        task_notices = _HeldNotices(take_notices())
-        try:
-            response_task = self.deps.response_runner.inbox.track_inbox_response(
-                self._execute_response_action(
-                    room,
-                    prepared.turn.event,
-                    prepared.dispatch,
-                    response_action,
-                    payload_inputs,
-                    dispatch_started_at=prepared.dispatch_started_at,
-                    handled_turn=handled_turn,
-                    matrix_run_metadata=self.deps.turn_store.build_run_metadata(handled_turn),
-                    on_lifecycle_lock_acquired=response_started.set,
-                    on_participation_approved=publish_voice,
-                    reconcile_visible_response=pending_turn.resumes_response,
-                    take_notices=task_notices.take,
-                    queued_follow_up_notices=prepared.turn.queued_follow_up_notices,
-                ),
-                name=f"inbox_response:{prepared.turn.event.event_id}",
-                room_id=room.room_id,
-                recovery_proof_ready=lambda: self.deps.turn_store.response_recovery_ready(handled_turn),
-                # The claim moves to the response task, which releases it when it ends. If this dispatch is
-                # cancelled while waiting for the lifecycle lock, it must not reopen the source meanwhile.
-                claim=take_claim(),
-                source_event_ids=handled_turn.source_event_ids,
-            )
-        except BaseException:
-            task_notices.release()
-            raise
-        # Release any still-held turn notices if the task is cancelled before its first step.
-        response_task.add_done_callback(lambda _task: task_notices.release())
+        response_task = self.deps.response_runner.inbox.track_inbox_response(
+            self._execute_response_action(
+                room,
+                prepared.turn.event,
+                prepared.dispatch,
+                response_action,
+                payload_inputs,
+                dispatch_started_at=prepared.dispatch_started_at,
+                handled_turn=handled_turn,
+                matrix_run_metadata=self.deps.turn_store.build_run_metadata(handled_turn),
+                on_lifecycle_lock_acquired=response_started.set,
+                on_participation_approved=publish_voice,
+                reconcile_visible_response=pending_turn.resumes_response,
+                notices=own_notices,
+            ),
+            name=f"inbox_response:{prepared.turn.event.event_id}",
+            room_id=room.room_id,
+            recovery_proof_ready=lambda: self.deps.turn_store.response_recovery_ready(handled_turn),
+            # The claim moves to the response task, which releases it when it ends. If this dispatch is
+            # cancelled while waiting for the lifecycle lock, it must not reopen the source meanwhile.
+            claim=take_claim(),
+            source_event_ids=handled_turn.source_event_ids,
+        )
+        # Synchronously transfer notice ownership to response_task (no intervening await):
+        # 1. Fallback cleanup for any exit/cancellation before run_locked_response.
+        # 2. Detach notices from PendingEvents and clear dispatcher cleanup so gate
+        #    cancellation cannot release notices owned by the live response_task.
+        if own_notices:
+            response_task.add_done_callback(lambda _task, held=own_notices: _release_notices(held))
+        detach_notices()
         started_wait = asyncio.ensure_future(response_started.wait())
         try:
             await asyncio.wait({started_wait, response_task}, return_when=asyncio.FIRST_COMPLETED)
@@ -1087,129 +1079,123 @@ class TurnDispatcher:
         on_lifecycle_lock_acquired: Callable[[], None] | None = None,
         on_participation_approved: Callable[[], Awaitable[None]] | None = None,
         reconcile_visible_response: bool = False,
-        take_notices: Callable[[], tuple[QueuedHumanNoticeReservation, ...]] | None = None,
-        queued_follow_up_notices: tuple[QueuedHumanNoticeReservation, ...] = (),
+        notices: tuple[QueuedHumanNoticeReservation, ...] = (),
     ) -> None:
         """Execute one final response path for a prepared dispatch action."""
-        owned_notices = _HeldNotices(take_notices() if take_notices is not None else ())
-        try:
-            action = self.deps.turn_policy.effective_response_action(action)
-            dispatch_timing = get_dispatch_pipeline_timing(event.source)
-            if dispatch_timing is not None:
-                dispatch_timing.note(response_action_kind=action.kind)
+        action = self.deps.turn_policy.effective_response_action(action)
+        dispatch_timing = get_dispatch_pipeline_timing(event.source)
+        if dispatch_timing is not None:
+            dispatch_timing.note(response_action_kind=action.kind)
 
-            with bound_log_context(
-                agent_id=self.deps.agent_name,
-                requester_id=dispatch.requester_user_id,
-                room_id=dispatch.target.room_id,
-                thread_id=dispatch.target.resolved_thread_id,
-                session_id=dispatch.target.session_id,
-                reply_to_event_id=event.event_id,
-                correlation_id=dispatch.correlation_id,
-            ):
-                if action.kind == "reject":
-                    assert action.rejection_message is not None
-                    response_event_id = (
-                        await self.deps.visible_responses.recovered_response_event_id(
-                            handled_turn,
-                            room_id=dispatch.target.room_id,
-                        )
-                        if reconcile_visible_response
-                        else None
-                    )
-                    response_event_id = await self.deps.visible_responses.deliver_recoverable_text(
+        with bound_log_context(
+            agent_id=self.deps.agent_name,
+            requester_id=dispatch.requester_user_id,
+            room_id=dispatch.target.room_id,
+            thread_id=dispatch.target.resolved_thread_id,
+            session_id=dispatch.target.session_id,
+            reply_to_event_id=event.event_id,
+            correlation_id=dispatch.correlation_id,
+        ):
+            if action.kind == "reject":
+                assert action.rejection_message is not None
+                response_event_id = (
+                    await self.deps.visible_responses.recovered_response_event_id(
                         handled_turn,
-                        target=dispatch.target,
-                        response_text=action.rejection_message,
-                        # One rejection, then the turn is terminal, so this send
-                        # satisfies the outbox's once-per-(turn, stage) rule.
-                        recovered_response_event_id=response_event_id,
+                        room_id=dispatch.target.room_id,
                     )
-                    await self.deps.turn_store.record_responded_turn(
-                        canonicalize_turn_record(handled_turn, response_event_id=response_event_id),
+                    if reconcile_visible_response
+                    else None
+                )
+                response_event_id = await self.deps.visible_responses.deliver_recoverable_text(
+                    handled_turn,
+                    target=dispatch.target,
+                    response_text=action.rejection_message,
+                    # One rejection, then the turn is terminal, so this send
+                    # satisfies the outbox's once-per-(turn, stage) rule.
+                    recovered_response_event_id=response_event_id,
+                )
+                await self.deps.turn_store.record_responded_turn(
+                    canonicalize_turn_record(handled_turn, response_event_id=response_event_id),
+                )
+                if dispatch_timing is not None and response_event_id is not None:
+                    dispatch_timing.mark_first_visible_reply("final", substantive=True)
+                    dispatch_timing.mark("response_complete")
+                    dispatch_timing.emit_summary(self.deps.logger, outcome="reject")
+                return
+
+            if not dispatch.context.am_i_mentioned:
+                self.deps.logger.info("Will respond: only agent in thread")
+
+            context_ready_monotonic = time.monotonic()
+
+            if dispatch_timing is not None and isinstance(dispatch.context.thread_history, ThreadHistoryResult):
+                dispatch_timing.note(**dispatch.context.thread_history.diagnostics)
+
+            self.deps.logger.info("Processing", event_id=event.event_id)
+            current_timestamp_ms = normalize_timestamp_ms(event.server_timestamp)
+            target_member_names: tuple[str, ...] | None = None
+            team_mode: TeamMode | None = None
+            if action.kind == "team":
+                assert action.form_team is not None
+                assert action.form_team.mode is not None
+                target_member_names = action.form_team.eligible_member_names
+                if action.form_team.intent is not TeamIntent.CONFIGURED_TEAM and event.body:
+                    team_mode = await select_ad_hoc_team_mode(
+                        event.body,
+                        action.form_team.eligible_member_names,
+                        self.deps.runtime.config,
+                        self.deps.runtime_paths,
                     )
-                    if dispatch_timing is not None and response_event_id is not None:
-                        dispatch_timing.mark_first_visible_reply("final", substantive=True)
-                        dispatch_timing.mark("response_complete")
-                        dispatch_timing.emit_summary(self.deps.logger, outcome="reject")
-                    return
+            payload_preparation = ResponsePayloadPreparation(
+                dispatch=dispatch,
+                prompt=event.body,
+                action_kind=action.kind,
+                payload_inputs=payload_inputs,
+                target_member_names=target_member_names,
+                dispatch_started_at=dispatch_started_at,
+                context_ready_monotonic=context_ready_monotonic,
+                routed_revision=event.source.get("content", {}).get(ROUTE_REVISION_KEY),
+            )
 
-                if not dispatch.context.am_i_mentioned:
-                    self.deps.logger.info("Will respond: only agent in thread")
-
-                context_ready_monotonic = time.monotonic()
-
-                if dispatch_timing is not None and isinstance(dispatch.context.thread_history, ThreadHistoryResult):
-                    dispatch_timing.note(**dispatch.context.thread_history.diagnostics)
-
-                self.deps.logger.info("Processing", event_id=event.event_id)
-                current_timestamp_ms = normalize_timestamp_ms(event.server_timestamp)
-                target_member_names: tuple[str, ...] | None = None
-                team_mode: TeamMode | None = None
-                if action.kind == "team":
-                    assert action.form_team is not None
-                    assert action.form_team.mode is not None
-                    target_member_names = action.form_team.eligible_member_names
-                    if action.form_team.intent is not TeamIntent.CONFIGURED_TEAM and event.body:
-                        team_mode = await select_ad_hoc_team_mode(
-                            event.body,
-                            action.form_team.eligible_member_names,
-                            self.deps.runtime.config,
-                            self.deps.runtime_paths,
-                        )
-                payload_preparation = ResponsePayloadPreparation(
-                    dispatch=dispatch,
-                    prompt=event.body,
-                    action_kind=action.kind,
-                    payload_inputs=payload_inputs,
-                    target_member_names=target_member_names,
-                    dispatch_started_at=dispatch_started_at,
-                    context_ready_monotonic=context_ready_monotonic,
-                    routed_revision=event.source.get("content", {}).get(ROUTE_REVISION_KEY),
-                )
-
-                response_request = ResponseRequest(
-                    thread_history=dispatch.context.thread_history,
-                    member_display_names=room_member_display_names(room),
-                    prompt=event.body,
-                    sources=ResponseSources(
-                        pending_event_ids=tuple(
-                            dict.fromkeys((event.event_id, *handled_turn.source_event_ids)),
-                        ),
-                        logical_source_event_ids=handled_turn.source_event_ids,
-                        discovery_event_ids=handled_turn.discovery_event_ids,
+            response_request = ResponseRequest(
+                thread_history=dispatch.context.thread_history,
+                member_display_names=room_member_display_names(room),
+                prompt=event.body,
+                sources=ResponseSources(
+                    pending_event_ids=tuple(
+                        dict.fromkeys((event.event_id, *handled_turn.source_event_ids)),
                     ),
-                    prompt_source_event_ids=tuple(event.source.get(ROUTE_EVENT_TYPE, ())),
-                    user_id=dispatch.requester_user_id,
-                    # A replay finds the reply its earlier attempt left through the reply's records.
-                    response_envelope=dispatch.envelope,
-                    correlation_id=dispatch.correlation_id,
-                    matrix_run_metadata=matrix_run_metadata,
-                    requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
-                    scheduled_history_budget=dispatch.scheduled_history_budget,
-                    scheduled_model=dispatch.scheduled_model,
-                    participation=action.participation,
-                    on_participation_approved=on_participation_approved,
-                    payload_preparation=payload_preparation,
-                    current_timestamp_ms=current_timestamp_ms,
-                    current_prompt_is_structured=dispatch.current_prompt_is_structured,
-                    pipeline_timing=dispatch_timing,
-                    on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
-                    notices=owned_notices.take(),
-                    queued_follow_up_notices=queued_follow_up_notices,
-                    prepare_source_turn=lambda history: self.deps.turn_store.prepare_pending_response_source(
-                        target=dispatch.target,
-                        source_event_ids=handled_turn.source_event_ids,
-                        thread_history=history,
-                    ),
-                )
-                fate = await run_response_action(
-                    self.deps.response_runner,
-                    response_request,
-                    action,
-                    team_mode=team_mode,
-                )
-                # A reply's records settle the sources it took and record the turn answered; the rest settle here.
-                await self.deps.visible_responses.settle_turn_fate(fate, handled_turn, room_id=dispatch.target.room_id)
-        finally:
-            owned_notices.release()
+                    logical_source_event_ids=handled_turn.source_event_ids,
+                    discovery_event_ids=handled_turn.discovery_event_ids,
+                ),
+                prompt_source_event_ids=tuple(event.source.get(ROUTE_EVENT_TYPE, ())),
+                user_id=dispatch.requester_user_id,
+                # A replay finds the reply its earlier attempt left through the reply's records.
+                response_envelope=dispatch.envelope,
+                correlation_id=dispatch.correlation_id,
+                matrix_run_metadata=matrix_run_metadata,
+                requires_model_history_refresh=dispatch.context.requires_model_history_refresh,
+                scheduled_history_budget=dispatch.scheduled_history_budget,
+                scheduled_model=dispatch.scheduled_model,
+                participation=action.participation,
+                on_participation_approved=on_participation_approved,
+                payload_preparation=payload_preparation,
+                current_timestamp_ms=current_timestamp_ms,
+                current_prompt_is_structured=dispatch.current_prompt_is_structured,
+                pipeline_timing=dispatch_timing,
+                on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
+                notices=notices,
+                prepare_source_turn=lambda history: self.deps.turn_store.prepare_pending_response_source(
+                    target=dispatch.target,
+                    source_event_ids=handled_turn.source_event_ids,
+                    thread_history=history,
+                ),
+            )
+            fate = await run_response_action(
+                self.deps.response_runner,
+                response_request,
+                action,
+                team_mode=team_mode,
+            )
+            # A reply's records settle the sources it took and record the turn answered; the rest settle here.
+            await self.deps.visible_responses.settle_turn_fate(fate, handled_turn, room_id=dispatch.target.room_id)

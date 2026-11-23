@@ -324,6 +324,30 @@ def _approve_continued_reply(participation: ParticipationGate | None, request: R
         participation.approve_existing_response()
 
 
+async def _normalize_late_stopped_reply(
+    request: ResponseRequest,
+    participation: ParticipationGate | None,
+) -> tuple[ResponseRequest, ParticipationGate | None]:
+    """Apply a late-latched Steer/judge stop under the lock after turn admission succeeds."""
+    if not any(notice.stopped_reply for notice in request.notices):
+        return request, participation
+    if request.payload_preparation is not None and not request.payload_preparation.dispatch.stopped_reply:
+        request = replace(
+            request,
+            payload_preparation=replace(
+                request.payload_preparation,
+                dispatch=replace(request.payload_preparation.dispatch, stopped_reply=True),
+            ),
+        )
+    if request.participation is not None:
+        deferred_voice = request.on_participation_approved
+        request = replace(request, participation=None, on_participation_approved=None)
+        participation = None
+        if deferred_voice is not None:
+            await deferred_voice()
+    return request, participation
+
+
 class _PostLockRequestPreparationError(RuntimeError):
     """Raised when post-lock request preparation fails before generation starts.
 
@@ -505,67 +529,55 @@ class ResponseRunner:
                 kind="mid_turn_defer",
             )
 
-        handed_to_lifecycle = False
-        try:
-            async with admitted_response_decision(
-                gate,
-                lambda: self.deps.runtime.wait_for_admission_or_shutdown(),
-                on_deferred=lambda: self.deps.logger.info("response_deferred_during_replacement", **log_context),
-                on_refused=lambda: self.deps.logger.warning(
-                    "response_refused_after_runtime_replacement",
-                    **log_context,
+        async with admitted_response_decision(
+            gate,
+            lambda: self.deps.runtime.wait_for_admission_or_shutdown(),
+            on_deferred=lambda: self.deps.logger.info("response_deferred_during_replacement", **log_context),
+            on_refused=lambda: self.deps.logger.warning("response_refused_after_runtime_replacement", **log_context),
+        ):
+            identity = ActiveResponseIdentity(
+                responder=(
+                    f"team/{self.deps.agent_name}"
+                    if self.deps.agent_name in self.deps.runtime.config.teams
+                    else self.deps.agent_name
                 ),
-            ):
-                identity = ActiveResponseIdentity(
-                    responder=(
-                        f"team/{self.deps.agent_name}"
-                        if self.deps.agent_name in self.deps.runtime.config.teams
-                        else self.deps.agent_name
-                    ),
-                    requester_id=request.response_envelope.requester_id,
-                )
-                gate.response_identities.add(identity)
-                self._in_flight_response_count += 1
-                try:
-                    # A contact turn reaches its contact room only through sends its message policy approved.
-                    with guarded_room(request.room_id) if request.contact is not None else nullcontext():
-                        async with self.deps.replies.span_scope():
-                            mid_turn_gate = _mid_turn_for_request(
+                requester_id=request.response_envelope.requester_id,
+            )
+            gate.response_identities.add(identity)
+            self._in_flight_response_count += 1
+            try:
+                # A contact turn reaches its contact room only through sends its message policy approved.
+                with guarded_room(request.room_id) if request.contact is not None else nullcontext():
+                    async with self.deps.replies.span_scope():
+                        fate = await self.lifecycle_coordinator.run_locked_response(
+                            target=request.response_envelope.target,
+                            response_envelope=request.response_envelope,
+                            pipeline_timing=request.pipeline_timing,
+                            mid_turn_gate=_mid_turn_for_request(
                                 request,
                                 self.deps.runtime.config,
                                 self.deps.runtime_paths,
                                 # A contact turn shows only its 👀, never a deferral's reaction on the other side's message.
                                 on_defer=None if request.contact is not None else acknowledge_deferred,
+                            ),
+                            locked_operation=lambda: self._run_locked_ending_span(request, locked_operation),
+                            signal_queued_message=signal_queued_message and not request.quiet,
+                            notices=request.notices,
+                        )
+                        handle = current_span()
+                        if handle is not None and not handle.exited:
+                            # Every exit path is meant to end its span; one that did not is a bug,
+                            # and releasing keeps the reply's sources for a retry.
+                            self.deps.logger.error(
+                                "reply_span_left_unended",
+                                span_id=handle.span_id,
+                                reply_id=handle.reply_id,
                             )
-                            handed_to_lifecycle = True
-                            fate = await self.lifecycle_coordinator.run_locked_response(
-                                target=request.response_envelope.target,
-                                response_envelope=request.response_envelope,
-                                pipeline_timing=request.pipeline_timing,
-                                mid_turn_gate=mid_turn_gate,
-                                locked_operation=lambda: self._run_locked_ending_span(request, locked_operation),
-                                signal_queued_message=signal_queued_message and not request.quiet,
-                                notices=request.notices,
-                                queued_follow_up_notices=request.queued_follow_up_notices,
-                            )
-                            handle = current_span()
-                            if handle is not None and not handle.exited:
-                                # Every exit path is meant to end its span; one that did not is a bug,
-                                # and releasing keeps the reply's sources for a retry.
-                                self.deps.logger.error(
-                                    "reply_span_left_unended",
-                                    span_id=handle.span_id,
-                                    reply_id=handle.reply_id,
-                                )
-                                await self.deps.delivery_gateway.end_reply_span(handle, release_decision(handle))
-                            return fate
-                finally:
-                    gate.response_identities.remove(identity)
-                    self._in_flight_response_count -= 1
-        finally:
-            if not handed_to_lifecycle:
-                for notice in request.notices:
-                    notice.release()
+                            await self.deps.delivery_gateway.end_reply_span(handle, release_decision(handle))
+                        return fate
+            finally:
+                gate.response_identities.remove(identity)
+                self._in_flight_response_count -= 1
 
     async def _run_locked_ending_span(
         self,
@@ -1481,12 +1493,7 @@ class ResponseRunner:
         response_kind: str,
     ) -> SourceFate:
         """Finalize an empty prompt through the locked lifecycle before setup side effects."""
-        try:
-            request = self.locked.with_contact(request)
-        except BaseException:
-            for notice in request.notices:
-                notice.release()
-            raise
+        request = self.locked.with_contact(request)
         return await self._run_locked_response_lifecycle(
             request,
             response_kind=response_kind,
@@ -1511,7 +1518,11 @@ class ResponseRunner:
         except (ReplyMembershipPendingError, RevisionSnapshotChangedError, ResponseAdmissionRefusedError):
             raise
         except Exception as error:
-            if participation is None or participation.decision is not None:
+            if (
+                participation is None
+                or participation.decision is not None
+                or any(notice.stopped_reply for notice in request.notices)
+            ):
                 raise
             participation.decline("preparation_failed")
             return await self._end_unprepared_turn(request, error, participation)
@@ -1593,7 +1604,7 @@ class ResponseRunner:
         )
         if not isinstance(admitted, ResponseRequest):
             return admitted
-        request = admitted
+        request, participation = await _normalize_late_stopped_reply(admitted, participation)
         if team is None:
             _approve_continued_reply(participation, request)
             # The cold-cache judge sees the model before the budget, which the response runtime applies after it.
@@ -2233,12 +2244,7 @@ class ResponseRunner:
 
     async def generate_response(self, request: ResponseRequest) -> SourceFate:
         """Generate and send/edit an agent response with lifecycle locking; return what it did with its sources."""
-        try:
-            request = self.locked.with_contact(request)
-        except BaseException:
-            for notice in request.notices:
-                notice.release()
-            raise
+        request = self.locked.with_contact(request)
         return await self._run_locked_response_lifecycle(
             request,
             response_kind="ai",
