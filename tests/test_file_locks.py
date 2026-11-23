@@ -313,3 +313,20 @@ def test_windows_shared_requests_lock_exclusively(tmp_path: Path, windows_file_l
     thread.join(timeout=2)
     assert not thread.is_alive()
     assert order == ["first-release", "second-acquire"]
+
+
+@pytest.mark.asyncio
+async def test_posix_lock_descriptors_are_read_write(tmp_path: Path, flock_access_modes: list[int]) -> None:
+    """Shared and exclusive locks work on NFS only on read-write descriptors."""
+    lock_path = tmp_path / "state.lock"
+
+    with advisory_file_lock(lock_path):
+        pass
+    with advisory_file_lock(lock_path, exclusive=False):
+        pass
+    release_file_lock(acquire_shared_file_lock(lock_path))
+    async with async_exclusive_file_lock(lock_path):
+        pass
+
+    assert flock_access_modes
+    assert set(flock_access_modes) == {os.O_RDWR}
