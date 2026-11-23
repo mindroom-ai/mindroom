@@ -49,7 +49,8 @@ MAX_BACKGROUNDED = 16
 _MAX_OUTPUT_LINES = 10_000
 _MAX_OUTPUT_BYTES = 50 * 1024
 _STREAM_READ_CHUNK_BYTES = 65536
-# Pause pipe reads briefly once an uncapped redirect is not active and the buffer is rotating.
+# Pause pipe reads briefly after each burst once an uncapped redirect is not active and the buffer is rotating.
+_CAPPED_STREAM_BURST_READS = 16
 _CAPPED_STREAM_PACE_SECONDS = 0.02
 # The most bytes of a streamed command's output handed on at once.
 _STREAM_CHUNK_BYTES = 32 * 1024
@@ -102,6 +103,9 @@ class _OutputBuffer:
 
         encoded = text.encode("utf-8", errors="replace")
         if len(encoded) > self.max_bytes:
+            self.chunks.clear()
+            self.byte_count = 0
+            self.retained_newlines = 0
             text = encoded[-self.max_bytes :].decode("utf-8", errors="ignore")
             encoded = text.encode("utf-8", errors="replace")
             newline_count = text.count("\n")
@@ -113,12 +117,7 @@ class _OutputBuffer:
             self.byte_count += byte_len
             self.retained_newlines += newline_count
 
-        while self.chunks and self.byte_count > self.max_bytes:
-            removed = self.chunks.popleft()
-            self.byte_count -= removed.byte_len
-            self.retained_newlines -= removed.newlines
-            self.bytes_capped = True
-
+        self._trim_to_max_bytes()
         self._trim_to_max_lines()
 
     def text(self) -> str:
@@ -162,6 +161,31 @@ class _OutputBuffer:
         if not self.chunks:
             return 0
         return self.retained_newlines + (not self.chunks[-1].text.endswith("\n"))
+
+    def _trim_to_max_bytes(self) -> None:
+        excess = self.byte_count - self.max_bytes
+        if excess <= 0:
+            return
+
+        while self.chunks and self.chunks[0].byte_len <= excess:
+            removed = self.chunks.popleft()
+            self.byte_count -= removed.byte_len
+            self.retained_newlines -= removed.newlines
+            excess -= removed.byte_len
+
+        if excess > 0 and self.chunks:
+            head = self.chunks.popleft()
+            self.byte_count -= head.byte_len
+            self.retained_newlines -= head.newlines
+            tail = head.text.encode("utf-8", errors="replace")[excess:].decode("utf-8", errors="ignore")
+            if tail:
+                tail_bytes = len(tail.encode("utf-8", errors="replace"))
+                tail_newlines = tail.count("\n")
+                self.chunks.appendleft(_OutputChunk(tail, tail_bytes, tail_newlines))
+                self.byte_count += tail_bytes
+                self.retained_newlines += tail_newlines
+
+        self.bytes_capped = True
 
     def _trim_to_max_lines(self) -> None:
         drop = len(self) - self.max_lines
@@ -969,6 +993,7 @@ async def _read_stream(
 
     try:
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        capped_reads = 0
         while True:
             chunk = await stream.read(_STREAM_READ_CHUNK_BYTES)
             if not chunk:
@@ -982,7 +1007,10 @@ async def _read_stream(
                 and (capture is None or capture.error is not None)
                 and not stream.at_eof()
             ):
-                await _pace_capped_stream(stream)
+                capped_reads += 1
+                if capped_reads >= _CAPPED_STREAM_BURST_READS:
+                    capped_reads = 0
+                    await _pace_capped_stream(stream)
 
         final = decoder.decode(b"", final=True)
         buf.append(final)
