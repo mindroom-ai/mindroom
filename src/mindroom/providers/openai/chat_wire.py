@@ -138,9 +138,11 @@ def _wrap_gemini_tool_result(result: ToolResultView) -> str | list[Any]:
     (``providers/gemini/wire.py``) and keeps every character intact. A tool output that is already valid JSON is
     wrapped too, as on that wire, so OpenRouter's JavaScript ``JSON.parse`` never rounds its integers beyond 53 bits
     or drops its formatting and duplicate keys. When the content is a list of content parts, OpenRouter concatenates
-    text parts before parsing, so the text parts become one wrapped text part while non-text parts and extra part
-    metadata (such as authored ``cache_control``) stay intact. Several text parts are wrapped as the list of their
-    texts, not joined, so the request log redacts each text apart as it does the parts of an unwrapped result.
+    text parts before parsing, so the text parts become one wrapped text part while non-text parts stay intact.
+    Several text parts are wrapped as the list of their texts, not joined, so the request log redacts each text
+    apart as it does the parts of an unwrapped result. One text part keeps all its fields; several keep only the
+    last authored ``cache_control``, because fields merged across parts could put one part's value beside another
+    part's ``name``, where the request log no longer redacts it as the secret its own ``name`` labels it.
     """
     content = result.content
     if isinstance(content, str):
@@ -156,10 +158,15 @@ def _wrap_gemini_tool_result(result: ToolResultView) -> str | list[Any]:
         return content
     texts = [part["text"] for part in text_parts]
     wrapped = _gemini_tool_result_json(texts[0] if len(texts) == 1 else texts, is_error=result.is_error)
-    extra_fields = {key: value for part in text_parts for key, value in part.items() if key not in {"type", "text"}}
-    if not other_parts and not extra_fields:
+    if len(text_parts) == 1:
+        first: dict[str, Any] = {**text_parts[0], "text": wrapped}
+    else:
+        first = {"type": "text", "text": wrapped}
+        for part in text_parts:
+            if "cache_control" in part:
+                first["cache_control"] = part["cache_control"]
+    if not other_parts and len(first) == 2:
         return wrapped
-    first: dict[str, Any] = {"type": "text", "text": wrapped, **extra_fields}
     return [first, *other_parts]
 
 

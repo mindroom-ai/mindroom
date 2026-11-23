@@ -3706,14 +3706,16 @@ async def test_openrouter_gemini_null_or_empty_extra_body_model_is_the_effective
 async def test_openrouter_gemini_wraps_multimodal_and_multipart_tool_results(tmp_path: Path) -> None:
     """Attached media stays beside one JSON-wrapped text part, and several text parts wrap as a list of their texts."""
     built = _Built(tmp_path, {"provider": "openrouter", "id": "google/gemini-4-neon", "api_key": "k"}, _chat_reply())
-    assistant = Message(role="assistant", content="", tool_calls=_calls("call_1", "call_2", "call_3", "call_4"))
+    call_ids = [f"call_{number}" for number in range(1, 7)]
+    assistant = Message(role="assistant", content="", tool_calls=_calls(*call_ids))
     image_part = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+    attached_image = Image(content=b"\x89PNG\r\n\x1a\n", mime_type="image/png")
     with_attached_image = Message(
         role="tool",
         content="Caption {}",
         tool_call_id="call_1",
         tool_name="get_weather",
-        images=[Image(content=b"\x89PNG\r\n\x1a\n", mime_type="image/png")],
+        images=[attached_image],
     )
     multi_text_only = Message(
         role="tool",
@@ -3728,10 +3730,34 @@ async def test_openrouter_gemini_wraps_multimodal_and_multipart_tool_results(tmp
         tool_name="get_weather",
     )
     image_only = Message(role="tool", content=[image_part], tool_call_id="call_4", tool_name="get_weather")
+    multi_text_around_inline_image = Message(
+        role="tool",
+        content=[{"type": "text", "text": "Part 1"}, image_part, {"type": "text", "text": "Part 2 {b: 2}"}],
+        tool_call_id="call_5",
+        tool_name="get_weather",
+    )
+    multi_text_with_attached_image = Message(
+        role="tool",
+        content=[{"type": "text", "text": "Part 1"}, {"type": "text", "text": "Part 2 {c: 3}"}],
+        tool_call_id="call_6",
+        tool_name="get_weather",
+        images=[attached_image],
+    )
 
     await _turn(
         built,
-        ModelRequest(messages=[_user(), assistant, with_attached_image, multi_text_only, mixed_parts, image_only]),
+        ModelRequest(
+            messages=[
+                _user(),
+                assistant,
+                with_attached_image,
+                multi_text_only,
+                mixed_parts,
+                image_only,
+                multi_text_around_inline_image,
+                multi_text_with_attached_image,
+            ],
+        ),
     )
 
     sent = built.body()["messages"]
@@ -3743,6 +3769,11 @@ async def test_openrouter_gemini_wraps_multimodal_and_multipart_tool_results(tmp
     assert json.loads(sent[4]["content"][0]["text"]) == {"result": "Before {}"}
     assert sent[4]["content"][1] == image_part
     assert sent[5]["content"] == [image_part]
+    assert [part["type"] for part in sent[6]["content"]] == ["text", "image_url"]
+    assert json.loads(sent[6]["content"][0]["text"]) == {"result": ["Part 1", "Part 2 {b: 2}"]}
+    assert sent[6]["content"][1] == image_part
+    assert [part["type"] for part in sent[7]["content"]] == ["text", "image_url"]
+    assert json.loads(sent[7]["content"][0]["text"]) == {"result": ["Part 1", "Part 2 {c: 3}"]}
 
 
 @pytest.mark.asyncio
@@ -3777,6 +3808,56 @@ async def test_openrouter_gemini_preserves_authored_cache_control_on_tool_text_p
     assert sent[0] == {"role": "system", "content": "System prompt"}
     assert sent[3]["content"][0]["cache_control"] == marker
     assert json.loads(sent[3]["content"][0]["text"]) == {"result": "Marked {}"}
+
+
+@pytest.mark.asyncio
+async def test_openrouter_gemini_wrapping_never_mixes_the_fields_of_several_text_parts(tmp_path: Path) -> None:
+    """Several text parts keep only a ``cache_control`` marker, and one text part keeps all its fields.
+
+    Fields merged across parts could put one part's value beside another part's ``name``, where the request log no
+    longer reads it as the secret its own ``name`` labels it.
+    """
+    log_dir = tmp_path / "request-logs"
+    built = _Built(tmp_path, {"provider": "openrouter", "id": "google/gemini-4-neon", "api_key": "k"}, _chat_reply())
+    provider = pipeline_provider(built.adapter, log_dir=log_dir)
+    labeled = {"name": "password", "value": "synthetic-meta-canary"}
+    first_marker, last_marker = {"type": "ephemeral"}, {"type": "ephemeral", "ttl": "1h"}
+    image_part = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+    contents = [
+        [{"type": "text", "text": "Part 1", **labeled}, {"type": "text", "text": "Part 2", "name": "display"}],
+        [{"type": "text", "text": "Only part", **labeled}],
+        [
+            {"type": "text", "text": "Part 1", **labeled, "cache_control": first_marker},
+            image_part,
+            {"type": "text", "text": "Part 2", "name": "display", "cache_control": last_marker},
+        ],
+    ]
+    call_ids = [f"call_{number}" for number in range(1, len(contents) + 1)]
+    assistant = Message(role="assistant", content="", tool_calls=_calls(*call_ids))
+    results = [
+        Message(role="tool", content=content, tool_call_id=call_id, tool_name="get_weather")
+        for call_id, content in zip(call_ids, contents, strict=True)
+    ]
+
+    await complete(provider, ModelRequest(messages=[_user(), assistant, *results]))
+
+    several_texts = json.dumps({"result": ["Part 1", "Part 2"]})
+    one_text = json.dumps({"result": "Only part"})
+    sent = [message["content"] for message in built.body()["messages"][2:]]
+    assert sent == [
+        several_texts,
+        [{"type": "text", "text": one_text, **labeled}],
+        [{"type": "text", "text": several_texts, "cache_control": last_marker}, image_part],
+    ]
+    (log_file,) = log_dir.glob("llm-requests-*.jsonl")
+    logged_text = log_file.read_text(encoding="utf-8")
+    assert "synthetic-meta-canary" not in logged_text
+    logged = [message["content"] for message in json.loads(logged_text.splitlines()[0])["body"]["messages"][2:]]
+    assert logged == [
+        several_texts,
+        [{"type": "text", "text": one_text, "name": "password", "value": "***redacted***"}],
+        [{"type": "text", "text": several_texts, "cache_control": last_marker}, image_part],
+    ]
 
 
 @pytest.mark.asyncio
