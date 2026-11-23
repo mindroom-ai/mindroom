@@ -65,10 +65,11 @@ from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.worker_routing import build_requester_execution_identity
 from mindroom.workflow_runs.answers import answer_command
-from mindroom.workflow_runs.saved import SavedWorkflow, format_workflows_listing, list_saved
+from mindroom.workflow_runs.graph import redacted_title
+from mindroom.workflow_runs.saved import SavedWorkflow, list_saved
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable
+    from collections.abc import Awaitable, Callable, Iterable, Sequence
     from pathlib import Path
 
     import nio
@@ -88,6 +89,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.plugins import PluginReloadResult
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.workflow_runs.engine import WorkflowEngine
+    from mindroom.workflow_runs.models import WorkflowRun
 
 logger = get_logger(__name__)
 
@@ -137,6 +139,35 @@ async def _background_jobs_command(
     )
 
 
+def _format_workflows_listing(
+    runs: Sequence[WorkflowRun],
+    saved: Sequence[tuple[str, SavedWorkflow]],
+) -> str:
+    """Format recent workflow runs and saved workflows for chat output (`!workflows`)."""
+    if not runs and not saved:
+        return "No workflow runs or saved workflows here."
+    sections: list[str] = []
+    if runs:
+        run_lines = [
+            f"- {run.agent_name}: `{run.run_id}` ({run.state.value}, attempt {run.attempt})"
+            + (f": {title}" if (title := redacted_title(run.title)) else "")
+            for run in runs
+        ]
+        sections.append("Workflow runs:\n" + "\n".join(run_lines))
+    if saved:
+        saved_lines: list[str] = []
+        for agent_name, item in saved:
+            line = f"- {agent_name}: `{item.name}`"
+            if item.description:
+                line += f": {item.description}"
+            if item.args:
+                arg_names = ", ".join(f"`{arg}`" for arg in item.args)
+                line += f" (args: {arg_names})"
+            saved_lines.append(line)
+        sections.append("Saved workflows:\n" + "\n".join(saved_lines))
+    return "\n\n".join(sections)
+
+
 async def _workflows_command(
     context: CommandHandlerContext,
     room: nio.MatrixRoom,
@@ -153,16 +184,15 @@ async def _workflows_command(
         top_level_only=True,
     )[:20]
     candidate_entities = await context.responder_candidates_for_room(room, requester_user_id)
-    saved: list[SavedWorkflow] = []
+    saved: list[tuple[str, SavedWorkflow]] = []
     if candidate_entities:
         registry = entity_identity_registry(context.config, context.runtime_paths)
-        tools = config_plugins(context.config, context.runtime_paths).tools
-        seen_workspaces: set[Path] = set()
+        seen: set[tuple[str, Path]] = set()
         for entity_id in candidate_entities:
             entity_name = registry.current_entity_name_for_user_id(entity_id.full_id, include_router=False)
             if entity_name is None or entity_name not in context.config.agents:
                 continue
-            if "workflow" not in resolve_agent_tools(context.config, entity_name, tools).tool_names:
+            if "workflow" not in context.config.resolve_agent(entity_name).tools.tool_names:
                 continue
             identity = build_requester_execution_identity(
                 agent_name=entity_name,
@@ -176,13 +206,13 @@ async def _workflows_command(
                 execution_identity=identity,
                 create=False,
             ).workspace.root
-            if workspace in seen_workspaces:
+            if (entity_name, workspace) in seen:
                 continue
-            seen_workspaces.add(workspace)
+            seen.add((entity_name, workspace))
             with suppress(OSError, ValueError):
-                saved.extend(list_saved(workspace))
-        saved.sort(key=lambda item: item.name)
-    return format_workflows_listing(runs, saved)
+                saved.extend((entity_name, item) for item in list_saved(workspace))
+        saved.sort(key=lambda entry: (entry[0], entry[1].name))
+    return _format_workflows_listing(runs, saved)
 
 
 def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) -> SchedulingRuntime:

@@ -15,7 +15,7 @@ import pytest
 import pytest_asyncio
 
 import mindroom.workflow as workflow_sdk
-from mindroom.commands.handler import _workflows_command
+from mindroom.commands.handler import _format_workflows_listing, _workflows_command
 from mindroom.commands.parsing import (
     _COMMAND_DOCS,
     COMMAND_TYPES_WITH_SIDE_EFFECTS,
@@ -32,7 +32,6 @@ from mindroom.workflow_runs.models import WorkflowRunState
 from mindroom.workflow_runs.saved import (
     SavedWorkflow,
     SavedWorkflowExistsError,
-    format_workflows_listing,
     list_saved,
     read_saved_source,
     save_source,
@@ -470,20 +469,23 @@ async def test_workflows_command_is_parsed_and_listed_in_help() -> None:
     assert CommandType.WORKFLOWS not in COMMAND_TYPES_WITH_SIDE_EFFECTS
     assert CommandType.WORKFLOWS in _COMMAND_DOCS
     assert "/workflows" in get_command_help()
-    assert format_workflows_listing([], []) == "No workflow runs or saved workflows here."
-    rendered = format_workflows_listing(
+    assert _format_workflows_listing([], []) == "No workflow runs or saved workflows here."
+    rendered = _format_workflows_listing(
         [],
         [
-            SavedWorkflow(
-                name="audit",
-                description="Audit a repo.",
-                args={"base": "Branch"},
-                path=Path("workflows/audit.py"),
+            (
+                "watcher",
+                SavedWorkflow(
+                    name="audit",
+                    description="Audit a repo.",
+                    args={"base": "Branch"},
+                    path=Path("workflows/audit.py"),
+                ),
             ),
         ],
     )
     assert "Saved workflows:" in rendered
-    assert "`audit`: Audit a repo. (args: `base`)" in rendered
+    assert "- watcher: `audit`: Audit a repo. (args: `base`)" in rendered
 
 
 @pytest.mark.asyncio
@@ -499,7 +501,10 @@ def main(args):
     return args
 """,
     )
-    own = json.loads(await tool_stack.call("start_workflow", source="def main(args):\n    return 1\n", title="My run"))
+    secret_title = "Deploy password=example-only " + "a" * 100
+    own = json.loads(
+        await tool_stack.call("start_workflow", source="def main(args):\n    return 1\n", title=secret_title),
+    )
     await tool_stack.until(lambda: tool_stack.store.get_run(own["run_id"]).state is WorkflowRunState.RUNNING)
     other_user = replace(tool_stack.context, requester_id="@bob:example.test")
     other = json.loads(
@@ -531,10 +536,12 @@ def main(args):
         tool_stack.context.requester_id,
         tool_stack.context.resolved_thread_id,
     )
-    assert own["run_id"] in reply
-    assert "My run" in reply
+    assert f"- watcher: `{own['run_id']}`" in reply
+    assert "example-only" not in reply
+    assert "***redacted***" in reply
+    assert "a" * 80 not in reply
     assert other["run_id"] not in reply
-    assert "`triage`: Triage incoming issues. (args: `repo`)" in reply
+    assert "- watcher: `triage`: Triage incoming issues. (args: `repo`)" in reply
 
 
 def test_an_agent_may_have_both_toolkits() -> None:

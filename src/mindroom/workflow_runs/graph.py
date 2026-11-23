@@ -59,6 +59,11 @@ def node_label(kind: str, args: Mapping[str, object], name: object = None) -> st
     return redact_sensitive_text(str(text).strip().partition("\n")[0], max_length=_NAME_CHARS)
 
 
+def redacted_title(title: str | None) -> str | None:
+    """Return a room-safe run title, redacted and capped at 80 characters as the run card shows it."""
+    return redact_sensitive_text(title, max_length=_NAME_CHARS) if title else None
+
+
 def projected_cost_usd(turn_costs: Sequence[float], open_agents: int, spent: float) -> float:
     """Return what a run will have cost if each agent still to end costs what a finished turn cost on average.
 
@@ -91,7 +96,7 @@ def graph_meta(
     return {
         "agent": run.agent_name,
         "thread_id": run.thread_root_event_id,
-        "title": redact_sensitive_text(run.title, max_length=_NAME_CHARS) if run.title else None,
+        "title": redacted_title(run.title),
         "status": run.state.value,
         "attempt": run.attempt,
         "started_at": _epoch(run.created_at),

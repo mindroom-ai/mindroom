@@ -2581,6 +2581,7 @@ expose = [
     "graph_rows",
     "node_label",
     "projected_cost_usd",
+    "redacted_title",
 ]
 
 [[modules]]
@@ -2712,7 +2713,6 @@ expose = [
     "SavedWorkflow",
     "SavedWorkflowExistsError",
     "WORKFLOWS_DIR",
-    "format_workflows_listing",
     "list_saved",
     "read_saved_source",
     "save_source",
@@ -5981,6 +5981,7 @@ depends_on = [
     "mindroom.runtime_resolution",
     "mindroom.tool_system.worker_routing",
     "mindroom.workflow_runs.answers",
+    "mindroom.workflow_runs.graph",
     "mindroom.workflow_runs.saved",
     "mindroom.tool_jobs.client_cancel",
     "mindroom.tool_jobs.runtime",
