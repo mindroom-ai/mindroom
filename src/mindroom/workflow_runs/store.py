@@ -28,7 +28,7 @@ from mindroom.workflow_runs.models import (
 from mindroom.workflow_runs.replay import DIRTY_DIGEST, parent_group, result_digest, split_key
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Iterable, Iterator
+    from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
     from pathlib import Path
 
 _BUSY_TIMEOUT_SECONDS = 10
@@ -53,7 +53,6 @@ _NODE_STAMP_FIELDS = frozenset(
     {"state", "waiting_on", "handle", "attempt", "stale", "label", "name", "phase", "group_key", "members"}
     | {"session_key", "cached", "started_at", "links"},
 )
-_BLANK_NODE = WorkflowNode(run_id="", key="", kind="", lane="", idx=0, digest="", request={}, attempt=0)
 _TERMINAL_STATE_VALUES = tuple(sorted(TERMINAL_RUN_STATES))
 _TERMINAL_STATE_PLACEHOLDERS = ", ".join("?" * len(_TERMINAL_STATE_VALUES))
 
@@ -107,7 +106,7 @@ class WorkflowRunStore:
         any moment finds either both or neither.
         """
         validated_workflow_run_id(run.run_id)
-        values = {**_row_values(run, _RUN_JSON_FIELDS), "reservation_digest": _reservation_digest(run)}
+        values = {**_row_values(asdict(run), _RUN_JSON_FIELDS), "reservation_digest": _reservation_digest(run)}
         with self._write_transaction() as connection:
             row = None
             if run.origin_job_id is not None:
@@ -254,7 +253,7 @@ class WorkflowRunStore:
                 raise WorkflowRunConflictError(msg)
             result, result_file = self._inline_result(node.run_id, saved["seq"], node.generation, node.result)
             node = replace(node, seq=saved["seq"], result=result, result_file=result_file)
-            _insert(connection, "INSERT OR REPLACE INTO workflow_nodes", _row_values(node, _NODE_JSON_FIELDS))
+            _insert(connection, "INSERT OR REPLACE INTO workflow_nodes", _row_values(asdict(node), _NODE_JSON_FIELDS))
             _count_progress(connection, node.run_id, node.state)
             if dirty_after:
                 _forget_after(connection, node.run_id, node.key)
@@ -277,15 +276,14 @@ class WorkflowRunStore:
         if not changes or changes.keys() - _NODE_STAMP_FIELDS or changes.get("state") in _ENDED_NODE_STATES:
             msg = f"A node stamp cannot set {sorted(changes)}; outcomes go through settle_node."
             raise WorkflowRunStoreError(msg)
-        values = _row_values(replace(_BLANK_NODE, **changes), _NODE_JSON_FIELDS)
-        columns = [_column(name, _NODE_JSON_FIELDS) for name in changes]
+        values = _row_values(changes, _NODE_JSON_FIELDS)
         unsettled = " AND state IN ('queued', 'running', 'waiting')" if "state" in changes else ""
         with self._write_transaction(run_id) as connection:
             _fenced(connection, run_id, epoch)
             updated = connection.execute(
-                f"UPDATE workflow_nodes SET {', '.join(f'{column} = ?' for column in columns)} "  # noqa: S608
+                f"UPDATE workflow_nodes SET {', '.join(f'{column} = ?' for column in values)} "  # noqa: S608
                 f"WHERE run_id = ? AND key = ? AND generation = ?{unsettled}",
-                (*(values[column] for column in columns), run_id, key, generation),
+                (*values.values(), run_id, key, generation),
             )
             if dirty_after and updated.rowcount:
                 _forget_after(connection, run_id, key)
@@ -409,12 +407,14 @@ class WorkflowRunStore:
 
     def usage_totals(self, run_id: str, *, attempt: int | None = None) -> UsageTotals:
         """Sum a run's usage, of every attempt or of one."""
-        return _totals(usage for _key, entry_attempt, usage in self._usage(run_id) if attempt in (None, entry_attempt))
+        return _totals(
+            usage for _key, _turn, entry_attempt, usage in self._usage(run_id) if attempt in (None, entry_attempt)
+        )
 
     def node_usage(self, run_id: str) -> dict[str, UsageTotals]:
         """Sum a run's usage per node key, over every generation of the node."""
         by_key: dict[str, list[dict[str, Any]]] = {}
-        for key, _attempt, usage in self._usage(run_id):
+        for key, _turn, _attempt, usage in self._usage(run_id):
             by_key.setdefault(key, []).append(usage)
         return {key: _totals(entries) for key, entries in by_key.items()}
 
@@ -423,13 +423,11 @@ class WorkflowRunStore:
 
         What the subagents of a turn cost is no turn of the run's.
         """
-        with self._connection() as connection:
-            rows = connection.execute(
-                "SELECT usage_json FROM workflow_usage WHERE run_id = ? AND turn NOT LIKE '%sub:%'",
-                (run_id,),
-            ).fetchall()
-        costs = [json.loads(row["usage_json"]).get("cost_usd") for row in rows]
-        return [cost for cost in costs if cost is not None]
+        return [
+            cost
+            for _key, turn, _attempt, usage in self._usage(run_id)
+            if "sub:" not in str(turn) and (cost := usage.get("cost_usd")) is not None
+        ]
 
     def append_log(self, run_id: str, epoch: int, text: str) -> None:
         """Append one line to a run's log, for the holder of *epoch*."""
@@ -513,13 +511,13 @@ class WorkflowRunStore:
             ).fetchall()
         return [_node_from_row(row) for row in rows]
 
-    def _usage(self, run_id: str) -> list[tuple[str, int, dict[str, Any]]]:
+    def _usage(self, run_id: str) -> list[tuple[str, int | str, int, dict[str, Any]]]:
         with self._connection() as connection:
             rows = connection.execute(
-                "SELECT key, attempt, usage_json FROM workflow_usage WHERE run_id = ?",
+                "SELECT key, turn, attempt, usage_json FROM workflow_usage WHERE run_id = ?",
                 (run_id,),
             ).fetchall()
-        return [(row["key"], row["attempt"], json.loads(row["usage_json"])) for row in rows]
+        return [(row["key"], row["turn"], row["attempt"], json.loads(row["usage_json"])) for row in rows]
 
     def _migrate(self) -> None:
         with self._write_transaction() as connection:
@@ -589,11 +587,13 @@ def _column(field_name: str, json_fields: frozenset[str]) -> str:
     return f"{field_name}_json" if field_name in json_fields else field_name
 
 
-def _row_values(record: WorkflowRun | WorkflowNode, json_fields: frozenset[str]) -> dict[str, object]:
-    """Return a record's column values; the fields in *json_fields* are stored as JSON text."""
+def _row_values(values: Mapping[str, object], json_fields: frozenset[str]) -> dict[str, object]:
+    """Return column values for *values*; fields in *json_fields* are stored as JSON text."""
     return {
-        _column(name, json_fields): _dumps(value) if name in json_fields else value
-        for name, value in asdict(record).items()
+        _column(name, json_fields): _dumps(asdict(value) if isinstance(value, DispatchHandle) else value)
+        if name in json_fields
+        else value
+        for name, value in values.items()
     }
 
 
@@ -638,12 +638,11 @@ def _select_run(connection: sqlite3.Connection, run_id: str) -> WorkflowRun:
 def _write_run(connection: sqlite3.Connection, run: WorkflowRun, changes: dict[str, object]) -> WorkflowRun:
     """Write *changes* to the row of *run* and return the run as stored."""
     run = replace(run, **changes)
-    values = _row_values(run, _RUN_JSON_FIELDS)
-    columns = [_column(name, _RUN_JSON_FIELDS) for name in changes]
-    if columns:
+    values = _row_values(changes, _RUN_JSON_FIELDS)
+    if values:
         connection.execute(
-            f"UPDATE workflow_runs SET {', '.join(f'{column} = ?' for column in columns)} WHERE run_id = ?",  # noqa: S608
-            (*(values[column] for column in columns), run.run_id),
+            f"UPDATE workflow_runs SET {', '.join(f'{column} = ?' for column in values)} WHERE run_id = ?",  # noqa: S608
+            (*values.values(), run.run_id),
         )
     return run
 
@@ -812,7 +811,7 @@ _LIGHT = {
 }
 _LIGHT_COLUMNS = ", ".join(
     f"{_LIGHT[column]} AS {column}" if column in _LIGHT else column
-    for column in _row_values(_BLANK_NODE, _NODE_JSON_FIELDS)
+    for column in (_column(field.name, _NODE_JSON_FIELDS) for field in fields(WorkflowNode))
 )
 
 # Each entry upgrades the database by one schema version; the stored version is how many have run.
