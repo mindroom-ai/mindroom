@@ -411,7 +411,7 @@ def kill_command_via_supervisor(socket_path: str, *, namespace: str, handle: str
     )
 
 
-def kill_namespace_via_supervisor(socket_path: str, *, namespace: str) -> int:
+def _kill_namespace_via_supervisor(socket_path: str, *, namespace: str) -> int:
     """Kill every background process in *namespace* through the supervisor, returning how many were removed."""
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
@@ -560,7 +560,7 @@ class _ShellSupervisorManager:
             )
         if socket_path is None:
             return 0
-        return kill_namespace_via_supervisor(socket_path, namespace=namespace)
+        return _kill_namespace_via_supervisor(socket_path, namespace=namespace)
 
     def shutdown(self) -> None:
         """Terminate the supervisor process and clear cached state."""

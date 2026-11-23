@@ -33,10 +33,10 @@ from mindroom.shell.execution import (
 from mindroom.shell.supervisor import (
     SHELL_SUPERVISOR_SOCKET_ENV,
     _handle_connection,
+    _kill_namespace_via_supervisor,
     _ShellSupervisorManager,
     check_command_via_supervisor,
     kill_command_via_supervisor,
-    kill_namespace_via_supervisor,
     kill_shell_supervisor_namespace,
     parse_shell_supervisor_kill,
     parse_shell_supervisor_status,
@@ -1411,13 +1411,13 @@ async def test_supervisor_background_log_kill_namespace_and_per_namespace_cap(
         other_pid = registry[other.handle].pid
 
         try:
-            killed = await asyncio.to_thread(kill_namespace_via_supervisor, socket_path, namespace="shell-scope:a")
+            killed = await asyncio.to_thread(_kill_namespace_via_supervisor, socket_path, namespace="shell-scope:a")
             assert killed == 1
             await _assert_pid_dead(first_pid)
             assert "[MindRoom: stopped when turn ended]" in first_log.read_text(encoding="utf-8")
             os.kill(other_pid, 0)
         finally:
-            await asyncio.to_thread(kill_namespace_via_supervisor, socket_path, namespace="shell-scope:b")
+            await asyncio.to_thread(_kill_namespace_via_supervisor, socket_path, namespace="shell-scope:b")
             await _assert_pid_dead(other_pid)
 
 

@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import re
 import shlex
 import signal
 import stat
@@ -28,6 +29,7 @@ _LOG_MAX_BYTES = 4 * 1024 * 1024
 _LOG_MAX_AGE_SECONDS = 24 * 3600
 _LOG_MAX_FILES = 64
 _LOG_RECENT_PROTECT_SECONDS = 5 * 60
+_BACKGROUND_LOG_NAME_RE = re.compile(r"^\d+-[0-9a-f]{8,32}\.log$")
 
 StopReason = Literal["timeout", "scope_ended", "stopped"]
 
@@ -72,7 +74,7 @@ class BackgroundLogPolicy:
         return cls(log_dir=log_dir, display_root=display_root, max_bytes=max_bytes)
 
 
-class _BackgroundLogFile:
+class BackgroundLogFile:
     """Bounded live log file for one auto-backgrounded shell process."""
 
     def __init__(self, *, path: Path, file: BinaryIO, max_bytes: int) -> None:
@@ -84,6 +86,7 @@ class _BackgroundLogFile:
         self.closed = False
 
     def write(self, text: str) -> None:
+        """Append *text* up to the byte cap, writing a single truncation notice if exceeded."""
         if self.closed or self._truncated or not text:
             return
         data = text.encode("utf-8", errors="replace")
@@ -104,6 +107,7 @@ class _BackgroundLogFile:
             self._truncated = True
 
     def finish(self, trailer: str | None = None) -> None:
+        """Write an optional status trailer and close the log file once."""
         if self.closed:
             return
         self.closed = True
@@ -127,10 +131,10 @@ class _BackgroundLogFile:
 
 
 @dataclass
-class _LogSinkRef:
+class LogSinkRef:
     """Mutable indirection letting stream readers attach to a lazily opened log file."""
 
-    sink: _BackgroundLogFile | None = None
+    sink: BackgroundLogFile | None = None
 
 
 _local_records_closer: Callable[[dict[str, ProcessRecord]], Coroutine[object, object, None]] | None = None
@@ -297,14 +301,14 @@ def _open_log_dir_fd(log_dir: Path) -> int:
     )
     root.mkdir(parents=True, exist_ok=True)
     current_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
-    for part in parts:
+    for idx, part in enumerate(parts):
         try:
             with contextlib.suppress(FileExistsError):
                 os.mkdir(part, 0o700, dir_fd=current_fd)
             next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current_fd)
         finally:
             os.close(current_fd)
-        if os.fstat(next_fd).st_uid != os.geteuid():
+        if idx == len(parts) - 1 and os.fstat(next_fd).st_uid != os.geteuid():
             os.close(next_fd)
             msg = f"Shell log directory is not owned by the current user: {log_dir}"
             raise PermissionError(msg)
@@ -323,7 +327,7 @@ def _sweep_old_log_files(dir_fd: int, *, active_names: set[str]) -> None:
     except OSError:
         return
     for name in names:
-        if not name.endswith(".log"):
+        if not _BACKGROUND_LOG_NAME_RE.match(name):
             continue
         try:
             st = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
@@ -349,13 +353,14 @@ def _sweep_old_log_files(dir_fd: int, *, active_names: set[str]) -> None:
             os.unlink(old_name, dir_fd=dir_fd)
 
 
-def _open_background_log(
+def open_background_log(
     policy: BackgroundLogPolicy,
     *,
     pid: int,
     handle: str,
     active_paths: set[str],
-) -> _BackgroundLogFile:
+) -> BackgroundLogFile:
+    """Create a private log file for one auto-backgrounded process and sweep expired generated logs."""
     log_dir = Path(policy.log_dir)
     filename = f"{pid}-{handle.removeprefix('shell:')}.log"
     log_path = log_dir / filename
@@ -372,14 +377,15 @@ def _open_background_log(
         _sweep_old_log_files(dir_fd, active_names=active_names)
     finally:
         os.close(dir_fd)
-    return _BackgroundLogFile(path=log_path, file=stream, max_bytes=policy.max_bytes)
+    return BackgroundLogFile(path=log_path, file=stream, max_bytes=policy.max_bytes)
 
 
-def _seed_background_log(
-    log_file: _BackgroundLogFile,
+def seed_background_log(
+    log_file: BackgroundLogFile,
     stdout_buf: _LogOutputBuffer,
     stderr_buf: _LogOutputBuffer,
 ) -> None:
+    """Write buffered foreground stdout and stderr into a newly opened background log file."""
     prev_ended_newline = True
     for buf, stream in ((stdout_buf, ""), (stderr_buf, "stderr")):
         raw = "".join(buf.chunks)
@@ -392,7 +398,7 @@ def _seed_background_log(
         prev_ended_newline = raw.endswith("\n")
 
 
-def _format_auto_background_message(
+def format_auto_background_message(
     *,
     pid: int,
     timeout: float,
@@ -404,6 +410,7 @@ def _format_auto_background_message(
     stderr_buf: _LogOutputBuffer,
     tail: int,
 ) -> str:
+    """Format the tool response returned when a shell command moves to the background."""
     shown = str(log_path)
     if display_root is not None:
         with contextlib.suppress(ValueError):
@@ -430,12 +437,13 @@ def _format_auto_background_message(
     return "\n".join(lines)
 
 
-def _format_log_trailer(
+def format_log_trailer(
     return_code: int | None,
     *,
     stop_reason: StopReason | None,
     max_runtime_seconds: float | None,
 ) -> str:
+    """Return the final status line appended when a backgrounded process stops or exits."""
     if stop_reason == "scope_ended":
         return "\n[MindRoom: stopped when turn ended]\n"
     if stop_reason == "stopped":

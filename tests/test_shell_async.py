@@ -10,6 +10,7 @@ import signal
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -1311,36 +1312,57 @@ def test_shell_request_budget_caps_auto_background_wait() -> None:
     assert shell_request_budget_seconds("shell", "run_shell_command", {}, auto_background=True) == 150.0
 
 
-@pytest.mark.asyncio
-async def test_background_log_ownership_sweep_protection_and_kill_all_trailer(
+def test_background_log_dir_ownership_checks_leaf_only(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Log dir checks uid ownership, sweep protects recent logs from the 64-file cap, and kill_all writes a trailer."""
+    """A foreign-owned .mindroom parent is allowed when the leaf log directory is owned by the current user."""
     from mindroom.shell import background_scope as bg_module  # noqa: PLC0415
-    from mindroom.shell.execution import kill_all_records  # noqa: PLC0415
 
-    # Ownership mismatch is rejected.
+    mounted_ws = tmp_path / "mounted"
+    parent_mindroom = mounted_ws / ".mindroom"
+    leaf_shell = parent_mindroom / "shell"
+    leaf_shell.mkdir(parents=True)
+    parent_ino = parent_mindroom.stat().st_ino
+    real_fstat = os.fstat
+
+    def fake_fstat(fd: int) -> object:
+        st = real_fstat(fd)
+        return SimpleNamespace(st_uid=os.geteuid() + 1) if st.st_ino == parent_ino else st
+
+    monkeypatch.setattr(os, "fstat", fake_fstat)
+    opened_fd = bg_module._open_log_dir_fd(leaf_shell)
+    os.close(opened_fd)
+    monkeypatch.undo()
+
     owned_dir = tmp_path / "foreign"
     owned_dir.mkdir()
     monkeypatch.setattr(os, "geteuid", lambda: owned_dir.stat().st_uid + 1)
     with pytest.raises(PermissionError, match="not owned by the current user"):
         bg_module._open_log_dir_fd(owned_dir)
-    monkeypatch.undo()
 
-    # Sweep via dir_fd expires >24h logs, evicts old (>5m) logs past cap, and protects recent (<5m) logs.
+
+@pytest.mark.asyncio
+async def test_background_log_sweep_filters_generated_names_and_kill_all_trailer(tmp_path: Path) -> None:
+    """Sweep only touches generated <pid>-<hex>.log names, protects recent logs, and kill_all writes a trailer."""
+    from mindroom.shell import background_scope as bg_module  # noqa: PLC0415
+    from mindroom.shell.execution import kill_all_records  # noqa: PLC0415
+
     log_dir = tmp_path / "sweep"
     log_dir.mkdir()
     now = time.time()
-    expired = log_dir / "expired.log"
+    expired = log_dir / "1001-deadbeef.log"
     expired.write_text("old", encoding="utf-8")
     os.utime(expired, (now - 25 * 3600, now - 25 * 3600))
-    old_evict = log_dir / "old-evict.log"
+    old_evict = log_dir / "1002-cafebabe.log"
     old_evict.write_text("evict", encoding="utf-8")
     os.utime(old_evict, (now - 600, now - 600))
+    unrelated = log_dir / "build.log"
+    unrelated.write_text("keep", encoding="utf-8")
+    os.utime(unrelated, (now - 25 * 3600, now - 25 * 3600))
     recent_files = []
     for idx in range(bg_module._LOG_MAX_FILES + 2):
-        recent = log_dir / f"recent-{idx}.log"
+        recent = log_dir / f"{2000 + idx}-{idx:08x}.log"
         recent.write_text("live", encoding="utf-8")
         recent_files.append(recent)
     dir_fd = bg_module._open_log_dir_fd(log_dir)
@@ -1350,6 +1372,7 @@ async def test_background_log_ownership_sweep_protection_and_kill_all_trailer(
         os.close(dir_fd)
     assert not expired.exists()
     assert not old_evict.exists()
+    assert unrelated.exists()
     assert all(path.exists() for path in recent_files)
 
     # kill_all_records writes a stop trailer to active auto-backgrounded logs.

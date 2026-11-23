@@ -204,7 +204,7 @@ Each Bash command starts a fresh shell: workspace files persist, but shell varia
 By default a minimal-mode Bash command (including in a minimal subagent) waits at most 120 seconds in the foreground: values of `timeout` <= 120 stop the command inline with its output so far, while an omitted `timeout` or value > 120 moves the command to the background after 120 seconds with a live `.mindroom/shell/` log and stops it automatically when `timeout` expires or when the turn ends.
 To keep work running past the end of the turn, start it detached (`nohup cmd > out.log 2>&1 &`) and read its log in later commands.
 Shell commands can run in parallel, and each keeps its own calls and media.
-A command can submit new `mindroom-agent` calls only while its Bash call is running or its earlier calls are finishing; once a Bash command is backgrounded and its call returns, it cannot make new `mindroom-agent` CLI calls after handoff (later submissions are rejected rather than queued).
+A command can submit new `mindroom-agent` calls only while its Bash call is running or its earlier calls are finishing; when a Bash command moves to the background, any already-admitted `mindroom-agent` calls still settle before the Bash call returns, and no new CLI calls are admitted after handoff (later submissions are rejected rather than queued).
 A command's `timeout` stops the command, not the calls it started: its Bash call returns once they finish, including a call that waits for an approval.
 `calls wait` on earlier receipts works until the response and its background jobs end.
 

@@ -29,18 +29,18 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.shell.background_scope import (
+    BackgroundLogFile,
     BackgroundLogPolicy,
+    LogSinkRef,
     ShellBackgroundScope,
     StopReason,
-    _BackgroundLogFile,
-    _format_auto_background_message,
-    _format_log_trailer,
-    _LogSinkRef,
-    _open_background_log,
-    _seed_background_log,
     bind_shell_background_scope,  # noqa: F401
     current_shell_background_scope,
+    format_auto_background_message,
+    format_log_trailer,
+    open_background_log,
     register_local_records_closer,
+    seed_background_log,
     shell_background_scope,  # noqa: F401
 )
 from mindroom.shell.output_capture import (
@@ -192,7 +192,7 @@ class ProcessRecord:
     output_receipt: str | None = None
     log_path: str | None = None
     max_runtime_seconds: float | None = None
-    _log_file: _BackgroundLogFile | None = field(default=None, repr=False)
+    _log_file: BackgroundLogFile | None = field(default=None, repr=False)
     _stop_reason: StopReason | None = field(default=None, repr=False)
     _monitor_task: asyncio.Task[None] | None = field(default=None, repr=False)
 
@@ -635,7 +635,7 @@ async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
 
     stdout_buf = _OutputBuffer()
     stderr_buf = _OutputBuffer()
-    log_sink = _LogSinkRef() if background_log is not None else None
+    log_sink = LogSinkRef() if background_log is not None else None
     stdout_reader = asyncio.create_task(
         _read_stream(process.stdout, stdout_buf, capture.stdout if capture else None, log_sink),
     )
@@ -810,10 +810,10 @@ def _prepare_background_log(
     registry: dict[str, ProcessRecord],
     stdout_buf: _OutputBuffer,
     stderr_buf: _OutputBuffer,
-    log_sink: _LogSinkRef | None,
+    log_sink: LogSinkRef | None,
     output_capture: ShellOutputCapture | None,
-) -> tuple[_BackgroundLogFile | None, ShellOutputCapture | None, str | None, str | None]:
-    log_file: _BackgroundLogFile | None = None
+) -> tuple[BackgroundLogFile | None, ShellOutputCapture | None, str | None, str | None]:
+    log_file: BackgroundLogFile | None = None
     active_paths = {
         record.log_path
         for record in registry.values()
@@ -821,8 +821,8 @@ def _prepare_background_log(
         and (not record.finished or (record._log_file is not None and not record._log_file.closed))
     }
     try:
-        log_file = _open_background_log(policy, pid=pid, handle=handle, active_paths=active_paths)
-        _seed_background_log(log_file, stdout_buf, stderr_buf)
+        log_file = open_background_log(policy, pid=pid, handle=handle, active_paths=active_paths)
+        seed_background_log(log_file, stdout_buf, stderr_buf)
     except OSError as exc:
         if log_file is not None:
             log_file.finish()
@@ -855,12 +855,12 @@ async def _background_process(
     started_at: float,
     max_runtime_seconds: float | None = None,
     background_log: BackgroundLogPolicy | None = None,
-    log_sink: _LogSinkRef | None = None,
+    log_sink: LogSinkRef | None = None,
 ) -> ShellRunResult:
     had_capture = output_capture is not None
     active_scope = current_shell_background_scope()
     handle = requested_handle or _unused_handle(registry)
-    log_file: _BackgroundLogFile | None = None
+    log_file: BackgroundLogFile | None = None
     record_capture, output_path_notice = output_capture, None
     rejection = _background_rejection(registry, namespace=namespace, handle=handle, active_scope=active_scope)
     if rejection is None and background_log is not None:
@@ -916,7 +916,7 @@ async def _background_process(
         discard_background_record(registry, handle)
         return ShellRunResult(message="Error: Shell turn already ended.", output_file_handled=had_capture)
     message = (
-        _format_auto_background_message(
+        format_auto_background_message(
             pid=process.pid,
             timeout=timeout,
             log_path=log_file.path,
@@ -1067,7 +1067,7 @@ def _kill_record(
     if record._log_file is not None and not record._log_file.closed:
         if stop_reason is not None and was_running:
             record._log_file.finish(
-                _format_log_trailer(
+                format_log_trailer(
                     record.process.returncode,
                     stop_reason=record._stop_reason,
                     max_runtime_seconds=record.max_runtime_seconds,
@@ -1095,7 +1095,7 @@ async def _read_stream(
     stream: asyncio.StreamReader | None,
     buf: _OutputBuffer,
     capture: CapturedShellStream | None = None,
-    log_sink: _LogSinkRef | None = None,
+    log_sink: LogSinkRef | None = None,
 ) -> None:
     """Read bounded chunks from an async stream into *buf* until EOF."""
     if stream is None:
@@ -1424,7 +1424,7 @@ async def _monitor_process(
         finally:
             if log_file is not None and not log_file.closed:
                 log_file.finish(
-                    _format_log_trailer(
+                    format_log_trailer(
                         process.returncode,
                         stop_reason=tracked._stop_reason if tracked is not None else None,
                         max_runtime_seconds=tracked.max_runtime_seconds if tracked is not None else None,

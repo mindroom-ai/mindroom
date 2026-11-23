@@ -56,6 +56,7 @@ from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.types import ConversationSession
+from mindroom.shell.background_scope import ShellBackgroundScope, bind_shell_background_scope
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agent_tools import room_turn_offers
 from mindroom.tool_system.invocation import CallResult, ToolCallContext, client_tool_result, run_tool_call
@@ -639,6 +640,7 @@ async def build_call_tools(
     # The call is one run for its tools, which share its session state the way one chat turn's tools do.
     call_context = ToolCallContext(run_id=f"{session_id}:voice", session_id=session_id, user_id=requester_id)
     connections = _CallConnections()
+    shell_scope = ShellBackgroundScope()
     middleware = agent_tool_middleware(build)
     tools: list[RawFunctionTool] = []
     for toolkit in build.spec.toolkits:
@@ -656,6 +658,7 @@ async def build_call_tools(
                     agent_name=agent_name,
                     authorize_operation=authorize_operation,
                     usage_owner=usage_owner,
+                    shell_scope=shell_scope,
                     connect=functools.partial(connections.connect, toolkit),
                 ),
             )
@@ -665,7 +668,7 @@ async def build_call_tools(
         tools=tuple(tools),
         instructions=_call_instructions(build, room_enrichment),
         execution_identity=execution_identity,
-        close=connections.close,
+        close=functools.partial(_close_call_tooling, shell_scope, connections),
     )
 
 
@@ -697,6 +700,23 @@ class _CallConnections:
         async with self._lock:
             self._closed = True
             await close_toolkits(self._closes)
+
+
+async def _close_call_tooling(shell_scope: ShellBackgroundScope, connections: _CallConnections) -> None:
+    """Stop any backgrounded shell processes and close connected toolkits for one realtime call."""
+    try:
+        close_task = asyncio.create_task(shell_scope.close())
+        cancelled: asyncio.CancelledError | None = None
+        while not close_task.done():
+            try:
+                await asyncio.shield(close_task)
+            except asyncio.CancelledError as exc:
+                cancelled = exc
+        await close_task
+        if cancelled is not None:
+            raise cancelled
+    finally:
+        await connections.close()
 
 
 async def _run_call_agent(
@@ -1032,6 +1052,7 @@ def _wrap_tool_function(
     agent_name: str,
     authorize_operation: _CallAuthorizationGuard,
     usage_owner: HelperUsageOwner,
+    shell_scope: ShellBackgroundScope,
     connect: Callable[[], Awaitable[None]],
 ) -> RawFunctionTool:
     """Wrap one of the build's functions as a livekit raw function tool that runs under the build's policy.
@@ -1053,7 +1074,11 @@ def _wrap_tool_function(
             logger.info("call_tool_executing", tool=function.name, agent=agent_name, room_id=context.room_id)
             try:
                 await connect()
-                with tool_runtime_context(context), helper_usage_owner_context(usage_owner):
+                with (
+                    tool_runtime_context(context),
+                    helper_usage_owner_context(usage_owner),
+                    bind_shell_background_scope(shell_scope),
+                ):
                     result = await run_tool_call(function, raw_arguments, call_context, middleware=middleware)
             except Exception as error:
                 result = CallResult("failed", error=error)
