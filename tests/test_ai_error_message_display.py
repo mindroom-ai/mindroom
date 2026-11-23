@@ -11,14 +11,17 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
+from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.final_delivery import Cancelled
 from mindroom.history.types import HistoryScope
 from mindroom.knowledge.utils import _KnowledgeResolution
+from mindroom.llm.errors import RateLimited
 from mindroom.llm.provider import TextDelta
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
@@ -396,3 +399,29 @@ class TestAIErrorDisplay:
         assert outcome.event_id == "$response_id"
         assert mock_ai.call_args.args[0].knowledge is None
         bot.logger.exception.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_failed_streaming_turn_logs_one_error_with_warning_traceback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failed streaming turn logs exactly one ERROR (agent_error) plus the traceback at WARNING."""
+        bot = _mock_bot()
+        unique_room_send_responses(bot.client)
+        model = ScriptedModel([[RateLimited("rate limited", provider="OpenRouter")]])
+        install_model_providers(monkeypatch, {"default": model})
+        _build_response_runner(bot)
+
+        with capture_logs() as logs:
+            await _respond(bot, _response_request(), streaming=True)
+
+        error_logs = [entry for entry in logs if entry["log_level"] == "error"]
+        assert [entry["event"] for entry in error_logs] == ["agent_error"]
+        stream_warnings = [entry for entry in logs if entry["event"] == "Error during streaming AI response"]
+        assert len(stream_warnings) == 1
+        assert stream_warnings[0]["log_level"] == "warning"
+        assert stream_warnings[0].get("exc_info") is True
+
+        with capture_logs() as non_streaming_logs:
+            get_user_friendly_error_message(RuntimeError("boom"), "test_agent")
+        assert [entry["event"] for entry in non_streaming_logs if entry["log_level"] == "error"] == ["agent_error"]

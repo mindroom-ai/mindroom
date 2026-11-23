@@ -1315,7 +1315,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912
     except ResponsePausedForApproval:
         raise
     except Exception as e:
-        logger.exception("Error during streaming AI response")
+        logger.warning("Error during streaming AI response", exc_info=True)
         state.error = e
 
 
