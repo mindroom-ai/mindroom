@@ -2697,6 +2697,27 @@ from = ["mindroom.workflow_runs.answers"]
 expose = ["answer_command", "answer_question", "handle_workflow_answer"]
 
 [[modules]]
+path = "mindroom.workflow_runs.saved"
+depends_on = [
+    "mindroom.atomic_file",
+    "mindroom.path_confinement",
+    "mindroom.script_runs.launch_contract",
+]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.saved"]
+expose = [
+    "SAVED_WORKFLOW_NAME_RE",
+    "SavedWorkflow",
+    "SavedWorkflowExistsError",
+    "WORKFLOWS_DIR",
+    "list_saved",
+    "read_saved_source",
+    "save_source",
+    "validate_workflow_name",
+]
+
+[[modules]]
 path = "mindroom.workflow_runs.view"
 depends_on = [
     "mindroom.live_frames.workflow",
