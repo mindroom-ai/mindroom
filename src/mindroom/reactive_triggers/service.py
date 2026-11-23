@@ -50,6 +50,9 @@ _POLL_INTERVAL_SECONDS = 5.0
 _PRUNE_INTERVAL_SECONDS = 3600.0
 _RESTORE_RETRY_DELAY_SECONDS = 30.0
 _READ_TIMEOUT_SECONDS = 60.0
+_UNFINISHED_WAIT_SECONDS = 300.0
+_REFETCH_WAIT_SECONDS = 600.0
+_ROOM_MEMBER_CACHE_TTL_SECONDS = 30.0
 _MAX_MESSAGES_PER_POLL = 50
 _MAX_FIRINGS_PER_DRAIN = 50
 
@@ -66,28 +69,23 @@ def _is_rule_expired(rule: ReactiveTriggerRecord, now: float) -> bool:
     return rule.expires_at is not None and now >= rule.expires_at
 
 
-def _initial_room_cursor(latest: ConversationCursor | None, now: float) -> RoomCursor:
-    """Build the initial cursor for a room_message rule without replaying prior history."""
-    started = RoomCursor(created_ts=int(now * 1000), logical_event_id="")
-    if latest is None or latest.created_ts > started.created_ts:
-        return started
-    latest_cursor = RoomCursor(created_ts=latest.created_ts, logical_event_id=latest.logical_event_id)
-    if (latest_cursor.created_ts, latest_cursor.logical_event_id) >= (started.created_ts, started.logical_event_id):
-        return latest_cursor
-    return started
+def _joined_members_from_snapshot(room_state: RoomStateSnapshot) -> frozenset[str]:
+    """Extract currently joined Matrix user IDs from an authoritative room state snapshot."""
+    return frozenset(
+        state_key
+        for (event_type, state_key), content in room_state.events.items()
+        if event_type == "m.room.member" and content.get("membership") == "join"
+    )
 
 
-def _owner_joined_in_snapshot(
-    room_state: RoomStateSnapshot,
+def _owner_joined_in_members(
+    joined_members: frozenset[str],
     owner_user_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> bool:
-    """Return whether the rule owner (or an equivalent human alias) is joined in the room state snapshot."""
-    return any(
-        room_state.events.get(("m.room.member", user_id), {}).get("membership") == "join"
-        for user_id in equivalent_requester_ids(owner_user_id, config, runtime_paths)
-    )
+    """Return whether the rule owner (or an equivalent human alias) is in the joined member set."""
+    return any(user_id in joined_members for user_id in equivalent_requester_ids(owner_user_id, config, runtime_paths))
 
 
 def _extract_thread_tag_observation(
@@ -160,6 +158,10 @@ class ReactiveTriggerService:
         self._restore_retries: dict[str, asyncio.Task[None]] = {}
         self._live_during_restore: dict[str, set[tuple[str, str]]] = {}
 
+        self._unfinished_waits: dict[str, tuple[str, float]] = {}
+        self._refetch_waits: dict[str, tuple[str, float]] = {}
+        self._room_member_cache: dict[str, tuple[frozenset[str], float]] = {}
+
         self._in_flight_firing_ids: set[int] = set()
         self._in_flight_trigger_ids: set[str] = set()
 
@@ -172,6 +174,7 @@ class ReactiveTriggerService:
         """Start or stop the background loop to match the active reactive trigger policy."""
         if self._store is not None and _reactive_enabled(config):
             self.start()
+            await self._reconcile_unrestored_thread_tag_rooms()
             self.notify_work()
         else:
             await self.stop()
@@ -183,13 +186,17 @@ class ReactiveTriggerService:
         self._loop.start()
 
     async def stop(self) -> None:
-        """Stop the background loop and cancel any pending room restore retries."""
+        """Stop the background loop, cancel restore retries, and reset transient wait/restore caches."""
         retries = list(self._restore_retries.values())
         self._restore_retries.clear()
         for retry in retries:
             retry.cancel()
         await asyncio.gather(*retries, return_exceptions=True)
         await self._loop.stop()
+        self._restored_rooms.clear()
+        self._refetch_waits.clear()
+        self._unfinished_waits.clear()
+        self._room_member_cache.clear()
 
     def notify_work(self) -> None:
         """Wake the delivery loop immediately when new reactive trigger work is enqueued."""
@@ -205,6 +212,35 @@ class ReactiveTriggerService:
                 running_loop.call_soon_threadsafe(self._wake_event.set)
             return
         self._wake_event.set()
+
+    async def _reconcile_unrestored_thread_tag_rooms(self) -> None:
+        """Reconcile joined rooms with enabled thread_tag rules that are not yet marked restored."""
+        if self._store is None:
+            return
+        try:
+            now = time.time()
+            rules = await asyncio.to_thread(
+                self._store.list_triggers,
+                include_disabled=False,
+                source_type="thread_tag",
+            )
+            room_ids = sorted(
+                {
+                    rule.source.room_id
+                    for rule in rules
+                    if isinstance(rule.source, ThreadTagSourceSpec)
+                    and not _is_rule_expired(rule, now)
+                    and rule.source.room_id not in self._restored_rooms
+                },
+            )
+            for room_id in room_ids:
+                bot = self._pick_bot_for_room(room_id)
+                if bot is not None:
+                    await self.restore_room(bot, room_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Reactive trigger thread_tag sync reconciliation failed")
 
     async def _run(self) -> None:
         """Poll room messages on a fixed cadence, drain due firings immediately on wakeup, and prune hourly."""
@@ -531,6 +567,30 @@ class ReactiveTriggerService:
         joined = next(self._joined_bots(room_id), None)
         return joined[0] if joined is not None else None
 
+    async def _get_room_joined_members(
+        self,
+        client: nio.AsyncClient,
+        room_id: str,
+        poll_failed_rooms: set[str],
+    ) -> frozenset[str] | None:
+        """Return joined member IDs for room_id using a short-TTL cache, failing closed on unreadable state."""
+        if room_id in poll_failed_rooms:
+            return None
+        now_mono = time.monotonic()
+        cached = self._room_member_cache.get(room_id)
+        if cached is not None and now_mono - cached[1] < _ROOM_MEMBER_CACHE_TTL_SECONDS:
+            return cached[0]
+
+        room_state = await read_room_state(client, room_id)
+        if room_state is None:
+            self._room_member_cache.pop(room_id, None)
+            poll_failed_rooms.add(room_id)
+            return None
+
+        members = _joined_members_from_snapshot(room_state)
+        self._room_member_cache[room_id] = (members, time.monotonic())
+        return members
+
     async def poll_room_messages_once(self) -> None:
         """Poll visible messages for all enabled room_message rules, doing zero journal reads when none exist."""
         if self._store is None:
@@ -559,7 +619,7 @@ class ReactiveTriggerService:
             rules_by_room.setdefault(rule.source.room_id, []).append(rule)
 
         repaired_pairs: set[tuple[str, str]] = set()
-        room_state_cache: dict[str, RoomStateSnapshot | None] = {}
+        poll_failed_rooms: set[str] = set()
 
         for source_room_id, room_rules in rules_by_room.items():
             for rule in room_rules:
@@ -574,7 +634,7 @@ class ReactiveTriggerService:
                         config=config,
                         now=now,
                         repaired_pairs=repaired_pairs,
-                        room_state_cache=room_state_cache,
+                        poll_failed_rooms=poll_failed_rooms,
                     )
                 except asyncio.CancelledError:
                     raise
@@ -594,7 +654,7 @@ class ReactiveTriggerService:
         config: Config,
         now: float,
         repaired_pairs: set[tuple[str, str]],
-        room_state_cache: dict[str, RoomStateSnapshot | None],
+        poll_failed_rooms: set[str],
     ) -> None:
         """Poll one room_message rule from its durable cursor, enqueue matches, and advance its cursor."""
         assert self._store is not None
@@ -604,14 +664,8 @@ class ReactiveTriggerService:
         reader = bot.conversation_reader
         cursor = await asyncio.to_thread(self._store.get_room_cursor, rule.trigger_id)
         if cursor is None:
-            async with asyncio.timeout(_READ_TIMEOUT_SECONDS):
-                latest = await reader.latest_room_cursor(source_room_id)
-            await asyncio.to_thread(
-                self._store.advance_room_cursor,
-                rule.trigger_id,
-                _initial_room_cursor(latest, now),
-            )
-            return
+            cursor = RoomCursor(created_ts=int(rule.created_at * 1000), logical_event_id="")
+            await asyncio.to_thread(self._store.advance_room_cursor, rule.trigger_id, cursor)
 
         repair_key = (bot.agent_name, source_room_id)
         if repair_key not in repaired_pairs:
@@ -629,14 +683,23 @@ class ReactiveTriggerService:
                 async with asyncio.timeout(_READ_TIMEOUT_SECONDS):
                     await reader.hydrator.resolve_refreshes(page.refresh_pending)
 
+        if await self._handle_stuck_refetch(
+            rule=rule,
+            bot=bot,
+            source_room_id=source_room_id,
+            after=after,
+            now_ms=now_ms,
+            last_cursor=page.last_cursor,
+            stopped_at=page.stopped_at,
+        ):
+            return
+
         messages = projected_visible_messages(page)[:_MAX_MESSAGES_PER_POLL]
         if not messages:
             return
 
         observed_room = bot.client.rooms.get(source_room_id) if isinstance(bot.client.rooms, Mapping) else None
         for msg in messages:
-            if is_unfinished_reply(msg.content):
-                break
             should_continue = await self._process_room_message(
                 rule=rule,
                 bot=bot,
@@ -644,10 +707,72 @@ class ReactiveTriggerService:
                 msg=msg,
                 config=config,
                 observed_room=observed_room,
-                room_state_cache=room_state_cache,
+                poll_failed_rooms=poll_failed_rooms,
             )
             if not should_continue:
                 break
+
+    async def _handle_stuck_refetch(
+        self,
+        *,
+        rule: ReactiveTriggerRecord,
+        bot: AgentBot,
+        source_room_id: str,
+        after: ConversationCursor,
+        now_ms: int,
+        last_cursor: ConversationCursor | None,
+        stopped_at: ConversationCursor | None,
+    ) -> bool:
+        """Track refetch waits and skip a permanently stuck refetch after _REFETCH_WAIT_SECONDS."""
+        assert self._store is not None
+        if stopped_at is None:
+            self._refetch_waits.pop(rule.trigger_id, None)
+            return False
+
+        now_mono = time.monotonic()
+        wait = self._refetch_waits.get(rule.trigger_id)
+        if wait is None or wait[0] != stopped_at.logical_event_id:
+            self._refetch_waits[rule.trigger_id] = (stopped_at.logical_event_id, now_mono)
+            waited = 0.0
+        else:
+            waited = now_mono - wait[1]
+
+        if last_cursor is not None or waited < _REFETCH_WAIT_SECONDS:
+            return False
+
+        async with asyncio.timeout(_READ_TIMEOUT_SECONDS):
+            retried = await bot.conversation_reader.read_room_after(source_room_id, after, 1, now_ms)
+        if retried.last_cursor is None and retried.stopped_at == stopped_at:
+            self._refetch_waits.pop(rule.trigger_id, None)
+            logger.warning(
+                "reactive_trigger_refetch_skipped",
+                trigger_id=rule.trigger_id,
+                room_id=source_room_id,
+                event_id=stopped_at.logical_event_id,
+            )
+            await asyncio.to_thread(
+                self._store.advance_room_cursor,
+                rule.trigger_id,
+                RoomCursor(created_ts=stopped_at.created_ts, logical_event_id=stopped_at.logical_event_id),
+            )
+        return True
+
+    def _should_hold_unfinished_reply(self, trigger_id: str, msg: ResolvedVisibleMessage) -> bool:
+        """Hold on an eligible unfinished reply until _UNFINISHED_WAIT_SECONDS elapses, then proceed."""
+        if not is_unfinished_reply(msg.content):
+            self._unfinished_waits.pop(trigger_id, None)
+            return False
+
+        now_mono = time.monotonic()
+        wait = self._unfinished_waits.get(trigger_id)
+        if wait is None or wait[0] != msg.event_id:
+            self._unfinished_waits[trigger_id] = (msg.event_id, now_mono)
+            return True
+        if now_mono - wait[1] < _UNFINISHED_WAIT_SECONDS:
+            return True
+
+        self._unfinished_waits.pop(trigger_id, None)
+        return False
 
     async def _process_room_message(
         self,
@@ -658,7 +783,7 @@ class ReactiveTriggerService:
         msg: ResolvedVisibleMessage,
         config: Config,
         observed_room: nio.MatrixRoom | None,
-        room_state_cache: dict[str, RoomStateSnapshot | None],
+        poll_failed_rooms: set[str],
     ) -> bool:
         """Evaluate one visible room message for one rule and return whether polling should continue."""
         assert self._store is not None
@@ -672,14 +797,16 @@ class ReactiveTriggerService:
             msg=msg,
             config=config,
             observed_room=observed_room,
-            room_state_cache=room_state_cache,
+            poll_failed_rooms=poll_failed_rooms,
         )
         if decision == "hold":
             return False
         if decision == "skip":
+            self._unfinished_waits.pop(rule.trigger_id, None)
             await asyncio.to_thread(self._store.advance_room_cursor, rule.trigger_id, msg_cursor)
             return True
 
+        self._unfinished_waits.pop(rule.trigger_id, None)
         event = TriggerEvent(
             source_type="room_message",
             source_id=source_room_id,
@@ -720,9 +847,9 @@ class ReactiveTriggerService:
         msg: ResolvedVisibleMessage,
         config: Config,
         observed_room: nio.MatrixRoom | None,
-        room_state_cache: dict[str, RoomStateSnapshot | None],
+        poll_failed_rooms: set[str],
     ) -> _MessageDecision:
-        """Check loop guard, bot filter, owner membership, and sender reply authorization."""
+        """Check loop guard, bot filter, owner membership, sender authorization, and bounded unfinished wait."""
         assert isinstance(rule.source, RoomMessageSourceSpec)
         assert bot.client is not None
 
@@ -739,12 +866,10 @@ class ReactiveTriggerService:
         ):
             return "skip"
 
-        if source_room_id not in room_state_cache:
-            room_state_cache[source_room_id] = await read_room_state(bot.client, source_room_id)
-        room_state = room_state_cache[source_room_id]
-        if room_state is None:
+        joined_members = await self._get_room_joined_members(bot.client, source_room_id, poll_failed_rooms)
+        if joined_members is None:
             return "hold"
-        if not _owner_joined_in_snapshot(room_state, rule.owner_user_id, config, self.runtime_paths):
+        if not _owner_joined_in_members(joined_members, rule.owner_user_id, config, self.runtime_paths):
             return "skip"
 
         requester_id = self._classify_message_requester(bot, source_room_id, msg)
@@ -761,7 +886,9 @@ class ReactiveTriggerService:
             )
         except ReplyMembershipPendingError:
             return "hold"
-        return "allow" if sender_allowed else "skip"
+        if not sender_allowed:
+            return "skip"
+        return "hold" if self._should_hold_unfinished_reply(rule.trigger_id, msg) else "allow"
 
     @staticmethod
     def _classify_message_requester(

@@ -47,7 +47,13 @@ from mindroom.reactive_triggers import (
     TriggerEvent,
     TriggerTargetSpec,
 )
-from mindroom.reactive_triggers.service import _MAX_MESSAGES_PER_POLL, ReactiveTriggerService
+from mindroom.reactive_triggers.service import (
+    _MAX_MESSAGES_PER_POLL,
+    _REFETCH_WAIT_SECONDS,
+    _ROOM_MEMBER_CACHE_TTL_SECONDS,
+    _UNFINISHED_WAIT_SECONDS,
+    ReactiveTriggerService,
+)
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -906,7 +912,8 @@ async def test_room_message_poll_enforces_owner_and_sender_auth_and_transient_ho
     assert [f.dedupe_key for f in store.list_due_firings()] == ["$m_ok"]
     assert store.get_room_cursor("tr_auth") == RoomCursor(created_ts=20_100, logical_event_id="$m_ok")
 
-    # 4. Owner left source room -> message skipped and cursor advances
+    # 4. Owner left source room (after member cache expires) -> message skipped and cursor advances
+    service._room_member_cache.clear()
     reader.pages.append(
         RoomPage(
             messages=(_visible_message("$m_after_leave", sender=_OTHER, body="after leave", created_ts=20_200),),
@@ -924,11 +931,23 @@ async def test_room_message_poll_enforces_owner_and_sender_auth_and_transient_ho
 
 
 @pytest.mark.asyncio
-async def test_room_message_poll_initializes_missing_cursor_without_replaying_history(tmp_path: Path) -> None:
-    """A room_message rule without a persisted cursor initializes to head and does not replay history."""
+async def test_room_message_poll_initializes_missing_cursor_from_rule_created_at(tmp_path: Path) -> None:
+    """Missing cursor initializes from rule.created_at so messages since creation are caught without replaying history."""
     config, runtime_paths = _make_config(tmp_path)
     store = ReactiveTriggerStore(runtime_paths)
-    reader = _FakeConversationReader(latest_cursor=ConversationCursor(created_ts=50_000, logical_event_id="$head"))
+    created_at = 50.0
+    msg_after_create = _visible_message("$m_since_create", body="arrived right after create", created_ts=50_500)
+    reader = _FakeConversationReader(
+        pages=[
+            RoomPage(
+                messages=(msg_after_create,),
+                refresh_pending=(),
+                more=False,
+                last_cursor=ConversationCursor(created_ts=50_500, logical_event_id="$m_since_create"),
+                stopped_at=None,
+            ),
+        ],
+    )
     bot = _make_fake_bot(reader=reader)
     service = ReactiveTriggerService(
         runtime_paths=runtime_paths,
@@ -938,13 +957,18 @@ async def test_room_message_poll_initializes_missing_cursor_without_replaying_hi
         store=store,
     )
 
-    store.create_trigger(_room_message_rule("tr_no_cursor"))
+    rule = _room_message_rule("tr_no_cursor").model_copy(update={"created_at": created_at, "updated_at": created_at})
+    store.create_trigger(rule)
     assert store.get_room_cursor("tr_no_cursor") is None
 
-    await service.poll_room_messages_once()
-    assert reader.read_calls == []
-    assert store.get_room_cursor("tr_no_cursor") is not None
-    assert store.list_due_firings() == []
+    snapshot = _room_state_snapshot(_ROOM_A, [_OWNER, _OTHER])
+    with patch("mindroom.reactive_triggers.service.read_room_state", new=AsyncMock(return_value=snapshot)):
+        await service.poll_room_messages_once()
+
+    assert len(reader.read_calls) == 1
+    assert reader.read_calls[0][1] == ConversationCursor(created_ts=50_000, logical_event_id="")
+    assert [f.dedupe_key for f in store.list_due_firings()] == ["$m_since_create"]
+    assert store.get_room_cursor("tr_no_cursor") == RoomCursor(created_ts=50_500, logical_event_id="$m_since_create")
 
 
 @pytest.mark.asyncio
@@ -1247,3 +1271,336 @@ async def test_prune_old_firings_delegates_to_store(tmp_path: Path) -> None:
     deleted = await service._prune_old_firings()
     assert deleted == 1
     assert store.get_firing(1) is None
+
+
+@pytest.mark.asyncio
+async def test_unfinished_bot_reply_does_not_block_include_bots_false_rule(tmp_path: Path) -> None:
+    """An approval-pending/streaming bot reply does not stall an include_bots=False rule."""
+    config, runtime_paths = _make_config(tmp_path, bot_accounts=[_BOT_ACC])
+    store = ReactiveTriggerStore(runtime_paths)
+    reader = _FakeConversationReader(
+        pages=[
+            RoomPage(
+                messages=(
+                    _visible_message(
+                        "$m_bot_streaming",
+                        sender=_BOT_ACC,
+                        body="waiting for approval...",
+                        created_ts=20_000,
+                        content_extra={
+                            AGENT_AUTHORED_KEY: True,
+                            STREAM_STATUS_KEY: STREAM_STATUS_STREAMING,
+                        },
+                    ),
+                    _visible_message("$m_human_after", sender=_OTHER, body="important update", created_ts=20_100),
+                ),
+                refresh_pending=(),
+                more=False,
+                last_cursor=ConversationCursor(created_ts=20_100, logical_event_id="$m_human_after"),
+                stopped_at=None,
+            ),
+        ],
+    )
+    bot = _make_fake_bot(reader=reader)
+    service = ReactiveTriggerService(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: config,
+        bots=lambda: {"research": bot},
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+
+    store.create_trigger(
+        _room_message_rule("tr_human_only", include_bots=False),
+        initial_cursor=RoomCursor(created_ts=10_000, logical_event_id="$init"),
+    )
+
+    snapshot = _room_state_snapshot(_ROOM_A, [_OWNER, _OTHER, _BOT_ACC])
+    with patch("mindroom.reactive_triggers.service.read_room_state", new=AsyncMock(return_value=snapshot)):
+        await service.poll_room_messages_once()
+
+    assert [f.dedupe_key for f in store.list_due_firings()] == ["$m_human_after"]
+    assert store.get_room_cursor("tr_human_only") == RoomCursor(created_ts=20_100, logical_event_id="$m_human_after")
+    assert "tr_human_only" not in service._unfinished_waits
+
+
+@pytest.mark.asyncio
+async def test_unfinished_eligible_reply_waits_then_proceeds_after_timeout(tmp_path: Path) -> None:
+    """An eligible unfinished reply waits initially, then proceeds once _UNFINISHED_WAIT_SECONDS elapses."""
+    config, runtime_paths = _make_config(tmp_path)
+    store = ReactiveTriggerStore(runtime_paths)
+
+    stuck_stream_page = RoomPage(
+        messages=(
+            _visible_message(
+                "$m_spoofed_stream",
+                sender=_OTHER,
+                body="still streaming forever",
+                created_ts=20_000,
+                content_extra={STREAM_STATUS_KEY: STREAM_STATUS_STREAMING},
+            ),
+            _visible_message("$m_after_stream", sender=_OTHER, body="next msg", created_ts=20_100),
+        ),
+        refresh_pending=(),
+        more=False,
+        last_cursor=ConversationCursor(created_ts=20_100, logical_event_id="$m_after_stream"),
+        stopped_at=None,
+    )
+    reader = _FakeConversationReader(pages=[stuck_stream_page, stuck_stream_page, stuck_stream_page])
+    bot = _make_fake_bot(reader=reader)
+    service = ReactiveTriggerService(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: config,
+        bots=lambda: {"research": bot},
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+
+    store.create_trigger(
+        _room_message_rule("tr_wait_stream"),
+        initial_cursor=RoomCursor(created_ts=10_000, logical_event_id="$init"),
+    )
+
+    now_mono = [1_000.0]
+    snapshot = _room_state_snapshot(_ROOM_A, [_OWNER, _OTHER])
+    with (
+        patch("mindroom.reactive_triggers.service.read_room_state", new=AsyncMock(return_value=snapshot)),
+        patch("mindroom.reactive_triggers.service.time.monotonic", side_effect=lambda: now_mono[0]),
+    ):
+        # Poll 1: starts wait, holds before $m_spoofed_stream
+        await service.poll_room_messages_once()
+        assert store.list_due_firings() == []
+        assert store.get_room_cursor("tr_wait_stream") == RoomCursor(created_ts=10_000, logical_event_id="$init")
+        assert service._unfinished_waits["tr_wait_stream"] == ("$m_spoofed_stream", 1_000.0)
+
+        # Poll 2: before timeout expires -> still holds
+        now_mono[0] = 1_000.0 + _UNFINISHED_WAIT_SECONDS - 10.0
+        await service.poll_room_messages_once()
+        assert store.list_due_firings() == []
+        assert store.get_room_cursor("tr_wait_stream") == RoomCursor(created_ts=10_000, logical_event_id="$init")
+
+        # Poll 3: timeout elapsed -> processes $m_spoofed_stream and $m_after_stream and clears wait
+        now_mono[0] = 1_000.0 + _UNFINISHED_WAIT_SECONDS + 1.0
+        await service.poll_room_messages_once()
+
+    assert [f.dedupe_key for f in store.list_due_firings()] == ["$m_spoofed_stream", "$m_after_stream"]
+    assert store.get_room_cursor("tr_wait_stream") == RoomCursor(created_ts=20_100, logical_event_id="$m_after_stream")
+    assert "tr_wait_stream" not in service._unfinished_waits
+
+
+@pytest.mark.asyncio
+async def test_stuck_refetch_waits_then_skips_after_timeout(tmp_path: Path) -> None:
+    """A permanently stuck refetch waits initially, then is skipped after _REFETCH_WAIT_SECONDS."""
+    config, runtime_paths = _make_config(tmp_path)
+    store = ReactiveTriggerStore(runtime_paths)
+
+    stuck_cursor = ConversationCursor(created_ts=20_000, logical_event_id="$stuck_refetch")
+    refresh_req = RefreshRequest(
+        room_id=_ROOM_A,
+        thread_id=None,
+        logical_event_id="$stuck_refetch",
+        revision_event_id="$stuck_refetch",
+        refresh_token=1,
+        membership_epoch=1,
+    )
+    stuck_page = RoomPage(
+        messages=(),
+        refresh_pending=(refresh_req,),
+        more=True,
+        last_cursor=None,
+        stopped_at=stuck_cursor,
+    )
+    after_page = RoomPage(
+        messages=(_visible_message("$m_after_stuck", body="unblocked", created_ts=21_000),),
+        refresh_pending=(),
+        more=False,
+        last_cursor=ConversationCursor(created_ts=21_000, logical_event_id="$m_after_stuck"),
+        stopped_at=None,
+    )
+    # Poll 1 (stuck), Poll 2 (still stuck), Poll 3 (stuck + limit=1 retry check), Poll 4 (after skip)
+    reader = _FakeConversationReader(pages=[stuck_page, stuck_page, stuck_page, stuck_page, after_page])
+    bot = _make_fake_bot(reader=reader)
+    service = ReactiveTriggerService(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: config,
+        bots=lambda: {"research": bot},
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+
+    store.create_trigger(
+        _room_message_rule("tr_refetch"),
+        initial_cursor=RoomCursor(created_ts=10_000, logical_event_id="$init"),
+    )
+
+    now_mono = [1_000.0]
+    snapshot = _room_state_snapshot(_ROOM_A, [_OWNER, _OTHER])
+    with (
+        patch("mindroom.reactive_triggers.service.read_room_state", new=AsyncMock(return_value=snapshot)),
+        patch("mindroom.reactive_triggers.service.time.monotonic", side_effect=lambda: now_mono[0]),
+        patch("mindroom.reactive_triggers.service.logger") as mock_logger,
+    ):
+        # Poll 1: starts refetch wait, cursor stays at $init
+        await service.poll_room_messages_once()
+        assert store.get_room_cursor("tr_refetch") == RoomCursor(created_ts=10_000, logical_event_id="$init")
+        assert service._refetch_waits["tr_refetch"] == ("$stuck_refetch", 1_000.0)
+
+        # Poll 2: before _REFETCH_WAIT_SECONDS -> still waiting
+        now_mono[0] = 1_000.0 + _REFETCH_WAIT_SECONDS - 10.0
+        await service.poll_room_messages_once()
+        assert store.get_room_cursor("tr_refetch") == RoomCursor(created_ts=10_000, logical_event_id="$init")
+
+        # Poll 3: past _REFETCH_WAIT_SECONDS -> logs warning and skips stuck refetch
+        now_mono[0] = 1_000.0 + _REFETCH_WAIT_SECONDS + 1.0
+        await service.poll_room_messages_once()
+        assert store.get_room_cursor("tr_refetch") == RoomCursor(created_ts=20_000, logical_event_id="$stuck_refetch")
+        assert "tr_refetch" not in service._refetch_waits
+        mock_logger.warning.assert_any_call(
+            "reactive_trigger_refetch_skipped",
+            trigger_id="tr_refetch",
+            room_id=_ROOM_A,
+            event_id="$stuck_refetch",
+        )
+
+        # Poll 4: subsequent message after the skipped event is processed
+        await service.poll_room_messages_once()
+
+    assert [f.dedupe_key for f in store.list_due_firings()] == ["$m_after_stuck"]
+    assert store.get_room_cursor("tr_refetch") == RoomCursor(created_ts=21_000, logical_event_id="$m_after_stuck")
+
+
+@pytest.mark.asyncio
+async def test_policy_disable_and_reenable_reconciles_unrestored_thread_tag_rooms(tmp_path: Path) -> None:
+    """stop() clears restore/wait state, and re-enabling via sync() reconciles thread_tag rooms."""
+    enabled_config, runtime_paths = _make_config(tmp_path, reactive_enabled=True)
+    disabled_config, _ = _make_config(tmp_path, reactive_enabled=False)
+    active_config = [enabled_config]
+
+    store = ReactiveTriggerStore(runtime_paths)
+    bot = _make_fake_bot()
+    bot.client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse([], _ROOM_A))
+
+    service = ReactiveTriggerService(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: active_config[0],
+        bots=lambda: {"research": bot},
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+    service._poll_interval_seconds = 60.0
+
+    store.create_trigger(
+        _thread_tag_rule("tr_reenable", thread_id=_THREAD_A, transition="added"),
+        initial_checkpoint=ThreadCheckpoint(tag_present=False, state_event_id=None, updated_at=time.time()),
+    )
+
+    try:
+        # Initial enable reconciles _ROOM_A (tag absent -> no firing)
+        await service.sync(enabled_config)
+        assert _ROOM_A in service._restored_rooms
+        assert store.list_due_firings() == []
+
+        # Populate transient wait caches, then disable via sync()
+        service._refetch_waits["tr_x"] = ("$e1", 10.0)
+        service._unfinished_waits["tr_x"] = ("$e2", 10.0)
+        service._room_member_cache[_ROOM_A] = (frozenset({_OWNER}), 10.0)
+
+        active_config[0] = disabled_config
+        await service.sync(disabled_config)
+        assert service._restored_rooms == set()
+        assert service._refetch_waits == {}
+        assert service._unfinished_waits == {}
+        assert service._room_member_cache == {}
+
+        # While disabled, thread becomes resolved in Matrix room state
+        bot.client.room_get_state = AsyncMock(
+            return_value=nio.RoomGetStateResponse(
+                [_tag_state_source(thread_root_id=_THREAD_A, tag="resolved", present=True, event_id="$while_disabled")],
+                _ROOM_A,
+            ),
+        )
+
+        # Re-enabling via sync() reconciles _ROOM_A and catches the missed transition
+        active_config[0] = enabled_config
+        with patch(
+            "mindroom.reactive_triggers.service.dispatch_reactive_trigger",
+            new=AsyncMock(return_value=DispatchResult(status="retry", reason="hold_for_check")),
+        ):
+            await service.sync(enabled_config)
+            assert _ROOM_A in service._restored_rooms
+            firing = store.get_firing(1)
+            assert firing is not None
+            assert firing.trigger_id == "tr_reenable"
+            assert firing.dedupe_key == "$while_disabled"
+    finally:
+        await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_room_member_cache_avoids_repeated_state_reads_and_fails_closed_on_expiry(tmp_path: Path) -> None:
+    """Room membership is cached across polls within TTL, refreshed after TTL, and fails closed on error."""
+    config, runtime_paths = _make_config(tmp_path)
+    store = ReactiveTriggerStore(runtime_paths)
+
+    pages = [
+        RoomPage(
+            messages=(_visible_message(f"$m_{idx}", body=f"msg {idx}", created_ts=20_000 + idx * 100),),
+            refresh_pending=(),
+            more=False,
+            last_cursor=ConversationCursor(created_ts=20_000 + idx * 100, logical_event_id=f"$m_{idx}"),
+            stopped_at=None,
+        )
+        for idx in range(4)
+    ]
+    # Poll 3 fails read_room_state and holds $m_2, so Poll 4 sees $m_2 again
+    reader = _FakeConversationReader(pages=[pages[0], pages[1], pages[2], pages[2]])
+    bot = _make_fake_bot(reader=reader)
+    service = ReactiveTriggerService(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: config,
+        bots=lambda: {"research": bot},
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+
+    store.create_trigger(
+        _room_message_rule("tr_cache"),
+        initial_cursor=RoomCursor(created_ts=10_000, logical_event_id="$init"),
+    )
+
+    now_mono = [1_000.0]
+    read_state_mock = AsyncMock(
+        side_effect=[
+            _room_state_snapshot(_ROOM_A, [_OWNER, _OTHER]),
+            None,
+            _room_state_snapshot(_ROOM_A, [_OTHER]),
+        ],
+    )
+    with (
+        patch("mindroom.reactive_triggers.service.read_room_state", new=read_state_mock),
+        patch("mindroom.reactive_triggers.service.time.monotonic", side_effect=lambda: now_mono[0]),
+    ):
+        # Poll 1 (t=1000): fetches room state
+        await service.poll_room_messages_once()
+        assert read_state_mock.await_count == 1
+        assert [f.dedupe_key for f in store.list_due_firings()] == ["$m_0"]
+
+        # Poll 2 (t=1010, within 30s TTL): hits cache, zero additional /state reads
+        now_mono[0] = 1_000.0 + _ROOM_MEMBER_CACHE_TTL_SECONDS / 3
+        await service.poll_room_messages_once()
+        assert read_state_mock.await_count == 1
+        assert [f.dedupe_key for f in store.list_due_firings()] == ["$m_0", "$m_1"]
+
+        # Poll 3 (t=1035, TTL expired): refresh returns None -> fails closed (holds cursor at $m_1)
+        now_mono[0] = 1_000.0 + _ROOM_MEMBER_CACHE_TTL_SECONDS + 5.0
+        await service.poll_room_messages_once()
+        assert read_state_mock.await_count == 2
+        assert store.get_room_cursor("tr_cache") == RoomCursor(created_ts=20_100, logical_event_id="$m_1")
+        assert [f.dedupe_key for f in store.list_due_firings()] == ["$m_0", "$m_1"]
+
+        # Poll 4 (t=1036): refresh succeeds showing owner left -> skips $m_2 and advances cursor
+        now_mono[0] += 1.0
+        await service.poll_room_messages_once()
+        assert read_state_mock.await_count == 3
+        assert store.get_room_cursor("tr_cache") == RoomCursor(created_ts=20_200, logical_event_id="$m_2")
+        assert [f.dedupe_key for f in store.list_due_firings()] == ["$m_0", "$m_1"]
