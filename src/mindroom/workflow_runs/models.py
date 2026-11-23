@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import ClassVar, Literal
+from typing import Literal
 from uuid import uuid4
 
 from mindroom.script_runs.models import utc_timestamp
@@ -74,7 +74,6 @@ class DispatchHandle:
 class WorkflowRun:
     """One durable workflow run: its owner, script, options and current attempt."""
 
-    entry: ClassVar[Literal["workflow"]] = "workflow"
     run_id: str
     agent_name: str
     owner_user_id: str
@@ -119,6 +118,11 @@ class WorkflowRun:
     error: str | None = None
     created_at: str = field(default_factory=utc_timestamp)
     finished_at: str | None = None
+
+    @property
+    def entry(self) -> Literal["workflow"]:
+        """What the shim does with the source: always hand it to the workflow SDK."""
+        return "workflow"
 
     def outcome_text(self) -> str:
         """Return an ended run's report, a string as it is and any other value as JSON, or its error.
