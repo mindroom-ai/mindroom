@@ -1576,7 +1576,7 @@ Use it when a task needs many agents, the same step over many items, an independ
 Give exactly one of `source` (inline Python), `path` (a file in your workspace), or `name` (a saved workflow, `workflows/<name>.py`).
 The script defines `def main(args):` and returns the final report, a string or a JSON value. MindRoom calls `main`; do not call it yourself.
 
-    from mindroom.workflow import agent, foreach, parallel, ask_user, shell, tool, phase, log, now, random, run, PartialFailure
+    from mindroom.workflow import agent, foreach, parallel, spawn, ask_user, shell, tool, phase, log, now, random, run, PartialFailure
 
     def main(args):
         phase("Research")                        # the same step over many items, in parallel
@@ -1595,6 +1595,16 @@ The script defines `def main(args):` and returns the final report, a string or a
             draft = agent(f"Fix these problems: {check['problems']}\\n\\n{draft}")
         return draft
 
+    def review_loop(task, test_command):         # two agents that keep their conversation, and a hard check
+        dev, reviewer = spawn("dev"), spawn("reviewer", system="Review diffs. Reply APPROVE or list problems.")
+        dev.ask(f"Implement and commit: {task}")
+        for _ in range(5):
+            tests, review = shell(test_command), reviewer.ask("Review `git diff main`.")
+            if tests.ok and review.startswith("APPROVE"):
+                return review
+            dev.ask(f"Fix and commit.\\n\\nTests:\\n{tests.output}\\n\\nReview:\\n{review}")
+        return "Not approved after 5 rounds:\\n" + review
+
 - agent(prompt, *, schema=None, name=None, agent=None, model=None, system=None, tools=None, skills=None, knowledge=None,
         profile=None, minimal=False, timeout=None, output_path=None, dedicated_worker=False, resource_profile=None)
   runs one agent turn and returns its answer: text, or parsed JSON when schema (a JSON Schema dict) is given.
@@ -1611,6 +1621,9 @@ The script defines `def main(args):` and returns the final report, a string or a
   If any call fails, both wait for the others and then raise PartialFailure: .ok holds the results that succeeded,
   .results every position, .errors the failures by position. Not caught, it fails the run.
   fn may make several calls and may itself call foreach or parallel. At most max_concurrent agents and tools run at once.
+- s = spawn(name, ...options of agent) keeps one agent's conversation: s.ask(message, *, schema=None, timeout=None)
+  sends the next message and returns the answer. A second ask while the session is in a turn fails.
+  Ask two sessions at once with parallel([lambda: a.ask(x), lambda: b.ask(y)]).
 - ask_user(question, options=None) asks the user in the thread and returns the answer: one of options (a list of strings),
   or free text without options. Only that branch waits, for as long as it takes; parallel branches keep running.
 - shell(command) runs a command with your shell tool and returns .ok, .exit_code and .output. tool(toolkit, function, **arguments) calls any other tool of yours.
@@ -1640,7 +1653,7 @@ Agents you can run with agent=: helper, roommate."""
 def test_description_teaches_what_this_release_runs_and_lists_the_configured_models(stack: WorkflowStack) -> None:
     """The offered description names the calls a script has now, how the report arrives, the models and the agents.
 
-    It promises nothing a later release adds: no sessions, no peers. The agents are those the owner may
+    It promises nothing a later release adds: no peers. The agents are those the owner may
     delegate to and those configured for the room, without the owner itself.
     """
     config, room_id = stack.context.config, stack.context.room_id
