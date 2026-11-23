@@ -97,7 +97,7 @@ Custom `config.data` must also set `event_journal.backend: postgres` so MindRoom
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 cd "$HOME/mindroom"
-cat <<'EOF' > runtime-values.yaml
+cat <<'YAML' > runtime-values.yaml
 matrix:
   homeserverUrl: http://matrix-mindroom-tuwunel.mindroom.svc.cluster.local:8008
   serverName: mindroom.local
@@ -126,7 +126,7 @@ config:
         rooms: [lobby]
     event_journal:
       backend: postgres
-EOF
+YAML
 helm upgrade --install mindroom-runtime ./cluster/k8s/runtime \
   --namespace mindroom \
   -f runtime-values.yaml \
