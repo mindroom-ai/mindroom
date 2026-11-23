@@ -70,6 +70,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.budgets.monitor import BudgetMonitor
+    from mindroom.commands.compact_commands import AdmitCompaction
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.desktop.identity import DesktopControllerIdentity
@@ -192,6 +193,7 @@ class CommandHandlerContext:
     # Whether the room's steward holds the power to write one state event type: (room_id, event_type).
     steward_may_write_state: Callable[[str, str], bool]
     budget_monitor: BudgetMonitor | None = None
+    admit_compaction: AdmitCompaction | None = None
 
 
 def _format_agent_description(agent_name: str, config: Config, tools: ToolRegistry) -> str:
@@ -427,6 +429,7 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
             requester_id=requester_user_id,
             membership_index=context.agent_reply_memberships,
             budget_monitor=context.budget_monitor,
+            admit_compaction=context.admit_compaction,
         )
 
     elif command.type == CommandType.HI:

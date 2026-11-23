@@ -2874,6 +2874,7 @@ depends_on = []
 [[modules]]
 path = "mindroom.history.manual"
 depends_on = [
+    "mindroom.history.runtime",
     "mindroom.history.policy",
     "mindroom.history.session_context",
     "mindroom.history.storage",
@@ -3158,6 +3159,7 @@ visibility = [
 [[modules]]
 path = "mindroom.history.runtime"
 depends_on = [
+    "mindroom.constants",
     "mindroom.session_storage.lanes",
     "mindroom.history.compaction",
     "mindroom.history.native",
@@ -3517,6 +3519,7 @@ visibility = [
 [[modules]]
 path = "mindroom.reply_turn.locked_turn"
 depends_on = [
+    "mindroom.conversation_resolver",
     "mindroom.ai_runtime",
     "mindroom.automations.steps",
     "mindroom.config.resolution",
@@ -3559,6 +3562,13 @@ expose = ["InboxResponses"]
 [[modules]]
 path = "mindroom.response_runner"
 depends_on = [
+    "mindroom.bot_runtime_view",
+    "mindroom.conversation_resolver",
+    "mindroom.event_journal",
+    "mindroom.history.manual",
+    "mindroom.history.runtime",
+    "mindroom.history.session_context",
+    "mindroom.providers.registry",
     "mindroom.agent_modes",
     "mindroom.agent_run_context",
     "mindroom.ai",
@@ -3638,6 +3648,7 @@ visibility = [
     "mindroom.orchestrator",
     "mindroom.plugin_http",
     "mindroom.reply_turn.inbox",
+    "mindroom.response_lifecycle",
     "mindroom.response_runner",
     "mindroom.slack.delivery",
     "mindroom.slack.turns",
@@ -3648,6 +3659,8 @@ visibility = [
 [[modules]]
 path = "mindroom.response_lifecycle"
 depends_on = [
+    "mindroom.bot_runtime_view",
+    "mindroom.response_admission",
     "mindroom.cancellation",
     "mindroom.constants",
     "mindroom.tool_jobs.control",
@@ -4178,6 +4191,8 @@ depends_on = ["mindroom.response_admission"]
 visibility = [
     "mindroom.bot",
     "mindroom.reply_turn.inbox",
+    "mindroom.response_lifecycle",
+    "mindroom.response_runner",
     "mindroom.turns.dispatch",
 ]
 
@@ -5228,6 +5243,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.bot"
 depends_on = [
+    "mindroom.contacts.turns",
     "mindroom.email_invites.receiver",
     "mindroom.agent_cli.cli_approval_waits",
     "mindroom.approval.continuation_runner",
@@ -8454,6 +8470,7 @@ depends_on = [
     "mindroom.history.team_scope",
 ]
 visibility = [
+    "mindroom.response_runner",
     "mindroom.ai",
     "mindroom.api.openai_compat",
     "mindroom.approval.execution",

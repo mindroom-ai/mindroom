@@ -129,16 +129,17 @@ class PendingEventWorker:
                 self._start_lane(room_id)
         self._wake.set()
 
-    def release(self, event_ids: Iterable[str]) -> None:
-        """Forget downstream ownership after its durable handoff.
+    def release(self, event_ids: Iterable[str], *, keep: _DeferralLivenessProbe | None = None) -> None:
+        """Forget downstream ownership after its durable handoff, except of the sources ``keep`` says stay parked.
 
         This remains an in-memory operation callable from terminal handoffs.
         A retry additionally wakes its room, invalidating the current page
         even after an approval source has left this cache.
         """
         for event_id in event_ids:
-            event = self._deferred.pop(event_id, None)
-            if event is not None:
+            event = self._deferred.get(event_id)
+            if event is not None and not (keep is not None and keep(event)):
+                del self._deferred[event_id]
                 self._rooms[event.room_id].deferred_count -= 1
                 self._queue_room(event.room_id)
                 self._wake.set()

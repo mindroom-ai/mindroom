@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 from . import interactive_questions, journal, matrix_delivery_rows, membership_hooks, outbox, projection, reads
 from .approval_store import ApprovalStore
 from .matrix_delivery_rows import ReplyRowRefusedError
-from .membership_state import projection_generation
+from .membership_state import current_active_membership_epoch, projection_generation
 from .principal_rows import PrincipalRows
 from .replies import ReplyStore
 
@@ -143,6 +143,10 @@ class DispatchView(ReplayView):
         """Return one admitted event."""
         return await self._read(journal.load, event_id)
 
+    async def admitted_membership_owner(self, event_id: str) -> tuple[str, int] | None:
+        """Return the room and membership epoch that admitted this event."""
+        return await self._read(journal.admitted_membership_owner, event_id)
+
     async def claim_semantic_consumer(
         self,
         event_id: str,
@@ -214,6 +218,10 @@ class _MembershipEpochView(PrincipalRows):
     async def membership_epoch(self, room_id: str) -> int:
         """Return the current membership epoch for one room."""
         return await self._read(journal.current_membership_epoch, room_id)
+
+    async def active_membership_epoch(self, room_id: str) -> int | None:
+        """Return the room's epoch only while it is not departure-fenced."""
+        return await self._read(current_active_membership_epoch, room_id)
 
 
 class _HydrationMarkerView(PrincipalRows):

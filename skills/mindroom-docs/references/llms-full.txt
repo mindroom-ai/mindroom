@@ -3723,11 +3723,14 @@ Add the `compact_context` tool to an agent's `tools` to let it request compactio
 The request runs before the next reply in the same conversation and always uses text compaction.
 It requires a summary model with a `context_window` and the same 2,000-token summary input budget; otherwise the tool returns `Error: Compaction is unavailable for this scope because ...` with the reason.
 
-You can request the same compaction from chat with `/compact` (or `!compact`).
+From chat, use `/compact` (or `!compact`) to compact now without another message.
 `/compact <agent_or_team>` requests it for one agent or configured team; `/compact` alone requests it for all of them.
 Both forms only reach agents and configured teams you may address that already have a conversation here.
 The conversation is the thread, or the whole room for an agent or team in room mode; for a thread-mode agent, send it inside the thread.
-The reply has one line per agent or team, with the reason when compaction is unavailable for it.
+The command acknowledges each target. Targets report estimated history tokens before and after compaction in separate notices.
+If a reply is in progress or waiting for approval, compaction waits behind it. Replies queued behind compaction wait for it to finish.
+In a target's contact room, compaction still runs before its next reply instead of sending a separate notice.
+If the target's recent room history has not synced or needs repair, the immediate fold is skipped and the request stays pending for its next reply.
 
 ## Team History and Compaction
 
@@ -5553,7 +5556,7 @@ This page lists every command and fully covers `/help`, `/hi`, and `/config`; th
 | `/cancel_job <id\|all>` | Cancel a background job by the short ID `/jobs` shows, or all of them in this thread, or in the whole room when sent outside any thread | [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
 | `/desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one agent | [Desktop](https://docs.mindroom.chat/tools/desktop/#desktop) |
 | `/mode <agent> minimal\|standard\|show\|reset` | Switch one agent between standard tools and a Bash-only interface | [Minimal Agent Mode](https://docs.mindroom.chat/tools/agent-cli/#mode) |
-| `/compact [agent_or_team]` | Compact context before the next reply in this conversation (bare `/compact` applies to every agent or configured team you may address that has a conversation here) | [History](https://docs.mindroom.chat/configuration/history/#manual-compaction) |
+| `/compact [agent_or_team]` | Compact context now, after any in-progress reply (bare `/compact` applies to every agent or configured team you may address that has a conversation here) | [History](https://docs.mindroom.chat/configuration/history/#manual-compaction) |
 | `/model [name\|name@level\|list\|reset]` | Show or switch the model used in the current thread | [Models](https://docs.mindroom.chat/configuration/models/#model) |
 | `/room_model [name\|name@level\|list\|reset]` | Show the room model default or switch it (set/reset require a room admin) | [Models](https://docs.mindroom.chat/configuration/models/#room_model) |
 | `/thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room (set/reset require a room admin) | [Threads](https://docs.mindroom.chat/configuration/threads/#thread_mode) |

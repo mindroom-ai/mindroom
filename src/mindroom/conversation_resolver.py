@@ -673,3 +673,22 @@ class ConversationResolver:
             thread_id=thread_id,
             limit=limit,
         )
+
+
+class DegradedThreadHistoryError(RuntimeError):
+    """A strict thread read came back degraded."""
+
+
+async def read_fresh_thread_history(
+    resolver: ConversationResolver,
+    target: MessageTarget,
+    *,
+    strict: bool = False,
+) -> ThreadHistoryResult | None:
+    """Read a locked target's thread with its fork parents, or None in a room; ``strict`` refuses a degraded read."""
+    if target.resolved_thread_id is None:
+        return None
+    history = await resolver.fetch_thread_history(target.room_id, target.resolved_thread_id)
+    if strict and is_thread_history_degraded(history):
+        raise DegradedThreadHistoryError(target.resolved_thread_id)
+    return history
