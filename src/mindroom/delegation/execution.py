@@ -38,7 +38,6 @@ from mindroom.delegation.lifecycle import (
 from mindroom.delegation.recovery import interrupt_child, interrupt_stopped_child, read_child_run
 from mindroom.delegation.sessions import subagent_liveness
 from mindroom.delegation.state import (
-    APPROVAL_TOOLKITS_KEY,
     DELEGATION_FUNCTIONS,
     DELEGATION_STATE_KEY,
     DelegationChild,
@@ -637,41 +636,6 @@ def _child_result_text(child: DelegationChild, receipt: str) -> str:
     return f"{result}\n\n{receipt}"
 
 
-async def _ask_child_approvals(
-    child: DelegationChild,
-    outcome: _ChildOutcome,
-    *,
-    runtime: ToolJobRuntime,
-    job_id: str,
-    owner: ToolExecutionIdentity,
-    config: Config,
-    runtime_paths: RuntimePaths,
-) -> tuple[ApprovalCall, ...]:
-    """Ask about the calls a paused child waits on, through its job's cards, and return them decided.
-
-    The job of a workflow run's agent says while it asks that it waits for approvals, and which toolkit owns each
-    call: the start that finds it waiting resumes this turn, and asks again before it has built the agent.
-    """
-    of_run = child.workflow_run_id is not None
-    if of_run:
-        asked = {tool.tool_name for tool in outcome.response.tools or () if tool.is_paused}
-        owners = [[*call, toolkit] for call, toolkit in outcome.toolkit_owners.items() if call[1] in asked]
-        await runtime.save_adapter(job_id, wait="approval", **{APPROVAL_TOOLKITS_KEY: owners})
-    calls = await request_child_approvals(
-        child,
-        outcome.response,
-        outcome.toolkit_owners,
-        runtime=runtime,
-        job_id=job_id,
-        owner=owner,
-        config=config,
-        runtime_paths=runtime_paths,
-    )
-    if of_run:
-        await runtime.save_adapter(job_id, wait=None)
-    return calls
-
-
 async def _run_job_child(
     child: DelegationChild,
     *,
@@ -737,9 +701,10 @@ async def _run_job_child(
                 receipts=receipts,
             )
             while outcome.response.status == RunStatus.paused:
-                calls = await _ask_child_approvals(
+                calls = await request_child_approvals(
                     child,
-                    outcome,
+                    outcome.response,
+                    outcome.toolkit_owners,
                     runtime=runtime,
                     job_id=job_id,
                     owner=owner,
