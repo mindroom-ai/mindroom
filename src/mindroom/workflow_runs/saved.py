@@ -103,7 +103,7 @@ def save_source(
 
 def _parse_metadata(raw: bytes) -> tuple[str, dict[str, str]]:
     try:
-        tree = ast.parse(raw.decode("utf-8"))
+        tree = ast.parse(raw.decode("utf-8-sig"))
     except (SyntaxError, UnicodeDecodeError):
         return "", {}
     raw_doc = ast.get_docstring(tree)

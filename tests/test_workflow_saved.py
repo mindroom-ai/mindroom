@@ -129,6 +129,19 @@ def main(args):
     ]
 
 
+def test_list_saved_parses_utf8_bom_metadata(tmp_path: Path) -> None:
+    """Listing saved workflows extracts docstring and literal ARGS from UTF-8 BOM files."""
+    workflows = tmp_path / "workflows"
+    workflows.mkdir()
+    (workflows / "bom-check.py").write_bytes(
+        '\ufeff"""Check BOM metadata."""\nARGS = {"target": "Target name"}\ndef main(args):\n    return args\n'.encode(),
+    )
+
+    assert list_saved(tmp_path) == [
+        SavedWorkflow(name="bom-check", description="Check BOM metadata.", args={"target": "Target name"}),
+    ]
+
+
 def test_save_refuses_to_replace_a_different_file_and_accepts_an_identical_one(tmp_path: Path) -> None:
     """Saving adds a missing docstring, accepts identical content, and refuses to overwrite different content."""
     source = "def main(args):\n    return 1\n"
