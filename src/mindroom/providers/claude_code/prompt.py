@@ -49,7 +49,7 @@ def _history_blocks(message: Message, provider: str, names: dict[str, str]) -> l
     if message.role == "tool":
         result = tool_result_view(message)
         name = names.get(result.call_id or "", result.name)
-        output = {"id": result.call_id, "name": called_name(name) if name else name, "output": result.content}
+        output = {"id": result.call_id, "name": _history_name(name), "output": result.content}
         if result.is_error:
             output["is_error"] = True
         return [_text(f"<tool-result>\n{_json(output)}\n</tool-result>"), *_images(message, provider)]
@@ -61,7 +61,7 @@ def _history_blocks(message: Message, provider: str, names: dict[str, str]) -> l
         _json(
             {
                 "id": call["id"],
-                "name": called_name(call["function"]["name"]),
+                "name": _history_name(call["function"]["name"]),
                 "input": _arguments(call["function"].get("arguments")),
             },
         )
@@ -71,6 +71,11 @@ def _history_blocks(message: Message, provider: str, names: dict[str, str]) -> l
     said = "\n".join(texts).replace("<", "&lt;")
     parts = [said, *(f"<tool-call>\n{call}\n</tool-call>" for call in calls)]
     return [_text("\n".join(["<assistant>", *filter(None, parts), "</assistant>"]))]
+
+
+def _history_name(name: str | None) -> str | None:
+    """Return the name Claude calls the tool by; a provider may have stored a call without one."""
+    return called_name(name) if name else name
 
 
 def _json(value: object) -> str:
