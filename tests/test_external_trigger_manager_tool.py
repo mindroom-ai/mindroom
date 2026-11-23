@@ -133,8 +133,9 @@ async def test_create_trigger_uses_current_context_and_hides_public_key(tmp_path
     tool = TriggersTools()
     with tool_runtime_context(_context(tmp_path)):
         payload = _payload(
-            await tool.create_trigger(
-                "campground",
+            await tool.triggers(
+                action="create",
+                trigger_id="campground",
                 public_key=_PUBLIC_KEY,
                 key_id="campground-main",
                 allowed_kinds=["campground.availability"],
@@ -171,8 +172,9 @@ async def test_external_trigger_admin_uses_current_policy(tmp_path: Path, admini
 
     with tool_runtime_context(context):
         payload = _payload(
-            await TriggersTools().create_trigger(
-                "revoked-admin",
+            await TriggersTools().triggers(
+                action="create",
+                trigger_id="revoked-admin",
                 public_key=_PUBLIC_KEY,
                 target_agent="other",
             ),
@@ -190,8 +192,9 @@ async def test_private_agent_create_trigger_uses_owner_as_scope_owner(tmp_path: 
 
     with tool_runtime_context(_context(tmp_path, requester_id="@owner:example.org", config=config)):
         payload = _payload(
-            await tool.create_trigger(
-                "private-campground",
+            await tool.triggers(
+                action="create",
+                trigger_id="private-campground",
                 public_key=_PUBLIC_KEY,
                 key_id="campground-main",
                 allowed_kinds=["campground.availability"],
@@ -224,8 +227,9 @@ async def test_private_agent_create_trigger_accepts_current_dynamic_room(tmp_pat
         ),
     ):
         payload = _payload(
-            await tool.create_trigger(
-                "private-dynamic-campground",
+            await tool.triggers(
+                action="create",
+                trigger_id="private-dynamic-campground",
                 public_key=_PUBLIC_KEY,
                 key_id="campground-main",
                 allowed_kinds=["campground.availability"],
@@ -263,7 +267,9 @@ async def test_generated_agent_create_trigger_accepts_current_dynamic_room(
     with tool_runtime_context(
         _context(tmp_path, requester_id=OWNER, room_id="!personal:localhost", config=config, agent_name=agent_name),
     ):
-        payload = _payload(await tool.create_trigger("dynamic-campground", public_key=_PUBLIC_KEY))
+        payload = _payload(
+            await tool.triggers(action="create", trigger_id="dynamic-campground", public_key=_PUBLIC_KEY),
+        )
 
     assert payload["status"] == "ok", payload
     assert payload["trigger"]["target"]["agent"] == agent_name
@@ -279,7 +285,7 @@ async def test_generated_agent_create_trigger_rejects_room_configured_for_others
     with tool_runtime_context(
         _context(tmp_path, requester_id=OWNER, room_id="lobby", config=config, agent_name="creator_research"),
     ):
-        payload = _payload(await tool.create_trigger("lobby-campground", public_key=_PUBLIC_KEY))
+        payload = _payload(await tool.triggers(action="create", trigger_id="lobby-campground", public_key=_PUBLIC_KEY))
 
     assert payload["status"] == "error"
     assert "target room must already be configured" in payload["message"]
@@ -301,8 +307,9 @@ async def test_shared_agent_create_trigger_rejects_current_dynamic_room(tmp_path
         ),
     ):
         payload = _payload(
-            await tool.create_trigger(
-                "shared-dynamic-campground",
+            await tool.triggers(
+                action="create",
+                trigger_id="shared-dynamic-campground",
                 public_key=_PUBLIC_KEY,
                 key_id="campground-main",
             ),
@@ -328,8 +335,9 @@ async def test_private_agent_create_trigger_rejects_other_dynamic_room(tmp_path:
         ),
     ):
         payload = _payload(
-            await tool.create_trigger(
-                "private-other-room",
+            await tool.triggers(
+                action="create",
+                trigger_id="private-other-room",
                 public_key=_PUBLIC_KEY,
                 key_id="campground-main",
                 target_room_id="!other:example.org",
@@ -356,8 +364,9 @@ async def test_admin_cross_target_private_agent_rejects_current_dynamic_room(tmp
         ),
     ):
         payload = _payload(
-            await tool.create_trigger(
-                "private-cross-target-dynamic-room",
+            await tool.triggers(
+                action="create",
+                trigger_id="private-cross-target-dynamic-room",
                 public_key=_PUBLIC_KEY,
                 key_id="campground-main",
                 target_agent="other",
@@ -395,8 +404,9 @@ async def test_non_admin_cannot_target_other_agent_or_room(
     )
     with tool_runtime_context(context):
         payload = _payload(
-            await tool.create_trigger(
-                "campground",
+            await tool.triggers(
+                action="create",
+                trigger_id="campground",
                 public_key=_PUBLIC_KEY,
                 target_agent=target_agent,
                 target_room_id=target_room_id,
@@ -417,7 +427,12 @@ async def test_non_admin_can_name_the_current_room_by_key_alias_or_id(tmp_path: 
     _record_rooms(tmp_path)
     with tool_runtime_context(_context(tmp_path, room_id="!lobby:example.org")):
         payload = _payload(
-            await tool.create_trigger("lobby-trigger", public_key=_PUBLIC_KEY, target_room_id=target_room_id),
+            await tool.triggers(
+                action="create",
+                trigger_id="lobby-trigger",
+                public_key=_PUBLIC_KEY,
+                target_room_id=target_room_id,
+            ),
         )
 
     assert payload["status"] == "ok", payload
@@ -455,15 +470,16 @@ async def test_create_trigger_stores_a_reply_thread_id_as_its_thread_root(
     )
     with tool_runtime_context(context):
         payload = _payload(
-            await tool.create_trigger(
-                "replies",
+            await tool.triggers(
+                action="create",
+                trigger_id="replies",
                 public_key=_PUBLIC_KEY,
                 target_agent=target_agent,
                 target_room_id=target_room_id,
                 target_thread_id="$reply:example.org",
             ),
         )
-        listed = _payload(tool.list_triggers())
+        listed = _payload(await tool.triggers(action="list"))
 
     assert payload["status"] == "ok", payload
     assert payload["trigger"]["target"]["thread_id"] == "$root:example.org"
@@ -478,9 +494,14 @@ async def test_create_trigger_refuses_a_reply_whose_thread_root_is_blank(tmp_pat
     context = replace(_context(tmp_path), relations=make_thread_reply_lookup("$reply:example.org", " "))
     with tool_runtime_context(context):
         payload = _payload(
-            await tool.create_trigger("blank-root", public_key=_PUBLIC_KEY, target_thread_id="$reply:example.org"),
+            await tool.triggers(
+                action="create",
+                trigger_id="blank-root",
+                public_key=_PUBLIC_KEY,
+                target_thread_id="$reply:example.org",
+            ),
         )
-        listed = _payload(tool.list_triggers())
+        listed = _payload(await tool.triggers(action="list"))
 
     assert payload["status"] == "error"
     assert "thread_id" in payload["message"]
@@ -493,9 +514,13 @@ async def test_rotate_trigger_key_returns_the_new_key_fingerprint(tmp_path: Path
     new_key_bytes = bytes(range(32))
     tool = TriggersTools()
     with tool_runtime_context(_context(tmp_path)):
-        created = _payload(await tool.create_trigger("rotating", public_key=_PUBLIC_KEY))
+        created = _payload(await tool.triggers(action="create", trigger_id="rotating", public_key=_PUBLIC_KEY))
         rotated = _payload(
-            tool.rotate_trigger_key("rotating", public_key=base64.b64encode(new_key_bytes).decode("ascii")),
+            await tool.triggers(
+                action="rotate_key",
+                trigger_id="rotating",
+                public_key=base64.b64encode(new_key_bytes).decode("ascii"),
+            ),
         )
 
     assert rotated["status"] == "ok"
@@ -511,15 +536,17 @@ async def test_create_trigger_validation_error_returns_tool_error_payload(tmp_pa
     tool = TriggersTools()
     with tool_runtime_context(_context(tmp_path)):
         empty_thread_payload = _payload(
-            await tool.create_trigger(
-                "campground",
+            await tool.triggers(
+                action="create",
+                trigger_id="campground",
                 public_key=_PUBLIC_KEY,
                 target_thread_id="  ",
             ),
         )
         conflict_payload = _payload(
-            await tool.create_trigger(
-                "thread-conflict",
+            await tool.triggers(
+                action="create",
+                trigger_id="thread-conflict",
                 public_key=_PUBLIC_KEY,
                 target_thread_id="$thread",
                 new_thread=True,
@@ -535,7 +562,7 @@ async def test_create_trigger_validation_error_returns_tool_error_payload(tmp_pa
 @pytest.mark.asyncio
 async def test_manager_requires_live_tool_context() -> None:
     """Trigger management is available only inside a live Matrix tool call."""
-    payload = _payload(await TriggersTools().create_trigger("no-context", public_key=_PUBLIC_KEY))
+    payload = _payload(await TriggersTools().triggers(action="create", trigger_id="no-context", public_key=_PUBLIC_KEY))
 
     assert payload["status"] == "error"
     assert payload["message"] == "Triggers requires live Matrix tool context."
@@ -566,33 +593,36 @@ async def test_every_manager_function_refuses_a_requester_who_cannot_own_trigger
     persist_owner_account(_runtime_paths(tmp_path))
     tool = TriggersTools()
     with tool_runtime_context(_context(tmp_path, config=config)):
-        assert _payload(await tool.create_trigger("owned", public_key=_PUBLIC_KEY))["status"] == "ok"
+        assert (
+            _payload(await tool.triggers(action="create", trigger_id="owned", public_key=_PUBLIC_KEY))["status"] == "ok"
+        )
 
     with tool_runtime_context(_context(tmp_path, requester_id=requester_id, config=config)):
         payloads = [
-            _payload(await tool.create_trigger("refused", public_key=_PUBLIC_KEY)),
-            _payload(tool.list_triggers()),
-            _payload(await tool.disable_trigger("owned")),
-            _payload(tool.delete_trigger("owned")),
-            _payload(tool.rotate_trigger_key("owned", public_key=_PUBLIC_KEY)),
+            _payload(await tool.triggers(action="create", trigger_id="refused", public_key=_PUBLIC_KEY)),
+            _payload(await tool.triggers(action="list")),
+            _payload(await tool.triggers(action="set_enabled", trigger_id="owned")),
+            _payload(await tool.triggers(action="delete", trigger_id="owned")),
+            _payload(await tool.triggers(action="rotate_key", trigger_id="owned", public_key=_PUBLIC_KEY)),
         ]
 
     assert [payload["status"] for payload in payloads] == ["error"] * len(payloads)
     assert all(message in payload["message"] for payload in payloads)
     with tool_runtime_context(_context(tmp_path, config=config)):
-        triggers = _payload(tool.list_triggers())["triggers"]
+        triggers = _payload(await tool.triggers(action="list"))["triggers"]
     assert [(trigger["trigger_id"], trigger["enabled"], trigger["version"]) for trigger in triggers] == [
         ("owned", True, 1),
     ]
 
 
-def test_manager_refuses_a_runtime_without_primary_control_state(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_manager_refuses_a_runtime_without_primary_control_state(tmp_path: Path) -> None:
     """A runtime without primary control state, such as a worker's, cannot manage triggers."""
     context = _context(tmp_path)
     context = replace(context, runtime_paths=replace(context.runtime_paths, control_state_root=None))
 
     with tool_runtime_context(context):
-        payload = _payload(TriggersTools().list_triggers())
+        payload = _payload(await TriggersTools().triggers(action="list"))
 
     assert payload["status"] == "error"
     assert "requires primary control state" in payload["message"]
@@ -606,8 +636,9 @@ async def test_admin_can_create_trigger_for_configured_cross_target(tmp_path: Pa
 
     with tool_runtime_context(_context(tmp_path, requester_id="@admin:example.org", config=config)):
         payload = _payload(
-            await tool.create_trigger(
-                "admin-target",
+            await tool.triggers(
+                action="create",
+                trigger_id="admin-target",
                 public_key=_PUBLIC_KEY,
                 target_agent="other",
                 target_room_id="other-room",
@@ -634,8 +665,9 @@ async def test_platform_admin_can_create_trigger_for_configured_cross_target(tmp
 
     with tool_runtime_context(_context(tmp_path, requester_id=requester, config=config)):
         payload = _payload(
-            await tool.create_trigger(
-                "platform-admin-target",
+            await tool.triggers(
+                action="create",
+                trigger_id="platform-admin-target",
                 public_key=_PUBLIC_KEY,
                 target_agent="other",
                 target_room_id="other-room",
@@ -658,8 +690,9 @@ async def test_external_trigger_admin_alias_has_canonical_authority(tmp_path: Pa
 
     with tool_runtime_context(_context(tmp_path, requester_id=alias_admin, config=config)):
         payload = _payload(
-            await tool.create_trigger(
-                "alias-admin-target",
+            await tool.triggers(
+                action="create",
+                trigger_id="alias-admin-target",
                 public_key=_PUBLIC_KEY,
                 target_agent="other",
                 target_room_id="other-room",
@@ -679,8 +712,9 @@ async def test_admin_create_trigger_for_private_cross_target_keeps_admin_owner(t
 
     with tool_runtime_context(_context(tmp_path, requester_id="@admin:example.org", config=config)):
         payload = _payload(
-            await tool.create_trigger(
-                "admin-private-target",
+            await tool.triggers(
+                action="create",
+                trigger_id="admin-private-target",
                 public_key=_PUBLIC_KEY,
                 target_agent="other",
                 target_room_id="other-room",
@@ -703,11 +737,15 @@ async def test_admin_list_triggers_sees_all_owners(tmp_path: Path) -> None:
     config = _config(admin_users=["@admin:example.org"])
     tool = TriggersTools()
     with tool_runtime_context(_context(tmp_path, requester_id="@owner:example.org", config=config)):
-        assert _payload(await tool.create_trigger("owner", public_key=_PUBLIC_KEY))["status"] == "ok"
+        assert (
+            _payload(await tool.triggers(action="create", trigger_id="owner", public_key=_PUBLIC_KEY))["status"] == "ok"
+        )
     with tool_runtime_context(_context(tmp_path, requester_id="@other-owner:example.org", config=config)):
-        assert _payload(await tool.create_trigger("other", public_key=_PUBLIC_KEY))["status"] == "ok"
+        assert (
+            _payload(await tool.triggers(action="create", trigger_id="other", public_key=_PUBLIC_KEY))["status"] == "ok"
+        )
     with tool_runtime_context(_context(tmp_path, requester_id="@admin:example.org", config=config)):
-        payload = _payload(tool.list_triggers())
+        payload = _payload(await tool.triggers(action="list"))
 
     assert payload["status"] == "ok"
     assert {trigger["trigger_id"] for trigger in payload["triggers"]} == {"owner", "other"}

@@ -24,6 +24,7 @@ INTERNAL_USER_ENTITY_NAME = "user"
 _IDENTITY_MEMO_LIMIT = 8
 type IdentityMemo[T] = dict[tuple[object, ...], tuple[MatrixState, T]]
 _MANAGED_ENTITY_IDS: IdentityMemo[frozenset[str]] = {}
+_PERSISTED_MANAGED_ENTITY_IDS: IdentityMemo[frozenset[str]] = {}
 
 
 def runtime_matrix_domain(runtime_paths: RuntimePaths) -> str:
@@ -52,6 +53,55 @@ def is_managed_entity_id(
 ) -> bool:
     """Return whether one Matrix user ID is a configured router, agent, or team account."""
     return user_id in _managed_entity_ids(config, runtime_paths)
+
+
+def is_persisted_managed_entity_id(
+    user_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Return whether one Matrix user ID matches a persisted/prepared router, agent, or team account.
+
+    Unlike ``is_managed_entity_id``, never matches unconfigured synthetic generated usernames; use this
+    for positive privilege grants such as ``include_bots`` exemptions.
+    """
+    return user_id in persisted_managed_entity_ids(config, runtime_paths)
+
+
+def persisted_managed_entity_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return ONLY persisted/prepared Matrix IDs of configured router, agent, and team accounts."""
+
+    def derive(domain: str, state: MatrixState) -> frozenset[str]:
+        user_ids: set[str] = set()
+        for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]:
+            account = state.get_account(managed_account_key(entity_name))
+            if account is not None:
+                user_ids.add(matrix_account_user_id(account, domain))
+        return frozenset(user_ids)
+
+    return memoized_entity_identities(_PERSISTED_MANAGED_ENTITY_IDS, config, runtime_paths, derive)
+
+
+def managed_entity_user_ids(
+    entity_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> frozenset[str]:
+    """Return persisted and generated Matrix user IDs for a configured agent or team (including team members)."""
+    entity_names: set[str] = {entity_name}
+    team_config = config.teams.get(entity_name)
+    if team_config is not None:
+        entity_names.update(team_config.agents)
+    domain = runtime_matrix_domain(runtime_paths)
+    state = matrix_state_for_runtime(runtime_paths)
+    user_ids: set[str] = set()
+    for name in entity_names:
+        account = state.get_account(managed_account_key(name))
+        if account is not None:
+            user_ids.add(matrix_account_user_id(account, domain))
+        if name != ROUTER_AGENT_NAME or account is not None:
+            user_ids.add(MatrixID.from_username(agent_username_localpart(name, runtime_paths), domain).full_id)
+    return frozenset(user_ids)
 
 
 def memoized_entity_identities[T](

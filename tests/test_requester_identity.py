@@ -17,7 +17,12 @@ from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.state import MatrixState
-from mindroom.requester_identity import is_human_requester_id, is_managed_entity_id, resolve_human_requester_alias
+from mindroom.requester_identity import (
+    is_human_requester_id,
+    is_managed_entity_id,
+    is_persisted_managed_entity_id,
+    resolve_human_requester_alias,
+)
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.matrix_state_helpers import save_matrix_state
 
@@ -56,6 +61,12 @@ def test_managed_entity_check_reads_matrix_state_once(tmp_path: Path, monkeypatc
     assert is_managed_entity_id("@mindroom_coder:localhost", config, runtime_paths)
     assert not is_managed_entity_id("@alice:localhost", config, runtime_paths)
     assert reads == 4
+
+    # Persisted managed-entity checks accept only prepared accounts, never unconfigured synthetic generated IDs.
+    assert is_persisted_managed_entity_id("@renamed_coder:localhost", config, runtime_paths)
+    assert is_persisted_managed_entity_id("@helper:old.example", config, runtime_paths)
+    assert not is_persisted_managed_entity_id("@mindroom_coder:localhost", config, runtime_paths)
+    assert not is_persisted_managed_entity_id("@alice:localhost", config, runtime_paths)
 
 
 @pytest.mark.usefixtures("enforce_turn_authorization")

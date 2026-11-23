@@ -10912,8 +10912,10 @@ depends_on = [
     "mindroom.matrix.room_reconciliation",
     "mindroom.matrix.state",
     "mindroom.reactive_triggers.external_sources",
+    "mindroom.reactive_triggers.matching",
     "mindroom.reactive_triggers.models",
     "mindroom.reactive_triggers.store",
+    "mindroom.reactive_triggers.triage",
     "mindroom.thread_tags",
     "mindroom.tool_system.authoring",
 ]

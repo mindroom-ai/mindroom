@@ -2722,7 +2722,8 @@
             "discriminator": {
               "mapping": {
                 "ed25519": "#/$defs/Ed25519EventSourceConfig",
-                "github": "#/$defs/GitHubEventSourceConfig"
+                "github": "#/$defs/GitHubEventSourceConfig",
+                "hmac": "#/$defs/HmacEventSourceConfig"
               },
               "propertyName": "kind"
             },
@@ -2732,6 +2733,9 @@
               },
               {
                 "$ref": "#/$defs/Ed25519EventSourceConfig"
+              },
+              {
+                "$ref": "#/$defs/HmacEventSourceConfig"
               }
             ]
           },
@@ -2815,6 +2819,99 @@
         "read_write"
       ],
       "type": "string"
+    },
+    "HmacEventSourceConfig": {
+      "additionalProperties": false,
+      "description": "Generic HMAC-SHA256 webhook event source configuration.",
+      "properties": {
+        "kind": {
+          "const": "hmac",
+          "default": "hmac",
+          "description": "Event source type for generic HMAC-SHA256 webhooks",
+          "title": "Kind",
+          "type": "string"
+        },
+        "secret_env": {
+          "description": "Environment variable name holding the HMAC webhook secret",
+          "title": "Secret Env",
+          "type": "string"
+        },
+        "signature_header": {
+          "default": "X-Webhook-Signature-256",
+          "description": "HTTP header name carrying the HMAC-SHA256 signature",
+          "title": "Signature Header",
+          "type": "string"
+        },
+        "signature_prefix": {
+          "default": "sha256=",
+          "description": "Optional prefix before the hex digest; empty string means bare hex",
+          "title": "Signature Prefix",
+          "type": "string"
+        },
+        "kind_header": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional HTTP header name carrying the event kind",
+          "title": "Kind Header"
+        },
+        "kind_field": {
+          "default": "kind",
+          "description": "JSON field or dot-path carrying the event kind when kind_header is unset",
+          "title": "Kind Field",
+          "type": "string"
+        },
+        "event_id_header": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional HTTP header name carrying a deduplication event ID",
+          "title": "Event Id Header"
+        },
+        "allowed_kinds": {
+          "default": [],
+          "description": "Optional allowlist of accepted event kinds",
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Kinds",
+          "type": "array"
+        },
+        "subscribers": {
+          "default": [],
+          "description": "Matrix user IDs allowed to subscribe reactive triggers to this source",
+          "items": {
+            "type": "string"
+          },
+          "title": "Subscribers",
+          "type": "array"
+        },
+        "max_body_bytes": {
+          "default": 262144,
+          "description": "Maximum accepted webhook body size in bytes",
+          "maximum": 1048576,
+          "minimum": 1024,
+          "title": "Max Body Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "secret_env"
+      ],
+      "title": "HmacEventSourceConfig",
+      "type": "object"
     },
     "HookOverrideConfig": {
       "additionalProperties": false,

@@ -21,6 +21,7 @@ from mindroom.api import main as api_main
 from mindroom.config.external_trigger_policy import (
     Ed25519EventSourceConfig,
     GitHubEventSourceConfig,
+    HmacEventSourceConfig,
 )
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
@@ -37,11 +38,13 @@ from mindroom.reactive_triggers import (
     ReactiveTriggerStore,
     TriggerEvent,
     TriggerTargetSpec,
+    check_external_event_source_access,
     fan_out_external_event,
     is_source_subscriber_allowed,
     validate_subscription_against_source,
     verify_and_normalize_ed25519_event,
     verify_and_normalize_github_webhook,
+    verify_and_normalize_hmac_webhook,
 )
 from tests.runtime_fakes import bind_test_embedded_runtime
 
@@ -1588,3 +1591,232 @@ def test_github_check_suite_preserves_id_and_url_for_subscription_matching(tmp_p
     assert due[0].event.data["id"] == 987654
     assert due[0].event.data["url"] == "https://api.github.com/repos/mindroom-ai/mindroom/check-suites/987654"
     assert config.external_trigger_policy.enabled is True
+
+
+def _hmac_sig(body: bytes, secret: str, *, prefix: str = "sha256=") -> str:
+    digest = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    return f"{prefix}{digest}"
+
+
+def test_verify_and_normalize_hmac_webhook_variants_and_errors(tmp_path: Path) -> None:
+    """verify_and_normalize_hmac_webhook enforces 503/401/400 errors and normalizes header, dot-path, and fallback fields."""
+    secret = "hmac-super-secret"  # noqa: S105
+    paths_no_secret = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env={},
+    )
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env={"CUSTOM_HMAC_SECRET": secret},
+    )
+    src = HmacEventSourceConfig(
+        secret_env="CUSTOM_HMAC_SECRET",  # noqa: S106
+        signature_header="X-Custom-Sig",
+        signature_prefix="sha256=",
+        kind_field="meta.event_type",
+        allowed_kinds=["deploy.done", "alert.fired"],
+        subscribers=[_ALICE],
+    )
+    body = json.dumps(
+        {
+            "meta": {"event_type": "deploy.done"},
+            "id": 42,
+            "actor": "ci-bot",
+            "title": "T" * 600,
+            "summary": "S" * 2500,
+            "text": "Deploy finished",
+            "env": "prod",
+        },
+    ).encode("utf-8")
+
+    # 503 when secret env var is missing
+    with pytest.raises(ExternalSourceUnavailableError):
+        verify_and_normalize_hmac_webhook(
+            source_id="ops",
+            source=src,
+            headers={"X-Custom-Sig": _hmac_sig(body, secret)},
+            body=body,
+            runtime_paths=paths_no_secret,
+        )
+
+    # 401 on missing / wrong / wrong-prefix signature
+    for bad_headers in (
+        {},
+        {"X-Custom-Sig": "sha256=deadbeef"},
+        {"X-Custom-Sig": _hmac_sig(body, secret, prefix="")},
+    ):
+        with pytest.raises(ExternalSourceAuthError):
+            verify_and_normalize_hmac_webhook(
+                source_id="ops",
+                source=src,
+                headers=bad_headers,
+                body=body,
+                runtime_paths=paths,
+            )
+
+    # Uppercase hex is normalized and accepted; dot-path kind, int id, bounded fields, and full data preserved
+    event = verify_and_normalize_hmac_webhook(
+        source_id="ops",
+        source=src,
+        headers={"x-custom-sig": "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest().upper()},
+        body=body,
+        runtime_paths=paths,
+        now=1234.0,
+    )
+    assert event.source_type == "external_event"
+    assert event.source_id == "ops"
+    assert event.kind == "deploy.done"
+    assert event.event_id == "42"
+    assert event.actor == "ci-bot"
+    assert event.title is not None
+    assert len(event.title) == 500
+    assert event.summary is not None
+    assert len(event.summary) == 2000
+    assert event.text == "Deploy finished"
+    assert event.data["env"] == "prod"
+
+    # 400 on bad JSON, non-dict JSON, missing kind, disallowed kind, oversized event_id
+    for bad_body in (b"not-json", b"[1,2]", b"{}", json.dumps({"meta": {"event_type": "disallowed"}}).encode()):
+        with pytest.raises(ExternalSourceBadRequestError):
+            verify_and_normalize_hmac_webhook(
+                source_id="ops",
+                source=src,
+                headers={"X-Custom-Sig": _hmac_sig(bad_body, secret)},
+                body=bad_body,
+                runtime_paths=paths,
+            )
+
+    huge_id_body = json.dumps({"meta": {"event_type": "deploy.done"}, "event_id": "x" * 300}).encode()
+    with pytest.raises(ExternalSourceBadRequestError):
+        verify_and_normalize_hmac_webhook(
+            source_id="ops",
+            source=src,
+            headers={"X-Custom-Sig": _hmac_sig(huge_id_body, secret)},
+            body=huge_id_body,
+            runtime_paths=paths,
+        )
+
+    # Bare hex signature + kind_header + event_id_header fallback to sha256 body hash (and ignores bool id)
+    bare_src = HmacEventSourceConfig(
+        secret_env="CUSTOM_HMAC_SECRET",  # noqa: S106
+        signature_header="Linear-Signature",
+        signature_prefix="",
+        kind_header="Linear-Event",
+        event_id_header="Linear-Delivery",
+    )
+    no_id_body = json.dumps({"id": True, "team": "eng"}).encode()
+    ev_fallback = verify_and_normalize_hmac_webhook(
+        source_id="linear",
+        source=bare_src,
+        headers={
+            "Linear-Signature": _hmac_sig(no_id_body, secret, prefix=""),
+            "Linear-Event": "Issue",
+        },
+        body=no_id_body,
+        runtime_paths=paths,
+    )
+    assert ev_fallback.kind == "Issue"
+    assert ev_fallback.event_id == f"sha256:{hashlib.sha256(no_id_body).hexdigest()[:32]}"
+
+    ev_header_id = verify_and_normalize_hmac_webhook(
+        source_id="linear",
+        source=bare_src,
+        headers={
+            "Linear-Signature": _hmac_sig(no_id_body, secret, prefix=""),
+            "Linear-Event": "Issue",
+            "Linear-Delivery": "lin-deliv-99",
+        },
+        body=no_id_body,
+        runtime_paths=paths,
+    )
+    assert ev_header_id.event_id == "lin-deliv-99"
+
+    with pytest.raises(ExternalSourceBadRequestError):
+        verify_and_normalize_hmac_webhook(
+            source_id="linear",
+            source=bare_src,
+            headers={"Linear-Signature": _hmac_sig(no_id_body, secret, prefix="")},
+            body=no_id_body,
+            runtime_paths=paths,
+        )
+
+
+def test_hmac_event_source_api_fanout_dedupe_and_access_recheck(tmp_path: Path) -> None:
+    """POST /api/event-sources/{source_id} verifies HMAC webhooks, fans out, deduplicates, and rechecks allowed_kinds."""
+    secret = "api-hmac-secret"  # noqa: S105
+    runtime_paths, config = _setup_event_source_api(
+        tmp_path,
+        event_sources={
+            "alerts": {
+                "kind": "hmac",
+                "secret_env": "ALERT_HMAC_SECRET",
+                "signature_header": "X-Alert-Sig",
+                "signature_prefix": "sha256=",
+                "kind_field": "alert.type",
+                "allowed_kinds": ["page.triggered"],
+                "subscribers": [_ALICE],
+            },
+        },
+        env={"ALERT_HMAC_SECRET": secret},
+    )
+    source_cfg = config.external_trigger_policy.event_sources["alerts"]
+    validate_subscription_against_source(source_cfg, kind="page.triggered", match={"service": "api"})
+    with pytest.raises(ValueError, match="not allowed"):
+        validate_subscription_against_source(source_cfg, kind="page.ignored", match={})
+
+    store = ReactiveTriggerStore(runtime_paths)
+    store.create_trigger(
+        _make_external_rule(
+            trigger_id="hmac-sub",
+            owner_user_id=_ALICE,
+            source_id="alerts",
+            kind="page.triggered",
+            match={"service": "api"},
+        ),
+    )
+
+    payload = json.dumps({"alert": {"type": "page.triggered"}, "service": "api", "text": "5xx spike"}).encode()
+    headers = {"X-Alert-Sig": _hmac_sig(payload, secret), "Content-Type": "application/json"}
+    with TestClient(api_main.app) as client:
+        bad_sig = client.post("/api/event-sources/alerts", content=payload, headers={"X-Alert-Sig": "sha256=bad"})
+        assert bad_sig.status_code == 401
+
+        ok = client.post("/api/event-sources/alerts", content=payload, headers=headers)
+        assert ok.status_code == 202
+        assert ok.json()["matched_rules"] == 1
+
+        # Same body hashes to same sha256 dedupe_key -> deduplicated
+        dup = client.post("/api/event-sources/alerts", content=payload, headers=headers)
+        assert dup.status_code == 202
+        assert dup.json()["matched_rules"] == 0
+
+    due = store.list_due_firings()
+    assert len(due) == 1
+    spec = ExternalEventSourceSpec(source_id="alerts", kind="page.triggered", match={"service": "api"})
+    assert (
+        check_external_event_source_access(
+            owner_user_id=_ALICE,
+            source_spec=spec,
+            event=due[0].event,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+        is None
+    )
+    # Revoking allowed_kinds fails closed at dispatch access check
+    revoked_config = config.model_copy(deep=True)
+    revoked_src = revoked_config.external_trigger_policy.event_sources["alerts"]
+    assert isinstance(revoked_src, HmacEventSourceConfig)
+    revoked_src.allowed_kinds = ["other.kind"]
+    assert (
+        check_external_event_source_access(
+            owner_user_id=_ALICE,
+            source_spec=spec,
+            event=due[0].event,
+            config=revoked_config,
+            runtime_paths=runtime_paths,
+        )
+        == "source_grant_revoked"
+    )

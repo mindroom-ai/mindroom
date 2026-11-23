@@ -59,6 +59,7 @@ from mindroom.config.legacy_fields import (
     approval_rule_a_file_rename_escapes,
     drop_retired_fields,
     rename_legacy_knowledge_reranker,
+    retired_trigger_approval_error,
 )
 from mindroom.config.matrix import (
     EventJournalConfig,
@@ -1548,6 +1549,18 @@ class Config(BaseModel):
         if (escaped := approval_rule_a_file_rename_escapes(globs, elsewhere)) is not None:
             msg = f"{escaped}, which another rule or the default now decides; rewrite the rules for the new names."
             raise ToolConfigOverrideError(msg)
+        if (
+            any(entry.name == "triggers" for _, entry in entries)
+            and (
+                trigger_error := retired_trigger_approval_error(
+                    self.tool_approval.rules,
+                    self.tool_approval.default,
+                    self.tool_approval.timeout_days,
+                )
+            )
+            is not None
+        ):
+            raise ToolConfigOverrideError(trigger_error)
 
     def _validate_tailnet_ssh_tools(self, tools: ToolRegistry) -> None:
         """Refuse an SSH opt-in when the turn can offer another toolkit's shell instead."""
