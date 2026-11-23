@@ -7,13 +7,13 @@ import sys
 
 import pytest
 
-from cluster.k8s.kind.chat_check import extract_latest_reply, is_terminal_reply, port_forward
+from cluster.k8s.kind.chat_check import extract_completed_reply, port_forward
 
 AGENT = "@mindroom_helper:mindroom.local"
 
 
-def test_extract_latest_reply_follows_streaming_replace_edits() -> None:
-    """Streaming placeholder and partial edits stay nonterminal until the final m.replace; m.notice is ignored."""
+def test_extract_completed_reply_follows_streaming_replace_edits() -> None:
+    """Streaming placeholder and partial edits return None until the final m.replace; m.notice is ignored."""
     events = [
         {
             "type": "m.room.message",
@@ -38,9 +38,7 @@ def test_extract_latest_reply_follows_streaming_replace_edits() -> None:
             },
         },
     ]
-    text, status = extract_latest_reply(events, AGENT, "$prompt")
-    assert (text, status) == ("po", "streaming")
-    assert not is_terminal_reply(text, status)
+    assert extract_completed_reply(events, AGENT, "$prompt") is None
 
     events.extend(
         [
@@ -67,13 +65,11 @@ def test_extract_latest_reply_follows_streaming_replace_edits() -> None:
             },
         ],
     )
-    text, status = extract_latest_reply(events, AGENT, "$prompt")
-    assert (text, status) == ("pong", "completed")
-    assert is_terminal_reply(text, status)
+    assert extract_completed_reply(events, AGENT, "$prompt") == "pong"
 
 
-def test_extract_latest_reply_ignores_unrelated_messages_and_orphan_edits() -> None:
-    """Only thread replies rooted at prompt_id (and edits of them) match."""
+def test_extract_completed_reply_ignores_unrelated_and_raises_on_error() -> None:
+    """Unrelated/nonterminal messages return None; error statuses raise immediately."""
     events = [
         {"type": "m.room.message", "event_id": "$other", "sender": "@tester:mindroom.local", "content": {"body": "hi"}},
         {"type": "m.room.member", "event_id": "$join", "sender": AGENT, "content": {"membership": "join"}},
@@ -94,21 +90,56 @@ def test_extract_latest_reply_ignores_unrelated_messages_and_orphan_edits() -> N
                 "m.relates_to": {"rel_type": "m.replace", "event_id": "$missing_root"},
             },
         },
+        {
+            "type": "m.room.message",
+            "event_id": "$waiting",
+            "sender": AGENT,
+            "content": {
+                "body": "waiting",
+                "io.mindroom.stream_status": "approval_pending",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$prompt"},
+            },
+        },
     ]
-    assert extract_latest_reply(events, AGENT, "$prompt") == (None, None)
-    assert not is_terminal_reply("", "completed")
-    assert not is_terminal_reply("waiting", "approval_pending")
-    assert is_terminal_reply("boom", "error")
+    assert extract_completed_reply(events, AGENT, "$prompt") is None
+
+    events.append(
+        {
+            "type": "m.room.message",
+            "event_id": "$err",
+            "sender": AGENT,
+            "content": {
+                "body": "",
+                "io.mindroom.stream_status": "error",
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$prompt"},
+            },
+        },
+    )
+    with pytest.raises(RuntimeError, match="status error"):
+        extract_completed_reply(events, AGENT, "$prompt")
 
 
-def test_port_forward_reports_stderr_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Port-forward surfaces kubectl stderr if the subprocess exits before becoming ready."""
+def test_port_forward_parses_ephemeral_port_and_handles_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Port-forward reads the assigned port from stdout and reports exit status without leaking stderr."""
     real_popen = subprocess.Popen
 
-    def fake_popen(_cmd: list[str], **_kwargs: object) -> subprocess.Popen[str]:
-        cmd = [sys.executable, "-c", "import sys; sys.stderr.write('svc not found\\n'); sys.exit(1)"]
-        return real_popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    def spawn_script(code: str) -> None:
+        def fake_popen(_cmd: list[str], **_kwargs: object) -> subprocess.Popen[str]:
+            return real_popen(
+                [sys.executable, "-c", code],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
 
-    monkeypatch.setattr(subprocess, "Popen", fake_popen)
-    with pytest.raises(RuntimeError, match="svc not found"), port_forward():
+        monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    spawn_script("import time; print('Forwarding from 127.0.0.1:43210 -> 8008', flush=True); time.sleep(30)")
+    with port_forward() as base:
+        assert base == "http://127.0.0.1:43210"
+
+    spawn_script("import sys; sys.stderr.write('secret-stderr\\n'); sys.exit(1)")
+    with pytest.raises(RuntimeError, match=r"exit 1") as exc_info, port_forward():
         pass
+    assert "secret-stderr" not in str(exc_info.value)
