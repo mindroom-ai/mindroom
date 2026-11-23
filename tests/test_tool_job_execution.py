@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
+import re
 import threading
 from collections.abc import AsyncIterator  # noqa: TC003 - Agno resolves tool return annotations at runtime.
 from concurrent.futures import ThreadPoolExecutor
@@ -28,6 +30,7 @@ from mindroom.llm.errors import ProviderError
 from mindroom.llm.runs import RunStatus
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.shell.execution import current_shell_background_scope
 from mindroom.tool_jobs import execution, results
 from mindroom.tool_jobs.consumption import (
     ConsumptionOwner,
@@ -1792,3 +1795,104 @@ async def test_a_call_whose_wait_is_refused_leaves_its_job_to_be_reported(
     finally:
         gate.set()
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_managed_shell_job_does_not_inherit_reply_shell_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A managed run_shell_command job keeps running after the reply ends and closes its shell scope."""
+    monkeypatch.setattr("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    context, runtime = await _managed_context(tmp_path)
+    toolkit = get_tool_by_name(
+        "shell",
+        context.runtime_paths,
+        worker_target=None,
+        runs_in_worker=False,
+        tool_init_overrides={"base_dir": str(workspace)},
+        tools=builtin_tool_registry(),
+    )
+    actor = job_actor(*toolkit_job_tools(toolkit, authored_name="shell").values())
+    model = ScriptedModel(
+        [calls(tool_call("run_shell_command", "shell-call", args="sleep 0.7; echo managed-done")), answer("done")],
+    )
+    seen_scopes: list[object] = []
+
+    @owned_tool_execution(enabled=always_owned)
+    async def reply() -> RunRecord:
+        seen_scopes.append(current_shell_background_scope())
+        return await run_job_turn(actor, model, "Run build", session_id=context.session_id)
+
+    try:
+        with tool_runtime_context(context):
+            record = await reply()
+        assert len(seen_scopes) == 1
+        assert seen_scopes[0] is not None
+        assert current_shell_background_scope() is None
+        [tool] = record.tools
+        assert not tool.is_error, tool.result
+        assert "Still running after" not in str(tool.result)
+        (job,) = runtime.retained_jobs()
+        assert job.status == "running"
+        await wait_for_status(runtime, job.job_id, "completed")
+        (completed,) = runtime.retained_jobs()
+        assert completed.result == "managed-done"
+        assert not (workspace / ".mindroom" / "shell").exists()
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True], ids=["blocking", "streaming"])
+async def test_non_job_owned_turn_auto_backgrounds_shell_and_cleans_up_on_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
+) -> None:
+    """An owned non-job turn auto-backgrounds slow shell calls, never leaks scope across yields, and stops them on exit."""
+    monkeypatch.setattr("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    paths = _runtime_paths(tmp_path)
+    toolkit = get_tool_by_name(
+        "shell",
+        paths,
+        worker_target=None,
+        runs_in_worker=False,
+        tool_init_overrides={"base_dir": str(workspace)},
+        tools=builtin_tool_registry(),
+    )
+    entrypoint = toolkit.functions["run_shell_command"]
+
+    @owned_tool_execution(enabled=lambda: False)
+    async def run_blocking() -> str:
+        receipt = await entrypoint("sleep 10")
+        assert isinstance(receipt, str)
+        return receipt
+
+    @owned_tool_execution(enabled=lambda: False)
+    async def run_streaming() -> AsyncIterator[str]:
+        receipt = await entrypoint("sleep 10")
+        assert isinstance(receipt, str)
+        yield receipt
+
+    if streaming:
+        chunks: list[str] = []
+        async for chunk in run_streaming():
+            assert current_shell_background_scope() is None
+            chunks.append(chunk)
+        [receipt] = chunks
+    else:
+        receipt = await run_blocking()
+
+    pid_match = re.search(r"moved to the background \(PID (\d+)\)\.", receipt)
+    log_match = re.search(r"^Log: (\S+) \(receives ongoing", receipt, flags=re.MULTILINE)
+    assert pid_match is not None, receipt
+    assert log_match is not None, receipt
+    pid, rel_log = int(pid_match.group(1)), log_match.group(1)
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    assert "[MindRoom: stopped when turn ended]" in (workspace / rel_log).read_text(encoding="utf-8")

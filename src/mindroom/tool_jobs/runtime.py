@@ -25,6 +25,7 @@ from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import JOB_ENDED_REASON, REPLY_STOPPED_REASON, ToolJobSnapshotUpdate
 from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
+from mindroom.shell.execution import bind_shell_background_scope
 from mindroom.tool_jobs.background_after import validate_wait_seconds
 from mindroom.tool_jobs.control import (
     JobControl,
@@ -869,6 +870,8 @@ class ToolJobRuntime:
                     # The reply span that started the job may end first; the job owns its calls' outcome.
                     recording_tool_calls(None),
                     job_control_context(entry.control),
+                    # Managed jobs outlive the reply that started them, so they never inherit its shell scope.
+                    bind_shell_background_scope(None),
                     # A run the job makes is told of no newer message: the reply that waits for the job is.
                     queued_message_signal_context(None),
                 ):
