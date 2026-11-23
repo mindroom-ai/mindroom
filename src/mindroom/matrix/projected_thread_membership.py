@@ -12,8 +12,10 @@ from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_reads import complete_thread_history, refetched_thread_history
+from mindroom.matrix.event_info import event_type_supports_thread_relations
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
+    ThreadResolutionState,
     resolve_event_thread_membership,
     thread_has_child,
     thread_messages_thread_membership_access,
@@ -106,6 +108,8 @@ async def resolve_thread_root_event_id(
     relations: RelationLookup,
     room_id: str,
     event_id: str,
+    *,
+    allow_standalone_root: bool = False,
 ) -> str | None:
     """Resolve one event ID into a canonical thread root when thread membership can prove one."""
     normalized_event_id = event_id.strip()
@@ -132,4 +136,11 @@ async def resolve_thread_root_event_id(
             ),
         ),
     )
+    if (
+        allow_standalone_root
+        and resolution.state is ThreadResolutionState.ROOM_LEVEL
+        and event_info.can_be_thread_root
+        and event_type_supports_thread_relations(event_info.event_type)
+    ):
+        return normalized_event_id
     return resolution.thread_id

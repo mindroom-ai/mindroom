@@ -5057,6 +5057,7 @@ depends_on = [
 path = "mindroom.matrix.projected_thread_membership"
 depends_on = [
     "mindroom.matrix.conversation_reads",
+    "mindroom.matrix.event_info",
     "mindroom.matrix.thread_membership",
 ]
 

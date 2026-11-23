@@ -143,6 +143,7 @@ async def resolve_canonical_tool_thread_target(
     thread_id: str | None,
     allow_context_fallback: bool = True,
     fail_closed_on_normalization_error: bool = False,
+    allow_standalone_root: bool = False,
 ) -> _CanonicalToolThreadTarget:
     """Resolve one tool thread target into the canonical thread root or a stable error."""
     requested_thread_id = resolve_context_thread_id(
@@ -159,12 +160,21 @@ async def resolve_canonical_tool_thread_target(
         )
 
     try:
-        canonical_thread_id = await resolve_thread_root_event_id(
-            context.conversation_reader,
-            context.relations,
-            room_id,
-            requested_thread_id,
-        )
+        if allow_standalone_root:
+            canonical_thread_id = await resolve_thread_root_event_id(
+                context.conversation_reader,
+                context.relations,
+                room_id,
+                requested_thread_id,
+                allow_standalone_root=True,
+            )
+        else:
+            canonical_thread_id = await resolve_thread_root_event_id(
+                context.conversation_reader,
+                context.relations,
+                room_id,
+                requested_thread_id,
+            )
     except Exception:
         if not fail_closed_on_normalization_error:
             raise
@@ -202,6 +212,8 @@ async def explicit_thread_root(context: ToolRuntimeContext, *, room_id: str, thr
 async def resolve_current_room_thread_root(
     context: ToolRuntimeContext,
     thread_id: str | None,
+    *,
+    allow_standalone_root: bool = False,
 ) -> tuple[str | None, str | None]:
     """Return the root of one thread in the current room, or why none resolves.
 
@@ -217,5 +229,6 @@ async def resolve_current_room_thread_root(
         room_id=context.room_id,
         thread_id=thread_id,
         fail_closed_on_normalization_error=True,
+        allow_standalone_root=allow_standalone_root,
     )
     return target.canonical_thread_id, target.error

@@ -4,18 +4,27 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from nio import RoomGetEventError
+from nio import RoomGetEventError, RoomGetEventResponse
 
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.custom_tools.thread_move import ThreadMoveTools
 from mindroom.custom_tools.thread_resolution import ThreadResolutionTools
+from mindroom.custom_tools.thread_tags import ThreadTagsTools
 from mindroom.message_target import MessageTarget
-from mindroom.thread_tags import RESOLVED_THREAD_TAG, SNOOZED_THREAD_TAG, ThreadTagsError
+from mindroom.thread_tags import (
+    RESOLVED_THREAD_TAG,
+    SNOOZED_THREAD_TAG,
+    ThreadTagRecord,
+    ThreadTagsError,
+    ThreadTagsState,
+)
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
@@ -372,3 +381,59 @@ async def test_resolve_thread_leaves_other_state_alone(tmp_path: Path) -> None:
         await ThreadResolutionTools().resolve_thread()
 
     mock_remove.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_standalone_room_message_resolves_for_resolution_and_tags_not_thread_move(tmp_path: Path) -> None:
+    """A relation-free room message with no replies resolves for resolution/tags but stays strict for thread_move."""
+    standalone_id = "$standalone:localhost"
+    state_event_id = "$topic:localhost"
+    events = {
+        standalone_id: {
+            "event_id": standalone_id,
+            "type": "m.room.message",
+            "content": {"msgtype": "m.text", "body": "hi"},
+        },
+        state_event_id: {"event_id": state_event_id, "type": "m.room.topic", "content": {"topic": "ops"}},
+    }
+
+    async def get_event(_room_id: str, event_id: str) -> RoomGetEventResponse | RoomGetEventError:
+        if event_id not in events:
+            return RoomGetEventError("missing", status_code="M_NOT_FOUND")
+        resp = RoomGetEventResponse()
+        resp.event = MagicMock(source=events[event_id])
+        return resp
+
+    context = _context(tmp_path, thread_id=None)
+    context.client.room_get_event = AsyncMock(side_effect=get_event)
+    context = replace(context, relations=make_relation_lookup(client=context.client))
+
+    with (
+        patch("mindroom.custom_tools.thread_resolution.set_thread_tag", new=AsyncMock()) as mock_resolve_set,
+        patch(
+            "mindroom.custom_tools.thread_tags.set_thread_tag",
+            new=AsyncMock(
+                return_value=ThreadTagsState(
+                    room_id=ROOM_ID,
+                    thread_root_id=standalone_id,
+                    tags={"ops": ThreadTagRecord(set_by="@user:localhost", set_at=datetime.now(UTC))},
+                ),
+            ),
+        ) as mock_tag_set,
+        tool_runtime_context(context),
+    ):
+        resolved = json.loads(await ThreadResolutionTools().resolve_thread(thread_id=standalone_id))
+        tagged = json.loads(await ThreadTagsTools().tag_thread("ops", thread_id=standalone_id))
+        moved = json.loads(await ThreadMoveTools().move_thread(room_id="!dest:localhost", thread_id=standalone_id))
+        rejected_state = json.loads(await ThreadResolutionTools().resolve_thread(thread_id=state_event_id))
+
+    assert resolved["status"] == "ok"
+    assert resolved["thread_id"] == standalone_id
+    mock_resolve_set.assert_awaited_once()
+    assert tagged["status"] == "ok"
+    assert tagged["thread_id"] == standalone_id
+    mock_tag_set.assert_awaited_once()
+    assert moved["status"] == "error"
+    assert "canonical thread root" in moved["message"]
+    assert rejected_state["status"] == "error"
+    assert "canonical thread root" in rejected_state["message"]
