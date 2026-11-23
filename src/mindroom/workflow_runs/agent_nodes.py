@@ -24,12 +24,13 @@ from mindroom.delegation.lifecycle import (
 )
 from mindroom.delegation.recovery import read_child_run
 from mindroom.delegation.state import (
+    CONTINUE_SUBAGENT,
     RESTART_INTERRUPTION_REASON,
     RUN_SUBAGENT,
     SPENT_RUNS_KEY,
     SubagentPersona,
 )
-from mindroom.delegation.targets import resolve_fresh_target
+from mindroom.delegation.targets import resolve_follow_up_target, resolve_fresh_target
 from mindroom.llm.messages import CUT_OFF_TEXT_KEY, is_own_model_message
 from mindroom.llm.runs import RunStatus
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -46,10 +47,13 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.delegation.state import DelegationChild
+    from mindroom.delegation.targets import DelegationTarget
     from mindroom.llm.runs import RunRecord, ToolExecution
     from mindroom.llm.usage import RunMetrics
     from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.workflow_runs.models import WorkflowNode, WorkflowRun
     from mindroom.workflow_runs.store import WorkflowRunStore
 
@@ -120,7 +124,8 @@ def schema_failure(request: dict[str, object]) -> str | None:
 
 def _first_prompt(node: WorkflowNode) -> str:
     """Return what the agent of *node* is sent first: its prompt, and with a schema the instruction to match it."""
-    prompt, schema = str(node.request.get("prompt")), node.request.get("schema")
+    raw = node.request["prompt"] if "prompt" in node.request else node.request.get("message")
+    prompt, schema = str(raw), node.request.get("schema")
     return prompt if schema is None else schema_prompt(prompt, schema)
 
 
@@ -128,6 +133,58 @@ def turn_job_id(run: WorkflowRun, key: str, generation: int, turn: int) -> str:
     """Return the ID of the job one turn of one generation of a node runs as: the same for the same turn, always."""
     identity = [run.execution_identity, run.run_id, key, generation, turn]
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
+async def _resolve_child_target(
+    context: ToolRuntimeContext,
+    run: WorkflowRun,
+    node: WorkflowNode,
+    owner: ToolExecutionIdentity,
+    *,
+    session: WorkflowNode | None,
+    follow_up: str | None,
+    correction: str | None,
+    previous: DelegationChild | None,
+) -> tuple[DelegationTarget, DelegationChild | None, str, dict[str, object]]:
+    """Resolve a fresh or continued child target and its delegation tool name/arguments."""
+    config, paths, caller = context.current_config, context.runtime_paths, run.agent_name
+    source = session.request if session is not None else node.request
+    arguments = {_RENAMED.get(name, name): value for name, value in source.items() if name in _OPTIONS}
+    if session is not None:
+        arguments["task"] = node.label
+    if correction is None and follow_up is not None:
+        call_args: dict[str, object] = {"subagent_id": follow_up, "message": node.label}
+        if OUTPUT_PATH_ARGUMENT in arguments:
+            call_args[OUTPUT_PATH_ARGUMENT] = arguments[OUTPUT_PATH_ARGUMENT]
+        target = await resolve_follow_up_target(
+            call_args,
+            owner=owner,
+            config=config,
+            runtime_paths=paths,
+            depth=run.depth,
+        )
+        if isinstance(target, str):
+            raise AgentNodeError(target)
+        return target, target.previous_child, CONTINUE_SUBAGENT, call_args
+    cap = SubagentPersona.from_dict(run.persona) if run.persona else None
+    if cap is not None and arguments.get("agent_name") in (None, caller) and not arguments.get("profile"):
+        # A copy of a narrowed agent is that agent again: its prompt, and at most what it was left with.
+        arguments["system_prompt"] = arguments.get("system_prompt") or cap.system_prompt
+    if not arguments.get("system_prompt") and _NARROWING & arguments.keys():
+        # `run_subagent` reads a list without a prompt as nothing, which would hand the copy every tool.
+        raise AgentNodeError(_NARROWS_WITH_SYSTEM)
+    target = resolve_fresh_target(
+        arguments,
+        caller_name=caller,
+        config=config,
+        runtime_paths=paths,
+        depth=run.depth,
+        workspace_root=lambda: resolve_agent_runtime(caller, config, paths, execution_identity=owner).workspace.root,
+        cap=cap,
+    )
+    if isinstance(target, str):
+        raise AgentNodeError(target)
+    return target, previous, RUN_SUBAGENT, arguments
 
 
 async def launch_child(
@@ -143,6 +200,8 @@ async def launch_child(
     turn: int = 1,
     correction: str | None = None,
     made: bool = False,
+    session: WorkflowNode | None = None,
+    follow_up: str | None = None,
 ) -> WorkflowNode:
     """Start the job of one agent turn of *run* in its owner's *context*, and return the node as saved with its handle.
 
@@ -165,28 +224,17 @@ async def launch_child(
     prompt = _first_prompt(node) if correction is None else correction
     prompt = prompt if correction is None or previous is not None else f"{_first_prompt(node)}\n\n{correction}"
     config, paths, caller = context.current_config, context.runtime_paths, run.agent_name
-    arguments = {_RENAMED.get(name, name): value for name, value in node.request.items() if name in _OPTIONS}
-    cap = SubagentPersona.from_dict(run.persona) if run.persona else None
-    if cap is not None and arguments.get("agent_name") in (None, caller) and not arguments.get("profile"):
-        # A copy of a narrowed agent is that agent again: its prompt, and at most what it was left with.
-        arguments["system_prompt"] = arguments.get("system_prompt") or cap.system_prompt
-    if not arguments.get("system_prompt") and _NARROWING & arguments.keys():
-        # `run_subagent` reads a list without a prompt as nothing, which would hand the copy every tool.
-        raise AgentNodeError(_NARROWS_WITH_SYSTEM)
     with tool_runtime_context(context):
-        target = resolve_fresh_target(
-            arguments,
-            caller_name=caller,
-            config=config,
-            runtime_paths=paths,
-            depth=run.depth,
-            workspace_root=lambda: (
-                resolve_agent_runtime(caller, config, paths, execution_identity=owner).workspace.root
-            ),
-            cap=cap,
+        target, previous, tool_name, call_args = await _resolve_child_target(
+            context,
+            run,
+            node,
+            owner,
+            session=session,
+            follow_up=follow_up,
+            correction=correction,
+            previous=previous,
         )
-        if isinstance(target, str):
-            raise AgentNodeError(target)
         try:
             authorized = authorize_delegation(
                 caller,
@@ -224,7 +272,8 @@ async def launch_child(
             node.key,
             node.generation,
         )
-        job_id = turn_job_id(run, node.key, node.generation, turn)
+        session_turn = int(node.request["turn"]) if node.kind == "turn" else 1
+        job_id = turn_job_id(run, node.key, node.generation, session_turn + turn - 1)
         orchestrator = context.orchestrator
         spec = delegation_call_job(
             child,
@@ -232,8 +281,8 @@ async def launch_child(
             runtime=jobs,
             owner=owner,
             parent_run_id=None,
-            tool_name=RUN_SUBAGENT,
-            arguments=arguments,
+            tool_name=tool_name,
+            arguments=call_args,
             run_child=run_delegated_child_response,
             prompt=prompt,
             config=authorized,
@@ -272,6 +321,22 @@ async def launch_child(
     await jobs.release_wait(job_id, claim)
     node = replace(node, handle=replace(handle, dispatched=True))
     await asyncio.to_thread(partial(stamp, handle=node.handle))
+    if session is not None:
+        session_links = {
+            "subagent_id": child.subagent_id,
+            "agent": target.agent_name,
+            "model": child.model_name,
+            "tip": f"{node.key}:{node.generation}",
+        }
+        update_session = partial(
+            store.update_node,
+            run.run_id,
+            session.key,
+            session.generation,
+            epoch,
+            links=session_links,
+        )
+        await asyncio.to_thread(update_session)
     return node
 
 

@@ -34,6 +34,7 @@ if TYPE_CHECKING:
 __all__ = [
     "AgentError",
     "PartialFailure",
+    "Session",
     "ShellResult",
     "ToolError",
     "WorkflowError",
@@ -48,6 +49,7 @@ __all__ = [
     "run",
     "run_workflow",
     "shell",
+    "spawn",
     "tool",
 ]
 
@@ -259,16 +261,18 @@ def _call(
     kind: str,
     args: dict[str, object],
     *,
+    key: str | None = None,
     label: str | None = None,
     name: str | None = None,
     cached: bool = True,
     timeout: float | None = None,
 ) -> object:
-    """Run one node: submit it under the lane's next key, wait until it settles, return its result or raise."""
+    """Run one node: submit it under *key* or the lane's next key, wait until it settles, return its result or raise."""
     lane = _current_lane()
     meta = {"cached": cached, "phase": lane.phase, "label": label, "name": name, "timeout": timeout}
     gateway = _gateway()
-    receipt = gateway.submit(_next_key(), kind, args, {key: value for key, value in meta.items() if value is not None})
+    node_key = _next_key() if key is None else key
+    receipt = gateway.submit(node_key, kind, args, {k: value for k, value in meta.items() if value is not None})
     node_id = str(receipt["id"])
     # A call that waits for a person is no active lane of its fan-out: the next lane starts in its place, and the
     # call takes a place again before it goes on.
@@ -357,6 +361,66 @@ def agent(
     if schema is None:
         return str(_call("agent", call, name=name, timeout=timeout))
     return _call("agent", {**call, "schema": schema}, name=name, timeout=timeout)
+
+
+class Session:
+    """An agent that keeps its conversation across `ask()` turns."""
+
+    def __init__(self, key: str, name: str) -> None:
+        self._key = key
+        self._name = name
+        self._turn = 0
+        self._lock = threading.Lock()
+
+    def ask(self, message: str, *, schema: object = None, timeout: float | None = None) -> object:
+        """Send the next message to this agent and return its answer; it remembers the earlier turns."""
+        _current_lane()
+        with self._lock:
+            self._turn += 1
+            turn = self._turn
+        call: dict[str, object] = {"session": self._key, "turn": turn, "message": str(message)}
+        if schema is None:
+            return str(_call("turn", call, name=self._name, timeout=timeout))
+        return _call("turn", {**call, "schema": schema}, name=self._name, timeout=timeout)
+
+
+def spawn(
+    name: str,
+    *,
+    agent: str | None = None,
+    model: str | None = None,
+    system: str | None = None,
+    tools: list[str] | None = None,
+    skills: list[str] | None = None,
+    knowledge: list[str] | None = None,
+    profile: str | None = None,
+    minimal: bool = False,
+    output_path: str | None = None,
+    dedicated_worker: bool = False,
+    resource_profile: str | None = None,
+    **unknown: object,
+) -> Session:
+    """Create an agent that keeps its conversation; takes the options of agent() except prompt and schema."""
+    _current_lane()
+    options: dict[str, object] = {
+        "agent": agent,
+        "model": model,
+        "system": system,
+        "tools": tools,
+        "skills": skills,
+        "knowledge": knowledge,
+        "profile": profile,
+        "minimal": minimal,
+        "output_path": output_path,
+        "dedicated_worker": dedicated_worker,
+        "resource_profile": resource_profile,
+    }
+    _check_options("spawn", unknown, frozenset(options))
+    label = str(name)
+    given = {option: value for option, value in options.items() if value is not None and value is not False}
+    key = _next_key()
+    _call("session", {"name": label, **given}, key=key, name=label)
+    return Session(key, label)
 
 
 def foreach(items: Iterable[object], fn: Callable[..., object], *, max_concurrent: int | None = None) -> list[object]:

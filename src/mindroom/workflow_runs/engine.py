@@ -136,6 +136,7 @@ _NOT_ANSWERED = "The run ended before the question was answered."
 _OVER_BUDGET = "Stopped at the cost limit (${spent} of ${limit})."
 _TOO_MANY_OPTIONS = "A question takes at most 20 options of at most 200 bytes each."
 _NO_SESSIONS = 'A workflow script cannot call delegate.{function} yet. Start a fresh agent with agent() or tool("delegate", "run_subagent", ...).'
+_SESSION_BUSY = "Session '{name}' is already in a turn. Wait for it or spawn another agent."
 _FILTERED_TURN = "A turn that is limited to some of its agent's tools cannot start or resume a workflow."
 # The node of the script's tool call that the current task runs, for a call of the `workflow` toolkit made in it.
 _CALLING_NODE: ContextVar[tuple[str, str, int] | None] = ContextVar("workflow_calling_node", default=None)
@@ -777,7 +778,10 @@ class WorkflowEngine:
             # Before anything is kept for the attempt: one that the run left behind leaves nothing behind here.
             msg = f"Run {run.run_id} takes no more calls from attempt {attempt.run_id}."
             raise SupersededAttemptError(msg)
-        digest = node_digest(kind, request.args)
+        if kind == "turn":
+            session, all_turns, in_attempt, earlier, digest = self._turn_context(run, key, request.args)
+        else:
+            session, all_turns, in_attempt, earlier, digest = None, [], [], [], node_digest(kind, request.args)
         members = _members(meta) if kind == "group" else None
         saved = self.store.get_node(run.run_id, key)
         # A saved call with '' was named by a resume; one with DIRTY_DIGEST follows a call that ran in a later attempt.
@@ -832,7 +836,14 @@ class WorkflowEngine:
         completed = saved is not None and saved.state is WorkflowNodeState.COMPLETED and not (dirty or rerun)
         previous = saved if completed else None
         changed = previous is not None and previous.digest != digest
-        if previous is not None and changed and cached and run.source_digest == run.previous_source_digest:
+        lineage_reran = any(not turn.cached for turn in earlier)
+        if (
+            previous is not None
+            and changed
+            and cached
+            and not lineage_reran
+            and run.source_digest == run.previous_source_digest
+        ):
             notice = _CHANGED_WITHOUT_EDIT.format(seq=previous.seq)
             await asyncio.to_thread(self.store.append_log, run.run_id, epoch, notice)
         lane, index = split_key(key)
@@ -841,6 +852,11 @@ class WorkflowEngine:
         grant, arguments = _tool_grant(request.args) if kind == "tool" else (None, request.args)
         delegated = grant is not None and grant.toolkit_name == "delegate"
         shown, asked = ("agent", delegated_request(arguments)) if delegated else (kind, request.args)
+        node_name = cast("str | None", meta.get("name"))
+        if session is not None:
+            node_name = session.name or cast("str | None", session.request.get("name")) or node_name
+        elif shown == "session":
+            node_name = cast("str | None", asked.get("name")) or node_name
         node = WorkflowNode(
             run_id=run.run_id,
             key=key,
@@ -852,10 +868,11 @@ class WorkflowEngine:
             generation=generation,
             state=WorkflowNodeState.COMPLETED,
             attempt=run.attempt,
-            label=node_label(shown, asked, meta.get("label") or asked.get("name")),
-            name=cast("str | None", meta.get("name")),
+            label=node_label(shown, asked, meta.get("label") or asked.get("name") or node_name),
+            name=node_name,
             phase=cast("str | None", meta.get("phase")),
             members=members,
+            session_key=None if session is None else session.key,
             started_at=utc_timestamp(),
         )
         # Before a tool call is saved or sent anywhere, whether it is a tool's or an agent's behind a gate.
@@ -873,8 +890,26 @@ class WorkflowEngine:
         elif delegated and grant is not None and grant.function_name != RUN_SUBAGENT:
             refused = {"kind": "refused", "message": _NO_SESSIONS.format(function=grant.function_name)}
             node = replace(node, state=WorkflowNodeState.FAILED, error=refused)
-        elif shown == "agent":
-            start = partial(self._enter, run, node, partial(self._dispatch_agent, run, timeout=_timeout(meta)))
+        elif (
+            shown == "turn"
+            and session is not None
+            and any(other.key != key and other.state in LIVE_NODE_STATES for other in in_attempt)
+        ):
+            busy = _SESSION_BUSY.format(name=node_name or session.key)
+            node = replace(node, state=WorkflowNodeState.FAILED, error={"kind": "failed", "message": busy})
+        elif (
+            shown == "turn"
+            and session is not None
+            and (bad_schema := schema_failure({**session.request, **asked})) is not None
+        ):
+            node = replace(node, state=WorkflowNodeState.FAILED, error={"kind": "schema", "message": bad_schema})
+        elif shown in ("agent", "turn"):
+            follow_up = None
+            if shown == "turn" and session is not None:
+                follow_up, prompt = await self._prepare_turn(session, all_turns, earlier, str(asked["message"]))
+                node = replace(node, request={**asked, "prompt": prompt})
+            dispatch = partial(self._dispatch_agent, run, timeout=_timeout(meta), follow_up=follow_up)
+            start = partial(self._enter, run, node, dispatch)
             return await (self._ask_gate(run, attempt, node, (grant, arguments)) if grant is not None else start())
         elif grant is not None:
             same_as = None
@@ -901,7 +936,7 @@ class WorkflowEngine:
             # What the script's own code raised in a lane of a fan-out: nothing ran, and the run shows where.
             message = f"{request.args.get('type')}: {request.args.get('message')}"
             node = replace(node, state=WorkflowNodeState.FAILED, error={"kind": "error", "message": message})
-        elif kind != "group":
+        elif kind not in ("group", "session"):
             msg = f"This MindRoom cannot run a '{kind}' call in a workflow yet."
             raise WorkflowRunStoreError(msg)
         # A value, a group and an error have ended when they are submitted, so no restart finds one half done. What earlier
@@ -1238,6 +1273,64 @@ class WorkflowEngine:
         await self._restate(run.run_id)
         return _receipt(node)
 
+    def _turn_context(
+        self,
+        run: WorkflowRun,
+        key: str,
+        args: dict[str, object],
+    ) -> tuple[WorkflowNode, list[WorkflowNode], list[WorkflowNode], list[WorkflowNode], str]:
+        """Resolve a `turn` call's session, its earlier turns in this attempt, and its lineage-hashed digest."""
+        session_key, turn_num = args.get("session"), args.get("turn")
+        session = self.store.get_node(run.run_id, session_key) if isinstance(session_key, str) else None
+        if session is None or session.kind != "session":
+            msg = f"Unknown session '{session_key}'."
+            raise WorkflowRunStoreError(msg)
+        if type(turn_num) is not int or turn_num < 1:
+            msg = "Session turn number must be a whole number of at least 1."
+            raise WorkflowRunStoreError(msg)
+        all_turns = self.store.session_turns(run.run_id, session.key)
+        in_attempt = [turn for turn in all_turns if turn.attempt == run.attempt and not turn.stale]
+        earlier = sorted(
+            (turn for turn in in_attempt if turn.key != key and int(turn.request["turn"]) < turn_num),
+            key=lambda turn: (int(turn.request["turn"]), turn.seq),
+        )
+        lineage = [(session.digest, session.generation), *((turn.digest, turn.generation) for turn in earlier)]
+        digest = result_digest({"kind": "turn", "args": args, "lineage": lineage})
+        return session, all_turns, in_attempt, earlier, digest
+
+    async def _prepare_turn(
+        self,
+        session: WorkflowNode,
+        all_turns: list[WorkflowNode],
+        earlier: list[WorkflowNode],
+        message: str,
+    ) -> tuple[str | None, str]:
+        """Decide whether a session turn continues the saved child or starts a fresh child with a transcript."""
+        completed = [turn for turn in earlier if turn.state is WorkflowNodeState.COMPLETED]
+        prev = completed[-1] if completed else None
+        prev_sub = prev.links.get("subagent_id") if prev is not None else None
+        can_continue = (
+            prev is not None
+            and prev_sub is not None
+            and session.links.get("subagent_id") == prev_sub
+            and session.links.get("tip") == f"{prev.key}:{prev.generation}"
+            and not any(
+                other.key != prev.key
+                and int(other.request["turn"]) >= int(prev.request["turn"])
+                and other.links.get("subagent_id") == prev_sub
+                for other in all_turns
+            )
+        )
+        if can_continue:
+            return prev_sub, message
+        if not completed:
+            return None, message
+        history = [
+            (str(turn.request["message"]), _answer_text(await asyncio.to_thread(self.store.whole_result, turn)))
+            for turn in completed
+        ]
+        return None, _transcript_prompt(history, message)
+
     async def _dispatch_agent(
         self,
         run: WorkflowRun,
@@ -1245,6 +1338,7 @@ class WorkflowEngine:
         *,
         timeout: float | None,  # noqa: ASYNC109 - the seconds of work the turn gets, not a deadline of this call.
         queued: bool = False,
+        follow_up: str | None = None,
     ) -> NodeReceipt:
         """Start the job of an agent node and wait for it as the engine's own task; a refusal is the node's end.
 
@@ -1253,7 +1347,7 @@ class WorkflowEngine:
         saved already, is tried again.
         """
         try:
-            node = await self._launch_agent(run, node, run.epoch, timeout=timeout, queued=queued)
+            node = await self._launch_agent(run, node, run.epoch, timeout=timeout, queued=queued, follow_up=follow_up)
         except AgentNotReadyError as exc:
             raise ScriptRuntimeUnavailableError(str(exc)) from exc
         except AgentNodeError as exc:
@@ -1284,9 +1378,26 @@ class WorkflowEngine:
             raise AgentNotReadyError(_OWNER_NOT_READY)
         if isinstance(context, str) or runtime is None:
             raise AgentNodeError(context if isinstance(context, str) else _NO_AGENTS)
-        if not options.get("turn") and not node.request.get("agent") and node.name in context.current_config.agents:
+        session = self.store.get_node(run.run_id, node.session_key) if node.session_key else None
+        source = session.request if session is not None else node.request
+        first_turn = node.kind != "turn" or int(node.request.get("turn", 1)) == 1
+        if (
+            not options.get("turn")
+            and first_turn
+            and not source.get("agent")
+            and node.name in context.current_config.agents
+        ):
             await asyncio.to_thread(self.store.append_log, run.run_id, epoch, _NAME_LABELS.format(name=node.name))
-        return await launch_child(context, run, node, epoch, store=self.store, jobs=runtime.jobs, **options)
+        return await launch_child(
+            context,
+            run,
+            node,
+            epoch,
+            store=self.store,
+            jobs=runtime.jobs,
+            session=session,
+            **options,
+        )
 
     def _wait_for_agent(self, run: WorkflowRun, node: WorkflowNode, epoch: int) -> None:
         """Start the engine's wait for the job of an agent node, in place of an earlier attempt's wait for it.
@@ -1383,7 +1494,8 @@ class WorkflowEngine:
             (kind, text), usage, claim, continued = ("indeterminate", str(exc)), {}, None, False
         # A further turn of the node is an entry of its own, and the node keeps whether any turn started a tool call.
         turn = int(node.links.get("turn", 1))
-        usage = {turn if key == 1 else key: used for key, used in usage.items()}
+        session_turn = int(node.request["turn"]) if node.kind == "turn" else 1
+        usage = {session_turn + turn - 1 if key == 1 else key: used for key, used in usage.items()}
         made = bool(node.links.get("made")) or any(used.get("tool_calls") for used in usage.values())
         stopping = node.run_id in self._stopping
         outcome: _Outcome | str | WorkflowNode
@@ -1934,6 +2046,17 @@ class WorkflowEngine:
                 reason = child.error or f"Nested run {child.run_id} ended interrupted."
                 return WorkflowNodeState.CANCELLED, None, {"kind": "interrupted", "message": reason}
         return None
+
+
+def _answer_text(value: object) -> str:
+    """Format a saved turn answer for an `Earlier conversation:` transcript prompt."""
+    return value if isinstance(value, str) else json.dumps(value)
+
+
+def _transcript_prompt(earlier: list[tuple[str, str]], message: str) -> str:
+    """Build the first prompt of a fresh session child from saved earlier exchanges and the new *message*."""
+    sections = ["Earlier conversation:", *(f"User: {asked}\nAssistant: {answered}" for asked, answered in earlier)]
+    return "\n\n".join(sections) + f"\n\n{message}"
 
 
 def _changed(node: WorkflowNode, outcome: _Outcome) -> bool:

@@ -52,7 +52,7 @@ def node_label(kind: str, args: Mapping[str, object], name: object = None) -> st
     A call with neither is named by its function or its operation. The label goes into the call's job, the room and
     the run's view, so it is redacted and cut to 80 characters.
     """
-    text = name or args.get("prompt") or args.get("question")
+    text = name or args.get("prompt") or args.get("message") or args.get("question")
     if not text:
         function = f"{args.get('toolkit')}.{args.get('function')}"
         text = function if kind == "tool" else args.get("op") or args.get("type") or kind
@@ -148,6 +148,7 @@ def graph_rows(
             key = parent_group(current_lane[key])
 
     current_lane = {node.key: node.lane for node in current}
+    session_turns = Counter(node.session_key for node in current if node.kind == "turn" and node.session_key)
     rows: list[_Row] = []
     for node in current:
         if node.kind == "group":
@@ -172,8 +173,12 @@ def graph_rows(
                 "run": links.get("delegation_id"),
                 "subagent": links.get("subagent_id"),
                 "job": links.get("job_id"),
-                "session": node.session_key,
-                "turns": int(links.get("turn", 1)) if node.kind in AGENT_KINDS else 0,
+                "session": ids.get(node.session_key) if node.session_key else None,
+                "turns": (
+                    session_turns[node.key]
+                    if node.kind == "session"
+                    else (int(links.get("turn", 1)) if node.kind in AGENT_KINDS else 0)
+                ),
                 "started_at": _epoch(node.started_at),
                 "ended_at": _epoch(node.ended_at),
                 "cached": node.cached,

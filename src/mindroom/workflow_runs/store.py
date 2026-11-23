@@ -313,6 +313,10 @@ class WorkflowRunStore:
         where = "run_id = ?" if include_stale else "run_id = ? AND stale = 0"
         return self._select_nodes(where, (run_id,), _LIGHT_COLUMNS if light else "*")
 
+    def session_turns(self, run_id: str, session_key: str) -> list[WorkflowNode]:
+        """Return every `turn` node of *session_key* in *run_id* (stale included), in submission order."""
+        return self._select_nodes("run_id = ? AND kind = 'turn' AND session_key = ?", (run_id, session_key))
+
     def node_states(self, run_id: str) -> frozenset[WorkflowNodeState]:
         """Return the states the run's current nodes are in."""
         with self._connection() as connection:
