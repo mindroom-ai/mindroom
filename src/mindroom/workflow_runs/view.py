@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
-from mindroom.live_frames.workflow import publish_run
+from mindroom.live_frames.workflow import publish_run, stop_run
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_types import WORKFLOW_RUN_CONTENT_KEY
 from mindroom.redaction import redact_sensitive_text
@@ -128,6 +128,7 @@ class RunViews:
     # What the card of each run that has not ended last said: what an edit follows at once, a digest of its content,
     # and when it was sent.
     _cards: dict[str, tuple[tuple[object, ...], str, float]] = field(default_factory=dict)
+    _streams: dict[str, tuple[str, str]] = field(default_factory=dict)
     _dirty: set[str] = field(default_factory=set)
     # When the view of each run is built next though nothing was written: for the numbers of a run that has not
     # ended, and for the card of an ended one that could not be sent, each time after twice as long.
@@ -204,13 +205,11 @@ class RunViews:
         if isinstance(access, tuple) and (bot := self.bot(run)) is not None:
             # Else the run may not act now, or nobody can post for it: its next view tries again.
             account, client = bot
-            if self.live_frames():
-                # By the account alone, as its sub-agent frames are sent: they share one publisher, which keeps the
-                # first lookup it gets, so a run that can no longer post must not end the account's other frames.
-                live, url = partial(self.client, account), self.homeserver_url
-                publish_run(account, run.room_id, run_id, meta, graph, client=live, homeserver_url=url)
+            self._publish_frame(run, account, meta, graph)
             shown = await self._card(run, meta, graph, client)
             await self._ask_pending(run_id)
+        else:
+            self._stop_frame(run_id)
         if run.state not in TERMINAL_RUN_STATES:
             self._due[run_id] = time.monotonic() + _REFRESH_SECONDS
         elif shown:
@@ -243,9 +242,37 @@ class RunViews:
             pending.extend(self._unasked_runs(child.run_id))
         return pending
 
+    def _publish_frame(self, run: WorkflowRun, account: str, meta: dict[str, Any], graph: Graph) -> None:
+        """Queue *run*'s frame on *account*, or stop any open stream if live frames are off."""
+        if not self.live_frames():
+            self._stop_frame(run.run_id)
+            return
+        place = (account, run.room_id)
+        if (old := self._streams.get(run.run_id)) is not None and old != place:
+            stop_run(*old, run.run_id)
+        # By the account alone, as its sub-agent frames are sent: they share one publisher, which keeps the
+        # first lookup it gets, so a run that can no longer post must not end the account's other frames.
+        live, url = partial(self.client, account), self.homeserver_url
+        publish_run(
+            account,
+            run.room_id,
+            run.run_id,
+            meta,
+            graph,
+            client=live,
+            homeserver_url=url,
+            allowed=lambda: isinstance(self.engine.authorize(run), tuple),
+        )
+        self._streams[run.run_id] = place
+
+    def _stop_frame(self, run_id: str) -> None:
+        """Close *run_id*'s open frame stream when it may no longer publish."""
+        if (place := self._streams.pop(run_id, None)) is not None:
+            stop_run(*place, run_id)
+
     def _forget(self, run_id: str) -> None:
         """Keep nothing of a run whose card says how it ended, or that is gone."""
-        for kept in (self._due, self._unsent, self._cards):
+        for kept in (self._due, self._unsent, self._cards, self._streams):
             kept.pop(run_id, None)
 
     def _mark_large(self, run: WorkflowRun, text: str) -> None:

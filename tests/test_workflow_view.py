@@ -10,6 +10,8 @@ import pytest
 import pytest_asyncio
 
 from mindroom.config.models import ModelPricing
+from mindroom.live_frames import subagents as subagents_module
+from mindroom.live_frames import workflow as workflow_frames_module
 from mindroom.matrix.event_types import WORKFLOW_RUN_CONTENT_KEY
 from mindroom.matrix.large_messages import fits_one_event
 from mindroom.script_runs.models import ScriptRunState
@@ -17,6 +19,7 @@ from mindroom.workflow_runs import view as view_module
 from mindroom.workflow_runs.graph import graph_meta
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
+from tests.subagent_activity_helpers import make_snapshot
 from tests.workflow_helpers import StackRoom, WorkflowStack, set_run, tool_args, workflow_stack
 
 if TYPE_CHECKING:
@@ -182,6 +185,69 @@ async def test_frames_of_a_run_go_out_through_its_accounts_client_whatever_becom
 
     assert client is _room(stack).client
     assert lookup() is client
+
+
+@pytest.mark.asyncio
+async def test_revoked_access_stops_an_open_frame_stream_without_stopping_other_streams(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Once access is revoked the run's stream closes and sends no keepalive or final snapshot; other streams go on."""
+
+    async def relays(_homeserver_url: str) -> bool:
+        return True
+
+    monkeypatch.setattr(subagents_module, "homeserver_relays_live_frames", relays)
+    monkeypatch.setattr(subagents_module, "_SEND_INTERVAL_SECONDS", 0.01)
+    monkeypatch.setattr(subagents_module, "RETRY_BACKOFF_SECONDS", 0.01)
+    monkeypatch.setattr(workflow_frames_module, "_SNAPSHOT_INTERVAL_SECONDS", 0.05)
+    stack.views.live_frames = lambda: True
+    room = _room(stack)
+    account = stack.context.agent_name
+    try:
+        subagents_module.publish(
+            account,
+            room.room_id,
+            make_snapshot(),
+            previews=True,
+            client=lambda: room.client,
+            homeserver_url=stack.views.homeserver_url,
+        )
+        await stack.views.show(stack.run_id)
+        await stack.until(
+            lambda: "io.mindroom.workflow" in room.sent_types and "io.mindroom.subagents" in room.sent_types,
+        )
+        wf_before = room.sent_types.count("io.mindroom.workflow")
+        sub_before = room.sent_types.count("io.mindroom.subagents")
+
+        # Revoke access without calling show() first: keepalive must close the stream and send nothing.
+        stack.access = "revoked"
+        await asyncio.sleep(0.15)
+        assert room.sent_types.count("io.mindroom.workflow") == wf_before
+
+        # Calling show() while revoked, including after the run ends, sends nothing more.
+        await stack.finish_attempt("done")
+        await stack.views.show(stack.run_id)
+        await asyncio.sleep(0.05)
+        assert room.sent_types.count("io.mindroom.workflow") == wf_before
+
+        # The unrelated ordinary subagent stream on the same publisher still sends frames.
+        subagents_module.publish(
+            account,
+            room.room_id,
+            make_snapshot(status="completed"),
+            previews=True,
+            client=lambda: room.client,
+            homeserver_url=stack.views.homeserver_url,
+        )
+        await stack.until(lambda: room.sent_types.count("io.mindroom.subagents") > sub_before)
+        await stack.until(lambda: subagents_module._PUBLISHERS == {})
+    finally:
+        tasks = [pub._task for pub in subagents_module._PUBLISHERS.values() if pub._task is not None]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        subagents_module._PUBLISHERS.clear()
 
 
 @pytest.mark.asyncio

@@ -14,7 +14,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from mindroom.live_frames.frames import FRAME_VERSION, new_publisher_id
-from mindroom.live_frames.subagents import publish_stream
+from mindroom.live_frames.subagents import publish_stream, stop_stream
 from mindroom.live_frames.transport import LiveSendOutcome, frame_fits, send_live_frame
 from mindroom.matrix.event_types import WORKFLOW_FRAME_EVENT_TYPE
 from mindroom.workflow_runs.faults import capture
@@ -36,10 +36,12 @@ type _Frame = dict[str, object]
 class _RunStream:
     """One run's frames: its stream id, the highest sequence number used, its latest view, and what landed."""
 
+    account: str
     run: str
     sid: str
     meta: dict[str, Any]
     graph: Graph
+    allowed: Callable[[], bool] = lambda: True
     seq: int = -1
     dirty: bool = True
     # The meta and the snapshot of the last frame that landed; None makes the next frame a snapshot.
@@ -71,6 +73,9 @@ class _RunStream:
         counts of what a snapshot leaves out changed, and when a delta would not fit; otherwise a delta from what
         landed last. Every frame is checked against the frame size as it goes out to the room before it is sent.
         """
+        if not self.allowed():
+            stop_stream(self.account, room_id, self.run)
+            return None
         meta, graph, landed = self.meta, self.graph, self.landed
         self.dirty = False
         fits = partial(frame_fits, client, room_id, event_type=WORKFLOW_FRAME_EVENT_TYPE)
@@ -115,6 +120,7 @@ def publish_run(
     *,
     client: Callable[[], nio.AsyncClient | None],
     homeserver_url: str,
+    allowed: Callable[[], bool] = lambda: True,
 ) -> None:
     """Queue a run's latest view as frames from ``account`` in ``room_id``, paced with the account's other frames there.
 
@@ -123,8 +129,15 @@ def publish_run(
 
     def put(stream: _RunStream | None) -> _RunStream:
         if stream is None:
-            return _RunStream(run=run_id, sid=new_publisher_id(), meta=meta, graph=graph)
-        stream.meta, stream.graph, stream.dirty = meta, graph, True
+            return _RunStream(
+                account=account,
+                run=run_id,
+                sid=new_publisher_id(),
+                meta=meta,
+                graph=graph,
+                allowed=allowed,
+            )
+        stream.meta, stream.graph, stream.allowed, stream.dirty = meta, graph, allowed, True
         return stream
 
     ended = meta["status"] in TERMINAL_RUN_STATES
@@ -138,3 +151,8 @@ def publish_run(
         client=client,
         homeserver_url=homeserver_url,
     )
+
+
+def stop_run(account: str, room_id: str, run_id: str) -> None:
+    """Close a run's open frame stream so nothing more is sent for it."""
+    stop_stream(account, room_id, run_id)

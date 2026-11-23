@@ -303,6 +303,12 @@ class _Publisher:
         self._wake = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
+    def stop(self, run: str) -> None:
+        """Close *run*'s stream without disturbing the publisher's other runs."""
+        self._streams.pop(run, None)
+        self._refused.pop(run, None)
+        self._wake.set()
+
     def update(self, run: str, status: str, *, ended: bool, put: Callable[[Any], FrameStream]) -> None:
         """Queue a run's latest state for its next frame, starting the publisher when it is idle.
 
@@ -354,7 +360,8 @@ class _Publisher:
             client_missing = False
             outcome = await self._send_next(client)
             if outcome is None:
-                await self._wait()
+                if self._streams:
+                    await self._wait()
             else:
                 # A failed send waits longer, so a homeserver failing every send at once, as through a proxy while it
                 # restarts, is not asked again every 125 ms.
@@ -369,6 +376,8 @@ class _Publisher:
             outcome = await stream.send_next(client, self._room_id, now) if due else None
             if outcome is None:
                 continue
+            if self._streams.get(run) is not stream:
+                return outcome
             del self._streams[run]
             ended = stream.ended
             if outcome is LiveSendOutcome.STOP and not ended:
@@ -449,3 +458,9 @@ def publish_stream(
         publisher = _Publisher((account, room_id), client=client, homeserver_url=homeserver_url)
         _PUBLISHERS[(account, room_id)] = publisher
     publisher.update(run, status, ended=ended, put=put)
+
+
+def stop_stream(account: str, room_id: str, run: str) -> None:
+    """Close ``run``'s stream on ``(account, room_id)``'s publisher, if one is open."""
+    if (publisher := _PUBLISHERS.get((account, room_id))) is not None:
+        publisher.stop(run)
