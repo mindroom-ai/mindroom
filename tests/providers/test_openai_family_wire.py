@@ -1090,7 +1090,7 @@ async def test_openrouter_chat_sends_video_parts_with_mime_resolution_and_canoni
     link = Message(role="user", content="Link", videos=[Video(url="https://example.com/clip.mp4")])
     await _adapter_turn(built, ModelRequest(messages=[link]))
     assert built.body(1)["messages"][0]["content"] == [
-        {"type": "text", "text": "Link"},
+        {"type": "text", "text": "Link", "cache_control": {"type": "ephemeral"}},
         {"type": "video_url", "video_url": {"url": "https://example.com/clip.mp4"}},
     ]
 

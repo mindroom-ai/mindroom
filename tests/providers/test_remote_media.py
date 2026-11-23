@@ -257,11 +257,13 @@ async def test_openrouter_downloads_remote_video_inline_and_falls_back_when_unre
     await complete(provider, ModelRequest(messages=[missing_msg]))
 
     assert wire.body(0)["messages"][-1]["content"] == [
-        {"type": "text", "text": "Watch"},
+        {"type": "text", "text": "Watch", "cache_control": {"type": "ephemeral"}},
         {"type": "video_url", "video_url": {"url": f"data:video/webm;base64,{_b64(b'webm-video')}"}},
     ]
     assert downloaded == ["https://media.test/clip.webm", "https://media.test/missing.mp4"]
-    assert spec.user_text(wire.body(1)) == f"Watch\n\n{_NOTE}"
+    assert wire.body(1)["messages"][-1]["content"] == [
+        {"type": "text", "text": f"Watch\n\n{_NOTE}", "cache_control": {"type": "ephemeral"}},
+    ]
 
 
 def _url_media(kind: str, url: str) -> dict[str, Any]:
