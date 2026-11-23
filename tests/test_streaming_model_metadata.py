@@ -53,6 +53,7 @@ from mindroom.response_sources import Owned, ResponseSources
 from mindroom.streaming import send_streaming_response
 from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.events import FailedReply
+from mindroom.turn_model import resolve_turn_model
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
@@ -82,10 +83,14 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.constants import RuntimePaths
+    from mindroom.event_journal import ApprovalContinuation
+    from mindroom.final_delivery import FinalDeliveryOutcome
     from mindroom.history.types import PreparedHistoryState
     from mindroom.reply_turn.request import ResponseRequest
     from mindroom.response_runner import ResponseRunner
-    from mindroom.turn_model import TurnModel
+    from mindroom.response_turn import PausedAttempt
+    from mindroom.turn_model import ModelScope, TurnBudget, TurnModel
 
 _SOURCE = "$event"
 
@@ -322,6 +327,66 @@ def echo_tool() -> Iterator[None]:
 
     with registered_toolkit(_ECHO_TOOL, _EchoTools):
         yield
+
+
+def _install_approval_store(turn: _TurnHarness) -> None:
+    """Initialize the approval store the turn's bot pauses into, with approval cards that deliver at once."""
+
+    async def prepare_event(_room: str, _thread: str | None, content: dict[str, Any], _sender: str) -> dict[str, Any]:
+        return content
+
+    initialize_approval_store_for_test(
+        turn.bot.runtime_paths,
+        prepare_approval_event=prepare_event,
+        send_approval_delivery=AsyncMock(return_value="$approval-card"),
+        resolve_approval_delivery=AsyncMock(return_value=None),
+        cards=turn.bot._journal_store.principal("router@shared"),
+        sender_bot=lambda _entity_name, _room_id: object(),
+        sender_device_id=AsyncMock(return_value="DEVICE"),
+    )
+
+
+async def _approve_and_resume(
+    turn: _TurnHarness,
+    continuation: ApprovalContinuation,
+    resume_gate: asyncio.Event,
+) -> list[dict[str, Any]]:
+    """Approve the paused ``call-1`` and resume its run, opening ``resume_gate`` once a progress edit shows.
+
+    Returns the writes the resume made.
+    """
+    writes_before_resume = len(turn.homeserver.writes)
+    approvals = turn.bot.journal_principal().approvals
+    await approvals.resolve_approval_call(
+        CallKey(continuation.approval_id, continuation.generation, "call-1"),
+        requested_status="approved",
+        reason=None,
+        metadata=ApprovalDecisionMetadata(resolved_by=_REQUESTER),
+    )
+    updated = await approvals.approval_continuation(continuation.approval_id)
+    assert updated is not None
+    resume_task = asyncio.create_task(dispatch_approval(turn.runner.approvals, updated, target=_target()))
+    try:
+        for _ in range(200):
+            resumed_writes = turn.homeserver.writes[writes_before_resume:]
+            if any(_stream_status(w) == STREAM_STATUS_STREAMING for w in resumed_writes):
+                break
+            await asyncio.sleep(0.01)
+        resume_gate.set()
+        await asyncio.wait_for(resume_task, timeout=10)
+    finally:
+        resume_gate.set()
+    return turn.homeserver.writes[writes_before_resume:]
+
+
+def _store_pauses_without_model(turn: _TurnHarness, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Store the turn's approval pauses without their runtime model, as legacy releases stored them."""
+    suspend = turn.runner.approvals.suspend_for_approval
+
+    async def suspend_without_model(paused: PausedAttempt, **kwargs: Any) -> FinalDeliveryOutcome:  # noqa: ANN401
+        return await suspend(replace(paused, runtime_model_name=None), **kwargs)
+
+    monkeypatch.setattr(turn.runner.approvals, "suspend_for_approval", suspend_without_model)
 
 
 # ---------------------------------------------------------------------------
@@ -755,6 +820,82 @@ async def test_mid_turn_switch_thread_model_after_toolcall_updates_streaming_mod
 
 
 @pytest.mark.asyncio
+async def test_mid_turn_switch_to_a_model_that_fails_to_build_reports_the_error_on_that_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A switch_thread_model(after-toolcall) whose new model cannot be built ends the reply with that model's error."""
+    turn = await _setup_turn(
+        tmp_path,
+        monkeypatch,
+        tools=["thread_model"],
+        thread_id=_THREAD,
+        # No provider is installed for "large", so building it fails once the turn has resolved it.
+        scripts={
+            "default": [
+                calls(
+                    tool_call("switch_thread_model", "switch-1", model_name="large", when="after-toolcall"),
+                    content="Switching now. ",
+                ),
+            ],
+        },
+    )
+
+    assert await turn.runner.generate_response(_plain_request(_target(thread_id=_THREAD))) == Owned()
+
+    writes = turn.homeserver.writes
+    _assert_provisional_ai_run(writes[0], model_payload(turn.bot.config, "default"))
+    for write in writes[:-1]:
+        assert _stream_status(write) in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}
+        assert "status" not in (_ai_run(write) or {})
+    assert "no provider installed for model 'large'" in str(_visible_content(writes[-1]).get("body", ""))
+    assert _stream_status(writes[-1]) == STREAM_STATUS_COMPLETED
+    assert _ai_run(writes[-1]) == {
+        "version": 1,
+        "status": "error",
+        "model": model_payload(turn.bot.config, "large"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_team_attempt_that_fails_to_build_reports_the_error_on_its_resolved_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A team attempt names the model it resolved before it builds the team, so a build failure reports that model."""
+    turn = await _setup_turn(tmp_path, monkeypatch, scripts={"default": [answer("never called")]})
+
+    def resolve_large(config: Config, paths: RuntimePaths, scope: ModelScope, budget: TurnBudget | None) -> TurnModel:
+        return resolve_turn_model(config, paths, replace(scope, explicit="large"), budget)
+
+    with (
+        patch("mindroom.teams.envelope.resolve_turn_model", resolve_large),
+        patch("mindroom.teams.envelope.build_team_spec", side_effect=RuntimeError("team build boom")),
+    ):
+        assert (
+            await turn.runner.generate_team_response_helper(
+                _plain_request(_target()),
+                member_names=["writer", "checker"],
+                team_mode="collaborate",
+            )
+            == Owned()
+        )
+
+    writes = turn.homeserver.writes
+    _assert_provisional_ai_run(writes[0], model_payload(turn.bot.config, "default"))
+    for write in writes[:-1]:
+        assert _stream_status(write) in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}
+        assert "status" not in (_ai_run(write) or {})
+    assert "team build boom" in str(_visible_content(writes[-1]).get("body", ""))
+    assert _stream_status(writes[-1]) == STREAM_STATUS_COMPLETED
+    assert _ai_run(writes[-1]) == {
+        "version": 1,
+        "status": "error",
+        "model": model_payload(turn.bot.config, "large"),
+    }
+
+
+@pytest.mark.asyncio
 async def test_provisional_model_never_masks_recorder_run_metadata_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -977,45 +1118,63 @@ async def test_terminal_notes_always_carry_terminal_ai_run_status(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("team", "stores_model"),
+    [(False, True), (False, False), (True, False)],
+    ids=["agent-stored-model", "agent-legacy-no-model", "team-legacy-no-model"],
+)
 async def test_approval_pause_resumed_stream_progress_and_final_carry_model_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     echo_tool: None,
+    *,
+    team: bool,
+    stores_model: bool,
 ) -> None:
-    """Approval pause edit, resumed stream_progress edits, and final edit carry model metadata."""
+    """Approval pause edit, resumed stream_progress edits, and final edit carry model metadata.
+
+    A pause stored without its runtime model, as legacy releases stored it, resumes on the model its entity resolves.
+    """
     del echo_tool
     resume_gate = asyncio.Event()
+    resumed_answer = _gated_answer("Resumed ", resume_gate, "finished.")
+    gated_call = calls(tool_call("echo", "call-1", text="hi"))
     turn = await _setup_turn(
         tmp_path,
         monkeypatch,
         tools=[_ECHO_TOOL],
-        scripts={
-            "default": [
-                calls(tool_call("echo", "call-1", text="hi")),
-                _gated_answer("Resumed ", resume_gate, "finished."),
-            ],
-        },
+        scripts=(
+            {
+                "default": [calls(tool_call("delegate_task_to_members", "delegate-1", task="Check")), resumed_answer],
+                "writer-model": [gated_call, answer("Writer note.")],
+                "checker-model": [answer("Checker note.")],
+            }
+            if team
+            else {"default": [gated_call, resumed_answer]}
+        ),
     )
+    # The team's pause is its member's gated call.
+    turn.bot.config.agents["writer"].tools = [_ECHO_TOOL]
     turn.bot.config.tool_approval = ToolApprovalConfig(
         rules=[ApprovalRuleConfig(match="echo", action="require_approval")],
     )
     turn.bot.config.background_tool_jobs.enabled = False
 
-    async def prepare_event(_room: str, _thread: str | None, content: dict[str, Any], _sender: str) -> dict[str, Any]:
-        return content
-
-    initialize_approval_store_for_test(
-        turn.bot.runtime_paths,
-        prepare_approval_event=prepare_event,
-        send_approval_delivery=AsyncMock(return_value="$approval-card"),
-        resolve_approval_delivery=AsyncMock(return_value=None),
-        cards=turn.bot._journal_store.principal("router@shared"),
-        sender_bot=lambda _entity_name, _room_id: object(),
-        sender_device_id=AsyncMock(return_value="DEVICE"),
-    )
+    _install_approval_store(turn)
     expected_model = model_payload(turn.bot.config, "default")
+    if not stores_model:
+        _store_pauses_without_model(turn, monkeypatch)
+    request = _plain_request(_target())
     try:
-        assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
+        if team:
+            started = turn.runner.generate_team_response_helper(
+                request,
+                member_names=["writer", "checker"],
+                team_mode="collaborate",
+            )
+        else:
+            started = turn.runner.generate_response(request)
+        assert await started == Owned()
 
         pause_writes = [w for w in turn.homeserver.writes if _stream_status(w) == STREAM_STATUS_APPROVAL_PENDING]
         assert pause_writes
@@ -1023,31 +1182,9 @@ async def test_approval_pause_resumed_stream_progress_and_final_carry_model_meta
 
         continuation = await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE)
         assert continuation is not None
-        assert continuation.runtime_model_name == "default"
-        writes_before_resume = len(turn.homeserver.writes)
+        assert continuation.runtime_model_name == ("default" if stores_model else None)
 
-        # Approve and resume the paused run while watching resumed stream_progress edits.
-        await turn.bot.journal_principal().approvals.resolve_approval_call(
-            CallKey(continuation.approval_id, continuation.generation, "call-1"),
-            requested_status="approved",
-            reason=None,
-            metadata=ApprovalDecisionMetadata(resolved_by=_REQUESTER),
-        )
-        updated = await turn.bot.journal_principal().approvals.approval_continuation(continuation.approval_id)
-        assert updated is not None
-        resume_task = asyncio.create_task(dispatch_approval(turn.runner.approvals, updated, target=_target()))
-        try:
-            for _ in range(200):
-                resumed_writes = turn.homeserver.writes[writes_before_resume:]
-                if any(_stream_status(w) == STREAM_STATUS_STREAMING for w in resumed_writes):
-                    break
-                await asyncio.sleep(0.01)
-            resume_gate.set()
-            await asyncio.wait_for(resume_task, timeout=10)
-        finally:
-            resume_gate.set()
-
-        resumed_writes = turn.homeserver.writes[writes_before_resume:]
+        resumed_writes = await _approve_and_resume(turn, continuation, resume_gate)
         resumed_streaming = [w for w in resumed_writes if _stream_status(w) == STREAM_STATUS_STREAMING]
         assert resumed_streaming
         for write in resumed_streaming:
@@ -1082,18 +1219,7 @@ async def test_approval_failure_note_carries_terminal_ai_run_with_model(
     )
     turn.bot.config.background_tool_jobs.enabled = False
 
-    async def prepare_event(_room: str, _thread: str | None, content: dict[str, Any], _sender: str) -> dict[str, Any]:
-        return content
-
-    initialize_approval_store_for_test(
-        turn.bot.runtime_paths,
-        prepare_approval_event=prepare_event,
-        send_approval_delivery=AsyncMock(return_value="$approval-card"),
-        resolve_approval_delivery=AsyncMock(return_value=None),
-        cards=turn.bot._journal_store.principal("router@shared"),
-        sender_bot=lambda _entity_name, _room_id: object(),
-        sender_device_id=AsyncMock(return_value="DEVICE"),
-    )
+    _install_approval_store(turn)
     try:
         assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
         continuation = await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE)
@@ -1137,18 +1263,7 @@ async def test_approval_failure_note_prefers_live_span_model_over_stale_continua
     )
     turn.bot.config.background_tool_jobs.enabled = False
 
-    async def prepare_event(_room: str, _thread: str | None, content: dict[str, Any], _sender: str) -> dict[str, Any]:
-        return content
-
-    initialize_approval_store_for_test(
-        turn.bot.runtime_paths,
-        prepare_approval_event=prepare_event,
-        send_approval_delivery=AsyncMock(return_value="$approval-card"),
-        resolve_approval_delivery=AsyncMock(return_value=None),
-        cards=turn.bot._journal_store.principal("router@shared"),
-        sender_bot=lambda _entity_name, _room_id: object(),
-        sender_device_id=AsyncMock(return_value="DEVICE"),
-    )
+    _install_approval_store(turn)
     try:
         assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
         continuation = await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE)

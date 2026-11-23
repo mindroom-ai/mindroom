@@ -778,10 +778,12 @@ async def _turn_model_and_provider(
     ctx: ResponseTurnContext,
     config: Config,
     runtime_paths: RuntimePaths,
+    on_model_resolved: Callable[[str], None] | None,
 ) -> tuple[TurnModel, ModelProvider]:
     """Resolve the turn's model and build its provider once.
 
     Both run off the event loop: resolution reads thread and room model overrides from disk (#1260).
+    ``on_model_resolved`` hears the model before its provider is built, so a failure from there on names it.
     """
     runtime_model = await asyncio.to_thread(
         resolve_turn_model,
@@ -795,6 +797,8 @@ async def _turn_model_and_provider(
         ),
         None,
     )
+    if on_model_resolved is not None:
+        on_model_resolved(runtime_model.model_name)
     if ctx.reusable_build is not None:
         return runtime_model, ctx.reusable_build.spec.model
     provider = await asyncio.to_thread(
@@ -815,17 +819,19 @@ async def _prepare_agent_and_prompt(
     config: Config,
     scope_context: ScopeSessionContext | None,
     current_event_id: str | None,
+    on_model_resolved: Callable[[str], None] | None = None,
 ) -> _PreparedAgentRun:
     """Prepare the agent build, this turn's system messages (stable, then turn), and its request input.
 
-    Returns the prepared run input plus history bookkeeping for one agent turn.
+    Returns the prepared run input plus history bookkeeping for one agent turn. ``on_model_resolved`` hears the
+    turn's model as soon as it is resolved, before anything is built for it.
     """
     agent_name = ctx.entity_label
     prompt = ctx.prompt
     execution_identity = ctx.execution_identity
     pipeline_timing = ctx.pipeline_timing
 
-    runtime_model, provider = await _turn_model_and_provider(ctx, config, runtime_paths)
+    runtime_model, provider = await _turn_model_and_provider(ctx, config, runtime_paths, on_model_resolved)
 
     def _build_agent() -> tuple[TurnModel, AgentBuild]:
         """Build the agent off the event loop (#1260): it walks workspace scaffolding and reads context files."""
@@ -1010,6 +1016,7 @@ async def _prepare_agent_run_context(
     config: Config,
     scope_context: ScopeSessionContext | None,
     turn_recorder: TurnRecorder,
+    on_model_resolved: Callable[[str], None] | None = None,
 ) -> _AgentRunContext:
     """Prepare one attempt of an agent response, as its ``continuation`` state asks, through metadata assembly."""
     ctx = replace(
@@ -1032,6 +1039,7 @@ async def _prepare_agent_run_context(
         config=config,
         scope_context=scope_context,
         current_event_id=continuation.active_current_event_id,
+        on_model_resolved=on_model_resolved,
     )
     if pipeline_timing is not None:
         pipeline_timing.mark("history_ready", overwrite=True)
@@ -1318,14 +1326,11 @@ async def _stream_agent_attempt_chunks(
     storage: RunStorage,
     state: _StreamingAttemptState,
     on_attempt_start: Callable[[str, str], None] | None,
-    on_model_resolved: Callable[[str], None] | None,
 ) -> AsyncGenerator[AIStreamChunk]:
     """Start and consume one streaming agent attempt."""
     show_tool_calls = run_context.turn.show_tool_calls
     pipeline_timing = run_context.turn.pipeline_timing
     try:
-        if on_model_resolved is not None:
-            on_model_resolved(run_context.prepared_run.runtime_model_name)
         if on_attempt_start is not None:
             on_attempt_start(attempt.run_id, run_context.prepared_run.runtime_model_name)
         request_context = _attempt_request_log_context(run_context)
@@ -1397,6 +1402,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 config=config,
                 scope_context=run.scope_context,
                 turn_recorder=run.record,
+                on_model_resolved=sinks.on_model_resolved,
             )
         except Exception as e:
             logger.exception("Error preparing agent", agent=agent_name)
@@ -1414,7 +1420,6 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             storage=storage,
             state=state,
             on_attempt_start=sinks.on_attempt_start,
-            on_model_resolved=sinks.on_model_resolved,
         )
         async with closing_async_stream(attempt_stream):
             async for stream_chunk in attempt_stream:

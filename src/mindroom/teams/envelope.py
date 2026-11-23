@@ -421,6 +421,9 @@ class _TeamTurn:
             ),
             None,
         )
+        # Heard before the team is built, so a failure from here on names this model.
+        if on_model_resolved is not None:
+            on_model_resolved(runtime_model.model_name)
         built = build_team_spec(
             members=members,
             mode=self.spec.mode,
@@ -451,8 +454,6 @@ class _TeamTurn:
             thread_history_render_limits=_MATRIX_TEAM_THREAD_HISTORY_RENDER_LIMITS,
             pipeline_timing=self.ctx.pipeline_timing,
         )
-        if on_model_resolved is not None:
-            on_model_resolved(prepared.runtime_model_name)
         run.run_metadata = prepared.run_metadata
         run.turn_input = TurnInput(context=prepared.turn.context)
         presentation = TeamStreamPresentation.new(

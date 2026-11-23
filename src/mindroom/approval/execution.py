@@ -160,6 +160,12 @@ def _reconcile_agent_tools(presentation: CollectedStreamPresentation, response: 
             presentation.complete_tool(tool.call)
 
 
+def note_reply_model(config: Config, model_name: str) -> None:
+    """Name the model the current span's reply runs on, which its live writes and error notes carry."""
+    if (handle := current_span()) is not None:
+        handle.reply_model = model_payload(config, model_name)
+
+
 def continuation_model(config: Config, runtime_paths: RuntimePaths, continuation: ApprovalContinuation) -> TurnModel:
     """Return the model a paused run resumes on: the one it ran, else the one its room and thread choose now."""
     return resolve_turn_model(
@@ -367,11 +373,7 @@ async def _stream_continuation_turn(
         sinks=TurnSinks(
             run_metadata_collector=run_metadata,
             on_completed=completed.append,
-            on_model_resolved=lambda model_name: (
-                setattr(span_handle, "reply_model", model_payload(config, model_name))
-                if (span_handle := current_span()) is not None
-                else None
-            ),
+            on_model_resolved=partial(note_reply_model, config),
             active_model=lambda: span_handle.reply_model if (span_handle := current_span()) is not None else None,
             subagent_cost=subagent_cost,
             response_event_id=current_reply_event_id,
@@ -486,6 +488,8 @@ class AgentApprovalExecution:
         )
         # The build and the resumed run use one model, even if a room or thread override changes meanwhile.
         model = continuation_model(config, self.runtime_paths, continuation)
+        # A continuation stored without its model learns it here, before the resume shows any progress.
+        note_reply_model(config, model.model_name)
         build = await asyncio.to_thread(
             create_agent,
             continuation.entity_name,

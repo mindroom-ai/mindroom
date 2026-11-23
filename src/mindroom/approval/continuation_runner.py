@@ -33,7 +33,7 @@ from mindroom.approval.continuation_rules import (
     continuation_facts,
     next_step,
 )
-from mindroom.approval.execution import AgentApprovalExecution, continuation_model
+from mindroom.approval.execution import AgentApprovalExecution, continuation_model, note_reply_model
 from mindroom.approval.failure import (
     cancelled_failure,
     prepare_approval_failure,
@@ -1236,6 +1236,13 @@ class ApprovalContinuationRunner:
         with approval_receipt_context((*continuation.earlier_calls, *continuation.calls), run_id=continuation.run_id):
             async with response_typing_indicator(self.locked.client(), request, response_run_id=continuation.run_id):
                 if continuation.entity_kind == "team":
+                    team_model_name = continuation_model(
+                        self.deps.runtime.config,
+                        self.deps.runtime_paths,
+                        continuation,
+                    ).model_name
+                    # A continuation stored without its model learns it here, before the resume shows any progress.
+                    note_reply_model(self.deps.runtime.config, team_model_name)
                     with tool_runtime_context(tool_context):
                         result = await continue_paused_team_run(
                             member_names=continuation.team_member_names,
@@ -1247,11 +1254,7 @@ class ApprovalContinuationRunner:
                             run_id=continuation.run_id,
                             user_id=continuation.requester_id,
                             configured_team_name=continuation.entity_name,
-                            model_name=continuation_model(
-                                self.deps.runtime.config,
-                                self.deps.runtime_paths,
-                                continuation,
-                            ).model_name,
+                            model_name=team_model_name,
                             refresh_scheduler=self.locked.knowledge_refresh_scheduler(),
                             member_model_names=dict(continuation.team_member_model_names) or None,
                             approval_calls=continuation.calls,
