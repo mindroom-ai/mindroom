@@ -168,6 +168,7 @@ class FakeClient:
     relations: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     history: list[dict[str, Any]] = field(default_factory=list)
     reported_depth: int | None = 3
+    event_calls: int = 0
     relation_calls: int = 0
     relation_events: int = 0
     # A relation tree that outlives any one walk, which is what a long thread of
@@ -237,6 +238,7 @@ class FakeClient:
     ) -> nio.RoomGetEventResponse | nio.RoomGetEventError:
         """Return one stored event."""
         del room_id
+        self.event_calls += 1
         if event_id in self.hidden_events:
             errcode = self.hidden_events[event_id]
             return nio.RoomGetEventError(f"{errcode}: Event not found.", errcode)
@@ -2539,6 +2541,41 @@ class TestSidecarResolution:
         assert [message.content["body"] for message in page.messages] == ["answer v3"]
         assert client.downloads == ["mxc://s/v3"]
 
+    async def test_a_strict_read_retries_when_a_streaming_edit_lands_during_refetch(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A newer sidecar edit admitted mid-refetch moves the debt rather than failing the read."""
+        original = self._sidecar_source("$m", "p0 [Message continues in attached file]", "mxc://s/v0", ts=1_000)
+        edit_1 = self._sidecar_source("$e1", "p1 [continues]", "mxc://s/v1", ts=2_000)
+        edit_1["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": "$m"}
+        edit_2 = self._sidecar_source("$e2", "p2 [continues]", "mxc://s/v2", ts=3_000)
+        edit_2["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": "$m"}
+        await admit_all(alice, [original, edit_1])
+
+        class _StreamingEditClient(FakeClient):
+            async def download(self, mxc: str) -> nio.DownloadResponse | nio.DownloadError:
+                if mxc == "mxc://s/v1" and edit_2 not in self.relations["$m"]:
+                    self.relations["$m"].append(edit_2)
+                    await admit_all(alice, [edit_2])
+                return await super().download(mxc)
+
+        client = _StreamingEditClient(
+            events={"$m": original},
+            relations={"$m": [edit_1]},
+            sidecars={
+                "mxc://s/v1": self._payload("answer v1"),
+                "mxc://s/v2": self._payload("answer v2"),
+            },
+        )
+        reader = await self._reader(alice, client)
+
+        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [message.content["body"] for message in page.messages] == ["answer v2"]
+        assert page.refresh_pending == ()
+        assert client.downloads == ["mxc://s/v1", "mxc://s/v2"]
+
     @pytest.mark.parametrize(
         "sidecar",
         [
@@ -3551,6 +3588,7 @@ class TestReadModes:
 
         with pytest.raises(ConversationReadError, match="awaiting a server refetch"):
             await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+        assert client.event_calls == 1
 
     @pytest.mark.parametrize(
         "read",
