@@ -21,6 +21,7 @@ from mindroom.workers import protocol
 _SCHEMA_DIGESTS = {
     9: "d6320479ed4156c12809f20bf04ebe9252c180c7a7965f46a898680301c59cf3",
     10: "4c9c192cd2a5ab1b39fcba118d538f96a827766174175ccbe2f7f935934819da",
+    11: "04382be89f01956e02dda500dc32034be0306f2a3801f1d167de2874b51e6ece",
 }
 
 

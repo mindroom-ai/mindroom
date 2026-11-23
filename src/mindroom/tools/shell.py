@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom.constants import (
     WORKSPACE_HOME_CONTRACT_ENV_NAMES,
@@ -644,56 +644,48 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             )
             scope = current_shell_background_scope()
             wait_limit = default_run_timeout_seconds()
+            auto_background = scope is not None and (timeout is None or timeout > wait_limit)
+            namespace = f"shell-scope:{scope.scope_id}" if auto_background and scope is not None else _SHELL_NAMESPACE
+            run_timeout = wait_limit if auto_background else shell_call_timeout(timeout)
+            on_timeout: Literal["background", "kill"] = "background" if auto_background else "kill"
+            max_runtime_seconds = timeout if auto_background else None
+            background_log = self._background_log_policy() if auto_background else None
             if self._supervisor_socket is not None:
                 result = await run_command_via_supervisor(
                     self._supervisor_socket,
-                    namespace=_SHELL_NAMESPACE,
+                    namespace=namespace,
                     argv=argv,
                     env=subprocess_env,
                     cwd=cwd,
                     tail=tail,
-                    timeout=shell_call_timeout(timeout),
-                    on_timeout="kill",
+                    timeout=run_timeout,
+                    on_timeout=on_timeout,
                     on_progress=report_tool_progress,
                     output_destination=output_destination,
                     launch_failure_exits=worker is not None,
+                    max_runtime_seconds=max_runtime_seconds,
+                    background_log=background_log,
                 )
-            elif scope is not None and (timeout is None or timeout > wait_limit):
-                result = await run_command(
-                    scope.records,
-                    namespace=f"shell-scope:{scope.scope_id}",
-                    argv=argv,
-                    env=subprocess_env,
-                    cwd=cwd,
-                    # Never the terminal MindRoom runs in, where a prompting command would wait forever.
-                    stdin=subprocess.DEVNULL,
-                    tail=tail,
-                    timeout=wait_limit,
-                    on_timeout="background",
-                    on_progress=report_tool_progress,
-                    output_destination=output_destination,
-                    launch_failure_exits=worker is not None,
-                    max_runtime_seconds=timeout,
-                    background_log=self._background_log_policy(),
-                )
-                if result.handle is not None:
-                    scope.had_backgrounded = True
             else:
                 result = await run_command(
-                    {},
-                    namespace=_SHELL_NAMESPACE,
+                    scope.records if auto_background and scope is not None else {},
+                    namespace=namespace,
                     argv=argv,
                     env=subprocess_env,
                     cwd=cwd,
                     # Never the terminal MindRoom runs in, where a prompting command would wait forever.
                     stdin=subprocess.DEVNULL,
                     tail=tail,
-                    timeout=shell_call_timeout(timeout),
-                    on_timeout="kill",
+                    timeout=run_timeout,
+                    on_timeout=on_timeout,
                     on_progress=report_tool_progress,
                     output_destination=output_destination,
                     launch_failure_exits=worker is not None,
+                    max_runtime_seconds=max_runtime_seconds,
+                    background_log=background_log,
                 )
+            if auto_background and scope is not None and result.handle is not None:
+                scope.had_backgrounded = True
             if worker is not None and result.execution_error:
                 raise ValueError(result.message)
             return ToolOutputFileHandled(result.message) if result.output_file_handled else result.message

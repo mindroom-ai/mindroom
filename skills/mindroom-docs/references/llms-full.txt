@@ -11058,8 +11058,10 @@ The command runs in the agent's workspace, or in its workdir, and the result hol
 With `mindroom_output_path`, the complete output is saved to that file instead, and the receipt includes `exit_code` whenever the command exits non-zero or is killed, such as by the OOM killer, even when no file is saved; a command stopped at its `timeout` reports the stop instead.
 A successful command saves its stdout alone, and when it also printed to stderr, the receipt gives its size as `stderr_bytes`; add `2>&1` to the command to save that text too.
 
-A command still running after `timeout` seconds is stopped together with the processes it started, and the tool returns its output so far after `Stopped after <timeout>s.`; a stopped command saves no `mindroom_output_path` file.
-Without `timeout`, a call that runs as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) has no time limit, even while the reply waits for it, and any other command stops after 120 seconds.
+Every shell call waits at most 120 seconds in the foreground.
+A command with `timeout` <= 120 that is still running after `timeout` seconds is stopped together with the processes it started, and the tool returns its output so far after `Stopped after <timeout>s.`.
+When `timeout` is omitted or > 120 and the command is still running after 120 seconds, a call that runs as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) returns a job handle while the command continues until completion, its `timeout`, or job cancellation; any other turn-scoped call (including subagent calls, minimal-mode turns, and turns with background jobs off) moves the command to the background, streams ongoing stdout and stderr into a bounded live log file under `.mindroom/shell/` ending with the exit status, returns its PID, log path, and wait/stop commands, and stops the process group automatically when `timeout` (if set) expires or when the turn ends.
+Neither a stopped nor a backgrounded command saves a `mindroom_output_path` file.
 While a job's command runs, `job(action="list")` shows the last lines of its output, and cancelling the job stops the command.
 A command that exits non-zero still returned its result, so its job ends `completed`; its summary in `job(action="list")`, the first 500 characters of that result, includes the `Exit code <code>` line, or, with `mindroom_output_path`, is the receipt with its `exit_code`.
 A process started with `nohup cmd > out.log 2>&1 &` keeps running after its command ends on its own, but not after a stop; only a process started in its own session, such as with `setsid`, survives a stop.
@@ -16306,7 +16308,7 @@ These files are audit exports that MindRoom never reads, so editing or deleting 
 
 Background jobs are on by default; set the root option `background_tool_jobs.enabled: false` and restart to turn them off.
 Hot reload saves a changed `enabled` or `exclude_toolkits` setting and reports that a restart is required; `approval_wait_timeout` applies to calls made after the reload.
-With the option off, tools run as they always do, without the generic `background_after` argument or the `job` function, and every shell command stops at its `timeout`.
+With the option off, tools run as they always do, without the generic `background_after` argument or the `job` function; shell calls with `timeout` <= 120 stop inline at `timeout`, while untimed calls or calls with `timeout` > 120 move to the background after 120 seconds with a live log and stop automatically when `timeout` expires or when the turn ends.
 Turning the option off leaves unfinished jobs untouched; after it is turned back on and MindRoom restarts, they are handled as after any restart.
 An approval that needed a job fails when it resumes while the option is off.
 
@@ -16334,8 +16336,8 @@ The generic runtime adds no `background_after`, creates no job, and does not rel
 A tool's own argument named `background_after` remains its native argument.
 Adding `delegate` excludes both fresh subagent calls and follow-up turns, while existing jobs and their child approvals retain their accepted execution owner.
 
-A shell command that runs as a job has no time limit unless the call sets `timeout`: `background_after` decides how long the reply waits, 120 seconds when the call leaves it unset, the command appears in the jobs bar and `!jobs`, and cancelling its job stops the command as its `timeout` would.
-A shell call that runs outside any job, such as during a voice call, in a [contact turn](https://docs.mindroom.chat/agent-contacts/#contact-turns), in a minimal-mode agent's own reply, or with `shell` in `exclude_toolkits`, stops after its `timeout`, 120 seconds by default.
+A shell command that runs as a top-level job has no time limit unless the call sets `timeout`: `background_after` decides how long the reply waits, 120 seconds when the call leaves it unset, the command appears in the jobs bar and `!jobs`, and cancelling its job stops the command as its `timeout` would.
+A shell call inside a turn without a managed shell job—including subagent calls (standard or minimal), a minimal-mode agent's own reply, or turns with `shell` in `exclude_toolkits` or background jobs off—waits at most 120 seconds in the foreground: values of `timeout` <= 120 stop inline, while omitted `timeout` or values > 120 move the command to the background with a live `.mindroom/shell/` log and stop it automatically when `timeout` expires or when the turn ends (calls outside any turn scope still stop after `timeout`, 120 seconds by default).
 A command that never exits, such as a server, keeps its job running until it is cancelled; start it detached (`nohup cmd > server.log 2>&1 &`) to keep it running after its call.
 Tools that run long in a [worker](https://docs.mindroom.chat/deployment/sandbox-proxy/) are not limited by the worker's request timeouts while they run as a job, except browser calls: a `browser` call stops after its own 120-second limit, and a `browser_mcp` call after the worker's request timeouts, 120 seconds by default.
 
@@ -23305,6 +23307,7 @@ Every environment variable is listed in [Configuration — Environment Variables
 ## Related Setup
 
 - [Bridges](https://docs.mindroom.chat/deployment/bridges/) - connect Telegram and other messaging platforms to Matrix.
+- [OIDC & Single Sign-On](https://docs.mindroom.chat/deployment/oidc-sso/) - sign in to self-hosted Tuwunel and MindRoom Chat with Pocket ID, Authelia, Authentik, Keycloak, or another OIDC provider.
 - [Cloudflare Access & Tunnel](https://docs.mindroom.chat/deployment/cloudflare-access/) - Chat, Matrix, calls, and the runtime on one host behind Cloudflare Access.
 - [Connect Google Accounts](https://docs.mindroom.chat/deployment/google-services-user-oauth/) - Google tools on a paired local install, with no Google Cloud setup.
 - [Google OAuth Apps & Scopes](https://docs.mindroom.chat/deployment/google-services-oauth/) - your own Google OAuth client for remote, public, or shared deployments.
@@ -24368,7 +24371,7 @@ Do not put upstream API tokens in `extra_env_passthrough` or `.mindroom/worker-e
 Stopping a response also stops its in-flight worker calls, such as `run_shell_command` and `run_python_code`.
 With [background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) enabled, a call that continues as a job stops when its job is cancelled instead.
 Tools that run inside the runner process itself, such as `file` under the runner's `inprocess` execution mode, and persistent browser actions finish before the stop takes effect.
-A shell command stops at its `timeout`; without one, a background job's command runs until it ends or the job is cancelled, and any other command stops after 120 seconds.
+Every shell call waits at most 120 seconds in the foreground: calls with `timeout` <= 120 stop inline; a top-level background job runs on until completion, its `timeout`, or job cancellation; and any other turn-scoped call (including subagents and minimal-mode turns) moves to the background on the worker with a live `.mindroom/shell/` log and stops automatically when `timeout` expires or when the turn ends.
 A runner or worker restart stops running commands; see the [shell tool](https://docs.mindroom.chat/tools/execution-and-coding/#shell).
 
 ## Browsers in workers
@@ -24418,7 +24421,7 @@ Unsupported resources or oversized results produce a tool error.
 | `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tools to route when no `worker_tools` list is set | `*` for `all` or an unset mode with a proxy URL, otherwise empty |
 | `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Let worker-default tools run locally when `static_runner` routing is requested without a proxy URL | `false` |
 | `MINDROOM_STATIC_RUNNER_AGENT_STORAGE` | `true` when the `static_runner` mounts the agents' storage; see [Filesystem isolation and agent data](#filesystem-isolation-and-agent-data) | `false` |
-| `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | Time limit for a proxy call that is not a background job, and for every `browser_mcp` call; a `run_shell_command` call waits at least its `timeout` plus 30 seconds, a `browser` call at least 150 seconds, and a `trafilatura` `crawl_website` or `extract_batch` call at least 210 seconds | `120` |
+| `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | Time limit for a proxy call that is not an unscoped background job, and for every `browser_mcp` call; an auto-backgrounding `run_shell_command` call waits at most 150 seconds (`min(timeout, 120) + 30`), an unscoped `run_shell_command` call waits at least its `timeout` plus 30 seconds, a `browser` call at least 150 seconds, and a `trafilatura` `crawl_website` or `extract_batch` call at least 210 seconds | `120` |
 | `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Largest attachment saved into a worker workspace with `get_attachment(..., mindroom_output_path=...)`, and largest Atlassian `confluence_download_attachment` download; values above the 64 MiB attachment limit have no effect | `67108864` (64 MiB) |
 | `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime | `60` |
 | `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON` | JSON mapping tool selectors to credential services | `{}` |
@@ -24456,7 +24459,7 @@ To deploy that backend without Helm, see [Worker settings](https://docs.mindroom
 | `MINDROOM_SANDBOX_RUNNER_MODE` | Set to `true` to run as a sandbox runner | `false` |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Runner bearer token; dedicated workers receive their derived token automatically | _(required)_ |
 | `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` | `inprocess`, `subprocess` (a fresh process per call), or `forkserver` (a fresh forked process per call from a warm template) | `inprocess`; dedicated workers use `forkserver` |
-| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Per-call timeout for `subprocess` and `forkserver` execution, except for a background job's call, which has none; a `run_shell_command` call gets at least its `timeout` plus 30 seconds, a `trafilatura` `crawl_website` or `extract_batch` call at least 210 seconds, and, job or not, a `browser` call in a dedicated worker that keeps a [browser session](#browsers-in-workers) or runs Worker Computer at least 150 seconds; it also limits every `browser_mcp` call in a dedicated worker, job or not | `120` |
+| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Per-call timeout for `subprocess` and `forkserver` execution, except for an unscoped background job's call, which has none; a scoped auto-backgrounding `run_shell_command` call gets at least `min(timeout, 120) + 30` seconds (bounded even inside a subagent job), an unscoped `run_shell_command` call gets at least its `timeout` plus 30 seconds, a `trafilatura` `crawl_website` or `extract_batch` call at least 210 seconds, and, job or not, a `browser` call in a dedicated worker that keeps a [browser session](#browsers-in-workers) or runs Worker Computer at least 150 seconds; it also limits every `browser_mcp` call in a dedicated worker, job or not | `120` |
 | `MINDROOM_STORAGE_PATH` | Writable directory for the tool registry and worker-local caches, such as `/app/workspace/.mindroom`; startup fails if it is not writable | `mindroom_data` next to the config |
 | `MINDROOM_CONFIG_PATH` | Config used for requests that carry no [live config snapshot](#live-config-snapshots) | _(optional)_ |
 
@@ -25865,6 +25868,198 @@ Host the dashboard on the app's public origin or on [its own host](#dashboard-on
 | `403 Browser changes require a same-origin request` or `Browser changes require a valid public origin` | Open the dashboard from its `MINDROOM_PUBLIC_URL` origin, or from `MINDROOM_DASHBOARD_URL` when set |
 | `403 OAuth link does not belong to the current user` | Open the conversation link while signed in as the requester who received it |
 | Connections portal errors | See [Connections troubleshooting](https://docs.mindroom.chat/connections-portal/#troubleshooting) |
+
+# OIDC & Single Sign-On
+
+Self-hosted deployments running MindRoom's Tuwunel fork (`mindroom-tuwunel`) can delegate Matrix sign-in to any OpenID Connect (OIDC) identity provider that supports Authorization Code with PKCE (`S256`), `client_secret_post`, and a UserInfo endpoint returning `sub`, including Pocket ID, Authelia, Authentik, and Keycloak.
+Tuwunel exposes the same configured identity provider to `m.login.sso` clients (such as MindRoom Chat) and to next-generation Matrix OIDC clients (such as Element X) through its built-in OIDC authorization server.
+
+This page covers configuring Tuwunel, wiring Docker Compose (`mindroom-stack`) or Kubernetes, running an SSO-only homeserver without breaking MindRoom's agent accounts, configuring MindRoom Chat, routing a reverse proxy, and authenticating to the MindRoom dashboard.
+Hosted `mindroom.chat` uses MindRoom's own configured SSO providers; bringing your own identity provider applies to self-hosted homeservers.
+
+## Identity Provider Requirements
+
+Create a **confidential** OAuth 2.0 / OIDC client in your identity provider:
+
+- **Client authentication:** Confidential client with a `client_secret` (Tuwunel requires `client_secret` or `client_secret_file`; public clients without a secret are not supported).
+- **Grant and flow:** Authorization Code flow (`response_type=code`) with PKCE (`S256`) and `client_secret_post` (providers that only accept `client_secret_basic` are not supported).
+- **UserInfo endpoint:** After exchanging the authorization code, Tuwunel queries the discovered UserInfo endpoint and requires a JSON response containing `sub`.
+- **Scopes:** `openid`, `email`, and `profile` (Tuwunel's default).
+- **Callback / redirect URI:** Register this exact URL with your identity provider:
+
+```text
+https://<your-matrix-host>/_matrix/client/unstable/login/sso/callback/<client_id>
+```
+
+Tuwunel discovers endpoints automatically from `<issuer_url>/.well-known/openid-configuration`.
+Keep `client_id` and `issuer_url` unchanged after users begin signing in, because Tuwunel binds stored user identities to them.
+
+## Configure Tuwunel
+
+The examples below use [Pocket ID](https://pocket-id.org/) as a concrete self-hosted OIDC provider; substitute your own `brand`, `name`, and `issuer_url` for Authelia, Authentik, Keycloak, or another OIDC provider.
+
+=== "tuwunel.toml"
+
+    ```toml
+    [global.well_known]
+    client = "https://matrix.example.com"
+
+    [[global.identity_provider]]
+    brand = "PocketID"
+    name = "Pocket ID"
+    client_id = "<client_id>"
+    client_secret_file = "/etc/tuwunel/oidc_client_secret"  # or client_secret = "<client_secret>"
+    issuer_url = "https://id.example.com"
+    callback_url = "https://matrix.example.com/_matrix/client/unstable/login/sso/callback/<client_id>"
+    ```
+
+=== "Docker Compose (mindroom-stack)"
+
+    In [`mindroom-stack`](https://github.com/mindroom-ai/mindroom-stack), set `CLIENT_HOMESERVER_URL=https://matrix.example.com` in `.env` (which sets `TUWUNEL_WELL_KNOWN__CLIENT`) and add your provider in a `compose.override.yaml`:
+
+    ```yaml
+    services:
+      tuwunel:
+        environment:
+          TUWUNEL_IDENTITY_PROVIDER__0__BRAND: "PocketID"
+          TUWUNEL_IDENTITY_PROVIDER__0__NAME: "Pocket ID"
+          TUWUNEL_IDENTITY_PROVIDER__0__CLIENT_ID: "${OIDC_CLIENT_ID}"
+          TUWUNEL_IDENTITY_PROVIDER__0__CLIENT_SECRET: "${OIDC_CLIENT_SECRET}"
+          TUWUNEL_IDENTITY_PROVIDER__0__ISSUER_URL: "https://id.example.com"
+          TUWUNEL_IDENTITY_PROVIDER__0__CALLBACK_URL: "https://matrix.example.com/_matrix/client/unstable/login/sso/callback/${OIDC_CLIENT_ID}"
+    ```
+
+    Put `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET` in `.env`, or mount a secret file and use `TUWUNEL_IDENTITY_PROVIDER__0__CLIENT_SECRET_FILE`.
+    Multiple providers use sequential indexes (`__0__`, `__1__`, and so on).
+
+    > [!WARNING]
+    > `mindroom-stack` defaults to open local registration (`TUWUNEL_ALLOW_REGISTRATION: "true"`) and grants local users access to the shell-enabled `Mind` agent.
+    > Adding an identity provider does not turn off password registration, and hiding Chat's Register link does not enforce it server-side.
+    > Before exposing the stack beyond localhost, restrict agent access in `config/config.yaml`, limit who can create accounts through SSO (at your IdP, or via the provider's `registration = false` or `registration_rules`), and close open password registration in one of two ways (turning off registration alone stops MindRoom from creating new password-based agent accounts):
+    >
+    > - Keep password-based agents with token-gated registration: add `TUWUNEL_REGISTRATION_TOKEN` (or `TUWUNEL_REGISTRATION_TOKEN_FILE`) and `TUWUNEL_YES_I_AM_VERY_VERY_SURE_I_WANT_AN_OPEN_REGISTRATION_SERVER_PRONE_TO_ABUSE: "false"` to `services.tuwunel.environment`, and the matching `MATRIX_REGISTRATION_TOKEN` to `services.mindroom.environment`.
+    > - Or switch MindRoom to [`appservice` mode](#disabling-password-login-sso-only) before setting `TUWUNEL_ALLOW_REGISTRATION: "false"` (and optionally `TUWUNEL_AUTHENTICATION__LOGIN__WITH_PASSWORD: "false"` for SSO-only sign-in).
+
+=== "Kubernetes (Helm)"
+
+    The [Tuwunel chart](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#oidc-login) renders `[[global.identity_provider]]` and mounts the client secret from a Kubernetes Secret:
+
+    ```yaml
+    tuwunel:
+      serverName: example.com
+      clientBaseUrl: https://matrix.example.com
+      oidc:
+        enabled: true
+        brand: PocketID
+        name: Pocket ID
+        issuer: https://id.example.com
+        clientId: <client_id>
+        clientSecret:
+          existingSecret: matrix-oidc
+          key: OIDC_CLIENT_SECRET
+        scope: [openid, profile, email]
+    ```
+
+### Matching Existing Matrix Accounts
+
+By default, Tuwunel creates a new Matrix account on a user's first SSO sign-in if the claimed username already belongs to an existing account.
+To attach SSO logins to existing accounts on an identity provider where you control the matched claims (self-hosting alone is not enough if users can choose another person's username or email):
+
+- Set `trusted = true` (with `userid_claims`, such as `["preferred_username"]` or `["sub"]`, matching your Matrix localparts) so Tuwunel signs the user into the matching existing account.
+  Never set `trusted = true` on public providers such as Google or GitHub, or on any provider where users can freely pick the matched claim, because it enables account takeover.
+- Or map specific addresses explicitly to full local Matrix user IDs with `assigned_accounts = { "alice@example.com" = "@alice:example.com" }`.
+  Do not combine this with `trusted = true`, and use it only with an OIDC client restricted to your own organization or paired with an organization-specific `assigned_accounts_claims` check (such as `{ hd = "example.com" }`) set before the first sign-in.
+
+See the `mindroom-tuwunel` [Identity Providers guide](https://github.com/mindroom-ai/mindroom-tuwunel/blob/main/docs/authentication/providers.md) for the full option reference, registration rules, and provider-specific guides for Authelia, Authentik, Keycloak, and MAS.
+
+## Disabling Password Login (SSO-Only)
+
+By default, MindRoom registers and logs in its agent, team, and router accounts with passwords (`MATRIX_MANAGED_ACCOUNT_AUTH=password`).
+Turning off password login on Tuwunel (`authentication.login.with_password = false` or `TUWUNEL_AUTHENTICATION__LOGIN__WITH_PASSWORD="false"`) refuses password registration and fresh password logins for every account; existing agents with valid stored device tokens can restart, but fresh installs and new agents or devices fail until you switch MindRoom to [`appservice` mode](https://docs.mindroom.chat/matrix/#agent-users):
+
+1. Create an application-service registration file (for example `mindroom-appservice.yaml`) whose exclusive `users` namespace matches every MindRoom-managed account, including any custom `matrix_username` or `mindroom_user.username`:
+
+    ```yaml
+    id: mindroom
+    url: null
+    as_token: <long-random-secret>
+    hs_token: <another-long-random-secret>
+    sender_localpart: mindroom-appservice
+    namespaces:
+      users:
+        - exclusive: true
+          # Widen this regex (for example "^@(mindroom_.*|custom_bot):example\\.com$")
+          # if you set custom matrix_username or mindroom_user.username values.
+          regex: "^@mindroom_.*:example\\.com$"
+    ```
+
+2. Mount or place that `.yaml` file in a directory readable by Tuwunel and set `appservice_dir = "/etc/tuwunel/appservices"` (`TUWUNEL_APPSERVICE_DIR="/etc/tuwunel/appservices"`).
+3. Configure MindRoom with `MATRIX_MANAGED_ACCOUNT_AUTH=appservice` and `MATRIX_APPSERVICE_TOKEN` (or `MATRIX_APPSERVICE_TOKEN_FILE`) matching `as_token`, and leave `MATRIX_REGISTRATION_TOKEN` unset.
+4. Disable password login on Tuwunel:
+
+    ```toml
+    [global.authentication.login]
+    with_password = false
+    ```
+
+    Or via environment variable: `TUWUNEL_AUTHENTICATION__LOGIN__WITH_PASSWORD="false"`.
+
+On Kubernetes, see [Passwordless MindRoom Accounts](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#passwordless-mindroom-accounts) and [Matrix Managed Account Authentication](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#matrix-managed-account-authentication).
+
+## MindRoom Chat
+
+MindRoom Chat supports custom OIDC providers out of the box on web, iOS, and Android through Matrix's `m.login.sso` flow (including SSO interactive authentication for sensitive actions).
+Every custom provider Tuwunel advertises on `/_matrix/client/v3/login` appears automatically as a **Continue with `<name>`** button (custom `mxc://` `icon` images display only if the homeserver serves unauthenticated media, which Tuwunel disables by default; Apple, Google, and GitHub use MindRoom Chat's bundled marks, and Apple uses **Sign in with Apple**).
+
+Optional settings in MindRoom Chat's `config.json` (`client-config.json` in `mindroom-stack`):
+
+```json
+{
+  "defaultHomeserver": 0,
+  "homeserverList": ["https://matrix.example.com"],
+  "allowCustomHomeservers": false,
+  "auth": {
+    "hideServerPickerWhenSingle": true,
+    "allowRegistration": false,
+    "disablePasswordLogin": true
+  }
+}
+```
+
+- `auth.disablePasswordLogin: true` hides the password form when password login is off.
+- `auth.allowRegistration: false` hides the Register link when accounts are created on first SSO sign-in.
+- Listing your homeserver in `homeserverList` (or setting `allowCustomHomeservers: false`) avoids the unlisted-server trust prompt before SSO redirects.
+
+See [MindRoom Chat sign-in configuration](https://github.com/mindroom-ai/mindroom-chat/blob/main/docs/configuration.md#sign-in) for all client options.
+
+## Next-Gen OIDC Clients (Element X) & Reverse Proxy
+
+Once `[global.well_known].client` and at least one `[[global.identity_provider]]` are configured, Tuwunel also activates its built-in OIDC authorization server (MSC3861 / MSC2965) for clients such as Element X.
+Your reverse proxy must forward all of these paths to Tuwunel (`:8008`):
+
+| Path | Used by |
+| --- | --- |
+| `/_matrix/*` | Matrix client, SSO redirect/callback, and federation APIs |
+| `/_tuwunel/oidc/*`, `/_tuwunel/sso/*` (or `/_tuwunel/*`) | Tuwunel's OIDC endpoints and SSO interactive-auth assets (`sso.css`, `complete.js`) |
+| `/.well-known/openid-configuration` | OIDC discovery document |
+| `/.well-known/matrix/client`, `/.well-known/matrix/server` | Matrix client and server discovery (unless served separately) |
+
+Additional notes:
+
+- To allow both local password accounts and your OIDC provider on Tuwunel's built-in OIDC login page, set `[global.authentication.oidc].native_auth = true` (`TUWUNEL_AUTHENTICATION__OIDC__NATIVE_AUTH="true"`).
+- If you restrict dynamic client registration with `authentication.oidc.registration_allowed_redirect_hosts`, include the exact redirect hosts or private-use schemes your clients use (for example `["element.io", "io.element.android"]` for Element X on iOS and Android; hosts match exactly rather than by subdomain, so list any web client's exact host too).
+- When MindRoom Chat and Tuwunel share one origin, exclude `/_tuwunel` from Chat's service-worker navigation fallback so `/_tuwunel/oidc/*` pages reach Tuwunel instead of the cached SPA (see [Service Worker](https://docs.mindroom.chat/deployment/cloudflare-access/#service-worker)).
+- See Tuwunel's [OIDC Authorization Server guide](https://github.com/mindroom-ai/mindroom-tuwunel/blob/main/docs/authentication/oidc-server.md) for token lifetimes, PKCE, and client-approval settings.
+
+## MindRoom Dashboard & API
+
+The MindRoom dashboard and API (port `8765`) do not run a direct OIDC login flow.
+Choose the dashboard authentication boundary that matches your deployment:
+
+- **API key + optional Chat sign-in:** Keep `MINDROOM_API_KEY` set whenever no upstream auth proxy fronts MindRoom; unsetting it leaves the dashboard in open standalone mode instead of SSO-only mode.
+  With `TUWUNEL_MINDROOM_OPENID_AUDIENCE=true` (default in `mindroom-stack`), `MINDROOM_PUBLIC_URL` set to the MindRoom portal origin (`CLIENT_MINDROOM_URL` in `mindroom-stack`), and any public self-hosted Chat origin listed in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, users signed in to MindRoom Chat via OIDC who have access to at least one agent or its credentials (other than `access.current_room_members`, which does not apply in a browser) can open `/connections` using Matrix OpenID tokens, and accounts in `administrators` can also reach dashboard routes from that session (see [Connections Portal](https://docs.mindroom.chat/connections-portal/#sessions-and-dashboard-access)).
+- **OIDC auth proxy:** Place an OIDC-capable reverse proxy that attaches a raw signed JWT header without a `Bearer ` prefix (such as `oauth2-proxy` backed by Pocket ID, or [Cloudflare Access](https://docs.mindroom.chat/deployment/cloudflare-access/)) in front of MindRoom and enable [Trusted Upstream Browser Auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) (`MINDROOM_TRUSTED_UPSTREAM_*`).
+  Unless `MINDROOM_CONNECTIONS_AGENT` (a private agent with `private.per: user` or `user_agent`) is set, every user admitted by the proxy gets dashboard operator access, so either restrict the proxy policy to operators or set `MINDROOM_CONNECTIONS_AGENT` to limit the dashboard to `administrators` (see [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary)).
 
 # Cloudflare Access & Tunnel
 

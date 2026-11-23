@@ -25,7 +25,7 @@ from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTES, build_execution_tool_env
 from mindroom.egress_broker.env import egress_agent_scope, egress_broker_enabled
 from mindroom.runtime_env_policy import KUBERNETES_POD_LIMIT_ENV_NAMES, SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.shell.execution import shell_request_budget_seconds
+from mindroom.shell.execution import current_shell_background_scope, shell_request_budget_seconds
 from mindroom.timing import reply_timing_binding
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
 from mindroom.tool_system.dedicated_threads import WORKER_PROXY_CALL_EXECUTOR
@@ -932,6 +932,11 @@ def _call_proxy_sync(
         )
         # A CLI call that asked for its command's raw output (`workers run`) gets it as frames while it runs.
         stream = get_call_output_stream() if tool_name == "shell" else None
+        shell_scope = (
+            current_shell_background_scope()
+            if (tool_name, function_name) == ("shell", "run_shell_command") and stream is None
+            else None
+        )
         header = None
         on_frame = None
         if stream is not None:
@@ -951,7 +956,12 @@ def _call_proxy_sync(
                 proxy_config,
                 runtime_paths,
                 request_budget_seconds=max(
-                    shell_request_budget_seconds(tool_name, function_name, wire_kwargs),
+                    shell_request_budget_seconds(
+                        tool_name,
+                        function_name,
+                        wire_kwargs,
+                        auto_background=shell_scope is not None,
+                    ),
                     browser_request_budget_seconds(tool_name, function_name),
                     trafilatura_request_budget_seconds(tool_name, function_name),
                 ),
@@ -976,6 +986,7 @@ def _call_proxy_sync(
             cancellation=cancellation,
             stream=stream,
             on_frame=on_frame,
+            shell_scope=shell_scope,
         )
         # Deferred: it loads the attachment store and the provider registry, which the slim tool registry must not.
         from mindroom.tool_system.media_attachments import finalize_tool_media  # noqa: PLC0415
@@ -988,14 +999,15 @@ def _call_proxy_sync(
             if isinstance(result, str):
                 return f"{header}\n{result}"
             # The runner can save its shell result before it gets here. The preview has the same exit line.
-            saved = result.get("mindroom_tool_output") if isinstance(result, dict) else None
-            if isinstance(saved, dict) and saved.get("status") == "saved_to_file":
-                preview = saved.get("preview")
-                if isinstance(preview, str):
-                    return {
-                        **result,
-                        "mindroom_tool_output": {**saved, "preview": f"{header}\n{preview}"},
-                    }
+            if isinstance(result, dict):
+                saved = result.get("mindroom_tool_output")
+                if isinstance(saved, dict) and saved.get("status") == "saved_to_file":
+                    preview = saved.get("preview")
+                    if isinstance(preview, str):
+                        return {
+                            **result,
+                            "mindroom_tool_output": {**saved, "preview": f"{header}\n{preview}"},
+                        }
         return result
 
 

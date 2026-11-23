@@ -38,6 +38,7 @@ from PIL import Image as PILImage
 import mindroom.api.sandbox_exec as sandbox_exec_module
 import mindroom.api.sandbox_runner as sandbox_runner_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
+import mindroom.tool_system.worker_proxy_client as worker_proxy_client_module
 import mindroom.tools  # noqa: F401
 import mindroom.tools.shell as shell_tool_module
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, bound_agent_cli_shell_env
@@ -60,6 +61,8 @@ from mindroom.hooks import HookRegistry
 from mindroom.llm.media import Image
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES
+from mindroom.shell.execution import ShellBackgroundScope, bind_shell_background_scope, shell_background_scope
+from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import (
     adapt_toolkit,
@@ -88,6 +91,8 @@ from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFi
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import (
+    CallOutputStream,
+    call_progress_sink_scope,
     tool_runtime_context,
     worker_progress_pump_scope,
 )
@@ -926,6 +931,7 @@ def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
         "extra_env_passthrough": None,
         "run_as_job": False,
         "stream_io": False,
+        "shell_scope_id": None,
     }
     assert captured["headers"] == {"x-mindroom-sandbox-token": "test-token"}
 
@@ -8135,3 +8141,191 @@ def test_proxy_composition_finalizes_decoded_media_and_returns_json_as_it_is(
     assert [image.content for image in media.images] == [b"png"]
     assert json.loads(media.content)["attachment_id"].startswith("att_")
     assert plain == ordinary
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("current_static_runner")
+async def test_proxy_shell_scope_forwarding_and_stream_io_exclusion(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Non-streamed shell calls forward shell_scope_id and cap budget; stream_io and non-shell calls exclude it."""
+    captured: dict[str, Any] = {}
+    captured_calls: list[tuple[str, dict[str, Any]]] = []
+    paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="selective",
+        proxy_tools={"shell", "calculator"},
+        credential_policy={},
+    )
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(captured=captured, captured_calls=captured_calls),
+    )
+
+    async with shell_background_scope() as scope:
+        await asyncio.to_thread(
+            call_proxy_sync_for_test,
+            runtime_paths=paths,
+            tool_name="shell",
+            function_name="run_shell_command",
+            args=("sleep 1",),
+            kwargs={"timeout": 600},
+            credentials_manager=None,
+        )
+        assert captured["timeout"] == 150.0
+        assert captured["json"]["shell_scope_id"] == scope.scope_id
+        assert captured["json"]["stream_io"] is False
+
+        with call_progress_sink_scope(None, stream=CallOutputStream(asyncio.get_running_loop())):
+            await asyncio.to_thread(
+                call_proxy_sync_for_test,
+                runtime_paths=paths,
+                tool_name="shell",
+                function_name="run_shell_command",
+                args=("echo hi",),
+                kwargs={},
+                credentials_manager=None,
+            )
+        assert captured["json"]["stream_io"] is True
+        assert captured["json"]["shell_scope_id"] is None
+
+        await asyncio.to_thread(
+            call_proxy_sync_for_test,
+            runtime_paths=paths,
+            tool_name="calculator",
+            function_name="add",
+            args=(1, 2),
+            kwargs={},
+            credentials_manager=None,
+        )
+        assert captured["json"]["shell_scope_id"] is None
+
+    assert [url for url, _ in captured_calls if url.endswith("/execute/shell-scope/kill")] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("current_static_runner")
+async def test_proxy_shell_scope_fires_remote_kill_only_when_backgrounded_or_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Scope close posts /execute/shell-scope/kill when a command backgrounded or while a call is still in-flight."""
+    captured_calls: list[tuple[str, dict[str, Any]]] = []
+    paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="selective",
+        proxy_tools={"shell"},
+        credential_policy={},
+    )
+
+    def bg_responder(url: str, _payload: dict[str, Any]) -> object:
+        if url.endswith("/execute/shell-scope/kill"):
+            return {"killed": 1}
+        return {"ok": True, "result": "Still running", "shell_backgrounded": True}
+
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(captured_calls=captured_calls, responder=bg_responder),
+    )
+    async with shell_background_scope() as scope:
+        await asyncio.to_thread(
+            call_proxy_sync_for_test,
+            runtime_paths=paths,
+            tool_name="shell",
+            function_name="run_shell_command",
+            args=("sleep 200",),
+            kwargs={},
+            credentials_manager=None,
+        )
+    kill_calls = [(url, body) for url, body in captured_calls if url.endswith("/execute/shell-scope/kill")]
+    assert kill_calls == [
+        (
+            "http://sandbox-runner:8765/api/sandbox-runner/execute/shell-scope/kill",
+            {"protocol": WORKER_PROTOCOL_VERSION, "shell_scope_id": scope.scope_id},
+        ),
+    ]
+
+    in_flight_calls: list[tuple[str, dict[str, Any]]] = []
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_responder(url: str, _payload: dict[str, Any]) -> object:
+        if url.endswith("/execute/shell-scope/kill"):
+            return {"killed": 1}
+        entered.set()
+        release.wait(timeout=5.0)
+        return {"ok": True, "result": "done", "shell_backgrounded": False}
+
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(captured_calls=in_flight_calls, responder=blocking_responder),
+    )
+    async with shell_background_scope() as racing_scope:
+        task = asyncio.create_task(
+            asyncio.to_thread(
+                call_proxy_sync_for_test,
+                runtime_paths=paths,
+                tool_name="shell",
+                function_name="run_shell_command",
+                args=("sleep 200",),
+                kwargs={},
+                credentials_manager=None,
+            ),
+        )
+        await asyncio.to_thread(entered.wait, 5.0)
+        await racing_scope.close()
+        release.set()
+        await task
+    racing_kills = [body for url, body in in_flight_calls if url.endswith("/execute/shell-scope/kill")]
+    assert racing_kills == [{"protocol": WORKER_PROTOCOL_VERSION, "shell_scope_id": racing_scope.scope_id}]
+
+
+@pytest.mark.usefixtures("current_static_runner")
+def test_proxy_shell_scope_keeps_bounded_deadline_under_job_control(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A scoped shell call inside a job keeps a bounded deadline; an unscoped shell job stays unbounded."""
+    deadlines: list[float | None] = []
+    original_read = worker_proxy_client_module._read_execute_stream
+
+    def recording_read(
+        response: worker_proxy_client_module._WorkerProxyStreamedResponse,
+        *,
+        deadline: float | None,
+        cancellation: worker_proxy_client_module.WorkerCallCancellation | None,
+        on_frame: Callable[[dict[str, object]], None] | None = None,
+    ) -> dict[str, object] | None:
+        deadlines.append(deadline)
+        return original_read(response, deadline=deadline, cancellation=cancellation, on_frame=on_frame)
+
+    paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="selective",
+        proxy_tools={"shell"},
+        credential_policy={},
+    )
+    monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _recording_client_class())
+    monkeypatch.setattr(worker_proxy_client_module, "_read_execute_stream", recording_read)
+
+    with job_control_context(JobControl()):
+        call_proxy_sync_for_test(
+            runtime_paths=paths,
+            tool_name="shell",
+            function_name="run_shell_command",
+            args=("echo job",),
+            kwargs={},
+            credentials_manager=None,
+        )
+        with bind_shell_background_scope(ShellBackgroundScope()):
+            call_proxy_sync_for_test(
+                runtime_paths=paths,
+                tool_name="shell",
+                function_name="run_shell_command",
+                args=("echo subagent",),
+                kwargs={},
+                credentials_manager=None,
+            )
+
+    assert deadlines[0] is None
+    assert deadlines[1] is not None

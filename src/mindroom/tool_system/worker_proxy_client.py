@@ -31,6 +31,7 @@ from mindroom.workers.protocol import (
     ExecuteRequest,
     ExecuteResponse,
     FailureKind,
+    KillShellScopeRequest,
     LeaseRequest,
     LeaseResponse,
     SaveAttachmentRequest,
@@ -44,12 +45,14 @@ from mindroom.workers.protocol import (
 
 if TYPE_CHECKING:
     from mindroom.credentials.manager import CredentialsManager
+    from mindroom.shell.execution import ShellBackgroundScope
     from mindroom.tool_system.runtime_context import CallOutputStream
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
     from mindroom.workers.backend import WorkerBackend
 
 _SANDBOX_PROXY_TOKEN_HEADER = "x-mindroom-sandbox-token"  # noqa: S105
 _EXECUTE_CANCEL_TIMEOUT_SECONDS = 10.0
+_SHELL_SCOPE_KILL_TIMEOUT_SECONDS = 5.0
 # How long a cancelled streamed command is waited for to confirm it stopped; the runner kills it within about a second.
 STOP_CONFIRMATION_SECONDS = 3.0
 # The runner streams at least one line this often while a call runs; a longer silence means the runner is gone.
@@ -380,6 +383,21 @@ def _post_execute_cancel(
         logger.warning("worker_execute_cancel_failed", url=url, exc_info=True)
 
 
+def _post_kill_shell_scope(
+    client_factory: _WorkerProxyClientFactory,
+    url: str,
+    headers: dict[str, str],
+    shell_scope_id: str,
+) -> None:
+    """Ask the runner to stop every auto-backgrounded shell process owned by one turn scope."""
+    try:
+        with client_factory(timeout=_SHELL_SCOPE_KILL_TIMEOUT_SECONDS) as client:
+            request = KillShellScopeRequest(protocol=WORKER_PROTOCOL_VERSION, shell_scope_id=shell_scope_id)
+            client.post(url, json=request.model_dump(mode="json"), headers=headers).raise_for_status()
+    except Exception:
+        logger.warning("worker_shell_scope_kill_failed", url=url, shell_scope_id=shell_scope_id, exc_info=True)
+
+
 async def _post_execute_stdin(
     post: Callable[..., _WorkerProxyResponse],
     failing: list[int],
@@ -471,6 +489,56 @@ def _read_execute_stream(
     raise RuntimeError(msg)
 
 
+def _arm_cancellation_and_stdin(
+    cancellation: WorkerCallCancellation | None,
+    *,
+    client: _WorkerProxyClient,
+    client_factory: _WorkerProxyClientFactory,
+    worker_handle: WorkerHandle | None,
+    runner_api_root: str,
+    headers: dict[str, str],
+    stream: CallOutputStream | None,
+) -> dict[str, object]:
+    if cancellation is None:
+        return {}
+    cancel_url = (
+        worker_api_endpoint(worker_handle, "execute-cancel")
+        if worker_handle is not None
+        else f"{runner_api_root}/execute/cancel"
+    )
+    # Arm before leasing credentials, so an abandoned call leases none.
+    cancellation._arm(
+        functools.partial(_post_execute_cancel, client_factory, cancel_url, headers, cancellation.request_id),
+    )
+    if stream is not None:
+        stdin_url = f"{cancel_url.removesuffix('/cancel')}/{cancellation.request_id}/stdin"
+        post_stdin = functools.partial(client.post, stdin_url, headers=headers)
+        stream.write_stdin = functools.partial(_post_execute_stdin, post_stdin, [-1, 0])
+    return {"request_id": cancellation.request_id}
+
+
+def _track_shell_scope_remote(
+    shell_scope: ShellBackgroundScope | None,
+    *,
+    client_factory: _WorkerProxyClientFactory,
+    worker_handle: WorkerHandle | None,
+    runner_api_root: str,
+    headers: dict[str, str],
+) -> str | None:
+    if shell_scope is None:
+        return None
+    kill_url = (
+        worker_api_endpoint(worker_handle, "shell-scope-kill")
+        if worker_handle is not None
+        else f"{runner_api_root}/execute/shell-scope/kill"
+    )
+    shell_scope.track_remote_start(
+        kill_url,
+        functools.partial(_post_kill_shell_scope, client_factory, kill_url, headers, shell_scope.scope_id),
+    )
+    return kill_url
+
+
 def execute_worker_proxy_request(
     *,
     config: WorkerProxyClientConfig,
@@ -485,6 +553,7 @@ def execute_worker_proxy_request(
     cancellation: WorkerCallCancellation | None = None,
     stream: CallOutputStream | None = None,
     on_frame: Callable[[dict[str, object]], None] | None = None,
+    shell_scope: ShellBackgroundScope | None = None,
 ) -> object:
     """Execute one tool call through the sandbox proxy or selected dedicated worker.
 
@@ -492,106 +561,120 @@ def execute_worker_proxy_request(
     ``worker_grantable_credentials`` names shared services a scoped call may lease.
     ``cancellation`` lets the caller stop the call at the runner once it stops waiting for it.
     ``stream`` is given the way to the stdin of a call's streamed command, whose frames ``on_frame`` takes.
+    ``shell_scope`` binds turn-scoped auto-backgrounding and remote cleanup for non-streamed shell calls.
     """
     if worker_handle is None and config.proxy_url is None:
         msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_url']} must be set when sandbox proxying is enabled."
         raise RuntimeError(msg)
 
+    shell_scope_id = shell_scope.scope_id if shell_scope is not None else request.shell_scope_id
+    tracked_kill_url: str | None = None
+    shell_backgrounded = False
     try:
-        headers = worker_request_headers(worker_handle, config=config)
-        runner_api_root = normalize_sandbox_runner_api_root(config.proxy_url or "")
-        execute_url = (
-            worker_api_endpoint(worker_handle, "execute") if worker_handle is not None else f"{runner_api_root}/execute"
-        )
-        lease_url = (
-            worker_api_endpoint(worker_handle, "leases") if worker_handle is not None else f"{runner_api_root}/leases"
-        )
-        with client_factory(timeout=config.proxy_timeout_seconds) as client:
-            run_as_job = job_owns_execution()
-            sent: dict[str, object] = {"run_as_job": run_as_job}
-            if cancellation is not None:
-                sent["request_id"] = cancellation.request_id
-                cancel_url = (
-                    worker_api_endpoint(worker_handle, "execute-cancel")
-                    if worker_handle is not None
-                    else f"{runner_api_root}/execute/cancel"
-                )
-                # Arm before leasing credentials, so an abandoned call leases none.
-                cancellation._arm(
-                    functools.partial(
-                        _post_execute_cancel,
-                        client_factory,
-                        cancel_url,
-                        headers,
-                        cancellation.request_id,
+        try:
+            headers = worker_request_headers(worker_handle, config=config)
+            runner_api_root = normalize_sandbox_runner_api_root(config.proxy_url or "")
+            execute_url = (
+                worker_api_endpoint(worker_handle, "execute")
+                if worker_handle is not None
+                else f"{runner_api_root}/execute"
+            )
+            lease_url = (
+                worker_api_endpoint(worker_handle, "leases")
+                if worker_handle is not None
+                else f"{runner_api_root}/leases"
+            )
+            with client_factory(timeout=config.proxy_timeout_seconds) as client:
+                run_as_job = job_owns_execution()
+                sent: dict[str, object] = {"run_as_job": run_as_job}
+                if shell_scope_id is not None:
+                    sent["shell_scope_id"] = shell_scope_id
+                sent.update(
+                    _arm_cancellation_and_stdin(
+                        cancellation,
+                        client=client,
+                        client_factory=client_factory,
+                        worker_handle=worker_handle,
+                        runner_api_root=runner_api_root,
+                        headers=headers,
+                        stream=stream,
                     ),
                 )
-                if stream is not None:
-                    stdin_url = f"{cancel_url.removesuffix('/cancel')}/{cancellation.request_id}/stdin"
-                    post_stdin = functools.partial(client.post, stdin_url, headers=headers)
-                    stream.write_stdin = functools.partial(_post_execute_stdin, post_stdin, [-1, 0])
-            lease_id = _create_credential_lease(
-                client,
-                config=config,
-                lease_url=lease_url,
-                headers=headers,
-                credentials_manager=credentials_manager,
-                tool_name=request.tool_name,
-                function_name=request.function_name,
-                worker_target=worker_target,
-                primary_built_service=primary_built_service,
-                worker_grantable_credentials=worker_grantable_credentials,
-            )
-            if lease_id is not None:
-                sent["lease_id"] = lease_id
-            payload = request.model_copy(update=sent).model_dump(mode="json")
-            # A call that holds a reply keeps its time limit; a job call runs as long as its tool does.
-            deadline = None if run_as_job else time.monotonic() + config.proxy_timeout_seconds
-            # The read timeout spans worker preparation before the first line and every gap between keep-alives.
-            timeout = httpx.Timeout(
-                config.proxy_timeout_seconds,
-                read=max(config.proxy_timeout_seconds, 3 * EXECUTE_KEEPALIVE_SECONDS),
-            )
-            in_flight = (
-                worker_call_in_flight(worker_manager, worker_handle.worker_key)
-                if worker_handle is not None
-                else nullcontext()
-            )
-            with (
-                in_flight,
-                client.stream("POST", execute_url, json=payload, headers=headers, timeout=timeout) as response,
-            ):
-                try:
-                    response.raise_for_status()
-                except httpx.HTTPStatusError as exc:
-                    response.read()
-                    raise _WorkerHttpError(exc.response) from exc
-                data = _read_execute_stream(
-                    response,
-                    deadline=deadline,
-                    cancellation=cancellation,
-                    on_frame=on_frame,
+                lease_id = _create_credential_lease(
+                    client,
+                    config=config,
+                    lease_url=lease_url,
+                    headers=headers,
+                    credentials_manager=credentials_manager,
+                    tool_name=request.tool_name,
+                    function_name=request.function_name,
+                    worker_target=worker_target,
+                    primary_built_service=primary_built_service,
+                    worker_grantable_credentials=worker_grantable_credentials,
                 )
-    except Exception as exc:
-        _record_proxy_exception_for_worker(
-            exc,
+                if lease_id is not None:
+                    sent["lease_id"] = lease_id
+                payload = request.model_copy(update=sent).model_dump(mode="json")
+                # A scoped call auto-backgrounds at 120s even inside a subagent job, so only unscoped job calls are unbounded.
+                deadline = (
+                    None if (run_as_job and shell_scope_id is None) else time.monotonic() + config.proxy_timeout_seconds
+                )
+                # The read timeout spans worker preparation before the first line and every gap between keep-alives.
+                timeout = httpx.Timeout(
+                    config.proxy_timeout_seconds,
+                    read=max(config.proxy_timeout_seconds, 3 * EXECUTE_KEEPALIVE_SECONDS),
+                )
+                in_flight = (
+                    worker_call_in_flight(worker_manager, worker_handle.worker_key)
+                    if worker_handle is not None
+                    else nullcontext()
+                )
+                tracked_kill_url = _track_shell_scope_remote(
+                    shell_scope,
+                    client_factory=client_factory,
+                    worker_handle=worker_handle,
+                    runner_api_root=runner_api_root,
+                    headers=headers,
+                )
+                with (
+                    in_flight,
+                    client.stream("POST", execute_url, json=payload, headers=headers, timeout=timeout) as response,
+                ):
+                    try:
+                        response.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
+                        response.read()
+                        raise _WorkerHttpError(exc.response) from exc
+                    data = _read_execute_stream(
+                        response,
+                        deadline=deadline,
+                        cancellation=cancellation,
+                        on_frame=on_frame,
+                    )
+        except Exception as exc:
+            _record_proxy_exception_for_worker(
+                exc,
+                worker_handle=worker_handle,
+                worker_manager=worker_manager,
+            )
+            raise
+        finally:
+            if stream is not None:
+                # The client that reached the command's stdin is closed.
+                stream.write_stdin = None
+
+        answer = _checked_worker_answer(
+            data,
+            ExecuteResponse,
             worker_handle=worker_handle,
             worker_manager=worker_manager,
+            operation="execute",
+            failure="Sandbox execution failed.",
         )
-        raise
+        shell_backgrounded = answer.shell_backgrounded
     finally:
-        if stream is not None:
-            # The client that reached the command's stdin is closed.
-            stream.write_stdin = None
-
-    answer = _checked_worker_answer(
-        data,
-        ExecuteResponse,
-        worker_handle=worker_handle,
-        worker_manager=worker_manager,
-        operation="execute",
-        failure="Sandbox execution failed.",
-    )
+        if shell_scope is not None and tracked_kill_url is not None:
+            shell_scope.track_remote_end(tracked_kill_url, backgrounded=shell_backgrounded)
     if worker_handle is not None:
         worker_manager.touch_worker(worker_handle.worker_key)
     return answer.result

@@ -14,6 +14,7 @@ import contextlib
 import errno
 import functools
 import itertools
+import logging
 import os
 import re
 import shlex
@@ -21,6 +22,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from collections import deque
@@ -162,6 +164,9 @@ class _OutputBuffer:
         self.lines_capped = True
 
 
+_logger = logging.getLogger(__name__)
+
+
 @dataclass(frozen=True)
 class BackgroundLogPolicy:
     """Where and how much output an auto-backgrounded shell command writes to its live log."""
@@ -169,6 +174,29 @@ class BackgroundLogPolicy:
     log_dir: str
     display_root: str | None = None
     max_bytes: int = _LOG_MAX_BYTES
+
+    @classmethod
+    def from_payload(cls, payload: object) -> BackgroundLogPolicy | None:
+        """Validate the optional serialized log policy sent to the supervisor."""
+        if payload is None:
+            return None
+        if not isinstance(payload, dict):
+            msg = "Invalid background shell log policy."
+            raise TypeError(msg)
+        log_dir = payload.get("log_dir")
+        display_root = payload.get("display_root")
+        max_bytes = payload.get("max_bytes", _LOG_MAX_BYTES)
+        if (
+            not isinstance(log_dir, str)
+            or not log_dir
+            or (display_root is not None and not isinstance(display_root, str))
+            or not isinstance(max_bytes, int)
+            or isinstance(max_bytes, bool)
+            or max_bytes <= 0
+        ):
+            msg = "Invalid background shell log policy."
+            raise ValueError(msg)
+        return cls(log_dir=log_dir, display_root=display_root, max_bytes=max_bytes)
 
 
 class _BackgroundLogFile:
@@ -258,17 +286,60 @@ class ProcessRecord:
 
 
 @dataclass
+class _RemoteScopeEndpoint:
+    cleanup: Callable[[], None]
+    in_flight: int = 0
+    needs_kill: bool = False
+
+
+def _run_remote_cleanup(cleanup: Callable[[], None]) -> None:
+    try:
+        cleanup()
+    except Exception:
+        _logger.warning("Remote shell background scope cleanup failed", exc_info=True)
+
+
+@dataclass
 class ShellBackgroundScope:
-    """Turn-scoped owner for auto-backgrounded local shell processes."""
+    """Turn-scoped owner for auto-backgrounded local and remote worker shell processes."""
 
     scope_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     records: dict[str, ProcessRecord] = field(default_factory=dict)
     had_backgrounded: bool = False
     closed: bool = False
+    _remote_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _remote_endpoints: dict[str, _RemoteScopeEndpoint] = field(default_factory=dict, repr=False)
 
-    async def close(self) -> None:
-        """Stop unfinished processes in this scope, flush log trailers, and clear records."""
-        self.closed = True
+    def track_remote_start(self, endpoint_key: str, cleanup: Callable[[], None]) -> None:
+        """Record an in-flight remote shell request for *endpoint_key*."""
+        with self._remote_lock:
+            entry = self._remote_endpoints.get(endpoint_key)
+            if entry is None:
+                self._remote_endpoints[endpoint_key] = _RemoteScopeEndpoint(cleanup=cleanup, in_flight=1)
+            else:
+                entry.cleanup = cleanup
+                entry.in_flight += 1
+
+    def track_remote_end(self, endpoint_key: str, *, backgrounded: bool) -> None:
+        """Record completion of a remote shell request; fire late cleanup if already closed."""
+        late_cleanup: Callable[[], None] | None = None
+        with self._remote_lock:
+            entry = self._remote_endpoints.get(endpoint_key)
+            if entry is None:
+                return
+            entry.in_flight = max(0, entry.in_flight - 1)
+            if backgrounded:
+                self.had_backgrounded = True
+                if self.closed:
+                    late_cleanup = entry.cleanup
+                else:
+                    entry.needs_kill = True
+            if self.closed and entry.in_flight == 0:
+                self._remote_endpoints.pop(endpoint_key, None)
+        if late_cleanup is not None:
+            _run_remote_cleanup(late_cleanup)
+
+    async def _close_local_records(self) -> None:
         records = list(self.records.values())
         if not records:
             return
@@ -288,6 +359,24 @@ class ShellBackgroundScope:
             for record in records:
                 _kill_record(record, stop_reason="scope_ended")
             self.records.clear()
+
+    async def close(self) -> None:
+        """Stop unfinished local and remote processes in this scope, flush log trailers, and clear records."""
+        with self._remote_lock:
+            self.closed = True
+            remote_cleanups = [
+                entry.cleanup for entry in self._remote_endpoints.values() if entry.needs_kill or entry.in_flight > 0
+            ]
+            for key in [k for k, e in self._remote_endpoints.items() if e.in_flight == 0]:
+                self._remote_endpoints.pop(key, None)
+            for entry in self._remote_endpoints.values():
+                entry.needs_kill = False
+        await self._close_local_records()
+        if remote_cleanups:
+            await asyncio.gather(
+                *(asyncio.to_thread(_run_remote_cleanup, cleanup) for cleanup in remote_cleanups),
+                return_exceptions=True,
+            )
 
 
 _SHELL_BACKGROUND_SCOPE: ContextVar[ShellBackgroundScope | None] = ContextVar(

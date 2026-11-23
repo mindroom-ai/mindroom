@@ -11,6 +11,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -41,6 +42,8 @@ import mindroom.api.sandbox_runner_app as sandbox_runner_app_module
 import mindroom.api.sandbox_runner_scripts as sandbox_runner_scripts_module
 import mindroom.api.sandbox_worker_prep as sandbox_worker_prep_module
 import mindroom.constants as constants_module
+import mindroom.shell.execution as shell_execution_module
+import mindroom.shell.supervisor as shell_supervisor_module
 import mindroom.tool_system.metadata as metadata_module
 import mindroom.tool_system.registration as registration_module
 import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
@@ -2842,7 +2845,13 @@ def test_cancel_that_overtakes_its_request_stops_it_on_arrival(
     retried = runner_client.post("/api/sandbox-runner/execute", headers=SANDBOX_HEADERS, json=request)
 
     assert cancel.json() == {"cancelled": False}
-    assert stopped.json() == {"ok": False, "result": None, "error": "Tool call was cancelled.", "failure_kind": "tool"}
+    assert stopped.json() == {
+        "ok": False,
+        "result": None,
+        "error": "Tool call was cancelled.",
+        "failure_kind": "tool",
+        "shell_backgrounded": False,
+    }
     assert retried.json()["ok"] is True
 
 
@@ -2895,7 +2904,13 @@ def test_cancelling_a_running_request_stops_it_without_blaming_the_worker(
                 os.kill(pid, signal.SIGKILL)
 
     assert cancel.json() == {"cancelled": True}
-    assert response.json() == {"ok": False, "result": None, "error": "Tool call was cancelled.", "failure_kind": "tool"}
+    assert response.json() == {
+        "ok": False,
+        "result": None,
+        "error": "Tool call was cancelled.",
+        "failure_kind": "tool",
+        "shell_backgrounded": False,
+    }
     assert not failures
 
 
@@ -2931,7 +2946,13 @@ def test_request_cancelled_while_its_worker_is_prepared_never_starts(
         },
     )
 
-    assert response.json() == {"ok": False, "result": None, "error": "Tool call was cancelled.", "failure_kind": "tool"}
+    assert response.json() == {
+        "ok": False,
+        "result": None,
+        "error": "Tool call was cancelled.",
+        "failure_kind": "tool",
+        "shell_backgrounded": False,
+    }
     assert spawned == []
 
 
@@ -3367,7 +3388,13 @@ def test_sandbox_runner_runs_plugin_tool_known_only_to_the_snapshot(
         )
 
     assert response.status_code == 200, response.text
-    assert response.json() == {"ok": True, "result": "from the snapshot", "error": None, "failure_kind": None}
+    assert response.json() == {
+        "ok": True,
+        "result": "from the snapshot",
+        "error": None,
+        "failure_kind": None,
+        "shell_backgrounded": False,
+    }
 
 
 def test_sandbox_runner_reloads_edited_snapshot_plugins_and_logs_only_changes(
@@ -3901,6 +3928,7 @@ def test_sandbox_runner_stops_a_shell_command_past_its_timeout_in_subprocess_mod
         "result": "Stopped after 1s.\nOutput:\nstarted",
         "error": None,
         "failure_kind": None,
+        "shell_backgrounded": False,
     }
 
 
@@ -4704,7 +4732,13 @@ def test_sandbox_runner_prepares_worker_once_before_subprocess_dispatch(
     )
 
     assert response.status_code == 200
-    assert response.json() == {"ok": True, "result": "ok", "error": None, "failure_kind": None}
+    assert response.json() == {
+        "ok": True,
+        "result": "ok",
+        "error": None,
+        "failure_kind": None,
+        "shell_backgrounded": False,
+    }
     assert prepare_calls == 1
 
 
@@ -8425,6 +8459,7 @@ _PROTOCOL_PAYLOADS: dict[str, dict[str, object]] = {
     "view-file": {"path": "sample.png"},
     "leases": {"tool_name": "calculator", "function_name": "add", "ttl_seconds": 60},
     "execute/cancel": {"request_id": "request-1"},
+    "execute/shell-scope/kill": {"shell_scope_id": "scope-1"},
 }
 
 
@@ -8667,3 +8702,176 @@ async def test_prepared_request_carries_the_parsed_caller_identity(
     assert prepared.request.execution_identity == asdict(identity)
     assert response.ok is True
     assert built == [identity]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"tool_name": "calculator", "function_name": "add", "args": [1, 2], "shell_scope_id": "scope-1"},
+        {"tool_name": "shell", "function_name": "other", "args": [], "shell_scope_id": "scope-1"},
+        {
+            "tool_name": "shell",
+            "function_name": "run_shell_command",
+            "args": [["true"]],
+            "stream_io": True,
+            "shell_scope_id": "scope-1",
+        },
+        {
+            "tool_name": "shell",
+            "function_name": "run_shell_command",
+            "args": [["true"]],
+            "shell_scope_id": "   ",
+        },
+    ],
+)
+def test_execute_rejects_shell_scope_id_for_non_shell_or_stream_io(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: dict[str, object],
+) -> None:
+    """shell_scope_id is only accepted for non-streamed shell run_shell_command calls with a non-blank ID."""
+    _set_sandbox_token(monkeypatch)
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={"protocol": WORKER_PROTOCOL_VERSION, **payload},
+    )
+    assert response.status_code == 400, response.text
+    assert "shell_scope_id" in response.text
+
+
+def _wait_pid_dead(pid: int, *, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        time.sleep(0.05)
+    pytest.fail(f"Process {pid} stayed alive after shell-scope kill")
+
+
+def test_execute_shell_scope_auto_backgrounds_and_kills_process_group_inprocess(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An inprocess scoped shell call auto-backgrounds and /execute/shell-scope/kill stops its process group."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE", "inprocess")
+    monkeypatch.setattr(shell_execution_module, "_DEFAULT_RUN_TIMEOUT_SECONDS", 0.2)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    child_pid_file = workspace / "child.pid"
+    cmd = f"sleep 60 & echo $! > {child_pid_file}; echo booted; wait"
+
+    response = runner_client.post(
+        "/api/sandbox-runner/execute",
+        headers=SANDBOX_HEADERS,
+        json={
+            "protocol": WORKER_PROTOCOL_VERSION,
+            "tool_name": "shell",
+            "function_name": "run_shell_command",
+            "args": [["bash", "-c", cmd]],
+            "kwargs": {},
+            "base_dir": str(workspace),
+            "execution_env": {"PATH": os.environ["PATH"]},
+            "shell_scope_id": "inproc-scope-1",
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["ok"] is True, body
+    assert body["shell_backgrounded"] is True
+    result_text = str(body["result"])
+    pid_match = re.search(r"PID (\d+)", result_text)
+    log_match = re.search(r"Log: (\S+)", result_text)
+    assert pid_match is not None, result_text
+    assert log_match is not None, result_text
+    pid = int(pid_match.group(1))
+    child_pid = int(child_pid_file.read_text(encoding="utf-8").strip())
+    log_path = workspace / log_match.group(1)
+    assert log_path.exists()
+
+    kill_response = runner_client.post(
+        "/api/sandbox-runner/execute/shell-scope/kill",
+        headers=SANDBOX_HEADERS,
+        json={"protocol": WORKER_PROTOCOL_VERSION, "shell_scope_id": "inproc-scope-1"},
+    )
+    assert kill_response.status_code == 200, kill_response.text
+    assert kill_response.json() == {"killed": 1}
+    _wait_pid_dead(pid)
+    _wait_pid_dead(child_pid)
+    assert "[MindRoom: stopped when turn ended]" in log_path.read_text(encoding="utf-8")
+
+
+def test_execute_shell_scope_auto_backgrounds_and_kills_process_group_subprocess(
+    runner_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A subprocess scoped shell call auto-backgrounds via the supervisor and stops on /execute/shell-scope/kill."""
+    _set_sandbox_token(monkeypatch)
+    monkeypatch.setattr(shell_execution_module, "_DEFAULT_RUN_TIMEOUT_SECONDS", 0.2)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    child_pid_file = workspace / "child.pid"
+    manager = shell_supervisor_module._ShellSupervisorManager()
+    monkeypatch.setattr(shell_supervisor_module, "_manager", manager)
+    try:
+        socket_path = manager.ensure()
+        monkeypatch.setenv(shell_supervisor_module.SHELL_SUPERVISOR_SOCKET_ENV, socket_path)
+        runtime_paths = resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "storage",
+            process_env={
+                "PATH": os.environ["PATH"],
+                shell_supervisor_module.SHELL_SUPERVISOR_SOCKET_ENV: socket_path,
+            },
+        )
+        cmd = f"sleep 60 & echo $! > {child_pid_file}; echo booted; wait"
+        prepared = sandbox_runner_module.PreparedSandboxRunnerExecuteRequest(
+            tool_name="shell",
+            function_name="run_shell_command",
+            args=[["bash", "-c", cmd]],
+            kwargs={},
+            tool_init_overrides={"base_dir": str(workspace)},
+            shell_scope_id="subproc-scope-1",
+        )
+        envelope = sandbox_protocol_module.serialize_subprocess_envelope(
+            request=prepared.model_dump(mode="json"),
+            runtime_paths=serialize_runtime_paths(runtime_paths),
+            config_yaml="{}\n",
+        )
+        exit_code, _tool_output, marked_response = sandbox_runner_module._run_subprocess_worker_payload(
+            envelope,
+            lambda _text: None,
+        )
+        assert exit_code == 0
+        response_json = sandbox_protocol_module.extract_response_json(marked_response)
+        assert response_json is not None
+        response = ExecuteResponse.model_validate_json(response_json)
+        assert response.ok is True, response
+        assert response.shell_backgrounded is True
+        result_text = str(response.result)
+        pid_match = re.search(r"PID (\d+)", result_text)
+        log_match = re.search(r"Log: (\S+)", result_text)
+        assert pid_match is not None, result_text
+        assert log_match is not None, result_text
+        pid = int(pid_match.group(1))
+        child_pid = int(child_pid_file.read_text(encoding="utf-8").strip())
+        log_path = workspace / log_match.group(1)
+        assert log_path.exists()
+
+        kill_response = runner_client.post(
+            "/api/sandbox-runner/execute/shell-scope/kill",
+            headers=SANDBOX_HEADERS,
+            json={"protocol": WORKER_PROTOCOL_VERSION, "shell_scope_id": "subproc-scope-1"},
+        )
+        assert kill_response.status_code == 200, kill_response.text
+        assert kill_response.json() == {"killed": 1}
+        _wait_pid_dead(pid)
+        _wait_pid_dead(child_pid)
+        assert "[MindRoom: stopped when turn ended]" in log_path.read_text(encoding="utf-8")
+    finally:
+        manager.shutdown()

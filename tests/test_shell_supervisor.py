@@ -24,13 +24,20 @@ from mindroom.script_runs import shim as script_run_shim
 from mindroom.script_runs.wire import ScriptWorkerError
 from mindroom.shell import execution as shell_execution_module
 from mindroom.shell import supervisor as shell_supervisor
-from mindroom.shell.execution import ShellRunResult, run_command, shell_request_budget_seconds
+from mindroom.shell.execution import (
+    BackgroundLogPolicy,
+    ShellRunResult,
+    run_command,
+    shell_request_budget_seconds,
+)
 from mindroom.shell.supervisor import (
     SHELL_SUPERVISOR_SOCKET_ENV,
     _handle_connection,
     _ShellSupervisorManager,
     check_command_via_supervisor,
     kill_command_via_supervisor,
+    kill_namespace_via_supervisor,
+    kill_shell_supervisor_namespace,
     parse_shell_supervisor_kill,
     parse_shell_supervisor_status,
     run_command_via_supervisor,
@@ -1356,3 +1363,109 @@ async def test_supervised_launch_passes_the_launch_contract_and_reports_a_refusa
         launch_contract.TOKEN_PATH_ENV: str(tmp_path / "cap"),
         launch_contract.WORKSPACE_ROOT_ENV: str(tmp_path),
     }
+
+
+@pytest.mark.asyncio
+async def test_supervisor_background_log_kill_namespace_and_per_namespace_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Supervisor supports background_log, per-namespace caps, and kill_namespace isolation."""
+    registry: dict[str, ProcessRecord] = {}
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    policy = BackgroundLogPolicy(log_dir=str(workspace / ".mindroom" / "shell"), display_root=str(workspace))
+    monkeypatch.setattr(shell_execution_module, "MAX_BACKGROUNDED", 1)
+
+    async with _running_server(registry) as socket_path:
+        first = await run_command_via_supervisor(
+            socket_path,
+            namespace="shell-scope:a",
+            argv=["bash", "-c", "echo alpha; sleep 30"],
+            env=dict(os.environ),
+            cwd=str(workspace),
+            tail=10,
+            timeout=0.2,
+            on_timeout="background",
+            background_log=policy,
+        )
+        rejected = await run_command_via_supervisor(
+            socket_path,
+            namespace="shell-scope:a",
+            argv=["bash", "-c", "sleep 30"],
+            env=dict(os.environ),
+            cwd=str(workspace),
+            tail=10,
+            timeout=0.2,
+            on_timeout="background",
+            background_log=policy,
+        )
+        other = await run_command_via_supervisor(
+            socket_path,
+            namespace="shell-scope:b",
+            argv=["bash", "-c", "sleep 30"],
+            env=dict(os.environ),
+            cwd=str(workspace),
+            tail=10,
+            timeout=0.2,
+            on_timeout="background",
+            background_log=policy,
+        )
+        assert first.handle is not None
+        assert other.handle is not None
+        assert "Still running after 0.2s; moved to the background" in first.message
+        assert "Log: .mindroom/shell/" in first.message
+        assert "Too many backgrounded processes (1/1)" in rejected.message
+        first_pid = registry[first.handle].pid
+        first_log = Path(registry[first.handle].log_path or "")
+        other_pid = registry[other.handle].pid
+
+        try:
+            killed = await asyncio.to_thread(kill_namespace_via_supervisor, socket_path, namespace="shell-scope:a")
+            assert killed == 1
+            await _assert_pid_dead(first_pid)
+            assert "[MindRoom: stopped when turn ended]" in first_log.read_text(encoding="utf-8")
+            os.kill(other_pid, 0)
+        finally:
+            await asyncio.to_thread(kill_namespace_via_supervisor, socket_path, namespace="shell-scope:b")
+            await _assert_pid_dead(other_pid)
+
+
+def test_kill_shell_supervisor_namespace_never_spawns_supervisor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Killing a namespace returns 0 without spawning when no supervisor is running."""
+    spawned: list[bool] = []
+    monkeypatch.setattr(_ShellSupervisorManager, "_spawn", lambda _self: spawned.append(True))
+    monkeypatch.setattr(shell_supervisor, "_manager", None)
+
+    assert kill_shell_supervisor_namespace("shell-scope:missing") == 0
+    assert _ShellSupervisorManager().kill_namespace("shell-scope:missing") == 0
+    assert spawned == []
+
+
+def test_shell_subprocess_dispatch_context_caps_auto_background_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Scoped shell dispatch caps foreground wait budget even when timeout > 120."""
+    socket_path = str(tmp_path / "test.sock")
+    monkeypatch.setattr(shell_supervisor, "ensure_shell_supervisor", lambda: socket_path)
+    assert shell_request_budget_seconds("shell", "run_shell_command", {"timeout": 600}, auto_background=True) == 150.0
+    prepared = sandbox_runner_module.PreparedSandboxRunnerExecuteRequest(
+        tool_name="shell",
+        function_name="run_shell_command",
+        kwargs={"timeout": 600},
+        shell_scope_id="scope-1",
+    )
+    subprocess_context = sandbox_runner_module._PreparedSandboxSubprocessContext(
+        python_executable=sys.executable,
+        subprocess_env={"PATH": "/usr/bin"},
+        subprocess_cwd=None,
+        template_env={"PATH": "/usr/bin"},
+    )
+
+    _, timeout_seconds = sandbox_runner_module._shell_subprocess_dispatch_context(
+        prepared,
+        subprocess_context,
+        120.0,
+    )
+    assert timeout_seconds == 150.0

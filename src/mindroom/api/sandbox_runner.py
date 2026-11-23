@@ -70,7 +70,13 @@ from mindroom.runtime_env_policy import (
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.script_runs.models import script_run_id_from_worker_key
 from mindroom.shell import supervisor as shell_supervisor
-from mindroom.shell.execution import CommandStdin, shell_request_budget_seconds, stream_command
+from mindroom.shell.execution import (
+    CommandStdin,
+    ShellBackgroundScope,
+    bind_shell_background_scope,
+    shell_request_budget_seconds,
+    stream_command,
+)
 from mindroom.terminal.session import SupportsTerminalLaunch, TerminalError, TerminalLaunch
 from mindroom.timing import elapsed_ms_between, elapsed_ms_since
 from mindroom.tool_jobs.control import JobControl, job_control_context, job_owns_execution
@@ -128,6 +134,8 @@ from mindroom.workers.protocol import (
     CancelResponse,
     ExecuteRequest,
     ExecuteResponse,
+    KillShellScopeRequest,
+    KillShellScopeResponse,
     LeaseRequest,
     LeaseResponse,
     SaveAttachmentRequest,
@@ -569,6 +577,7 @@ class PreparedSandboxRunnerExecuteRequest(BaseModel):
     runtime_overrides: dict[str, Any] = Field(default_factory=dict)
     tool_output_workspace_root: str | None = None
     run_as_job: bool = False
+    shell_scope_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1081,6 +1090,7 @@ def _prepare_execute_request(call: _ExecuteCall) -> _PreparedSandboxRequestConte
         tool_name=request.tool_name,
         function_name=request.function_name,
         run_as_job=request.run_as_job,
+        shell_scope_id=request.shell_scope_id,
         args=list(request.args),
         kwargs=kwargs,
         worker_scope=request.worker_scope,
@@ -1208,15 +1218,57 @@ async def _execute_prepared_request_inprocess(
     )
 
 
+_inprocess_shell_scopes: dict[str, ShellBackgroundScope] = {}
+_inprocess_shell_scope_refs: dict[str, int] = {}
+
+
+async def close_inprocess_shell_scopes() -> None:
+    """Stop every in-process auto-backgrounded shell scope on runner shutdown."""
+    scopes = list(_inprocess_shell_scopes.values())
+    _inprocess_shell_scopes.clear()
+    _inprocess_shell_scope_refs.clear()
+    if scopes:
+        await asyncio.gather(*(scope.close() for scope in scopes), return_exceptions=True)
+
+
 async def _execute_request_inprocess(call: _ExecuteCall) -> ExecuteResponse:
     prepared_request = _prepare_execute_request(call)
-    return await _execute_prepared_request_inprocess(
-        prepared_request.request,
-        prepared_request.runtime_paths,
-        call.route.config,
-        call.tools,
-        credentials_manager=get_runtime_credentials_manager(call.route.runtime_paths),
-    )
+    scope_id = prepared_request.request.shell_scope_id
+    if scope_id is None:
+        return await _execute_prepared_request_inprocess(
+            prepared_request.request,
+            prepared_request.runtime_paths,
+            call.route.config,
+            call.tools,
+            credentials_manager=get_runtime_credentials_manager(call.route.runtime_paths),
+        )
+    scope = _inprocess_shell_scopes.get(scope_id)
+    if scope is None or scope.closed:
+        scope = ShellBackgroundScope(scope_id=scope_id)
+        _inprocess_shell_scopes[scope_id] = scope
+    _inprocess_shell_scope_refs[scope_id] = _inprocess_shell_scope_refs.get(scope_id, 0) + 1
+    before_handles = set(scope.records)
+    before_had = scope.had_backgrounded
+    try:
+        with bind_shell_background_scope(scope):
+            response = await _execute_prepared_request_inprocess(
+                prepared_request.request,
+                prepared_request.runtime_paths,
+                call.route.config,
+                call.tools,
+                credentials_manager=get_runtime_credentials_manager(call.route.runtime_paths),
+            )
+    finally:
+        remaining = _inprocess_shell_scope_refs.get(scope_id, 1) - 1
+        if remaining <= 0:
+            _inprocess_shell_scope_refs.pop(scope_id, None)
+            if not scope.records and _inprocess_shell_scopes.get(scope_id) is scope:
+                _inprocess_shell_scopes.pop(scope_id, None)
+        else:
+            _inprocess_shell_scope_refs[scope_id] = remaining
+    if bool(set(scope.records) - before_handles) or (not before_had and scope.had_backgrounded):
+        response = response.model_copy(update={"shell_backgrounded": True})
+    return response
 
 
 def prepare_terminal_launch(app: FastAPI, payload: ExecuteRequest, cwd: str | None) -> TerminalLaunch:
@@ -1468,7 +1520,12 @@ def _shell_subprocess_dispatch_context(
     if timeout_seconds is not None:
         timeout_seconds = max(
             timeout_seconds,
-            shell_request_budget_seconds(prepared.tool_name, prepared.function_name, prepared.kwargs),
+            shell_request_budget_seconds(
+                prepared.tool_name,
+                prepared.function_name,
+                prepared.kwargs,
+                auto_background=prepared.shell_scope_id is not None,
+            ),
         )
     return replace(subprocess_context, subprocess_env=subprocess_env), timeout_seconds
 
@@ -1501,10 +1558,10 @@ def _execute_request_subprocess_sync(call: _ExecuteCall) -> ExecuteResponse:
         runtime_paths=constants.serialize_runtime_paths(prepared_request.runtime_paths),
         config_yaml=_subprocess_config_yaml(call.route.config, prepared_request.request.tool_name),
     )
-    # A job's call runs as long as its tool does; any other call keeps the runner's limit, or its own when longer.
+    # A scoped shell call auto-backgrounds at 120s even inside a subagent job, so only unscoped job calls are unbounded.
     timeout_seconds = (
         None
-        if prepared_request.request.run_as_job
+        if prepared_request.request.run_as_job and prepared_request.request.shell_scope_id is None
         else max(
             sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths),
             trafilatura_request_budget_seconds(
@@ -1723,12 +1780,22 @@ def _run_subprocess_worker_payload(payload: str, report_progress: Callable[[str]
         # Children start with `-P`; python-tool code may still import workspace modules, after installed ones.
         sys.path.append(str(Path.cwd()))
     job = job_control_context(JobControl()) if request.run_as_job else nullcontext()
-    with redirect_stdout(captured_out), redirect_stderr(captured_err), tool_progress_reporter(report_progress), job:
+    shell_scope = ShellBackgroundScope(scope_id=request.shell_scope_id) if request.shell_scope_id is not None else None
+    scope_binding = bind_shell_background_scope(shell_scope) if shell_scope is not None else nullcontext()
+    with (
+        redirect_stdout(captured_out),
+        redirect_stderr(captured_err),
+        tool_progress_reporter(report_progress),
+        job,
+        scope_binding,
+    ):
         # A fresh child loads the request's plugins itself, except the ones its template preloaded.
         tools = refresh_plugins(config, runtime_paths).tools
         stage_ends.append(time.monotonic())
         response = asyncio.run(_execute_prepared_request_inprocess(request, runtime_paths, config, tools))
         stage_ends.append(time.monotonic())
+    if shell_scope is not None and shell_scope.had_backgrounded:
+        response = response.model_copy(update={"shell_backgrounded": True})
 
     stages = zip(("config_ms", "plugins_ms", "tool_ms"), stage_ends, stage_ends[1:], strict=False)
     timing: dict[str, object] = {stage: elapsed_ms_between(start, end) for stage, start, end in stages}
@@ -1887,6 +1954,15 @@ def _validated_execute_request(request: ExecuteRequest, *, tool_metadata: Mappin
         raise HTTPException(status_code=400, detail="execution_env is only supported for execution tools.")
     if request.extra_env_passthrough is not None and request.tool_name != "shell":
         raise HTTPException(status_code=400, detail="extra_env_passthrough is only supported for shell.")
+    if request.shell_scope_id is not None and (
+        not request.shell_scope_id.strip()
+        or (request.tool_name, request.function_name) != ("shell", "run_shell_command")
+        or request.stream_io
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="shell_scope_id is only supported for non-streamed shell run_shell_command calls.",
+        )
     return request.model_copy(
         update={"tool_init_overrides": tool_init_overrides, "tool_config_overrides": tool_config_overrides},
     )
@@ -2093,6 +2169,23 @@ async def cancel_tool_call(payload: CancelRequest) -> CancelResponse | WorkerFai
     if (failure := _protocol_failure(payload.protocol)) is not None:
         return failure
     return CancelResponse(cancelled=sandbox_request_cancellation.cancel_request(payload.request_id))
+
+
+@router.post("/execute/shell-scope/kill")
+async def kill_shell_scope(payload: KillShellScopeRequest) -> KillShellScopeResponse | WorkerFailure:
+    """Stop every auto-backgrounded shell process owned by one turn scope."""
+    if (failure := _protocol_failure(payload.protocol)) is not None:
+        return failure
+    killed = 0
+    scope = _inprocess_shell_scopes.pop(payload.shell_scope_id, None)
+    if scope is not None:
+        killed += len(scope.records)
+        await scope.close()
+    killed += await asyncio.to_thread(
+        shell_supervisor.kill_shell_supervisor_namespace,
+        f"shell-scope:{payload.shell_scope_id}",
+    )
+    return KillShellScopeResponse(killed=killed)
 
 
 @router.post("/execute/{request_id}/stdin")

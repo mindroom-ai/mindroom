@@ -19,6 +19,7 @@ from mindroom.api.sandbox_runner import (
     app_runner_token,
     app_runtime_config,
     app_runtime_paths,
+    close_inprocess_shell_scopes,
     initialize_sandbox_runner_app,
     load_config_from_startup_runtime,
     start_eager_worker_setup,
@@ -91,6 +92,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         if eager_setup is not None:
             eager_setup.cancel()
+        await close_inprocess_shell_scopes()
         await close_worker_terminals(app)
         await stop_worker_ssh(app)
         await close_worker_services(app)
