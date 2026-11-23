@@ -142,8 +142,41 @@ def test_a_model_reference_at_a_level_passes_every_model_reference_check(runtime
         return {"models": {"default": _sol()}, "agents": {"code": {"display_name": "Code", "model": model}}}
 
     assert Config.validate_with_runtime(data("default@high"), runtime_paths).agents["code"].model == "default@high"
-    with pytest.raises(ConfigRuntimeValidationError, match="default@xhigh"):
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match=r"agents\.code\.model: unsupported level 'xhigh' for default; supported: low, medium, high",
+    ):
         Config.validate_with_runtime(data("default@xhigh"), runtime_paths)
+
+
+def test_unsupported_level_message_names_the_supported_levels() -> None:
+    models = _config(sol=_sol(), plain={"provider": "openai", "id": "gpt-6"}).models
+
+    assert (
+        models.unsupported_level_message("sol@xhigh")
+        == "unsupported level 'xhigh' for sol; supported: low, medium, high"
+    )
+    assert models.unsupported_level_message("plain@high") == "unsupported level 'high' for plain; supported: none"
+    for ok_or_unknown in ("sol@high", "sol", "nope@high", "missing", "@high", None):
+        assert models.unsupported_level_message(ok_or_unknown) is None
+
+
+def test_runtime_validation_distinguishes_an_unsupported_level_from_an_unknown_model(
+    runtime_paths: RuntimePaths,
+) -> None:
+    def data(model: str) -> dict[str, Any]:
+        return {
+            "models": {"default": _sol(), "plain": {"provider": "openai", "id": "gpt-6"}},
+            "agents": {"code": {"display_name": "Code", "model": model}},
+        }
+
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match=r"^agents\.code\.model: unsupported level 'high' for plain; supported: none$",
+    ):
+        Config.validate_with_runtime(data("plain@high"), runtime_paths)
+    with pytest.raises(ConfigRuntimeValidationError, match=r"^Unknown model for agents\.code\.model: 'nope@high'\."):
+        Config.validate_with_runtime(data("nope@high"), runtime_paths)
 
 
 # --- Applying a level to a route ----------------------------------------------------------------------------

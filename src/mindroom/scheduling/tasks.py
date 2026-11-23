@@ -1066,8 +1066,10 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     if model is not None:
         selected_model = model.strip() or None
     if selected_model is not None and selected_model not in runtime.config.models:
-        available = ", ".join(sorted(runtime.config.models))
-        msg = f"Unknown model: {selected_model}. Available models: {available}"
+        msg = runtime.config.models.unsupported_level_message(selected_model)
+        if not isinstance(msg, str):
+            available = ", ".join(sorted(runtime.config.models))
+            msg = f"Unknown model: {selected_model}. Available models: {available}"
         raise SchedulingError(msg)
 
     client = runtime.client

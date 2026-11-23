@@ -77,8 +77,10 @@ def configured_model(config: Config, runtime_paths: RuntimePaths, model_name: st
     A key written as ``${NAME}`` becomes that runtime env variable's value, and stays as written when it is unset.
     """
     if model_name not in config.models:
-        available = ", ".join(sorted(config.models))
-        msg = f"Unknown model: {model_name}. Available models: {available}"
+        msg = config.models.unsupported_level_message(model_name)
+        if msg is None:
+            available = ", ".join(sorted(config.models))
+            msg = f"Unknown model: {model_name}. Available models: {available}"
         raise ValueError(msg)
     model_config = model_with_dashboard_key(model_name, config.models[model_name], runtime_paths)
     return resolve_api_key_reference(apply_reasoning_level(model_config), runtime_paths)

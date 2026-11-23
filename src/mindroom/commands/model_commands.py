@@ -46,8 +46,9 @@ def _apply_model_selection(
         if request.operation == "reset":
             text, removed = _clear_thread_model(config, runtime_paths, thread_id, entity_names)
             return text, None, removed
-        if request.model not in config.models:
-            error = f"Unknown model `{request.model}`. Refresh the model picker."
+        if request.model is None or request.model not in config.models:
+            reason = config.models.unsupported_level_message(request.model) or f"Unknown model `{request.model}`"
+            error = f"{reason}. Refresh the model picker."
             return f"❌ {error}", error, False
         text = _set_thread_model(
             request.model,
@@ -219,7 +220,8 @@ def handle_model_command(
     if thread_id is None:
         return _THREAD_REQUIRED_MESSAGE, None
     if not named_model and requested.lower() not in _RESET_ARGUMENTS:
-        return f"❌ Unknown model `{requested}`. Available models:\n{available_models_text(config)}", None
+        reason = config.models.unsupported_level_message(requested) or f"Unknown model `{requested}`"
+        return f"❌ {reason}. Available models:\n{available_models_text(config)}", None
     request = ModelSelectionRequest(
         client.user_id,
         client.device_id or "",

@@ -688,8 +688,10 @@ def authorize_delegation(  # noqa: PLR0911
     if depth >= MAX_DELEGATION_DEPTH:
         return "Cannot delegate: the maximum delegation depth was reached."
     if model is not None and (not isinstance(model, str) or model not in active_config.models):
+        reason = active_config.models.unsupported_level_message(model)
         available_models = ", ".join(sorted(active_config.models))
-        return f"Cannot delegate: Unknown model '{model}'. Available models: {available_models}."
+        detail = reason or f"Unknown model '{model}'. Available models: {available_models}"
+        return f"Cannot delegate: {detail}."
     return active_config
 
 

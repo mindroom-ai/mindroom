@@ -127,10 +127,16 @@ class ThreadModelTools(Toolkit):
         current = context.current_config
         switchable = context.config.models.keys() & current.models.keys()
         if model_name not in switchable:
+            reason = (
+                current.models.unsupported_level_message(model_name)
+                or context.config.models.unsupported_level_message(model_name)
+                if model_name.partition("@")[0] in switchable
+                else None
+            )
             return self._payload(
                 "error",
                 action="switch",
-                message=f"Unknown model '{model_name}'.",
+                message=f"{reason}." if reason else f"Unknown model '{model_name}'.",
                 available_models=sorted(switchable),
             )
         entity_names = self._addressable_entities(context)
