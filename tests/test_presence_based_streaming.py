@@ -236,6 +236,7 @@ class TestBotIntegration:
             _event_id: str,
             content: dict,
             _display_text: str,
+            **_kwargs: object,
         ) -> object:
             return delivered_matrix_event("$edit", content)
 
