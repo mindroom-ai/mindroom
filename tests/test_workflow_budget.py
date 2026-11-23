@@ -263,6 +263,46 @@ async def test_cost_question_whose_card_could_not_be_posted_is_posted_without_a_
     assert (_questions(stack)[-1]["status"], _states(stack)["@1"]) == ("open", "queued")
     assert await _answer(stack, "$budget:1", _CONTINUE)
     await _settled(stack, "@1")
+
+
+@pytest.mark.asyncio
+async def test_nested_run_cost_question_whose_card_could_not_be_posted_is_posted_by_views(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A nested run has no card of its own, yet its unsent budget question is retried until the room takes it."""
+    monkeypatch.setattr(view_module, "_REFRESH_SECONDS", 0.02)
+    monkeypatch.setattr(view_module, "_SETTLE_SECONDS", 0.005)
+    await stack.start(max_concurrent=1)
+    outer = stack.run_id
+    inner = await stack.start(
+        max_cost_usd=1,
+        max_concurrent=1,
+        parent_run_id=outer,
+        parent_node_key="@0",
+    )
+    gate = asyncio.Event()
+    stack.child_script([Await(gate.wait), *_turn(1.2)], _turn())
+    assert [await _agent(stack, index) for index in range(2)] == ["running", "queued"]
+    assert stack.room is not None
+    stack.room.refuse_sends = True
+    gate.set()
+    await stack.until(lambda: stack.store.get_run(inner.run_id).state is WorkflowRunState.WAITING)
+    stack.views.start()
+    await asyncio.sleep(0.1)
+    assert _questions(stack) == []
+
+    stack.room.refuse_sends = False
+    await stack.until(lambda: "event_id" in stack.store.get_node(inner.run_id, "$budget:1").links)
+    await stack.views.close()
+
+    assert (_questions(stack)[-1]["run"], _questions(stack)[-1]["status"], _states(stack)["@1"]) == (
+        inner.run_id,
+        "open",
+        "queued",
+    )
+    assert await _answer(stack, "$budget:1", _CONTINUE)
+    await _settled(stack, "@1")
     """Stop ends the run cancelled. Its limit is not raised: a resume that wants to work is asked again."""
     gate = await _over_the_limit(stack)
     gate.set()

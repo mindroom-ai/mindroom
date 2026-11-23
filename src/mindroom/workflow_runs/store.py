@@ -229,7 +229,7 @@ class WorkflowRunStore:
 
     def unshown_runs(self) -> list[str]:
         """Return the runs with a card of their own whose card does not say how they ended: all that have not, too."""
-        runs = self._select_runs("parent_run_id IS NULL AND attempt > 0 AND card_status IS NOT state", ())
+        runs = self._select_runs("parent_run_id IS NULL AND attempt > 0 AND card_epoch IS NOT epoch", ())
         return [run.run_id for run in runs]
 
     def child_runs(self, run_id: str) -> list[WorkflowRun]:
@@ -757,7 +757,7 @@ _SCHEMA_STATEMENTS = (
         source TEXT NOT NULL, source_digest TEXT NOT NULL, previous_source_digest TEXT, args_json TEXT NOT NULL,
         max_concurrent INTEGER NOT NULL, max_cost_usd REAL, large INTEGER NOT NULL, resource_profile TEXT,
         runtime_seconds_left REAL, state TEXT NOT NULL, attempt INTEGER NOT NULL, idle_resumes INTEGER NOT NULL,
-        script_run_id TEXT, job_id TEXT, card_event_id TEXT, card_status TEXT, result_json TEXT NOT NULL, error TEXT,
+        script_run_id TEXT, job_id TEXT, card_event_id TEXT, card_epoch INTEGER, result_json TEXT NOT NULL, error TEXT,
         created_at TEXT NOT NULL, finished_at TEXT
     )
     """,

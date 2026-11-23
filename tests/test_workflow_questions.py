@@ -318,6 +318,30 @@ async def test_question_and_answer_of_any_length_keep_the_card_one_event(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_question_with_escaped_accepted_options_keeps_open_and_closed_cards_one_event(tmp_path: Path) -> None:
+    """Any accepted options fit in one encrypted event both when posted open and when edited answered or cancelled."""
+    options = ["\x01" * 198 + f"{index:02d}" for index in range(20)]
+    request = {"question": "Which?", "options": options}
+    with workflow_stack(tmp_path, require_approval=()) as stack:
+        room = stack.show(encrypted=True) and _room(stack)
+        await stack.start()
+        card = await _ask(stack, "@0", request)
+        assert _cards(stack)[-1]["options"] == options
+
+        assert await _answer(stack, card, option=options[0]) == "accepted"
+        assert len(room.events) == 2
+        assert _cards(stack)[-1]["status"] == "answered"
+        assert await stack.result("@0", "ask", request) == options[0]
+
+        await _ask(stack, "@1", request)
+        await stack.engine.cancel(stack.run_id, reason="Stopped.")
+        assert len(room.events) == 4
+        assert _cards(stack)[-1]["status"] == "cancelled"
+        assert all(room.encrypted_size(content) <= 65_536 for _, _, content in room.events)
+        await stack.engine.close()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("options", [[f"Option {number}" for number in range(21)], ["Yes", "é" * 101]])
 async def test_options_that_a_card_cannot_show_whole_are_refused_before_the_call_waits(
     stack: WorkflowStack,

@@ -14,6 +14,7 @@ from mindroom.matrix.event_types import WORKFLOW_RUN_CONTENT_KEY
 from mindroom.matrix.large_messages import fits_one_event
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.workflow_runs import view as view_module
+from mindroom.workflow_runs.graph import graph_meta
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.workflow_helpers import StackRoom, WorkflowStack, set_run, tool_args, workflow_stack
@@ -228,11 +229,18 @@ async def test_card_is_edited_on_status_phase_and_waiting_changes_and_else_every
 @pytest.mark.asyncio
 async def test_card_of_a_run_that_works_for_72_hours_is_edited_fewer_than_450_times(stack: WorkflowStack) -> None:
     """A run whose numbers change all the time and whose status does not edits its card six times an hour at most."""
-    for step in range(72 * 12):
-        if step % 2 == 0:
-            await stack.result(f"@{step}", "value", _NOW)
+    await stack.result("@0", "value", _NOW)
+    await stack.views.show(stack.run_id)
+    built = stack.views._build(stack.run_id)
+    assert built is not None
+    run, nodes, used, graph = built
+    meta = graph_meta(run, nodes, used, large=False)
+    client = _room(stack).client
+    for step in range(1, 72 * 12):
         stack.now += 300
-        await stack.views.show(stack.run_id)
+        if step % 2 == 0:
+            meta = {**meta, "counts": {**meta["counts"], "completed": step // 2 + 1}}
+        await stack.views._card(run, meta, graph, client)
 
     assert 400 < len(_cards(stack)) < 450
 
@@ -375,11 +383,11 @@ async def test_final_card_edit_that_fails_is_sent_again_until_it_lands(
     await stack.finish_attempt("done")
     tried = sends.await_count
     await stack.until(lambda: sends.await_count >= tried + 2)
-    assert stack.store.get_run(stack.run_id).card_status is None
+    assert stack.store.get_run(stack.run_id).card_epoch is None
 
     room.refuse_sends = False
     await stack.until(lambda: _cards(stack)[-1]["status"] == "completed")
-    await stack.until(lambda: stack.store.get_run(stack.run_id).card_status == "completed")
+    await stack.until(lambda: stack.store.get_run(stack.run_id).card_epoch == stack.store.get_run(stack.run_id).epoch)
     sent = sends.await_count
     await asyncio.sleep(0.2)
     await stack.views.close()
@@ -404,10 +412,40 @@ async def test_run_that_ended_while_nobody_showed_it_gets_the_card_of_its_end_at
     assert stack.store.unshown_runs() == [stack.run_id]
 
     stack.views.start()
-    await stack.until(lambda: stack.store.get_run(stack.run_id).card_status == "completed")
+    await stack.until(lambda: stack.store.get_run(stack.run_id).card_epoch == stack.store.get_run(stack.run_id).epoch)
     await stack.views.close()
 
     assert (_cards(stack)[-1]["status"], "graph" in _cards(stack)[-1]) == ("completed", True)
+    assert stack.store.unshown_runs() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["failed", "completed"])
+async def test_resumed_run_that_ends_with_the_same_status_sends_its_final_card_again(
+    stack: WorkflowStack,
+    status: str,
+) -> None:
+    """Ending a resumed attempt with the same status as before still sends that attempt's final card."""
+    if status == "failed":
+        await stack.finish_attempt(error="ValueError: first")
+    else:
+        await stack.finish_attempt("first")
+    first = await _shown(stack)
+    assert (first["status"], first["attempt"], "graph" in first) == (status, 1, True)
+    assert stack.store.unshown_runs() == []
+
+    await stack.resume(stack.run_id)
+    running = await _shown(stack)
+    assert (running["status"], running["attempt"]) == ("running", 2)
+
+    if status == "failed":
+        await stack.finish_attempt(error="ValueError: second")
+    else:
+        await stack.finish_attempt("second")
+    assert stack.store.unshown_runs() == [stack.run_id]
+
+    second = await _shown(stack)
+    assert (second["status"], second["attempt"], "graph" in second) == (status, 2, True)
     assert stack.store.unshown_runs() == []
 
 

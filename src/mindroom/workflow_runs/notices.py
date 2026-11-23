@@ -28,7 +28,9 @@ _CUT = "... [truncated]"
 
 def clip(text: str, chars: int) -> str:
     """Return *text* in at most *chars* characters, with a mark at the end of one that was cut."""
-    return text if len(text) <= chars else text[: chars - len(_CUT)] + _CUT
+    if len(text) <= chars:
+        return text
+    return text[: chars - len(_CUT)] + _CUT if chars > len(_CUT) else text[:chars]
 
 
 def _signable(value: object) -> object:
@@ -50,11 +52,22 @@ def notice(run: WorkflowRun, text: str, key: str, content: dict[str, Any]) -> di
     )
 
 
-def notice_fits(client: nio.AsyncClient, run: WorkflowRun, message: dict[str, Any], event_id: str | None) -> bool:
-    """Return whether *message* is one event in the run's room as an edit of the notice at *event_id*."""
+def notice_fits(
+    client: nio.AsyncClient,
+    run: WorkflowRun,
+    message: dict[str, Any],
+    event_id: str | None,
+    *,
+    as_edit: bool = True,
+) -> bool:
+    """Return whether *message* is one event in the run's room, as an edit of *event_id* when *as_edit*."""
     room = client.rooms.get(run.room_id)
-    edit = build_edit_event_content(event_id=event_id or _NO_EVENT, new_content=message, new_text=message["body"])
-    return fits_one_event(client, run.room_id, edit, room_encrypted=room is None or bool(room.encrypted))
+    payload = (
+        build_edit_event_content(event_id=event_id or _NO_EVENT, new_content=message, new_text=message["body"])
+        if as_edit
+        else message
+    )
+    return fits_one_event(client, run.room_id, payload, room_encrypted=room is None or bool(room.encrypted))
 
 
 async def send_notice(

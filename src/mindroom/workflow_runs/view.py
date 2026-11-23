@@ -186,7 +186,10 @@ class RunViews:
         """
         built = await asyncio.to_thread(self._build, run_id)
         if built is None:
-            self._forget(run_id)
+            if await self._ask_pending(run_id):
+                self._due[run_id] = time.monotonic() + _REFRESH_SECONDS
+            else:
+                self._forget(run_id)
             return
         run, nodes, usage, graph = built
         agents = sum(node.kind in _AGENT_KINDS for node in nodes)
@@ -207,8 +210,7 @@ class RunViews:
                 live, url = partial(self.client, account), self.homeserver_url
                 publish_run(account, run.room_id, run_id, meta, graph, client=live, homeserver_url=url)
             shown = await self._card(run, meta, graph, client)
-            if any(_unasked(node) for node in nodes):
-                await self.engine.ask_again(run_id)
+            await self._ask_pending(run_id)
         if run.state not in TERMINAL_RUN_STATES:
             self._due[run_id] = time.monotonic() + _REFRESH_SECONDS
         elif shown:
@@ -217,6 +219,29 @@ class RunViews:
             # Nothing writes to an ended run again, so its card is sent again from here until it says the end.
             tries = self._unsent[run_id] = self._unsent.get(run_id, 0) + 1
             self._due[run_id] = time.monotonic() + min(_REFRESH_SECONDS * 2**tries, _CARD_SECONDS)
+
+    async def _ask_pending(self, run_id: str) -> bool:
+        """Retry unposted question cards for *run_id* and its descendants; return whether any remain unposted."""
+        pending = await asyncio.to_thread(self._unasked_runs, run_id)
+        if not pending:
+            return False
+        for waiting_id in pending:
+            await self.engine.ask_again(waiting_id)
+        return bool(await asyncio.to_thread(self._unasked_runs, run_id))
+
+    def _unasked_runs(self, run_id: str) -> list[str]:
+        """Return every live run in *run_id*'s tree that has a waiting question with no card yet."""
+        store = self.engine.store
+        try:
+            run = store.get_run(run_id)
+        except WorkflowRunNotFoundError:
+            return []
+        if run.state in TERMINAL_RUN_STATES:
+            return []
+        pending = [run_id] if any(_unasked(node) for node in store.nodes(run_id, light=True)) else []
+        for child in store.child_runs(run_id):
+            pending.extend(self._unasked_runs(child.run_id))
+        return pending
 
     def _forget(self, run_id: str) -> None:
         """Keep nothing of a run whose card says how it ended, or that is gone."""
@@ -266,7 +291,7 @@ class RunViews:
         earlier post's. The run remembers that its card says the end, so the edit is sent until it landed.
         """
         final = run.state in TERMINAL_RUN_STATES
-        if final and run.card_status == run.state.value:
+        if final and run.card_epoch == run.epoch:
             return True
 
         def message(content: dict[str, Any]) -> dict[str, Any]:
@@ -298,5 +323,5 @@ class RunViews:
         self._cards[run.run_id] = (follows, digest, now)
         if final:
             with suppress(SupersededAttemptError):
-                await asyncio.to_thread(partial(save, card_status=run.state.value))
+                await asyncio.to_thread(partial(save, card_epoch=run.epoch))
         return True
