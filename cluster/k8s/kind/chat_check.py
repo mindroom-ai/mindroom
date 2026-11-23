@@ -21,37 +21,37 @@ NONTERMINAL_STATUSES = frozenset({"pending", "streaming", "approval_pending"})
 ERROR_STATUSES = frozenset({"error", "cancelled", "interrupted"})
 
 
+def _is_notice(content: dict[str, Any]) -> bool:
+    return content.get("msgtype") == "m.notice" or "io.mindroom.thread_summary" in content
+
+
 def extract_latest_reply(
     events: Iterable[dict[str, Any]],
     sender_id: str,
     prompt_event_id: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Return the latest ``(body, stream_status)`` from *sender_id*, applying ``m.replace`` edits."""
-    order: list[str] = []
     replies: dict[str, tuple[str, str | None, bool]] = {}
     for event in events:
         if event.get("type") != "m.room.message" or event.get("sender") != sender_id:
             continue
         content = event.get("content")
-        if not isinstance(content, dict):
+        if not isinstance(content, dict) or _is_notice(content):
             continue
         rel = content.get("m.relates_to") if isinstance(content.get("m.relates_to"), dict) else {}
         if rel.get("rel_type") == "m.replace" and isinstance(content.get("m.new_content"), dict):
             target = rel.get("event_id")
-            if isinstance(target, str):
-                new = content["m.new_content"]
+            new = content["m.new_content"]
+            if isinstance(target, str) and not _is_notice(new):
                 status = new.get("io.mindroom.stream_status") or content.get("io.mindroom.stream_status")
-                if target not in replies:
-                    order.append(target)
-                replies[target] = (str(new.get("body", "")), status, replies[target][2] if target in replies else False)
+                matched = replies[target][2] if target in replies else False
+                replies[target] = (str(new.get("body", "")), status, matched)
         elif isinstance(event_id := event.get("event_id"), str):
             in_reply = rel.get("m.in_reply_to") if isinstance(rel.get("m.in_reply_to"), dict) else {}
             matched = prompt_event_id is not None and prompt_event_id in (rel.get("event_id"), in_reply.get("event_id"))
-            if event_id not in replies:
-                order.append(event_id)
             replies[event_id] = (str(content.get("body", "")), content.get("io.mindroom.stream_status"), matched)
 
-    chosen = [eid for eid in order if replies[eid][2]] or order
+    chosen = [eid for eid, (_, _, matched) in replies.items() if matched] or list(replies)
     if not chosen:
         return None, None
     body, status, _ = replies[chosen[-1]]

@@ -16,6 +16,8 @@ Preconditions:
 - Linux or macOS with Docker running (no `sudo` required), plus `git`, `curl`, `python3`, and `openssl`.
 - `OPENAI_API_KEY` exported in your shell. This quick start uses OpenAI; see [Provider API Keys from Kubernetes Secrets](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#provider-api-keys-from-kubernetes-secrets) and [Models](../configuration/models.md) to configure another provider.
 
+Run steps 1–8 in the same shell session so `PATH` and the `mindroom` working directory stay active.
+
 ### 1. Install `kind`, `kubectl`, and `helm`
 
 Install pinned binaries into `~/.local/bin` for your OS and architecture:

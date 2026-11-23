@@ -50,6 +50,19 @@ def test_extract_latest_reply_follows_streaming_replace_edits() -> None:
             },
         },
     )
+    events.append(
+        {
+            "type": "m.room.message",
+            "event_id": "$summary",
+            "sender": AGENT,
+            "content": {
+                "msgtype": "m.notice",
+                "body": "🔁 Pong reply test",
+                "io.mindroom.thread_summary": {"summary": "🔁 Pong reply test"},
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$prompt"},
+            },
+        },
+    )
     text, status = extract_latest_reply(events, AGENT, prompt_event_id="$prompt")
     assert (text, status) == ("pong", "completed")
     assert is_terminal_reply(text, status)
