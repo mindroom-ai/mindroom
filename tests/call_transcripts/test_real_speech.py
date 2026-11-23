@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.call_transcripts.wav import wav_seconds
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig
 from mindroom.voice.handler import transcribe_speech
+from mindroom.voice.wav import wav_seconds
 from tests import conftest
 from tests.conftest import test_runtime_paths
 

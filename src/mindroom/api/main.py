@@ -39,6 +39,8 @@ from mindroom.api.connections_session import router as connections_session_route
 
 # Import routers
 from mindroom.api.credentials import router as credentials_router
+from mindroom.api.dictation import close_dictation_http_client
+from mindroom.api.dictation import router as dictation_router
 from mindroom.api.dynamic_workflows import router as dynamic_workflows_router
 from mindroom.api.egress_broker import router as egress_broker_router
 from mindroom.api.egress_credentials import router as egress_credentials_router
@@ -104,11 +106,13 @@ logger = get_logger(__name__)
 _NATIVE_SIGN_IN_PATH = f"{connections_native_router.prefix}/"
 # Paths a Matrix web client calls from its own origin with a bearer token and no cookies, and the paths under them.
 _CALL_TRANSCRIPTS_PATH = "/api/call-transcripts"
+_DICTATION_PATH = "/api/dictation"
 _CLIENT_ORIGIN_PATHS = (
     "/api/computers",
     "/api/client-sessions",
     "/api/plugins",
     _CALL_TRANSCRIPTS_PATH,
+    _DICTATION_PATH,
     "/api/rooms",
     "/api/github",
 )
@@ -136,8 +140,8 @@ def _is_client_origin_path(path: str) -> bool:
 
 
 def _client_origin_expose_headers(path: str) -> tuple[str, ...]:
-    """Return the headers a client on another origin may read on ``path``: call transcripts say when to try again."""
-    if path.startswith(f"{_CALL_TRANSCRIPTS_PATH}/"):
+    """Return the headers a client on another origin may read on ``path``: call transcripts and dictation say when to try again."""
+    if path.startswith((f"{_CALL_TRANSCRIPTS_PATH}/", f"{_DICTATION_PATH}/")):
         return ("WWW-Authenticate", "Retry-After")
     return ("WWW-Authenticate",)
 
@@ -352,6 +356,7 @@ def initialize_api_app(api_app: FastAPI, runtime_paths: constants.RuntimePaths) 
         )
     elif config_lifecycle.publish_runtime_paths(app_state.api_state, runtime_paths):
         app_state.external_trigger_runtime = None
+        app_state.dictation_limiter = None
         withdraw_computer_runtime(api_app)
     config_lifecycle.register_api_app(api_app)
 
@@ -397,6 +402,7 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
     with suppress(asyncio.CancelledError):
         await worker_cleanup
     close_usage_export_runner(_app)
+    await close_dictation_http_client(_app)
 
 
 def bind_external_trigger_runtime(
@@ -530,6 +536,7 @@ app.include_router(computers_router)
 app.include_router(agent_terminals_router)  # Authenticates client sessions.
 app.include_router(client_sessions_router)  # Authenticates with a Matrix OpenID token, not verify_user.
 app.include_router(call_transcripts_router)  # Authenticates client sessions; 404 while call transcripts are off.
+app.include_router(dictation_router)  # Authenticates client sessions; 404 while dictation is off.
 app.include_router(workspace_files_router)  # Authenticates client sessions.
 app.include_router(agent_profiles_router)  # Authenticates client sessions.
 app.include_router(secret_requests_router)  # Authenticates client sessions.
