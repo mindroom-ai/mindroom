@@ -898,6 +898,31 @@ async def test_call_after_a_rerun_runs_again_after_an_interruption_between_them(
 
 
 @pytest.mark.asyncio
+async def test_live_question_after_a_rerun_is_not_reattached_after_an_interruption_between_them(
+    stack: WorkflowStack,
+) -> None:
+    """A crash between a rerun call and an earlier attempt's live question does not reattach that stale question (B4)."""
+    question: dict[str, object] = {"question": "Ship?", "options": ["Yes", "No"]}
+    stack.show()
+    await _started(stack)
+    await stack.result("@0", "tool", _A)
+    first = await stack.submit("@1", "ask", question)
+    assert first.state == "waiting"
+    node = stack.store.get_node(stack.run_id, "@0")
+    assert node is not None
+    await _resumed_by_a_person(stack, rerun=[f"n{node.seq}"])
+    await stack.result("@0", "tool", _A)
+
+    await _interrupted_and_resumed(stack)
+
+    assert (await stack.submit("@0", "tool", _A)).cached
+    second = await stack.submit("@1", "ask", question)
+    saved = stack.store.get_node(stack.run_id, "@1")
+    assert saved is not None
+    assert (second.state, saved.generation) == ("waiting", 2)
+
+
+@pytest.mark.asyncio
 async def test_call_after_a_changed_result_runs_again_when_the_attempt_died_before_it_compared(
     stack: WorkflowStack,
     monkeypatch: pytest.MonkeyPatch,

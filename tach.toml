@@ -2537,7 +2537,7 @@ depends_on = ["mindroom.workflow_runs.models"]
 [[interfaces]]
 from = ["mindroom.workflow_runs.replay"]
 expose = [
-    "DirtyLanes",
+    "DIRTY_DIGEST",
     "decide",
     "may_have_written",
     "node_digest",

@@ -11,7 +11,6 @@ import pytest
 
 from mindroom.workflow_runs.models import WorkflowNode, WorkflowNodeState
 from mindroom.workflow_runs.replay import (
-    DirtyLanes,
     decide,
     node_digest,
     parent_group,
@@ -127,55 +126,6 @@ def test_cached_false_runs_a_completed_node() -> None:
     """`cached=False` runs a finished call again, and still joins one that is alive."""
     assert decide(_done("@0", "d", attempt=1), "d", attempt=2, dirty=False, rerun=False, cached=False) == "run"
     assert decide(_waiting("@0", "d", attempt=1), "d", attempt=2, dirty=False, rerun=False, cached=False) == "attach"
-
-
-def test_changed_item_dirties_what_follows_the_join_and_not_its_siblings() -> None:
-    """One item that ran again reruns the rest of its lane and what follows the group, nothing else."""
-    dirty = DirtyLanes()
-    dirty.mark("/0:a@0")  # item a of the foreach at @0 ran again
-    assert dirty.is_dirty("/0:a@1")  # later in its lane
-    assert dirty.is_dirty("@1")  # after the join
-    assert not dirty.is_dirty("/0:b@0")  # a sibling item
-    assert not dirty.is_dirty("@0")  # the group itself
-    assert not dirty.is_dirty("/0:a@0")
-
-
-def test_nested_join_reaches_the_root() -> None:
-    """A call inside a group inside a group dirties what follows each enclosing join."""
-    dirty = DirtyLanes()
-    dirty.mark("/1:x/0:p0@0")
-    assert dirty.is_dirty("/1:x/0:p0@1")
-    assert dirty.is_dirty("/1:x@1")
-    assert dirty.is_dirty("@2")
-    assert not dirty.is_dirty("/1:x@0")
-    assert not dirty.is_dirty("@1")
-    assert not dirty.is_dirty("@0")
-    assert not dirty.is_dirty("/1:x/0:p1@0")
-    assert not dirty.is_dirty("/1:y@0")
-
-
-def test_calls_inside_a_group_that_follows_a_dirty_call_are_dirty() -> None:
-    """A group after a call that ran is itself later in that lane, so its members run again too."""
-    dirty = DirtyLanes()
-    dirty.mark("@0")
-    assert dirty.is_dirty("@1")
-    assert dirty.is_dirty("/1:a@0")
-    assert dirty.is_dirty("/1:a/3:p0@2")
-    assert not dirty.is_dirty("/0:a@0")
-    dirty.mark("@3")  # a later call in the same lane does not make the lane clean before it
-    assert dirty.is_dirty("@1")
-
-
-def test_changed_membership_dirties_the_parent_after_the_group_and_no_item_lane() -> None:
-    """An item added, removed or moved reruns what follows the group; the items that stayed keep their results."""
-    dirty = DirtyLanes()
-    dirty.mark("/1:x@0")  # the group at index 0 of item x has another member list
-    assert dirty.is_dirty("/1:x@1")
-    assert dirty.is_dirty("@2")  # and, through the join, what follows the enclosing group
-    assert not dirty.is_dirty("/1:x@0")
-    assert not dirty.is_dirty("/1:x/0:a@0")
-    assert not dirty.is_dirty("/1:x/0:b@5")
-    assert not dirty.is_dirty("@1")
 
 
 def test_keys_split_into_lane_and_index_and_lanes_name_their_group() -> None:

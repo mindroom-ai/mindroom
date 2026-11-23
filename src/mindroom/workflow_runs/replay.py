@@ -13,6 +13,9 @@ if TYPE_CHECKING:
 
 type _Action = Literal["return", "hit", "attach", "reconcile", "raise_indeterminate", "run"]
 
+# Written onto earlier-attempt rows after a node that ran, so they rerun without colliding with explicit reruns ('').
+DIRTY_DIGEST = "dirty"
+
 
 def node_digest(kind: str, args: dict[str, object]) -> str:
     """Return the SHA-256 of a call's kind and arguments in canonical JSON."""
@@ -83,31 +86,6 @@ def decide(
     else:
         action = "run"
     return action
-
-
-class DirtyLanes:
-    """The lanes in which a call ran in this attempt, so that the calls after it run again."""
-
-    def __init__(self) -> None:
-        self._dirty_after: dict[str, int] = {}
-
-    def mark(self, key: str) -> None:
-        """Record that the node at *key* ran: its lane is dirty after it, and so is each enclosing lane after its group."""
-        group: str | None = key
-        while group is not None:
-            lane, index = split_key(group)
-            self._dirty_after[lane] = min(index, self._dirty_after.get(lane, index))
-            group = parent_group(lane)
-
-    def is_dirty(self, key: str) -> bool:
-        """Return whether the call at *key* follows, directly or through an enclosing group, a call that ran."""
-        group: str | None = key
-        while group is not None:
-            lane, index = split_key(group)
-            if lane in self._dirty_after and index > self._dirty_after[lane]:
-                return True
-            group = parent_group(lane)
-        return False
 
 
 def stale_keys(nodes: Iterable[WorkflowNode], attempt: int) -> tuple[str, ...]:

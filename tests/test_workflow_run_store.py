@@ -28,7 +28,7 @@ from mindroom.workflow_runs.models import (
     new_workflow_run_id,
     validated_workflow_run_id,
 )
-from mindroom.workflow_runs.replay import DirtyLanes
+from mindroom.workflow_runs.replay import DIRTY_DIGEST
 from mindroom.workflow_runs.store import (
     SupersededAttemptError,
     WorkflowRunConflictError,
@@ -881,28 +881,48 @@ def test_every_write_of_an_attempt_is_refused_once_its_run_moved_on(tmp_path: Pa
     assert (store.get_run(_RUN_A), store.nodes(_RUN_A, include_stale=True), store.log(_RUN_A)) == before
 
 
-_LANE_KEYS = ("@0", "@1", "@2", "@3", "/1:a@0", "/1:a@1", "/1:b@0", "/1:b/0:x@0", "/1:b/0:x@1", "/1:b@1", "/3:a@0")
+_EXPECTED_DIRTY_AFTER: dict[str, set[str]] = {
+    "@0": {"@1", "@2", "@3", "/1:a@0", "/1:a@1", "/1:b@0", "/1:b/0:x@0", "/1:b/0:x@1", "/1:b@1", "/3:a@0"},
+    "@1": {"@2", "@3", "/3:a@0"},
+    "@2": {"@3", "/3:a@0"},
+    "@3": set(),
+    "/1:a@0": {"/1:a@1", "@2", "@3", "/3:a@0"},
+    "/1:a@1": {"@2", "@3", "/3:a@0"},
+    "/1:b@0": {"/1:b@1", "@2", "@3", "/3:a@0"},
+    "/1:b/0:x@0": {"/1:b/0:x@1", "/1:b@1", "@2", "@3", "/3:a@0"},
+    "/1:b/0:x@1": {"/1:b@1", "@2", "@3", "/3:a@0"},
+    "/1:b@1": {"@2", "@3", "/3:a@0"},
+    "/3:a@0": set(),
+}
 
 
-@pytest.mark.parametrize("ran", _LANE_KEYS)
-def test_call_that_runs_makes_exactly_what_follows_it_in_earlier_attempts_run_again(tmp_path: Path, ran: str) -> None:
-    """The store's one write blanks the rows the replay rule calls dirty, and no other.
+@pytest.mark.parametrize(("ran", "expected"), list(_EXPECTED_DIRTY_AFTER.items()))
+def test_call_that_runs_makes_exactly_what_follows_it_in_earlier_attempts_run_again(
+    tmp_path: Path,
+    ran: str,
+    expected: set[str],
+) -> None:
+    """The store's one write marks earlier-attempt rows after *ran* dirty, live rows included.
 
-    Not a row of the call's own attempt, and not a call that may have run.
+    Not a row of the call's own attempt, not an explicit rerun (''), and not an indeterminate call.
     """
     store = WorkflowRunStore(tmp_path / "w.sqlite3")
     store.reserve_run(_run())
-    for key in _LANE_KEYS:
+    for key in _EXPECTED_DIRTY_AFTER:
         store.put_node(_node(key, state=WorkflowNodeState.COMPLETED, attempt=1), 0)
+    store.put_node(_node("@7", state=WorkflowNodeState.WAITING, attempt=1), 0)
+    store.put_node(replace(_node("@8", state=WorkflowNodeState.COMPLETED, attempt=1), digest=""), 0)
     store.put_node(_node("@9", state=WorkflowNodeState.INDETERMINATE, attempt=1), 0)
     store.put_node(_node("@10", state=WorkflowNodeState.COMPLETED, attempt=2), 0)
-    lanes = DirtyLanes()
-    lanes.mark(ran)
 
     store.put_node(replace(_saved(store, ran), generation=2, attempt=2), 0, dirty_after=True)
 
-    blanked = {node.key for node in store.nodes(_RUN_A) if not node.digest}
-    assert blanked == {key for key in _LANE_KEYS if lanes.is_dirty(key)}
+    marked = {node.key for node in store.nodes(_RUN_A) if node.digest == DIRTY_DIGEST}
+    # Every key in _EXPECTED_DIRTY_AFTER precedes @7 in the root lane except @3 and /3:a@0? No, @3 and /3:a@0 also precede @7!
+    assert marked == expected | {"@7"}
+    assert _saved(store, "@8").digest == ""
+    assert _saved(store, "@9").digest == "digest"
+    assert _saved(store, "@10").digest == "digest"
 
 
 def test_first_attempt_and_a_clean_stamp_blank_nothing(tmp_path: Path) -> None:
@@ -916,9 +936,9 @@ def test_first_attempt_and_a_clean_stamp_blank_nothing(tmp_path: Path) -> None:
     assert store.settle_node(_RUN_A, "@2", 1, 0, state=WorkflowNodeState.COMPLETED)
 
     assert [node.digest for node in store.nodes(_RUN_A)] == ["digest"] * 3
-    # The stamp that says the group changed blanks what follows it, in its own write.
+    # The stamp that says the group changed marks what follows it dirty, in its own write.
     assert store.update_node(_RUN_A, "@0", 1, 0, dirty_after=True, attempt=3)
-    assert [node.digest for node in store.nodes(_RUN_A)] == ["digest", "", ""]
+    assert [node.digest for node in store.nodes(_RUN_A)] == ["digest", DIRTY_DIGEST, DIRTY_DIGEST]
 
 
 def test_prune_keeps_the_run_of_a_job_that_has_not_saved_its_report(tmp_path: Path) -> None:

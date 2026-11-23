@@ -26,7 +26,7 @@ from mindroom.workflow_runs.models import (
     WorkflowRunState,
     validated_workflow_run_id,
 )
-from mindroom.workflow_runs.replay import parent_group, split_key
+from mindroom.workflow_runs.replay import DIRTY_DIGEST, parent_group, split_key
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Iterator
@@ -680,21 +680,22 @@ def _require_slot(connection: sqlite3.Connection, run: WorkflowRun, max_active: 
 
 
 def _forget_after(connection: sqlite3.Connection, run_id: str, key: str) -> None:
-    """Make each completed call an attempt before the node's left after the node at *key* match no request.
+    """Mark each earlier-attempt call after *key* dirty so it runs again when reached.
 
-    Such a call runs again when it is reached: what follows the node in its lane or in a lane opened there, and the
-    same after each group around it. One statement per lane selects and writes, so no row of the node's own attempt
-    or a later one is touched, and a call that may have run keeps its digest and its own rule.
+    What follows the node in its lane or in a lane opened there, and the same after each group around it, gets
+    `DIRTY_DIGEST` (including live rows from earlier attempts). Explicit reruns (`digest = ''`) and indeterminate
+    rows keep their own digests and rules, and no row of the node's own attempt or a later one is touched.
     """
     group: str | None = key
     while group is not None:
         lane, index = split_key(group)
         connection.execute(
-            "UPDATE workflow_nodes SET digest = '' WHERE run_id = :run AND state = 'completed' AND digest != '' "
+            "UPDATE workflow_nodes SET digest = :dirty WHERE run_id = :run "
+            "AND state != 'indeterminate' AND digest != '' "
             "AND attempt < (SELECT attempt FROM workflow_nodes WHERE run_id = :run AND key = :key) "
             "AND ((lane = :lane AND idx > :idx) "
             "OR (substr(lane, 1, :size + 1) = :lane || '/' AND CAST(substr(lane, :size + 2) AS INTEGER) > :idx))",
-            {"run": run_id, "key": key, "lane": lane, "idx": index, "size": len(lane)},
+            {"dirty": DIRTY_DIGEST, "run": run_id, "key": key, "lane": lane, "idx": index, "size": len(lane)},
         )
         group = parent_group(lane)
 

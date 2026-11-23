@@ -67,7 +67,7 @@ from mindroom.workflow_runs.notices import RETRY_SECONDS
 from mindroom.workflow_runs.questions import MAX_OPTION_BYTES, MAX_OPTIONS, show_question
 from mindroom.workflow_runs.recovery import AUTO_RESUME_REASONS, NO_ACCESS
 from mindroom.workflow_runs.replay import (
-    DirtyLanes,
+    DIRTY_DIGEST,
     decide,
     may_have_written,
     node_digest,
@@ -275,8 +275,6 @@ class WorkflowEngine:
         self._refused: set[str] = set()
         # The runs that are ending and wait, without their lock, for their agents to stop: they take no call.
         self._stopping: set[str] = set()
-        # The lanes in which a call ran in each attempt.
-        self._dirty: dict[str, DirtyLanes] = {}
         # When each running run's working time was last charged, by the engine's clock.
         self._charged: dict[str, float] = {}
         # One per run with a waiter or a launch in progress: polls and `wait` sleep on it, a launch holds its lock.
@@ -711,14 +709,13 @@ class WorkflowEngine:
             # Before anything is kept for the attempt: one that the run left behind leaves nothing behind here.
             msg = f"Run {run.run_id} takes no more calls from attempt {attempt.run_id}."
             raise SupersededAttemptError(msg)
-        lanes = self._dirty.setdefault(attempt.run_id, DirtyLanes())
         digest = node_digest(kind, request.args)
         members = _members(meta) if kind == "group" else None
         saved = self.store.get_node(run.run_id, key)
-        # A saved call with no digest was named by a resume, or follows a call that ran in an attempt that died.
+        # A saved call with '' was named by a resume; one with DIRTY_DIGEST follows a call that ran in a later attempt.
         cached, dirty, rerun = (
             meta.get("cached") is not False,
-            lanes.is_dirty(key),
+            saved is not None and saved.digest == DIRTY_DIGEST,
             saved is not None and not saved.digest,
         )
         decision = partial(decide, digest=digest, attempt=run.attempt, dirty=dirty, rerun=rerun, cached=cached)
@@ -746,8 +743,6 @@ class WorkflowEngine:
             stamp: dict[str, object] = {"attempt": run.attempt, "stale": False, "cached": action == "hit"}
             if regrouped := members != saved.members:
                 stamp["members"] = members
-                # What follows the group is dirty and no member lane is, which is what marking the group does.
-                lanes.mark(key)
             restamp = partial(self.store.update_node, run.run_id, key, saved.generation, epoch, dirty_after=regrouped)
             await asyncio.to_thread(partial(restamp, **stamp))
             if action == "raise_indeterminate":
@@ -803,7 +798,6 @@ class WorkflowEngine:
         elif shown == "agent" and (bad_schema := _schema_failure(asked)) is not None:
             node = replace(node, state=WorkflowNodeState.FAILED, error={"kind": "schema", "message": bad_schema})
         elif shown == "agent":
-            lanes.mark(key)
             start = partial(self._enter, run, node, partial(self._dispatch_agent, run, timeout=_timeout(meta)))
             return await (self._ask_gate(run, attempt, node, *_tool_grant(request.args)) if delegated else start())
         elif kind == "tool":
@@ -811,7 +805,7 @@ class WorkflowEngine:
             if previous is not None and not cached:
                 # A check that runs on every resume, also one whose arguments were edited, in a lane that was clean.
                 same_as = result_digest(await asyncio.to_thread(self.store.whole_result, previous))
-            start = partial(self._dispatch_tool, run, attempt, lanes=lanes, same_as=same_as)
+            start = partial(self._dispatch_tool, run, attempt, same_as=same_as)
             return await self._enter(run, node, start, dirty_after=same_as is None)
         elif kind == "ask":
             options = [str(option) for option in request.args.get("options") or ()]
@@ -831,8 +825,7 @@ class WorkflowEngine:
             msg = f"This MindRoom cannot run a '{kind}' call in a workflow yet."
             raise WorkflowRunStoreError(msg)
         # A value, a group and an error have ended when they are submitted, so no restart finds one half done. What earlier
-        # attempts left after the call runs again in any attempt, which this one remembers and the same write saves.
-        lanes.mark(key)
+        # attempts left after the call runs again in any attempt, which the same write marks in the store.
         ended_at = None if kind == "ask" else node.started_at
         put = partial(self.store.put_node, replace(node, ended_at=ended_at), epoch, dirty_after=True)
         node = await asyncio.to_thread(put)
@@ -1147,7 +1140,6 @@ class WorkflowEngine:
         attempt: ScriptRunRecord,
         node: WorkflowNode,
         *,
-        lanes: DirtyLanes,
         same_as: str | None,
         queued: bool = False,
     ) -> NodeReceipt:
@@ -1159,8 +1151,6 @@ class WorkflowEngine:
         """
         grant, arguments = _tool_grant(node.request)
         call_id = uuid5(NAMESPACE_OID, f"{run.run_id}:{node.key}:{node.generation}").hex
-        if same_as is None:
-            lanes.mark(node.key)
         # Saved before the dispatch, so a crash after the tool ran reads the broker's receipt for this call.
         handle = DispatchHandle("broker", f"{attempt.run_id}:{call_id}", dispatched=False, same_as=same_as)
         node = replace(node, state=WorkflowNodeState.RUNNING, handle=handle)
@@ -1180,7 +1170,7 @@ class WorkflowEngine:
             waits=partial(self._node_waits, node, run.epoch),
         )
         # The call has its task before anything else may fail: a saved call nobody runs would never end.
-        self._spawn(run.run_id, self._run_tool_node(node, run.epoch, call, lanes))
+        self._spawn(run.run_id, self._run_tool_node(node, run.epoch, call))
         # A run that waited for a person works again from here.
         await self._restate(run.run_id)
         return _receipt(node)
@@ -1687,7 +1677,6 @@ class WorkflowEngine:
         node: WorkflowNode,
         epoch: int,
         call: Callable[[], Awaitable[ScriptCallRecord]],
-        lanes: DirtyLanes,
     ) -> None:
         """Run one tool call and settle its node."""
         outcome: _Outcome
@@ -1700,9 +1689,7 @@ class WorkflowEngine:
             outcome = WorkflowNodeState.FAILED, None, {"kind": "failed", "message": str(exc)}
         finally:
             self._leave(node.run_id, node.key)
-        if dirty := _changed(node, outcome):
-            # Before the node shows its end, so the script's next call already finds the lane dirty.
-            lanes.mark(node.key)
+        dirty = _changed(node, outcome)
         await hold("before_settle")
         state, result, error = outcome
         settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
@@ -1835,7 +1822,6 @@ class WorkflowEngine:
 
                 def forget(written: asyncio.Future[WorkflowRun]) -> None:
                     if not written.cancelled() and written.exception() is None:
-                        self._dirty.pop(attempt, None)
                         self._launched.pop(attempt, None)
 
                 write = partial(self.store.update_run, run.run_id, run.epoch, **changes)
