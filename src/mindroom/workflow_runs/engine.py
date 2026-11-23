@@ -748,6 +748,8 @@ class WorkflowEngine:
         if saved is not None and action != "run":
             # Reused: the node is this attempt's now, and a fan-out whose items changed dirties what follows it.
             stamp: dict[str, object] = {"attempt": run.attempt, "stale": False, "cached": action == "hit"}
+            if (phase := cast("str | None", meta.get("phase"))) != saved.phase:
+                stamp["phase"] = phase
             if regrouped := members != saved.members:
                 stamp["members"] = members
             restamp = partial(self.store.update_node, run.run_id, key, saved.generation, epoch, dirty_after=regrouped)

@@ -910,3 +910,18 @@ async def test_call_and_stop_of_an_attempt_that_the_run_moved_on_from_reach_no_l
     assert (current.state, current.attempt) == (WorkflowRunState.RUNNING, 2)
     assert (stack.store.nodes(stack.run_id), stack.counting_tool.calls) == ([], 0)
     assert stack.attempt.state is ScriptRunState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_cached_node_restamps_phase_on_reuse_without_invalidating_result(stack: WorkflowStack) -> None:
+    """Renaming a phase around an unchanged call reuses the cached result and restamps the stored phase."""
+    assert await stack.result("@0", "tool", _A, {"phase": "Old"}) == "appended"
+    assert stack.counting_tool.lines == ["a"]
+    await _replayed(stack)
+
+    reused = await stack.submit("@0", "tool", _A, {"phase": "New"})
+    node = stack.store.get_node(stack.run_id, "@0")
+
+    assert (reused.cached, reused.result, stack.counting_tool.lines) == (True, "appended", ["a"])
+    assert node is not None
+    assert (node.phase, node.generation) == ("New", 1)
