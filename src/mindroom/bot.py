@@ -1232,7 +1232,8 @@ class AgentBot:
 
     async def _publish_server_state(self, room_id: str) -> None:
         if self.client is not None:
-            self._active_runs.schedule_startup_sweep((room_id,))
+            if self.agent_name != ROUTER_AGENT_NAME:
+                self._active_runs.schedule_startup_sweep((room_id,))
             await publish_server_state(self.client, room_id, self._server_state_content(self.config))
 
     def _server_state_content(self, config: Config) -> dict[str, object]:
