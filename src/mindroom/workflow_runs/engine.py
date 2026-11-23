@@ -1264,19 +1264,19 @@ class WorkflowEngine:
         await self._notify(node.run_id)
 
     def _budget_exceeded(self, run: WorkflowRun) -> str | None:
-        """Return the stop reason when *run* has reached its `max_cost_usd`, else None."""
-        if run.max_cost_usd is None:
-            return None
-        spent = self.run_usage(run.run_id)["cost_usd"]
-        return (
-            _OVER_BUDGET.format(spent=_usd(spent), limit=_usd(run.max_cost_usd))
-            if _limit_reached(spent, run.max_cost_usd)
-            else None
-        )
+        """Return the stop reason when *run* or any ancestor has reached its `max_cost_usd`, else None."""
+        current: WorkflowRun | None = run
+        while current is not None:
+            if current.max_cost_usd is not None:
+                spent = self.run_usage(current.run_id)["cost_usd"]
+                if _limit_reached(spent, current.max_cost_usd):
+                    return _OVER_BUDGET.format(spent=_usd(spent), limit=_usd(current.max_cost_usd))
+            current = self.store.get_run(current.parent_run_id) if current.parent_run_id is not None else None
+        return None
 
     async def _check_budget(self, run: WorkflowRun) -> bool:
-        """Return whether *run* reached its cost limit; drop queued work and stop once running calls end."""
-        if run.state not in SERVED_RUN_STATES or run.max_cost_usd is None:
+        """Return whether *run* or an ancestor reached its cost limit; drop queued work and stop once idle."""
+        if run.state not in SERVED_RUN_STATES or (run.max_cost_usd is None and run.parent_run_id is None):
             return False
         if (reason := await asyncio.to_thread(self._budget_exceeded, run)) is None:
             return False

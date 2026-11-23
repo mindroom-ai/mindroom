@@ -20,7 +20,7 @@ from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.engine import WorkflowLimits
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
 from tests.fakes.scripted_model import Await, answer, usage
-from tests.workflow_helpers import CallFailed, WorkflowStack, workflow_stack
+from tests.workflow_helpers import CallFailed, WorkflowStack, tool_args, workflow_stack
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -322,3 +322,66 @@ async def test_large_notice_fires_when_the_projection_passes_ten_dollars(
     log = ["Large run: 2 agents, about $12.00 projected."] if large else []
     assert (stack.store.get_run(stack.run_id).large, stack.store.log(stack.run_id)) == (large, log)
     await stack.engine.cancel(stack.run_id, reason="Done.")
+
+
+@pytest.mark.asyncio
+async def test_nested_run_stops_at_ancestors_cost_limit_and_parent_stops_too(stack: WorkflowStack) -> None:
+    """A nested run enforces its ancestors' cost limits: after exceeding parent's $0.10, no second inner agent starts."""
+    await stack.start(max_cost_usd=0.10, max_concurrent=1)
+    parent = stack.run_id
+    model = stack.child_script(_turn(0.20), _turn(0.20))
+
+    start_inner = tool_args("workflow", "start_workflow", source="def main(args): return 'inner'", max_concurrent=1)
+    await stack.submit("@0", "tool", start_inner)
+    # Queue a second call in the parent behind the nested run; it must never start once the parent limit is hit.
+    assert await _agent(stack, 1) == "queued"
+    await stack.until(lambda: [run.state for run in stack.store.child_runs(parent)] == [WorkflowRunState.RUNNING])
+    [inner] = stack.store.child_runs(parent)
+    assert inner.max_cost_usd is None
+
+    stack.run_id = inner.run_id
+    assert await _agent(stack, 0) == "running"
+    assert await _agent(stack, 1) == "queued"
+    await stack.until(lambda: stack.store.get_run(inner.run_id).state is WorkflowRunState.INTERRUPTED)
+
+    reason = "Stopped at the cost limit ($0.20 of $0.10)."
+    ended_inner = stack.store.get_run(inner.run_id)
+    assert (ended_inner.state, ended_inner.error) == (WorkflowRunState.INTERRUPTED, reason)
+    inner_second = stack.store.get_node(inner.run_id, "@1")
+    assert inner_second is not None
+    assert (inner_second.state, inner_second.handle) == (WorkflowNodeState.CANCELLED, None)
+
+    stack.run_id = parent
+    await stack.until(lambda: stack.store.get_run(parent).state is WorkflowRunState.INTERRUPTED)
+    ended_parent = stack.store.get_run(parent)
+    assert (ended_parent.state, ended_parent.error) == (WorkflowRunState.INTERRUPTED, reason)
+    assert len(model.requests) == 1
+    assert stack.engine.run_usage(parent)["cost_usd"] == pytest.approx(0.20)
+    queued_parent = stack.store.get_node(parent, "@1")
+    assert queued_parent is not None
+    assert (queued_parent.state, queued_parent.handle) == (WorkflowNodeState.CANCELLED, None)
+
+
+@pytest.mark.asyncio
+async def test_nested_run_with_lower_own_limit_stops_without_stopping_parent(stack: WorkflowStack) -> None:
+    """A nested run with a tighter limit stops at its own limit while its under-budget parent keeps running."""
+    await stack.start(max_cost_usd=1.0, max_concurrent=2)
+    parent = stack.run_id
+    model = stack.child_script(_turn(0.20), _turn(0.20))
+
+    start_inner = tool_args("workflow", "start_workflow", source="def main(args): return 'inner'", max_cost_usd=0.10)
+    await stack.submit("@0", "tool", start_inner)
+    await stack.until(lambda: [run.state for run in stack.store.child_runs(parent)] == [WorkflowRunState.RUNNING])
+    [inner] = stack.store.child_runs(parent)
+
+    stack.run_id = inner.run_id
+    assert await stack.result("@0", "agent", {"prompt": "First inner agent."}) == "done"
+    await stack.until(lambda: stack.store.get_run(inner.run_id).state is WorkflowRunState.INTERRUPTED)
+    assert stack.store.get_run(inner.run_id).error == "Stopped at the cost limit ($0.20 of $0.10)."
+
+    stack.run_id = parent
+    await _settled(stack, "@0")
+    assert stack.store.get_run(parent).state is WorkflowRunState.RUNNING
+    assert await stack.result("@1", "agent", {"prompt": "Parent continues."}) == "done"
+    assert len(model.requests) == 2
+    assert stack.store.get_run(parent).state is WorkflowRunState.RUNNING
