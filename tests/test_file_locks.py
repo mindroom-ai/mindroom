@@ -322,11 +322,12 @@ async def test_posix_lock_descriptors_are_read_write(tmp_path: Path, flock_acces
 
     with advisory_file_lock(lock_path):
         pass
+    assert flock_access_modes == [os.O_RDWR]
     with advisory_file_lock(lock_path, exclusive=False):
         pass
+    assert flock_access_modes == [os.O_RDWR] * 2
     release_file_lock(acquire_shared_file_lock(lock_path))
+    assert flock_access_modes == [os.O_RDWR] * 3
     async with async_exclusive_file_lock(lock_path):
         pass
-
-    assert flock_access_modes
-    assert set(flock_access_modes) == {os.O_RDWR}
+    assert flock_access_modes == [os.O_RDWR] * 4

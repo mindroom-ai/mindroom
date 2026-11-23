@@ -200,8 +200,7 @@ def test_recovery_lock_descriptor_is_read_write(tmp_path: Path, flock_access_mod
     with session_storage_preflight(tmp_path / "state", TableNames("general"), timeout_seconds=1):
         pass
 
-    assert flock_access_modes
-    assert set(flock_access_modes) == {os.O_RDWR}
+    assert flock_access_modes == [os.O_RDWR]
 
 
 @pytest.mark.parametrize("plant", ["held", "fifo", "link"])

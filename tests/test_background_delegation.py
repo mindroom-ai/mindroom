@@ -1601,8 +1601,7 @@ async def test_subagent_lock_descriptors_are_read_write(tmp_path: Path, flock_ac
 
     async with subagent_liveness(child, paths):
         pass
+    assert flock_access_modes == [os.O_RDWR]
     with subagent_recovery_lock(child.subagent_id, paths) as acquired:
         assert acquired
-
-    assert flock_access_modes
-    assert set(flock_access_modes) == {os.O_RDWR}
+    assert flock_access_modes == [os.O_RDWR] * 2
