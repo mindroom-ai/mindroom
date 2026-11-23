@@ -822,8 +822,9 @@ async def test_room_message_poll_loop_guard_and_bot_filtering(tmp_path: Path) ->
 
     # tr_no_bots sees ONLY the human message
     assert by_trigger["tr_no_bots"] == ["$m_human"]
-    # tr_with_bots skips $m_loop (ALWAYS!), sees agent-marker, bot account, and human
-    assert by_trigger["tr_with_bots"] == ["$m_agent_marker", "$m_bot_acc", "$m_human"]
+    # tr_with_bots skips $m_loop and $m_agent_marker (ALWAYS history-only to prevent personal-agent self-loops),
+    # and sees bot accounts and humans
+    assert by_trigger["tr_with_bots"] == ["$m_bot_acc", "$m_human"]
     assert store.get_room_cursor("tr_no_bots") == RoomCursor(created_ts=20_300, logical_event_id="$m_human")
     assert store.get_room_cursor("tr_with_bots") == RoomCursor(created_ts=20_300, logical_event_id="$m_human")
 

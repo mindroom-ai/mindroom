@@ -933,17 +933,13 @@ class ReactiveTriggerService:
         assert isinstance(rule.source, RoomMessageSourceSpec)
         assert bot.client is not None
 
+        sender_is_human = is_human_requester_id(msg.sender, config, self.runtime_paths)
         if (
             is_reactive_trigger_event_content(msg.content)
             or not is_human_requester_id(rule.owner_user_id, config, self.runtime_paths)
             or msg.sender in managed_entity_user_ids(rule.target.agent, config, self.runtime_paths)
-            or (
-                not rule.source.include_bots
-                and (
-                    carries_agent_authored_marker(msg.content)
-                    or not is_human_requester_id(msg.sender, config, self.runtime_paths)
-                )
-            )
+            or (sender_is_human and carries_agent_authored_marker(msg.content))
+            or (not rule.source.include_bots and not sender_is_human)
         ):
             return "skip"
 

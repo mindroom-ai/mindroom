@@ -98,23 +98,6 @@ _TOOL_ERRORS = (
 )
 
 
-_IMMUTABLE_UPDATE_FIELDS: tuple[str, ...] = (
-    "room_id",
-    "thread_id",
-    "tag",
-    "transition",
-    "source_id",
-    "kind",
-    "target_agent",
-    "target_room_id",
-    "target_thread_id",
-    "thread_key",
-    "public_key",
-    "key_id",
-    "allowed_kinds",
-    "replay_window_seconds",
-    "max_body_bytes",
-)
 _UPDATABLE_FIELDS: tuple[str, ...] = (
     "prompt",
     "description",
@@ -1433,12 +1416,6 @@ def _load_reactive_or_error(
 
 def _validate_update_args(args: _TriggerParams) -> str:
     resolved_trigger_id = _require_non_empty_arg(args["trigger_id"], "trigger_id", "update")
-    provided_immutable = [name for name in _IMMUTABLE_UPDATE_FIELDS if args[name] is not None]
-    if args["new_thread"]:
-        provided_immutable.append("new_thread")
-    if provided_immutable:
-        msg = f"Cannot modify immutable trigger field(s) in place: {', '.join(sorted(provided_immutable))}."
-        raise ValueError(msg)
     if all(args[name] is None for name in _UPDATABLE_FIELDS):
         msg = "Provide at least one field to update."
         raise ValueError(msg)
