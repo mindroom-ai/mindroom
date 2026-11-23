@@ -104,8 +104,7 @@ def validate_subscription_against_source(
             if not isinstance(repo_value, str):
                 msg = "GitHub repo match value must be a string"
                 raise ValueError(msg)
-            allowed_repos_lower = {allowed.lower() for allowed in source.allowed_repos}
-            if repo_value.lower() not in allowed_repos_lower:
+            if repo_value not in source.allowed_repos:
                 msg = f"Repository {repo_value!r} is not allowed for this event source"
                 raise ValueError(msg)
         return
@@ -282,7 +281,7 @@ def _verify_github_signature(headers: Mapping[str, str], *, body: bytes, secret:
         raise ExternalSourceAuthError(msg)
     provided = signature_header.removeprefix("sha256=")
     expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(expected, provided):
+    if not hmac.compare_digest(expected.encode("ascii"), provided.encode("utf-8", "surrogateescape")):
         msg = "Invalid GitHub webhook signature"
         raise ExternalSourceAuthError(msg)
 

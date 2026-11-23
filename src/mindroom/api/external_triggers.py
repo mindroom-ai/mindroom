@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, ParamSpec, TypeVar, cast
@@ -692,7 +693,7 @@ async def _fan_out_event_source_firings(
 
     try:
         return await asyncio.to_thread(_enqueue)
-    except ReactiveTriggerStoreError as exc:
+    except (ReactiveTriggerStoreError, sqlite3.Error) as exc:
         raise HTTPException(status_code=503, detail="Reactive trigger store is not available") from exc
 
 

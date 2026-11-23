@@ -6,6 +6,7 @@ import base64
 import hashlib
 import hmac
 import json
+import sqlite3
 import time
 from typing import TYPE_CHECKING, cast
 
@@ -203,7 +204,7 @@ def test_is_source_subscriber_allowed_checks_subscribers_admins_and_aliases(tmp_
 
 
 def test_validate_subscription_against_github_source() -> None:
-    """GitHub subscriptions enforce allowed_events on base event and case-insensitive allowed_repos."""
+    """GitHub subscriptions enforce allowed_events on base event and exact allowed_repos matching."""
     source = _github_source(
         allowed_repos=["MindRoom-AI/MindRoom"],
         allowed_events=["pull_request", "push"],
@@ -212,9 +213,17 @@ def test_validate_subscription_against_github_source() -> None:
     validate_subscription_against_source(
         source,
         kind="pull_request.merged",
-        match={"repo": "mindroom-ai/mindroom", "number": 42},
+        match={"repo": "MindRoom-AI/MindRoom", "number": 42},
     )
     validate_subscription_against_source(source, kind="push", match={})
+
+    # Mismatched casing is rejected so validated rules match matches_external_event's exact equality
+    with pytest.raises(ValueError, match="Repository"):
+        validate_subscription_against_source(
+            source,
+            kind="pull_request.merged",
+            match={"repo": "mindroom-ai/mindroom"},
+        )
 
     with pytest.raises(ValueError, match="allowed"):
         validate_subscription_against_source(source, kind="issues.opened", match={})
@@ -313,7 +322,13 @@ def test_github_webhook_header_and_signature_validation(tmp_path: Path) -> None:
         )
 
     # Bad signature (wrong secret or missing sha256= prefix)
-    for bad_sig in ("", "sha1=deadbeef", _github_signature(body, secret=_GH_WRONG_SECRET)):
+    for bad_sig in (
+        "",
+        "sha1=deadbeef",
+        "sha256=\xff",
+        "sha256=café",
+        _github_signature(body, secret=_GH_WRONG_SECRET),
+    ):
         with pytest.raises(ExternalSourceAuthError, match="signature") as exc_info:
             verify_and_normalize_github_webhook(
                 source_id="github",
@@ -1006,6 +1021,18 @@ def test_event_sources_endpoint_github_fan_out_dedupe_and_wake_callback(tmp_path
             )
             assert bad_sig.status_code == 401
 
+            # Non-ASCII signature -> 401 (never 500 from hmac.compare_digest TypeError)
+            non_ascii_sig = client.post(
+                "/api/event-sources/github",
+                content=body,
+                headers=[
+                    (b"x-github-delivery", b"delivery-http-42"),
+                    (b"x-github-event", b"pull_request"),
+                    (b"x-hub-signature-256", b"sha256=\xff"),
+                ],
+            )
+            assert non_ascii_sig.status_code == 401
+
             # Missing X-GitHub-Delivery -> 400
             no_deliv = client.post(
                 "/api/event-sources/github",
@@ -1227,5 +1254,46 @@ def test_bind_and_unbind_external_trigger_runtime_with_reactive_callback(tmp_pat
 
         api_main.unbind_external_trigger_runtime(api_main.app)
         assert config_lifecycle.app_state(api_main.app).external_trigger_runtime is None
+    finally:
+        api_main.unbind_external_trigger_runtime(api_main.app)
+
+
+def test_event_sources_endpoint_sqlite_error_returns_503(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SQLite OperationalError during event-source fan-out maps to HTTP 503 instead of 500."""
+    _setup_event_source_api(
+        tmp_path,
+        event_sources={
+            "github": {
+                "kind": "github",
+                "secret_env": "GITHUB_WEBHOOK_SECRET",
+                "allowed_repos": ["mindroom-ai/mindroom"],
+                "subscribers": [_ALICE],
+            },
+        },
+        env={"GITHUB_WEBHOOK_SECRET": _GH_SECRET},
+    )
+
+    def _raise_sqlite_error(*_args: object, **_kwargs: object) -> int:
+        msg = "database is locked"
+        raise sqlite3.OperationalError(msg)
+
+    monkeypatch.setattr("mindroom.api.external_triggers.fan_out_external_event", _raise_sqlite_error)
+
+    body = json.dumps({"repository": {"full_name": "mindroom-ai/mindroom"}}).encode("utf-8")
+    try:
+        with TestClient(api_main.app) as client:
+            resp = client.post(
+                "/api/event-sources/github",
+                content=body,
+                headers={
+                    "X-GitHub-Delivery": "d-sqlite-err",
+                    "X-GitHub-Event": "push",
+                    "X-Hub-Signature-256": _github_signature(body),
+                },
+            )
+            assert resp.status_code == 503
     finally:
         api_main.unbind_external_trigger_runtime(api_main.app)

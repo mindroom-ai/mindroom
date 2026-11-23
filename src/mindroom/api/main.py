@@ -42,9 +42,7 @@ from mindroom.api.credentials import router as credentials_router
 from mindroom.api.dynamic_workflows import router as dynamic_workflows_router
 from mindroom.api.egress_broker import router as egress_broker_router
 from mindroom.api.egress_credentials import router as egress_credentials_router
-from mindroom.api.external_triggers import (
-    event_sources_router,
-)
+from mindroom.api.external_triggers import event_sources_router
 from mindroom.api.external_triggers import router as external_triggers_router
 from mindroom.api.frontend import router as frontend_router
 from mindroom.api.github_requests import router as github_requests_router
