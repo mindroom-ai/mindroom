@@ -310,3 +310,48 @@ async def test_room_state_has_one_job_for_a_run_of_200_agents(
     assert not any(word in json.dumps(content) for word in ("Secret", "invented", "Look into"))
     gate.set()
     await stack.engine.cancel(stack.run_id, reason="Done.")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("state", "expected_status"),
+    [
+        (WorkflowRunState.CANCELLED, "cancelled"),
+        (WorkflowRunState.COMPLETED, "completed"),
+        (WorkflowRunState.FAILED, "failed"),
+        (WorkflowRunState.INTERRUPTED, "interrupted"),
+    ],
+)
+async def test_ended_workflow_run_settles_its_job_on_orderly_shutdown(
+    stack: WorkflowStack,
+    state: WorkflowRunState,
+    expected_status: str,
+) -> None:
+    """A workflow run that already ended before a stop settles its job on shutdown instead of staying running."""
+    stack.continues = lambda job: job.kind == "workflow"
+    run = stack.store.get_run(stack.run_id)
+    error = None if state is WorkflowRunState.COMPLETED else "ended"
+    stack.store.update_run(run.run_id, run.epoch, state=state, error=error)
+
+    await stack.restart(kill=False)
+
+    assert stack.jobs.awaiting_continuation() == ()
+    assert [job.status for job in stack.jobs.retained_jobs()] == [expected_status]
+    assert _jobs_state_content(stack.jobs.retained_jobs()) == {"jobs": [], "total": 0}
+
+
+@pytest.mark.asyncio
+async def test_workflow_job_whose_run_ended_while_waiting_to_continue_clears_room_state_at_once(
+    stack: WorkflowStack,
+) -> None:
+    """When a run ends while its job waits to continue, continuation settles the job before room state publishes."""
+    stack.continues = lambda job: job.kind == "workflow"
+    await stack.restart(kill=True)
+    assert len(stack.jobs.awaiting_continuation()) == 1
+
+    await stack.engine.cancel(stack.run_id, reason="The run reached its cost limit.")
+    await stack.continue_jobs()
+
+    # No event-loop yield: `_reconcile` publishes room state on the line right after `_continue_stopped_jobs`.
+    assert [job.status for job in stack.jobs.retained_jobs()] == ["cancelled"]
+    assert _jobs_state_content(stack.jobs.retained_jobs()) == {"jobs": [], "total": 0}

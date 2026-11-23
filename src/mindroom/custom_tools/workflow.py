@@ -616,16 +616,17 @@ async def stopped_workflow_job(
 ) -> BackgroundOutcome | None:
     """Stop the run of a stopped job and return how the job ends: as its run ended, while that run is still its own.
 
-    A Stop that a restart found saved (not *live*) stops no run here, since the pass ends the run of a stopped job:
-    it only gives the job the report of a run that had already ended.
+    A shutdown (`live=True`, `job_stopped_by_shutdown`) cancels no live run, so the next start can continue it, while
+    a run that has already ended settles its job immediately instead of keeping it running across the restart. A
+    restart recovery (`live=False`) of a running job defers to `continued_workflow_job`; a Stop that a restart found
+    saved (`not job_stopped_by_shutdown`) returns the report of a run that had already ended.
     """
-    if job_stopped_by_shutdown():
-        # A stopping primary cancels nothing: the run is the restart's to continue or to end.
+    if not live and job_stopped_by_shutdown():
         return None
     run_id = str(job.adapter.get("workflow"))
     try:
         run = engine.store.get_run(run_id)
-        if live:
+        if live and not job_stopped_by_shutdown():
             run = await engine.cancel(run_id, owner=job.job_id, **engine.job_stop(run, "The run's job was cancelled."))
     except WorkflowRunNotFoundError:
         return None
@@ -634,16 +635,18 @@ async def stopped_workflow_job(
     return await _workflow_job_outcome(engine, run) if ended else None
 
 
-async def continued_workflow_job(job: BackgroundJob) -> JobSpec:
-    """Return what the job of a workflow run goes on as after a restart stopped it.
+async def continued_workflow_job(job: BackgroundJob) -> JobSpec | BackgroundOutcome:
+    """Return what the job of a workflow run goes on as after a restart stopped it, or its outcome if it already ended.
 
     Called in the tool context of the job's conversation, once the job runtime granted the job again. The job waits
     for its run again and can cancel it, so every attempt the run waits for starts there: the first, the next once
     the engine's pass recorded the old one's end, and that of a resume that was admitted and stopped before it took
-    the run. A run that has ended ends the job with its report, and one that is gone raises, which ends the job.
+    the run. A run that has already ended settles the job at once, and one that is gone raises, which ends the job.
     """
     engine, context = _runtime()
     run = engine.store.get_run(str(job.adapter.get("workflow")))
+    if run.owner == job.job_id and run.state in TERMINAL_RUN_STATES:
+        return await _workflow_job_outcome(engine, run)
     limits = workflow_limits(context.config, run.agent_name)
     return _run_job(engine, run, job.job_id, context, limits, resume=job.adapter.get("resume"))
 

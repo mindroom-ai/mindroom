@@ -445,7 +445,7 @@ class ToolJobRuntimeCoordinator:
         bot = self._ready_bot(job)
         if bot is None:
             return
-        spec: JobSpec | str
+        spec: JobSpec | BackgroundOutcome | str
         if isinstance(bot, str):
             spec = bot
         else:

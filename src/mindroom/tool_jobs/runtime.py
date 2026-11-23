@@ -629,6 +629,7 @@ class ToolJobRuntime:
         job = entry.job
         return (
             settled.status == "interrupted"
+            and not (job.kind == "workflow" and settled.result_payload is not None)
             and _stopped_while_working(job)
             and not entry.control.reply_stopped
             and self._continues(job)
@@ -681,8 +682,8 @@ class ToolJobRuntime:
             and self._grant(entry.job) == "allowed"
         )
 
-    async def continue_stopped(self, job_id: str, spec: JobSpec | None) -> None:
-        """Run a job a restart stopped on as ``spec``, under its own ID, or end it interrupted when ``spec`` is None.
+    async def continue_stopped(self, job_id: str, spec: JobSpec | BackgroundOutcome | None) -> None:
+        """Run a job a restart stopped on as ``spec``, settle a decided outcome, or end it interrupted when None.
 
         A job that was continued, cancelled, or settled since it was listed is left alone. A Stop of its reply that
         marked it while it waited ends it, and it stays as it is while its requester's access is no longer allowed:
@@ -693,7 +694,9 @@ class ToolJobRuntime:
             entry = self._entries.get(job_id)
             if entry is None or entry.interruption is None or not self._awaits_continuation(entry):
                 return
-            if spec is None or entry.control.reply_stopped:
+            if isinstance(spec, BackgroundOutcome):
+                await self._publish_outcome(entry, spec)
+            elif spec is None or entry.control.reply_stopped:
                 await self._publish_outcome(entry, entry.interruption)
             elif self._grant(entry.job) == "allowed":
                 await run_coroutine_until_complete(self._relaunch(entry, spec))
