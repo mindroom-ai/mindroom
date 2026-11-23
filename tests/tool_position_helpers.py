@@ -11,9 +11,10 @@ from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.tool_system.events import tool_markers_out_of_text
 
 _TRACE_KEY = "io.mindroom.tool_trace"
-_CASES = json.loads((Path(__file__).parent / "fixtures" / "tool-positions-v1.json").read_text(encoding="utf-8"))[
-    "cases"
-]
+_FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "tool-positions-v1.json").read_text(encoding="utf-8"))
+_CASES = _FIXTURE["cases"]
+# The ``events`` of each ``placeholder_body`` trace that is not sound.
+_KEPT_PLACEHOLDERS = _FIXTURE["kept_placeholders"]
 _SENT_CASES = [case for case in _CASES if case["wire"] is not None]
 _SHELL = {"type": "tool_call_completed", "tool_name": "shell"}
 

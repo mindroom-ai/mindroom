@@ -20,6 +20,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.constants import (
+    DURABLE_DELIVERY_ID_KEY,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
@@ -28,7 +29,7 @@ from mindroom.constants import (
 )
 from mindroom.custom_tools.matrix_conversation_operations import _message_payload
 from mindroom.custom_tools.matrix_user_reads import _message_lines
-from mindroom.delivery_gateway import _reply_row_wire_content
+from mindroom.delivery_gateway import SendTextRequest, _reply_row_wire_content
 from mindroom.entity_resolution import current_internal_sender_ids, entity_identity_registry
 from mindroom.event_journal import DeliveryStage, MatrixDelivery, matrix_delivery_payload
 from mindroom.event_journal.models import ConversationPage, ReplyRowFacts, VisibleMessage
@@ -72,9 +73,8 @@ from mindroom.matrix.room_history_reads import (
 )
 from mindroom.message_target import MessageTarget
 from mindroom.mid_turn import MidTurnGate, MidTurnOutcome, QueuedMessage
-from mindroom.reply_presentation import Presentation, encode_presentation
-from mindroom.reply_scope import ReplyWrite
-from mindroom.response_sources import ResponseSources
+from mindroom.reply_presentation import Presentation
+from mindroom.reply_scope import initial_write, terminal_write
 from mindroom.tool_system import events
 from mindroom.tool_system.events import (
     ToolTraceEntry,
@@ -86,15 +86,28 @@ from mindroom.tool_system.events import (
 from tests.conftest import bind_runtime_paths, make_matrix_client_mock, test_runtime_paths
 from tests.cpu_budget_helpers import cpu_budget
 from tests.identity_helpers import persist_entity_accounts
+from tests.reply_span_helpers import reply_span
 from tests.test_matrix_api_tool import _make_context
 from tests.test_mentions import _default_runtime_paths, _make_config, _runtime_paths_for
-from tests.test_response_delivery_gateway import _gateway
-from tests.tool_position_helpers import _CASES, _SENT_CASES, _SHELL, _TRACE_KEY, _case, _content, _marked, _sent, _wire
+from tests.test_response_delivery_gateway import _delivered_event_response, _gateway
+from tests.tool_position_helpers import (
+    _CASES,
+    _KEPT_PLACEHOLDERS,
+    _SENT_CASES,
+    _SHELL,
+    _TRACE_KEY,
+    _case,
+    _content,
+    _marked,
+    _sent,
+    _wire,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.event_journal import EventJournalStore, ProjectedEvent
+    from mindroom.delivery_gateway import DeliveryGateway
+    from mindroom.event_journal import EventJournalStore, PrincipalStore, ProjectedEvent
     from mindroom.judgment.state import JudgmentMessage
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -263,105 +276,138 @@ async def test_an_edit_bound_to_its_target_when_its_row_is_claimed_sends_no_mark
     assert tool_markers_in_text(wire) == row
 
 
-_USABLE_ENCRYPTED_SIDECAR = (
-    "mxc://localhost/full",
-    {
-        "size": 100,
-        "mimetype": "application/json",
-        "url": "mxc://localhost/full",
-        "key": {"k": "secret"},
-        "iv": "iv",
-        "hashes": {"sha256": "hash"},
-        "v": "v2",
-    },
-)
+def _reply_gateway(tmp_path: Path, outbox: PrincipalStore, room_send: AsyncMock) -> DeliveryGateway:
+    """Return a gateway that writes an agent's reply rows to ``outbox`` and sends them with ``room_send``."""
+    gateway = _gateway(tmp_path, outbox)
+    client = gateway.deps.runtime.client
+    client.user_id = _AGENT
+    client.room_send = room_send
+
+    def observed(room_id: str, event_id: str) -> nio.RoomGetEventResponse:
+        response = _delivered_event_response(room_id, event_id)
+        response.event.sender = _AGENT
+        return response
+
+    client.room_get_event = AsyncMock(side_effect=observed)
+    return gateway
+
+
+def _sent_events(room_send: AsyncMock) -> list[dict[str, Any]]:
+    """Return the content of each event the client sent to Matrix, in order."""
+    return [call.kwargs["content"] for call in room_send.await_args_list]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("upload_result", "expect_sidecar"),
-    [(_USABLE_ENCRYPTED_SIDECAR, True), ((None, None), False)],
-    ids=["usable-sidecar", "upload-failure-fallback"],
-)
-async def test_a_late_bound_large_edit_freezes_clean_fallback_and_fits_after_wrapping(
+@pytest.mark.parametrize("uploads", [True, False], ids=["sidecar", "upload-failure-fallback"])
+async def test_an_edit_bound_when_claimed_that_is_too_large_for_an_event_is_sent_whole_and_read_back(
     tmp_path: Path,
     journal_store: EventJournalStore,
-    upload_result: tuple[str | None, dict[str, Any] | None],
-    expect_sidecar: bool,
+    uploads: bool,
 ) -> None:
-    """A late-bound edit freezes a clean bounded new_text and budgets for the m.replace wrapper on sidecar and fallback."""
-    outbox = journal_store.principal("principal")
-    gateway = _gateway(tmp_path, outbox)
-    gateway.deps.runtime.client.user_id = _AGENT
-    gateway.deps.runtime.client.rooms[_ROOM] = next(iter(gateway.deps.runtime.client.rooms.values()))
-    gateway.deps.runtime.client.room_send = AsyncMock(return_value=None)
-    # Claim a reply whose INITIAL row has not yet bound a Matrix event ID (event_id=None).
-    claimed = await outbox.replies.claim(
-        rl.ClaimRequest(
-            span_id="span-1",
-            delivery_id="$src",
-            sources=ResponseSources(pending_event_ids=("$src",), logical_source_event_ids=("$src",)),
-            bot_generation="gen-1",
-            now_ns=1,
-            new_reply_id="reply-1",
-            entity_name="agent",
-            room_id=_ROOM,
-            thread_id=None,
-            membership_epoch=await outbox.membership_epoch(_ROOM),
-            empty_presentation=encode_presentation(Presentation()),
-        ),
-    )
-    reply = claimed.transition.reply
-    span = claimed.transition.claimed
-    assert reply is not None
-    assert span is not None
-    assert reply.event_id is None
+    """A terminal row written while the reply's create is still owed gets its edit envelope only when claimed.
 
+    Its replacement is sized with that envelope, so the event fits. The sidecar holds the replacement alone, as
+    no event existed to edit when it was uploaded, and a read still takes it for the edit the event is.
+    """
+    outbox = journal_store.principal("agent@alice")
+    room_send = AsyncMock(
+        side_effect=[None, nio.RoomSendResponse("$reply", _ROOM), nio.RoomSendResponse("$edit", _ROOM)],
+    )
+    gateway = _reply_gateway(tmp_path, outbox, room_send)
+    target = MessageTarget.resolve(_ROOM, None, "$cause")
     replacement = _large(3, 80_000)
-    shown = Presentation()
-    write = ReplyWrite(
-        span=span,
-        stage=rl.WriteStage.FINAL,
-        shown=shown,
-        decide=lambda current, active: rl.finish(
-            current,
-            active,
-            rl.TerminalWrite(
-                shown=encode_presentation(shown),
-                prepared_revision=current.revision,
-                state=rl.ReplyState.COMPLETED,
-            ),
-            now_ns=2,
-        ),
+    sidecars: list[bytes] = []
+
+    async def upload(_client: object, data: bytes, **_kwargs: object) -> tuple[object, None]:
+        sidecars.append(data)
+        return (nio.UploadResponse("mxc://localhost/full") if uploads else nio.UploadError("refused")), None
+
+    with patch("mindroom.matrix.large_messages.upload_media_bytes", new=upload):
+        async with reply_span(outbox, source_event_id="$cause", room_id=_ROOM) as handle:
+            # Matrix refuses the placeholder, so the answer is written before the reply has an event.
+            placeholder = initial_write(handle, Presentation(), placeholder_only=True)
+            assert await gateway.send_text(SendTextRequest(target, "Thinking...", reply_write=placeholder)) is None
+            await gateway._deliver_reply_write(
+                terminal_write(handle, Presentation(), state=rl.ReplyState.COMPLETED),
+                target=target,
+                content=replacement,
+                new_text=replacement["body"],
+                result=None,
+            )
+
+    row = await outbox.load_matrix_delivery(delivery_id="$cause", stage=DeliveryStage.FINAL)
+    assert row is not None
+    assert row.reply_row is not None
+    assert (row.edits_event_id, row.acknowledged_event_id) == ("$reply", "$edit")
+    assert "m.new_content" not in row.payload
+    assert row.reply_row.new_text == row.payload["body"]
+    placeholder_sent, placeholder_resent, wire = _sent_events(room_send)
+    assert placeholder_sent == placeholder_resent
+    assert wire["m.relates_to"] == {"rel_type": "m.replace", "event_id": "$reply"}
+    assert wire["m.new_content"] == row.payload
+    assert wire["body"] == f"* {row.payload['body']}"
+    assert wire["body"].startswith("* xxxx")
+    assert ("io.mindroom.long_text" in wire["m.new_content"]) is uploads
+    _assert_no_raw_markers_on_wire(wire)
+    for room_encrypted in (False, True):
+        size = _calculate_delivery_event_size(wire, room_id=_ROOM, room_encrypted=room_encrypted, device_id="DEVICE")
+        assert size <= _MATRIX_EVENT_HARD_LIMIT
+    client = gateway.deps.runtime.client
+    if not uploads:
+        assert await extract_edit_body(_event(wire, "$edit"), client) == (row.payload["body"], row.payload)
+        return
+    frozen = {**replacement, DURABLE_DELIVERY_ID_KEY: row.payload[DURABLE_DELIVERY_ID_KEY]}
+    with patch("mindroom.matrix.message_content.download_mxc_bytes", new=AsyncMock(return_value=sidecars[0])):
+        edited = await extract_edit_body(_event(wire, "$edit"), client)
+        resolved = await resolve_event_source_content(_event(wire, "$edit"), client)
+    assert edited == (replacement["body"], frozen)
+    # As the edit reads that had room for its replacement in its event.
+    assert resolved["content"] == build_edit_event_content(
+        event_id="$reply",
+        new_content=frozen,
+        new_text=replacement["body"],
     )
 
-    with patch("mindroom.matrix.large_messages.upload_json_sidecar", new=AsyncMock(return_value=upload_result)):
-        await gateway._deliver_reply_write(
-            write,
-            target=MessageTarget.resolve(_ROOM, None, "$src"),
-            content=replacement,
-            new_text=replacement["body"],
-            result=None,
-        )
 
-    enqueued_row = await outbox.load_matrix_delivery(delivery_id="$src", stage=DeliveryStage.FINAL)
-    assert enqueued_row is not None
-    assert enqueued_row.reply_row is not None
-    assert ("io.mindroom.long_text" in enqueued_row.payload) is expect_sidecar
-    assert enqueued_row.reply_row.new_text == enqueued_row.payload["body"]
-    assert "🔧" not in enqueued_row.reply_row.new_text
+@pytest.mark.asyncio
+async def test_an_answer_that_creates_its_reply_is_sized_as_a_message_and_not_as_an_edit(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+) -> None:
+    """A terminal row with no earlier row left to create the reply's event creates it, and is never wrapped.
 
-    wrapped = _reply_row_wire_content(replace(enqueued_row, edits_event_id="$" + "e" * 43))
-    _assert_no_raw_markers_on_wire(wrapped)
-    assert wrapped["body"] == f"* {enqueued_row.payload['body']}"
-    for room_encrypted in (False, True):
-        size = _calculate_delivery_event_size(
-            wrapped,
-            room_id=_ROOM,
-            room_encrypted=room_encrypted,
-            device_id="CURRENT-DEVICE",
-        )
-        assert size <= _MATRIX_EVENT_HARD_LIMIT
+    Sized with an edit envelope it never gets, an answer of 16,000 characters, about 45 KB once encrypted, would
+    move to a sidecar where it has an event's room to itself.
+    """
+    outbox = journal_store.principal("agent@alice")
+    room_send = AsyncMock(return_value=nio.RoomSendResponse("$reply", _ROOM))
+    gateway = _reply_gateway(tmp_path, outbox, room_send)
+    target = MessageTarget.resolve(_ROOM, None, "$cause")
+    answer = _large(1, 16_000)
+    upload = AsyncMock(return_value=(nio.UploadResponse("mxc://localhost/full"), None))
+
+    with patch("mindroom.matrix.large_messages.upload_media_bytes", new=upload):
+        async with reply_span(outbox, source_event_id="$cause", room_id=_ROOM) as handle:
+            await gateway._deliver_reply_write(
+                terminal_write(handle, Presentation(), state=rl.ReplyState.COMPLETED),
+                target=target,
+                content=answer,
+                new_text=answer["body"],
+                result=None,
+            )
+
+    upload.assert_not_awaited()
+    row = await outbox.load_matrix_delivery(delivery_id="$cause", stage=DeliveryStage.FINAL)
+    assert row is not None
+    assert (row.edits_event_id, row.acknowledged_event_id) == (None, "$reply")
+    assert row.payload == {**answer, DURABLE_DELIVERY_ID_KEY: row.payload[DURABLE_DELIVERY_ID_KEY]}
+    (wire,) = _sent_events(room_send)
+    assert "io.mindroom.long_text" not in wire
+    assert "m.new_content" not in wire
+    assert wire["body"] == "x" * 16_000
+    assert tool_markers_in_text(wire) == row.payload
+    encrypted_size = _calculate_delivery_event_size(wire, room_id=_ROOM, room_encrypted=True, device_id="DEVICE")
+    assert 44_000 < encrypted_size <= _MATRIX_EVENT_HARD_LIMIT
 
 
 def test_pre_upgrade_late_bound_sidecar_row_keeps_verbatim_new_text_for_exact_recovery() -> None:
@@ -431,6 +477,97 @@ async def test_a_canonical_streaming_reply_of_calls_alone_sends_thinking_placeho
     assert restored == content
     restored_inner = restored["m.new_content"] if edit else restored
     assert "placeholder_body" not in restored_inner[_TRACE_KEY]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("row", ["create", "edit", "edit-bound-when-claimed"])
+@pytest.mark.parametrize("stream_status", [STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING])
+async def test_an_outbox_row_of_calls_alone_is_sent_with_its_markers_while_its_reply_streams(
+    stream_status: str,
+    row: str,
+) -> None:
+    """A stream that opens with a call creates its reply through the outbox, while the reply is still pending.
+
+    Recovery finds a row's event again by its exact content, and the release before this one does not restore a
+    reply from ``placeholder_body``: after a rollback it would send the row a second time. So a row, which carries
+    its delivery identity, goes out as it was built, and only a write outside the outbox says it is thinking.
+    """
+    built = {
+        **_marked("🔧 `shell` [1] ⏳", [{**_SHELL, "type": "tool_call_started"}]),
+        STREAM_STATUS_KEY: stream_status,
+    }
+    edit = build_edit_event_content(event_id="$reply", new_content=built, new_text=built["body"])
+    direct = built if row == "create" else edit
+    stage = DeliveryStage.INITIAL if row == "create" else DeliveryStage.EDIT
+    # As the delivery gateway freezes the row, and as it wraps an edit whose target its create bound later.
+    frozen = matrix_delivery_payload("principal", "$turn", stage, built if row == "edit-bound-when-claimed" else direct)
+    claimed = MatrixDelivery(
+        delivery_id="$turn",
+        stage=stage,
+        room_id=_ROOM,
+        membership_epoch=0,
+        thread_id=None,
+        transaction_id="tx",
+        payload=frozen,
+        edits_event_id=None if row == "create" else "$reply",
+        acknowledged_event_id=None,
+        created_at_ns=0,
+        reply_id="reply",
+        reply_row=ReplyRowFacts(placeholder_only=False, new_text=built["body"]),
+    )
+    sent = _reply_row_wire_content(claimed)
+    client = _client()
+
+    await send_message_outcome(
+        client,
+        _ROOM,
+        sent,
+        operation="send_message" if row == "create" else "edit_message",
+        transaction_id="tx",
+        content_is_prepared=True,
+    )
+
+    wire = _on_the_wire(client)
+    assert wire == sent
+    for layer in (wire, wire.get("m.new_content", wire)):
+        assert layer[DURABLE_DELIVERY_ID_KEY]["delivery_id"] == "$turn"
+        assert layer["body"].endswith("🔧 `shell` [1] ⏳")
+        assert layer[_TRACE_KEY] == {"version": 2, "events": built[_TRACE_KEY]["events"]}
+    # The same reply without the row's identity is a progress write, which says it is thinking.
+    held = tool_markers_out_of_text(direct)
+    progress = held.get("m.new_content", held)
+    assert (progress["body"], progress[_TRACE_KEY]["placeholder_body"]) == ("Thinking...", True)
+    assert tool_markers_in_text(held) == direct
+
+
+@pytest.mark.asyncio
+async def test_a_stream_that_opens_with_a_call_creates_its_reply_as_it_was_built(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+) -> None:
+    """The create of a stream's reply is an outbox row even while the reply is pending, so it says nothing else."""
+    outbox = journal_store.principal("agent@alice")
+    room_send = AsyncMock(return_value=nio.RoomSendResponse("$reply", _ROOM))
+    gateway = _reply_gateway(tmp_path, outbox, room_send)
+    built = {
+        **_marked("🔧 `shell` [1] ⏳", [{**_SHELL, "type": "tool_call_started"}]),
+        STREAM_STATUS_KEY: STREAM_STATUS_PENDING,
+    }
+
+    async with reply_span(outbox, source_event_id="$cause", room_id=_ROOM) as handle:
+        await gateway._deliver_reply_write(
+            initial_write(handle, Presentation(), placeholder_only=False),
+            target=MessageTarget.resolve(_ROOM, None, "$cause"),
+            content=built,
+            new_text=None,
+            result=None,
+        )
+
+    row = await outbox.load_matrix_delivery(delivery_id="$cause", stage=DeliveryStage.INITIAL)
+    assert row is not None
+    assert row.acknowledged_event_id == "$reply"
+    (wire,) = _sent_events(room_send)
+    assert wire == row.payload == {**built, DURABLE_DELIVERY_ID_KEY: row.payload[DURABLE_DELIVERY_ID_KEY]}
 
 
 @pytest.mark.asyncio
@@ -659,8 +796,20 @@ async def test_a_large_nonterminal_streaming_edit_strips_markers_from_every_prev
 
 
 @pytest.mark.asyncio
-async def test_an_oversized_tool_only_streaming_edit_previews_thinking_and_uploads_marked_v2() -> None:
-    """An oversized tool-calls-only streaming edit shows Thinking... in its preview and uploads the full v2 edit."""
+@pytest.mark.parametrize(
+    ("upload_result", "expect_sidecar"),
+    [(_USABLE_SIDECAR, True), (_FAILED_SIDECAR, False)],
+    ids=["usable-sidecar", "upload-failure-fallback"],
+)
+async def test_an_oversized_streaming_edit_of_calls_alone_says_thinking_only_over_the_sidecar_that_holds_its_calls(
+    upload_result: tuple[str | None, dict[str, Any] | None],
+    expect_sidecar: bool,
+) -> None:
+    """The preview's placeholder stands for calls a reader finds in the sidecar, which holds the edit as it was built.
+
+    When the upload fails nothing else on the wire names the calls, so the edit keeps their marker lines, which
+    MindRoom Chat draws as rows of tool names, as it did before previews went out without markers.
+    """
     calls = 150
     body = "\n\n".join(f"🔧 `shell` [{index}]" for index in range(1, calls + 1))
     trace = [{"type": "tool_call_completed", "tool_name": "shell", "args_preview": "x" * 200} for _ in range(calls)]
@@ -668,18 +817,24 @@ async def test_an_oversized_tool_only_streaming_edit_previews_thinking_and_uploa
     edit = build_edit_event_content(event_id="$reply", new_content=replacement, new_text=replacement["body"])
     assert calculate_event_size(edit) > EDIT_MESSAGE_SIZE_LIMIT
     client = _client()
-    upload = AsyncMock(return_value=_USABLE_SIDECAR)
+    upload = AsyncMock(return_value=upload_result)
 
     with patch("mindroom.matrix.large_messages.upload_json_sidecar", new=upload):
         await edit_message_result(client, _ROOM, "$reply", replacement, replacement["body"])
 
     preview = _on_the_wire(client)
+    assert upload.await_args.args[2] == edit
+    assert _TRACE_KEY not in preview
+    assert _TRACE_KEY not in preview["m.new_content"]
+    assert ("io.mindroom.long_text" in preview["m.new_content"]) is expect_sidecar
+    if not expect_sidecar:
+        assert (preview["body"], preview["m.new_content"]["body"]) == (f"* {body}", body)
+        assert preview["m.new_content"]["formatted_body"] == replacement["formatted_body"]
+        return
     _assert_no_raw_markers_on_wire(preview)
     assert preview["body"] == "* Thinking..."
     assert preview["m.new_content"]["body"] == "Thinking..."
     assert preview["m.new_content"]["formatted_body"] == "<p>Thinking...</p>\n"
-    assert "io.mindroom.long_text" in preview["m.new_content"]
-    assert upload.await_args.args[2] == edit
     uploaded_bytes = json.dumps(upload.await_args.args[2]).encode("utf-8")
     with patch("mindroom.matrix.message_content.download_mxc_bytes", new=AsyncMock(return_value=uploaded_bytes)):
         resolved = await resolve_event_source_content(_event(preview, "$edit"), client)
@@ -1261,17 +1416,32 @@ def test_placeholder_body_reader_restores_non_streaming_placeholders_and_legacy_
     assert tool_markers_in_text(placeholder_edit) == edit
 
 
-@pytest.mark.parametrize(
-    "bad_position",
-    [
-        {"body_line": 1, "at": 0},
-        {"body_line": 0, "at": 1},
-        {"body_line": -1, "at": 0},
-        {"body_line": 0, "at": -1},
-    ],
-)
-def test_placeholder_body_reader_rejects_nonzero_positions(bad_position: dict[str, int]) -> None:
-    """Malformed placeholder_body=True traces with non-zero positions are left untouched."""
-    wire = _wire(_case("a streaming reply of calls alone"))
-    wire[_TRACE_KEY]["events"][0].update(bad_position)
-    assert tool_markers_in_text(wire) is wire
+@pytest.mark.parametrize("edit", [False, True])
+@pytest.mark.parametrize("kept", _KEPT_PLACEHOLDERS, ids=[kept["name"] for kept in _KEPT_PLACEHOLDERS])
+def test_a_placeholder_trace_that_is_not_sound_is_read_as_it_is(kept: dict[str, Any], edit: bool) -> None:
+    """The shared fixture pins the traces whose placeholder text this reader and MindRoom Chat both keep."""
+    held = _content("Thinking...", "<p>Thinking...</p>\n", 3, kept["events"])
+    held[_TRACE_KEY]["placeholder_body"] = True
+    content = build_edit_event_content(event_id="$reply", new_content=held, new_text=held["body"]) if edit else held
+
+    assert tool_markers_in_text(content) is content
+
+
+def test_a_placeholder_position_of_zero_is_read_as_chat_reads_it_whether_json_wrote_it_as_a_float_or_not() -> None:
+    """MindRoom Chat cannot tell a JSON ``0.0`` from ``0``, so neither counts as another position here."""
+    case = _case("a streaming reply of calls alone")
+    held = _wire(case)
+    held[_TRACE_KEY]["events"][0].update({"body_line": 0.0, "at": -0.0})
+
+    assert tool_markers_in_text(held) == _sent(case)
+
+
+def test_a_placeholder_body_that_is_not_true_is_read_as_the_positions_of_the_text_it_has() -> None:
+    """Only ``true`` says the text is a placeholder, and only then does the key leave the trace."""
+    case = _case("calls between two paragraphs share one position")
+    held = _wire(case)
+    held[_TRACE_KEY]["placeholder_body"] = 1
+    sent = _sent(case)
+    sent[_TRACE_KEY]["placeholder_body"] = 1
+
+    assert tool_markers_in_text(held) == sent

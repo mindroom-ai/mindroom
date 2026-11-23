@@ -300,6 +300,7 @@ async def test_agent_reading_a_card_that_wakes_no_one_is_not_mentioned_but_sees_
 async def test_long_card_keeps_its_exact_mentions_on_the_preview(config: Config) -> None:
     """A card too long for one event shows a preview that still mentions only whom the hook named."""
     client = MagicMock(spec=nio.AsyncClient)
+    client.user_id = ROUTER
     client.upload.return_value = (nio.UploadResponse("mxc://server/sidecar"), None)
     content = {
         "msgtype": "m.text",

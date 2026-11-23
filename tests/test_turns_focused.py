@@ -51,7 +51,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.config.participation import ParticipationConfig
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.constants import ROUTER_AGENT_NAME, WAKE_MENTIONED_KEY
+from mindroom.constants import DURABLE_DELIVERY_ID_KEY, ROUTER_AGENT_NAME, WAKE_MENTIONED_KEY
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from mindroom.credentials.manager import get_runtime_credentials_manager
@@ -88,7 +88,6 @@ from mindroom.event_journal import (
     turn_rows,
 )
 from mindroom.event_journal.identity import journal_principal_id
-from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.event_journal.opening import open_event_journal
 from mindroom.execution_preparation import _build_unseen_context_messages, render_prepared_messages_text
 from mindroom.hooks import (

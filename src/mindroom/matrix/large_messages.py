@@ -43,7 +43,7 @@ from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
 from mindroom.matrix.media import durable_session_closed, prepare_media_upload, upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import build_matrix_edit_content, markdown_to_html
 from mindroom.matrix_identifiers import has_agent_username
-from mindroom.tool_system.events import tool_markers_out_of_text
+from mindroom.tool_system.events import has_placeholder_body, tool_markers_out_of_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -890,20 +890,24 @@ def _fit_large_message_preview(
     )
 
 
-def _preview_source_for_large_message(
+def _large_message_preview(
     client: nio.AsyncClient,
     content: dict[str, Any],
+    source_content: dict[str, Any],
     *,
     is_edit: bool,
-) -> tuple[dict[str, Any], dict[str, Any], str]:
-    """Return ``(preview_envelope, preview_source, preview_text)`` with raw tool markers stripped for agent senders."""
-    preview_envelope = (
-        tool_markers_out_of_text(content) if has_agent_username(getattr(client, "user_id", None)) else content
-    )
-    preview_source = (
-        preview_envelope["m.new_content"] if is_edit and "m.new_content" in preview_envelope else preview_envelope
-    )
-    return preview_envelope, preview_source, preview_source.get("body", "")
+) -> tuple[dict[str, Any], str, str]:
+    """Return the layer a preview shows, its text, and the text sent in the preview's place without a sidecar.
+
+    An agent's preview shows its text without its tool markers, as its events that fit are sent. A reply of calls
+    alone then shows a placeholder for the calls its sidecar holds. Without a sidecar nothing sent names them, so
+    the text sent in its place keeps their markers.
+    """
+    sent = tool_markers_out_of_text(content) if has_agent_username(client.user_id) else content
+    preview_source = sent["m.new_content"] if is_edit and "m.new_content" in sent else sent
+    preview_text = preview_source.get("body", "")
+    fallback_text = source_content.get("body", "") if has_placeholder_body(preview_source) else preview_text
+    return preview_source, preview_text, fallback_text
 
 
 async def prepare_large_message(
@@ -959,16 +963,16 @@ async def prepare_large_message(
     if (textless or current_size <= size_limit) and calculate_delivery_event_size(content) <= _MATRIX_EVENT_HARD_LIMIT:
         return content
 
-    # Keep the uploaded sidecar on the original v2 payload for full reader compatibility,
-    # while stripping raw tool markers from every preview and text fallback on the wire.
-    preview_envelope, preview_source, preview_text = _preview_source_for_large_message(
+    # The sidecar holds the message as it was built, tool markers in its text, as every reader takes it.
+    preview_source, preview_text, fallback_text = _large_message_preview(
         client,
         content,
+        source_content,
         is_edit=is_edit,
     )
     _ensure_minimum_preview_can_fit(
-        preview_envelope,
-        preview_source,
+        content,
+        source_content,
         is_edit=is_edit,
         room_id=room_id,
         calculate_event_size=calculate_delivery_event_size,
@@ -1002,9 +1006,9 @@ async def prepare_large_message(
             mxc_uri = None
             file_info = None
         modified_content = _build_nonterminal_streaming_edit_preview(
-            preview_envelope,
-            preview_source,
-            preview_text,
+            content,
+            source_content,
+            fallback_text if mxc_uri is None else preview_text,
             room_encrypted=encrypted_delivery_safe,
             mxc_uri=mxc_uri,
             file_info=file_info,
@@ -1046,10 +1050,10 @@ async def prepare_large_message(
         room_encrypted=encrypted_delivery_safe,
     )
     if sidecar_usable:
-        if preview_source.get("msgtype") == "m.notice":
+        if source_content.get("msgtype") == "m.notice":
             # A notice's preview stays a notice, so the push rule that keeps notices quiet still matches it.
             modified_content["msgtype"] = "m.notice"
-        _copy_preview_metadata(preview_source, modified_content)
+        _copy_preview_metadata(source_content, modified_content)
         _add_sidecar_metadata(
             modified_content,
             room_encrypted=encrypted_delivery_safe,
@@ -1064,8 +1068,8 @@ async def prepare_large_message(
             modified_content["formatted_body"] = preview_source["formatted_body"]
     else:
         modified_content = _build_text_fallback_content(
-            preview_source,
-            preview_text,
+            source_content,
+            fallback_text,
             size_limit,
             sidecar_required=sidecar_required,
         )
@@ -1080,10 +1084,10 @@ async def prepare_large_message(
 
     try:
         modified_content = _fit_large_message_preview(
-            preview_envelope,
-            preview_source,
+            content,
+            source_content,
             modified_content,
-            preview_text,
+            preview_text if sidecar_usable else fallback_text,
             is_edit=is_edit,
             continuation_indicator=(_CONTINUATION_INDICATOR if sidecar_usable else _SIDECAR_UPLOAD_FALLBACK_INDICATOR),
             calculate_event_size=calculate_delivery_event_size,
@@ -1096,8 +1100,8 @@ async def prepare_large_message(
         # above; fall back to it instead of failing and uploading again on the
         # next delivery attempt.
         text_fallback = _build_text_fallback_content(
-            preview_source,
-            preview_text,
+            source_content,
+            fallback_text,
             size_limit,
             sidecar_required=sidecar_required,
         )
@@ -1108,10 +1112,10 @@ async def prepare_large_message(
             is_edit=is_edit,
         )
         modified_content = _fit_large_message_preview(
-            preview_envelope,
-            preview_source,
+            content,
+            source_content,
             text_fallback,
-            preview_text,
+            fallback_text,
             is_edit=is_edit,
             continuation_indicator=_SIDECAR_UPLOAD_FALLBACK_INDICATOR,
             calculate_event_size=calculate_delivery_event_size,

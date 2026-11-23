@@ -1160,6 +1160,8 @@ REASONING_CONTENT_KEY = "io.mindroom.reasoning"
 STREAM_VISIBLE_BODY_KEY = "io.mindroom.visible_body"
 STREAM_WARMUP_SUFFIX_KEY = "io.mindroom.warmup_suffix"
 TOOL_TRACE_CONTENT_KEY = "io.mindroom.tool_trace"
+# The identity of the outbox row a payload was frozen for; a write sent outside the outbox carries none.
+DURABLE_DELIVERY_ID_KEY = "io.mindroom.delivery_id"
 STREAM_STATUS_PENDING = "pending"
 STREAM_STATUS_STREAMING = "streaming"
 STREAM_STATUS_APPROVAL_PENDING = "approval_pending"
@@ -1167,7 +1169,7 @@ STREAM_STATUS_COMPLETED = "completed"
 STREAM_STATUS_CANCELLED = "cancelled"
 STREAM_STATUS_INTERRUPTED = "interrupted"
 STREAM_STATUS_ERROR = "error"
-# A reply with one of these statuses is still actively streaming (never committed to the durable outbox).
+# A reply with one of these statuses is still being streamed.
 NONTERMINAL_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
 # A reply with one of these statuses is still being written or waits for a tool approval.
 UNFINISHED_REPLY_STATUSES = frozenset(

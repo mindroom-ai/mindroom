@@ -140,6 +140,20 @@ def _with_event_marker(
     return resolved_content
 
 
+def _edit_of_replacement(replacement: dict[str, Any]) -> dict[str, Any]:
+    """Return the edit whose sidecar holds its replacement content alone.
+
+    A reply row prepared before its reply had an event to edit is wrapped as an edit only when it is claimed, so one
+    too large for an event uploaded the replacement, and its preview is what got the envelope. The fallback repeats
+    the replacement after "* ", as that wrapping builds it for a row that fits.
+    """
+    replacement = {key: value for key, value in replacement.items() if key != "m.relates_to"}
+    edit = {**replacement, "m.new_content": replacement}
+    if isinstance(replacement.get("body"), str):
+        edit["body"] = f"* {replacement['body']}"
+    return edit
+
+
 async def _resolve_event_content(
     event_source: dict[str, Any],
     client: nio.AsyncClient | None,
@@ -148,6 +162,8 @@ async def _resolve_event_content(
     preview_content = _normalized_content_dict(event_source.get("content", {}))
     resolved_content = await _resolve_canonical_content(preview_content, client)
     if resolved_content is not preview_content:
+        if isinstance(preview_content.get("m.new_content"), dict) and "m.new_content" not in resolved_content:
+            resolved_content = _edit_of_replacement(resolved_content)
         resolved_content = _with_event_marker(_with_event_relation(resolved_content, preview_content), preview_content)
     if has_agent_username(event_source.get("sender")):
         resolved_content = tool_markers_in_text(resolved_content)

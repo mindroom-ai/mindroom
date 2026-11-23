@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, NamedTuple
 
 from mindroom.attachments.ids import merge_attachment_ids
+from mindroom.constants import DURABLE_DELIVERY_ID_KEY
 from mindroom.dispatch_handoff import (
     DispatchPayloadMetadata,
     MediaDispatchEvent,
@@ -20,7 +21,6 @@ from mindroom.dispatch_source import (
     MEDIA_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
-from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.member_display_names import room_member_display_names

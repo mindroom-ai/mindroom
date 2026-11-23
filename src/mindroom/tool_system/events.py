@@ -9,6 +9,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from mindroom.constants import (
+    DURABLE_DELIVERY_ID_KEY,
     NONTERMINAL_STREAM_STATUSES,
     STREAM_STATUS_KEY,
     STREAM_VISIBLE_BODY_KEY,
@@ -26,6 +27,8 @@ _TOOL_TRACE_KEY = "io.mindroom.tool_trace"
 _TOOL_TRACE_VERSION = 3
 # Version 2 has its markers in the text, as the pipeline builds a reply before sending it.
 _MARKED_TEXT_VERSION = 2
+# The text of a streaming reply of calls alone, whose version-3 trace says so with ``placeholder_body``.
+_PLACEHOLDER_BODY = "Thinking..."
 
 _MAX_TOOL_ARGS_PREVIEW_CHARS = 1200
 _MAX_TOOL_ARG_VALUE_PREVIEW_CHARS = 250
@@ -706,19 +709,49 @@ def _body_with_markers(body: str, placed: list[tuple[int, dict[str, Any]]]) -> s
     return "\n".join(marked + lines[line:])
 
 
+def has_placeholder_body(layer: Mapping[str, Any]) -> bool:
+    """Return whether a layer's text stands in for a reply that is its calls' markers alone."""
+    payload = layer.get(_TOOL_TRACE_KEY)
+    return isinstance(payload, dict) and payload.get("placeholder_body") is True
+
+
+def _is_zero(value: object) -> bool:
+    """Return whether a JSON value is the number 0, which MindRoom Chat cannot tell from 0.0; no boolean is."""
+    return isinstance(value, int | float) and not isinstance(value, bool) and value == 0
+
+
+def _placeholder_calls(
+    placed: list[tuple[int, dict[str, Any]]],
+    *,
+    all_named: bool,
+) -> list[tuple[int, dict[str, Any]]]:
+    """Return the placed calls of a ``placeholder_body`` trace, each at the start; none unless the trace is sound.
+
+    Its text stands in for a reply that is its markers alone, so the trace says all of the reply: every entry is a
+    named call (``all_named``), at least one has a position, and each position is ``body_line`` 0 with ``at`` 0.
+    MindRoom Chat's ``isPlaceholderTrace`` holds a trace to the same rule, so both discard the same texts.
+    """
+    if not all_named or not all(_is_zero(event.get(key)) for _index, event in placed for key in ("body_line", "at")):
+        return []
+    return [(index, {**event, "body_line": 0, "at": 0}) for index, event in placed]
+
+
 def _layer_with_markers(layer: Mapping[str, Any], fallback: str | None) -> tuple[dict[str, Any], str] | None:
     """Restore ordered v3 positions in body, HTML and any edit fallback; None for invalid or missing positions."""
     calls = _trace_calls(layer, _TOOL_TRACE_VERSION)
     body, html = layer.get("body"), layer.get("formatted_body")
-    placed = [(index, event) for index, event in (calls or {}).items() if "body_line" in event or "at" in event]
-    if not placed or not isinstance(body, str) or not isinstance(html, str):
+    if calls is None or not isinstance(body, str) or not isinstance(html, str):
         return None
+    placed = [(index, event) for index, event in calls.items() if "body_line" in event or "at" in event]
     payload = layer[_TOOL_TRACE_KEY]
-    placeholder_body = payload.get("placeholder_body") is True
+    placeholder_body = has_placeholder_body(layer)
     if placeholder_body:
-        body = ""
-        fallback = "" if fallback is not None else None
-        html = ""
+        placed = _placeholder_calls(placed, all_named=len(calls) == len(payload["events"]))
+    if not placed:
+        return None
+    if placeholder_body:
+        # The markers go back in place of the text, which a reader that puts none back shows instead.
+        body, html, fallback = "", "", None if fallback is None else ""
     marked_body = _body_with_markers(body, placed)
     marked_fallback = "" if fallback is None else _body_with_markers(fallback, placed)
     if marked_body is None or marked_fallback is None:
@@ -735,14 +768,14 @@ def _layer_with_markers(layer: Mapping[str, Any], fallback: str | None) -> tuple
     events = [
         {key: value for key, value in event.items() if key not in ("at", "body_line")} for event in payload["events"]
     ]
-    restored_payload = {**payload, "version": _MARKED_TEXT_VERSION, "events": events}
+    trace = {**payload, "version": _MARKED_TEXT_VERSION, "events": events}
     if placeholder_body:
-        restored_payload.pop("placeholder_body", None)
+        del trace["placeholder_body"]
     return {
         **layer,
         "body": marked_body,
         "formatted_body": marked_html + html[offset:],
-        _TOOL_TRACE_KEY: restored_payload,
+        _TOOL_TRACE_KEY: trace,
     }, marked_fallback
 
 
@@ -795,37 +828,22 @@ def _layer_without_markers(layer: Mapping[str, Any], fallback: str | None) -> tu
     places = {index: {"body_line": line, "at": block} for (index, line), block in zip(body_lines, blocks)}
     payload = layer[_TOOL_TRACE_KEY]
     events = [{**event, **places.get(index, {})} for index, event in enumerate(payload["events"], start=1)]
-    remaining_html = "".join(pieces) + html[cursor:]
-    if not any(line.strip() for line in kept):
-        # Emit placeholder_body only for non-terminal streaming replies (never committed to the durable outbox),
-        # so rolling back to an older backend never breaks exact outbox recovery on terminal replies.
-        if (
-            kept
-            or other
-            or not body_lines
-            or len(body_lines) != len(blocks)
-            or remaining_html
-            or layer.get(STREAM_STATUS_KEY) not in NONTERMINAL_STREAM_STATUSES
-        ):
-            return None
-        placeholder = "Thinking..."
-        return {
-            **layer,
-            "body": placeholder,
-            "formatted_body": f"<p>{placeholder}</p>\n",
-            _TOOL_TRACE_KEY: {
-                **payload,
-                "version": _TOOL_TRACE_VERSION,
-                "placeholder_body": True,
-                "events": events,
-            },
-        }, placeholder
+    rest = "".join(pieces) + html[cursor:]
+    trace = {**payload, "version": _TOOL_TRACE_VERSION, "events": events}
+    if any(line.strip() for line in kept):
+        return {**layer, "body": "\n".join(kept), "formatted_body": rest, _TOOL_TRACE_KEY: trace}, "\n".join(other)
+    # A reply of calls alone keeps its lines, or a reader that puts no markers back would see no message. Only a
+    # progress write of a stream, sent outside the outbox, says it is thinking in their place: an outbox row is found
+    # again by its exact content, which the release before this one does not restore from ``placeholder_body``.
+    streams = layer.get(STREAM_STATUS_KEY) in NONTERMINAL_STREAM_STATUSES and DURABLE_DELIVERY_ID_KEY not in layer
+    if not streams or kept or other or rest:
+        return None
     return {
         **layer,
-        "body": "\n".join(kept),
-        "formatted_body": remaining_html,
-        _TOOL_TRACE_KEY: {**payload, "version": _TOOL_TRACE_VERSION, "events": events},
-    }, "\n".join(other)
+        "body": _PLACEHOLDER_BODY,
+        "formatted_body": f"<p>{_PLACEHOLDER_BODY}</p>\n",
+        _TOOL_TRACE_KEY: {**trace, "placeholder_body": True},
+    }, _PLACEHOLDER_BODY
 
 
 def _each_layer[C: Mapping[str, Any]](

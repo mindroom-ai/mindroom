@@ -18,7 +18,7 @@ import nio
 from mindroom import constants, interactive
 from mindroom import reply_lifecycle as rl
 from mindroom.cancellation import classify_cancel_source
-from mindroom.constants import ACTING_REQUESTER_KEY, ROUTE_EVENT_TYPE, SKIP_MENTIONS_KEY
+from mindroom.constants import ACTING_REQUESTER_KEY, DURABLE_DELIVERY_ID_KEY, ROUTE_EVENT_TYPE, SKIP_MENTIONS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
     MatrixDelivery,
@@ -37,7 +37,6 @@ from mindroom.event_journal.matrix_delivery import (
     ReplyRowEnqueuer,
     SendDelivery,
 )
-from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.event_journal.replies import (
     AppliedTransition,
     PreparedReplyRow,
@@ -185,7 +184,8 @@ class _PreparedWirePayload:
 
     content: dict[str, Any]
     continuation_payloads: tuple[dict[str, Any], ...] = ()
-    used_preview: bool = False
+    # Whether the content is a preview of a message too large for one event, not the message itself.
+    previews: bool = False
 
 
 def _result_with_segment_payloads(
@@ -1010,7 +1010,14 @@ class DeliveryGateway:
                 assert reply is not None
                 delivery_id = edit_delivery_id(delivery_id, reply.reply_sequence + 1)
             edits = stage is not DeliveryStage.INITIAL and event_id is not None
-            late_bound_edit = not edits and stage is not DeliveryStage.INITIAL
+            # A row without a target is wrapped as an edit when claimed only while an earlier row of the reply may
+            # still create the event; with none left it creates the event itself, sized as any other message.
+            late_bound_edit = (
+                stage is not DeliveryStage.INITIAL
+                and reply is not None
+                and event_id is None
+                and await self.deps.outbox.replies.has_unresolved_rows(reply.reply_id)
+            )
             payload: dict[str, Any] = (
                 build_edit_event_content(event_id=event_id, new_content=content, new_text=new_text or "")
                 if edits and event_id is not None
@@ -1026,26 +1033,22 @@ class DeliveryGateway:
                 late_bound_edit=late_bound_edit,
             )
             failure_reason = None
+            wrapped_text = new_text or str(content.get("body", ""))
             if isinstance(prepared, MatrixDeliveryFailure):
                 if prepared.kind is not MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
                     raise _DeliveryRefusedError(_matrix_delivery_failure_reason(prepared))
                 failure_reason = _matrix_delivery_failure_reason(prepared)
             else:
                 payload = prepared.content
+                if prepared.previews:
+                    # The fallback of an edit repeats its replacement, which now shows the start of the text.
+                    wrapped_text = str(payload.get("body", ""))
             return PreparedReplyRow(
                 payload=payload,
                 result=_result_with_segment_payloads(result, prepared),
                 permanent_failure_reason=failure_reason,
                 # Wrapped when the row is claimed, if the reply's create binds an event by then.
-                new_text=(
-                    (
-                        str(payload.get("body", ""))
-                        if not isinstance(prepared, MatrixDeliveryFailure) and prepared.used_preview
-                        else (new_text or str(content.get("body", "")))
-                    )
-                    if late_bound_edit
-                    else None
-                ),
+                new_text=wrapped_text if not edits and stage is not DeliveryStage.INITIAL else None,
             )
 
         recorded: list[ReplyRowEnqueue] = []
@@ -2276,6 +2279,9 @@ class DeliveryGateway:
         encrypted form before the payload is frozen, even while the room is
         currently plaintext. Direct sends keep standard plaintext sidecars and
         rebuild only if encryption changes during their upload.
+
+        A ``late_bound_edit`` is the replacement content of an edit that gets its
+        envelope when its row is claimed, so it is sized with that envelope.
         """
         existing = await self.deps.outbox.load_matrix_delivery(delivery_id=turn_id, stage=stage)
         if existing is not None and existing.attempted:
@@ -2328,7 +2334,7 @@ class DeliveryGateway:
                 prepare_for_encrypted_delivery=True,
                 edit_wrapper_budget=late_bound_edit,
             )
-            return _PreparedWirePayload(content=prepared, used_preview=prepared is not wire_content)
+            return _PreparedWirePayload(content=prepared, previews=prepared is not wire_content)
         except MatrixEventTooLargeError as error:
             return MatrixDeliveryFailure(MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE, str(error))
 

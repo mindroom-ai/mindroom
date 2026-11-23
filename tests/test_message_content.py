@@ -454,8 +454,10 @@ class TestResolvedMessageExtraction:
             client,
         )
 
-        # The text is hydrated, so this pins preservation rather than a skipped download.
-        assert event_source["content"]["body"] == "Full text"
+        # The text is hydrated, so this pins preservation rather than a skipped download: the payload is the edit's
+        # replacement, which takes no relation of its own either.
+        assert event_source["content"]["m.new_content"] == {"msgtype": "m.text", "body": "Full text"}
+        assert event_source["content"]["body"] == "* Full text"
         event_info = EventInfo.from_event(event_source)
         assert event_info.is_edit is True
         assert event_info.original_event_id == "$original"
