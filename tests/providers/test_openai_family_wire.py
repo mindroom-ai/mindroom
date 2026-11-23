@@ -3729,13 +3729,14 @@ async def test_openrouter_gemini_preserves_authored_cache_control_on_tool_text_p
 
 @pytest.mark.asyncio
 async def test_openrouter_gemini_request_log_redacts_secrets_inside_wrapped_tool_results(tmp_path: Path) -> None:
-    """Request logging redacts decoded JSON-wrapped tool text while keeping the outbound wire body intact."""
+    """Request logging redacts decoded wrapped tool text once, keeping valid JSON and non-secret text intact."""
     log_dir = tmp_path / "request-logs"
     built = _Built(tmp_path, {"provider": "openrouter", "id": "google/gemini-4-neon", "api_key": "k"}, _chat_reply())
     provider = pipeline_provider(built.adapter, log_dir=log_dir)
     json_payload = '{"password": "synthetic-json-value", "public": "ok"}'
     kv_payload = "password=synthetic-kv-value\nnext=ok"
-    assistant = Message(role="assistant", content="", tool_calls=_calls("call_1", "call_2"))
+    quoted_payload = 'password="synthetic-quoted-value" followed by public text'
+    assistant = Message(role="assistant", content="", tool_calls=_calls("call_1", "call_2", "call_3"))
     json_tool = Message(role="tool", content=json_payload, tool_call_id="call_1", tool_name="get_weather")
     multipart_tool = Message(
         role="tool",
@@ -3744,45 +3745,81 @@ async def test_openrouter_gemini_request_log_redacts_secrets_inside_wrapped_tool
         tool_name="get_weather",
         images=[Image(content=b"\x89PNG\r\n\x1a\n", mime_type="image/png")],
     )
+    quoted_tool = Message(role="tool", content=quoted_payload, tool_call_id="call_3", tool_name="get_weather")
 
-    await complete(provider, ModelRequest(messages=[_user(), assistant, json_tool, multipart_tool]))
+    await complete(provider, ModelRequest(messages=[_user(), assistant, json_tool, multipart_tool, quoted_tool]))
 
     wire_messages = built.body()["messages"]
     assert json.loads(wire_messages[2]["content"]) == {"result": json_payload}
     assert json.loads(wire_messages[3]["content"][0]["text"]) == {"result": kv_payload}
+    assert json.loads(wire_messages[4]["content"]) == {"result": quoted_payload}
 
     log_files = list(log_dir.glob("llm-requests-*.jsonl"))
     assert len(log_files) == 1
     logged_text = log_files[0].read_text(encoding="utf-8")
     assert "synthetic-json-value" not in logged_text
     assert "synthetic-kv-value" not in logged_text
+    assert "synthetic-quoted-value" not in logged_text
     request_record = json.loads(logged_text.splitlines()[0])
     logged_messages = request_record["body"]["messages"]
     assert json.loads(logged_messages[2]["content"]) == {
         "result": '{"password": "***redacted***", "public": "ok"}',
     }
-    assert "***redacted***" in json.loads(logged_messages[3]["content"][0]["text"])["result"]
+    assert json.loads(logged_messages[3]["content"][0]["text"]) == {
+        "result": "password=***redacted***\nnext=ok",
+    }
+    assert json.loads(logged_messages[4]["content"]) == {
+        "result": 'password="***redacted***" followed by public text',
+    }
 
 
-def test_openrouter_gemini_context_key_distinguishes_wrapped_tool_route(tmp_path: Path) -> None:
-    """The context key records the OpenRouter Gemini wrapper flag so pre-upgrade token anchors do not match."""
+@pytest.mark.asyncio
+async def test_request_log_does_not_parse_or_rewrite_non_gemini_tool_results(tmp_path: Path) -> None:
+    """Unrelated routes skip wrapped-tool decoding so formatting stays byte-exact and deep JSON never recurses."""
+    log_dir = tmp_path / "request-logs"
+    built = _Built(tmp_path, {"provider": "openrouter", "id": "z-ai/glm-5.3", "api_key": "k"}, _chat_reply())
+    provider = pipeline_provider(built.adapter, log_dir=log_dir)
+    compact_json = '{"result":"ok"}'
+    deeply_nested = '{"a":' * 1500 + "1" + "}" * 1500
+    assistant = Message(role="assistant", content="", tool_calls=_calls("call_1", "call_2"))
+    compact_tool = Message(role="tool", content=compact_json, tool_call_id="call_1", tool_name="get_weather")
+    deep_tool = Message(role="tool", content=deeply_nested, tool_call_id="call_2", tool_name="get_weather")
+
+    await complete(provider, ModelRequest(messages=[_user(), assistant, compact_tool, deep_tool]))
+
+    log_files = list(log_dir.glob("llm-requests-*.jsonl"))
+    assert len(log_files) == 1
+    request_record = json.loads(log_files[0].read_text(encoding="utf-8").splitlines()[0])
+    logged_messages = request_record["body"]["messages"]
+    assert logged_messages[2]["content"] == compact_json
+    assert logged_messages[3]["content"] == deeply_nested
+
+
+def test_openrouter_gemini_context_key_records_wrapper_flag(tmp_path: Path) -> None:
+    """The OpenRouter Gemini route records its wrapper flag in ``RequestParts`` so pre-upgrade anchors miss."""
+    from mindroom.token_counting.requests import RequestParts  # noqa: PLC0415
+
     runtime = _runtime(tmp_path)
     gemini = build_provider(
         ModelConfig(provider="openrouter", id="google/gemini-4-neon", api_key="k"),
         runtime,
     )
-    overridden_to_glm = build_provider(
-        ModelConfig(
-            provider="openrouter",
-            id="google/gemini-4-neon",
-            api_key="k",
-            extra_kwargs={"extra_body": {"model": "z-ai/glm-5.3"}},
-        ),
+    glm = build_provider(
+        ModelConfig(provider="openrouter", id="z-ai/glm-5.3", api_key="k"),
         runtime,
     )
+    assert isinstance(gemini, ChatAdapter)
+    assert isinstance(glm, ChatAdapter)
     request = ModelRequest(messages=[_user()])
+    gemini_parts = RequestParts(gemini.token_counter)
+    glm_parts = RequestParts(glm.token_counter)
 
-    assert gemini.context_key(request) != overridden_to_glm.context_key(request)
+    gemini._parts(replace(request, messages=()), 0, gemini_parts)
+    glm._parts(replace(request, messages=()), 0, glm_parts)
+
+    assert "openrouter_gemini_tool_results" in gemini_parts.flags
+    assert "openrouter_gemini_tool_results" not in glm_parts.flags
+    assert gemini.context_key(request) != glm.context_key(request)
 
 
 @pytest.mark.asyncio

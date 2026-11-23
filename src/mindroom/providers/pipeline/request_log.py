@@ -25,7 +25,7 @@ from mindroom.redaction import redact_sensitive_data
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import AsyncIterator, Mapping, Sequence
     from pathlib import Path
 
     from mindroom.config.models import DebugConfig
@@ -55,49 +55,105 @@ def _attribution(context: Mapping[str, Any]) -> dict[str, Any]:
     return {name: context[name] for name in REQUEST_ATTRIBUTION_FIELDS if name in context}
 
 
+_OPENROUTER_PROVIDER = "OpenRouter"
+_OPENROUTER_GEMINI_MODEL_PREFIXES = ("google/gemini-", "~google/gemini-")
 _WRAPPED_TOOL_RESULT_KEYS = frozenset({"result", "error"})
 
 
-def _redact_wrapped_tool_text(text: str) -> str:
-    """Redact the decoded text inside a JSON-wrapped ``{"result": ...}`` / ``{"error": ...}`` tool string.
+def _is_openrouter_gemini_request(provider: str, body: Mapping[str, Any], model_id: str) -> bool:
+    if provider != _OPENROUTER_PROVIDER:
+        return False
+    candidate = body.get("model")
+    effective_model = candidate if isinstance(candidate, str) and candidate else model_id
+    return effective_model.casefold().startswith(_OPENROUTER_GEMINI_MODEL_PREFIXES)
 
-    OpenRouter Gemini tool results travel as a JSON-encoded object string whose escaped quotes and newlines hide
-    credential patterns (such as ``"password": "..."``) from plain-text redaction; redacting the decoded string
-    before re-encoding preserves the wire shape in the log without leaking secrets.
-    """
+
+def _decode_wrapped_tool_text(text: str) -> dict[str, str] | None:
+    """Return the decoded ``{"result": ...}`` or ``{"error": ...}`` dict for a wrapped tool string, else None."""
     if not text.startswith("{"):
-        return text
+        return None
     try:
         decoded = json.loads(text)
-    except ValueError:
-        return text
+    except (ValueError, RecursionError):
+        return None
     if not isinstance(decoded, dict) or len(decoded) != 1:
-        return text
+        return None
     ((key, inner),) = decoded.items()
     if key not in _WRAPPED_TOOL_RESULT_KEYS or not isinstance(inner, str):
-        return text
-    redacted = redact_sensitive_data(inner)
-    return json.dumps({key: redacted}, ensure_ascii=False)
+        return None
+    return {key: inner}
 
 
-def _redact_wrapped_tool_results(body: Any) -> Any:  # noqa: ANN401 - json_safe request body
-    """Redact JSON-wrapped ``role: "tool"`` contents inside a detached ``json_safe`` body copy."""
+def _unwrap_tool_results_for_redaction(body: Any) -> list[tuple[int, int | None]]:  # noqa: ANN401 - json_safe copy
+    """Decode JSON-wrapped tool strings in a detached ``json_safe`` body copy so redaction runs once on plain text.
+
+    OpenRouter Gemini tool results travel as JSON-encoded ``{"result": ...}`` / ``{"error": ...}`` strings whose
+    escaped quotes and newlines hide or distort credential patterns during text redaction. Decoding before
+    ``redact_sensitive_data`` and re-encoding afterwards redacts once without corrupting the logged JSON envelope.
+    """
     if not isinstance(body, dict):
-        return body
+        return []
     messages = body.get("messages")
     if not isinstance(messages, list):
-        return body
-    for message in messages:
+        return []
+    wrapped_positions: list[tuple[int, int | None]] = []
+    for msg_idx, message in enumerate(messages):
         if not isinstance(message, dict) or message.get("role") != "tool":
             continue
         content = message.get("content")
         if isinstance(content, str):
-            message["content"] = _redact_wrapped_tool_text(content)
+            if (decoded := _decode_wrapped_tool_text(content)) is not None:
+                message["content"] = decoded
+                wrapped_positions.append((msg_idx, None))
         elif isinstance(content, list):
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
-                    part["text"] = _redact_wrapped_tool_text(part["text"])
-    return body
+            for part_idx, part in enumerate(content):
+                if (
+                    isinstance(part, dict)
+                    and part.get("type") == "text"
+                    and isinstance(part.get("text"), str)
+                    and (decoded := _decode_wrapped_tool_text(part["text"])) is not None
+                ):
+                    part["text"] = decoded
+                    wrapped_positions.append((msg_idx, part_idx))
+    return wrapped_positions
+
+
+def _rewrap_redacted_tool_results(payload: Any, wrapped_positions: Sequence[tuple[int, int | None]]) -> None:  # noqa: ANN401
+    """Re-encode decoded tool dicts in a redacted request record back into their wire JSON-string form."""
+    if not wrapped_positions or not isinstance(payload, dict):
+        return
+    body = payload.get("body")
+    if not isinstance(body, dict):
+        return
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return
+    for msg_idx, part_idx in wrapped_positions:
+        if msg_idx >= len(messages) or not isinstance(message := messages[msg_idx], dict):
+            continue
+        if part_idx is None:
+            content = message.get("content")
+            if isinstance(content, dict):
+                message["content"] = json.dumps(content, ensure_ascii=False)
+        else:
+            content = message.get("content")
+            if isinstance(content, list) and part_idx < len(content) and isinstance(part := content[part_idx], dict):
+                text = part.get("text")
+                if isinstance(text, dict):
+                    part["text"] = json.dumps(text, ensure_ascii=False)
+
+
+class _LoggedRequestRecord(dict[str, Any]):
+    """Request-log dict carrying positions of decoded tool envelopes to re-encode after redaction."""
+
+    def __init__(
+        self,
+        data: Mapping[str, Any],
+        *,
+        wrapped_tool_positions: Sequence[tuple[int, int | None]],
+    ) -> None:
+        super().__init__(data)
+        self.wrapped_tool_positions = tuple(wrapped_tool_positions)
 
 
 def _write_request_record(
@@ -105,6 +161,7 @@ def _write_request_record(
     body: Mapping[str, Any],
     log: RequestLog,
     *,
+    provider: str,
     model_id: str,
     model_params: dict[str, Any],
     deferred_tool_names: list[str],
@@ -116,19 +173,23 @@ def _write_request_record(
     Serializing the whole conversation and tool schemas takes long enough to stall the event loop, so the record is
     built in the writer thread; the adapter sends the body only after the write, so nothing edits it meanwhile.
     """
-    _write_line(
-        path,
-        {
-            "timestamp": datetime.now().astimezone().isoformat(),
-            "request_log_id": request_log_id,
-            **context,
-            "model_name": log.model_name,
-            "model_id": model_id,
-            "body": _redact_wrapped_tool_results(json_safe(body)),
-            "deferred_tool_names": deferred_tool_names,
-            "model_params": model_params,
-        },
+    safe_body = json_safe(body)
+    wrapped_positions = (
+        _unwrap_tool_results_for_redaction(safe_body) if _is_openrouter_gemini_request(provider, body, model_id) else []
     )
+    record: dict[str, Any] = {
+        "timestamp": datetime.now().astimezone().isoformat(),
+        "request_log_id": request_log_id,
+        **context,
+        "model_name": log.model_name,
+        "model_id": model_id,
+        "body": safe_body,
+        "deferred_tool_names": deferred_tool_names,
+        "model_params": model_params,
+    }
+    if wrapped_positions:
+        record = _LoggedRequestRecord(record, wrapped_tool_positions=wrapped_positions)
+    _write_line(path, record)
 
 
 def _daily_log_path(log_dir: str | None, storage_root: Path, now: datetime) -> Path:
@@ -138,12 +199,15 @@ def _daily_log_path(log_dir: str | None, storage_root: Path, now: datetime) -> P
 
 def _write_line(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    redacted = redact_sensitive_data(payload)
+    if isinstance(payload, _LoggedRequestRecord) and payload.wrapped_tool_positions:
+        _rewrap_redacted_tool_results(redacted, payload.wrapped_tool_positions)
     # One write per record: with a separate newline write, a large record reaches the file in more than one
     # write(2) (text chunks of about 8 KiB before Python 3.14, the 128 KiB buffer on 3.14), so another model call's
     # record could land between them on the same line. Each record gets its own O_APPEND handle, and on a local
     # file system the kernel appends each write(2) whole, so one write per record keeps every record on its own line.
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(redact_sensitive_data(payload)) + "\n")
+        handle.write(json.dumps(redacted) + "\n")
 
 
 def _log_usage(
@@ -214,6 +278,7 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
                     log_path,
                     body,
                     log,
+                    provider=inner.identity.provider,
                     model_id=inner.identity.id,
                     model_params=inner.model_params,
                     deferred_tool_names=deferred_tool_names,
