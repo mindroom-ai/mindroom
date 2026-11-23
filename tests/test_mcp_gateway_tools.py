@@ -165,6 +165,7 @@ async def test_agent_query_finds_later_selection_after_default_result_limit(cont
         ("scheduler", "list_schedules"),
         ("thread_model", "list_models"),
         ("thread_summary", "set_thread_summary"),
+        ("triggers", "list_triggers"),
         ("usage_stats", "get_my_usage"),
         ("usage_stats", "get_my_private_usage"),
     ],

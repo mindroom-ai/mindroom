@@ -70,6 +70,7 @@ _DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
         "external_trigger_manager",
         "self_config",
         "skill_manage",
+        "triggers",
     },
 )
 
