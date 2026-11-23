@@ -15,6 +15,7 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.custom_tools.job import JobTools
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal.models import EventClass, EventKind, InboundEvent
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
@@ -1254,5 +1255,79 @@ async def test_held_notice_names_subagent_title_caps_list_and_mentions_only_requ
             assert mentioned_agents == []
             assert am_i_mentioned is False
             assert has_non_agent_mentions is True
+    finally:
+        await runtime.shutdown()
+
+
+async def test_held_notice_escapes_markdown_and_html_in_titles(tmp_path: Path) -> None:
+    """Markdown and HTML in job titles render as literal text while keeping the intentional requester pill."""
+    runtime = await tool_job_runtime(tmp_path)
+    bot = _admitting_bot()
+    coordinator = job_coordinator(tmp_path, runtime, bot)
+    key = _key(job_owner())
+    last = _follow_up_event_id(key, [], _FOLLOW_UP_LIMIT)
+    tricky_title = "**bold** [click](https://evil.example) [@general](https://matrix.to/#/@mindroom_general:example.org) <img src=x>"
+    try:
+        with patch(_SEND, AsyncMock()) as send:
+            await _ended(
+                runtime,
+                "a1b2c3d4" + "0" * 56,
+                BackgroundOutcome("completed", "done"),
+                source_event_id=last,
+                tool_name="research",
+                kind="delegation",
+                adapter={"child": {"title": tricky_title}},
+            )
+            await coordinator._admit_follow_ups(runtime)
+            send.assert_awaited_once()
+            content = send.await_args.args[2]
+            formatted = content["formatted_body"]
+            assert content["msgtype"] == "m.text"
+            assert content["m.mentions"] == {"user_ids": [key.requester_id]}
+            assert formatted.count("<a ") == 1
+            assert f'<a href="https://matrix.to/#/{key.requester_id}">{key.requester_id}</a>' in formatted
+            assert "<strong>" not in formatted
+            assert "<img" not in formatted
+            assert "&lt;img src=x&gt;" in formatted
+            assert "**bold** [click](https://evil.example)" in formatted
+    finally:
+        await runtime.shutdown()
+
+
+async def test_held_notice_for_managed_agent_requester_stays_unmentioned_notice(tmp_path: Path) -> None:
+    """When the requester is a managed agent account, post an unmentioned m.notice so it cannot wake that agent."""
+    runtime = await tool_job_runtime(tmp_path)
+    bot = _admitting_bot()
+    coordinator = job_coordinator(tmp_path, runtime, bot)
+    config = Config(
+        agents={"helper": AgentConfig(display_name="Helper"), "general": AgentConfig(display_name="General")},
+    )
+    persist_entity_accounts(config, coordinator.runtime_paths)
+    coordinator.config_provider = lambda: config
+    agent_requester = entity_identity_registry(config, coordinator.runtime_paths).current_id("helper").full_id
+    owner = replace(job_owner(), requester_id=agent_requester)
+    key = _key(owner)
+    last = _follow_up_event_id(key, [], _FOLLOW_UP_LIMIT)
+    try:
+        with patch(_SEND, AsyncMock()) as send:
+            await _ended(
+                runtime,
+                "c6256cac" + "1" * 56,
+                BackgroundOutcome("completed", "done"),
+                owner=owner,
+                source_event_id=last,
+                tool_name="research",
+                kind="delegation",
+                adapter={"child": {"title": "Audit worker"}},
+            )
+            await coordinator._admit_follow_ups(runtime)
+            send.assert_awaited_once()
+            content = send.await_args.args[2]
+            assert content["msgtype"] == "m.notice"
+            assert "m.mentions" not in content
+            assert content["io.mindroom.conversation"] is True
+            assert agent_requester not in content["body"]
+            assert "Audit worker (`c6256cac`)" in content["body"]
+            assert "<a " not in content["formatted_body"]
     finally:
         await runtime.shutdown()

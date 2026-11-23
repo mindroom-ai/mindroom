@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import html
 from typing import TYPE_CHECKING
 
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
@@ -129,25 +130,43 @@ _MAX_HELD_NOTICE_JOBS = 5
 _SHORT_JOB_ID_LENGTH = 8
 
 
-def _held_job_label(job: BackgroundJob) -> str:
+def _held_job_parts(job: BackgroundJob) -> tuple[str, str]:
     child = job.adapter.get("child") if job.kind == "delegation" and isinstance(job.adapter, dict) else None
     title = child.get("title") if isinstance(child, dict) else None
     name = title.strip() if isinstance(title, str) and title.strip() else job.tool_name
-    return f"{name} (`{job.job_id[:_SHORT_JOB_ID_LENGTH]}`)"
+    return name, job.job_id[:_SHORT_JOB_ID_LENGTH]
 
 
-def held_notice(key: ConversationKey, jobs: Sequence[BackgroundJob]) -> tuple[str, str]:
-    """Return the transaction ID and text of the notice that the limit holds ``jobs``; follow-ups start at streak 1."""
+def held_notice(
+    key: ConversationKey,
+    jobs: Sequence[BackgroundJob],
+    *,
+    mention_plain: str = "",
+    mention_html: str = "",
+) -> tuple[str, str, str]:
+    """Return the transaction ID, plain text, and HTML of the notice that the limit holds ``jobs``."""
     noun = "job" if len(jobs) == 1 else "jobs"
     header = (
         f"⏸️ {len(jobs)} background {noun} finished while I was paused after "
         f"{_FOLLOW_UP_LIMIT} automatic follow-ups in a row without a message from you"
     )
+    lead_plain = f"{mention_plain} {header}" if mention_plain else header
+    lead_html = f"{mention_html} {html.escape(header)}" if mention_html else html.escape(header)
     if len(jobs) == 1:
-        body = f"{header}: {_held_job_label(jobs[0])}. Reply here to let me continue."
+        name, short_id = _held_job_parts(jobs[0])
+        body = f"{lead_plain}: {name} (`{short_id}`). Reply here to let me continue."
+        formatted = f"<p>{lead_html}: {html.escape(name)} (<code>{html.escape(short_id)}</code>). Reply here to let me continue.</p>"
     else:
-        lines = [f"- {_held_job_label(job)}" for job in jobs[:_MAX_HELD_NOTICE_JOBS]]
+        shown = [_held_job_parts(job) for job in jobs[:_MAX_HELD_NOTICE_JOBS]]
+        plain_lines = [f"- {name} (`{short_id}`)" for name, short_id in shown]
+        html_lines = [
+            f"<li>{html.escape(name)} (<code>{html.escape(short_id)}</code>)</li>" for name, short_id in shown
+        ]
         if (remaining := len(jobs) - _MAX_HELD_NOTICE_JOBS) > 0:
-            lines.append(f"- and {remaining} more")
-        body = f"{header}:\n" + "\n".join(lines) + "\n\nReply here to let me continue."
-    return _follow_up_event_id(key, jobs, 0), body
+            plain_lines.append(f"- and {remaining} more")
+            html_lines.append(f"<li>and {remaining} more</li>")
+        body = f"{lead_plain}:\n" + "\n".join(plain_lines) + "\n\nReply here to let me continue."
+        formatted = (
+            f"<p>{lead_html}:</p>\n<ul>\n" + "\n".join(html_lines) + "\n</ul>\n<p>Reply here to let me continue.</p>"
+        )
+    return _follow_up_event_id(key, jobs, 0), body, formatted

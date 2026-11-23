@@ -25,6 +25,7 @@ from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.mentions import format_user_mention
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.message_target import MessageTarget
+from mindroom.requester_identity import is_managed_entity_id
 from mindroom.tool_jobs.approvals import end_tool_call_approval, prune_job_approvals
 from mindroom.tool_jobs.authorization import locally_allowed
 from mindroom.tool_jobs.conversation import ConversationKey, unheld_jobs
@@ -46,7 +47,7 @@ from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     import nio
 
@@ -110,17 +111,30 @@ def _follow_up_candidates(jobs: Iterable[BackgroundJob]) -> dict[ConversationKey
     return {key: tuple(groups[key]) for key in sorted(groups, key=_key_order)}
 
 
-async def _post_held_notice(client: nio.AsyncClient, key: ConversationKey, txn: str, text: str) -> bool:
+async def _post_held_notice(
+    client: nio.AsyncClient,
+    key: ConversationKey,
+    held: Sequence[BackgroundJob],
+    *,
+    mention_requester: bool,
+) -> bool:
     """Post the agent's notice that the limit holds jobs; a failed send is retried on a later pass, as the same transaction."""
-    # Mentioning only the human requester notifies them without waking any agent; as a conversation a room-level one is listed.
-    plain_mention, mentioned_user_ids, markdown_mention = format_user_mention(key.requester_id)
+    # Mention only non-managed requesters so a managed agent requester is not woken; as a conversation a room-level one is listed.
+    if mention_requester:
+        plain_mention, mentioned_user_ids, markdown_mention = format_user_mention(key.requester_id)
+        mention_html = markdown_to_html(markdown_mention).strip().removeprefix("<p>").removesuffix("</p>")
+        extra_content: dict[str, Any] = {CONVERSATION_CONTENT_KEY: True}
+    else:
+        plain_mention, mentioned_user_ids, mention_html = "", None, ""
+        extra_content = {"msgtype": "m.notice", CONVERSATION_CONTENT_KEY: True}
+    txn, body, formatted_body = held_notice(key, held, mention_plain=plain_mention, mention_html=mention_html)
     content = build_message_content(
-        f"{plain_mention} {text}",
-        formatted_body=markdown_to_html(f"{markdown_mention} {text}"),
+        body,
+        formatted_body=formatted_body,
         mentioned_user_ids=mentioned_user_ids,
         thread_event_id=key.thread_id,
         latest_thread_event_id=key.thread_id,
-        extra_content={CONVERSATION_CONTENT_KEY: True},
+        extra_content=extra_content,
     )
     delivered = await send_message_result(client, key.room_id, content, operation="send_job_hold", transaction_id=txn)
     return delivered is not None
@@ -514,8 +528,18 @@ class ToolJobRuntimeCoordinator:
                     self._admitted_follow_ups.add(follow_up_id)
                 due.add(follow_up_id)
             elif (held := held_jobs(ended)) and bot.client is not None:
-                notice_id, text = held_notice(key, held)
-                if notice_id in self._sent_notices or await _post_held_notice(bot.client, key, notice_id, text):
+                notice_id = held_notice(key, held)[0]
+                mention_requester = not is_managed_entity_id(
+                    key.requester_id,
+                    self.config_provider(),
+                    self.runtime_paths,
+                )
+                if notice_id in self._sent_notices or await _post_held_notice(
+                    bot.client,
+                    key,
+                    held,
+                    mention_requester=mention_requester,
+                ):
                     self._sent_notices[notice_id] = frozenset(job.job_id for job in held)
         # Forget follow-ups whose jobs were reported since, so a long-running process does not keep them all.
         self._admitted_follow_ups &= due
