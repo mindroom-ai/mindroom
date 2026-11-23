@@ -62,6 +62,7 @@ _TRANSPORT_KEYS = frozenset(
         "media_type",
         "mime_type",
         "image_url",
+        "video_url",
         "file_id",
         "file_data",
         "file_uri",

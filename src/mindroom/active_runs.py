@@ -38,6 +38,7 @@ class _ActiveRunLease:
     thread_id: str | None
     pauses: int = 0
     registered: bool = False
+    release_delay_seconds: float = 0.0
 
 
 _CURRENT_LEASE: ContextVar[_ActiveRunLease | None] = ContextVar("mindroom_active_run_lease", default=None)
@@ -70,6 +71,7 @@ class ActiveRunPublisher:
     heartbeat_seconds: float = _HEARTBEAT_SECONDS
     retry_backoffs: tuple[float, ...] = _RETRY_BACKOFFS
     _leases: dict[str, list[_ActiveRunLease]] = field(default_factory=dict, init=False)
+    _pending_releases: dict[_ActiveRunLease, asyncio.TimerHandle] = field(default_factory=dict, init=False)
     _published: dict[str, list[str | None] | None] = field(default_factory=dict, init=False)
     _dirty: dict[str, asyncio.Event] = field(default_factory=dict, init=False)
     _workers: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False)
@@ -95,24 +97,33 @@ class ActiveRunPublisher:
         token = _CURRENT_LEASE.set(lease)
         if active:
             self._register(lease)
+        failed = False
         try:
             yield lease
+        except BaseException:
+            failed = True
+            raise
         finally:
             _CURRENT_LEASE.reset(token)
-            self._unregister(lease)
+            self._unregister(lease, immediate=failed)
 
     @asynccontextmanager
     async def activate(self, lease: _ActiveRunLease) -> AsyncIterator[None]:
         """Register a deferred lease once progress becomes visible and unregister it on exit."""
         self._register(lease)
+        failed = False
         try:
             yield
+        except BaseException:
+            failed = True
+            raise
         finally:
-            self._unregister(lease)
+            self._unregister(lease, immediate=failed)
 
     def cancel(self) -> None:
         """Synchronously stop background workers and sweeps without yielding."""
         self._closing = True
+        self._cancel_pending_releases()
         for task in (*self._workers.values(), *self._sweep_tasks):
             task.cancel()
         self._workers.clear()
@@ -151,6 +162,7 @@ class ActiveRunPublisher:
     async def shutdown(self, timeout_seconds: float = 1.5) -> None:
         """Cancel background workers and best-effort clear any non-empty or unacked rooms within ``timeout_seconds``."""
         self._closing = True
+        self._cancel_pending_releases()
         tasks = [*self._workers.values(), *self._sweep_tasks]
         for task in tasks:
             task.cancel()
@@ -171,14 +183,36 @@ class ActiveRunPublisher:
         return [room_id for room_id, state in self._published.items() if state != [] and room_id not in self._refused]
 
     def _register(self, lease: _ActiveRunLease) -> None:
+        if (handle := self._pending_releases.pop(lease, None)) is not None:
+            handle.cancel()
         if not lease.registered:
             lease.registered = True
             self._leases.setdefault(lease.room_id, []).append(lease)
             self._wake(lease.room_id)
 
-    def _unregister(self, lease: _ActiveRunLease) -> None:
+    def _unregister(self, lease: _ActiveRunLease, *, immediate: bool = False) -> None:
         if not lease.registered:
             return
+        delay = 0.0 if immediate or self._closing else lease.release_delay_seconds
+        if delay > 0:
+            if lease not in self._pending_releases:
+                self._pending_releases[lease] = asyncio.get_running_loop().call_later(
+                    delay,
+                    self._finish_delayed_unregister,
+                    lease,
+                )
+            return
+        if (handle := self._pending_releases.pop(lease, None)) is not None:
+            handle.cancel()
+        self._remove_lease(lease)
+        self._wake(lease.room_id)
+
+    def _finish_delayed_unregister(self, lease: _ActiveRunLease) -> None:
+        if self._pending_releases.pop(lease, None) is not None:
+            self._remove_lease(lease)
+            self._wake(lease.room_id)
+
+    def _remove_lease(self, lease: _ActiveRunLease) -> None:
         lease.registered = False
         leases = self._leases.get(lease.room_id)
         if leases is not None:
@@ -186,7 +220,12 @@ class ActiveRunPublisher:
                 leases.remove(lease)
             if not leases:
                 self._leases.pop(lease.room_id, None)
-        self._wake(lease.room_id)
+
+    def _cancel_pending_releases(self) -> None:
+        for lease, handle in list(self._pending_releases.items()):
+            handle.cancel()
+            self._remove_lease(lease)
+        self._pending_releases.clear()
 
     def _wake(self, room_id: str) -> None:
         if self._closing:

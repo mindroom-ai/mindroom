@@ -30,7 +30,7 @@ from mindroom.llm.provider import (
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import ThinkTagSplitter
 from mindroom.providers.names import is_openrouter_gemini_model
-from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part
+from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part, chat_video_part
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.tool_ids import chat_call_id, reformat_tool_call_ids
 from mindroom.providers.tool_policy import disable_tool_selection, disables_tools
@@ -225,12 +225,13 @@ def _chat_message(
     formatted = {key: value for key, value in values.items() if value is not None}
     images = [part for image in message.images or () if (part := chat_image_part(image, provider=provider)) is not None]
     audio = [part for clip in message.audio or () if (part := chat_audio_part(clip, provider=provider)) is not None]
+    videos = [part for video in message.videos or () if (part := chat_video_part(video, provider=provider)) is not None]
     files = [part for file in message.files or () if (part := chat_file_part(file, provider=provider)) is not None]
-    if images or audio or files:
+    if images or audio or videos or files:
         content = formatted.get("content")
         text = [{"type": "text", "text": content}] if isinstance(content, str) else list(content or [])
         # The text goes first, then each kind of media in the order it came, as on every wire.
-        formatted["content"] = [*text, *images, *audio, *files]
+        formatted["content"] = [*text, *images, *audio, *videos, *files]
     elif message.content is None and message.role != "tool":
         formatted["content"] = ""
     reasoning_details = (message.provider_data or {}).get("reasoning_details") if message.role == "assistant" else None

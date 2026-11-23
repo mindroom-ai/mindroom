@@ -11,24 +11,37 @@ from unittest.mock import AsyncMock
 import nio
 import pytest
 
-from mindroom.active_runs import ActiveRunPublisher, pause_current_active_run
+from mindroom.active_runs import _CURRENT_LEASE, ActiveRunPublisher, pause_current_active_run
 from mindroom.agent_cli.cli_approval_waits import CliApprovalWaits, CliWaiters
+from mindroom.coalescing.ingress_lanes import IngressRetryError
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import EventJournalStore
+from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import _MANAGED_ROOM_EVENT_POWER_LEVELS
 from mindroom.matrix.event_types import ACTIVE_RUNS_EVENT_TYPE
+from mindroom.matrix.identity import MatrixID
+from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.participation import ParticipationGate
 from mindroom.reply_turn.request import response_typing_indicator
+from mindroom.response_lifecycle import ResponseLifecycleCoordinator
 from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, SYNC_RESTART_SHUTDOWN
 from mindroom.secret_request_cards import _job_awaits_requester
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.response_runner_helpers import _bot, _plain_request, _target
+from mindroom.turns.facts import IngressFacts
+from mindroom.voice import ingress as voice_ingress_module
+from mindroom.voice.ingress import VoiceIngress, VoiceIngressDeps
+from tests.bot_helpers import make_test_agent_bot
+from tests.conftest import TEST_PASSWORD, test_runtime_paths
+from tests.response_runner_helpers import _bot, _config, _envelope, _plain_request, _target
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
 
@@ -626,3 +639,248 @@ async def test_bot_prepare_for_sync_shutdown_fence_and_restart_clear(tmp_path: P
         await _wait_for_puts(restart_client, 1)
         await restart_bot.prepare_for_sync_shutdown(shutdown_intent=SYNC_RESTART_SHUTDOWN)
     assert [_threads_of(put) for put in restart_client.puts] == [["$t2"], []]
+
+
+_VOICE_PREPARED = PreparedIngress(
+    sender="@user:localhost",
+    event_id="$voice-1",
+    body="hi",
+    source={"content": {"msgtype": "m.text", "body": "hi"}},
+    payload_trusted=True,
+)
+
+
+def _gated_voice_prepare(
+    exc: type[BaseException] | None = None,
+) -> tuple[asyncio.Event, asyncio.Event, Callable[..., Awaitable[PreparedIngress]]]:
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def _prepare(*_a: object, **_kw: object) -> PreparedIngress:
+        started.set()
+        await release.wait()
+        if exc is not None:
+            raise exc
+        return _VOICE_PREPARED
+
+    return started, release, _prepare
+
+
+async def _admit_voice(
+    tmp_path: Path,
+    *,
+    active_runs: ActiveRunPublisher | None,
+    prepare_impl: Callable[..., Awaitable[PreparedIngress]],
+    event_id: str = "$voice-1",
+    thread_id: str | None = "$root",
+    voice_enabled: bool = True,
+    prepared: object | None = None,
+    may_be_for_me: bool = True,
+    can_publish_active_run: Callable[[str], bool] | None = None,
+) -> asyncio.Task[object]:
+    config = _config(tmp_path)
+    config.voice.enabled = voice_enabled
+    resolver = SimpleNamespace(
+        coalescing_thread_id=AsyncMock(return_value=thread_id),
+        build_message_target=lambda *, room_id, thread_id, reply_to_event_id, **_kw: MessageTarget.resolve(
+            room_id=room_id,
+            thread_id=thread_id,
+            reply_to_event_id=reply_to_event_id,
+            thread_start_root_event_id=reply_to_event_id if thread_id is None else None,
+        ),
+        build_envelope=lambda *, event, target, **_kw: _envelope(target, source_event_id=event.event_id),
+    )
+    readiness = SimpleNamespace(
+        prepared_source=AsyncMock(return_value=prepared),
+        prepare=AsyncMock(side_effect=prepare_impl),
+    )
+    extra_deps: dict[str, Any] = (
+        {"can_publish_active_run": can_publish_active_run} if can_publish_active_run is not None else {}
+    )
+    deps = VoiceIngressDeps(
+        runtime=cast("Any", SimpleNamespace(config=config)),
+        logger=get_logger("test.voice_active_runs"),
+        runtime_paths=test_runtime_paths(tmp_path),
+        matrix_id=MatrixID.parse("@bot:localhost"),
+        resolver=cast("Any", resolver),
+        response_runner=cast("Any", SimpleNamespace(lifecycle_coordinator=ResponseLifecycleCoordinator())),
+        delivery_gateway=cast("Any", SimpleNamespace()),
+        readiness=cast("Any", readiness),
+        turn_policy=cast("Any", SimpleNamespace(not_for_this_agent=lambda *_a: not may_be_for_me)),
+        active_runs=active_runs,
+        **extra_deps,
+    )
+    tasks: list[asyncio.Task[object]] = []
+    event = SimpleNamespace(
+        event_id=event_id,
+        sender="@user:localhost",
+        source={"content": {"msgtype": "m.audio", "body": "clip.ogg"}},
+        server_timestamp=1_000,
+    )
+    facts = IngressFacts(physical_sender="@user:localhost", source_kind="message", lane_requester_id="@user:localhost")
+    await VoiceIngress(deps).admit(
+        nio.MatrixRoom("!room:localhost", "@bot:localhost"),
+        cast("Any", event),
+        facts,
+        dispatch_timing=None,
+        ticket=cast("Any", SimpleNamespace(admit_ready=lambda _k, task, **_kw: tasks.append(task))),
+    )
+    return tasks[0]
+
+
+@pytest.mark.asyncio
+async def test_delayed_release_cancel_shutdown_and_error() -> None:
+    """Delayed release clears immediately on error and cancels cleanly on cancel() and shutdown()."""
+    client = _FakeClient()
+    publisher = ActiveRunPublisher(get_client=lambda: client, user_id="@bot:localhost")
+
+    async def fail_tracked() -> None:
+        async with publisher.track("!r:localhost", "$t1") as lease:
+            await _wait_for_puts(client, 1)
+            lease.release_delay_seconds = 5.0
+            raise RuntimeError
+
+    with pytest.raises(RuntimeError):
+        await fail_tracked()
+    assert _CURRENT_LEASE.get() is None
+    assert not publisher._pending_releases
+    await _wait_workers_done(publisher)
+    assert _threads_of(client.puts[-1]) == []
+
+    async with publisher.track("!r:localhost", "$t2") as lease:
+        await _wait_for_puts(client, 3)
+        lease.release_delay_seconds = 0.04
+    assert len(publisher._pending_releases) == 1
+    before_cancel = len(client.puts)
+    publisher.cancel()
+    assert not publisher._pending_releases
+    assert not publisher._leases
+    await asyncio.sleep(0.07)
+    assert len(client.puts) == before_cancel
+
+    publisher.reopen()
+    async with publisher.track("!r:localhost", "$t3") as lease:
+        await _wait_for_puts(client, before_cancel + 1)
+        lease.release_delay_seconds = 5.0
+    await publisher.shutdown(timeout_seconds=1.0)
+    assert not publisher._pending_releases
+    assert not publisher._leases
+    assert _threads_of(client.puts[-1]) == []
+    after_shutdown = len(client.puts)
+    publisher.reopen()
+    await asyncio.sleep(0.02)
+    assert len(client.puts) == after_shutdown
+
+
+@pytest.mark.asyncio
+async def test_voice_ingress_active_run_tracking_handoff_and_immediate_clear(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VoiceIngress publishes during transcription, bridges replies, and clears immediately otherwise."""
+    client = _FakeClient()
+    publisher = ActiveRunPublisher(get_client=lambda: client, user_id="@bot:localhost")
+    monkeypatch.setattr(voice_ingress_module, "_VOICE_HANDOFF_GRACE_SECONDS", 0.06)
+
+    # 1. Thread reply publishes in-flight and bridges into reply lease without an intermediate [] write.
+    started, release, prepare = _gated_voice_prepare()
+    task = await _admit_voice(tmp_path / "t1", active_runs=publisher, prepare_impl=prepare, thread_id="$root")
+    await started.wait()
+    await _wait_for_puts(client, 1)
+    assert _threads_of(client.puts[0]) == ["$root"]
+    release.set()
+    await task
+    assert _CURRENT_LEASE.get() is None
+    assert len(publisher._pending_releases) == 1
+    async with publisher.track("!room:localhost", "$root"):
+        await asyncio.sleep(0.09)
+        assert not publisher._pending_releases
+        assert len(client.puts) == 1
+    await _wait_workers_done(publisher)
+    assert [_threads_of(p) for p in client.puts] == [["$root"], []]
+
+    # 2. New root voice message publishes its own event ID and clears once handoff grace expires.
+    started, release, prepare = _gated_voice_prepare()
+    task = await _admit_voice(
+        tmp_path / "t2",
+        active_runs=publisher,
+        prepare_impl=prepare,
+        event_id="$v-root",
+        thread_id=None,
+    )
+    await started.wait()
+    await _wait_for_puts(client, 3)
+    assert _threads_of(client.puts[-1]) == ["$v-root"]
+    release.set()
+    await task
+    await _wait_workers_done(publisher)
+    assert _threads_of(client.puts[-1]) == []
+
+    # 3. may_be_for_me=False, prepare errors, and cancellation clear immediately (0 grace).
+    monkeypatch.setattr(voice_ingress_module, "_VOICE_HANDOFF_GRACE_SECONDS", 5.0)
+    for name, may_be_for_me, exc_type in (
+        ("other", False, None),
+        ("err", True, IngressRetryError),
+        ("cancel", True, asyncio.CancelledError),
+    ):
+        started, release, prepare = _gated_voice_prepare(exc_type)
+        before = len(client.puts)
+        task = await _admit_voice(
+            tmp_path / name,
+            active_runs=publisher,
+            prepare_impl=prepare,
+            may_be_for_me=may_be_for_me,
+        )
+        await started.wait()
+        await _wait_for_puts(client, before + 1)
+        if exc_type is asyncio.CancelledError:
+            task.cancel()
+        else:
+            release.set()
+        if exc_type is not None:
+            with pytest.raises(exc_type):
+                await task
+        else:
+            await task
+        assert not publisher._pending_releases
+        await _wait_workers_done(publisher)
+        assert _threads_of(client.puts[-1]) == []
+
+
+@pytest.mark.asyncio
+async def test_voice_ingress_active_run_skip_conditions_and_bot_wiring(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """VoiceIngress skips publishing when checkpointed, voice-disabled, contact-room, or router-owned."""
+    client = _FakeClient()
+    publisher = ActiveRunPublisher(get_client=lambda: client, user_id="@bot:localhost")
+    skip_cases: tuple[dict[str, Any], ...] = (
+        {"active_runs": publisher, "prepared": SimpleNamespace(thread_id="$root", coalescing_thread_id="$root")},
+        {"active_runs": publisher, "voice_enabled": False},
+        {"active_runs": publisher, "can_publish_active_run": lambda _r: False},
+        {"active_runs": None},
+    )
+    for idx, kwargs in enumerate(skip_cases):
+        await (
+            await _admit_voice(tmp_path / f"skip-{idx}", prepare_impl=AsyncMock(return_value=_VOICE_PREPARED), **kwargs)
+        )
+    await _wait_workers_done(publisher)
+    assert client.puts == []
+    assert not publisher._pending_releases
+
+    bot = _bot(tmp_path / "agent-bot")
+    assert bot._voice_ingress.deps.active_runs is bot._active_runs
+    assert bot._voice_ingress.deps.can_publish_active_run("!room:localhost") is True
+    monkeypatch.setattr("mindroom.bot.contact_room", lambda *_a: (object(), "a"))
+    assert bot._voice_ingress.deps.can_publish_active_run("!contact:localhost") is False
+    router = make_test_agent_bot(
+        AgentMatrixUser(
+            agent_name=ROUTER_AGENT_NAME,
+            password=TEST_PASSWORD,
+            display_name="Router",
+            user_id="@mindroom_router:localhost",
+        ),
+        _config(tmp_path / "router-bot"),
+        rooms=["!room:localhost"],
+    )
+    assert router._voice_ingress.deps.active_runs is None
