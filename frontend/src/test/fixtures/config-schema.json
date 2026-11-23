@@ -5757,6 +5757,19 @@
           "title": "Enabled",
           "type": "boolean"
         },
+        "dictation": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Enable streaming composer dictation via voice.stt (defaults to voice.enabled)",
+          "title": "Dictation"
+        },
         "visible_router_echo": {
           "default": true,
           "description": "Post the transcript of a voice message before the reply",
@@ -6478,6 +6491,7 @@
       "$ref": "#/$defs/VoiceConfig",
       "default": {
         "enabled": false,
+        "dictation": null,
         "visible_router_echo": true,
         "stt": {
           "api_key": null,

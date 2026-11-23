@@ -57,6 +57,7 @@ Without `api_key` or `credentials_service`, MindRoom sends a non-secret placehol
 | Field | Default | Description |
 |-------|---------|-------------|
 | `voice.enabled` | `false` | Transcribe voice messages; when `false`, voice messages use the [raw-audio fallback](#voice-fallback-no-stt-available). |
+| `voice.dictation` | `null` (follows `voice.enabled`) | Enable streaming composer dictation via `voice.stt`; set `true` or `false` to override `voice.enabled`. |
 | `voice.visible_router_echo` | `true` | Post the transcript of a voice message before the reply ("Voice Transcript" in the dashboard); see [Voice Message Processing](#voice-message-processing). |
 | `voice.stt.provider` | `openai` | `openai` or `openai_compatible`. |
 | `voice.stt.model` | `gpt-transcribe` | STT model name. |
@@ -111,6 +112,16 @@ Attachment IDs follow the context-scoping rules in [File & Video Attachments](at
 If the audio cannot be downloaded from Matrix, the fallback text is dispatched without an attachment.
 
 Without a transcript, routing has little text to work with, so use explicit `@mentions` or reply in an existing thread in rooms with several responders.
+
+## Streaming Composer Dictation
+
+Clients with a Matrix client session can dictate directly into the message composer using the same `voice.stt` backend.
+Dictation is enabled whenever `voice.dictation` is `true`, or when `voice.dictation` is unset and `voice.enabled` is `true`, provided `voice.stt` resolves an endpoint and credential.
+
+- `GET /api/dictation/v1/status` (optional `?room_id=...`): returns `{"enabled": true, "maxSegmentSeconds": 30, "maxSegmentBytes": 1000000}` for authorized users, or `404` when dictation or STT is unavailable.
+- `POST /api/dictation/v1/transcribe`: accepts `multipart/form-data` strictly in memory with `audio` (16 kHz mono 16-bit PCM WAV, up to 30 seconds and 1,000,000 bytes) and optional `prompt`, `language`, and `room_id`, returning `{"text": "...", "seconds": ...}`.
+
+Dictation audio and transcripts are never written to disk or logged, and provider token usage is recorded under `voice_dictation`.
 
 ## Limitations and Tips
 

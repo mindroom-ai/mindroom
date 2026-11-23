@@ -8,6 +8,7 @@ import re
 import time
 import uuid
 from collections import OrderedDict
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -59,6 +60,7 @@ logger = get_logger(__name__)
 # The overall deadline also bounds upload time and responses that keep trickling data.
 _STT_TOTAL_TIMEOUT_SECONDS = 60.0
 _STT_HTTP_TIMEOUT = httpx.Timeout(_STT_TOTAL_TIMEOUT_SECONDS, connect=5.0, write=10.0, pool=5.0)
+_STT_PROMPT_MAX_CHARS = 800
 _STT_AUDIO_EXTENSION_BY_MIME_TYPE = {
     "audio/aac": ".aac",
     "audio/flac": ".flac",
@@ -578,6 +580,35 @@ async def _transcribe_audio(
     return transcript.text
 
 
+def resolve_stt_connection(config: Config, runtime_paths: RuntimePaths) -> tuple[str, str] | None:
+    """Return the configured STT endpoint URL and bearer key, or None when no key can be resolved."""
+    stt_base_url = normalize_speech_base_url(config.voice.stt.host)
+    url = f"{stt_base_url or OPENAI_BASE_URL_DEFAULT}/audio/transcriptions"
+
+    api_key = config.voice.stt.api_key
+    if api_key is None:
+        credentials_service = config.voice.stt.credentials_service
+        if credentials_service is not None:
+            api_key = get_api_key_for_service(credentials_service, runtime_paths)
+        elif config.voice.stt.provider == "openai_compatible":
+            api_key = LOCAL_OPENAI_API_KEY_DEFAULT
+    if not api_key:
+        return None
+    return url, api_key
+
+
+def _stt_http_timeout(timeout_seconds: float) -> httpx.Timeout:
+    """Return an httpx timeout matching ``timeout_seconds`` without widening short connect/write/pool caps."""
+    if timeout_seconds == _STT_HTTP_TIMEOUT.read:
+        return _STT_HTTP_TIMEOUT
+    return httpx.Timeout(
+        timeout_seconds,
+        connect=min(5.0, timeout_seconds),
+        write=min(10.0, timeout_seconds),
+        pool=min(5.0, timeout_seconds),
+    )
+
+
 async def transcribe_speech(
     audio: bytes,
     config: Config,
@@ -585,6 +616,9 @@ async def transcribe_speech(
     *,
     mime_type: str | None = "audio/wav",
     language: str | None = None,
+    prompt: str | None = None,
+    timeout_seconds: float | None = None,
+    http_client: httpx.AsyncClient | None = None,
 ) -> SpeechTranscript | None:
     """Transcribe audio with the ``voice.stt`` speech service, through its OpenAI-compatible API.
 
@@ -596,25 +630,22 @@ async def transcribe_speech(
         runtime_paths: Explicit runtime context for STT credential lookup
         mime_type: Declared MIME type of the audio
         language: Language code hinted to the speech service, over one in its ``extra_kwargs``
+        prompt: Optional context prompt combined with any configured ``extra_kwargs.prompt``
+        timeout_seconds: Optional total deadline in seconds (defaults to ``_STT_TOTAL_TIMEOUT_SECONDS``)
+        http_client: Optional pooled HTTP client to reuse without closing
 
     Returns:
         The transcript, or None if transcription failed
 
     """
+    effective_timeout = _STT_TOTAL_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
     try:
-        stt_base_url = normalize_speech_base_url(config.voice.stt.host)
-        url = f"{stt_base_url or OPENAI_BASE_URL_DEFAULT}/audio/transcriptions"
-
-        api_key = config.voice.stt.api_key
-        if api_key is None:
-            credentials_service = config.voice.stt.credentials_service
-            if credentials_service is not None:
-                api_key = get_api_key_for_service(credentials_service, runtime_paths)
-            elif config.voice.stt.provider == "openai_compatible":
-                api_key = LOCAL_OPENAI_API_KEY_DEFAULT
-        if not api_key:
+        connection = resolve_stt_connection(config, runtime_paths)
+        if connection is None:
             logger.error("No OpenAI-compatible STT API key configured for speech-to-text")
             return None
+        url, api_key = connection
+        stt_base_url = normalize_speech_base_url(config.voice.stt.host)
         headers = {"Authorization": f"Bearer {api_key}"}
 
         filename, upload_mime_type = _stt_upload_filename_and_mime_type(mime_type)
@@ -623,19 +654,25 @@ async def transcribe_speech(
         form_data.update(config.voice.stt.extra_kwargs)
         if language is not None:
             form_data["language"] = language
+        cleaned_prompt = prompt.strip() if prompt is not None else ""
+        if cleaned_prompt:
+            existing_prompt = form_data.get("prompt")
+            base_prompt = existing_prompt.strip() if isinstance(existing_prompt, str) else ""
+            combined_prompt = f"{base_prompt} {cleaned_prompt}".strip() if base_prompt else cleaned_prompt
+            form_data["prompt"] = combined_prompt[-_STT_PROMPT_MAX_CHARS:]
 
-        async with (
-            asyncio.timeout(_STT_TOTAL_TIMEOUT_SECONDS),
-            httpx.AsyncClient(timeout=_STT_HTTP_TIMEOUT) as http_client,
-        ):
+        http_timeout = _stt_http_timeout(effective_timeout)
+        async with asyncio.timeout(effective_timeout), AsyncExitStack() as stack:
+            if http_client is not None:
+                client = http_client
+                post_kwargs: dict[str, Any] = {"timeout": http_timeout}
+            else:
+                client = await stack.enter_async_context(httpx.AsyncClient(timeout=http_timeout))
+                post_kwargs = {}
             request_started_at = int(time.time())
-            response = await http_client.post(url, headers=headers, files=files, data=form_data)
+            response = await client.post(url, headers=headers, files=files, data=form_data, **post_kwargs)
             if response.status_code != 200:
-                logger.error(
-                    "stt_api_error",
-                    status_code=response.status_code,
-                    error=response.text,
-                )
+                logger.error("stt_api_error", status_code=response.status_code)
                 return None
 
             result = response.json()
@@ -653,7 +690,7 @@ async def transcribe_speech(
         return SpeechTranscript(text=result.get("text", "").strip(), usage=usage)
 
     except TimeoutError:
-        logger.warning("stt_transcription_timeout", timeout_seconds=_STT_TOTAL_TIMEOUT_SECONDS)
+        logger.warning("stt_transcription_timeout", timeout_seconds=effective_timeout)
         return None
     except Exception:
         logger.exception("Error transcribing audio")
