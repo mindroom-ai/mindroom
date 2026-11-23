@@ -31,6 +31,7 @@ from tests.test_delegation_direct_audit import _identity
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -213,125 +214,91 @@ async def test_persona_round_trips_through_session_record(tmp_path: Path) -> Non
     ]
 
 
+async def _save_handle(
+    paths: RuntimePaths,
+    config: Config,
+    owner: ToolExecutionIdentity,
+    subagent_id: str,
+    *,
+    depth: int = 1,
+) -> None:
+    child = replace(
+        _self_child(config, owner),
+        delegation_id=subagent_id,
+        subagent_id=subagent_id,
+        session_id=f"delegate:leader:leader:{subagent_id}",
+        depth=depth,
+        status="completed",
+        result="Done",
+    )
+    await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
+
+
 @pytest.mark.asyncio
 async def test_subagent_prefix_resolves_only_unique_owned_handle(tmp_path: Path) -> None:
     """An 8+ lowercase hex prefix resolves one owned handle, ignores foreign handles, and rejects ambiguity/invalid input."""
-    paths = _runtime_paths(tmp_path)
+    paths, owner = _runtime_paths(tmp_path), _identity()
     config = Config(agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])})
-    owner = _identity()
-    other_owner = replace(owner, requester_id="@other:example.org")
-    other_room = replace(owner, room_id="!other:example.org")
-    shared_prefix = "c6256cac"
-    own_first = f"{shared_prefix}{'1' * 24}"
-    own_second = f"{shared_prefix}{'2' * 24}"
-    foreign_id = f"{shared_prefix}{'9' * 24}"
-    deeper_id = f"{shared_prefix}{'8' * 24}"
+    prefix = "c6256cac"
+    own_first, own_second, foreign_id, deeper_id = (f"{prefix}{d * 24}" for d in ("1", "2", "9", "8"))
 
-    async def save_child(subagent_id: str, child_owner: ToolExecutionIdentity, *, depth: int = 1) -> None:
-        child = replace(
-            _self_child(config, child_owner),
-            delegation_id=subagent_id,
-            subagent_id=subagent_id,
-            session_id=f"delegate:leader:leader:{subagent_id}",
-            depth=depth,
-            status="completed",
-            result="Done",
-        )
-        await reserve_subagent_turn(child, owner=child_owner, runtime_paths=paths)
+    await _save_handle(paths, config, owner, own_first)
+    await _save_handle(paths, config, replace(owner, requester_id="@other:example.org"), foreign_id)
+    await _save_handle(paths, config, replace(owner, room_id="!other:example.org"), f"{prefix}{'7' * 24}")
+    await _save_handle(paths, config, owner, deeper_id, depth=2)
 
-    await save_child(own_first, owner)
-    await save_child(foreign_id, other_owner)
-    await save_child(f"{shared_prefix}{'7' * 24}", other_room)
-    await save_child(deeper_id, owner, depth=2)
-
-    # Foreign/other-conversation/other-depth handles with the same prefix are neither matched nor counted.
-    resolved = await resolve_subagent_id(shared_prefix, owner=owner, runtime_paths=paths, depth=0)
-    assert resolved == own_first
-
-    # Another caller with only our handle cannot match or learn of it.
+    assert await resolve_subagent_id(prefix, owner=owner, runtime_paths=paths, depth=0) == own_first
     with pytest.raises(SubagentSessionError, match="not available"):
         await resolve_subagent_id(
-            shared_prefix,
+            prefix,
             owner=replace(owner, requester_id="@stranger:example.org"),
             runtime_paths=paths,
             depth=0,
         )
-
-    # Too-short, uppercase, or non-hex prefixes are refused without globbing.
-    for invalid in (shared_prefix[:7], shared_prefix.upper(), "../c6256cac", "c6256ca*", "zzzzzzzz"):
+    for invalid in (prefix[:7], prefix.upper(), "../c6256cac", "c6256ca*", "zzzzzzzz"):
         with pytest.raises(SubagentSessionError, match="not available"):
             await resolve_subagent_id(invalid, owner=owner, runtime_paths=paths, depth=0)
 
-    # Ambiguous prefix lists only this caller's own full IDs, never foreign handles.
-    await save_child(own_second, owner)
+    await _save_handle(paths, config, owner, own_second)
     with pytest.raises(SubagentSessionError) as exc_info:
-        await resolve_subagent_id(shared_prefix, owner=owner, runtime_paths=paths, depth=0)
-    message = str(exc_info.value)
-    assert f'Subagent ID prefix "{shared_prefix}" matches several subagents in this conversation:' in message
-    assert own_first in message
-    assert own_second in message
-    assert foreign_id not in message
-    assert deeper_id not in message
+        await resolve_subagent_id(prefix, owner=owner, runtime_paths=paths, depth=0)
+    msg = str(exc_info.value)
+    assert f'Subagent ID prefix "{prefix}" matches several subagents in this conversation:' in msg
+    assert {own_first in msg, own_second in msg, foreign_id not in msg, deeper_id not in msg} == {True}
 
 
 @pytest.mark.asyncio
 async def test_subagent_prefix_skips_corrupt_and_symlinked_siblings(tmp_path: Path) -> None:
     """Corrupt, missing-key, symlinked-json, and symlinked-lock sibling handles are skipped cleanly."""
-    paths = _runtime_paths(tmp_path)
+    paths, owner = _runtime_paths(tmp_path), _identity()
     config = Config(agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])})
-    owner = _identity()
+    root, prefix = subagent_sessions_dir(paths), "deadbeef"
+    clean_own = f"{prefix}{'1' * 24}"
+    await _save_handle(paths, config, owner, clean_own)
+    (root / f"{prefix}{'2' * 24}.json").write_text("{not valid json")
+    (root / f"{prefix}{'3' * 24}.json").write_text("{}")
 
-    async def save_child(subagent_id: str) -> None:
-        child = replace(
-            _self_child(config, owner),
-            delegation_id=subagent_id,
-            subagent_id=subagent_id,
-            session_id=f"delegate:leader:leader:{subagent_id}",
-            depth=1,
-            status="completed",
-            result="Done",
-        )
-        await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
+    async def symlink_handle(subagent_id: str) -> Path:
+        await _save_handle(paths, config, owner, subagent_id)
+        target = tmp_path / f"{subagent_id}.external.json"
+        (root / f"{subagent_id}.json").replace(target)
+        (root / f"{subagent_id}.json").symlink_to(target)
+        return target
 
-    clean_prefix = "deadbeef"
-    clean_own = f"{clean_prefix}{'1' * 24}"
-    await save_child(clean_own)
-    sessions_root = subagent_sessions_dir(paths)
-    (sessions_root / f"{clean_prefix}{'2' * 24}.json").write_text("{not valid json")
-    (sessions_root / f"{clean_prefix}{'3' * 24}.json").write_text("{}")
+    # Target carries the symlink stem as stored subagent_id so only the symlink guard rejects it.
+    ext = await symlink_handle(f"{prefix}{'4' * 24}")
+    for digit, suffix in (("5", ".lock"), ("6", ".active.lock")):
+        sid = f"{prefix}{digit * 24}"
+        await _save_handle(paths, config, owner, sid)
+        (root / f"{sid}{suffix}").unlink(missing_ok=True)
+        (root / f"{sid}{suffix}").symlink_to(ext)
+    assert await resolve_subagent_id(prefix, owner=owner, runtime_paths=paths, depth=0) == clean_own
 
-    # Symlink target carries the symlink's own stem as its stored subagent_id, so only the symlink guard rejects it.
-    symlink_sibling_id = f"{clean_prefix}{'4' * 24}"
-    await save_child(symlink_sibling_id)
-    external_sibling = tmp_path / f"{symlink_sibling_id}.external.json"
-    (sessions_root / f"{symlink_sibling_id}.json").replace(external_sibling)
-    (sessions_root / f"{symlink_sibling_id}.json").symlink_to(external_sibling)
-
-    # Sibling whose .lock or .active.lock is a symlink is skipped instead of creating false ambiguity.
-    lock_symlink_id = f"{clean_prefix}{'5' * 24}"
-    await save_child(lock_symlink_id)
-    sibling_lock = sessions_root / f"{lock_symlink_id}.lock"
-    sibling_lock.unlink(missing_ok=True)
-    sibling_lock.symlink_to(external_sibling)
-    active_lock_symlink_id = f"{clean_prefix}{'6' * 24}"
-    await save_child(active_lock_symlink_id)
-    (sessions_root / f"{active_lock_symlink_id}.active.lock").symlink_to(external_sibling)
-
-    assert await resolve_subagent_id(clean_prefix, owner=owner, runtime_paths=paths, depth=0) == clean_own
-
-    # A symlinked handle alone (with matching stored subagent_id) is never resolved or followed.
-    only_symlink_prefix = "cafebabe"
-    only_symlink_id = f"{only_symlink_prefix}{'0' * 24}"
-    await save_child(only_symlink_id)
-    external_only = tmp_path / f"{only_symlink_id}.external.json"
-    (sessions_root / f"{only_symlink_id}.json").replace(external_only)
-    (sessions_root / f"{only_symlink_id}.json").symlink_to(external_only)
+    await symlink_handle(f"cafebabe{'0' * 24}")
     with pytest.raises(SubagentSessionError, match="not available"):
-        await resolve_subagent_id(only_symlink_prefix, owner=owner, runtime_paths=paths, depth=0)
+        await resolve_subagent_id("cafebabe", owner=owner, runtime_paths=paths, depth=0)
 
-    # A symlink on the resolved handle's lock file is still refused when loading it.
-    lock_path = sessions_root / f"{clean_own}.lock"
-    lock_path.unlink(missing_ok=True)
-    lock_path.symlink_to(external_only)
+    (root / f"{clean_own}.lock").unlink(missing_ok=True)
+    (root / f"{clean_own}.lock").symlink_to(ext)
     with pytest.raises(SubagentSessionError, match="symlinks"):
         await load_subagent(clean_own, owner=owner, config=config, runtime_paths=paths, depth=0)

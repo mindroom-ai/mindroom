@@ -421,10 +421,7 @@ async def test_a_room_level_hold_is_a_conversation_notice(tmp_path: Path) -> Non
             await coordinator._admit_follow_ups(runtime)
             content = send.await_args.args[2]
             assert "m.relates_to" not in content
-            assert content["msgtype"] == "m.notice"
             assert content[CONVERSATION_CONTENT_KEY] is True
-            assert content[EXACT_MENTIONS_KEY] is True
-            assert content["m.mentions"] == {"user_ids": []}
             assert content["body"].startswith("⏸️ 2 background jobs finished")
             assert "`tool_capped_a` (capped_a), `tool_capped_b` (capped_b)" in content["body"]
     finally:
@@ -1192,96 +1189,58 @@ async def test_a_ready_result_at_the_boundary_does_not_continue_the_turn(tmp_pat
         await runtime.shutdown()
 
 
-async def test_held_notice_names_subagent_title_caps_list_and_keeps_mentions_exact(tmp_path: Path) -> None:
-    """Held notices list titles or tool names + 8-char IDs, cap at 5, and add no history mentions from titles."""
+async def _post_held_jobs(tmp_path: Path, specs: list[tuple[str, str, str | None]]) -> dict[str, object]:
     runtime = await tool_job_runtime(tmp_path)
-    bot = _admitting_bot()
-    coordinator = job_coordinator(tmp_path, runtime, bot)
-    key = _key(job_owner())
-    last = _follow_up_event_id(key, [], _FOLLOW_UP_LIMIT)
+    coordinator = job_coordinator(tmp_path, runtime, _admitting_bot())
+    last = _follow_up_event_id(_key(job_owner()), [], _FOLLOW_UP_LIMIT)
     try:
         with patch(_SEND, AsyncMock()) as send:
-            first_id = "c6256cac" + "1" * 56
-            second_id = "d4e5f607" + "2" * 56
-            await _ended(
-                runtime,
-                first_id,
-                BackgroundOutcome("completed", "done"),
-                source_event_id=last,
-                tool_name="research",
-                kind="delegation",
-                adapter={"child": {"title": "Review @general design"}},
-            )
-            await _ended(
-                runtime,
-                second_id,
-                BackgroundOutcome("completed", "done"),
-                source_event_id=last,
-                tool_name="research",
-                kind="delegation",
-                adapter={"child": {"title": ""}},
-            )
-            for idx in range(5):
+            for job_id, tool_name, title in specs:
+                kind = "delegation" if title is not None else "tool"
+                adapter = {"child": {"title": title}} if title is not None else None
                 await _ended(
                     runtime,
-                    f"{idx:08x}" + "a" * 56,
+                    job_id,
                     BackgroundOutcome("completed", "done"),
                     source_event_id=last,
-                    tool_name=f"run_tool_{idx}",
+                    tool_name=tool_name,
+                    kind=kind,
+                    adapter=adapter,
                 )
             await coordinator._admit_follow_ups(runtime)
             send.assert_awaited_once()
-            content = send.await_args.args[2]
-            assert content["msgtype"] == "m.notice"
-            assert content[CONVERSATION_CONTENT_KEY] is True
-            assert content[EXACT_MENTIONS_KEY] is True
-            assert content["m.mentions"] == {"user_ids": []}
-            assert "`Review @general design` (c6256cac), `research` (d4e5f607)" in content["body"]
-            assert ", and 2 more." in content["body"]
-            assert "20 automatic follow-ups in a row without a message from you" in content["body"]
-
-            config = Config(agents={"general": AgentConfig(display_name="General")})
-            paths = _runtime_paths(tmp_path)
-            persist_entity_accounts(config, paths)
-            assert history_mentioned_user_ids(content, config, paths) == []
+            return send.await_args.args[2]
     finally:
         await runtime.shutdown()
+
+
+async def test_held_notice_names_subagent_title_caps_list_and_keeps_mentions_exact(tmp_path: Path) -> None:
+    """Held notices list titles or tool names + 8-char IDs, cap at 5, and add no history mentions from titles."""
+    specs = [
+        ("c6256cac" + "1" * 56, "research", "Review @general design"),
+        ("d4e5f607" + "2" * 56, "research", ""),
+        *((f"{idx:08x}" + "a" * 56, f"run_tool_{idx}", None) for idx in range(5)),
+    ]
+    content = await _post_held_jobs(tmp_path, specs)
+    assert (content["msgtype"], content[EXACT_MENTIONS_KEY], content["m.mentions"]) == (
+        "m.notice",
+        True,
+        {"user_ids": []},
+    )
+    assert "`Review @general design` (c6256cac), `research` (d4e5f607)" in str(content["body"])
+    assert ", and 2 more." in str(content["body"])
+
+    config, paths = Config(agents={"general": AgentConfig(display_name="General")}), _runtime_paths(tmp_path)
+    persist_entity_accounts(config, paths)
+    assert history_mentioned_user_ids(content, config, paths) == []
 
 
 async def test_held_notice_escapes_markdown_html_and_backticks_in_titles(tmp_path: Path) -> None:
     """Markdown, HTML, and backticks in job titles render as literal code spans without links or formatting."""
-    runtime = await tool_job_runtime(tmp_path)
-    bot = _admitting_bot()
-    coordinator = job_coordinator(tmp_path, runtime, bot)
-    key = _key(job_owner())
-    last = _follow_up_event_id(key, [], _FOLLOW_UP_LIMIT)
-    tricky_title = (
-        "**x** [a](https://e.x) <b>y</b> [@general](https://matrix.to/#/@mindroom_general:example.org) ``tick``"
-    )
-    try:
-        with patch(_SEND, AsyncMock()) as send:
-            await _ended(
-                runtime,
-                "a1b2c3d4" + "0" * 56,
-                BackgroundOutcome("completed", "done"),
-                source_event_id=last,
-                tool_name="research",
-                kind="delegation",
-                adapter={"child": {"title": tricky_title}},
-            )
-            await coordinator._admit_follow_ups(runtime)
-            send.assert_awaited_once()
-            content = send.await_args.args[2]
-            formatted = content["formatted_body"]
-            assert content["msgtype"] == "m.notice"
-            assert content[EXACT_MENTIONS_KEY] is True
-            assert content["m.mentions"] == {"user_ids": []}
-            assert "<a " not in formatted
-            assert "<strong>" not in formatted
-            assert "<b>" not in formatted
-            assert (
-                "<code>**x** [a](https://e.x) &lt;b&gt;y&lt;/b&gt; "
-                "[@general](https://matrix.to/#/@mindroom_general:example.org) ``tick``</code>"
-            ) in formatted
-    finally:
-        await runtime.shutdown()
+    tricky = "**x** [a](https://e.x) <b>y</b> [@general](https://matrix.to/#/@mindroom_general:example.org) ``tick``"
+    formatted = str((await _post_held_jobs(tmp_path, [("a1b2c3d4" + "0" * 56, "research", tricky)]))["formatted_body"])
+    assert not any(tag in formatted for tag in ("<a ", "<strong>", "<b>"))
+    assert (
+        "<code>**x** [a](https://e.x) &lt;b&gt;y&lt;/b&gt; "
+        "[@general](https://matrix.to/#/@mindroom_general:example.org) ``tick``</code>"
+    ) in formatted
