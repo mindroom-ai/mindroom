@@ -399,8 +399,9 @@ async def test_jobs_the_limit_holds_get_one_notice_of_the_agent(tmp_path: Path) 
             assert f'href="https://matrix.to/#/{key.requester_id}"' in content["formatted_body"]
             assert content["m.relates_to"]["event_id"] == key.thread_id
             assert content["body"] == (
-                f"{key.requester_id} ⏸️ 1 background job finished while I was paused after "
-                "20 automatic follow-ups in a row without a message from you: tool_capped (`capped`). "
+                f"[{key.requester_id}](https://matrix.to/#/{key.requester_id}) "
+                "⏸️ 1 background job finished while I was paused after "
+                "20 automatic follow-ups in a row without a message from you: `tool_capped` (capped). "
                 "Reply here to let me continue."
             )
     finally:
@@ -424,9 +425,10 @@ async def test_a_room_level_hold_is_a_conversation_notice(tmp_path: Path) -> Non
             assert content["msgtype"] == "m.text"
             assert content["m.mentions"] == {"user_ids": [owner.requester_id]}
             assert content["io.mindroom.conversation"] is True
-            assert content["body"].startswith(f"{owner.requester_id} ⏸️ 2 background jobs finished")
-            assert "- tool_capped_a (`capped_a`)" in content["body"]
-            assert "- tool_capped_b (`capped_b`)" in content["body"]
+            assert content["body"].startswith(
+                f"[{owner.requester_id}](https://matrix.to/#/{owner.requester_id}) ⏸️ 2 background jobs finished",
+            )
+            assert "`tool_capped_a` (capped_a), `tool_capped_b` (capped_b)" in content["body"]
     finally:
         await runtime.shutdown()
 
@@ -1235,9 +1237,8 @@ async def test_held_notice_names_subagent_title_caps_list_and_mentions_only_requ
             assert content["msgtype"] == "m.text"
             assert content["m.mentions"] == {"user_ids": [key.requester_id]}
             assert f'href="https://matrix.to/#/{key.requester_id}"' in content["formatted_body"]
-            assert "- Review @general design (`c6256cac`)" in content["body"]
-            assert "- research (`d4e5f607`)" in content["body"]
-            assert "- and 2 more" in content["body"]
+            assert "`Review @general design` (c6256cac), `research` (d4e5f607)" in content["body"]
+            assert ", and 2 more." in content["body"]
             assert "20 automatic follow-ups in a row without a message from you" in content["body"]
 
             # Mentioning only the human requester dispatches no agent even when a title contains @general.
@@ -1266,7 +1267,9 @@ async def test_held_notice_escapes_markdown_and_html_in_titles(tmp_path: Path) -
     coordinator = job_coordinator(tmp_path, runtime, bot)
     key = _key(job_owner())
     last = _follow_up_event_id(key, [], _FOLLOW_UP_LIMIT)
-    tricky_title = "**bold** [click](https://evil.example) [@general](https://matrix.to/#/@mindroom_general:example.org) <img src=x>"
+    tricky_title = (
+        "**x** [a](https://e.x) <b>y</b> [@general](https://matrix.to/#/@mindroom_general:example.org) `tick`"
+    )
     try:
         with patch(_SEND, AsyncMock()) as send:
             await _ended(
@@ -1287,9 +1290,11 @@ async def test_held_notice_escapes_markdown_and_html_in_titles(tmp_path: Path) -
             assert formatted.count("<a ") == 1
             assert f'<a href="https://matrix.to/#/{key.requester_id}">{key.requester_id}</a>' in formatted
             assert "<strong>" not in formatted
-            assert "<img" not in formatted
-            assert "&lt;img src=x&gt;" in formatted
-            assert "**bold** [click](https://evil.example)" in formatted
+            assert "<b>" not in formatted
+            assert (
+                "<code>**x** [a](https://e.x) &lt;b&gt;y&lt;/b&gt; "
+                "[@general](https://matrix.to/#/@mindroom_general:example.org) &#x27;tick&#x27;</code>"
+            ) in formatted
     finally:
         await runtime.shutdown()
 
@@ -1327,7 +1332,7 @@ async def test_held_notice_for_managed_agent_requester_stays_unmentioned_notice(
             assert "m.mentions" not in content
             assert content["io.mindroom.conversation"] is True
             assert agent_requester not in content["body"]
-            assert "Audit worker (`c6256cac`)" in content["body"]
+            assert "`Audit worker` (c6256cac)" in content["body"]
             assert "<a " not in content["formatted_body"]
     finally:
         await runtime.shutdown()

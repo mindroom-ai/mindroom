@@ -23,7 +23,7 @@ from mindroom.event_journal import turn_rows
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.mentions import format_user_mention
-from mindroom.matrix.message_builder import build_message_content, markdown_to_html
+from mindroom.matrix.message_builder import build_message_content
 from mindroom.message_target import MessageTarget
 from mindroom.requester_identity import is_managed_entity_id
 from mindroom.tool_jobs.approvals import end_tool_call_approval, prune_job_approvals
@@ -47,7 +47,7 @@ from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping
 
     import nio
 
@@ -114,27 +114,19 @@ def _follow_up_candidates(jobs: Iterable[BackgroundJob]) -> dict[ConversationKey
 async def _post_held_notice(
     client: nio.AsyncClient,
     key: ConversationKey,
-    held: Sequence[BackgroundJob],
-    *,
-    mention_requester: bool,
+    txn: str,
+    text: str,
+    mentioned: list[str] | None = None,
 ) -> bool:
     """Post the agent's notice that the limit holds jobs; a failed send is retried on a later pass, as the same transaction."""
     # Mention only non-managed requesters so a managed agent requester is not woken; as a conversation a room-level one is listed.
-    if mention_requester:
-        plain_mention, mentioned_user_ids, markdown_mention = format_user_mention(key.requester_id)
-        mention_html = markdown_to_html(markdown_mention).strip().removeprefix("<p>").removesuffix("</p>")
-        extra_content: dict[str, Any] = {CONVERSATION_CONTENT_KEY: True}
-    else:
-        plain_mention, mentioned_user_ids, mention_html = "", None, ""
-        extra_content = {"msgtype": "m.notice", CONVERSATION_CONTENT_KEY: True}
-    txn, body, formatted_body = held_notice(key, held, mention_plain=plain_mention, mention_html=mention_html)
+    extra: dict[str, Any] = {CONVERSATION_CONTENT_KEY: True, **({"msgtype": "m.notice"} if mentioned is None else {})}
     content = build_message_content(
-        body,
-        formatted_body=formatted_body,
-        mentioned_user_ids=mentioned_user_ids,
+        text,
+        mentioned_user_ids=mentioned,
         thread_event_id=key.thread_id,
         latest_thread_event_id=key.thread_id,
-        extra_content=extra_content,
+        extra_content=extra,
     )
     delivered = await send_message_result(client, key.room_id, content, operation="send_job_hold", transaction_id=txn)
     return delivered is not None
@@ -528,17 +520,15 @@ class ToolJobRuntimeCoordinator:
                     self._admitted_follow_ups.add(follow_up_id)
                 due.add(follow_up_id)
             elif (held := held_jobs(ended)) and bot.client is not None:
-                notice_id = held_notice(key, held)[0]
-                mention_requester = not is_managed_entity_id(
-                    key.requester_id,
-                    self.config_provider(),
-                    self.runtime_paths,
-                )
+                managed = is_managed_entity_id(key.requester_id, self.config_provider(), self.runtime_paths)
+                _, mentioned, mention = ("", None, "") if managed else format_user_mention(key.requester_id)
+                notice_id, text = held_notice(key, held, mention)
                 if notice_id in self._sent_notices or await _post_held_notice(
                     bot.client,
                     key,
-                    held,
-                    mention_requester=mention_requester,
+                    notice_id,
+                    text,
+                    mentioned,
                 ):
                     self._sent_notices[notice_id] = frozenset(job.job_id for job in held)
         # Forget follow-ups whose jobs were reported since, so a long-running process does not keep them all.

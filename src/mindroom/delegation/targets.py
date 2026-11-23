@@ -18,7 +18,7 @@ from mindroom.delegation.personas import (
     resolve_persona_request,
 )
 from mindroom.delegation.recovery import load_settled_subagent
-from mindroom.delegation.sessions import SubagentSessionError, matches_subagent_id, resolve_subagent_id
+from mindroom.delegation.sessions import SUBAGENT_PREFIX_PATTERN, SubagentSessionError, resolve_subagent_id
 from mindroom.delegation.state import CONTINUE_SUBAGENT, display_title
 from mindroom.delegation.workers import dedicated_worker_refusal
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -119,7 +119,9 @@ async def resolve_follow_up_target(
         return "Cannot continue: subagent_id and message must be strings."
     if retained is not None:
         # A resumed call continues the child it started, whatever the caller's tools are now.
-        if not matches_subagent_id(retained.subagent_id, subagent_id):
+        if retained.subagent_id != subagent_id and not (
+            SUBAGENT_PREFIX_PATTERN.fullmatch(subagent_id) and retained.subagent_id.startswith(subagent_id)
+        ):
             msg = "Subagent ID no longer matches its retained requirement"
             raise RuntimeError(msg)
         return DelegationTarget(retained.child_agent_name, task, previous_child=retained)

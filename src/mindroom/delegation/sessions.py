@@ -29,18 +29,11 @@ if TYPE_CHECKING:
 _UNAVAILABLE = "Subagent ID is not available in this conversation."
 SUBAGENT_BUSY = "Subagent is busy or awaiting approval. Finish its current turn before sending a follow-up."
 _SUBAGENT_ID_PATTERN = re.compile(r"[a-f0-9]{32}")
-_SUBAGENT_PREFIX_PATTERN = re.compile(r"[a-f0-9]{8,31}")
+SUBAGENT_PREFIX_PATTERN = re.compile(r"[a-f0-9]{8,31}")
 
 
 class SubagentSessionError(ValueError):
     """A handle cannot be used by this caller or already owns another turn."""
-
-
-def matches_subagent_id(full_id: str, requested_id: str) -> bool:
-    """Return whether a requested full ID or valid 8..31-hex prefix matches ``full_id``."""
-    return full_id == requested_id or (
-        bool(_SUBAGENT_PREFIX_PATTERN.fullmatch(requested_id)) and full_id.startswith(requested_id)
-    )
 
 
 def _path(subagent_id: str, paths: RuntimePaths) -> Path:
@@ -84,7 +77,7 @@ async def resolve_subagent_id(
     """Resolve a full 32-hex subagent ID or a unique owned 8..31-hex prefix to the full ID."""
     if _SUBAGENT_ID_PATTERN.fullmatch(subagent_id):
         return subagent_id
-    if not _SUBAGENT_PREFIX_PATTERN.fullmatch(subagent_id) or not owner.session_id:
+    if not SUBAGENT_PREFIX_PATTERN.fullmatch(subagent_id) or not owner.session_id:
         raise SubagentSessionError(_UNAVAILABLE)
 
     def resolve() -> str:
@@ -98,10 +91,10 @@ async def resolve_subagent_id(
                 continue
             with suppress(SubagentSessionError, OSError, KeyError, TypeError, ValueError):
                 child = _read(path, owner)
-                if (child.subagent_id, child.caller_agent_name, child.depth) == (
-                    candidate,
-                    owner.agent_name,
-                    depth + 1,
+                if (
+                    child.subagent_id == candidate
+                    and child.caller_agent_name == owner.agent_name
+                    and child.depth == depth + 1
                 ):
                     matches.append(candidate)
         if len(matches) == 1:
