@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
-from mindroom.constants import CONVERSATION_CONTENT_KEY
+from mindroom.constants import CONVERSATION_CONTENT_KEY, EXACT_MENTIONS_KEY
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_child, reconcile_delegation
 from mindroom.delegation.continuation import continued_subagent_job
@@ -111,12 +111,17 @@ def _follow_up_candidates(jobs: Iterable[BackgroundJob]) -> dict[ConversationKey
 
 async def _post_held_notice(client: nio.AsyncClient, key: ConversationKey, txn: str, text: str) -> bool:
     """Post the agent's notice that the limit holds jobs; a failed send is retried on a later pass, as the same transaction."""
-    # An m.notice starts no turn; as a conversation a room-level one is listed, and a room-mode reply keeps its key.
+    # An m.notice starts no turn; exact empty mentions prevent job titles from adding agents to thread history.
     content = build_message_content(
         text,
         thread_event_id=key.thread_id,
         latest_thread_event_id=key.thread_id,
-        extra_content={"msgtype": "m.notice", CONVERSATION_CONTENT_KEY: True},
+        extra_content={
+            "msgtype": "m.notice",
+            CONVERSATION_CONTENT_KEY: True,
+            EXACT_MENTIONS_KEY: True,
+            "m.mentions": {"user_ids": []},
+        },
     )
     delivered = await send_message_result(client, key.room_id, content, operation="send_job_hold", transaction_id=txn)
     return delivered is not None

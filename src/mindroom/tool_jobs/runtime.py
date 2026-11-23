@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
@@ -52,6 +53,7 @@ type _BackgroundStatus = Literal["running", "awaiting_approval", "cancel_request
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "denied", "interrupted"})
 _RUNNING_STATUSES = frozenset({"running", "awaiting_approval"})
 _UNAVAILABLE = "Tool job is not available in this conversation."
+_JOB_PREFIX_PATTERN = re.compile(r"[a-f0-9]{8,63}")
 _JOB_SUMMARY_MAX_CHARS = 500
 # A reattaching call must name exactly the operation its job was admitted for.
 _ADMITTED_OPERATION = attrgetter("tool_name", "toolkit_name", "kind", "source_event_id", "source_kind", "adapter")
@@ -455,9 +457,23 @@ class ToolJobRuntime:
         """Whether a caller owns a job it may still access."""
         return self._owns(entry.job, owner, depth) and self._grant(entry.job) == "allowed"
 
+    def _resolve_entry(self, job_id: str, owner: ToolExecutionIdentity, depth: int) -> _Entry | None:
+        if (entry := self._entries.get(job_id)) is not None or not _JOB_PREFIX_PATTERN.fullmatch(job_id):
+            return entry
+        group = self._by_conversation.get(_conversation_key(self._canonical_owner(owner)), {})
+        ids = sorted(
+            cid
+            for cid, item in group.items()
+            if cid.startswith(job_id) and not _returned_inline(item) and self._visible(item, owner, depth)
+        )
+        if len(ids) > 1:
+            msg = f'Job ID prefix "{job_id}" matches several jobs in this conversation: {", ".join(ids)}. Pass the full ID.'
+            raise ValueError(msg)
+        return group[ids[0]] if ids else None
+
     def _entry(self, job_id: str, owner: ToolExecutionIdentity, depth: int) -> _Entry:
         self._ensure_open()
-        entry = self._entries.get(job_id)
+        entry = self._resolve_entry(job_id, owner, depth)
         if entry is None or not self._visible(entry, owner, depth):
             raise JobUnavailableError(_UNAVAILABLE)
         return entry
@@ -470,7 +486,7 @@ class ToolJobRuntime:
         call that may have run.
         """
         self._ensure_open()
-        entry = self._entries.get(job_id)
+        entry = self._resolve_entry(job_id, owner, depth)
         if entry is None or not self._owns(entry.job, owner, depth):
             raise JobUnavailableError(_UNAVAILABLE)
         grant = self._grant(entry.job)
@@ -889,6 +905,7 @@ class ToolJobRuntime:
         retained = False
         async with self._lock:
             entry, readable = self._waited_entry(job_id, owner, depth)
+            job_id = entry.job.job_id
             if not readable and claim is not None and entry.claim == claim:
                 # A wait that cannot read its job returns no claim, so it gives back the one it was handed.
                 entry.claim = None
