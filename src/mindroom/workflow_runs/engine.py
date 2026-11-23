@@ -1294,7 +1294,10 @@ class WorkflowEngine:
             (turn for turn in in_attempt if turn.key != key and int(turn.request["turn"]) < turn_num),
             key=lambda turn: (int(turn.request["turn"]), turn.seq),
         )
-        lineage = [(session.digest, session.generation), *((turn.digest, turn.generation) for turn in earlier)]
+        lineage = [
+            (session.digest, session.generation),
+            *((turn.key, turn.digest, turn.generation) for turn in earlier),
+        ]
         digest = result_digest({"kind": "turn", "args": args, "lineage": lineage})
         return session, all_turns, in_attempt, earlier, digest
 

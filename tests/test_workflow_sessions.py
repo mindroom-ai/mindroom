@@ -321,6 +321,37 @@ async def test_rerun_of_turn_one_with_the_same_message_reruns_turn_two(stack: Wo
 
 
 @pytest.mark.asyncio
+async def test_moved_earlier_turn_reruns_later_turn_in_sibling_lane(stack: WorkflowStack) -> None:
+    """Inserting a call before turn 1 moves it to a new key; a later turn in a sibling lane must miss."""
+    stack.child_script(answer("old findings"), answer("old summary"))
+
+    await stack.result("@0", "session", {"name": "dev"}, meta={"name": "dev"})
+    await stack.submit("@1", "group", {"op": "parallel"}, meta={"members": ["/1:p0", "/1:p1"]})
+    assert await stack.result("/1:p0@0", "turn", _turn_args("@0", 1, "Read current data"), meta={"name": "dev"}) == (
+        "old findings"
+    )
+    assert await stack.result("/1:p1@0", "turn", _turn_args("@0", 2, "Summarize"), meta={"name": "dev"}) == (
+        "old summary"
+    )
+    await stack.finish_attempt("v1")
+
+    # Attempt 2 inserts a call at /1:p0@0 so turn 1 moves to /1:p0@1 (fresh generation 1 with the same message).
+    await stack.resume(stack.run_id, source="def main(args): return 2")
+    model2 = stack.child_script(answer("new findings"), answer("new summary"))
+    await stack.result("@0", "session", {"name": "dev"}, meta={"name": "dev"})
+    await stack.submit("@1", "group", {"op": "parallel"}, meta={"members": ["/1:p0", "/1:p1"]})
+    await stack.result("/1:p0@0", "value", {"op": "now"})
+    assert await stack.result("/1:p0@1", "turn", _turn_args("@0", 1, "Read current data"), meta={"name": "dev"}) == (
+        "new findings"
+    )
+    summary = await stack.result("/1:p1@0", "turn", _turn_args("@0", 2, "Summarize"), meta={"name": "dev"})
+
+    turn2 = stack.store.get_node(stack.run_id, "/1:p1@0")
+    assert turn2 is not None
+    assert (summary, len(model2.requests), turn2.cached) == ("new summary", 2, False)
+
+
+@pytest.mark.asyncio
 async def test_session_ask_supports_schema_correction_on_later_turns(stack: WorkflowStack) -> None:
     """A session turn with `schema` retries invalid JSON on the same child and returns parsed JSON."""
     schema = {"type": "object", "required": ["verdict"], "properties": {"verdict": {"type": "string"}}}
