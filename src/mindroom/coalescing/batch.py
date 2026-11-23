@@ -141,17 +141,22 @@ class PreparedTurn:
     payload: DispatchPayloadMetadata
     current_prompt_is_structured: bool
     media_events: tuple[MediaDispatchEvent, ...]
-    # The batch's per-event claims and queued notices, which dispatch replaces and releases.
+    # The batch's per-event claims (replaced by dispatch) and queued notices (held across pre-lock
+    # preparation until lock acquisition, or released if dispatch exits before taking the lock).
     claims: tuple[TurnClaim, ...]
     notices: tuple[QueuedHumanNoticeReservation, ...]
     selection: InteractiveSelectionDispatch | None
     # The queued notices of follow-ups still waiting behind this batch when it flushed, which dispatch
-    # releases with its own. Only a batch of an active response's follow-ups has any.
+    # releases immediately when this batch starts dispatch so edits cannot re-arm them against this turn.
+    # Only a batch of an active response's follow-ups has any.
     queued_follow_up_notices: tuple[QueuedHumanNoticeReservation, ...]
     # Whether this turn's queue still holds a run other than the given run identity's own messages for this
     # agent. A live read, not a snapshot: dispatch asks after awaiting its context, and a message admitted
     # meanwhile counts.
     queues_other_run: Callable[[RunIdentity], bool]
+    # Detaches this batch's notices from its PendingEvents once a detached response task owns them,
+    # so gate cancellation closing the segment cannot release notices still waiting on the lock.
+    detach_notices: Callable[[], None] = field(default=lambda: None, compare=False)
     # Combined composer mid-turn mode of the batch for lock-race notice registration.
     mid_turn_mode: MidTurnMode = MidTurnMode.AUTO
 
@@ -503,6 +508,11 @@ def build_prepared_turn(
         alias for pending_event in ordered_pending_events for alias in pending_event.facts.discovery_event_ids
     )
     facts = _batch_facts(ordered_pending_events)
+
+    def detach_notices() -> None:
+        for pending_event in ordered_pending_events:
+            pending_event.notice = None
+
     return PreparedTurn(
         room=primary_pending_event.room,
         event=replace(primary_pending_event.event, body=prompt_rendering.prompt),
@@ -536,6 +546,7 @@ def build_prepared_turn(
         selection=next((event.selection for event in ordered_pending_events if event.selection is not None), None),
         queued_follow_up_notices=queued_follow_up_notices,
         queues_other_run=queues_other_run,
+        detach_notices=detach_notices,
         mid_turn_mode=coalesced_mid_turn_mode(
             tuple(mid_turn_mode(pending_event.event.source.get("content")) for pending_event in ordered_pending_events),
         ),

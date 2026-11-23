@@ -705,30 +705,41 @@ class ResponseLifecycleCoordinator:
         locked_operation: Callable[[], Awaitable[_LockedResponseResult]],
         signal_queued_message: bool = True,
         mid_turn_gate: MidTurnGate | None = None,
+        notices: Sequence[QueuedHumanNoticeReservation] = (),
         mid_turn_mode: MidTurnMode = MidTurnMode.AUTO,
     ) -> _LockedResponseResult:
-        """Run one locked response operation with shared queued-message bookkeeping."""
-        self._assert_target_matches_envelope(target, response_envelope)
-        reservation = _current_response_lifecycle_reservation.get()
-        if reservation is None:
-            reservation = self._begin_response_turn(
-                response_envelope,
-                signal_queued_message=signal_queued_message,
-                mid_turn_mode=mid_turn_mode,
-            )
-        else:
-            reservation._consume(self, target)
-            # This response now owns the reservation locally. Descendant tasks
-            # must acquire their own lifecycle instead of inheriting this one-shot claim.
-            _current_response_lifecycle_reservation.set(None)
-        conversation = reservation._conversation
+        """Run one locked response operation with shared queued-message bookkeeping.
+
+        ``notices`` are this turn's own waiting-message reservations; they stay
+        active across lock wait and are released once this turn acquires the
+        lock (or synchronously in ``finally`` before releasing the reservation
+        if lock acquisition never completes).
+        """
+        reservation: _ResponseLifecycleReservation | None = None
         try:
+            self._assert_target_matches_envelope(target, response_envelope)
+            inherited = _current_response_lifecycle_reservation.get()
+            if inherited is None:
+                reservation = self._begin_response_turn(
+                    response_envelope,
+                    signal_queued_message=signal_queued_message,
+                    mid_turn_mode=mid_turn_mode,
+                )
+            else:
+                inherited._consume(self, target)
+                # This response now owns the reservation locally. Descendant tasks
+                # must acquire their own lifecycle instead of inheriting this one-shot claim.
+                _current_response_lifecycle_reservation.set(None)
+                reservation = inherited
+            conversation = reservation._conversation
             if pipeline_timing is not None:
                 pipeline_timing.mark("lock_wait_start")
             await reservation.wait_until_acquired()
             if pipeline_timing is not None:
                 pipeline_timing.mark("lock_acquired")
             reservation._consume_notice()
+            for notice in notices:
+                notice.release()
             conversation.mid_turn_gate = mid_turn_gate
             conversation.bind_active_requester(response_envelope.origin.active_human_requester_id)
             if mid_turn_gate is not None:
@@ -745,7 +756,10 @@ class ResponseLifecycleCoordinator:
                     # The Steers it latched keep their reason for their own follow-ups.
                     conversation.bind_active_requester(None)
         finally:
-            await reservation.release()
+            for notice in notices:
+                notice.release()
+            if reservation is not None:
+                await reservation.release()
 
 
 @dataclass

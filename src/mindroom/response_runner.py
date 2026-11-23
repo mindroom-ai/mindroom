@@ -325,6 +325,30 @@ def _approve_continued_reply(participation: ParticipationGate | None, request: R
         participation.approve_existing_response()
 
 
+async def _normalize_late_stopped_reply(
+    request: ResponseRequest,
+    participation: ParticipationGate | None,
+) -> tuple[ResponseRequest, ParticipationGate | None]:
+    """Apply a late-latched Steer/judge stop under the lock after turn admission succeeds."""
+    if not any(notice.stopped_reply for notice in request.notices):
+        return request, participation
+    if request.payload_preparation is not None and not request.payload_preparation.dispatch.stopped_reply:
+        request = replace(
+            request,
+            payload_preparation=replace(
+                request.payload_preparation,
+                dispatch=replace(request.payload_preparation.dispatch, stopped_reply=True),
+            ),
+        )
+    if request.participation is not None:
+        deferred_voice = request.on_participation_approved
+        request = replace(request, participation=None, on_participation_approved=None)
+        participation = None
+        if deferred_voice is not None:
+            await deferred_voice()
+    return request, participation
+
+
 class _PostLockRequestPreparationError(RuntimeError):
     """Raised when post-lock request preparation fails before generation starts.
 
@@ -539,6 +563,7 @@ class ResponseRunner:
                             ),
                             locked_operation=lambda: self._run_locked_ending_span(request, locked_operation),
                             signal_queued_message=signal_queued_message and not request.quiet,
+                            notices=request.notices,
                             mid_turn_mode=request.mid_turn_mode,
                         )
                         handle = current_span()
@@ -1505,7 +1530,11 @@ class ResponseRunner:
         except (ReplyMembershipPendingError, RevisionSnapshotChangedError, ResponseAdmissionRefusedError):
             raise
         except Exception as error:
-            if participation is None or participation.decision is not None:
+            if (
+                participation is None
+                or participation.decision is not None
+                or any(notice.stopped_reply for notice in request.notices)
+            ):
                 raise
             participation.decline("preparation_failed")
             return await self._end_unprepared_turn(request, error, participation)
@@ -1587,7 +1616,7 @@ class ResponseRunner:
         )
         if not isinstance(admitted, ResponseRequest):
             return admitted
-        request = admitted
+        request, participation = await _normalize_late_stopped_reply(admitted, participation)
         if team is None:
             _approve_continued_reply(participation, request)
             # The cold-cache judge sees the model before the budget, which the response runtime applies after it.
