@@ -1035,15 +1035,11 @@ class ToolJobRuntime:
         ``returned_inline`` says that tool result belongs to the call that started the job, and ``adapter`` holds
         what the job's kind keeps of its first acknowledgement, which is added to the job's adapter.
         """
-        async with self._lock:
-            self._ensure_open()
-            entry = self._entries[job_id]
-            if claim is None or entry.claim != claim:
-                msg = "Tool job wait claim no longer belongs to this waiter."
-                raise ValueError(msg)
-            job = _acknowledged_job(entry.job, returned_inline=returned_inline, adapter=adapter)
-            await self._publish(entry, job)
-            entry.claim = None
+        errors = await self.acknowledge_waits(
+            (AcknowledgeWait(job_id, claim, returned_inline=returned_inline, adapter=adapter),),
+        )
+        if errors:
+            raise errors[0][1]
 
     async def acknowledge_waits(self, waits: Sequence[AcknowledgeWait]) -> tuple[tuple[str, Exception], ...]:
         """Mark every valid claimed outcome consumed in one journal write; return per-claim validation errors."""

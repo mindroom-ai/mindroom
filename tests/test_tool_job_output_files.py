@@ -437,3 +437,44 @@ async def test_wait_media_redirect_error_keeps_claim_and_state_for_same_turn_ret
     assert saved_text == "plain-report\nSession state conflicts: clash"
     assert state_after_ok == {"ok": 1, "clash": "newer"}
     assert (await lookup(case.runtime, conflict_id, owner=case.owner, depth=0)).consumed
+
+
+async def test_collect_auto_save_error_releases_claims_immediately_and_keeps_jobs_unconsumed(
+    output_agent: _OutputAgent,
+) -> None:
+    """An auto-save output error without mindroom_output_path releases claims immediately and leaves jobs unconsumed."""
+    case = output_agent
+    large_id = await case.save_payload_job(
+        "f" * 64,
+        ToolResultPayload(
+            value=_LARGE_RESULT,
+            state_delta=session_state_delta({"k": "before"}, {"k": "after"}),
+        ),
+        summary="large",
+    )
+    small_id = await case.save_payload_job(
+        "1" * 64,
+        ToolResultPayload(value="small-ok"),
+        summary="small",
+    )
+    # Block auto-save directory creation with a regular file so auto-save returns a real output error receipt.
+    (case.workspace / "mindroom_tool_outputs").write_text("blocker", encoding="utf-8")
+
+    turn, state_after, _ = await case.owned_turn(
+        calls(tool_call("job", "collect-auto-err", action="collect")),
+        calls(tool_call("job", "wait-small", action="wait", job_id=small_id)),
+        answer("recovered"),
+        session_state={"k": "before"},
+        run_id="collect-auto-err-run",
+    )
+    assert len(turn.tools or ()) == 2
+    receipt = literal_eval(str(turn.tools[0].result))["mindroom_tool_output"]
+    assert receipt["status"] == "error"
+    # Immediate release let the same-turn wait claim and consume the small job while large_id stays unconsumed.
+    assert str(turn.tools[1].result) == "small-ok"
+    assert state_after == {"k": "before"}
+    assert (await lookup(case.runtime, small_id, owner=case.owner, depth=0)).consumed
+    assert not (await lookup(case.runtime, large_id, owner=case.owner, depth=0)).consumed
+    reclaimed = await case.runtime.wait(large_id, owner=case.owner, depth=0, timeout=0)
+    assert reclaimed.claim is not None
+    await case.runtime.release_wait(large_id, reclaimed.claim)

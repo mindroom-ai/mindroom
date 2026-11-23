@@ -262,27 +262,24 @@ def _merge_session_state(
     value: Any,  # noqa: ANN401
     job: BackgroundJob,
     payload: ToolResultPayload,
-) -> tuple[Any, tuple[tuple[str, bool, Any], ...]]:
-    """Apply unconflicted state changes to ``state`` and return ``(value_with_conflicts, applied_changes)``."""
+) -> Any:  # noqa: ANN401
+    """Apply unconflicted state changes to ``state``, reporting conflicts in a new value that leaves the payload intact."""
     if job.consumed or job.status != "completed":
-        return value, ()
+        return value
     conflicts: list[str] = []
-    changes: list[tuple[str, bool, Any]] = []
     for key, change in payload.state_delta.items():
         if (key in state) != change["before_present"] or state.get(key) != change["before"]:
             conflicts.append(key)
         elif change["present"]:
             state[key] = change["value"]
-            changes.append((key, True, change["value"]))
         else:
             state.pop(key, None)
-            changes.append((key, False, None))
     if conflicts:
         warning = "Session state conflicts: " + ", ".join(sorted(conflicts))
         if isinstance(value, ToolValue):
-            return replace(value, content=f"{value.content}\n{warning}"), tuple(changes)
-        return ToolValue(content=f"{value}\n{warning}"), tuple(changes)
-    return value, tuple(changes)
+            return replace(value, content=f"{value.content}\n{warning}")
+        return ToolValue(content=f"{value}\n{warning}")
+    return value
 
 
 def _require_call_identity(call: JobCall) -> tuple[str, str]:
@@ -293,23 +290,32 @@ def _require_call_identity(call: JobCall) -> tuple[str, str]:
     return run_id, call_id
 
 
-def _apply_state_changes(state: dict[str, Any], changes: Sequence[tuple[str, bool, Any]]) -> None:
-    for key, present, change_value in changes:
-        if present:
-            state[key] = change_value
-        else:
-            state.pop(key, None)
+@dataclass(frozen=True, slots=True)
+class PreparedConsumption:
+    """One staged outcome after merging its state delta against a fresh copy of live session state."""
+
+    job: BackgroundJob
+    value: Any
+    payload: ToolResultPayload
+
+
+@dataclass(frozen=True, slots=True)
+class _StagedPayload:
+    runtime: ToolJobRuntime
+    job: BackgroundJob
+    claim: JobClaim
+    payload: ToolResultPayload
+    returned_inline: bool
+    subagent_cost: tuple[str, float | None] | None
 
 
 @dataclass
 class StagedConsumptions:
-    """Outcomes read by one tool call whose state, cost, and claims commit only if the call returns them."""
+    """Payloads read by one tool call whose session state, cost, and claims commit only if the call returns them."""
 
     job_call: JobCall | None = None
-    _items: list[tuple[ToolJobRuntime, BackgroundJob, JobClaim, bool]] = field(default_factory=list)
-    _staged_state: dict[str, Any] | None = field(default=None, init=False)
-    _state_changes: list[tuple[str, bool, Any]] = field(default_factory=list, init=False)
-    _subagent_costs: list[tuple[str, float | None]] = field(default_factory=list, init=False)
+    _items: list[_StagedPayload] = field(default_factory=list, init=False)
+    _prepared_state: dict[str, Any] | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         """Capture the active management call when none was supplied explicitly."""
@@ -323,18 +329,13 @@ class StagedConsumptions:
         claim: JobClaim,
         *,
         returned_inline: bool = False,
-    ) -> tuple[Any, ToolResultPayload]:
-        """Read one claimed outcome against staged session state without committing side effects yet."""
+    ) -> int:
+        """Read one claimed outcome without touching session state, subagent cost, or retaining its claim yet."""
         owner = _OWNER.get()
         try:
             payload = await read_result_payload(runtime, job)
-            value = payload.value
-            state_changes: tuple[tuple[str, bool, Any], ...] = ()
             if self.job_call is not None and owner is not None:
                 _require_call_identity(self.job_call)
-                if self._staged_state is None:
-                    self._staged_state = dict(self.job_call.context.session_state)
-                value, state_changes = _merge_session_state(self._staged_state, value, job, payload)
             subagent_cost = (
                 (child.delegation_id, child.cost_usd)
                 if job.kind == "delegation" and not job.consumed and (child := delegation_child(job))
@@ -343,53 +344,73 @@ class StagedConsumptions:
         except BaseException:
             await runtime.release_wait(job.job_id, claim)
             raise
-        self._items.append((runtime, job, claim, returned_inline))
-        self._state_changes.extend(state_changes)
-        if subagent_cost is not None:
-            self._subagent_costs.append(subagent_cost)
-        return value, payload
+        self._items.append(_StagedPayload(runtime, job, claim, payload, returned_inline, subagent_cost))
+        return len(self._items) - 1
+
+    def prepare_values(self) -> list[PreparedConsumption]:
+        """Merge all staged payloads synchronously against a fresh copy of live session state."""
+        owner = _OWNER.get()
+        staged_state = (
+            dict(self.job_call.context.session_state) if self.job_call is not None and owner is not None else None
+        )
+        prepared = [
+            PreparedConsumption(
+                job=item.job,
+                value=(
+                    _merge_session_state(staged_state, item.payload.value, item.job, item.payload)
+                    if staged_state is not None
+                    else item.payload.value
+                ),
+                payload=item.payload,
+            )
+            for item in self._items
+        ]
+        self._prepared_state = staged_state
+        return prepared
 
     async def commit(self) -> None:
-        """Apply all staged session-state deltas, subagent costs, and claim retentions."""
+        """Apply prepared session-state changes, subagent costs, and claim retentions."""
         if not self._items:
             return
         owner, call = _OWNER.get(), self.job_call
         if owner is None or call is None:
-            await _release_by_runtime([(r, j.job_id, c) for r, j, c, _ in self._items])
-            self._items.clear()
-        else:
-            try:
-                run_id, call_id = _require_call_identity(call)
-            except ValueError:
-                await self.release()
-                raise
-            items, self._items = self._items, []
-            _apply_state_changes(call.context.session_state, self._state_changes)
-            for runtime, job, claim, returned_inline in items:
-                owner.register(
-                    runtime,
-                    job,
-                    claim,
-                    run_id=run_id,
-                    team=call.team,
-                    call_id=call_id,
-                    returned_inline=returned_inline,
-                )
-        for delegation_id, cost_usd in self._subagent_costs:
-            # The turn that reads a subagent job's result first receives what its child cost.
-            receive_subagent_cost(delegation_id, cost_usd)
-        self._state_changes.clear()
-        self._subagent_costs.clear()
-        self._staged_state = None
+            await _release_by_runtime([(item.runtime, item.job.job_id, item.claim) for item in self._items])
+            items, self._items, self._prepared_state = self._items, [], None
+            for item in items:
+                if item.subagent_cost is not None:
+                    receive_subagent_cost(*item.subagent_cost)
+            return
+        try:
+            run_id, call_id = _require_call_identity(call)
+        except ValueError:
+            await self.release()
+            raise
+        if self._prepared_state is None:
+            self.prepare_values()
+        items, prepared_state = self._items, self._prepared_state
+        self._items, self._prepared_state = [], None
+        if prepared_state is not None:
+            call.context.session_state.clear()
+            call.context.session_state.update(prepared_state)
+        for item in items:
+            if item.subagent_cost is not None:
+                # The turn that reads a subagent job's result first receives what its child cost.
+                receive_subagent_cost(*item.subagent_cost)
+            owner.register(
+                item.runtime,
+                item.job,
+                item.claim,
+                run_id=run_id,
+                team=call.team,
+                call_id=call_id,
+                returned_inline=item.returned_inline,
+            )
 
     async def release(self) -> None:
         """Release every still-staged claim in one lock acquisition per runtime."""
-        items, self._items = self._items, []
-        self._state_changes.clear()
-        self._subagent_costs.clear()
-        self._staged_state = None
+        items, self._items, self._prepared_state = self._items, [], None
         if items:
-            await _release_by_runtime([(r, j.job_id, c) for r, j, c, _ in items])
+            await _release_by_runtime([(item.runtime, item.job.job_id, item.claim) for item in items])
 
 
 async def consume_tool_job(
@@ -406,6 +427,11 @@ async def consume_tool_job(
     says this tool call is the one that started the job.
     """
     staging = StagedConsumptions(job_call)
-    value, payload = await staging.stage(runtime, job, claim, returned_inline=returned_inline)
-    await staging.commit()
-    return value, payload
+    try:
+        await staging.stage(runtime, job, claim, returned_inline=returned_inline)
+        (prepared,) = staging.prepare_values()
+        await staging.commit()
+    except BaseException:
+        await staging.release()
+        raise
+    return prepared.value, prepared.payload

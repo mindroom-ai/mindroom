@@ -30,9 +30,10 @@ from mindroom.tool_system.runtime_context import current_execution_identity
 from mindroom.tool_system.tool_function import ToolValue
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Collection, Sequence
 
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_jobs.consumption import PreparedConsumption
     from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
     from mindroom.tool_system.output_files import ToolOutputFilePolicy
     from mindroom.tool_system.tool_function import ToolFunction
@@ -75,6 +76,33 @@ async def _finish_staged_result(staging: StagedConsumptions, result: object) -> 
     return ToolOutputFileHandled(finalized)
 
 
+def _render_collected(
+    entries: Sequence[tuple[BackgroundJob, int | None]],
+    prepared: Sequence[PreparedConsumption],
+) -> str | ToolValue:
+    sections: list[str] = []
+    collected: list[ToolValue] = []
+    for job, index in entries:
+        if index is None:
+            sections.append(f"{describe_job(job)} {job.status}: its result could not be read now")
+            continue
+        item = prepared[index]
+        value = item.value
+        if isinstance(value, ToolValue):
+            collected.append(value)
+            value = value.content
+        detail = job_failure_text(value, item.payload) if job.status == "failed" else value or ""
+        sections.append(f"{describe_job(job)} {job.status}:\n{detail}".rstrip())
+    content = "\n\n".join(sections)
+    images = tuple(item for result in collected for item in result.images)
+    audios = tuple(item for result in collected for item in result.audios)
+    videos = tuple(item for result in collected for item in result.videos)
+    files = tuple(item for result in collected for item in result.files)
+    if images or audios or videos or files:
+        return ToolValue(content=content, images=images, audios=audios, videos=videos, files=files)
+    return content
+
+
 async def _claimed_result(runtime: ToolJobRuntime, job: BackgroundJob, claim: JobClaim) -> Any:  # noqa: ANN401 - Tool value.
     """Return a completed job's outcome as this call's own result; every other outcome raises its reason.
 
@@ -82,10 +110,11 @@ async def _claimed_result(runtime: ToolJobRuntime, job: BackgroundJob, claim: Jo
     """
     staging = StagedConsumptions()
     try:
-        value, payload = await staging.stage(runtime, job, claim)
-        failure = job_failure(job, value, payload)
+        await staging.stage(runtime, job, claim)
+        (prepared,) = staging.prepare_values()
+        failure = job_failure(job, prepared.value, prepared.payload)
         if failure is None:
-            return await _finish_staged_result(staging, value)
+            return await _finish_staged_result(staging, prepared.value)
         await staging.commit()
     except BaseException:
         await staging.release()
@@ -95,8 +124,7 @@ async def _claimed_result(runtime: ToolJobRuntime, job: BackgroundJob, claim: Jo
 
 async def _collect(runtime: ToolJobRuntime, owner: ToolExecutionIdentity) -> Any:  # noqa: ANN401 - Tool value.
     """Return every ended, unacknowledged job of this caller with its result, acknowledging each once this call saves."""
-    sections: list[str] = []
-    collected: list[ToolValue] = []
+    entries: list[tuple[BackgroundJob, int | None]] = []
     staging = StagedConsumptions()
     try:
         for job in await current_ended_jobs():
@@ -109,28 +137,16 @@ async def _collect(runtime: ToolJobRuntime, owner: ToolExecutionIdentity) -> Any
                 # Another caller is reading this outcome now.
                 continue
             try:
-                value, payload = await staging.stage(runtime, waited.job, waited.claim)
+                index = await staging.stage(runtime, waited.job, waited.claim)
             except ValueError:
                 # Unavailable or undecodable; its claim is released, so a later collect reads it, and the others arrive now.
-                sections.append(f"{describe_job(job)} {job.status}: its result could not be read now")
+                entries.append((job, None))
                 continue
-            if isinstance(value, ToolValue):
-                collected.append(value)
-                value = value.content
-            detail = job_failure_text(value, payload) if job.status == "failed" else value or ""
-            sections.append(f"{describe_job(job)} {job.status}:\n{detail}".rstrip())
-        if not sections:
+            entries.append((job, index))
+        if not entries:
             return "No ended background jobs."
-        content = "\n\n".join(sections)
-        images = tuple(item for result in collected for item in result.images)
-        audios = tuple(item for result in collected for item in result.audios)
-        videos = tuple(item for result in collected for item in result.videos)
-        files = tuple(item for result in collected for item in result.files)
-        result: str | ToolValue = (
-            ToolValue(content=content, images=images, audios=audios, videos=videos, files=files)
-            if images or audios or videos or files
-            else content
-        )
+        # All awaits are finished; merge live session state synchronously before finalizing output and committing.
+        result = _render_collected(entries, staging.prepare_values())
         return await _finish_staged_result(staging, result)
     except BaseException:
         await staging.release()
