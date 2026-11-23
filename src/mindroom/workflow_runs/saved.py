@@ -137,15 +137,10 @@ def _with_docstring(source: str, description: str) -> str:
         return source
     if ast.get_docstring(tree) is not None:
         return source
-    literal = repr(description.strip())
     lines = source.splitlines(keepends=True)
-    insert_at = 0
-    if lines and lines[0].startswith("#!"):
-        insert_at = 1
-    if insert_at < len(lines) and _ENCODING_COOKIE_RE.match(lines[insert_at]):
-        insert_at += 1
-    elif insert_at == 0 and len(lines) > 1 and _ENCODING_COOKIE_RE.match(lines[1]):
-        insert_at = 2
-    prefix = "".join(lines[:insert_at])
-    rest = "".join(lines[insert_at:]).lstrip("\n")
+    header = int(bool(lines and lines[0].startswith("#!")))
+    if header < len(lines) and _ENCODING_COOKIE_RE.match(lines[header]):
+        header += 1
+    prefix, rest = "".join(lines[:header]), "".join(lines[header:]).lstrip("\n")
+    literal = repr(description.strip())
     return f"{prefix}{literal}\n\n{rest}" if rest else f"{prefix}{literal}\n"

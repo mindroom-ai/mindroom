@@ -71,7 +71,6 @@ from mindroom.workflow_runs.saved import SavedWorkflow, list_saved
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Sequence
-    from pathlib import Path
 
     import nio
     import structlog
@@ -145,28 +144,23 @@ def _format_workflows_listing(
     saved: Sequence[tuple[str, SavedWorkflow]],
 ) -> str:
     """Format recent workflow runs and saved workflows for chat output (`!workflows`)."""
-    if not runs and not saved:
-        return "No workflow runs or saved workflows here."
     sections: list[str] = []
     if runs:
-        run_lines = [
+        lines = [
             f"- {run.agent_name}: `{run.run_id}` ({run.state.value}, attempt {run.attempt})"
             + (f": {title}" if (title := redacted_title(run.title)) else "")
             for run in runs
         ]
-        sections.append("Workflow runs:\n" + "\n".join(run_lines))
+        sections.append("Workflow runs:\n" + "\n".join(lines))
     if saved:
-        saved_lines: list[str] = []
-        for agent_name, item in saved:
-            line = f"- {agent_name}: `{item.name}`"
-            if item.description:
-                line += f": {item.description}"
-            if item.args:
-                arg_names = ", ".join(f"`{arg}`" for arg in item.args)
-                line += f" (args: {arg_names})"
-            saved_lines.append(line)
-        sections.append("Saved workflows:\n" + "\n".join(saved_lines))
-    return "\n\n".join(sections)
+        lines = [
+            f"- {agent}: `{item.name}`"
+            + (f": {item.description}" if item.description else "")
+            + (f" (args: {', '.join(f'`{arg}`' for arg in item.args)})" if item.args else "")
+            for agent, item in saved
+        ]
+        sections.append("Saved workflows:\n" + "\n".join(lines))
+    return "\n\n".join(sections) or "No workflow runs or saved workflows here."
 
 
 async def _workflows_command(
@@ -192,31 +186,28 @@ async def _workflows_command(
         saved: list[tuple[str, SavedWorkflow]] = []
         if candidate_entities:
             registry = entity_identity_registry(context.config, context.runtime_paths)
-            seen: set[tuple[str, Path]] = set()
-            for entity_id in candidate_entities:
-                entity_name = registry.current_entity_name_for_user_id(entity_id.full_id, include_router=False)
-                if entity_name is None or entity_name not in context.config.agents:
-                    continue
-                if "workflow" not in context.config.resolve_agent(entity_name).tools.tool_names:
-                    continue
+            agents = dict.fromkeys(
+                name
+                for entity_id in candidate_entities
+                if (name := registry.current_entity_name_for_user_id(entity_id.full_id, include_router=False))
+                and name in context.config.agents
+                and "workflow" in context.config.resolve_agent(name).tools.tool_names
+            )
+            for name in sorted(agents):
                 identity = build_requester_execution_identity(
-                    agent_name=entity_name,
+                    agent_name=name,
                     runtime_paths=context.runtime_paths,
                     requester_id=requester_user_id,
                 )
                 workspace = resolve_agent_runtime(
-                    entity_name,
+                    name,
                     context.config,
                     context.runtime_paths,
                     execution_identity=identity,
                     create=False,
                 ).workspace.root
-                if (entity_name, workspace) in seen:
-                    continue
-                seen.add((entity_name, workspace))
                 with suppress(OSError, ValueError):
-                    saved.extend((entity_name, item) for item in list_saved(workspace))
-            saved.sort(key=lambda entry: (entry[0], entry[1].name))
+                    saved.extend((name, item) for item in list_saved(workspace))
         return _format_workflows_listing(runs, saved)
 
     return await asyncio.to_thread(load_listing)
