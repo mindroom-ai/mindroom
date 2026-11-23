@@ -236,7 +236,9 @@ def _make_fake_bot(
     }
     client = SimpleNamespace(
         rooms=rooms,
-        room_get_state=AsyncMock(return_value=nio.RoomGetStateResponse([_member_state_source(_OWNER)], _ROOM_A)),
+        room_get_state=AsyncMock(
+            side_effect=lambda room_id: nio.RoomGetStateResponse([_member_state_source(_OWNER)], room_id),
+        ),
     )
     return SimpleNamespace(
         agent_name=agent_name,
@@ -1826,8 +1828,8 @@ async def test_external_event_subscriber_revoked_during_retry_backoff_skips_retr
 
 
 @pytest.mark.asyncio
-async def test_disabled_thread_tag_rule_tracks_checkpoints_so_reenable_fires_next_transition(tmp_path: Path) -> None:
-    """watch_thread(once=True) fires on resolved -> reopened while disabled -> re-enabled -> resolved again MUST fire."""
+async def test_disabled_thread_tag_rule_ignored_during_live_observation(tmp_path: Path) -> None:
+    """Disabled thread_tag rules are ignored by live observation; re-enable refreshes checkpoint separately."""
     config, runtime_paths = _make_config(tmp_path)
     store = ReactiveTriggerStore(runtime_paths)
     bot = _make_fake_bot()
@@ -1853,20 +1855,50 @@ async def test_disabled_thread_tag_rule_tracks_checkpoints_so_reenable_fires_nex
     assert disabled.enabled is False
     assert disabled.disabled_reason == "once_consumed"
 
-    # 2. Thread reopened while rule is disabled -> checkpoint updates to tag_present=False WITHOUT enqueueing
+    # 2. Tag changes while rule is disabled -> neither enqueues nor mutates checkpoint
     service.observe_state_event(_ROOM_A, _tag_state_source(present=False, event_id="$reopen-while-disabled"))
     cp = store.get_thread_checkpoint("tr_once_rearm")
     assert cp is not None
-    assert cp.tag_present is False
-    assert cp.state_event_id == "$reopen-while-disabled"
+    assert cp.tag_present is True
+    assert cp.state_event_id == "$res-first"
     assert store.list_due_firings() == []
 
-    # 3. User re-enables rule, then thread is resolved again -> MUST fire!
-    assert store.set_enabled("tr_once_rearm", True) is not None
-    service.observe_state_event(_ROOM_A, _tag_state_source(present=True, event_id="$res-second"))
-    due = store.list_due_firings()
-    assert len(due) == 1
-    assert due[0].dedupe_key == "$res-second"
+
+@pytest.mark.asyncio
+async def test_thread_tag_live_observation_delivers_when_owner_absent_from_lazy_room_users(tmp_path: Path) -> None:
+    """Under $LAZY sync, a joined owner absent from partial room.users MUST still enqueue and deliver."""
+    config, runtime_paths = _make_config(tmp_path)
+    store = ReactiveTriggerStore(runtime_paths)
+    bot = _make_fake_bot()
+    # Populate partial room.users containing only another speaker (owner hasn't spoken under $LAZY sync)
+    bot.client.rooms[_ROOM_A].users[_OTHER] = SimpleNamespace(user_id=_OTHER)
+    assert _OWNER not in bot.client.rooms[_ROOM_A].users
+
+    store.create_trigger(
+        _thread_tag_rule("tr_lazy_tag", room_id=_ROOM_A, thread_id=_THREAD_A, transition="added"),
+        initial_checkpoint=ThreadCheckpoint(tag_present=False, state_event_id=None, updated_at=time.time()),
+    )
+
+    service = ReactiveTriggerService(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: config,
+        bots=lambda: {"research": bot},
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+
+    service.observe_state_event(_ROOM_A, _tag_state_source(present=True, event_id="$lazy-resolve-1"))
+    assert len(store.list_due_firings()) == 1
+
+    send_mock = AsyncMock(return_value=SimpleNamespace(event_id="$delivered-lazy-1"))
+    with patch("mindroom.reactive_triggers.dispatch.send_matrix_message", new=send_mock):
+        await service.drain_due_firings_once()
+
+    send_mock.assert_awaited_once()
+    firing = store.get_firing(1)
+    assert firing is not None
+    assert firing.status == "delivered"
+    assert firing.matrix_event_id == "$delivered-lazy-1"
 
 
 @pytest.mark.asyncio
@@ -2089,3 +2121,174 @@ async def test_sync_is_non_blocking_and_drain_survives_sqlite_errors(tmp_path: P
         patch.object(store, "mark_delivered", side_effect=sqlite3.OperationalError("database is locked")),
     ):
         await service.drain_due_firings_once()
+
+
+@pytest.mark.asyncio
+async def test_target_access_checked_before_triage_and_claim_preserves_once_rule(tmp_path: Path) -> None:
+    """When owner leaves target room, once=True rules (with or without triage) skip without triage or consuming once."""
+    config, runtime_paths = _make_config(tmp_path)
+    store = ReactiveTriggerStore(runtime_paths)
+    bot = _make_fake_bot()
+    # Owner is NOT joined in target room _ROOM_B
+    bot.client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse([_member_state_source(_OTHER)], _ROOM_B),
+    )
+
+    store.create_trigger(
+        _external_event_rule(
+            "tr_once_triaged_left",
+            once=True,
+            triage=TriageSpec(instructions="Important?", provider="llm", model="cheap"),
+        ),
+    )
+    store.create_trigger(_external_event_rule("tr_once_plain_left", once=True))
+    store.enqueue_firing("tr_once_triaged_left", "deliv-left-1", _external_event("deliv-left-1"))
+    store.enqueue_firing("tr_once_plain_left", "deliv-left-2", _external_event("deliv-left-2"))
+
+    service = ReactiveTriggerService(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: config,
+        bots=lambda: {"research": bot},
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+
+    triage_mock = AsyncMock(return_value=TriageOutcome(act=True, reason="yes"))
+    send_mock = AsyncMock()
+    with (
+        patch("mindroom.reactive_triggers.service.evaluate_triage", new=triage_mock),
+        patch("mindroom.reactive_triggers.dispatch.send_matrix_message", new=send_mock),
+    ):
+        await service.drain_due_firings_once()
+
+    triage_mock.assert_not_awaited()
+    send_mock.assert_not_awaited()
+    for firing_id, trigger_id in ((1, "tr_once_triaged_left"), (2, "tr_once_plain_left")):
+        firing = store.get_firing(firing_id)
+        rule = store.get_trigger(trigger_id)
+        assert firing is not None
+        assert firing.status == "skipped"
+        assert firing.error_message == "owner_not_joined"
+        assert rule is not None
+        assert rule.enabled is True
+        assert rule.fire_count == 0
+
+
+@pytest.mark.asyncio
+async def test_drain_refreshes_config_per_firing_and_after_triage(tmp_path: Path) -> None:
+    """Revoking a subscriber mid-batch skips later firings in the same drain, and mid-triage skips before claim."""
+    config_allowed, runtime_paths = _make_config(tmp_path)
+    config_revoked, _ = _make_config(
+        tmp_path,
+        event_sources={
+            "github": GitHubEventSourceConfig(
+                kind="github",
+                secret_env="GH_SECRET",  # noqa: S106
+                allowed_repos=["mindroom-ai/mindroom"],
+                subscribers=[_OTHER],
+            ),
+        },
+    )
+    active_config = [config_allowed]
+
+    store = ReactiveTriggerStore(runtime_paths)
+    bot = _make_fake_bot()
+    store.create_trigger(_external_event_rule("tr_batch_1"))
+    store.create_trigger(_external_event_rule("tr_batch_2"))
+    store.enqueue_firing("tr_batch_1", "deliv-b1", _external_event("deliv-b1"))
+    store.enqueue_firing("tr_batch_2", "deliv-b2", _external_event("deliv-b2"))
+
+    service = ReactiveTriggerService(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: active_config[0],
+        bots=lambda: {"research": bot},
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+
+    async def _send_then_revoke(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        active_config[0] = config_revoked
+        return SimpleNamespace(event_id="$delivered-b1")
+
+    send_mock = AsyncMock(side_effect=_send_then_revoke)
+    with patch("mindroom.reactive_triggers.dispatch.send_matrix_message", new=send_mock):
+        await service.drain_due_firings_once()
+
+    send_mock.assert_awaited_once()
+    f1 = store.get_firing(1)
+    f2 = store.get_firing(2)
+    assert f1 is not None
+    assert f1.status == "delivered"
+    assert f2 is not None
+    assert f2.status == "skipped"
+    assert f2.error_message == "source_subscriber_revoked"
+
+    # Also verify revocation during evaluate_triage skips before claim_firing (preserving once=True)
+    active_config[0] = config_allowed
+    store.create_trigger(
+        _external_event_rule(
+            "tr_mid_triage",
+            once=True,
+            triage=TriageSpec(instructions="Check", provider="llm", model="cheap"),
+        ),
+    )
+    store.enqueue_firing("tr_mid_triage", "deliv-mt1", _external_event("deliv-mt1"))
+
+    async def _triage_then_revoke(*_args: object, **_kwargs: object) -> TriageOutcome:
+        active_config[0] = config_revoked
+        return TriageOutcome(act=True, reason="yes")
+
+    send_mock.reset_mock()
+    with (
+        patch("mindroom.reactive_triggers.service.evaluate_triage", side_effect=_triage_then_revoke),
+        patch("mindroom.reactive_triggers.dispatch.send_matrix_message", new=send_mock),
+    ):
+        await service.drain_due_firings_once()
+
+    send_mock.assert_not_awaited()
+    f3 = store.get_firing(3)
+    r3 = store.get_trigger("tr_mid_triage")
+    assert f3 is not None
+    assert f3.status == "skipped"
+    assert f3.error_message == "source_subscriber_revoked"
+    assert r3 is not None
+    assert r3.enabled is True
+    assert r3.fire_count == 0
+
+
+@pytest.mark.asyncio
+async def test_corrupt_spec_json_marks_pending_firing_failed_without_blocking_healthy_firings(tmp_path: Path) -> None:
+    """A corrupt spec_json row fails immediately instead of staying pending forever and blocking healthy firings."""
+    config, runtime_paths = _make_config(tmp_path)
+    store = ReactiveTriggerStore(runtime_paths)
+    bot = _make_fake_bot()
+
+    store.create_trigger(_external_event_rule("tr_corrupt"))
+    store.create_trigger(_external_event_rule("tr_healthy"))
+    store.enqueue_firing("tr_corrupt", "deliv-corrupt", _external_event("deliv-corrupt"))
+    store.enqueue_firing("tr_healthy", "deliv-healthy", _external_event("deliv-healthy"))
+    with store._write_transaction() as conn:
+        conn.execute("UPDATE reactive_triggers SET spec_json = '{not valid json' WHERE trigger_id = 'tr_corrupt'")
+
+    service = ReactiveTriggerService(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: config,
+        bots=lambda: {"research": bot},
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+
+    send_mock = AsyncMock(return_value=SimpleNamespace(event_id="$delivered-healthy"))
+    with patch("mindroom.reactive_triggers.dispatch.send_matrix_message", new=send_mock):
+        await service.drain_due_firings_once()
+
+    send_mock.assert_awaited_once()
+    f_corrupt = store.get_firing(1)
+    f_healthy = store.get_firing(2)
+    assert f_corrupt is not None
+    assert f_corrupt.status == "failed"
+    assert f_corrupt.next_retry_at is None
+    assert f_corrupt.error_message == "unexpected_error:ValidationError"
+    assert f_healthy is not None
+    assert f_healthy.status == "delivered"
+    assert store.list_due_firings() == []

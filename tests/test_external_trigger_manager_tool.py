@@ -571,7 +571,7 @@ async def test_every_manager_function_refuses_a_requester_who_cannot_own_trigger
         payloads = [
             _payload(await tool.create_trigger("refused", public_key=_PUBLIC_KEY)),
             _payload(tool.list_triggers()),
-            _payload(await tool.disable_trigger("owned")),
+            _payload(tool.disable_trigger("owned")),
             _payload(tool.delete_trigger("owned")),
             _payload(tool.rotate_trigger_key("owned", public_key=_PUBLIC_KEY)),
         ]

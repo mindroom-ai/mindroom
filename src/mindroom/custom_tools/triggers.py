@@ -419,6 +419,116 @@ class TriggersTools(Toolkit):
             msg = "trigger can only be changed by its owner or an external trigger admin"
             raise ReactiveTriggerStoreError(msg)
 
+    async def _create_reactive_rule(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        policy: ExternalTriggerPolicyConfig,
+        validated_trigger_id: str | None,
+        description: str,
+        source: RoomMessageSourceSpec | ThreadTagSourceSpec | ExternalEventSourceSpec,
+        triage: TriageSpec | None,
+        target: TriggerTargetSpec,
+        once: bool,
+        max_fires_per_hour: int,
+        cooldown_seconds: int,
+        expires_at: float | None,
+        now: float,
+        initial_cursor: RoomCursor | None = None,
+        initial_checkpoint: ThreadCheckpoint | None = None,
+    ) -> ReactiveTriggerRecord:
+        external_store = ExternalTriggerStore(context.runtime_paths)
+        reactive_store = ReactiveTriggerStore(context.runtime_paths)
+
+        def _create() -> ReactiveTriggerRecord:
+            with trigger_id_creation_lock(context.runtime_paths):
+                resolved_trigger_id = _resolve_unique_reactive_trigger_id(
+                    validated_trigger_id,
+                    external_store=external_store,
+                    reactive_store=reactive_store,
+                )
+                record = ReactiveTriggerRecord(
+                    trigger_id=resolved_trigger_id,
+                    owner_user_id=context.requester_id,
+                    description=description,
+                    source=source,
+                    triage=triage,
+                    target=target,
+                    once=once,
+                    max_fires_per_hour=max_fires_per_hour,
+                    cooldown_seconds=cooldown_seconds,
+                    expires_at=expires_at,
+                    created_at=now,
+                    updated_at=now,
+                )
+                return reactive_store.create_trigger(
+                    record,
+                    initial_cursor=initial_cursor,
+                    initial_checkpoint=initial_checkpoint,
+                    max_per_owner=policy.max_reactive_triggers_per_owner,
+                )
+
+        created = await run_blocking_until_complete(_create)
+        self._notify_reactive_service(context)
+        return created
+
+    def _apply_set_enabled_sync(
+        self,
+        context: ToolRuntimeContext,
+        external_store: ExternalTriggerStore,
+        reactive_store: ReactiveTriggerStore,
+        trigger_id: str,
+        *,
+        enabled: bool,
+        refreshed_tag_present: bool | None = None,
+    ) -> str:
+        if _has_external_trigger(external_store, trigger_id):
+            record = external_store.set_enabled(
+                trigger_id,
+                enabled=enabled,
+                actor_user_id=context.requester_id,
+                config=context.config,
+            )
+            return self._payload("ok", action="set_enabled", trigger=self._record_payload(record))
+
+        reactive_record = reactive_store.get_trigger(trigger_id)
+        if reactive_record is None:
+            msg = f"external trigger not found: {trigger_id}"
+            raise ExternalTriggerStoreError(msg)
+        self._require_reactive_owner_or_admin(context, reactive_record)
+        if enabled and not reactive_record.enabled:
+            if isinstance(reactive_record.source, RoomMessageSourceSpec):
+                reactive_store.advance_room_cursor(
+                    trigger_id,
+                    RoomCursor(created_ts=int(time.time() * 1000), logical_event_id=""),
+                    expected_rule_uid=reactive_record.rule_uid,
+                )
+            elif isinstance(reactive_record.source, ThreadTagSourceSpec):
+                if refreshed_tag_present is not None:
+                    reactive_store.update_thread_checkpoint_and_enqueue(
+                        trigger_id,
+                        tag_present=refreshed_tag_present,
+                        state_event_id=None,
+                        expected_rule_uid=reactive_record.rule_uid,
+                    )
+                else:
+                    reactive_store.clear_thread_checkpoint(
+                        trigger_id,
+                        expected_rule_uid=reactive_record.rule_uid,
+                    )
+        updated = reactive_store.set_enabled(trigger_id, enabled, expected_rule_uid=reactive_record.rule_uid)
+        if updated is None:
+            msg = f"external trigger not found: {trigger_id}"
+            raise ExternalTriggerStoreError(msg)
+        if enabled:
+            self._notify_reactive_service(context)
+        return self._payload("ok", action="set_enabled", trigger=self._reactive_record_payload(updated))
+
+    def _disable_trigger_sync(self, trigger_id: str, *, enabled: bool) -> str:
+        return self._with_stores(
+            lambda ctx, ext, rea: self._apply_set_enabled_sync(ctx, ext, rea, trigger_id, enabled=enabled),
+        )
+
     async def watch_room(
         self,
         prompt: str,
@@ -471,8 +581,6 @@ class TriggersTools(Toolkit):
         try:
             context = require_external_trigger_owner_context(self._CONTEXT_LABEL)
             policy = self._require_reactive_policy(context)
-            external_store = ExternalTriggerStore(context.runtime_paths)
-            reactive_store = ReactiveTriggerStore(context.runtime_paths)
             now = time.time()
 
             validated_trigger_id, triage, expires_at = self._validate_reactive_common(
@@ -524,35 +632,21 @@ class TriggersTools(Toolkit):
                 now=now,
             )
 
-            def _create_watch_room() -> ReactiveTriggerRecord:
-                with trigger_id_creation_lock(context.runtime_paths):
-                    resolved_trigger_id = _resolve_unique_reactive_trigger_id(
-                        validated_trigger_id,
-                        external_store=external_store,
-                        reactive_store=reactive_store,
-                    )
-                    record = ReactiveTriggerRecord(
-                        trigger_id=resolved_trigger_id,
-                        owner_user_id=context.requester_id,
-                        description=description,
-                        source=source,
-                        triage=triage,
-                        target=target,
-                        once=once,
-                        max_fires_per_hour=max_fires_per_hour,
-                        cooldown_seconds=cooldown_seconds,
-                        expires_at=expires_at,
-                        created_at=now,
-                        updated_at=now,
-                    )
-                    return reactive_store.create_trigger(
-                        record,
-                        initial_cursor=initial_cursor,
-                        max_per_owner=policy.max_reactive_triggers_per_owner,
-                    )
-
-            created = await run_blocking_until_complete(_create_watch_room)
-            self._notify_reactive_service(context)
+            created = await self._create_reactive_rule(
+                context,
+                policy=policy,
+                validated_trigger_id=validated_trigger_id,
+                description=description,
+                source=source,
+                triage=triage,
+                target=target,
+                once=once,
+                max_fires_per_hour=max_fires_per_hour,
+                cooldown_seconds=cooldown_seconds,
+                expires_at=expires_at,
+                now=now,
+                initial_cursor=initial_cursor,
+            )
         except _TOOL_ERRORS as exc:
             return self._payload("error", message=str(exc))
 
@@ -605,8 +699,6 @@ class TriggersTools(Toolkit):
         try:
             context = require_external_trigger_owner_context(self._CONTEXT_LABEL)
             policy = self._require_reactive_policy(context)
-            external_store = ExternalTriggerStore(context.runtime_paths)
-            reactive_store = ReactiveTriggerStore(context.runtime_paths)
             now = time.time()
 
             validated_trigger_id, _triage, expires_at = self._validate_reactive_common(
@@ -657,17 +749,7 @@ class TriggersTools(Toolkit):
                 transition=transition,
             )
 
-            watch_client = (
-                _client_for_room(
-                    context,
-                    resolved_watch_room_id,
-                    preferred_agent=target.agent,
-                )
-                or context.client
-            )
-            tag_state = await get_thread_tags(watch_client, resolved_watch_room_id, resolved_watch_thread_id)
-            current_tags = tag_state.tags if tag_state is not None else {}
-            tag_present = source.tag.lower() in {existing.lower() for existing in current_tags}
+            tag_present = await _read_thread_tag_present(context, source, preferred_agent=target.agent)
             initial_checkpoint = ThreadCheckpoint(
                 tag_present=tag_present,
                 state_event_id=None,
@@ -677,35 +759,21 @@ class TriggersTools(Toolkit):
                 source.transition == "removed" and not tag_present
             )
 
-            def _create_watch_thread() -> ReactiveTriggerRecord:
-                with trigger_id_creation_lock(context.runtime_paths):
-                    resolved_trigger_id = _resolve_unique_reactive_trigger_id(
-                        validated_trigger_id,
-                        external_store=external_store,
-                        reactive_store=reactive_store,
-                    )
-                    record = ReactiveTriggerRecord(
-                        trigger_id=resolved_trigger_id,
-                        owner_user_id=context.requester_id,
-                        description=description,
-                        source=source,
-                        triage=None,
-                        target=target,
-                        once=once,
-                        max_fires_per_hour=max_fires_per_hour,
-                        cooldown_seconds=cooldown_seconds,
-                        expires_at=expires_at,
-                        created_at=now,
-                        updated_at=now,
-                    )
-                    return reactive_store.create_trigger(
-                        record,
-                        initial_checkpoint=initial_checkpoint,
-                        max_per_owner=policy.max_reactive_triggers_per_owner,
-                    )
-
-            created = await run_blocking_until_complete(_create_watch_thread)
-            self._notify_reactive_service(context)
+            created = await self._create_reactive_rule(
+                context,
+                policy=policy,
+                validated_trigger_id=validated_trigger_id,
+                description=description,
+                source=source,
+                triage=None,
+                target=target,
+                once=once,
+                max_fires_per_hour=max_fires_per_hour,
+                cooldown_seconds=cooldown_seconds,
+                expires_at=expires_at,
+                now=now,
+                initial_checkpoint=initial_checkpoint,
+            )
         except _TOOL_ERRORS as exc:
             return self._payload("error", message=str(exc))
 
@@ -768,8 +836,6 @@ class TriggersTools(Toolkit):
         try:
             context = require_external_trigger_owner_context(self._CONTEXT_LABEL)
             policy = self._require_reactive_policy(context)
-            external_store = ExternalTriggerStore(context.runtime_paths)
-            reactive_store = ReactiveTriggerStore(context.runtime_paths)
             now = time.time()
 
             validated_trigger_id, triage, expires_at = self._validate_reactive_common(
@@ -834,34 +900,20 @@ class TriggersTools(Toolkit):
                 allow_origin=False,
             )
 
-            def _create_subscribe() -> ReactiveTriggerRecord:
-                with trigger_id_creation_lock(context.runtime_paths):
-                    resolved_trigger_id = _resolve_unique_reactive_trigger_id(
-                        validated_trigger_id,
-                        external_store=external_store,
-                        reactive_store=reactive_store,
-                    )
-                    record = ReactiveTriggerRecord(
-                        trigger_id=resolved_trigger_id,
-                        owner_user_id=context.requester_id,
-                        description=description,
-                        source=source_spec,
-                        triage=triage,
-                        target=target,
-                        once=once,
-                        max_fires_per_hour=max_fires_per_hour,
-                        cooldown_seconds=cooldown_seconds,
-                        expires_at=expires_at,
-                        created_at=now,
-                        updated_at=now,
-                    )
-                    return reactive_store.create_trigger(
-                        record,
-                        max_per_owner=policy.max_reactive_triggers_per_owner,
-                    )
-
-            created = await run_blocking_until_complete(_create_subscribe)
-            self._notify_reactive_service(context)
+            created = await self._create_reactive_rule(
+                context,
+                policy=policy,
+                validated_trigger_id=validated_trigger_id,
+                description=description,
+                source=source_spec,
+                triage=triage,
+                target=target,
+                once=once,
+                max_fires_per_hour=max_fires_per_hour,
+                cooldown_seconds=cooldown_seconds,
+                expires_at=expires_at,
+                now=now,
+            )
         except _TOOL_ERRORS as exc:
             return self._payload("error", message=str(exc))
 
@@ -1008,73 +1060,33 @@ class TriggersTools(Toolkit):
             external_store = ExternalTriggerStore(context.runtime_paths)
             reactive_store = ReactiveTriggerStore(context.runtime_paths)
 
-            if await run_blocking_until_complete(partial(_has_external_trigger, external_store, trigger_id)):
-                record = await run_blocking_until_complete(
-                    partial(
-                        external_store.set_enabled,
-                        trigger_id,
-                        enabled=enabled,
-                        actor_user_id=context.requester_id,
-                        config=context.config,
-                    ),
-                )
-                return self._payload("ok", action="set_enabled", trigger=self._record_payload(record))
-
-            reactive_record = await run_blocking_until_complete(partial(reactive_store.get_trigger, trigger_id))
-            if reactive_record is None:
-                msg = f"external trigger not found: {trigger_id}"
-                raise ExternalTriggerStoreError(msg)
-            self._require_reactive_owner_or_admin(context, reactive_record)
-            was_disabled = not reactive_record.enabled
-            if enabled and was_disabled:
-                if isinstance(reactive_record.source, RoomMessageSourceSpec):
-                    await run_blocking_until_complete(
-                        partial(
-                            reactive_store.advance_room_cursor,
-                            trigger_id,
-                            RoomCursor(created_ts=int(time.time() * 1000), logical_event_id=""),
-                            expected_rule_uid=reactive_record.rule_uid,
-                        ),
+            refreshed_tag_present: bool | None = None
+            if enabled and not await run_blocking_until_complete(
+                partial(_has_external_trigger, external_store, trigger_id),
+            ):
+                reactive_record = await run_blocking_until_complete(partial(reactive_store.get_trigger, trigger_id))
+                if (
+                    reactive_record is not None
+                    and not reactive_record.enabled
+                    and isinstance(reactive_record.source, ThreadTagSourceSpec)
+                ):
+                    self._require_reactive_owner_or_admin(context, reactive_record)
+                    refreshed_tag_present = await _read_thread_tag_present(
+                        context,
+                        reactive_record.source,
+                        preferred_agent=reactive_record.target.agent,
                     )
-                elif isinstance(reactive_record.source, ThreadTagSourceSpec):
-                    watch_client = (
-                        _client_for_room(
-                            context,
-                            reactive_record.source.room_id,
-                            preferred_agent=reactive_record.target.agent,
-                        )
-                        or context.client
-                    )
-                    tag_state = await get_thread_tags(
-                        watch_client,
-                        reactive_record.source.room_id,
-                        reactive_record.source.thread_id,
-                    )
-                    current_tags = tag_state.tags if tag_state is not None else {}
-                    tag_present = reactive_record.source.tag.lower() in {existing.lower() for existing in current_tags}
-                    await run_blocking_until_complete(
-                        partial(
-                            reactive_store.update_thread_checkpoint_and_enqueue,
-                            trigger_id,
-                            tag_present=tag_present,
-                            state_event_id=None,
-                            expected_rule_uid=reactive_record.rule_uid,
-                        ),
-                    )
-            updated = await run_blocking_until_complete(
+            return await run_blocking_until_complete(
                 partial(
-                    reactive_store.set_enabled,
+                    self._apply_set_enabled_sync,
+                    context,
+                    external_store,
+                    reactive_store,
                     trigger_id,
-                    enabled,
-                    expected_rule_uid=reactive_record.rule_uid,
+                    enabled=enabled,
+                    refreshed_tag_present=refreshed_tag_present,
                 ),
             )
-            if updated is None:
-                msg = f"external trigger not found: {trigger_id}"
-                raise ExternalTriggerStoreError(msg)
-            if enabled:
-                self._notify_reactive_service(context)
-            return self._payload("ok", action="set_enabled", trigger=self._reactive_record_payload(updated))
         except _TOOL_ERRORS as exc:
             return self._payload("error", message=str(exc))
 
@@ -1150,6 +1162,18 @@ class TriggersTools(Toolkit):
             )
 
         return self._with_stores(rotate)
+
+
+async def _read_thread_tag_present(
+    context: ToolRuntimeContext,
+    source: ThreadTagSourceSpec,
+    *,
+    preferred_agent: str,
+) -> bool:
+    watch_client = _client_for_room(context, source.room_id, preferred_agent=preferred_agent) or context.client
+    tag_state = await get_thread_tags(watch_client, source.room_id, source.thread_id)
+    current_tags = tag_state.tags if tag_state is not None else {}
+    return source.tag.lower() in {existing.lower() for existing in current_tags}
 
 
 def _has_external_trigger(external_store: ExternalTriggerStore, trigger_id: str) -> bool:

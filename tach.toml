@@ -10883,5 +10883,5 @@ depends_on = [
 [[modules]]
 path = "mindroom.tools.external_trigger_manager"
 depends_on = [
-    "mindroom.tools.triggers",
+    "mindroom.custom_tools.external_trigger_manager",
 ]

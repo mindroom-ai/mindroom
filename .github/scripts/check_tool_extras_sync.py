@@ -24,6 +24,7 @@ IGNORED_GROUPS: set[str] = {
     "aws_bedrock",
     "chromadb",
     "coding",  # Earlier name of filesystem, kept so `uv sync --extra coding` still resolves.
+    "external_trigger_manager",  # Earlier name of triggers, kept so `uv sync --extra external_trigger_manager` still resolves.
     "file",  # Earlier name of filesystem, kept so `uv sync --extra file` still resolves.
     "kubernetes",
     "matrix-e2ee",

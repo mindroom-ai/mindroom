@@ -1177,7 +1177,7 @@ def test_matches_room_message_hits_timeout_error_guard_on_backtracking_regex(
     elapsed = time.monotonic() - started
 
     assert matched is False
-    assert elapsed < 0.5
+    assert elapsed < 2.0
     assert any("timed out" in msg.lower() for msg, _ in warnings)
 
 

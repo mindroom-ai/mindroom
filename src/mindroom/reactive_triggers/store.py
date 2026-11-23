@@ -399,6 +399,14 @@ class ReactiveTriggerStore:
             updated_at=float(row["updated_at"]),
         )
 
+    def clear_thread_checkpoint(self, trigger_id: str, *, expected_rule_uid: str | None = None) -> bool:
+        """Delete any persisted thread tag checkpoint for a trigger when its rule_uid matches."""
+        with self._write_transaction() as conn:
+            if expected_rule_uid is not None and _live_rule_uid(conn, trigger_id) != expected_rule_uid:
+                return False
+            cursor = conn.execute("DELETE FROM thread_checkpoints WHERE trigger_id = ?", (trigger_id,))
+            return cursor.rowcount > 0
+
     def update_thread_checkpoint_and_enqueue(
         self,
         trigger_id: str,
@@ -653,15 +661,16 @@ class ReactiveTriggerStore:
             )
             return "claimed"
 
-    def defer_pending_firing(
+    def _retry_firing(
         self,
         firing_id: int,
         error: str,
         *,
+        expected_status: Literal["pending", "claimed"],
+        verb: str,
         now: float | None = None,
         max_attempts: int = 5,
     ) -> RetryResult:
-        """Back off a pending firing on transient pre-triage unavailability without consuming once=True."""
         current_time = time.time() if now is None else now
         with self._write_transaction() as conn:
             row = conn.execute(
@@ -672,41 +681,49 @@ class ReactiveTriggerStore:
                 msg = f"Reactive trigger firing not found: {firing_id}"
                 raise ReactiveTriggerStoreError(msg)
             status = str(row["status"])
-            if status != "pending":
-                msg = f"Cannot defer firing {firing_id} in status {status!r}; expected 'pending'"
+            if status != expected_status:
+                msg = f"Cannot {verb} firing {firing_id} in status {status!r}; expected {expected_status!r}"
                 raise ReactiveTriggerStoreError(msg)
 
             attempt = int(row["attempt_count"]) + 1
+            result: RetryResult
             if attempt >= max_attempts:
-                conn.execute(
-                    """
-                    UPDATE trigger_firings
-                    SET status = 'failed',
-                        attempt_count = ?,
-                        next_retry_at = NULL,
-                        error_message = ?,
-                        updated_at = ?
-                    WHERE id = ? AND status = 'pending'
-                    """,
-                    (attempt, error, current_time, firing_id),
-                )
-                return "failed"
+                next_status, next_retry_at, result = "failed", None, "failed"
+            else:
+                backoff_seconds = min(_MAX_BACKOFF_SECONDS, _BASE_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+                next_status, next_retry_at, result = expected_status, current_time + backoff_seconds, "retrying"
 
-            backoff_seconds = min(_MAX_BACKOFF_SECONDS, _BASE_BACKOFF_SECONDS * (2 ** (attempt - 1)))
-            next_retry_at = current_time + backoff_seconds
             conn.execute(
                 """
                 UPDATE trigger_firings
-                SET status = 'pending',
+                SET status = ?,
                     attempt_count = ?,
                     next_retry_at = ?,
                     error_message = ?,
                     updated_at = ?
-                WHERE id = ? AND status = 'pending'
+                WHERE id = ? AND status = ?
                 """,
-                (attempt, next_retry_at, error, current_time, firing_id),
+                (next_status, attempt, next_retry_at, error, current_time, firing_id, expected_status),
             )
-            return "retrying"
+            return result
+
+    def defer_pending_firing(
+        self,
+        firing_id: int,
+        error: str,
+        *,
+        now: float | None = None,
+        max_attempts: int = 5,
+    ) -> RetryResult:
+        """Back off a pending firing on transient pre-triage unavailability without consuming once=True."""
+        return self._retry_firing(
+            firing_id,
+            error,
+            expected_status="pending",
+            verb="defer",
+            now=now,
+            max_attempts=max_attempts,
+        )
 
     def mark_delivered(
         self,
@@ -741,51 +758,14 @@ class ReactiveTriggerStore:
         max_attempts: int = 5,
     ) -> RetryResult:
         """Record a transient delivery error with exponential backoff, or mark failed once exhausted."""
-        current_time = time.time() if now is None else now
-        with self._write_transaction() as conn:
-            row = conn.execute(
-                "SELECT status, attempt_count FROM trigger_firings WHERE id = ?",
-                (firing_id,),
-            ).fetchone()
-            if row is None:
-                msg = f"Reactive trigger firing not found: {firing_id}"
-                raise ReactiveTriggerStoreError(msg)
-            status = str(row["status"])
-            if status != "claimed":
-                msg = f"Cannot retry firing {firing_id} in status {status!r}; expected 'claimed'"
-                raise ReactiveTriggerStoreError(msg)
-
-            attempt = int(row["attempt_count"]) + 1
-            if attempt >= max_attempts:
-                conn.execute(
-                    """
-                    UPDATE trigger_firings
-                    SET status = 'failed',
-                        attempt_count = ?,
-                        next_retry_at = NULL,
-                        error_message = ?,
-                        updated_at = ?
-                    WHERE id = ? AND status = 'claimed'
-                    """,
-                    (attempt, error, current_time, firing_id),
-                )
-                return "failed"
-
-            backoff_seconds = min(_MAX_BACKOFF_SECONDS, _BASE_BACKOFF_SECONDS * (2 ** (attempt - 1)))
-            next_retry_at = current_time + backoff_seconds
-            conn.execute(
-                """
-                UPDATE trigger_firings
-                SET status = 'claimed',
-                    attempt_count = ?,
-                    next_retry_at = ?,
-                    error_message = ?,
-                    updated_at = ?
-                WHERE id = ? AND status = 'claimed'
-                """,
-                (attempt, next_retry_at, error, current_time, firing_id),
-            )
-            return "retrying"
+        return self._retry_firing(
+            firing_id,
+            error,
+            expected_status="claimed",
+            verb="retry",
+            now=now,
+            max_attempts=max_attempts,
+        )
 
     def mark_skipped(self, firing_id: int, reason: str, *, now: float | None = None) -> bool:
         """Mark a pending or claimed firing as skipped with an explanatory reason."""

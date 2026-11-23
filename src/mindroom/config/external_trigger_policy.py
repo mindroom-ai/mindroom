@@ -17,10 +17,11 @@ from cryptography.hazmat.primitives.serialization import (
 )
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from mindroom.matrix.identity import valid_matrix_server_name
+
 _ENV_VAR_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _GITHUB_REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _EVENT_SOURCE_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
-_MATRIX_USER_ID_PATTERN = re.compile(r"^@[^:\s]+:[^:\s]+$")
 _ED25519_PUBLIC_KEY_BYTES = 32
 
 
@@ -36,11 +37,20 @@ def _validate_non_empty_list_items(values: list[str], *, field_name: str) -> lis
     return [_strip_non_empty(item, field_name=field_name) for item in values]
 
 
+def _is_valid_matrix_user_id(user_id: str) -> bool:
+    if not user_id.startswith("@") or ":" not in user_id:
+        return False
+    localpart, server_name = user_id[1:].split(":", 1)
+    if not localpart or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in localpart):
+        return False
+    return valid_matrix_server_name(server_name)
+
+
 def _validate_matrix_user_ids(values: list[str], *, field_name: str) -> list[str]:
     normalized: list[str] = []
     for raw in values:
         user_id = _strip_non_empty(raw, field_name=field_name)
-        if _MATRIX_USER_ID_PATTERN.fullmatch(user_id) is None:
+        if not _is_valid_matrix_user_id(user_id):
             msg = f"Invalid Matrix user ID in {field_name}: {raw!r}"
             raise ValueError(msg)
         normalized.append(user_id)
@@ -88,8 +98,8 @@ def _public_key_bytes_from_pem(value: str) -> bytes | None:
     return _raw_ed25519_public_key_bytes(key)
 
 
-def _normalize_ed25519_public_key(value: str) -> str:
-    """Normalize raw base64, OpenSSH, or PEM Ed25519 public keys to raw 32-byte base64."""
+def normalize_ed25519_public_key(value: str) -> tuple[str, bytes]:
+    """Normalize raw base64, OpenSSH, or PEM Ed25519 public keys to (raw_base64, raw_32_bytes)."""
     normalized_input = _strip_non_empty(value, field_name="public_key")
     public_key_bytes = (
         _public_key_bytes_from_pem(normalized_input)
@@ -102,7 +112,7 @@ def _normalize_ed25519_public_key(value: str) -> str:
             "OpenSSH single-line format ('ssh-ed25519 <base64> [comment]'), or PEM SubjectPublicKeyInfo"
         )
         raise ValueError(msg)
-    return base64.b64encode(public_key_bytes).decode("ascii")
+    return base64.b64encode(public_key_bytes).decode("ascii"), public_key_bytes
 
 
 class GitHubEventSourceConfig(BaseModel):
@@ -216,7 +226,7 @@ class Ed25519EventSourceConfig(BaseModel):
     @classmethod
     def validate_public_key(cls, value: str) -> str:
         """Validate and normalize an Ed25519 public key (raw base64, OpenSSH, or PEM) to raw base64."""
-        return _normalize_ed25519_public_key(value)
+        return normalize_ed25519_public_key(value)[0]
 
     @field_validator("key_id")
     @classmethod

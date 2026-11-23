@@ -2,8 +2,17 @@
 
 from __future__ import annotations
 
-from mindroom.tools.triggers import triggers_tools
+from typing import TYPE_CHECKING
 
-external_trigger_manager_tools = triggers_tools
+if TYPE_CHECKING:
+    from mindroom.custom_tools.external_trigger_manager import ExternalTriggerManagerTools
+
+
+def external_trigger_manager_tools() -> type[ExternalTriggerManagerTools]:
+    """Return the backward-compatible external trigger manager toolkit class."""
+    from mindroom.custom_tools.external_trigger_manager import ExternalTriggerManagerTools
+
+    return ExternalTriggerManagerTools
+
 
 __all__ = ["external_trigger_manager_tools"]

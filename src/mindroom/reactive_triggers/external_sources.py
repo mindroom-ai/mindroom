@@ -508,11 +508,13 @@ def _normalize_check_suite(
     data = _clean_data(
         {
             "repo": repo,
+            "id": cs.get("id"),
             "action": action,
             "status": cs.get("status"),
             "conclusion": cs.get("conclusion"),
             "branch": cs.get("head_branch"),
             "sha": cs.get("head_sha"),
+            "url": cs.get("url"),
         },
     )
     title = _clip_text(_mapping(cs.get("head_commit")).get("message"), _MAX_TITLE_CHARS)

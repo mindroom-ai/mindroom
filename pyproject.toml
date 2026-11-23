@@ -460,6 +460,7 @@ trafilatura = [
 trello = [
   "py-trello",
 ]
+triggers = []
 twilio = [
   "twilio",
 ]

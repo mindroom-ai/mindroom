@@ -33,8 +33,10 @@ from mindroom.reactive_triggers.store import ReactiveTriggerStore
 from mindroom.thread_tags import ThreadTagRecord, ThreadTagsError, ThreadTagsState
 from mindroom.tool_system.catalog import builtin_tool_registry, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from mindroom.tools.external_trigger_manager import external_trigger_manager_tools
-from mindroom.tools.triggers import triggers_tools
+from mindroom.tools import external_trigger_manager_tools
+from mindroom.tools.external_trigger_manager import (
+    external_trigger_manager_tools as module_external_trigger_manager_tools,
+)
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     make_conversation_reader_mock,
@@ -872,13 +874,38 @@ async def test_reenabling_disabled_room_message_trigger_advances_cursor_forward(
     assert kept_cursor.logical_event_id == "$future:example.org"
 
 
-def test_legacy_external_trigger_manager_tool_factory_shim_does_not_double_register() -> None:
-    """Legacy Python import shim exports external_trigger_manager_tools without creating duplicate metadata."""
+@pytest.mark.asyncio
+async def test_legacy_external_trigger_manager_tool_factory_shim_does_not_double_register(tmp_path: Path) -> None:
+    """Legacy Python import shim exports ExternalTriggerManagerTools with sync disable_trigger and no duplicate metadata."""
     registry = builtin_tool_registry()
-    assert external_trigger_manager_tools is triggers_tools
-    assert external_trigger_manager_tools() is TriggersTools
+    assert external_trigger_manager_tools is module_external_trigger_manager_tools
+    assert external_trigger_manager_tools() is ExternalTriggerManagerTools
     assert "triggers" in registry.entries
     assert "external_trigger_manager" not in registry.entries
+
+    _record_rooms(tmp_path)
+    legacy_tool = ExternalTriggerManagerTools()
+    absent_state = ThreadTagsState(room_id="!lobby:example.org", thread_root_id="$thread1", tags={})
+    with (
+        tool_runtime_context(_context(tmp_path)),
+        patch("mindroom.custom_tools.triggers.get_thread_tags", new=AsyncMock(return_value=absent_state)),
+    ):
+        assert _payload(await legacy_tool.create_trigger("legacy-direct", public_key=_PUBLIC_KEY))["status"] == "ok"
+        assert (
+            _payload(await legacy_tool.watch_thread("Follow up", thread_id="$thread1", trigger_id="legacy-tag"))[
+                "status"
+            ]
+            == "ok"
+        )
+        # Synchronous disable_trigger works without await for both direct and reactive triggers
+        assert _payload(legacy_tool.disable_trigger("legacy-direct", enabled=False))["trigger"]["enabled"] is False
+        assert _payload(legacy_tool.disable_trigger("legacy-direct", enabled=True))["trigger"]["enabled"] is True
+        assert _payload(legacy_tool.disable_trigger("legacy-tag", enabled=False))["trigger"]["enabled"] is False
+        assert _payload(legacy_tool.disable_trigger("legacy-tag", enabled=True))["trigger"]["enabled"] is True
+
+    store = ReactiveTriggerStore(_runtime_paths(tmp_path))
+    # Sync re-enable cleared any stale thread checkpoint so restore_room/live events re-seed cleanly
+    assert store.get_thread_checkpoint("legacy-tag") is None
 
 
 @pytest.mark.asyncio

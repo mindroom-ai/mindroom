@@ -27,8 +27,6 @@ from mindroom.reactive_triggers.store import ReactiveTriggerStore, ReactiveTrigg
 from mindroom.requester_identity import equivalent_requester_ids, is_human_requester_id
 
 if TYPE_CHECKING:
-    import nio
-
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
@@ -317,14 +315,16 @@ async def dispatch_reactive_trigger(
     return DispatchResult(status="delivered", matrix_event_id=delivered.event_id)
 
 
-def _check_target_bot_and_owner_auth(
+async def check_reactive_target_access(
     *,
     rule: ReactiveTriggerRecord,
     target_bot: AgentBot | None,
     config: Config,
     runtime_paths: RuntimePaths,
     memberships: AgentReplyMembershipIndex,
+    room_states: dict[str, RoomStateSnapshot] | None = None,
 ) -> DispatchResult | None:
+    """Verify policy, target bot readiness, owner reply authorization, and live owner target-room membership."""
     if not config.external_trigger_policy.enabled or not config.external_trigger_policy.reactive_enabled:
         return DispatchResult(status="skipped", reason="reactive_triggers_disabled")
     if target_bot is None or not target_bot.running or target_bot.client is None:
@@ -340,7 +340,22 @@ def _check_target_bot_and_owner_auth(
     rooms = getattr(target_bot.client, "rooms", None)
     if not isinstance(rooms, Mapping) or rule.target.room_id not in rooms:
         return DispatchResult(status="retry", reason="target_bot_not_joined")
-    return None
+
+    target_room_state = await read_room_state(target_bot.client, rule.target.room_id)
+    if target_room_state is None:
+        return DispatchResult(status="retry", reason="room_state_unreadable")
+    if room_states is not None:
+        room_states[rule.target.room_id] = target_room_state
+    return (
+        None
+        if _is_owner_joined_in_state(
+            target_room_state,
+            owner_user_id=rule.owner_user_id,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+        else DispatchResult(status="skipped", reason="owner_not_joined")
+    )
 
 
 async def _check_dispatch_preconditions(
@@ -354,28 +369,18 @@ async def _check_dispatch_preconditions(
     memberships: AgentReplyMembershipIndex,
 ) -> DispatchResult | None:
     """Return a skip/retry DispatchResult when preconditions are not met, or None to proceed."""
-    rejection = _check_target_bot_and_owner_auth(
+    room_states: dict[str, RoomStateSnapshot] = {}
+    rejection = await check_reactive_target_access(
         rule=rule,
         target_bot=target_bot,
         config=config,
         runtime_paths=runtime_paths,
         memberships=memberships,
+        room_states=room_states,
     )
     if rejection is not None:
         return rejection
     assert target_bot is not None
-    assert target_bot.client is not None
-
-    target_room_state = await _read_owner_room_state(target_bot.client, rule.target.room_id)
-    if target_room_state is None:
-        return DispatchResult(status="retry", reason="room_state_unreadable")
-    if not _is_owner_joined_in_state(
-        target_room_state,
-        owner_user_id=rule.owner_user_id,
-        config=config,
-        runtime_paths=runtime_paths,
-    ):
-        return DispatchResult(status="skipped", reason="owner_not_joined")
 
     effective_source_bot = source_bot if source_bot is not None else target_bot
     return await check_reactive_source_access(
@@ -385,7 +390,7 @@ async def _check_dispatch_preconditions(
         config=config,
         runtime_paths=runtime_paths,
         memberships=memberships,
-        known_room_states={rule.target.room_id: target_room_state},
+        known_room_states=room_states,
     )
 
 
@@ -486,10 +491,6 @@ def _persist_thread_key_binding(
             matrix_event_id=matrix_event_id,
             exc_info=True,
         )
-
-
-async def _read_owner_room_state(client: nio.AsyncClient, room_id: str) -> RoomStateSnapshot | None:
-    return await read_room_state(client, room_id)
 
 
 def _is_owner_joined_in_state(

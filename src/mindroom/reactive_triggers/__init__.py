@@ -5,6 +5,7 @@ from mindroom.reactive_triggers.dispatch import (
     build_reactive_trigger_body,
     build_reactive_trigger_transaction_id,
     check_reactive_source_access,
+    check_reactive_target_access,
     dispatch_reactive_trigger,
 )
 from mindroom.reactive_triggers.external_sources import (
@@ -96,6 +97,7 @@ __all__ = (
     "build_reactive_trigger_transaction_id",
     "check_external_event_source_access",
     "check_reactive_source_access",
+    "check_reactive_target_access",
     "dispatch_reactive_trigger",
     "evaluate_triage",
     "event_source_replay_store",

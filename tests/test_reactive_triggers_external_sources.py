@@ -1527,3 +1527,64 @@ def test_github_typed_events_reject_missing_or_non_dict_object_key(
             },
         )
     assert resp.status_code == 400
+
+
+def test_github_check_suite_preserves_id_and_url_for_subscription_matching(tmp_path: Path) -> None:
+    """check_suite.completed preserves check_suite.id and check_suite.url so match={'id': ...} fans out cleanly."""
+    secret = _GH_SECRET
+    runtime_paths, config = _setup_event_source_api(
+        tmp_path,
+        event_sources={
+            "gh": {
+                "kind": "github",
+                "secret_env": "GH_CS_SECRET",
+                "allowed_repos": ["mindroom-ai/mindroom"],
+                "subscribers": [_ALICE],
+            },
+        },
+        env={"GH_CS_SECRET": secret},
+    )
+    store = ReactiveTriggerStore(runtime_paths)
+    store.create_trigger(
+        _make_external_rule(
+            trigger_id="cs-match-id",
+            owner_user_id=_ALICE,
+            source_id="gh",
+            kind="check_suite.completed",
+            match={"repo": "mindroom-ai/mindroom", "id": 987654, "conclusion": "failure"},
+        ),
+    )
+
+    body_obj = {
+        "action": "completed",
+        "repository": {"full_name": "mindroom-ai/mindroom"},
+        "sender": {"login": "github-actions[bot]"},
+        "check_suite": {
+            "id": 987654,
+            "status": "completed",
+            "conclusion": "failure",
+            "head_branch": "main",
+            "head_sha": "abc1234",
+            "url": "https://api.github.com/repos/mindroom-ai/mindroom/check-suites/987654",
+            "head_commit": {"message": "ci run"},
+        },
+    }
+    payload = json.dumps(body_obj).encode("utf-8")
+    with TestClient(api_main.app) as client:
+        resp = client.post(
+            "/api/event-sources/gh",
+            content=payload,
+            headers={
+                "X-GitHub-Event": "check_suite",
+                "X-GitHub-Delivery": "deliv-cs-987654",
+                "X-Hub-Signature-256": _github_signature(payload, secret),
+                "Content-Type": "application/json",
+            },
+        )
+    assert resp.status_code == 202
+    assert resp.json()["matched_rules"] == 1
+    due = store.list_due_firings()
+    assert len(due) == 1
+    assert due[0].event.data["id"] == 987654
+    assert due[0].event.data["url"] == "https://api.github.com/repos/mindroom-ai/mindroom/check-suites/987654"
+    assert config.external_trigger_policy.enabled is True
