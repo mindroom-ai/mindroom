@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -20,13 +21,10 @@ from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.hooks import HookRegistry, HookRegistryState
 from mindroom.llm.errors import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusal
-from mindroom.llm.provider import Capabilities, RequestOverrides
 from mindroom.llm.usage import MessageMetrics
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.identity import MatrixID
 from mindroom.message_target import MessageTarget
-from mindroom.providers.openai.adapter_common import request_settings
-from mindroom.providers.openai.settings import ChatSettings, ResponsesSettings
 from mindroom.scheduling import tasks as scheduling_tasks
 from mindroom.scheduling.errors import SchedulingError
 from mindroom.scheduling.executor import execute_scheduled_workflow, send_scheduled_failure_notice
@@ -563,16 +561,14 @@ class TestParseWorkflowSchedule:
         assert result.cron_schedule is not None
         assert result.cron_schedule.to_cron_string() == "0 9 5 6 1"
 
-    async def test_parse_workflow_schedule_caps_output_and_times_out(
+    async def test_parse_workflow_schedule_times_out_and_logs_error(
         self,
         monkeypatch: pytest.MonkeyPatch,
         mock_config: Config,
     ) -> None:
-        """Schedule parsing passes a bounded max_tokens override and raises SchedulingError on timeout."""
-        captured_overrides: list[RequestOverrides] = []
+        """Schedule parsing raises SchedulingError and logs an error when complete_prompt stalls."""
 
-        async def slow_complete_prompt(*_args: object, **kwargs: object) -> object:
-            captured_overrides.append(kwargs["overrides"])  # type: ignore[arg-type]
+        async def slow_complete_prompt(*_args: object, **_kwargs: object) -> object:
             await asyncio.sleep(5)
             pytest.fail("should have timed out")
 
@@ -580,7 +576,7 @@ class TestParseWorkflowSchedule:
         monkeypatch.setattr(scheduling_tasks, "complete_prompt", slow_complete_prompt)
         monkeypatch.setattr(scheduling_tasks, "_SCHEDULE_PARSE_TIMEOUT_SECONDS", 0.05)
 
-        with pytest.raises(SchedulingError, match="Timed out parsing the schedule request"):
+        with capture_logs() as logs, pytest.raises(SchedulingError, match="Timed out parsing the schedule request"):
             await _parse_workflow_schedule(
                 "Daily at 9am check my email",
                 config=mock_config,
@@ -589,9 +585,9 @@ class TestParseWorkflowSchedule:
                 timezone="UTC",
             )
 
-        assert captured_overrides == [RequestOverrides(max_tokens=2048)]
-        assert request_settings(ChatSettings(), captured_overrides[0], Capabilities()).max_tokens == 2048
-        assert request_settings(ResponsesSettings(), captured_overrides[0], Capabilities()).max_output_tokens == 2048
+        assert [entry["log_level"] for entry in logs if entry["event"] == "Timed out parsing workflow schedule"] == [
+            "error",
+        ]
 
 
 @pytest.mark.asyncio

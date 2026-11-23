@@ -38,7 +38,6 @@ from mindroom.entity_resolution import entity_identity_registry, persisted_bot_u
 from mindroom.failure_text import failure_text
 from mindroom.helper_usage import record_system_usage
 from mindroom.llm.errors import ModelSafeguardRefusal
-from mindroom.llm.provider import RequestOverrides
 from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_hydration import ConversationReadError
 from mindroom.matrix.conversation_reads import complete_thread_history
@@ -74,8 +73,7 @@ logger = get_logger(__name__)
 
 # Maximum length for message preview in task listings
 _MESSAGE_PREVIEW_LENGTH = 50
-_SCHEDULE_PARSE_MAX_TOKENS = 2048
-_SCHEDULE_PARSE_TIMEOUT_SECONDS = 120.0
+_SCHEDULE_PARSE_TIMEOUT_SECONDS = 300.0
 
 # Reasons shown on a scheduled tool call's approval card when its task changes.
 SCHEDULE_CANCELLED_REASON = "Schedule cancelled."
@@ -932,11 +930,10 @@ async def _parse_workflow_schedule(
                 prompt,
                 instructions=["Parse scheduling requests into structured workflows"],
                 schema=ScheduledWorkflow,
-                overrides=RequestOverrides(max_tokens=_SCHEDULE_PARSE_MAX_TOKENS),
             )
         await record_system_usage(response.usage, runtime_paths=runtime_paths, kind="schedule_parse")
     except TimeoutError:
-        logger.warning(
+        logger.exception(
             "Timed out parsing workflow schedule",
             request=request,
             timeout_seconds=_SCHEDULE_PARSE_TIMEOUT_SECONDS,
