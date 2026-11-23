@@ -16,8 +16,7 @@ DIRTY_DIGEST = "dirty"
 
 def node_digest(kind: str, args: dict[str, object]) -> str:
     """Return the SHA-256 of a call's kind and arguments in canonical JSON."""
-    canonical = json.dumps({"kind": kind, "args": args}, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode()).hexdigest()
+    return result_digest({"kind": kind, "args": args})
 
 
 def result_digest(result: object) -> str:

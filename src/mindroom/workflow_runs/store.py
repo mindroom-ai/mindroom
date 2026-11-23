@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import shutil
 import sqlite3
@@ -26,7 +25,7 @@ from mindroom.workflow_runs.models import (
     WorkflowRunState,
     validated_workflow_run_id,
 )
-from mindroom.workflow_runs.replay import DIRTY_DIGEST, parent_group, split_key
+from mindroom.workflow_runs.replay import DIRTY_DIGEST, parent_group, result_digest, split_key
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Iterator
@@ -717,8 +716,9 @@ def _reservation_digest(run: WorkflowRun) -> str:
     It is taken once, when the run is reserved: the owner, the script as first submitted, and the
     arguments in canonical JSON, in which key order does not matter and `true` is not `1`.
     """
-    identity = [run.agent_name, run.owner_user_id, run.room_id, run.thread_root_event_id, run.source_digest, run.args]
-    return hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return result_digest(
+        [run.agent_name, run.owner_user_id, run.room_id, run.thread_root_event_id, run.source_digest, run.args],
+    )
 
 
 def _totals(entries: Iterable[dict[str, Any]]) -> UsageTotals:
