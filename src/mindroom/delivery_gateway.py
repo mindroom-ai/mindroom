@@ -721,6 +721,7 @@ class DeliveryGateway:
             operation=operation,
             transaction_id=transaction_id,
             content_is_prepared=True,
+            transient_failure_recoverable=True,
         )
         if isinstance(outcome, MatrixDeliveryFailure):
             detail = _matrix_delivery_failure_reason(outcome)

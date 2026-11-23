@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom import reply_lifecycle as rl
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
@@ -4497,10 +4498,15 @@ async def test_durable_send_transient_http_status_logs_deferred_warning(
         return_value=nio.RoomSendError("unknown error", room_id=_ROOM_ID, http_status=http_status),
     )
     target = MessageTarget.resolve(_ROOM_ID, None, "$cause")
-    result = await gateway.send_text(
-        SendTextRequest(target=target, response_text="hello", delivery_turn_id=delivery_turn_id),
-    )
+    with capture_logs() as logs:
+        result = await gateway.send_text(
+            SendTextRequest(target=target, response_text="hello", delivery_turn_id=delivery_turn_id),
+        )
     assert result is None
+    send_logs = [entry for entry in logs if entry["event"] == "matrix_message_send_failed"]
+    assert [(entry["log_level"], entry["http_status"]) for entry in send_logs] == [
+        ("warning" if expect_warning else "error", http_status),
+    ]
     if expect_warning:
         gateway.deps.logger.warning.assert_called_once()
         args, kwargs = gateway.deps.logger.warning.call_args

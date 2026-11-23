@@ -1471,6 +1471,7 @@ class StreamingResponse:
                 self.event_id,
                 content,
                 display_text,
+                transient_failure_recoverable=True,
             )
         return delivered is not None
 

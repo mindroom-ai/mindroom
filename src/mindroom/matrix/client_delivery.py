@@ -432,6 +432,7 @@ async def send_message_outcome(
     content_is_prepared: bool = False,
     write_allowed: Callable[[], bool] | None = None,
     sidecar_required: bool = False,
+    transient_failure_recoverable: bool = False,
 ) -> MatrixSendOutcome:
     """Send a message to a Matrix room and return the delivered payload or a typed failure.
 
@@ -454,6 +455,7 @@ async def send_message_outcome(
         content_is_prepared=content_is_prepared,
         write_allowed=write_allowed,
         sidecar_required=sidecar_required,
+        transient_failure_recoverable=transient_failure_recoverable,
     )
 
 
@@ -469,6 +471,7 @@ async def _send_resolved_message(
     content_is_prepared: bool = False,
     write_allowed: Callable[[], bool] | None = None,
     sidecar_required: bool = False,
+    transient_failure_recoverable: bool = False,
 ) -> MatrixSendOutcome:
     """Prepare and send one message with the room encryption its caller resolved after any upload it references."""
     emit_timing_event(
@@ -560,7 +563,7 @@ async def _send_resolved_message(
         outcome="error",
         error=str(response),
     )
-    log = logger.warning if is_transient_homeserver_status(status) else logger.error
+    log = logger.warning if transient_failure_recoverable and is_transient_homeserver_status(status) else logger.error
     log(
         "matrix_message_send_failed",
         room_id=room_id,
@@ -940,6 +943,7 @@ async def edit_message_outcome(
     *,
     extra_content: dict[str, Any] | None = None,
     transaction_id: str | None = None,
+    transient_failure_recoverable: bool = False,
 ) -> MatrixSendOutcome:
     """Edit an existing Matrix message and return the delivered payload or a typed failure."""
     edit_content = build_edit_event_content(
@@ -955,6 +959,7 @@ async def edit_message_outcome(
         edit_content,
         operation="edit_message",
         transaction_id=transaction_id,
+        transient_failure_recoverable=transient_failure_recoverable,
     )
 
 
@@ -967,6 +972,7 @@ async def edit_message_result(
     *,
     extra_content: dict[str, Any] | None = None,
     transaction_id: str | None = None,
+    transient_failure_recoverable: bool = False,
 ) -> DeliveredMatrixEvent | None:
     """Edit an existing Matrix message and return the prepared delivered payload."""
     outcome = await edit_message_outcome(
@@ -977,6 +983,7 @@ async def edit_message_result(
         new_text,
         extra_content=extra_content,
         transaction_id=transaction_id,
+        transient_failure_recoverable=transient_failure_recoverable,
     )
     return outcome if isinstance(outcome, DeliveredMatrixEvent) else None
 

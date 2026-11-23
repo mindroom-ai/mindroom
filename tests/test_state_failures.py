@@ -155,17 +155,24 @@ async def test_transient_homeserver_failures_log_warning_with_http_status(
 
     with capture_logs() as logs:
         await send_message_outcome(client, _ROOM_ID, {"msgtype": "m.text", "body": "hi"})
+        await send_message_outcome(
+            client,
+            _ROOM_ID,
+            {"msgtype": "m.text", "body": "hi"},
+            transient_failure_recoverable=True,
+        )
         assert await get_joined_rooms(client) is None
         assert await upload_json_sidecar(client, _ROOM_ID, {"body": "x"}, room_encrypted=False, durable=False) == (
             None,
             None,
         )
 
-    for event in (
-        "matrix_message_send_failed",
-        "matrix_joined_rooms_fetch_failed",
-        "large_message_sidecar_upload_failed",
-    ):
+    send_logs = [entry for entry in logs if entry["event"] == "matrix_message_send_failed"]
+    assert [(entry["log_level"], entry["http_status"]) for entry in send_logs] == [
+        ("error", http_status),
+        (expected_level, http_status),
+    ]
+    for event in ("matrix_joined_rooms_fetch_failed", "large_message_sidecar_upload_failed"):
         matching = [entry for entry in logs if entry["event"] == event]
         assert len(matching) == 1
         assert matching[0]["log_level"] == expected_level
@@ -198,10 +205,30 @@ async def test_shutdown_fenced_delivery_exception_and_non_final_stream_edit_log_
         progress_delivered=AsyncMock(),
     )
     stream.event_id = "$msg"
-    stream._edit_existing_content = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    edit_client = AsyncMock(spec=nio.AsyncClient)
+    edit_client.user_id = "@bot:localhost"
+    edit_client.rooms = {_ROOM_ID: MagicMock(encrypted=False)}
+    edit_client.room_send = AsyncMock(
+        return_value=nio.RoomSendError("unknown error", room_id=_ROOM_ID, http_status=502),
+    )
+    stream.terminal_edit = AsyncMock(return_value=None)
     progress = ProgressState(text="x", tool_trace=(), presentation_state=None, placeholder_only=False)
     with capture_logs() as edit_logs:
-        await stream._send_content(client, content={}, display_text="x", is_final=False, progress=progress)
-        await stream._send_content(client, content={}, display_text="x", is_final=True, progress=progress)
+        await stream._send_content(
+            edit_client,
+            content={"msgtype": "m.text", "body": "x"},
+            display_text="x",
+            is_final=False,
+            progress=progress,
+        )
+        await stream._send_content(
+            edit_client,
+            content={"msgtype": "m.text", "body": "x"},
+            display_text="x",
+            is_final=True,
+            progress=progress,
+        )
+    send_edit_logs = [entry for entry in edit_logs if entry["event"] == "matrix_message_send_failed"]
+    assert [(entry["log_level"], entry["http_status"]) for entry in send_edit_logs] == [("warning", 502)]
     failed_edits = [entry for entry in edit_logs if entry["event"] == "Failed to edit streaming message"]
     assert [entry["log_level"] for entry in failed_edits] == ["warning", "error"]
