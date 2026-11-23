@@ -135,12 +135,20 @@ def test_the_wire_models_change_only_with_the_protocol_version() -> None:
 def test_the_opt_in_fields_are_exactly_the_listed_ones() -> None:
     """A model leaves a field out of its bodies only when this file lists it, so no field skips the digest unseen."""
     declared = {
-        name: set(model.opt_in_fields)
+        name: opt_in
         for name, model in vars(protocol).items()
-        if isinstance(model, type) and issubclass(model, BaseModel) and getattr(model, "opt_in_fields", None)
+        if isinstance(model, type)
+        and issubclass(model, BaseModel)
+        and (opt_in := {field for field, info in model.model_fields.items() if info.exclude_if is not None})
     }
 
     assert declared == {name: set(listed) for name, listed in _OPT_IN_FIELDS.items()}
+
+
+def test_response_serialization_schema_preserves_properties() -> None:
+    """Opt-in field exclusion must not erase worker response schemas from OpenAPI (B23)."""
+    schema = protocol.ExecuteResponse.model_json_schema(mode="serialization")
+    assert {"ok", "result", "error", "failure_kind", "metadata"} <= set(schema["properties"])
 
 
 def test_a_plain_call_is_byte_identical_to_the_wire_before_the_opt_in_fields() -> None:

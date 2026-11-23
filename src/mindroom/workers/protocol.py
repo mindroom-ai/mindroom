@@ -7,17 +7,16 @@ of them added.
 
 from __future__ import annotations
 
+import operator
 from dataclasses import fields
-from typing import Annotated, Any, ClassVar, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import (
     AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
-    SerializerFunctionWrapHandler,
     field_validator,
-    model_serializer,
 )
 
 from mindroom.config.tool_aliases import canonical_tool_name
@@ -34,7 +33,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerSco
 # 9: so does a worker a reply's calls name (`named=<id>` in its key).
 # 10: a shell call with `stream_io` streams its command's raw output as frames before its result line, and
 #     /execute/{request_id}/stdin writes the command's stdin.
-# A wire model change bumps this, except an opt-in field (see ``_WireModel.opt_in_fields``);
+# A wire model change bumps this, except an opt-in field declared with ``exclude_if``;
 # `tests/test_worker_protocol_schema.py` pins each version's schema.
 WORKER_PROTOCOL_VERSION = 10
 
@@ -43,17 +42,6 @@ FailureKind = Literal["tool", "worker"]
 
 class _WireModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    # The fields a body carries only when set, each added without a protocol bump: every other body is byte for byte
-    # what it was, so a peer that predates such a field refuses only the calls that ask for what it adds.
-    opt_in_fields: ClassVar[frozenset[str]] = frozenset()
-
-    @model_serializer(mode="wrap")
-    def _omit_unset_opt_in_fields(self, dump: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        body = dump(self)
-        for name in self.opt_in_fields:
-            if not body.get(name):
-                body.pop(name, None)
-        return body
 
 
 _EXECUTION_IDENTITY_FIELDS = frozenset(field.name for field in fields(ToolExecutionIdentity))
@@ -122,8 +110,7 @@ class ExecuteRequest(WorkerRoute):
     # A shell call whose command's stdout and stderr stream as raw bytes while it runs, for `workers run`.
     stream_io: bool = False
     # The caller stores the result itself: no size moves it to a workspace file, and the answer carries `metadata`.
-    structured_result: bool = False
-    opt_in_fields = frozenset({"structured_result"})
+    structured_result: bool = Field(default=False, exclude_if=operator.not_)
 
 
 class SaveAttachmentRequest(WorkerRoute):
@@ -194,8 +181,7 @@ class ExecuteResponse(_WireModel):
     error: str | None = None
     failure_kind: FailureKind | None = None
     # What the tool reported about a structured result, such as a command's exit status.
-    metadata: dict[str, Any] | None = None
-    opt_in_fields = frozenset({"metadata"})
+    metadata: dict[str, Any] | None = Field(default=None, exclude_if=operator.not_)
 
 
 class SaveAttachmentResponse(_WireModel):
