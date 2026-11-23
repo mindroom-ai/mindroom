@@ -934,7 +934,7 @@ async def test_every_cli_toolkit_answers_to_its_own_tool_name(
     )
     assert "attachments (list_attachments," in roster_line
     if "openclaw_compat" in tools:
-        assert "edit_file" in roster_line
+        assert re.search(r"\bfilesystem \([^)]*\bedit_file\b", roster_line)
     assert set(roster.split(", ")) <= offered
     # A preset offers no functions of its own.
     assert "openclaw_compat" not in offered

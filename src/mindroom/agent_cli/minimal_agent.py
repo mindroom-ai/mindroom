@@ -113,10 +113,10 @@ def minimal_turn(
     toolkit_functions: dict[str, list[str]] = {}
     for toolkit in build.spec.toolkits:
         for function in toolkit.functions:
-            toolkit_name = function.registered_toolkit or function.toolkit
-            if toolkit_name is None:
+            # The CLI files a function under its registered toolkit; one without (a generated function) under `agent`.
+            if function.registered_toolkit is None:
                 continue
-            functions = toolkit_functions.setdefault(toolkit_name, [])
+            functions = toolkit_functions.setdefault(function.registered_toolkit, [])
             if function.name not in functions:
                 functions.append(function.name)
     bootstrap = minimal_system_message(
