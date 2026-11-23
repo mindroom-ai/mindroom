@@ -13,7 +13,9 @@ import pytest
 
 from mindroom import reply_lifecycle as rl
 from mindroom.coalescing.batch import PreparedTurn, active_follow_up_coalescing_key, build_prepared_turn
-from mindroom.config.agent import TeamConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.main import Config
+from mindroom.constants import CONVERSATION_CONTENT_KEY, EXACT_MENTIONS_KEY
 from mindroom.custom_tools.job import JobTools
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import (
@@ -37,6 +39,7 @@ from mindroom.response_turn import (
     stream_response_turn,
 )
 from mindroom.session_storage.store import ConversationStore
+from mindroom.thread_utils import history_mentioned_user_ids
 from mindroom.tool_jobs.client_cancel import JobCancelRequest, cancel_jobs_command, cancel_room_jobs
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import (
@@ -61,6 +64,7 @@ from tests.conftest import (
     patch_response_runner_module,
     unwrap_extracted_collaborator,
 )
+from tests.delegation_helpers import _runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _envelope, _noop_typing, _target
 from tests.tool_job_helpers import (
@@ -150,6 +154,9 @@ async def _ended(
     owner: ToolExecutionIdentity | None = None,
     source_event_id: str | None = None,
     reply_id: str | None = None,
+    tool_name: str | None = None,
+    kind: str = "tool",
+    adapter: dict[str, object] | None = None,
 ) -> None:
     """Start a job that ends with ``outcome`` at once, as the turn ``source_event_id`` started it."""
 
@@ -159,9 +166,10 @@ async def _ended(
     await start_job(
         runtime,
         job_id,
-        tool_name=f"tool_{job_id}",
+        tool_name=tool_name or f"tool_{job_id}",
         depth=0,
-        adapter={},
+        kind=kind,
+        adapter={} if adapter is None else adapter,
         owner=owner or job_owner(),
         operation=operation,
         source_event_id=source_event_id,
@@ -393,10 +401,19 @@ async def test_jobs_the_limit_holds_get_one_notice_of_the_agent(tmp_path: Path) 
             client, room_id, content = send.await_args.args
             assert (client, room_id) == (bot.client, key.room_id)
             assert send.await_args.kwargs["operation"] == "send_job_hold"
+            assert send.await_args.kwargs["transaction_id"] == _follow_up_event_id(
+                key,
+                [job for job in runtime.retained_jobs() if job.job_id == "capped"],
+                0,
+            )
             assert content["msgtype"] == "m.notice"
+            assert content[CONVERSATION_CONTENT_KEY] is True
+            assert content[EXACT_MENTIONS_KEY] is True
+            assert content["m.mentions"] == {"user_ids": []}
             assert content["m.relates_to"]["event_id"] == key.thread_id
             assert content["body"] == (
-                "⏸️ 1 background job finished while I was paused after 20 automatic follow-ups. "
+                "⏸️ 1 background job finished while I was paused after "
+                "20 automatic follow-ups in a row without a message from you: `tool_capped` (capped). "
                 "Reply here to let me continue."
             )
     finally:
@@ -417,8 +434,9 @@ async def test_a_room_level_hold_is_a_conversation_notice(tmp_path: Path) -> Non
             await coordinator._admit_follow_ups(runtime)
             content = send.await_args.args[2]
             assert "m.relates_to" not in content
-            assert content["io.mindroom.conversation"] is True
+            assert content[CONVERSATION_CONTENT_KEY] is True
             assert content["body"].startswith("⏸️ 2 background jobs finished")
+            assert "`tool_capped_a` (capped_a), `tool_capped_b` (capped_b)" in content["body"]
     finally:
         await runtime.shutdown()
 
@@ -1321,3 +1339,60 @@ async def test_follow_up_yields_while_human_turn_prepares_before_lock(tmp_path: 
         assert not conversation.has_pending_human_messages()
     finally:
         await runtime.shutdown()
+
+
+async def _post_held_jobs(tmp_path: Path, specs: list[tuple[str, str, str | None]]) -> dict[str, object]:
+    runtime = await tool_job_runtime(tmp_path)
+    coordinator = job_coordinator(tmp_path, runtime, _admitting_bot())
+    last = _follow_up_event_id(_key(job_owner()), [], _FOLLOW_UP_LIMIT)
+    try:
+        with patch(_SEND, AsyncMock()) as send:
+            for job_id, tool_name, title in specs:
+                kind = "delegation" if title is not None else "tool"
+                adapter = {"child": {"title": title}} if title is not None else None
+                await _ended(
+                    runtime,
+                    job_id,
+                    BackgroundOutcome("completed", "done"),
+                    source_event_id=last,
+                    tool_name=tool_name,
+                    kind=kind,
+                    adapter=adapter,
+                )
+            await coordinator._admit_follow_ups(runtime)
+            send.assert_awaited_once()
+            return send.await_args.args[2]
+    finally:
+        await runtime.shutdown()
+
+
+async def test_held_notice_names_subagent_title_caps_list_and_keeps_mentions_exact(tmp_path: Path) -> None:
+    """Held notices list titles or tool names + 8-char IDs, cap at 5, and add no history mentions from titles."""
+    specs = [
+        ("c6256cac" + "1" * 56, "research", "Review @general design"),
+        ("d4e5f607" + "2" * 56, "research", ""),
+        *((f"{idx:08x}" + "a" * 56, f"run_tool_{idx}", None) for idx in range(5)),
+    ]
+    content = await _post_held_jobs(tmp_path, specs)
+    assert (content["msgtype"], content[EXACT_MENTIONS_KEY], content["m.mentions"]) == (
+        "m.notice",
+        True,
+        {"user_ids": []},
+    )
+    assert "`Review @general design` (c6256cac), `research` (d4e5f607)" in str(content["body"])
+    assert ", and 2 more." in str(content["body"])
+
+    config, paths = Config(agents={"general": AgentConfig(display_name="General")}), _runtime_paths(tmp_path)
+    persist_entity_accounts(config, paths)
+    assert history_mentioned_user_ids(content, config, paths) == []
+
+
+async def test_held_notice_escapes_markdown_html_and_backticks_in_titles(tmp_path: Path) -> None:
+    """Markdown, HTML, and backticks in job titles render as literal code spans without links or formatting."""
+    tricky = "**x** [a](https://e.x) <b>y</b> [@general](https://matrix.to/#/@mindroom_general:example.org) ``tick``"
+    formatted = str((await _post_held_jobs(tmp_path, [("a1b2c3d4" + "0" * 56, "research", tricky)]))["formatted_body"])
+    assert not any(tag in formatted for tag in ("<a ", "<strong>", "<b>"))
+    assert (
+        "<code>**x** [a](https://e.x) &lt;b&gt;y&lt;/b&gt; "
+        "[@general](https://matrix.to/#/@mindroom_general:example.org) ``tick``</code>"
+    ) in formatted

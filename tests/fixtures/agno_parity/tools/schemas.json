@@ -6049,7 +6049,7 @@
           "properties": {
             "subagent_id": {
               "type": "string",
-              "description": "Exact Subagent ID returned by run_subagent or continue_subagent."
+              "description": "Subagent ID (or a unique prefix of at least 8 hex characters) returned by run_subagent or continue_subagent."
             },
             "message": {
               "type": "string",
