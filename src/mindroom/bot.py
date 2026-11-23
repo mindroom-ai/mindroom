@@ -749,6 +749,10 @@ class AgentBot:
                     logger=self.logger,
                 ),
                 turn_policy=self._turn_policy,
+                active_runs=None if self.agent_name == ROUTER_AGENT_NAME else self._active_runs,
+                can_publish_active_run=lambda room_id: (
+                    contact_room(self.config, self.runtime_paths, room_id, self.agent_name) is None
+                ),
             ),
         )
         self._turn_dispatcher = TurnDispatcher(
