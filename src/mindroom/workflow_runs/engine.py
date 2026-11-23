@@ -76,7 +76,13 @@ from mindroom.workflow_runs.replay import (
     stale_keys,
 )
 from mindroom.workflow_runs.store import SupersededAttemptError, WorkflowRunNotFoundError, WorkflowRunStoreError
-from mindroom.workflow_runs.structured import SCHEMA_TURNS, SchemaError, extract_json, validation_error
+from mindroom.workflow_runs.structured import (
+    SCHEMA_TURNS,
+    SchemaError,
+    extract_json,
+    schema_prompt,
+    validation_error,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
@@ -1581,7 +1587,10 @@ class WorkflowEngine:
             owner, jobs = self.store.get_run(run_id).job_id, runtime.jobs.retained_jobs()
             live = not any(job.job_id == owner and job.status in _STOPPED_JOB_STATUSES for job in jobs)
         prompt = node.request.get("prompt") if node is not None and live else None
-        return prompt if isinstance(prompt, str) else None
+        if not isinstance(prompt, str) or node is None:
+            return None
+        schema = node.request.get("schema")
+        return schema_prompt(prompt, schema) if schema is not None else prompt
 
     async def node(self, attempt: ScriptRunRecord, node_id: str) -> WorkflowNode:
         """Return one node of the attempt's run, for its whole result."""

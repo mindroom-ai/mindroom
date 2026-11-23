@@ -24,6 +24,7 @@ from mindroom.script_runs.models import ScriptRunState
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
+from mindroom.workflow_runs.structured import schema_prompt
 from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
 from tests.tool_job_helpers import JobApprovalCards, wait_for_status
 from tests.workflow_helpers import NodeFailed, WorkflowStack, tool_args, workflow_stack
@@ -404,3 +405,19 @@ async def test_job_that_ended_while_mindroom_was_down_is_read_once_it_is_up(stac
         1,
         1,
     )
+
+
+@pytest.mark.asyncio
+async def test_restart_before_first_tool_call_keeps_schema_instruction(stack: WorkflowStack) -> None:
+    """A structured agent restarted before its first tool call still receives its schema instruction."""
+    schema = {"type": "object", "properties": {"verdict": {"type": "string"}}, "required": ["verdict"]}
+    request: dict[str, object] = {"prompt": "Classify this item.", "schema": schema}
+    stack.child_script([Await(asyncio.Event().wait), *answer("never")])
+    await stack.submit("@0", "agent", request)
+    await stack.until(lambda: len(stack.models["watcher"].requests) == 1)
+
+    await _restarted(stack, answer('```json\n{"verdict": "ok"}\n```'))
+
+    assert await stack.result("@0", "agent", request) == {"verdict": "ok"}
+    assert schema_prompt("Classify this item.", schema) in _sent(stack)
+    assert "verdict" not in json.dumps(stack.node_job("@0").adapter)
