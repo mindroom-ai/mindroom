@@ -6,12 +6,12 @@ import hashlib
 import json
 from typing import TYPE_CHECKING, Literal
 
-from mindroom.workflow_runs.models import LIVE_NODE_STATES, UNSETTLED_NODE_STATES, WorkflowNode, WorkflowNodeState
+from mindroom.workflow_runs.models import LIVE_NODE_STATES, WorkflowNode, WorkflowNodeState
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-type _Action = Literal["return", "hit", "attach", "reconcile", "raise_indeterminate", "run"]
+type _Action = Literal["hit", "attach", "raise_indeterminate", "run"]
 
 # Written onto earlier-attempt rows after a node that ran, so they rerun without colliding with explicit reruns ('').
 DIRTY_DIGEST = "dirty"
@@ -57,35 +57,22 @@ def decide(
     saved: WorkflowNode | None,
     digest: str,
     *,
-    attempt: int,
     dirty: bool,
     rerun: bool,
     cached: bool,
-    live: bool = False,
 ) -> _Action:
-    """Decide what a submitted call does, given the node saved at its key.
-
-    `reconcile` asks the caller to settle the saved node from its dispatch handle and decide
-    again, with *live* set when the handle's work is still alive.
-    """
-    action: _Action
+    """Decide what a submitted call does, given the reconciled node from an earlier attempt."""
     if saved is None:
-        action = "run"
-    elif saved.attempt == attempt and not saved.stale:
-        action = "return"
-    elif saved.state in UNSETTLED_NODE_STATES and not live:
-        action = "reconcile"
-    elif saved.state is WorkflowNodeState.INDETERMINATE and not rerun:
-        action = "raise_indeterminate"
-    elif rerun or dirty or saved.digest != digest:
-        action = "run"
-    elif saved.state in LIVE_NODE_STATES:
-        action = "attach"
-    elif saved.state is WorkflowNodeState.COMPLETED and cached:
-        action = "hit"
-    else:
-        action = "run"
-    return action
+        return "run"
+    if saved.state is WorkflowNodeState.INDETERMINATE and not rerun:
+        return "raise_indeterminate"
+    if rerun or dirty or saved.digest != digest:
+        return "run"
+    if saved.state in LIVE_NODE_STATES:
+        return "attach"
+    if saved.state is WorkflowNodeState.COMPLETED and cached:
+        return "hit"
+    return "run"
 
 
 def stale_keys(nodes: Iterable[WorkflowNode], attempt: int) -> tuple[str, ...]:

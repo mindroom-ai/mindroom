@@ -55,49 +55,31 @@ def _indeterminate(key: str, digest: str, attempt: int) -> WorkflowNode:
     return _node(key, digest, attempt, WorkflowNodeState.INDETERMINATE)
 
 
-def test_same_attempt_returns_the_node_even_when_it_failed() -> None:
-    """A redelivered request of the attempt that made the node gets that node, whatever its state."""
-    node = _failed_node("@0", "d", attempt=2)
-    assert decide(node, "d", attempt=2, dirty=False, rerun=False, cached=True) == "return"
-    assert decide(node, "other", attempt=2, dirty=True, rerun=True, cached=False) == "return"
-    assert decide(_running("@0", "d", attempt=2), "d", attempt=2, dirty=False, rerun=False, cached=True) == "return"
-    stale = replace(node, stale=True)
-    assert decide(stale, "d", attempt=2, dirty=False, rerun=False, cached=True) == "run"
-
-
 def test_completed_same_digest_hits_and_live_attaches() -> None:
     """A finished call returns its saved result, and work that is still alive is joined."""
-    assert decide(_done("@0", "d", attempt=1), "d", attempt=2, dirty=False, rerun=False, cached=True) == "hit"
-    assert decide(_waiting("@0", "d", attempt=1), "d", attempt=2, dirty=False, rerun=False, cached=True) == "attach"
-    live = decide(_running("@0", "d", attempt=1), "d", attempt=2, dirty=False, rerun=False, cached=True, live=True)
-    assert live == "attach"
-
-
-def test_running_node_of_a_dead_attempt_is_reconciled_not_run() -> None:
-    """Work a dead attempt left open is settled from its handle before anything else is decided."""
-    assert decide(_running("@0", "d", attempt=1), "d", attempt=2, dirty=False, rerun=False, cached=True) == "reconcile"
-    queued = _node("@0", "d", 1, WorkflowNodeState.QUEUED)
-    assert decide(queued, "d", attempt=2, dirty=False, rerun=False, cached=True) == "reconcile"
+    assert decide(_done("@0", "d", attempt=1), "d", dirty=False, rerun=False, cached=True) == "hit"
+    assert decide(_waiting("@0", "d", attempt=1), "d", dirty=False, rerun=False, cached=True) == "attach"
+    assert decide(_running("@0", "d", attempt=1), "d", dirty=False, rerun=False, cached=True) == "attach"
 
 
 def test_indeterminate_raises_until_rerun_names_it() -> None:
     """A call whose end is unknown is never issued again unless a person names it."""
     node = _indeterminate("@0", "d", attempt=1)
-    assert decide(node, "d", attempt=2, dirty=False, rerun=False, cached=True) == "raise_indeterminate"
-    assert decide(node, "d", attempt=2, dirty=False, rerun=True, cached=True) == "run"
+    assert decide(node, "d", dirty=False, rerun=False, cached=True) == "raise_indeterminate"
+    assert decide(node, "d", dirty=False, rerun=True, cached=True) == "run"
 
 
 def test_indeterminate_raises_with_a_changed_digest_and_in_a_dirty_lane() -> None:
     """Neither an edited call nor a dirty lane nor `cached=False` turns an unknown end into a retry."""
     node = _indeterminate("@0", "d", attempt=1)
     for digest, dirty, cached in (("other", False, True), ("d", True, True), ("other", True, False)):
-        decision = decide(node, digest, attempt=2, dirty=dirty, rerun=False, cached=cached)
+        decision = decide(node, digest, dirty=dirty, rerun=False, cached=cached)
         assert decision == "raise_indeterminate"
-        assert decide(node, digest, attempt=2, dirty=dirty, rerun=True, cached=cached) == "run"
+        assert decide(node, digest, dirty=dirty, rerun=True, cached=cached) == "run"
 
 
-def test_dead_running_node_is_reconciled_before_digest_dirty_or_rerun_are_looked_at() -> None:
-    """Reconciling comes first, so a changed call cannot abandon work whose outcome is not known yet."""
+def test_live_node_with_changed_digest_dirty_or_rerun_runs() -> None:
+    """A reconciled live node whose call changed, is dirty, or was named for rerun is replaced."""
     node = _running("@0", "d", attempt=1)
     for digest, dirty, rerun in (
         ("other", False, False),
@@ -105,27 +87,25 @@ def test_dead_running_node_is_reconciled_before_digest_dirty_or_rerun_are_looked
         ("d", False, True),
         ("other", True, True),
     ):
-        assert decide(node, digest, attempt=2, dirty=dirty, rerun=rerun, cached=False) == "reconcile"
-        replaced = decide(node, digest, attempt=2, dirty=dirty, rerun=rerun, cached=True, live=True)
-        assert replaced == "run"
+        assert decide(node, digest, dirty=dirty, rerun=rerun, cached=True) == "run"
 
 
 def test_changed_digest_dirty_lane_and_failed_node_run_as_the_next_generation() -> None:
     """A call that must run replaces its saved node, and a first call has nothing to replace."""
     node = _done("@0", "d", attempt=1)
-    assert decide(None, "d", attempt=1, dirty=False, rerun=False, cached=True) == "run"
-    assert decide(None, "d", attempt=2, dirty=True, rerun=True, cached=True) == "run"
-    assert decide(node, "other", attempt=2, dirty=False, rerun=False, cached=True) == "run"
-    assert decide(node, "d", attempt=2, dirty=True, rerun=False, cached=True) == "run"
-    assert decide(node, "d", attempt=2, dirty=False, rerun=True, cached=True) == "run"
+    assert decide(None, "d", dirty=False, rerun=False, cached=True) == "run"
+    assert decide(None, "d", dirty=True, rerun=True, cached=True) == "run"
+    assert decide(node, "other", dirty=False, rerun=False, cached=True) == "run"
+    assert decide(node, "d", dirty=True, rerun=False, cached=True) == "run"
+    assert decide(node, "d", dirty=False, rerun=True, cached=True) == "run"
     for ended in (_failed_node("@0", "d", attempt=1), _node("@0", "d", 1, WorkflowNodeState.CANCELLED)):
-        assert decide(ended, "d", attempt=2, dirty=False, rerun=False, cached=True) == "run"
+        assert decide(ended, "d", dirty=False, rerun=False, cached=True) == "run"
 
 
 def test_cached_false_runs_a_completed_node() -> None:
     """`cached=False` runs a finished call again, and still joins one that is alive."""
-    assert decide(_done("@0", "d", attempt=1), "d", attempt=2, dirty=False, rerun=False, cached=False) == "run"
-    assert decide(_waiting("@0", "d", attempt=1), "d", attempt=2, dirty=False, rerun=False, cached=False) == "attach"
+    assert decide(_done("@0", "d", attempt=1), "d", dirty=False, rerun=False, cached=False) == "run"
+    assert decide(_waiting("@0", "d", attempt=1), "d", dirty=False, rerun=False, cached=False) == "attach"
 
 
 def test_keys_split_into_lane_and_index_and_lanes_name_their_group() -> None:

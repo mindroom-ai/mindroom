@@ -718,26 +718,25 @@ class WorkflowEngine:
             saved is not None and saved.digest == DIRTY_DIGEST,
             saved is not None and not saved.digest,
         )
-        decision = partial(decide, digest=digest, attempt=run.attempt, dirty=dirty, rerun=rerun, cached=cached)
-        action = decision(saved)
-        if saved is not None and action == "return":
+        if saved is not None and saved.attempt == run.attempt and not saved.stale:
             # A request the script sent twice never repeats work, not even failed work.
             return _receipt(await self._asked(run, saved, epoch))
-        if saved is not None and action != "return" and saved.state in LIVE_NODE_STATES:
+        live, handle = False, None
+        if saved is not None and saved.state in LIVE_NODE_STATES:
             # Left live by an attempt that ended: its handle says how it ended, or that its job still runs, before
             # any rule may run it again.
-            live = await self._reconcile(run, saved, epoch)
-            handle, saved = saved.handle, self.store.get_node(run.run_id, key)
-            action = decision(saved, live=live)
-            if live and action == "run" and saved is not None and saved.kind == "ask":
-                # The question the call asked before is no longer the call's: nobody can answer its card.
-                await self._close_card(run, saved, "cancelled")
-            if live and action == "run" and handle is not None:
-                # The call that replaces a node whose job still runs stops that job, and nothing waits for its end
-                # under the run's lock: the script's SDK asks again, and what the stopped turn did decides then. One
-                # that called a tool is not replaced unasked either.
-                await cast("AgentRuntime", self.agents()).jobs.request_cancel(handle.ref)
-                raise ScriptRuntimeUnavailableError(_STOPPING)
+            live, handle = await self._reconcile(run, saved, epoch), saved.handle
+            saved = self.store.get_node(run.run_id, key)
+        action = decide(saved, digest, dirty=dirty, rerun=rerun, cached=cached)
+        if live and action == "run" and saved is not None and saved.kind == "ask":
+            # The question the call asked before is no longer the call's: nobody can answer its card.
+            await self._close_card(run, saved, "cancelled")
+        if live and action == "run" and handle is not None:
+            # The call that replaces a node whose job still runs stops that job, and nothing waits for its end
+            # under the run's lock: the script's SDK asks again, and what the stopped turn did decides then. One
+            # that called a tool is not replaced unasked either.
+            await cast("AgentRuntime", self.agents()).jobs.request_cancel(handle.ref)
+            raise ScriptRuntimeUnavailableError(_STOPPING)
         if saved is not None and action != "run":
             # Reused: the node is this attempt's now, and a fan-out whose items changed dirties what follows it.
             stamp: dict[str, object] = {"attempt": run.attempt, "stale": False, "cached": action == "hit"}
@@ -1476,9 +1475,8 @@ class WorkflowEngine:
         if node.kind == "ask":
             # A question outlives its attempt and not its run: nothing of it ran, and its card says it is closed.
             if stop:
-                ended: _Outcome = WorkflowNodeState.CANCELLED, None, {"kind": "cancelled", "message": _NOT_ANSWERED}
-                state, _, error = _unless_proven(node, False, ended)
-                await asyncio.to_thread(partial(settle, state=state, error=error))
+                error = {"kind": "cancelled", "message": _NOT_ANSWERED}
+                await asyncio.to_thread(partial(settle, state=WorkflowNodeState.CANCELLED, error=error))
                 await self._close_card(run, node, "cancelled")
             return not stop
         if node.handle is None or node.handle.kind == "run":
@@ -1487,7 +1485,8 @@ class WorkflowEngine:
             # settles the group, or this does.
             end = WorkflowNodeState.CANCELLED if stop else WorkflowNodeState.FAILED
             error = {"kind": "cancelled", "message": _RUN_ENDED} if stop else _INTERRUPTED
-            await (self.cancel(node.handle.ref, reason=_RUN_ENDED) if node.handle else asyncio.sleep(0))
+            if node.handle is not None:
+                await self.cancel(node.handle.ref, reason=_RUN_ENDED)
             await asyncio.to_thread(partial(settle, state=end, error=error))
             return False
         if node.handle.kind != "job":
@@ -1505,11 +1504,10 @@ class WorkflowEngine:
             # A restart stopped the job, and whether it goes on is not decided: until then it is neither live nor
             # ended, and the call must not attach to a job that may yet end without having done anything.
             raise ScriptRuntimeUnavailableError(_NOT_CONTINUED_YET)
-        if _works(runtime, job_id):
+        if runtime is not None and _works(runtime, job_id):
             if not stop:
                 return True
-            if runtime is not None:
-                await runtime.jobs.request_cancel(job_id)
+            await runtime.jobs.request_cancel(job_id)
         try:
             await self._settle_agent(run, node, epoch, block=False)
         except AgentNotReadyError as exc:
@@ -1519,8 +1517,7 @@ class WorkflowEngine:
             # A Stop waits for nobody's access and for no job runtime: the turn it may not read may have done
             # anything. A handle without the mark that its job was handed over proves nothing either, since the job
             # starts before that mark is saved.
-            cancelled: _Outcome = WorkflowNodeState.CANCELLED, None, {"kind": "cancelled", "message": _RUN_ENDED}
-            state, _, error = _unless_proven(node, None, cancelled)
+            state, _, error = _indeterminate(node)
             await asyncio.to_thread(partial(settle, state=state, error=error))
         return False
 
@@ -1889,9 +1886,10 @@ def _tool_grant(request: dict[str, object]) -> tuple[ScriptToolGrant, dict[str, 
 
 
 def _works(runtime: AgentRuntime | None, job_id: str) -> bool:
-    """Return whether the job still works, as far as anyone can say: without a job runtime nobody can."""
-    jobs = runtime.jobs.retained_jobs() if runtime is not None else ()
-    return runtime is None or any(job.job_id == job_id and job.status not in TERMINAL_STATUSES for job in jobs)
+    """Return whether the job still works in *runtime*."""
+    return runtime is not None and any(
+        job.job_id == job_id and job.status not in TERMINAL_STATUSES for job in runtime.jobs.retained_jobs()
+    )
 
 
 def _timeout(meta: dict[str, object]) -> float | None:
