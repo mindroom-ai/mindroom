@@ -25,6 +25,9 @@ ROUTE_PROVIDERS = {
     "zai": "ZAI",
 }
 PROVIDER_ROUTES = frozenset(ROUTE_PROVIDERS)
+# OpenRouter model ID prefixes routed through its Gemini request translator, whose ``role: "tool"`` parser
+# extracts ``{...}`` substrings out of non-JSON text into ``functionResponse.response`` and drops surrounding text.
+_OPENROUTER_GEMINI_MODEL_PREFIXES = ("google/gemini-", "~google/gemini-")
 
 
 def normalized_provider_name(provider: str) -> str:
@@ -39,3 +42,8 @@ def provider_route(provider: str) -> str:
     """
     canonical = normalized_provider_name(provider)
     return _PROVIDER_ALIASES.get(canonical, canonical)
+
+
+def is_openrouter_gemini_model(model: str) -> bool:
+    """Return whether OpenRouter routes the ``model`` a request names through its Gemini request translator."""
+    return model.casefold().startswith(_OPENROUTER_GEMINI_MODEL_PREFIXES)
