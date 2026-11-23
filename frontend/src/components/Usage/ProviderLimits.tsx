@@ -4,7 +4,10 @@ import { AlertTriangle, Clock, Loader2, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { fetchProviderLimits } from "@/services/usageService";
+import {
+  fetchProviderLimits,
+  ProviderLimitsHttpError,
+} from "@/services/usageService";
 import type {
   ProviderLimitAccount,
   ProviderLimitWindow,
@@ -31,7 +34,9 @@ function formatUsd(cost: number, estimated: boolean): string {
 function formatResetCountdown(resetsAt: string, nowMs: number): string | null {
   const targetMs = Date.parse(resetsAt);
   if (!Number.isFinite(targetMs)) return null;
-  const diffMins = Math.round((targetMs - nowMs) / 60_000);
+  const diffMs = targetMs - nowMs;
+  if (diffMs <= 0) return null;
+  const diffMins = Math.round(diffMs / 60_000);
   if (diffMins <= 1) return "Resets soon";
   if (diffMins < 60) return `Resets in ${diffMins}m`;
   const hours = Math.floor(diffMins / 60);
@@ -126,6 +131,8 @@ function AccountCard({
   nowMs: number;
 }) {
   const planLabel = account.plan ?? account.account_label;
+  const showStale =
+    account.stale && account.unavailable_reason !== "not_signed_in";
   return (
     <Card>
       <CardContent className="space-y-3 p-4">
@@ -138,7 +145,7 @@ function AccountCard({
                   {planLabel}
                 </Badge>
               )}
-              {account.stale && (
+              {showStale && (
                 <Badge
                   variant="outline"
                   className="border-amber-500/40 bg-amber-500/10 text-xs text-amber-600 dark:text-amber-400"
@@ -173,7 +180,7 @@ function AccountCard({
           </div>
         )}
 
-        {account.stale && (
+        {showStale && (
           <p className="flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
             <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
             <span>Showing cached reading after a failed refresh.</span>
@@ -194,6 +201,7 @@ export function ProviderLimits() {
   const queryClient = useQueryClient();
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
+  const [authError, setAuthError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 60_000);
@@ -202,6 +210,7 @@ export function ProviderLimits() {
   const query = useQuery({
     queryKey: ["provider-limits"],
     queryFn: ({ signal }) => fetchProviderLimits(false, signal),
+    enabled: authError === null,
     retry: false,
     staleTime: 60_000,
     gcTime: 0,
@@ -211,22 +220,41 @@ export function ProviderLimits() {
   const handleRefresh = async () => {
     setRefreshing(true);
     setRefreshError(null);
+    setAuthError(null);
     try {
       const fresh = await fetchProviderLimits(true);
       queryClient.setQueryData(["provider-limits"], fresh);
       setNowMs(Date.now());
     } catch (error) {
-      setRefreshError(
+      const message =
         error instanceof Error
           ? error.message
-          : "Could not refresh provider limits.",
-      );
+          : "Could not refresh provider limits.";
+      if (
+        error instanceof ProviderLimitsHttpError &&
+        (error.status === 401 || error.status === 403)
+      ) {
+        queryClient.setQueryData(["provider-limits"], undefined);
+        setAuthError(message);
+      } else {
+        setRefreshError(message);
+      }
     } finally {
       setRefreshing(false);
     }
   };
 
-  const snapshot = query.data;
+  const handleRetry = () => {
+    const hadAuthError = authError !== null;
+    setAuthError(null);
+    setRefreshError(null);
+    if (!hadAuthError) {
+      void query.refetch();
+    }
+  };
+
+  const snapshot = authError ? undefined : query.data;
+  const blockingError = authError ?? (query.isError ? query.error.message : null);
   const busy = query.isFetching || refreshing;
 
   return (
@@ -268,26 +296,22 @@ export function ProviderLimits() {
         </p>
       )}
 
-      {query.isPending ? (
+      {blockingError ? (
+        <Card>
+          <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
+            <p role="alert" className="text-sm text-muted-foreground">
+              {blockingError}
+            </p>
+            <Button variant="outline" size="sm" onClick={handleRetry}>
+              Try again
+            </Button>
+          </CardContent>
+        </Card>
+      ) : query.isPending ? (
         <Card>
           <CardContent className="flex items-center gap-2.5 p-4 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
             <span>Checking provider limits…</span>
-          </CardContent>
-        </Card>
-      ) : query.isError ? (
-        <Card>
-          <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
-            <p role="alert" className="text-sm text-muted-foreground">
-              {query.error.message}
-            </p>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void query.refetch()}
-            >
-              Try again
-            </Button>
           </CardContent>
         </Card>
       ) : snapshot && snapshot.accounts.length > 0 ? (

@@ -8,7 +8,7 @@ import {
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import contractFixture from "../../../../tests/fixtures/provider_usage_contract.json";
+import contractFixture from "./__fixtures__/providerUsageContract.json";
 import type { ProviderUsageSnapshot } from "@/types/usage";
 import { ProviderLimits } from "./ProviderLimits";
 
@@ -108,10 +108,20 @@ describe("ProviderLimits", () => {
           provider: "claude_code",
           display_name: "Claude Code",
           model_keys: ["opus"],
-          windows: [],
+          windows: [
+            {
+              id: "five_hour",
+              kind: "session",
+              label: "5-hour window",
+              used_percent: 50,
+              remaining_percent: 50,
+              window_duration_mins: 300,
+              resets_at: "2026-11-23T19:00:00Z",
+            },
+          ],
           unavailable_reason: "not_signed_in",
           checked_at: "2026-11-23T20:00:00Z",
-          stale: false,
+          stale: true,
           tokens_7d: 0,
           cost_usd_7d: null,
           cost_estimated: false,
@@ -138,11 +148,12 @@ describe("ProviderLimits", () => {
     vi.mocked(fetch).mockResolvedValue(respond(snapshot));
     renderProviderLimits();
 
-    expect(await screen.findByText("Stale")).toBeInTheDocument();
+    expect(await screen.findAllByText("Stale")).toHaveLength(1);
     expect(
-      screen.getByText(/Showing cached reading after a failed refresh/i),
-    ).toBeInTheDocument();
+      screen.getAllByText(/Showing cached reading after a failed refresh/i),
+    ).toHaveLength(1);
     expect(screen.getByText("Not signed in")).toBeInTheDocument();
+    expect(screen.queryByText("Resets soon")).not.toBeInTheDocument();
     expect(screen.getByText("Unlimited credit")).toBeInTheDocument();
     expect(
       screen.getByText(/250,000 additional tokens.*~\$2\.10/i),
@@ -190,5 +201,25 @@ describe("ProviderLimits", () => {
       "/api/usage/provider-limits?refresh=true",
       expect.objectContaining({ cache: "no-store", credentials: "same-origin" }),
     );
+  });
+
+  it("hides previous account cards when refresh returns 403 and allows retry", async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(respond(contractFixture))
+      .mockResolvedValueOnce(respond({}, 403))
+      .mockResolvedValueOnce(respond(contractFixture));
+
+    renderProviderLimits();
+    expect(await screen.findByText("Claude Code")).toBeInTheDocument();
+
+    await userEvent.click(
+      screen.getByRole("button", { name: "Refresh limits" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(/permission/i);
+    expect(screen.queryByText("Claude Code")).not.toBeInTheDocument();
+    expect(screen.queryByText("OpenRouter")).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByText("Claude Code")).toBeInTheDocument();
   });
 });

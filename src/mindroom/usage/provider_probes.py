@@ -52,6 +52,7 @@ CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage"
 OPENROUTER_KEY_URL = f"{OPENROUTER_BASE_URL_DEFAULT}/key"
 
 _CLAUDE_PLAN_RE = re.compile(r"Claude (Pro|Team|Enterprise|Max( \d+x)?)")
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
 _CODEX_PLANS = {
     "pro": "ChatGPT Pro",
     "plus": "ChatGPT Plus",
@@ -83,6 +84,8 @@ _CLAUDE_CLI_FLAGS = (
     "--no-session-persistence",
     "--permission-mode",
     "dontAsk",
+    "--settings",
+    '{"disableAllHooks":true}',
 )
 
 
@@ -96,6 +99,10 @@ class ProbeResult:
     unavailable_reason: UnavailableReason | None = None
     observed_at: datetime | None = None
     succeeded: bool = False
+
+
+def _as_mapping(value: object) -> Mapping[str, Any] | None:
+    return value if isinstance(value, Mapping) else None
 
 
 async def _fetch_json_or_error(url: str, headers: dict[str, str]) -> dict[str, Any] | UnavailableReason:
@@ -122,11 +129,11 @@ def _parse_codex_payload(data: Mapping[str, Any], now: datetime) -> ProbeResult:
         if isinstance(raw_plan, str) and raw_plan.strip()
         else None
     )
-    rate_limit = data.get("rate_limit") if isinstance(data.get("rate_limit"), Mapping) else {}
+    rate_limit = _as_mapping(data.get("rate_limit")) or {}
     windows: list[PassiveWindow] = []
     for slot, default_mins in (("primary", 300), ("secondary", 10080)):
-        entry = rate_limit.get(f"{slot}_window")
-        if not isinstance(entry, Mapping) or (used := finite_float(entry.get("used_percent"))) is None:
+        entry = _as_mapping(rate_limit.get(f"{slot}_window"))
+        if entry is None or (used := finite_float(entry.get("used_percent"))) is None:
             continue
         secs, mins = finite_float(entry.get("limit_window_seconds")), finite_float(entry.get("window_minutes"))
         duration = round(secs / 60.0) if secs and secs > 0 else (round(mins) if mins and mins > 0 else default_mins)
@@ -182,10 +189,30 @@ async def probe_openrouter(api_key: str | None, now: datetime) -> ProbeResult:
     )
     if isinstance(fetched, str):
         return ProbeResult(unavailable_reason=fetched)
-    data = fetched.get("data") if isinstance(fetched.get("data"), Mapping) else fetched
-    limit = finite_float(data.get("limit"))
-    if limit is None or limit <= 0:
+    data = _as_mapping(fetched.get("data")) or fetched
+    raw_limit = data.get("limit")
+    if raw_limit is None:
         return ProbeResult(plan="Unlimited credit", account_label="Unlimited credit", observed_at=now, succeeded=True)
+    limit = finite_float(raw_limit)
+    if limit is None:
+        return ProbeResult(unavailable_reason="probe_failed")
+    reset_kind = str(data.get("limit_reset") or "").lower()
+    kind: WindowKind = "session" if reset_kind == "daily" else ("weekly" if reset_kind == "weekly" else "monthly")
+    if limit <= 0:
+        window = build_window(
+            window_id="credit_limit",
+            kind=kind,
+            label="Credit limit",
+            used_percent=100.0,
+            detail="$0.00 / $0.00 left",
+        )
+        return ProbeResult(
+            windows=(window,),
+            plan="Credit cap",
+            account_label="Credit cap",
+            observed_at=now,
+            succeeded=True,
+        )
     rem_raw, usage_raw = finite_float(data.get("limit_remaining")), finite_float(data.get("usage"))
     if rem_raw is not None:
         remaining = max(0.0, rem_raw)
@@ -195,8 +222,6 @@ async def probe_openrouter(api_key: str | None, now: datetime) -> ProbeResult:
         remaining = max(0.0, limit - used)
     else:
         used, remaining = 0.0, limit
-    reset_kind = str(data.get("limit_reset") or "").lower()
-    kind: WindowKind = "session" if reset_kind == "daily" else ("weekly" if reset_kind == "weekly" else "monthly")
     window = build_window(
         window_id="credit_limit",
         kind=kind,
@@ -213,65 +238,111 @@ async def probe_openrouter(api_key: str | None, now: datetime) -> ProbeResult:
     )
 
 
-def _claude_percent(entry: Mapping[str, Any], *, scale: float) -> float | None:
-    for key in ("used_percent", "used_percentage"):
+def _claude_percent(entry: Mapping[str, Any]) -> float | None:
+    """Read an active Claude ``get_usage`` percentage (always 0..100)."""
+    for key in ("used_percent", "used_percentage", "utilization"):
         if (val := finite_float(entry.get(key))) is not None:
             return val
-    if (util := finite_float(entry.get("utilization"))) is not None:
-        return util * (100.0 if ("status" in entry and util <= 1.0) else scale)
     return None
 
 
-def _collect_claude_entries(rate_limits: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
-    entries = [(b, e) for b in ("five_hour", "seven_day") if isinstance(e := rate_limits.get(b), Mapping)]
-    scoped = rate_limits.get("model_scoped")
+def _model_scoped_bucket(raw_name: str) -> str:
+    slug = _SLUG_RE.sub("_", raw_name.strip().lower()).strip("_") or "model"
+    return slug if slug.startswith("seven_day_") else f"seven_day_{slug}"
+
+
+def _model_scoped_label(entry: Mapping[str, Any], default_label: str) -> str:
+    display_name = entry.get("display_name")
+    if not isinstance(display_name, str) or not (cleaned := display_name.strip()):
+        return default_label
+    lowered = cleaned.lower()
+    if any(token in lowered for token in ("7-day", "7 day", "weekly", "5-hour", "5 hour")):
+        return cleaned
+    return f"7-day {cleaned}"
+
+
+def _model_scoped_entries(scoped: object) -> list[tuple[str, Mapping[str, Any]]]:
     if isinstance(scoped, Mapping):
-        for key, entry in sorted(scoped.items()):
-            if isinstance(entry, Mapping):
-                entries.append((key if key.startswith("seven_day_") else f"seven_day_{key}", entry))
-    elif isinstance(scoped, list):
-        entries.extend(
-            (k if k.startswith("seven_day_") else f"seven_day_{k}", entry)
-            for entry in scoped
-            if isinstance(entry, Mapping)
-            and isinstance(k := (entry.get("id") or entry.get("model") or entry.get("name")), str)
+        return [
+            (_model_scoped_bucket(key), entry)
+            for key, raw_entry in sorted(scoped.items())
+            if isinstance(key, str) and (entry := _as_mapping(raw_entry)) is not None
+        ]
+    if not isinstance(scoped, list):
+        return []
+    entries: list[tuple[str, Mapping[str, Any]]] = []
+    for raw_entry in scoped:
+        if (entry := _as_mapping(raw_entry)) is None:
+            continue
+        raw_name = (
+            entry.get("id")
+            or entry.get("rate_limit_type")
+            or entry.get("model")
+            or entry.get("name")
+            or entry.get("display_name")
         )
-    seen = {b for b, _ in entries}
-    for key, entry in sorted(rate_limits.items()):
-        if isinstance(key, str) and key.startswith("seven_day_") and key not in seen and isinstance(entry, Mapping):
-            entries.append((key, entry))
+        if isinstance(raw_name, str) and raw_name.strip():
+            entries.append((_model_scoped_bucket(raw_name), entry))
     return entries
 
 
-def _parse_claude_usage(payload: Mapping[str, Any]) -> tuple[PassiveWindow, ...]:
-    rate_limits = payload.get("rate_limits") if isinstance(payload.get("rate_limits"), Mapping) else payload
-    entries = _collect_claude_entries(rate_limits)
-    utils = [val for _, entry in entries if (val := finite_float(entry.get("utilization"))) is not None]
-    scale = 100.0 if utils and max(utils) <= 1.0 and any(0.0 < val < 1.0 for val in utils) else 1.0
-    windows = [
-        build_window(
-            window_id=wid,
-            kind=kind,
-            label=label,
-            used_percent=used,
-            window_duration_mins=duration,
-            resets_at=parse_reset_timestamp(entry.get("resets_at") or entry.get("resetsAt")),
-        )
-        for bucket, entry in entries
-        if (used := _claude_percent(entry, scale=scale)) is not None
-        for wid, kind, label, duration in (claude_window_metadata(bucket),)
+def _collect_claude_entries(rate_limits: Mapping[str, Any]) -> list[tuple[str, Mapping[str, Any]]]:
+    entries = [
+        (bucket, entry)
+        for bucket in ("five_hour", "seven_day")
+        if (entry := _as_mapping(rate_limits.get(bucket))) is not None
     ]
-    extra = (
-        rate_limits.get("extra_usage")
-        if isinstance(rate_limits.get("extra_usage"), Mapping)
-        else payload.get("extra_usage")
+    entries.extend(_model_scoped_entries(rate_limits.get("model_scoped")))
+    seen = {bucket for bucket, _ in entries}
+    entries.extend(
+        (key, entry)
+        for key, raw_entry in sorted(rate_limits.items())
+        if isinstance(key, str)
+        and key.startswith("seven_day_")
+        and key not in seen
+        and (entry := _as_mapping(raw_entry)) is not None
     )
-    if isinstance(extra, Mapping) and extra.get("is_enabled", extra.get("enabled", True)) is not False:
+    return entries
+
+
+def _parse_claude_usage(
+    payload: Mapping[str, Any],
+) -> tuple[PassiveWindow, ...] | UnavailableReason:
+    if payload.get("rate_limits_available") is False:
+        return "unsupported"
+    if "rate_limits" in payload:
+        rate_limits = _as_mapping(payload.get("rate_limits"))
+        if rate_limits is None:
+            return "probe_failed"
+    elif _as_mapping(payload.get("five_hour")) is not None or _as_mapping(payload.get("seven_day")) is not None:
+        rate_limits = payload
+    else:
+        return "probe_failed"
+
+    entries = _collect_claude_entries(rate_limits)
+    windows: list[PassiveWindow] = []
+    for bucket, entry in entries:
+        if (used := _claude_percent(entry)) is None:
+            continue
+        wid, kind, default_label, duration = claude_window_metadata(bucket)
+        label = _model_scoped_label(entry, default_label) if bucket.startswith("seven_day_") else default_label
+        windows.append(
+            build_window(
+                window_id=wid,
+                kind=kind,
+                label=label,
+                used_percent=used,
+                window_duration_mins=duration,
+                resets_at=parse_reset_timestamp(entry.get("resets_at") or entry.get("resetsAt")),
+            ),
+        )
+    extra = _as_mapping(rate_limits.get("extra_usage")) or _as_mapping(payload.get("extra_usage"))
+    if extra is not None and extra.get("is_enabled", extra.get("enabled", True)) is not False:
         used_credits, monthly_limit = finite_float(extra.get("used_credits")), finite_float(extra.get("monthly_limit"))
         used_extra = (
             (used_credits / monthly_limit) * 100.0
             if used_credits is not None and monthly_limit and monthly_limit > 0
-            else _claude_percent(extra, scale=scale)
+            else _claude_percent(extra)
         )
         if used_extra is not None:
             detail = extra.get("detail") if isinstance(extra.get("detail"), str) else None
@@ -285,13 +356,19 @@ def _parse_claude_usage(payload: Mapping[str, Any]) -> tuple[PassiveWindow, ...]
                     detail=detail,
                 ),
             )
+    if not windows:
+        return "probe_failed"
     return sort_windows(windows)
 
 
-async def _claude_control_rpc(proc: asyncio.subprocess.Process, request_id: str, subtype: str) -> dict[str, Any] | None:
+async def _claude_control_rpc(
+    proc: asyncio.subprocess.Process,
+    request_id: str,
+    request: dict[str, object],
+) -> dict[str, Any] | None:
     assert proc.stdin is not None
     assert proc.stdout is not None
-    msg = json.dumps({"type": "control_request", "request_id": request_id, "request": {"subtype": subtype}}) + "\n"
+    msg = json.dumps({"type": "control_request", "request_id": request_id, "request": request}) + "\n"
     proc.stdin.write(msg.encode("utf-8"))
     await proc.stdin.drain()
     while raw_line := await proc.stdout.readline():
@@ -301,13 +378,13 @@ async def _claude_control_rpc(proc: asyncio.subprocess.Process, request_id: str,
             continue
         if not isinstance(frame, Mapping) or frame.get("type") != "control_response":
             continue
-        response = frame.get("response")
-        if not isinstance(response, Mapping) or response.get("request_id") != request_id:
+        response = _as_mapping(frame.get("response"))
+        if response is None or response.get("request_id") != request_id:
             continue
         if response.get("subtype") == "error":
             return None
-        body = response.get("response")
-        return dict(body) if isinstance(body, Mapping) else {}
+        body = _as_mapping(response.get("response"))
+        return dict(body) if body is not None else {}
     return None
 
 
@@ -356,10 +433,10 @@ async def probe_claude_code(cli_path: str | None, now: datetime) -> ProbeResult:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.DEVNULL,
                 )
-                init_data = await _claude_control_rpc(proc, "mindroom-init", "initialize")
+                init_data = await _claude_control_rpc(proc, "mindroom-init", {"subtype": "initialize"})
                 if init_data is None:
                     return ProbeResult(unavailable_reason="probe_failed")
-                acct = init_data.get("account") if isinstance(init_data.get("account"), Mapping) else {}
+                acct = _as_mapping(init_data.get("account")) or {}
                 other = acct.get("apiKeySource") or acct.get("tokenSource")
                 if other == "none":
                     return ProbeResult(unavailable_reason="not_signed_in")
@@ -369,11 +446,18 @@ async def probe_claude_code(cli_path: str | None, now: datetime) -> ProbeResult:
                 if not _CLAUDE_PLAN_RE.fullmatch(sub):
                     return ProbeResult(unavailable_reason="not_signed_in")
                 plan = sub.removeprefix("Claude ").strip() or sub
-                usage_data = await _claude_control_rpc(proc, "mindroom-usage", "get_usage")
+                usage_data = await _claude_control_rpc(
+                    proc,
+                    "mindroom-usage",
+                    {"subtype": "get_usage", "skip_behaviors": True},
+                )
                 if usage_data is None:
                     return ProbeResult(unavailable_reason="probe_failed")
+                parsed = _parse_claude_usage(usage_data)
+                if isinstance(parsed, str):
+                    return ProbeResult(unavailable_reason=parsed)
                 return ProbeResult(
-                    windows=_parse_claude_usage(usage_data),
+                    windows=parsed,
                     plan=plan,
                     account_label=plan,
                     observed_at=now,

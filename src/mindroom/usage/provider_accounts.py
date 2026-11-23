@@ -57,6 +57,46 @@ class AccountSpec:
     target: str | None = None
 
 
+def _digest(secret: str) -> str:
+    return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+
+def _client_params(model_config: ModelConfig) -> Mapping[str, object]:
+    extra = model_config.extra_kwargs or {}
+    raw = extra.get("client_params")
+    return raw if isinstance(raw, Mapping) else {}
+
+
+def _header_override(model_config: ModelConfig, header_name: str) -> tuple[bool, object]:
+    """Return ``(found, value)`` for ``header_name`` across extra/default headers in precedence order."""
+    extra = model_config.extra_kwargs or {}
+    client_params = _client_params(model_config)
+    target = header_name.lower()
+    for raw_headers in (
+        extra.get("extra_headers"),
+        client_params.get("default_headers"),
+        extra.get("default_headers"),
+    ):
+        if not isinstance(raw_headers, Mapping):
+            continue
+        for key, value in raw_headers.items():
+            if isinstance(key, str) and key.lower() == target:
+                return True, value
+    return False, None
+
+
+def _authorization_override(model_config: ModelConfig) -> tuple[Literal["none", "bearer", "opaque"], str | None]:
+    found, raw_value = _header_override(model_config, "authorization")
+    if not found:
+        return "none", None
+    if not isinstance(raw_value, str):
+        return "opaque", None
+    parts = raw_value.strip().split()
+    if len(parts) == 2 and parts[0].lower() == "bearer" and not ENV_PLACEHOLDER_PATTERN.fullmatch(parts[1]):
+        return "bearer", parts[1]
+    return "opaque", None
+
+
 def _is_official_openrouter_url(url: str | None) -> bool:
     if not isinstance(url, str) or not url.strip():
         return False
@@ -66,8 +106,9 @@ def _is_official_openrouter_url(url: str | None) -> bool:
 
 def _effective_base_url(route: str, model_config: ModelConfig, runtime_paths: RuntimePaths) -> str | None:
     extra = model_config.extra_kwargs or {}
-    client_params = extra.get("client_params") if isinstance(extra.get("client_params"), Mapping) else {}
-    if isinstance(authored := (client_params.get("base_url") or extra.get("base_url")), str) and authored.strip():
+    client_params = _client_params(model_config)
+    authored = client_params.get("base_url") or extra.get("base_url")
+    if isinstance(authored, str) and authored.strip():
         return authored.strip()
     if route == "openrouter":
         return OPENROUTER_BASE_URL_DEFAULT
@@ -80,7 +121,7 @@ def _effective_base_url(route: str, model_config: ModelConfig, runtime_paths: Ru
     return None
 
 
-def _resolve_openrouter_key(model_key: str, model_config: ModelConfig, runtime_paths: RuntimePaths) -> str | None:
+def _resolve_model_key(model_key: str, model_config: ModelConfig, runtime_paths: RuntimePaths) -> str | None:
     candidate = model_config
     with suppress(OSError, ValueError):
         candidate = model_with_dashboard_key(model_key, candidate, runtime_paths)
@@ -99,6 +140,25 @@ def _resolve_openrouter_key(model_key: str, model_config: ModelConfig, runtime_p
     return key.strip()
 
 
+def _payg_credential_fingerprint(
+    model_key: str,
+    model_config: ModelConfig,
+    runtime_paths: RuntimePaths,
+) -> str:
+    """Return an in-memory credential fingerprint for grouping PAYG models by billing account."""
+    auth_kind, bearer = _authorization_override(model_config)
+    if auth_kind == "bearer" and bearer is not None:
+        return _digest(f"auth:{bearer}")
+    if auth_kind == "opaque":
+        _, raw = _header_override(model_config, "authorization")
+        return _digest(f"auth-opaque:{raw!r}")
+    found_xkey, raw_xkey = _header_override(model_config, "x-api-key")
+    if found_xkey:
+        return _digest(f"x-api-key:{raw_xkey!r}")
+    key = _resolve_model_key(model_key, model_config, runtime_paths)
+    return _digest(key) if key else "__default__"
+
+
 def _resolve_cli_scope(cli_path: str | None) -> tuple[str | None, str]:
     effective = cli_path.strip() if isinstance(cli_path, str) and cli_path.strip() else shutil.which("claude")
     if not effective:
@@ -113,13 +173,42 @@ def _display_name(route: str) -> str:
     return _DISPLAY_OVERRIDES.get(route, ROUTE_PROVIDERS.get(route, route.replace("_", " ").title()))
 
 
+def _payg_specs(
+    payg_groups: dict[tuple[str, bool], dict[str, tuple[list[str], set[tuple[str, str]]]]],
+    runtime_paths: RuntimePaths,
+) -> list[AccountSpec]:
+    specs: list[AccountSpec] = []
+    for (route, is_custom), by_cred in sorted(payg_groups.items()):
+        shared = get_api_key_for_provider(route, runtime_paths=runtime_paths)
+        default_fp = _digest(shared.strip()) if isinstance(shared, str) and shared.strip() else "__default__"
+        ordered = sorted(by_cred.items(), key=lambda item: (item[0] != default_fp, item[1][0][0]))
+        for idx, (_cred_fp, (keys, ukeys)) in enumerate(ordered):
+            if is_custom:
+                account_id = f"{route}:custom" if idx == 0 else f"{route}:custom:{idx + 1}"
+            else:
+                account_id = f"{route}:default" if idx == 0 else f"{route}:{idx + 1}"
+            specs.append(
+                AccountSpec(
+                    id=account_id,
+                    provider=route,
+                    display_name=_display_name(route),
+                    model_keys=tuple(keys),
+                    usage_keys=frozenset(ukeys),
+                    probe_kind="payg",
+                ),
+            )
+    return specs
+
+
 def discover_accounts(config: Config, runtime_paths: RuntimePaths) -> list[AccountSpec]:
     """Group configured models into distinct billing accounts with opaque external IDs."""
     env_codex = get_secret_from_env("CODEX_HOME", runtime_paths=runtime_paths)
     defaults = {"claude_code": _resolve_cli_scope(None)[1], "codex": normalize_codex_scope_key(env_codex)}
     grouped: dict[str, dict[str, tuple[str | None, list[str], set[tuple[str, str]]]]] = {
-        k: {} for k in ("claude_code", "codex", "openrouter", "payg")
+        k: {} for k in ("claude_code", "codex", "openrouter")
     }
+    payg_groups: dict[tuple[str, bool], dict[str, tuple[list[str], set[tuple[str, str]]]]] = {}
+
     for model_key in sorted(config.models):
         model_config = config.models[model_key]
         route, identity, extra = (
@@ -127,23 +216,31 @@ def discover_accounts(config: Config, runtime_paths: RuntimePaths) -> list[Accou
             model_identity(model_config),
             model_config.extra_kwargs or {},
         )
+        usage_key = (identity.provider, identity.id)
         if route == "codex":
             raw_home = extra.get("codex_home")
             target = raw_home.strip() if isinstance(raw_home, str) and raw_home.strip() else env_codex
-            bucket, key = "codex", normalize_codex_scope_key(target)
+            _, keys, ukeys = grouped["codex"].setdefault(normalize_codex_scope_key(target), (target, [], set()))
         elif route == "claude_code":
-            target, key = _resolve_cli_scope(extra.get("cli_path") if isinstance(extra.get("cli_path"), str) else None)
-            bucket = "claude_code"
+            raw_cli = extra.get("cli_path") if isinstance(extra.get("cli_path"), str) else None
+            target, scope = _resolve_cli_scope(raw_cli)
+            _, keys, ukeys = grouped["claude_code"].setdefault(scope, (target, [], set()))
         elif route in {"openrouter", "openai", "anthropic"} and _is_official_openrouter_url(
             _effective_base_url(route, model_config, runtime_paths),
         ):
-            target = _resolve_openrouter_key(model_key, model_config, runtime_paths)
-            bucket, key = "openrouter", hashlib.sha256(target.encode()).hexdigest() if target else "__missing__"
+            auth_kind, bearer = _authorization_override(model_config)
+            if auth_kind == "opaque":
+                cred_fp = _payg_credential_fingerprint(model_key, model_config, runtime_paths)
+                keys, ukeys = payg_groups.setdefault(("openrouter", True), {}).setdefault(cred_fp, ([], set()))
+            else:
+                target = bearer if auth_kind == "bearer" else _resolve_model_key(model_key, model_config, runtime_paths)
+                key_fp = _digest(target) if target else "__missing__"
+                _, keys, ukeys = grouped["openrouter"].setdefault(key_fp, (target, [], set()))
         else:
-            bucket, key, target = "payg", (f"{route}:custom" if route == "openrouter" else f"{route}:default"), route
-        _, keys, ukeys = grouped[bucket].setdefault(key, (target, [], set()))
+            cred_fp = _payg_credential_fingerprint(model_key, model_config, runtime_paths)
+            keys, ukeys = payg_groups.setdefault((route, route == "openrouter"), {}).setdefault(cred_fp, ([], set()))
         keys.append(model_key)
-        ukeys.add((identity.provider, identity.id))
+        ukeys.add(usage_key)
 
     accounts: list[AccountSpec] = []
     for kind in ("claude_code", "codex"):
@@ -169,22 +266,13 @@ def discover_accounts(config: Config, runtime_paths: RuntimePaths) -> list[Accou
             model_keys=tuple(keys),
             usage_keys=frozenset(ukeys),
             probe_kind="openrouter",
+            scope_key=key_fp,
             target=api_key,
         )
-        for i, (_, (api_key, keys, ukeys)) in enumerate(
+        for i, (key_fp, (api_key, keys, ukeys)) in enumerate(
             sorted(grouped["openrouter"].items(), key=lambda item: item[1][1][0]),
             start=1,
         )
     )
-    accounts.extend(
-        AccountSpec(
-            id=aid,
-            provider=route or "unknown",
-            display_name=_display_name(route or "unknown"),
-            model_keys=tuple(keys),
-            usage_keys=frozenset(ukeys),
-            probe_kind="payg",
-        )
-        for aid, (route, keys, ukeys) in sorted(grouped["payg"].items())
-    )
+    accounts.extend(_payg_specs(payg_groups, runtime_paths))
     return accounts

@@ -1,0 +1,133 @@
+{
+  "version": 1,
+  "request_id": "req-provider-usage-1",
+  "checked_at": "2026-11-23T20:00:00Z",
+  "partial": false,
+  "accounts": [
+    {
+      "id": "claude_code:default",
+      "provider": "claude_code",
+      "display_name": "Claude Code",
+      "account_label": "Max 20x",
+      "plan": "Max 20x",
+      "model_keys": ["opus_native", "sonnet_native"],
+      "windows": [
+        {
+          "id": "five_hour",
+          "kind": "session",
+          "label": "5-hour window",
+          "used_percent": 38.0,
+          "remaining_percent": 62.0,
+          "window_duration_mins": 300,
+          "resets_at": "2026-11-23T22:24:00Z"
+        },
+        {
+          "id": "seven_day",
+          "kind": "weekly",
+          "label": "7-day window",
+          "used_percent": 22.0,
+          "remaining_percent": 78.0,
+          "window_duration_mins": 10080,
+          "resets_at": "2026-11-26T09:00:00Z"
+        }
+      ],
+      "checked_at": "2026-11-23T20:00:00Z",
+      "stale": false,
+      "tokens_7d": 14200000,
+      "cost_usd_7d": null,
+      "cost_estimated": false
+    },
+    {
+      "id": "codex:default",
+      "provider": "codex",
+      "display_name": "Codex",
+      "account_label": "ChatGPT Pro",
+      "plan": "ChatGPT Pro",
+      "model_keys": ["astra", "sol"],
+      "windows": [
+        {
+          "id": "five_hour",
+          "kind": "session",
+          "label": "5-hour window",
+          "used_percent": 88.0,
+          "remaining_percent": 12.0,
+          "window_duration_mins": 300,
+          "resets_at": "2026-11-23T23:06:00Z"
+        },
+        {
+          "id": "seven_day",
+          "kind": "weekly",
+          "label": "7-day window",
+          "used_percent": 81.0,
+          "remaining_percent": 19.0,
+          "window_duration_mins": 10080,
+          "resets_at": "2026-11-25T14:00:00Z"
+        }
+      ],
+      "checked_at": "2026-11-23T20:00:00Z",
+      "stale": false,
+      "tokens_7d": 9800000,
+      "cost_usd_7d": null,
+      "cost_estimated": false
+    },
+    {
+      "id": "openrouter:1",
+      "provider": "openrouter",
+      "display_name": "OpenRouter",
+      "account_label": "Credit cap",
+      "plan": "Credit cap",
+      "model_keys": ["neon"],
+      "windows": [
+        {
+          "id": "credit_limit",
+          "kind": "monthly",
+          "label": "Credit limit",
+          "used_percent": 36.8,
+          "remaining_percent": 63.2,
+          "detail": "$31.60 / $50.00 left"
+        }
+      ],
+      "checked_at": "2026-11-23T20:00:00Z",
+      "stale": false,
+      "tokens_7d": 6400000,
+      "cost_usd_7d": 18.4,
+      "cost_estimated": true
+    },
+    {
+      "id": "anthropic:default",
+      "provider": "anthropic",
+      "display_name": "Anthropic",
+      "account_label": "Pay-as-you-go",
+      "plan": "Pay-as-you-go",
+      "model_keys": ["haiku"],
+      "windows": [],
+      "checked_at": "2026-11-23T20:00:00Z",
+      "stale": false,
+      "tokens_7d": 1200000,
+      "cost_usd_7d": 3.25,
+      "cost_estimated": true
+    }
+  ],
+  "daily_7d": [
+    {
+      "day": "2026-11-17",
+      "by_account": {
+        "claude_code:default": 1900000,
+        "codex:default": 1200000,
+        "openrouter:1": 900000
+      },
+      "unattributed_tokens": 0
+    },
+    {
+      "day": "2026-11-18",
+      "by_account": {
+        "claude_code:default": 2100000,
+        "codex:default": 1500000,
+        "openrouter:1": 850000
+      },
+      "unattributed_tokens": 0
+    }
+  ],
+  "unattributed_tokens_7d": 0,
+  "unattributed_cost_usd_7d": null
+}

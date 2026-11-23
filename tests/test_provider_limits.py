@@ -505,13 +505,18 @@ for line in sys.stdin:
     assert recorded["cwd_entries"] == []
     assert "--no-session-persistence" in recorded["argv"]
     assert "--strict-mcp-config" in recorded["argv"]
+    assert "--settings" in recorded["argv"]
+    assert '{"disableAllHooks":true}' in recorded["argv"]
     assert [req["request"]["subtype"] for req in recorded["requests"]] == ["initialize", "get_usage"]
+    assert recorded["requests"][1]["request"].get("skip_behaviors") is True
     assert all(req["type"] == "control_request" for req in recorded["requests"])
 
     # API-key login must be rejected before get_usage is ever sent.
     apikey_log = tmp_path / "apikey-log.json"
+    apikey_dir = tmp_path / "apikey_dir"
+    apikey_dir.mkdir()
     apikey_cli = _make_fake_claude_cli(
-        tmp_path / "apikey_dir" if (tmp_path / "apikey_dir").mkdir() or True else tmp_path,
+        apikey_dir,
         f"""
 import json, sys
 from pathlib import Path
@@ -738,3 +743,184 @@ def test_fit_to_device_budget_drops_daily_then_trims_model_keys() -> None:
     assert trimmed["daily_7d"] == []
     assert len(json.dumps(trimmed).encode("utf-8")) <= 1200
     assert len(trimmed["accounts"][0]["model_keys"]) < 400
+
+
+def test_frontend_contract_fixture_matches_backend_byte_for_byte() -> None:
+    """Dashboard frontend contract fixture stays byte-identical to backend fixture."""
+    frontend_fixture = (
+        Path(__file__).resolve().parents[1]
+        / "frontend"
+        / "src"
+        / "components"
+        / "Usage"
+        / "__fixtures__"
+        / "providerUsageContract.json"
+    )
+    assert frontend_fixture.read_bytes() == CONTRACT_FIXTURE.read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_openrouter_auth_header_override_and_zero_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Authorization header override beats OPENAI_API_KEY; non-Bearer skips probe; limit==0 is $0 cap."""
+    seen_auth: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        auth = request.headers.get("authorization", "")
+        seen_auth.append(auth)
+        if auth == "Bearer sk-or-header-tok":
+            return httpx.Response(200, json={"data": {"limit": 0, "limit_remaining": 0, "limit_reset": "monthly"}})
+        return httpx.Response(500)
+
+    _mock_httpx(monkeypatch, _handler)
+    monkeypatch.setattr(provider_limits, "collect_admin_usage", lambda **_kw: _empty_report())
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"OPENAI_API_KEY": "sk-openai-shared-never-send"},
+    )
+    config = Config(
+        models={
+            "or_bearer_hdr": ModelConfig(
+                provider="openai",
+                id="openai/gpt-5.4",
+                extra_kwargs={
+                    "base_url": "https://openrouter.ai/api/v1",
+                    "extra_headers": {"Authorization": "Bearer sk-or-header-tok"},
+                },
+            ),
+            "or_non_bearer": ModelConfig(
+                provider="openai",
+                id="openai/gpt-5.4-mini",
+                extra_kwargs={
+                    "base_url": "https://openrouter.ai/api/v1",
+                    "default_headers": {"Authorization": "Basic dXNlcjpwYXNz"},
+                },
+            ),
+        },
+    )
+    snapshot = await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW)
+    assert seen_auth == ["Bearer sk-or-header-tok"]
+    assert all("sk-openai-shared-never-send" not in h for h in seen_auth)
+    by_id = {acct.id: acct for acct in snapshot.accounts}
+    assert by_id["openrouter:1"].plan == "Credit cap"
+    assert by_id["openrouter:1"].windows[0].remaining_percent == 0.0
+    assert by_id["openrouter:1"].windows[0].detail == "$0.00 / $0.00 left"
+    assert by_id["openrouter:custom"].plan == "Pay-as-you-go"
+    assert by_id["openrouter:custom"].windows == ()
+
+
+@pytest.mark.asyncio
+async def test_payg_accounts_group_by_credential_and_route_shared_model_to_unattributed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two distinct PAYG keys on the same provider/model ID become distinct accounts and stay unattributed."""
+    daily = (
+        UsageDailyBreakdownRow(
+            date="2026-11-23",
+            totals=TokenCounts(input_tokens=1000, output_tokens=500, total_tokens=1500),
+            run_count=1,
+            model_breakdown=(
+                UsageModelBreakdownRow(
+                    model_provider="Anthropic",
+                    model="claude-haiku-4-5",
+                    totals=TokenCounts(input_tokens=1000, output_tokens=500, total_tokens=1500),
+                    run_count=1,
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(provider_limits, "collect_admin_usage", lambda **_kw: _empty_report(daily))
+    config = Config(
+        models={
+            "haiku_a": ModelConfig(
+                provider="anthropic",
+                id="claude-haiku-4-5",
+                api_key="sk-ant-key-one",
+                pricing=ModelPricing(input=1.0, output=5.0),
+            ),
+            "haiku_b": ModelConfig(
+                provider="anthropic",
+                id="claude-haiku-4-5",
+                api_key="sk-ant-key-two",
+                pricing=ModelPricing(input=1.0, output=5.0),
+            ),
+        },
+    )
+    snapshot = await get_provider_usage_snapshot(
+        config=config,
+        runtime_paths=test_runtime_paths(tmp_path),
+        now=FIXED_NOW,
+    )
+    payload_text = json.dumps(snapshot.to_dict())
+    assert "sk-ant-key-" not in payload_text
+    by_id = {acct.id: acct for acct in snapshot.accounts}
+    assert set(by_id) == {"anthropic:default", "anthropic:2"}
+    assert by_id["anthropic:default"].tokens_7d == 0
+    assert by_id["anthropic:2"].tokens_7d == 0
+    assert snapshot.unattributed_tokens_7d == 1500
+    assert snapshot.unattributed_cost_usd_7d == pytest.approx(0.0035)
+    assert snapshot.daily_7d[0].unattributed_tokens == 1500
+
+
+@pytest.mark.asyncio
+async def test_claude_get_usage_low_percent_display_name_null_limits_and_unrelated_edit_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Active get_usage keeps 0.5 as 0.5%, uses model_scoped display_name, and preserves stale on null rate_limits."""
+    parsed = provider_probes._parse_claude_usage(
+        {
+            "rate_limits_available": True,
+            "rate_limits": {
+                "five_hour": {"utilization": 0.5, "resets_at": "2026-11-23T22:00:00Z"},
+                "model_scoped": [
+                    {"display_name": "Sonnet", "utilization": 12.5, "resets_at": "2026-11-26T09:00:00Z"},
+                ],
+            },
+        },
+    )
+    assert not isinstance(parsed, str)
+    assert [(w.id, w.label, w.used_percent, w.remaining_percent) for w in parsed] == [
+        ("five_hour", "5-hour window", 0.5, 99.5),
+        ("seven_day_sonnet", "7-day Sonnet", 12.5, 87.5),
+    ]
+    assert provider_probes._parse_claude_usage({"rate_limits_available": True, "rate_limits": None}) == "probe_failed"
+    assert provider_probes._parse_claude_usage({"rate_limits_available": False, "rate_limits": None}) == "unsupported"
+
+    # Probe succeeds once, then unrelated model edit invalidates cache; next probe returns null rate_limits -> stale preserved.
+    monkeypatch.setattr(provider_limits, "collect_admin_usage", lambda **_kw: _empty_report())
+    mode = ["ok"]
+
+    async def _fake_claude(_cli: str | None, now: datetime) -> provider_probes.ProbeResult:
+        if mode[0] == "ok":
+            return provider_probes.ProbeResult(
+                windows=parsed,
+                plan="Max 20x",
+                account_label="Max 20x",
+                observed_at=now,
+                succeeded=True,
+            )
+        return provider_probes.ProbeResult(unavailable_reason="probe_failed")
+
+    monkeypatch.setattr(provider_limits, "probe_claude_code", _fake_claude)
+    paths = test_runtime_paths(tmp_path)
+    cfg1 = Config(models={"opus": ModelConfig(provider="claude_code", id="claude-opus-4-6")})
+    snap1 = await get_provider_usage_snapshot(config=cfg1, runtime_paths=paths, now=FIXED_NOW)
+    assert snap1.accounts[0].stale is False
+    assert snap1.accounts[0].windows[0].used_percent == 0.5
+
+    mode[0] = "null"
+    cfg2 = Config(
+        models={
+            "opus": ModelConfig(provider="claude_code", id="claude-opus-4-6"),
+            "haiku": ModelConfig(provider="anthropic", id="claude-haiku-4-5"),
+        },
+    )
+    snap2 = await get_provider_usage_snapshot(config=cfg2, runtime_paths=paths, now=FIXED_NOW)
+    claude_acct = {a.id: a for a in snap2.accounts}["claude_code:default"]
+    assert claude_acct.stale is True
+    assert claude_acct.windows[0].used_percent == 0.5

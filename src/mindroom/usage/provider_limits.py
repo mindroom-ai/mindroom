@@ -7,7 +7,7 @@ import copy
 import hashlib
 import json
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -50,6 +50,8 @@ __all__ = [
 
 CACHE_TTL_SECONDS = 60.0
 REFRESH_COOLDOWN_SECONDS = 10.0
+_MAX_CACHE_ENTRIES = 16
+_MAX_LAST_GOOD_ENTRIES = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,11 +142,16 @@ class _CacheEntry:
     fetched_monotonic: float
 
 
-_CACHE: dict[tuple[Path, Path, str], _CacheEntry] = {}
-_LAST_GOOD: dict[tuple[tuple[Path, Path, str], str], ProbeResult] = {}
-_LOOP_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[tuple[Path, Path, str], asyncio.Lock]] = (
-    WeakKeyDictionary()
-)
+_CACHE: OrderedDict[tuple[Path, Path, str], _CacheEntry] = OrderedDict()
+_LAST_GOOD: OrderedDict[tuple[tuple[Path, Path], str, str], ProbeResult] = OrderedDict()
+_LOOP_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[tuple[Path, Path], asyncio.Lock]] = WeakKeyDictionary()
+
+
+def _put_bounded[K, V](store: OrderedDict[K, V], key: K, value: V, *, max_entries: int) -> None:
+    store[key] = value
+    store.move_to_end(key)
+    while len(store) > max_entries:
+        store.popitem(last=False)
 
 
 def _monotonic() -> float:
@@ -161,14 +168,15 @@ def _build_account(
     spec: AccountSpec,
     probe: ProbeResult,
     *,
-    cache_key: tuple[Path, Path, str],
+    runtime_key: tuple[Path, Path],
     now: datetime,
     tokens_7d: int,
     cost_usd_7d: float | None,
 ) -> ProviderLimitAccount:
     windows, plan, label, reason, checked, stale = (), None, None, probe.unavailable_reason, format_utc_iso(now), False
+    last_good_key = (runtime_key, spec.id, spec.scope_key)
     if probe.succeeded:
-        _LAST_GOOD[(cache_key, spec.id)] = probe
+        _put_bounded(_LAST_GOOD, last_good_key, probe, max_entries=_MAX_LAST_GOOD_ENTRIES)
         windows, plan, label, reason, checked = (
             probe.windows,
             probe.plan,
@@ -191,7 +199,7 @@ def _build_account(
                 True,
             )
     else:
-        candidates = [last] if (last := _LAST_GOOD.get((cache_key, spec.id))) is not None else []
+        candidates = [last] if (last := _LAST_GOOD.get(last_good_key)) is not None else []
         if spec.probe_kind in {"codex", "claude_code"} and (
             passive := get_passive_windows(spec.probe_kind, spec.scope_key)
         ):
@@ -326,16 +334,19 @@ async def get_provider_usage_snapshot(
     now: datetime | None = None,
 ) -> ProviderUsageSnapshot:
     """Return cached or freshly probed per-account limits and 7-day usage."""
-    cache_key = (runtime_paths.config_path, runtime_paths.storage_root, _config_signature(config))
+    runtime_key = (runtime_paths.config_path, runtime_paths.storage_root)
+    cache_key = (*runtime_key, _config_signature(config))
     min_age = REFRESH_COOLDOWN_SECONDS if force_refresh else CACHE_TTL_SECONDS
     if (cached := _CACHE.get(cache_key)) is not None and (_monotonic() - cached.fetched_monotonic) < min_age:
+        _CACHE.move_to_end(cache_key)
         return cached.snapshot
-    lock = _LOOP_LOCKS.setdefault(asyncio.get_running_loop(), {}).setdefault(cache_key, asyncio.Lock())
+    lock = _LOOP_LOCKS.setdefault(asyncio.get_running_loop(), {}).setdefault(runtime_key, asyncio.Lock())
     async with lock:
         if (cached := _CACHE.get(cache_key)) is not None and (_monotonic() - cached.fetched_monotonic) < min_age:
+            _CACHE.move_to_end(cache_key)
             return cached.snapshot
         current_utc = (datetime.now(UTC) if now is None else now).astimezone(UTC)
-        specs = discover_accounts(config, runtime_paths)
+        specs = await asyncio.to_thread(discover_accounts, config, runtime_paths)
         probe_results, report = await asyncio.gather(
             asyncio.gather(*(_probe_account(spec, current_utc) for spec in specs)),
             asyncio.to_thread(collect_admin_usage, config=config, runtime_paths=runtime_paths, include_daily=True),
@@ -350,7 +361,7 @@ async def get_provider_usage_snapshot(
             _build_account(
                 spec,
                 probe,
-                cache_key=cache_key,
+                runtime_key=runtime_key,
                 now=current_utc,
                 tokens_7d=tokens_7d.get(spec.id, 0),
                 cost_usd_7d=costs_7d.get(spec.id),
@@ -365,7 +376,12 @@ async def get_provider_usage_snapshot(
             unattributed_tokens_7d=unattr_tokens,
             unattributed_cost_usd_7d=unattr_cost,
         )
-        _CACHE[cache_key] = _CacheEntry(snapshot=snapshot, fetched_monotonic=_monotonic())
+        _put_bounded(
+            _CACHE,
+            cache_key,
+            _CacheEntry(snapshot=snapshot, fetched_monotonic=_monotonic()),
+            max_entries=_MAX_CACHE_ENTRIES,
+        )
         return snapshot
 
 

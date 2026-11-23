@@ -282,6 +282,16 @@ export function isProviderUsageSnapshot(
   );
 }
 
+export class ProviderLimitsHttpError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ProviderLimitsHttpError";
+    this.status = status;
+  }
+}
+
 export async function fetchProviderLimits(
   refresh = false,
   signal?: AbortSignal,
@@ -303,18 +313,28 @@ export async function fetchProviderLimits(
     throw new Error("Could not reach the server. Try again.");
   }
   if (response.status === 401) {
-    throw new Error(
+    throw new ProviderLimitsHttpError(
       "Your session has expired. Reload this page to sign in again.",
+      401,
     );
   }
   if (response.status === 403) {
-    throw new Error("You do not have permission to view provider limits.");
+    throw new ProviderLimitsHttpError(
+      "You do not have permission to view provider limits.",
+      403,
+    );
   }
   if (response.status === 503) {
-    throw new Error("Provider limits are temporarily unavailable. Try again.");
+    throw new ProviderLimitsHttpError(
+      "Provider limits are temporarily unavailable. Try again.",
+      503,
+    );
   }
   if (!response.ok) {
-    throw new Error("Could not load provider limits. Try again.");
+    throw new ProviderLimitsHttpError(
+      "Could not load provider limits. Try again.",
+      response.status,
+    );
   }
   let payload: unknown;
   try {
