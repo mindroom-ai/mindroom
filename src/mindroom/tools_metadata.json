@@ -8758,36 +8758,6 @@
     },
     {
       "agent_override_fields": null,
-      "auth_provider": null,
-      "category": "productivity",
-      "config_fields": null,
-      "consumes_workspace_paths": false,
-      "default_execution_target": "primary",
-      "dependencies": null,
-      "description": "Create and manage signed external trigger endpoints",
-      "display_name": "External Trigger Manager",
-      "docs_url": "https://docs.mindroom.chat/external-triggers/",
-      "executes_code": false,
-      "file_access": "none",
-      "function_names": [
-        "create_trigger",
-        "list_triggers",
-        "disable_trigger",
-        "delete_trigger",
-        "rotate_trigger_key"
-      ],
-      "helper_text": null,
-      "icon": "Webhook",
-      "icon_color": "text-emerald-500",
-      "name": "external_trigger_manager",
-      "requires_conversation": false,
-      "requires_primary_runtime": true,
-      "requires_room_context": true,
-      "setup_type": "none",
-      "status": "available"
-    },
-    {
-      "agent_override_fields": null,
       "auth_provider": "google_calendar",
       "category": "productivity",
       "config_fields": [
@@ -10329,6 +10299,42 @@
       "requires_room_context": false,
       "setup_type": "api_key",
       "status": "requires_config"
+    },
+    {
+      "agent_override_fields": null,
+      "aliases": [
+        "external_trigger_manager"
+      ],
+      "auth_provider": null,
+      "category": "productivity",
+      "config_fields": null,
+      "consumes_workspace_paths": false,
+      "default_execution_target": "primary",
+      "dependencies": null,
+      "description": "Watch rooms, thread tags, shared event sources, and signed webhooks to wake agents",
+      "display_name": "Triggers",
+      "docs_url": "https://docs.mindroom.chat/external-triggers/",
+      "executes_code": false,
+      "file_access": "none",
+      "function_names": [
+        "watch_room",
+        "watch_thread",
+        "subscribe_event",
+        "create_trigger",
+        "list_triggers",
+        "disable_trigger",
+        "delete_trigger",
+        "rotate_trigger_key"
+      ],
+      "helper_text": null,
+      "icon": "Webhook",
+      "icon_color": "text-emerald-500",
+      "name": "triggers",
+      "requires_conversation": false,
+      "requires_primary_runtime": true,
+      "requires_room_context": true,
+      "setup_type": "none",
+      "status": "available"
     },
     {
       "agent_override_fields": null,

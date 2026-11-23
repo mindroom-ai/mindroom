@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
@@ -17,6 +17,7 @@ class ExternalTriggerRuntimeCoordinator:
     """Own external trigger API runtime binding and live deliverability state."""
 
     api_enabled: bool = True
+    on_reactive_event: Callable[[], None] | None = None
 
     def bind_if_ready(
         self,
@@ -33,6 +34,7 @@ class ExternalTriggerRuntimeCoordinator:
             api_main.app,
             runtime_config=config,
             target_bot=lambda entity_name: _running(bots.get(entity_name)),
+            on_reactive_event=self.on_reactive_event,
         )
 
     def unbind(self) -> None:

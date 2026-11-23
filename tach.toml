@@ -576,6 +576,7 @@ visibility = [
     "mindroom.matrix.transport_progress",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.reaction_dispatch",
+    "mindroom.reactive_triggers.service",
     "mindroom.reply_scope",
     "mindroom.response_runner",
     "mindroom.thread_export.projected_history",
@@ -652,6 +653,7 @@ depends_on = ["mindroom.constants"]
 visibility = [
     "mindroom.listening.service",
     "mindroom.matrix.journal_ingress",
+    "mindroom.reactive_triggers.service",
 ]
 
 [[modules]]
@@ -664,6 +666,7 @@ visibility = [
     "mindroom.listening.service",
     "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.journal_ingress",
+    "mindroom.reactive_triggers.service",
     "mindroom.turns.ingress",
 ]
 
@@ -739,6 +742,7 @@ visibility = [
     "mindroom.matrix.projected_thread_membership",
     "mindroom.matrix_rtc.call_origin",
     "mindroom.post_response_effects",
+    "mindroom.reactive_triggers.service",
     "mindroom.room_activity.note",
     "mindroom.scheduling.tasks",
     "mindroom.thread_export.projected_history",
@@ -1864,6 +1868,8 @@ depends_on = [
     "mindroom.delivery_replay",
     "mindroom.external_triggers.executor",
     "mindroom.matrix.client_room_admin",
+    "mindroom.reactive_triggers.external_sources",
+    "mindroom.reactive_triggers.store",
     "mindroom.response_admission",
 ]
 
@@ -3473,6 +3479,7 @@ depends_on = [
     "mindroom.knowledge_graph.runtime",
     "mindroom.egress_broker",
     "mindroom.listening.service",
+    "mindroom.reactive_triggers.service",
 ]
 
 [[modules]]
@@ -4342,12 +4349,15 @@ visibility = [
 path = "mindroom.matrix.room_reconciliation"
 depends_on = ["mindroom.matrix.room_power"]
 visibility = [
+    "mindroom.custom_tools.triggers",
     "mindroom.email_invites.policy",
     "mindroom.external_triggers.executor",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.rooms",
     "mindroom.orchestration.plugin_http_runtime",
     "mindroom.orchestration.rooms",
+    "mindroom.reactive_triggers.dispatch",
+    "mindroom.reactive_triggers.service",
     "mindroom.thread_tags",
     "mindroom.topic_generator",
 ]
@@ -10779,3 +10789,98 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.state_failures"
 depends_on = []
+
+[[modules]]
+path = "mindroom.reactive_triggers"
+depends_on = [
+    "mindroom.reactive_triggers.dispatch",
+    "mindroom.reactive_triggers.external_sources",
+    "mindroom.reactive_triggers.matching",
+    "mindroom.reactive_triggers.models",
+    "mindroom.reactive_triggers.service",
+    "mindroom.reactive_triggers.store",
+    "mindroom.reactive_triggers.triage",
+]
+
+[[modules]]
+path = "mindroom.reactive_triggers.models"
+depends_on = []
+
+[[modules]]
+path = "mindroom.reactive_triggers.store"
+depends_on = [
+    "mindroom.reactive_triggers.models",
+]
+
+[[modules]]
+path = "mindroom.reactive_triggers.matching"
+depends_on = [
+    "mindroom.constants",
+]
+
+[[modules]]
+path = "mindroom.reactive_triggers.triage"
+depends_on = [
+    "mindroom.config.judgment",
+    "mindroom.judgment.evaluator",
+    "mindroom.judgment.state",
+]
+
+[[modules]]
+path = "mindroom.reactive_triggers.dispatch"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.entity_resolution",
+    "mindroom.hooks.sender",
+    "mindroom.matrix.room_reconciliation",
+    "mindroom.reactive_triggers.external_sources",
+    "mindroom.reactive_triggers.matching",
+    "mindroom.reactive_triggers.models",
+    "mindroom.reactive_triggers.store",
+]
+
+[[modules]]
+path = "mindroom.reactive_triggers.external_sources"
+depends_on = [
+    "mindroom.delivery_replay",
+    "mindroom.reactive_triggers.matching",
+    "mindroom.reactive_triggers.models",
+]
+
+[[modules]]
+path = "mindroom.reactive_triggers.service"
+depends_on = [
+    "mindroom.event_journal",
+    "mindroom.matrix.agent_authored",
+    "mindroom.matrix.conversation_reads",
+    "mindroom.matrix.room_reconciliation",
+    "mindroom.matrix.transport_progress",
+    "mindroom.reactive_triggers.dispatch",
+    "mindroom.reactive_triggers.matching",
+    "mindroom.reactive_triggers.models",
+    "mindroom.reactive_triggers.store",
+    "mindroom.reactive_triggers.triage",
+    "mindroom.thread_tags",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.triggers"
+depends_on = [
+    "mindroom.custom_tools.attachment_helpers",
+    "mindroom.entity_resolution",
+    "mindroom.matrix.room_reconciliation",
+    "mindroom.matrix.state",
+    "mindroom.reactive_triggers.external_sources",
+    "mindroom.reactive_triggers.models",
+    "mindroom.reactive_triggers.store",
+    "mindroom.thread_tags",
+    "mindroom.tool_system.authoring",
+]
+
+[[modules]]
+path = "mindroom.tools.triggers"
+depends_on = [
+    "mindroom.custom_tools.triggers",
+    "mindroom.tool_system.declarations",
+    "mindroom.tool_system.registration",
+]
