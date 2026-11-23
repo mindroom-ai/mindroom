@@ -134,7 +134,7 @@ def _cut_oldest_text(items: list[_SubagentItem], limit: int) -> int:
 
 
 def _public_entry(entry: ToolTraceEntry) -> ToolTraceEntry:
-    """Return a new entry with only the names and the redacted previews a shown tool trace carries, cut to 300 characters."""
+    """Return a new entry with only the public fields a shown tool trace carries, with previews cut to 300 characters."""
     args_preview, args_cut = _cut_preview(entry.args_preview)
     result_preview, result_cut = _cut_preview(entry.result_preview)
     return ToolTraceEntry(
@@ -143,6 +143,7 @@ def _public_entry(entry: ToolTraceEntry) -> ToolTraceEntry:
         args_preview=args_preview,
         result_preview=result_preview,
         truncated=entry.truncated or args_cut or result_cut,
+        is_error=entry.is_error,
     )
 
 
@@ -271,11 +272,26 @@ class _SubagentActivity:
         result: str | None = None,
         interrupted_by_restart: bool = False,
     ) -> None:
-        """Move to a status; terminal ones set `ended_at`, `running` clears it."""
+        """Move to a status; terminal ones set `ended_at` and settle running tools, non-terminal ones clear `ended_at`."""
         self.status, self.interrupted_by_restart = status, interrupted_by_restart
-        self.ended_at = now if status in TERMINAL_CHILD_STATUSES else None
+        if status in TERMINAL_CHILD_STATUSES:
+            self.ended_at = now
+            self._settle_running_tools(failed=status != "completed")
+        else:
+            self.ended_at = None
         if result is not None:
             self.result = result
+
+    def _settle_running_tools(self, *, failed: bool) -> None:
+        """Close every still-running tool row so ended runs never leave pending spinners behind."""
+        self._running_calls.clear()
+        state: Literal["done", "error"] = "error" if failed else "done"
+        self._items = [
+            replace(item, state=state, tool=replace(item.tool, type="tool_call_completed", is_error=failed))
+            if item.kind == "tool" and item.state == "running" and item.tool is not None
+            else item
+            for item in self._items
+        ]
 
     def snapshot(self) -> SubagentSnapshot:
         """Build the redacted, capped snapshot: whole text items are redacted, then the text cap cuts.
