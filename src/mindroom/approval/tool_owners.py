@@ -213,7 +213,7 @@ def check_prepared_catalog_authority(context: ToolRuntimeContext) -> None:
     if (
         old_agent is None
         or current_agent is None
-        or bool(set(old_agent.rooms) - set(current_agent.rooms))
+        or not set(old_agent.rooms) <= set(current_agent.rooms)
         or _catalog_authority(current, context.agent_name) != _catalog_authority(context.config, context.agent_name)
     ):
         msg = "Current configuration no longer permits this prepared CLI call"
