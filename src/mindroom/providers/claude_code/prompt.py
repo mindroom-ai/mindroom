@@ -73,9 +73,9 @@ def _history_blocks(message: Message, provider: str, names: dict[str, str]) -> l
     return [_text("\n".join(["<assistant>", *filter(None, parts), "</assistant>"]))]
 
 
-def _history_name(name: str | None) -> str | None:
-    """Return the name Claude calls the tool by; a provider may have stored a call without one."""
-    return called_name(name) if name else name
+def _history_name(name: object) -> object:
+    """Return the name Claude calls the tool by; a stored call may lack a usable name, which stays as stored."""
+    return called_name(name) if isinstance(name, str) and name else name
 
 
 def _json(value: object) -> str:
