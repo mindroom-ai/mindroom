@@ -430,12 +430,14 @@ class ResponseRunner:
         if model_name is not None and (handle := current_span()) is not None:
             handle.reply_model = model_payload(self.deps.runtime.config, model_name)
 
-    def _agent_placeholder_model_name(self, request: ResponseRequest, *, runtime_model: TurnModel) -> str:
+    def _agent_placeholder_model_name(
+        self,
+        target: MessageTarget,
+        *,
+        requester_id: str | None,
+        explicit: str | None,
+    ) -> str:
         """Apply the requester's budget without logging fallback to pick the agent placeholder's model."""
-        budget = self._turn_budget(request)
-        if budget is None:
-            return runtime_model.model_name
-        target = request.response_envelope.target
         return resolve_turn_model(
             self.deps.runtime.config,
             self.deps.runtime_paths,
@@ -443,10 +445,23 @@ class ResponseRunner:
                 entity=self.deps.agent_name,
                 room_id=target.room_id,
                 thread_id=target.resolved_thread_id,
-                explicit=runtime_model.model_name,
+                explicit=explicit,
             ),
-            replace(budget, log_fallback=False),
+            TurnBudget(
+                monitor=self.deps.runtime.orchestrator.budgets,
+                requester_id=requester_id,
+                log_fallback=False,
+            ),
         ).model_name
+
+    def placeholder_ai_run_content(self, target: MessageTarget, *, requester_id: str | None) -> dict[str, Any]:
+        """Return the provisional run metadata of an agent reply's placeholder that another owner sends.
+
+        An interactive selection's acknowledgement is that placeholder, which the answer then edits instead of
+        sending its own; it names the model the answer's turn resolves for ``requester_id``.
+        """
+        model_name = self._agent_placeholder_model_name(target, requester_id=requester_id, explicit=None)
+        return streaming_ai_run_content(model_payload(self.deps.runtime.config, model_name))
 
     @property
     def in_flight_response_count(self) -> int:
@@ -1623,8 +1638,9 @@ class ResponseRunner:
                 None,
             )
             placeholder_model_name: str | None = self._agent_placeholder_model_name(
-                request,
-                runtime_model=runtime_model,
+                target,
+                requester_id=request.response_envelope.requester_id,
+                explicit=runtime_model.model_name,
             )
         else:
             team_models = (

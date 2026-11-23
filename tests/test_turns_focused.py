@@ -326,6 +326,10 @@ class _RecordingResponseRunner:
         for task in self.inbox_tasks:
             await task
 
+    def placeholder_ai_run_content(self, target: MessageTarget, *, requester_id: str | None) -> dict[str, Any]:  # noqa: ARG002
+        """Name no model on a selection's acknowledgement; these tests follow its sources, not its content."""
+        return {}
+
     async def generate_response(self, request: ResponseRequest) -> SourceFate:
         self.requests.append(request)
         self.response_started.set()

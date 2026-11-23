@@ -12,6 +12,7 @@ import nio
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom import interactive
 from mindroom import reply_lifecycle as rl
 from mindroom.ai_run_metadata import (
     build_prepared_history_metadata_content,
@@ -39,6 +40,7 @@ from mindroom.constants import (
     STREAM_STATUS_STREAMING,
 )
 from mindroom.delivery_gateway import FinalDeliveryRequest
+from mindroom.dispatch_source import INTERACTIVE_SELECTION_SOURCE_KIND
 from mindroom.event_journal import ApprovalDecisionMetadata, CallKey, EventClass, EventKind, InboundEvent
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelIdentity, TextDelta, TurnCompleted, UsageReported
@@ -67,6 +69,7 @@ from tests.conftest import (
     initialize_approval_store_for_test,
     install_model_providers,
     install_runtime_journal_support,
+    make_ingress_facts,
     make_matrix_client_mock,
     runtime_paths_for,
     test_runtime_paths,
@@ -690,6 +693,67 @@ async def test_agent_placeholder_applies_budget_without_double_logging_and_keeps
     # Budget fallback must be logged exactly once (in prepare_response_runtime, not placeholder resolution).
     fallback_logs = [entry for entry in logs if entry.get("event") == "budget_fallback_applied"]
     assert len(fallback_logs) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("over_budget", [False, True], ids=["within-budget", "over-budget"])
+async def test_interactive_selection_acknowledgement_names_the_model_from_its_first_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    over_budget: bool,
+) -> None:
+    """A selection's Thinking... acknowledgement, the placeholder its answer edits, names the answer's budgeted model."""
+    model_name = "cheap" if over_budget else "default"
+    turn = await _setup_turn(
+        tmp_path,
+        monkeypatch,
+        scripts={model_name: [answer("Selected answer.")]},
+        budgets=BudgetsConfig(monthly_limit_usd=10.0, fallback_model="cheap"),
+    )
+    turn.bot.config.models["default"].pricing = ModelPricing(input=5, output=30)
+    monkeypatch.setattr(
+        turn.bot.orchestrator,
+        "_budgets",
+        budget_monitor_with_spend(turn.bot.runtime_paths, {_REQUESTER: 15.0 if over_budget else 0.0}),
+    )
+    selections = turn.bot._interactive_selections
+    selection = interactive.InteractiveSelection(
+        question_event_id="$question",
+        question_text="Proceed?",
+        selection_key="1",
+        selected_label="Yes",
+        selected_value="yes",
+        thread_id=None,
+    )
+    room = MagicMock()
+    room.room_id = _ROOM
+
+    with capture_logs() as logs:
+        assert await selections._execute_admitted_interactive_selection(
+            room,
+            selection=selection,
+            facts=make_ingress_facts(_REQUESTER, source_kind=INTERACTIVE_SELECTION_SOURCE_KIND),
+            source_event_id=_SOURCE,
+            response_target=selections._interactive_selection_target(_ROOM, selection),
+        )
+
+    writes = turn.homeserver.writes
+    expected_model = model_payload(turn.bot.config, model_name)
+    assert _visible_content(writes[0])["body"] == AGENT_PLACEHOLDER
+    assert _stream_status(writes[0]) == STREAM_STATUS_PENDING
+    _assert_provisional_ai_run(writes[0], expected_model)
+    # The answer edits the acknowledgement instead of sending a placeholder of its own.
+    assert all(write.get("m.relates_to", {}).get("rel_type") == "m.replace" for write in writes[1:])
+    assert "Selected answer." in str(_visible_content(writes[-1]).get("body", ""))
+    assert _stream_status(writes[-1]) == STREAM_STATUS_COMPLETED
+    final_ai_run = _ai_run(writes[-1])
+    assert final_ai_run is not None
+    assert final_ai_run["status"] == "completed"
+    assert final_ai_run["model"] == expected_model
+    # The acknowledgement's model resolution logs no budget fallback of its own.
+    fallback_logs = [entry for entry in logs if entry.get("event") == "budget_fallback_applied"]
+    assert len(fallback_logs) == (1 if over_budget else 0)
 
 
 @pytest.mark.asyncio
