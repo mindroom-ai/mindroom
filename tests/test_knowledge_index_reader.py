@@ -24,9 +24,11 @@ if TYPE_CHECKING:
 class _Embedder:
     def __init__(self, *, stall: bool = False) -> None:
         self.stall = stall
+        self.texts: list[str] = []
 
     async def aembed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
         del purpose
+        self.texts.extend(texts)
         if self.stall:
             await asyncio.Event().wait()
         return [[1.0, 0.0] for _text in texts]
@@ -105,3 +107,16 @@ async def test_a_stalled_embedder_times_out(tmp_path: Path, monkeypatch: pytest.
 
     with pytest.raises(TimeoutError):
         await reader.asearch("alpha", limit=1)
+
+
+@pytest.mark.asyncio
+async def test_a_long_query_is_embedded_truncated_but_searched_in_full(tmp_path: Path) -> None:
+    """A prompt longer than the cap embeds only its leading characters, and the search still returns."""
+    embedder = _Embedder()
+    reader = _reader(tmp_path, embedder)
+    query = "alpha " + "x" * (index_reader_module._MAX_QUERY_EMBED_CHARS * 2)
+
+    hits = await reader.asearch(query, limit=1)
+
+    assert embedder.texts == [query[: index_reader_module._MAX_QUERY_EMBED_CHARS]]
+    assert [hit.content for hit in hits] == ["alpha"]
