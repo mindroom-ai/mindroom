@@ -2517,6 +2517,7 @@ depends_on = [
     "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
     "mindroom.api.usage_export",
+    "mindroom.usage.provider_limits",
 ]
 
 [[modules]]
@@ -5274,6 +5275,7 @@ depends_on = [
     "mindroom.response_lifecycle",
     "mindroom.tool_jobs.client_cancel",
     "mindroom.model_catalog_receiver",
+    "mindroom.usage.limits_receiver",
     "mindroom.tool_jobs.follow_ups",
     "mindroom.reply_scope",
     "mindroom.knowledge.utils",
@@ -10013,6 +10015,13 @@ depends_on = [
     "mindroom.usage.legacy_usage_storage",
     "mindroom.usage.limit_store",
     "mindroom.usage.provider_probes",
+]
+
+[[modules]]
+path = "mindroom.usage.limits_receiver"
+depends_on = [
+    "mindroom.matrix.olm_to_device",
+    "mindroom.usage.provider_limits",
 ]
 
 # Shared judgment leaves; no dependency on the response pipeline.

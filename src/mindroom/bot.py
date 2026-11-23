@@ -68,6 +68,7 @@ from mindroom.runtime_shutdown import (
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
+from mindroom.usage.limits_receiver import register_provider_usage_receiver
 
 from . import constants
 from .active_runs import ActiveRunPublisher
@@ -1757,6 +1758,13 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 config_getter=lambda: self.config,
                 membership_index=self._runtime_view.agent_reply_memberships,
+                answers_in_room=lambda room_id: self.orchestrator.room_poster(room_id) is self,
+                callback_wrapper=partial(_create_best_effort_task_wrapper, owner=self._runtime_view),
+            )
+            register_provider_usage_receiver(
+                client=client,
+                runtime_paths=self.runtime_paths,
+                config_getter=lambda: self.config,
                 answers_in_room=lambda room_id: self.orchestrator.room_poster(room_id) is self,
                 callback_wrapper=partial(_create_best_effort_task_wrapper, owner=self._runtime_view),
             )
