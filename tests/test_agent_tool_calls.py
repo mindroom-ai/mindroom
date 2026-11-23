@@ -1008,6 +1008,10 @@ _CONFIG_EDITS: dict[str, tuple[Callable[[Config], object], bool]] = {
         lambda config: setattr(config.models["default"], "pricing", ModelPricing(input=1, output=2)),
         True,
     ),
+    "room_model_added": (lambda config: config.room_models.__setitem__("new-room", "spare"), True),
+    "own_room_appended": (lambda config: config.agents["helper"].rooms.append("new-room"), True),
+    "own_room_removed": (lambda config: config.agents["helper"].rooms.remove("lobby"), False),
+    "memory_search_exclude": (lambda config: config.memory.search.exclude.append("archive/**"), False),
     "default_tools": (lambda config: setattr(config.defaults, "tools", ["calculator"]), False),
     "default_worker_routing": (lambda config: setattr(config.defaults, "worker_scope", "user"), False),
     "approval_rule": (
@@ -1040,7 +1044,7 @@ async def test_a_prepared_cli_call_survives_config_edits_that_leave_its_agent_un
     catalog = await _catalog(tmp_path, [_function(action)])
     config = Config(
         agents={
-            "helper": AgentConfig(display_name="Helper", tools=["shell"], instructions=["Be brief."]),
+            "helper": AgentConfig(display_name="Helper", tools=["shell"], instructions=["Be brief."], rooms=["lobby"]),
             "other": AgentConfig(display_name="Other", instructions=["Be thorough."]),
         },
         models={
