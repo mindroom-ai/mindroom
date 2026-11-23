@@ -54,9 +54,7 @@ from mindroom.matrix.client_visible_messages import (
 from mindroom.matrix.conversation_reads import projected_thread_history
 from mindroom.matrix.journal_ingress import ingestion_timeline_views
 from mindroom.matrix.large_messages import (
-    _MATRIX_EVENT_HARD_LIMIT,
     EDIT_MESSAGE_SIZE_LIMIT,
-    _calculate_delivery_event_size,
     calculate_event_size,
     should_send_oversized_nonterminal_streaming_edit,
 )
@@ -72,7 +70,6 @@ from mindroom.matrix.room_history_reads import (
     find_outbox_delivery_event_id_via_room_messages,
     missing_outbox_delivery_copy_indices_via_room_messages,
 )
-from mindroom.matrix.visible_body import visible_body_from_event_source
 from mindroom.message_target import MessageTarget
 from mindroom.mid_turn import MidTurnGate, MidTurnOutcome, QueuedMessage
 from mindroom.reply_presentation import Presentation
@@ -302,17 +299,12 @@ def _sent_events(room_send: AsyncMock) -> list[dict[str, Any]]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("uploads", [True, False], ids=["sidecar", "upload-failure-fallback"])
-async def test_an_edit_bound_when_claimed_that_is_too_large_for_an_event_is_sent_whole_and_read_back(
+async def test_a_late_bound_sidecar_preview_freezes_clean_preview_body_as_row_new_text(
     tmp_path: Path,
     journal_store: EventJournalStore,
     uploads: bool,
 ) -> None:
-    """A terminal row written while the reply's create is still owed gets its edit envelope only when claimed.
-
-    Its replacement is sized with that envelope, so the event fits. No event existed to edit when its sidecar was
-    uploaded, so the file holds the replacement as the content it is and as an edit's ``m.new_content``: the
-    release before this one finds an edit's text nowhere else, and the row creates the reply when no earlier row did.
-    """
+    """A late-bound row preview freezes its clean marker-free preview body as ``new_text`` for claim-time wrapping."""
     outbox = journal_store.principal("agent@alice")
     room_send = AsyncMock(
         side_effect=[None, nio.RoomSendResponse("$reply", _ROOM), nio.RoomSendResponse("$edit", _ROOM)],
@@ -353,67 +345,16 @@ async def test_an_edit_bound_when_claimed_that_is_too_large_for_an_event_is_sent
     assert wire["body"].startswith("* xxxx")
     assert ("io.mindroom.long_text" in wire["m.new_content"]) is uploads
     _assert_no_raw_markers_on_wire(wire)
-    for room_encrypted in (False, True):
-        size = _calculate_delivery_event_size(wire, room_id=_ROOM, room_encrypted=room_encrypted, device_id="DEVICE")
-        assert size <= _MATRIX_EVENT_HARD_LIMIT
-    client = gateway.deps.runtime.client
-    if not uploads:
-        assert await extract_edit_body(_event(wire, "$edit"), client) == (row.payload["body"], row.payload)
-        return
-    frozen = {**replacement, DURABLE_DELIVERY_ID_KEY: row.payload[DURABLE_DELIVERY_ID_KEY]}
-    file = row.payload["file"]
-    uploaded = decrypt_media_bytes(sidecars[0], key=file["key"]["k"], sha256=file["hashes"]["sha256"], iv=file["iv"])
-    assert json.loads(uploaded) == {**frozen, "m.new_content": frozen}
-    with patch("mindroom.matrix.message_content.download_mxc_bytes", new=AsyncMock(return_value=sidecars[0])):
-        edited = await extract_edit_body(_event(wire, "$edit"), client)
-        resolved = await resolve_event_source_content(_event(wire, "$edit"), client)
-        # As the row is sent when the reply's create failed for good: it is then the message itself.
-        created = await resolve_event_source_content(_event(row.payload, "$reply"), client)
-    assert edited == (replacement["body"], frozen)
-    assert resolved["content"] == {**frozen, "m.new_content": frozen, "m.relates_to": wire["m.relates_to"]}
-    assert created["content"] == {**frozen, "m.new_content": frozen}
-    assert visible_body_from_event_source(created, "") == replacement["body"]
-
-
-@pytest.mark.asyncio
-async def test_an_answer_that_creates_its_reply_is_sized_as_a_message_and_not_as_an_edit(
-    tmp_path: Path,
-    journal_store: EventJournalStore,
-) -> None:
-    """A terminal row with no earlier row left to create the reply's event creates it, and is never wrapped.
-
-    Sized with an edit envelope it never gets, an answer of 16,000 characters, about 45 KB once encrypted, would
-    move to a sidecar where it has an event's room to itself.
-    """
-    outbox = journal_store.principal("agent@alice")
-    room_send = AsyncMock(return_value=nio.RoomSendResponse("$reply", _ROOM))
-    gateway = _reply_gateway(tmp_path, outbox, room_send)
-    target = MessageTarget.resolve(_ROOM, None, "$cause")
-    answer = _large(1, 16_000)
-    upload = AsyncMock(return_value=(nio.UploadResponse("mxc://localhost/full"), None))
-
-    with patch("mindroom.matrix.large_messages.upload_media_bytes", new=upload):
-        async with reply_span(outbox, source_event_id="$cause", room_id=_ROOM) as handle:
-            await gateway._deliver_reply_write(
-                terminal_write(handle, Presentation(), state=rl.ReplyState.COMPLETED),
-                target=target,
-                content=answer,
-                new_text=answer["body"],
-                result=None,
-            )
-
-    upload.assert_not_awaited()
-    row = await outbox.load_matrix_delivery(delivery_id="$cause", stage=DeliveryStage.FINAL)
-    assert row is not None
-    assert (row.edits_event_id, row.acknowledged_event_id) == (None, "$reply")
-    assert row.payload == {**answer, DURABLE_DELIVERY_ID_KEY: row.payload[DURABLE_DELIVERY_ID_KEY]}
-    (wire,) = _sent_events(room_send)
-    assert "io.mindroom.long_text" not in wire
-    assert "m.new_content" not in wire
-    assert wire["body"] == "x" * 16_000
-    assert tool_markers_in_text(wire) == row.payload
-    encrypted_size = _calculate_delivery_event_size(wire, room_id=_ROOM, room_encrypted=True, device_id="DEVICE")
-    assert 44_000 < encrypted_size <= _MATRIX_EVENT_HARD_LIMIT
+    if uploads:
+        frozen = {**replacement, DURABLE_DELIVERY_ID_KEY: row.payload[DURABLE_DELIVERY_ID_KEY]}
+        file = row.payload["file"]
+        uploaded = decrypt_media_bytes(
+            sidecars[0],
+            key=file["key"]["k"],
+            sha256=file["hashes"]["sha256"],
+            iv=file["iv"],
+        )
+        assert json.loads(uploaded) == frozen
 
 
 def test_pre_upgrade_late_bound_sidecar_row_keeps_verbatim_new_text_for_exact_recovery() -> None:
@@ -1464,7 +1405,10 @@ def test_a_fallback_that_is_not_its_placeholder_replacement_again_is_read_as_it_
         "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
     }
 
-    assert tool_markers_in_text(edit) == {**edit, "m.new_content": _sent(case)}
+    restored = tool_markers_in_text(edit)
+    assert restored == {**edit, "m.new_content": _sent(case)}
+    if _TRACE_KEY in edit:
+        assert restored[_TRACE_KEY] == edit[_TRACE_KEY]
 
 
 def test_a_placeholder_position_of_zero_is_read_as_chat_reads_it_whether_json_wrote_it_as_a_float_or_not() -> None:

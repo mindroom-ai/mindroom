@@ -1,5 +1,5 @@
 {
-  "description": "MindRoom tool positions (io.mindroom.tool_trace version 3). 'sent' is a reply as the backend builds it, its markers in the text (version 2); 'wire' is what Matrix gets: the text without the markers of its calls, and on each such call 'body_line', the number of lines of the wire body before its marker, and 'at', the number of top-level blocks of the wire formatted_body before it (null: the call has neither key, and no marker). A top-level block is a top-level element with its content, a top-level void element, or a run of top-level text with a non-whitespace character; a tag name ends at the first character that is no ASCII letter, digit or hyphen. A reader puts each marker back as 'sent' has it: a body line before line 'body_line' with a blank line after it, or at the end after a blank line; a <p> and a newline before block 'at' or at the end. For a position that is no integer, is past the end or lies before an earlier call's, MindRoom Chat puts the marker at the end and the backend reads the content as it is. 'wire' null: the backend sends 'sent' as it is, version 2, because no marker would go, a marker line is not also a top-level <p> of the same call in the same order, a line that looks like a marker would stay, or the text would not read back exactly. 'written' false: the backend sends 'sent' as it is too, because no text would be left for a reader that puts no markers back, and a reader still takes this 'wire', which an earlier build sent. 'rendered' false: the formatted_body is not the backend's rendering of the body. A reply of calls alone whose 'stream_status' is pending or streaming, sent as a progress write outside the backend's outbox, goes out with the text \"Thinking...\" for a reader that puts no markers back and with 'placeholder_body': true on its trace, and a reader puts the markers back in place of that text. It does so only for a sound trace: body and formatted_body are strings, every entry of 'events' is an object with a non-empty string 'tool_name', each entry with 'body_line' or 'at' has both as the number 0, and at least one entry has them. 'kept_placeholders' lists the 'events' of traces with 'placeholder_body': true that are not sound: MindRoom Chat and the backend both read content with one as it is, its text kept. An edit's fallback repeats its replacement: the same formatted_body, and the replacement's body after '* '. The fallback of a replacement with 'placeholder_body': true repeats it only with exactly that body, since the markers go back in place of the text. 'kept_fallbacks' lists the keys a fallback has in place of those that would repeat the 'wire' of 'a streaming reply of calls alone': for each, MindRoom Chat and the backend put the markers back in the replacement and read the fallback as it is. Shared by mindroom (tests/fixtures) and mindroom-chat (src/app/matrix/protocol/__fixtures__); change both copies together.",
+  "description": "MindRoom tool positions (io.mindroom.tool_trace version 3). 'sent' is a reply as the backend builds it, its markers in the text (version 2); 'wire' is what Matrix gets: the text without the markers of its calls, and on each such call 'body_line', the number of lines of the wire body before its marker, and 'at', the number of top-level blocks of the wire formatted_body before it (null: the call has neither key, and no marker). A top-level block is a top-level element with its content, a top-level void element, or a run of top-level text with a non-whitespace character; a tag name ends at the first character that is no ASCII letter, digit or hyphen. A reader puts each marker back as 'sent' has it: a body line before line 'body_line' with a blank line after it, or at the end after a blank line; a <p> and a newline before block 'at' or at the end. For a position that is no integer, is past the end or lies before an earlier call's, MindRoom Chat puts the marker at the end and the backend reads the content as it is. 'wire' null: the backend sends 'sent' as it is, version 2, because no marker would go, a marker line is not also a top-level <p> of the same call in the same order, a line that looks like a marker would stay, or the text would not read back exactly. 'written' false: the backend sends 'sent' as it is too, because no text would be left for a reader that puts no markers back, and a reader still takes this 'wire', which an earlier build sent. 'rendered' false: the formatted_body is not the backend's rendering of the body. A reply of calls alone whose 'stream_status' is pending or streaming, sent as a progress write outside the backend's outbox, goes out with the text \"Thinking...\" for a reader that puts no markers back and with 'placeholder_body': true on its trace, and a reader puts the markers back in place of that text. It does so only for a sound trace: body and formatted_body are strings, every entry of 'events' is an object with a non-empty string 'tool_name', each entry with 'body_line' or 'at' has both as the number 0, and at least one entry has them. 'kept_placeholders' lists the 'events' of traces with 'placeholder_body': true that are not sound: MindRoom Chat and the backend both read content with one as it is, its text kept. An edit's fallback repeats its replacement: the same formatted_body, the same io.mindroom.tool_trace when the fallback carries one, and the replacement's body after '* '. The fallback of a replacement with 'placeholder_body': true repeats it only with exactly that body, since the markers go back in place of the text. 'kept_fallbacks' lists the keys a fallback has in place of those that would repeat the 'wire' of 'a streaming reply of calls alone': for each, MindRoom Chat and the backend put the markers back in the replacement and read the fallback as it is. Shared by mindroom (tests/fixtures) and mindroom-chat (src/app/matrix/protocol/__fixtures__); change both copies together.",
   "cases": [
     {
       "name": "calls between two paragraphs share one position",
@@ -495,6 +495,26 @@
       "fallback": {
         "body": "* Different fallback text",
         "formatted_body": "<p>Different fallback text</p>\n"
+      }
+    },
+    {
+      "name": "another tool trace",
+      "fallback": {
+        "body": "* Thinking...",
+        "formatted_body": "<p>Thinking...</p>\n",
+        "io.mindroom.tool_trace": {
+          "version": 3,
+          "placeholder_body": true,
+          "events": [
+            {
+              "type": "tool_call_completed",
+              "tool_name": "read_file",
+              "args_preview": "path=notes.txt",
+              "body_line": 0,
+              "at": 0
+            }
+          ]
+        }
       }
     }
   ]
