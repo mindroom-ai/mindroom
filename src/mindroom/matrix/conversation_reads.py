@@ -358,8 +358,8 @@ class ConversationReader:
 
         Retries resolving up to a small bound when a newer revision moves the
         pending debt underneath an in-flight refetch (for example, a streaming
-        sidecar edit landing during download), while failing immediately when
-        the debt is unchanged.
+        sidecar edit landing during download), while failing after one pass
+        when the debt is unchanged.
 
         Raises ``ConversationReadError`` rather than returning a page with
         content missing. A caller building a prompt cannot tell an omitted
