@@ -73,7 +73,6 @@ from mindroom.workflow_runs.replay import (
     node_digest,
     result_digest,
     split_key,
-    stale_keys,
 )
 from mindroom.workflow_runs.store import SupersededAttemptError, WorkflowRunNotFoundError, WorkflowRunStoreError
 from mindroom.workflow_runs.structured import (
@@ -1815,8 +1814,7 @@ class WorkflowEngine:
                         await self._reconcile(current, node, run.epoch, stop=ended)
                 if state is WorkflowRunState.COMPLETED:
                     # What the completed script no longer reaches leaves the run's current view.
-                    stale = stale_keys(nodes, current.attempt)
-                    await asyncio.to_thread(self.store.mark_stale, run.run_id, run.epoch, stale)
+                    await asyncio.to_thread(self.store.mark_stale, run.run_id, run.epoch)
                 at = current.finished_at or utc_timestamp()
                 changes = {"state": state, "error": error, "finished_at": at, **self._time_left(current), **changes}
                 attempt = current.script_run_id or ""

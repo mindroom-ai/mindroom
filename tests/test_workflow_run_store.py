@@ -516,12 +516,16 @@ def test_stamps_change_named_fields_and_never_an_outcome(tmp_path: Path) -> None
 
 
 def test_stale_nodes_leave_the_current_view(tmp_path: Path) -> None:
-    """Nodes are listed in sequence order, and stale ones only on request."""
-    store, first = _store_with_node(tmp_path)
-    second, third = store.put_node(_node(key="@1"), 0), store.put_node(_node(key="/1:ab@0"), 0)
-    store.mark_stale(first.run_id, 0, ["@1", "@7"])
+    """Nodes not reached by the run's current attempt leave the view; stale ones appear only on request."""
+    store = WorkflowRunStore(tmp_path / "w.sqlite3")
+    store.reserve_run(_run(attempt=2))
+    first = store.put_node(_node(key="@0", attempt=2), 0)
+    second = store.put_node(_node(key="@1", attempt=1), 0)
+    third = store.put_node(_node(key="/1:ab@0", attempt=2), 0)
+    already_stale = store.put_node(replace(_node(key="@2", attempt=1), stale=True), 0)
+    store.mark_stale(first.run_id, 0)
     assert store.nodes(first.run_id) == [first, third]
-    assert store.nodes(first.run_id, include_stale=True) == [first, replace(second, stale=True), third]
+    assert store.nodes(first.run_id, include_stale=True) == [first, replace(second, stale=True), third, already_stale]
     assert store.nodes(_RUN_B) == []
 
 
@@ -854,7 +858,7 @@ _FENCED_WRITES: dict[str, Callable[[WorkflowRunStore, WorkflowNode, int], object
         result="late",
         dirty_after=True,
     ),
-    "mark_stale": lambda store, node, epoch: store.mark_stale(node.run_id, epoch, [node.key]),
+    "mark_stale": lambda store, node, epoch: store.mark_stale(node.run_id, epoch),
     "append_log": lambda store, node, epoch: store.append_log(node.run_id, epoch, "late"),
 }
 
@@ -1001,7 +1005,7 @@ def test_every_write_of_a_run_tells_who_listens_which_run_changed(tmp_path: Path
     store.settle_node(_RUN_A, "@0", 1, 0, state=WorkflowNodeState.COMPLETED, result=1)
     store.add_usage(_RUN_A, "@0", 1, 1, 1, {"cost_usd": 0.5})
     store.append_log(_RUN_A, 0, "a line")
-    store.mark_stale(_RUN_A, 0, ["@0"])
+    store.mark_stale(_RUN_A, 0)
     store.update_run(_RUN_A, 0, large=True)
     with pytest.raises(SupersededAttemptError):
         store.append_log(_RUN_A, 7, "of an attempt the run left")

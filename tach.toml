@@ -2544,7 +2544,6 @@ expose = [
     "parent_group",
     "result_digest",
     "split_key",
-    "stale_keys",
 ]
 
 [[modules]]

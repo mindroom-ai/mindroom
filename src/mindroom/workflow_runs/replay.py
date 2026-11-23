@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 from mindroom.workflow_runs.models import LIVE_NODE_STATES, WorkflowNode, WorkflowNodeState
-
-if TYPE_CHECKING:
-    from collections.abc import Iterable
 
 type _Action = Literal["hit", "attach", "raise_indeterminate", "run"]
 
@@ -73,8 +70,3 @@ def decide(
     if saved.state is WorkflowNodeState.COMPLETED and cached:
         return "hit"
     return "run"
-
-
-def stale_keys(nodes: Iterable[WorkflowNode], attempt: int) -> tuple[str, ...]:
-    """Return the keys of the nodes that the completed *attempt* did not reach and that are not stale yet."""
-    return tuple(node.key for node in nodes if node.attempt != attempt and not node.stale)

@@ -375,13 +375,13 @@ class WorkflowRunStore:
             return node.result
         return json.loads((self.directory / node.result_file).read_bytes())
 
-    def mark_stale(self, run_id: str, epoch: int, keys: Iterable[str]) -> None:
-        """Take the nodes at *keys* out of the run's current view, for the holder of *epoch*."""
+    def mark_stale(self, run_id: str, epoch: int) -> None:
+        """Take nodes not reached by *run_id*'s current attempt out of its current view, for the holder of *epoch*."""
         with self._write_transaction(run_id) as connection:
-            _fenced(connection, run_id, epoch)
-            connection.executemany(
-                "UPDATE workflow_nodes SET stale = 1 WHERE run_id = ? AND key = ?",
-                [(run_id, key) for key in keys],
+            run = _fenced(connection, run_id, epoch)
+            connection.execute(
+                "UPDATE workflow_nodes SET stale = 1 WHERE run_id = ? AND attempt != ? AND stale = 0",
+                (run_id, run.attempt),
             )
 
     def add_usage(

@@ -5,17 +5,12 @@ Level: pure (functions with no I/O).
 
 from __future__ import annotations
 
-from dataclasses import replace
-
-import pytest
-
 from mindroom.workflow_runs.models import WorkflowNode, WorkflowNodeState
 from mindroom.workflow_runs.replay import (
     decide,
     node_digest,
     parent_group,
     split_key,
-    stale_keys,
 )
 
 
@@ -128,16 +123,3 @@ def test_digest_covers_name_and_ignores_key_order() -> None:
     assert digest != node_digest("session", {"prompt": "Check it", "name": "checker", "tools": ["shell"]})
     assert digest != node_digest("agent", {"prompt": "Check it", "name": "checker", "tools": ["shell", "file"]})
     assert node_digest("value", {}) == "9a49f22227188a1075ac17b9a2f8b637ede6532e06eaa1c09bf911d192a26f0a"
-
-
-@pytest.mark.parametrize("attempt", [2, 3])
-def test_stale_keys_are_those_a_completed_attempt_did_not_touch(attempt: int) -> None:
-    """Nodes the finished attempt never reached leave the view; those already stale are not named again."""
-    nodes = [
-        _done("@0", "d", attempt=attempt),
-        _done("@1", "d", attempt=attempt - 1),
-        _failed_node("/1:a@0", "d", attempt=1),
-        replace(_done("@2", "d", attempt=1), stale=True),
-    ]
-    assert stale_keys(nodes, attempt) == ("@1", "/1:a@0")
-    assert stale_keys([], attempt) == ()
