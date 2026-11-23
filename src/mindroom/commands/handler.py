@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
@@ -177,42 +178,48 @@ async def _workflows_command(
     """List the requester's workflow runs here and the saved workflows of workflow-enabled agents in the room."""
     if context.workflow_engine is None:
         return "Workflows are not running here."
-    runs = context.workflow_engine.store.list_runs(
-        owner_user_id=requester_user_id,
-        room_id=room.room_id,
-        thread_root_event_id=thread_id,
-        top_level_only=True,
-    )[:20]
     candidate_entities = await context.responder_candidates_for_room(room, requester_user_id)
-    saved: list[tuple[str, SavedWorkflow]] = []
-    if candidate_entities:
-        registry = entity_identity_registry(context.config, context.runtime_paths)
-        seen: set[tuple[str, Path]] = set()
-        for entity_id in candidate_entities:
-            entity_name = registry.current_entity_name_for_user_id(entity_id.full_id, include_router=False)
-            if entity_name is None or entity_name not in context.config.agents:
-                continue
-            if "workflow" not in context.config.resolve_agent(entity_name).tools.tool_names:
-                continue
-            identity = build_requester_execution_identity(
-                agent_name=entity_name,
-                runtime_paths=context.runtime_paths,
-                requester_id=requester_user_id,
-            )
-            workspace = resolve_agent_runtime(
-                entity_name,
-                context.config,
-                context.runtime_paths,
-                execution_identity=identity,
-                create=False,
-            ).workspace.root
-            if (entity_name, workspace) in seen:
-                continue
-            seen.add((entity_name, workspace))
-            with suppress(OSError, ValueError):
-                saved.extend((entity_name, item) for item in list_saved(workspace))
-        saved.sort(key=lambda entry: (entry[0], entry[1].name))
-    return _format_workflows_listing(runs, saved)
+    engine = context.workflow_engine
+
+    def load_listing() -> str:
+        runs = engine.store.list_runs(
+            owner_user_id=requester_user_id,
+            room_id=room.room_id,
+            thread_root_event_id=thread_id,
+            top_level_only=True,
+            limit=20,
+        )
+        saved: list[tuple[str, SavedWorkflow]] = []
+        if candidate_entities:
+            registry = entity_identity_registry(context.config, context.runtime_paths)
+            seen: set[tuple[str, Path]] = set()
+            for entity_id in candidate_entities:
+                entity_name = registry.current_entity_name_for_user_id(entity_id.full_id, include_router=False)
+                if entity_name is None or entity_name not in context.config.agents:
+                    continue
+                if "workflow" not in context.config.resolve_agent(entity_name).tools.tool_names:
+                    continue
+                identity = build_requester_execution_identity(
+                    agent_name=entity_name,
+                    runtime_paths=context.runtime_paths,
+                    requester_id=requester_user_id,
+                )
+                workspace = resolve_agent_runtime(
+                    entity_name,
+                    context.config,
+                    context.runtime_paths,
+                    execution_identity=identity,
+                    create=False,
+                ).workspace.root
+                if (entity_name, workspace) in seen:
+                    continue
+                seen.add((entity_name, workspace))
+                with suppress(OSError, ValueError):
+                    saved.extend((entity_name, item) for item in list_saved(workspace))
+            saved.sort(key=lambda entry: (entry[0], entry[1].name))
+        return _format_workflows_listing(runs, saved)
+
+    return await asyncio.to_thread(load_listing)
 
 
 def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) -> SchedulingRuntime:

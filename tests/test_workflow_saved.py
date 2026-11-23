@@ -484,6 +484,7 @@ def main(args):
     )
     await tool_stack.until(lambda: tool_stack.store.get_run(other_user_run["run_id"]).state is WorkflowRunState.RUNNING)
 
+    assert len(tool_stack.store.list_runs(limit=2)) == 2
     listing = json.loads(await tool_stack.call("list_workflow_runs"))
     assert [run["run_id"] for run in listing["runs"]] == [own["run_id"]]
     assert listing["runs"][0]["title"] == "Mine"

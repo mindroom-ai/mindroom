@@ -204,6 +204,7 @@ class WorkflowRunStore:
         thread_root_event_id: str | None = None,
         top_level_only: bool = False,
         include_finished: bool = True,
+        limit: int | None = None,
     ) -> list[WorkflowRun]:
         """List runs, newest first, narrowed by each filter that is given."""
         filters = {
@@ -219,7 +220,7 @@ class WorkflowRunStore:
         if not include_finished:
             clauses.append(f"state NOT IN ({_TERMINAL_STATE_PLACEHOLDERS})")
             params.extend(_TERMINAL_STATE_VALUES)
-        return self._select_runs(" AND ".join(clauses) or "1", params)
+        return self._select_runs(" AND ".join(clauses) or "1", params, limit=limit)
 
     def unshown_runs(self) -> list[str]:
         """Return the runs with a card of their own whose card does not say how they ended: all that have not, too."""
@@ -527,12 +528,20 @@ class WorkflowRunStore:
         write_json_file_durable(path, result, strict_atomic_replace=True)
         return encoded[:_RESULT_PREVIEW_BYTES], result_file
 
-    def _select_runs(self, where: str, params: Iterable[object]) -> list[WorkflowRun]:
+    def _select_runs(
+        self,
+        where: str,
+        params: Iterable[object],
+        *,
+        limit: int | None = None,
+    ) -> list[WorkflowRun]:
+        query = f"SELECT * FROM workflow_runs WHERE {where} ORDER BY created_at DESC, run_id DESC"  # noqa: S608
+        bound = tuple(params)
+        if limit is not None:
+            query += " LIMIT ?"
+            bound = (*bound, limit)
         with self._connection() as connection:
-            rows = connection.execute(
-                f"SELECT * FROM workflow_runs WHERE {where} ORDER BY created_at DESC, run_id DESC",  # noqa: S608
-                tuple(params),
-            ).fetchall()
+            rows = connection.execute(query, bound).fetchall()
         return [_run_from_row(row) for row in rows]
 
     def _select_nodes(self, where: str, params: tuple[object, ...], columns: str = "*") -> list[WorkflowNode]:

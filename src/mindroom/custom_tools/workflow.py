@@ -345,6 +345,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
             room_id=context.room_id,
             thread_root_event_id=context.resolved_thread_id,
             top_level_only=True,
+            limit=20,
         )
         try:
             workspace = await asyncio.to_thread(context.agent_workspace_root, create=False)
@@ -361,7 +362,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
                     "created_at": run.created_at,
                     "finished_at": run.finished_at,
                 }
-                for run in runs[:20]
+                for run in runs
             ],
             "saved": [{"name": item.name, "description": item.description, "args": item.args} for item in saved],
         }
