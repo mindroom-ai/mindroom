@@ -315,6 +315,9 @@ class _Forgetful:
     def retained_jobs(self) -> tuple[()]:
         return ()
 
+    def retained_job(self, _job_id: str) -> None:
+        return None
+
     def __getattr__(self, name: str) -> object:
         return getattr(self._jobs, name)
 

@@ -336,7 +336,7 @@ async def test_job_that_was_started_and_is_gone_leaves_its_call_indeterminate(
     await stack.submit("@0", "agent", _PROMPT)
     assert _node(stack).handle == DispatchHandle("job", stack.node_job("@0").job_id, dispatched=True)
     await _replayed(stack)
-    monkeypatch.setattr(stack.jobs, "retained_jobs", lambda: ())
+    monkeypatch.setattr(stack.jobs, "retained_job", lambda _job_id: None)
 
     receipt = await stack.submit("@0", "agent", _PROMPT)
 
