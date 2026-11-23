@@ -1008,7 +1008,7 @@ _CONFIG_EDITS: dict[str, tuple[Callable[[Config], object], bool]] = {
         lambda config: setattr(config.models["default"], "pricing", ModelPricing(input=1, output=2)),
         True,
     ),
-    "room_model_added": (lambda config: config.room_models.__setitem__("new-room", "spare"), True),
+    "room_model_added": (lambda config: config.room_models.__setitem__("lobby", "spare"), True),
     "own_room_appended": (lambda config: config.agents["helper"].rooms.append("new-room"), True),
     "own_room_removed": (lambda config: config.agents["helper"].rooms.remove("lobby"), False),
     "memory_search_exclude": (lambda config: config.memory.search.exclude.append("archive/**"), False),
