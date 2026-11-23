@@ -428,6 +428,7 @@ async def test_raising_parent_limit_continues_stopped_nested_child(stack: Workfl
         ),
     )
     assert [run.run_id for run in stack.store.child_runs(parent)] == [child.run_id]
+    assert stack.engine.run_usage(parent)["attempt_cost_usd"] == pytest.approx(0.0)
 
     stack.run_id = child.run_id
     first_replayed = await stack.submit("@0", "agent", {"prompt": "First"})
@@ -444,6 +445,8 @@ async def test_raising_parent_limit_continues_stopped_nested_child(stack: Workfl
     await stack.finish_attempt(result=parent_node.result)
     assert stack.store.get_run(parent).result == "firstnext"
     assert len(model.requests) == 2
+    reported = json.loads(await stack.call("get_workflow", run_id=parent))["usage"]
+    assert (reported["attempt_cost_usd"], reported["cost_usd"]) == pytest.approx((0.20, 0.40))
 
 
 @pytest.mark.asyncio

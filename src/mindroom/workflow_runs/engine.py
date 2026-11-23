@@ -661,7 +661,10 @@ class WorkflowEngine:
             used["cost_unknown"] = used["cost_unknown"] or inner["cost_unknown"]
             group = self.store.get_node(run_id, f"{child.parent_node_key}/{child.run_id}")
             if group is not None and group.attempt == run.attempt:
-                used["attempt_cost_usd"] += inner["cost_usd"]
+                if group.generation == 1:
+                    used["attempt_cost_usd"] += inner["cost_usd"]
+                elif child.state is not WorkflowRunState.STARTING:
+                    used["attempt_cost_usd"] += inner["attempt_cost_usd"]
         return used
 
     async def settle(self, run: WorkflowRun, *, replay: bool = False) -> WorkflowRun:
