@@ -44,6 +44,15 @@ def current_membership_epoch(
     return 0 if row is None else int(row["membership_epoch"])
 
 
+def current_active_membership_epoch(transaction: Transaction, principal_id: str, room_id: str) -> int | None:
+    """Read the current epoch unless this membership is departure-fenced."""
+    row = transaction.fetchone(
+        "SELECT membership_epoch, departure_fenced FROM room_membership WHERE principal_id = ? AND room_id = ?",
+        (principal_id, room_id),
+    )
+    return 0 if row is None else None if row["departure_fenced"] else int(row["membership_epoch"])
+
+
 def projection_generation(transaction: Transaction, principal_id: str, room_id: str) -> int:
     """Return how often this principal left the room; each departure dropped what it had projected there."""
     row = transaction.fetchone(

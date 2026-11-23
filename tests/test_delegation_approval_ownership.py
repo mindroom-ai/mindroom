@@ -465,7 +465,7 @@ async def test_an_approved_childs_call_and_its_delegation_keep_their_own_results
     )
 
     assert isinstance(result, CompletedApprovalRun)
-    assert result.response_text == "\n\n🔧 `run_subagent` [1]\n\n\n\n🔧 `add` [2]\n\nDone."
+    assert result.response_text == "🔧 `run_subagent` [1]\n\n🔧 `add` [2]\n\nDone."
     assert [(entry.type, entry.tool_name) for entry in trace] == [
         ("tool_call_completed", "run_subagent"),
         ("tool_call_completed", "add"),

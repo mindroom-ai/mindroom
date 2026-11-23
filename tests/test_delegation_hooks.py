@@ -128,7 +128,7 @@ async def test_a_delegated_child_s_calls_tell_their_hooks_the_chat_does_not_show
     )
 
     # The reply shows its own delegation call and none of the child's.
-    assert answered == "\n\n🔧 `run_subagent` [1]\n\nParent done"
+    assert answered == "🔧 `run_subagent` [1]\n\nParent done"
     assert seen == [("leader", "run_subagent", True), ("child", "add", False)]
 
 

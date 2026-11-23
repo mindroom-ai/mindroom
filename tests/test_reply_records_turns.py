@@ -2200,7 +2200,7 @@ async def test_a_replay_no_longer_shows_the_call_its_stopped_attempt_left_runnin
         assert ("The `counter` tool was still running" in account) is runs
         assert "The `counter` tool finished" not in account
         assert _sent_bodies(restarted)[-1] == (
-            f"\n\n🔧 `counter` [1]\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\nThe complete report."
+            f"🔧 `counter` [1]\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\nThe complete report."
         )
         assert _last_trace_types(restarted) == ["tool_call_completed"]
     finally:
@@ -2220,7 +2220,7 @@ async def test_a_stop_during_a_tool_call_no_longer_shows_it_as_running(tmp_path:
     assert await bot._user_stop_reconciler.finalize(reply.event_id, 7, room_id=_target().room_id)
     await asyncio.wait_for(response, timeout=5)
 
-    assert _sent_bodies(bot)[-1] == "\n\n🔧 `counter` [1]\n\n**[Response cancelled by user]**"
+    assert _sent_bodies(bot)[-1] == "🔧 `counter` [1]\n\n**[Response cancelled by user]**"
     assert _last_trace_types(bot) == ["tool_call_completed"]
 
 

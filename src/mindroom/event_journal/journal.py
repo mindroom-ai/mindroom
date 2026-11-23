@@ -39,8 +39,10 @@ from . import (
     turn_rows,
 )
 from .identity import agent_of_principal, decode_thread_id, encode_thread_id
+from .membership_state import claim_active_membership_epoch as claim_active
 from .membership_state import claim_membership_epoch, current_membership_epoch, projection_generation
 from .models import (
+    RUNTIME_SOURCE_KINDS,
     TURN_BACKED_KINDS,
     AdmissionFacts,
     AdmissionResult,
@@ -67,6 +69,8 @@ from .projection import ProjectedEvent, is_redacted, project, scrub_redacted_pro
 from .schema import PENDING_STATE, SETTLED_STATE
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.turn_record import TurnRecord
 
     from .backend import Row, Transaction
@@ -918,6 +922,8 @@ def admit_snapshotting_source(
 
     Batch admission snapshots only the actionable events it admits, after their disposition, so it calls ``_admit``.
     """
+    if event.kind is EventKind.COMPACTION and claim_active(transaction, principal_id, room_id=event.room_id) is None:
+        return AdmissionResult.MEMBERSHIP_FENCED
     result = _admit(transaction, principal_id, event, projected)
     if result is AdmissionResult.ADMITTED:
         _snapshot_interactive_source(transaction, principal_id, event)
@@ -1480,6 +1486,31 @@ def _settle(transaction: Transaction, principal_id: str, event_id: str) -> None:
         "DELETE FROM interactive_selections WHERE principal_id = ? AND source_event_id = ?",
         (principal_id, event_id),
     )
+
+
+def settle_runtime_sources_of(transaction: Transaction, ends: Callable[[str], bool]) -> None:
+    """Settle the pending runtime sources of every principal whose entity ``ends`` names: it has no bot any more.
+
+    Only the entity's own runtime runs such a source, so its row would wait for an owner that never comes. One an
+    approval continuation holds is that approval's to settle, and replays if the entity returns before it does.
+    """
+    kinds = tuple(sorted(kind.value for kind in RUNTIME_SOURCE_KINDS))
+    # Placeholders are generated, values are still bound.
+    owed = f"state = 'pending' AND kind IN ({', '.join('?' for _ in kinds)})"
+    unheld = transaction.fetchall(
+        f"""
+        SELECT principal_id, event_id FROM journal_events WHERE {owed}
+          AND NOT EXISTS (
+              SELECT 1 FROM {approval_continuations.HELD_SOURCES}
+              WHERE held_source.principal_id = journal_events.principal_id
+                AND held_source.event_id = journal_events.event_id
+          )
+        """,  # noqa: S608
+        kinds,
+    )
+    for principal_id, event_id in ((str(row["principal_id"]), str(row["event_id"])) for row in unheld):
+        if ends(agent_of_principal(principal_id)):
+            _settle(transaction, principal_id, event_id)
 
 
 def settle_many(transaction: Transaction, principal_id: str, event_ids: tuple[str, ...]) -> None:

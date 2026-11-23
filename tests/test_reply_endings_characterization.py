@@ -1053,7 +1053,7 @@ async def test_a_silent_schedule_that_reports_nothing_after_an_approval_ends_its
     assert reply.state is rl.ReplyState.COMPLETED
     # The pause's message is the only one, and its end is an edit of it.
     assert turn.homeserver.statuses == ["pending", "completed"]
-    assert turn.homeserver.bodies[-1] == (f"\n\n{shown_calls}" if show_tool_calls else "Done.")
+    assert turn.homeserver.bodies[-1] == (shown_calls if show_tool_calls else "Done.")
     assert turn.bot.client.room_redact.await_args_list == []
     assert turn.bot.client.room_typing.await_args_list == []
     assert await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE) is None
@@ -1073,13 +1073,13 @@ async def test_a_silent_schedule_that_reports_nothing_after_an_approval_ends_its
         # The replay's own call numbers after the call the stopped attempt showed, as a stream of it would.
         pytest.param(
             [calls(tool_call("multiply", "call-2", a=6, b=7)), answer("NO_REPLY")],
-            "\n\n🔧 `multiply` [2]",
+            "🔧 `multiply` [2]",
             "Done.",
             id="call-then-reports-nothing",
         ),
         pytest.param(
             [calls(tool_call("multiply", "call-2", a=6, b=7)), answer("Disk full.")],
-            "\n\n🔧 `multiply` [2]\n\nDisk full.",
+            "🔧 `multiply` [2]\n\nDisk full.",
             "Disk full.",
             id="call-then-finding",
         ),
@@ -1341,7 +1341,7 @@ async def test_a_silent_schedule_s_team_waiting_message_never_shows_a_member_s_n
         consensus = "\n\n\n**Team Consensus**:\n\n🔧 `delegate_task_to_members`"
         waiting = [
             f"{_TEAM_HEADER}**Writer**:\n\n🔧 `echo` [1] ⏳{consensus} [2]",
-            f"{_TEAM_HEADER}**Writer**:\n\n🔧 `echo` [1]\n\n\n\n🔧 `echo` [2] ⏳{consensus} [3]",
+            f"{_TEAM_HEADER}**Writer**:\n\n🔧 `echo` [1]\n\n🔧 `echo` [2] ⏳{consensus} [3]",
         ]
     else:
         waiting = ["Thinking...", "Thinking..."]

@@ -18,6 +18,7 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom import interactive
+from mindroom.ai import collect_streamed_response_content
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, StreamingConfig
@@ -34,11 +35,12 @@ from mindroom.history.interrupted_replay import (
     _render_interrupted_replay_content,
 )
 from mindroom.hooks import MessageEnvelope
-from mindroom.llm.events import ToolCompleted, ToolStarted
+from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRequirement, ToolExecution
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, build_edit_event_content
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.large_messages import calculate_event_size
+from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.reply_turn.inbox import InboxResponses
@@ -65,12 +67,16 @@ from mindroom.streaming import (
     send_streaming_response,
 )
 from mindroom.streaming import _consume_streaming_chunks as _consume_streaming_chunks_impl
+from mindroom.teams.presentation import TeamStreamPresentation
 from mindroom.timing import DispatchPipelineTiming
 from mindroom.tool_system.events import (
+    CollectedStreamPresentation,
     StructuredStreamChunk,
     ToolTraceEntry,
+    build_tool_trace_content,
     format_tool_started_event,
     tool_markers_in_text,
+    tool_markers_out_of_text,
 )
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
@@ -967,7 +973,7 @@ class TestStreamingBehavior:
 
         hidden_bodies = await run_case(show_tool_calls=False)
         assert hidden_bodies[0] == "Hello, this is a partial wo"
-        assert hidden_bodies[1] == "Hello, this is a partial wo\n\n"
+        assert hidden_bodies[1] == "Hello, this is a partial wo"
 
     @pytest.mark.asyncio
     async def test_pre_tool_flush_does_not_double_emit_after_idle_gap(self) -> None:
@@ -3260,7 +3266,7 @@ class TestStreamingBehavior:
                 session_id="session-1",
                 run_id="run-1",
                 requirements=(RunRequirement(tool),),
-                response_text=f"Before approval.{marker}",
+                response_text=f"Before approval.\n\n{marker}",
                 tool_trace=(trace_entry,),
                 toolkit_owners={("general", "inspect"): "test_toolkit"},
             ),
@@ -3287,7 +3293,7 @@ class TestStreamingBehavior:
             streaming.accumulated_text = "Before approval."
             await streaming._send_or_edit_message(mock_client)
             recorded_force_flags.clear()
-            streaming.accumulated_text += marker
+            streaming._append_tool_marker(marker)
             streaming.tool_trace.append(trace_entry)
             raise pause
 
@@ -3323,7 +3329,7 @@ class TestStreamingBehavior:
                     await run_stream()
                 assert raised_pause.value is pause
                 assert pause.presentation is not None
-                assert pause.presentation.response_text == f"Before approval.{marker}".rstrip()
+                assert pause.presentation.response_text == f"Before approval.\n\n{marker}"
                 assert pause.presentation.tool_trace == (trace_entry,)
             else:
                 with pytest.raises(PausePresentationError) as raised_delivery:
@@ -3353,7 +3359,7 @@ class TestStreamingBehavior:
                 session_id="session-1",
                 run_id="run-1",
                 requirements=(RunRequirement(tool),),
-                response_text=f"{raw_interactive}{marker}".rstrip(),
+                response_text=f"{raw_interactive}\n\n{marker}",
                 tool_trace=(trace_entry,),
                 toolkit_owners={("general", "inspect"): "test_toolkit"},
             ),
@@ -3361,7 +3367,7 @@ class TestStreamingBehavior:
 
         async def paused_stream() -> AsyncIterator[object]:
             yield StructuredStreamChunk(
-                content=f"{raw_interactive}{marker}",
+                content=f"{raw_interactive}\n\n{marker}",
                 tool_trace=[trace_entry],
             )
             raise pause
@@ -3385,8 +3391,8 @@ class TestStreamingBehavior:
 
         assert raised_pause.value is pause
         assert pause.presentation is not None
-        assert pause.presentation.response_text == f"{raw_interactive}{marker}".rstrip()
-        assert pause.presentation.rendered_response_text == f"{rendered_interactive}{marker}".rstrip()
+        assert pause.presentation.response_text == f"{raw_interactive}\n\n{marker}"
+        assert pause.presentation.rendered_response_text == f"{rendered_interactive}\n\n{marker}"
         assert pause.presentation.tool_trace == (trace_entry,)
 
     @pytest.mark.asyncio
@@ -4592,3 +4598,414 @@ async def test_a_failing_final_transform_still_delivers_the_streamed_answer(tmp_
 
     assert prepared is not None
     assert "the streamed answer" in prepared.content["body"]
+
+
+def _sending_client_mock() -> AsyncMock:
+    client = _make_matrix_client_mock()
+    client.room_send.return_value = MagicMock(spec=nio.RoomSendResponse, event_id="$stream-1")
+    return client
+
+
+def _tool_pair(call_id: str, tool_name: str) -> list[object]:
+    return [
+        ToolStarted(ToolExecution(tool_call_id=call_id, tool_name=tool_name, tool_args={}).call),
+        ToolCompleted(ToolExecution(tool_call_id=call_id, tool_name=tool_name, result="ok").call),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("chunks", "expected_body", "expected_at", "expected_body_line", "expected_hidden"),
+    [
+        pytest.param(
+            [*_tool_pair("call-1", "read_file"), *_tool_pair("call-2", "shell"), TextDelta("Done!")],
+            "Done!",
+            [0, 0],
+            [0, 0],
+            "Done!",
+            id="leading-tools",
+        ),
+        pytest.param(
+            [
+                TextDelta("Checking."),
+                *_tool_pair("call-1", "read_file"),
+                *_tool_pair("call-2", "shell"),
+                TextDelta("Found it."),
+            ],
+            "Checking.\n\nFound it.",
+            [1, 1],
+            [2, 2],
+            "Checking.\n\nFound it.",
+            id="between-paragraphs",
+        ),
+        pytest.param(
+            [*_tool_pair("call-1", "read_file"), TextDelta("\nFound it.")],
+            "Found it.",
+            [0],
+            [0],
+            "\nFound it.",
+            id="leading-lf-after-marker",
+        ),
+        pytest.param(
+            [*_tool_pair("call-1", "read_file"), TextDelta("\n"), TextDelta("\n"), TextDelta("Found it.")],
+            "Found it.",
+            [0],
+            [0],
+            "\n\nFound it.",
+            id="split-lf-after-marker",
+        ),
+        pytest.param(
+            [TextDelta("Checking.\r\n"), *_tool_pair("call-1", "read_file"), TextDelta("\r\nFound")],
+            "Checking.\r\n\nFound",
+            [1],
+            [2],
+            "Checking.\r\n\nFound",
+            id="crlf-around-marker",
+        ),
+        pytest.param(
+            [*_tool_pair("call-1", "read_file"), TextDelta("\r\n\r\nAfter.")],
+            "After.",
+            [0],
+            [0],
+            "\r\n\r\nAfter.",
+            id="double-crlf-after-marker",
+        ),
+        pytest.param(
+            [*_tool_pair("call-1", "read_file"), TextDelta("\r"), TextDelta("\nX")],
+            "X",
+            [0],
+            [0],
+            "\r\nX",
+            id="split-cr-lf-after-marker",
+        ),
+        pytest.param(
+            [*_tool_pair("call-1", "read_file"), TextDelta("\r\n"), TextDelta("After.")],
+            "After.",
+            [0],
+            [0],
+            "\r\nAfter.",
+            id="newline-only-crlf-after-marker",
+        ),
+        pytest.param(
+            [TextDelta("Checking.\r"), *_tool_pair("call-1", "read_file"), TextDelta("After.")],
+            "Checking.\r\n\nAfter.",
+            [1],
+            [2],
+            "Checking.\r\n\nAfter.",
+            id="lone-cr-before-marker",
+        ),
+        pytest.param(
+            [TextDelta("Doc\r\n\r\n"), *_tool_pair("call-1", "read_file")],
+            "Doc\r\n\r",
+            [1],
+            [2],
+            "Doc\r\n\r\n",
+            id="crlf-blank-line-before-trailing-marker",
+        ),
+        pytest.param(
+            [
+                TextDelta("Doc\r\n\r\n"),
+                ToolStarted(ToolExecution(tool_call_id="call-1", tool_name="read_file", tool_args={}).call),
+            ],
+            "Doc\r\n\r",
+            [1],
+            [2],
+            "Doc\r\n\r\n",
+            id="crlf-blank-line-before-pending-marker",
+        ),
+        pytest.param(
+            [TextDelta("Before\r\n\r\n"), *_tool_pair("call-1", "read_file"), TextDelta("After")],
+            "Before\r\n\r\n\nAfter",
+            [1],
+            [3],
+            "Before\r\n\r\nAfter",
+            id="crlf-blank-line-before-interior-marker",
+        ),
+        pytest.param(
+            [TextDelta("Checking."), *_tool_pair("call-1", "read_file"), *_tool_pair("call-2", "shell")],
+            "Checking.",
+            [1, 1],
+            [1, 1],
+            "Checking.",
+            id="trailing-completed-markers",
+        ),
+        pytest.param(
+            [
+                TextDelta("Checking."),
+                ToolStarted(ToolExecution(tool_call_id="call-1", tool_name="read_file", tool_args={}).call),
+            ],
+            "Checking.",
+            [1],
+            [1],
+            "Checking.",
+            id="trailing-pending-marker",
+        ),
+    ],
+)
+async def test_tool_markers_strip_to_clean_wire_body_without_blank_lines(
+    tmp_path: Path,
+    chunks: list[object],
+    expected_body: str,
+    expected_at: list[int],
+    expected_body_line: list[int],
+    expected_hidden: str,
+) -> None:
+    """Streamed and collected replies send a clean v3 body that reads back exactly; hidden calls leave only text."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    paths = runtime_paths_for(config)
+    mock_client = _sending_client_mock()
+
+    async def stream() -> AsyncIterator[object]:
+        for chunk in chunks:
+            yield chunk
+
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!room:localhost", None, "$src"),
+        config=config,
+        runtime_paths=paths,
+        show_tool_calls=True,
+        **reply_hooks(),
+    )
+    await _consume_streaming_chunks_for_test(mock_client, stream(), streaming)
+    prepared = await streaming._prepare_delivery_async(is_final=True, allow_empty_progress=False)
+    assert prepared is not None
+    streamed_wire = tool_markers_out_of_text(prepared.content)
+    assert streamed_wire["body"] == expected_body
+    assert "🔧" not in streamed_wire["body"]
+    assert streamed_wire["io.mindroom.tool_trace"]["version"] == 3
+    assert [event["at"] for event in streamed_wire["io.mindroom.tool_trace"]["events"]] == expected_at
+    assert [event["body_line"] for event in streamed_wire["io.mindroom.tool_trace"]["events"]] == expected_body_line
+    assert tool_markers_in_text(streamed_wire) == prepared.content
+
+    collected_body, collected_trace = await collect_streamed_response_content(
+        stream(),
+        presentation=CollectedStreamPresentation(show_tool_calls=True),
+    )
+    collected_content = format_message_with_mentions(
+        config,
+        paths,
+        collected_body,
+        extra_content=build_tool_trace_content(collected_trace),
+    )
+    collected_wire = tool_markers_out_of_text(collected_content)
+    assert collected_wire["body"] == expected_body
+    assert "🔧" not in collected_wire["body"]
+    assert collected_wire["io.mindroom.tool_trace"]["version"] == 3
+    assert [event["at"] for event in collected_wire["io.mindroom.tool_trace"]["events"]] == expected_at
+    assert [event["body_line"] for event in collected_wire["io.mindroom.tool_trace"]["events"]] == expected_body_line
+    assert tool_markers_in_text(collected_wire) == collected_content
+
+    hidden = StreamingResponse(
+        target=MessageTarget.resolve("!room:localhost", None, "$src"),
+        config=config,
+        runtime_paths=paths,
+        show_tool_calls=False,
+        **reply_hooks(),
+    )
+    await _consume_streaming_chunks_for_test(mock_client, stream(), hidden)
+    assert hidden.has_progress() is True
+    assert hidden.accumulated_text == expected_hidden
+
+
+@pytest.mark.asyncio
+async def test_tool_marker_edge_cases_hidden_progress_replacement_and_teams(tmp_path: Path) -> None:
+    """Cover hidden leading progress, calls-only replies, replacement inline mentions, and teams."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    paths = runtime_paths_for(config)
+    mock_client = _sending_client_mock()
+
+    # 1. Leading hidden ToolStarted marks progress while accumulated_text stays empty.
+    hidden = StreamingResponse(
+        target=MessageTarget.resolve("!room:localhost", None, "$src"),
+        config=config,
+        runtime_paths=paths,
+        show_tool_calls=False,
+        **reply_hooks(),
+    )
+    await _consume_streaming_chunks_for_test(
+        mock_client,
+        _aiter(ToolStarted(ToolExecution(tool_call_id="call-h1", tool_name="shell", tool_args={}).call)),
+        hidden,
+    )
+    assert hidden.accumulated_text == ""
+    assert hidden.has_progress() is True
+
+    # 2. Trailing markers only (no prose) stay v2 with canonical spacing and no leading/trailing blank lines.
+    calls_only_body, calls_only_trace = await collect_streamed_response_content(
+        _aiter(*_tool_pair("call-1", "read_file"), *_tool_pair("call-2", "shell")),
+        presentation=CollectedStreamPresentation(show_tool_calls=True),
+    )
+    assert calls_only_body == "🔧 `read_file` [1]\n\n🔧 `shell` [2]"
+    calls_only_content = format_message_with_mentions(
+        config,
+        paths,
+        calls_only_body,
+        extra_content=build_tool_trace_content(calls_only_trace),
+    )
+    assert tool_markers_out_of_text(calls_only_content) is calls_only_content
+
+    # 3. Replacement-mode snapshot quoting a pending marker inline still appends and completes the real marker line.
+    inline_sentence = "What does 🔧 `read` [1] ⏳ mean?"
+    replacement = ReplacementStreamingResponse(
+        target=MessageTarget.resolve("!room:localhost", None, "$src"),
+        config=config,
+        runtime_paths=paths,
+        show_tool_calls=True,
+        **reply_hooks(),
+    )
+    read_call = ToolExecution(tool_call_id="call-r1", tool_name="read", tool_args={}, result="ok").call
+    await _consume_streaming_chunks_for_test(
+        mock_client,
+        _aiter(ToolStarted(read_call), StructuredStreamChunk(content=inline_sentence), ToolCompleted(read_call)),
+        replacement,
+    )
+    assert replacement.accumulated_text == f"{inline_sentence}\n\n🔧 `read` [1]"
+    prepared_rep = await replacement._prepare_delivery_async(is_final=True, allow_empty_progress=False)
+    assert prepared_rep is not None
+    rep_wire = tool_markers_out_of_text(prepared_rep.content)
+    assert rep_wire["body"] == inline_sentence
+    assert rep_wire["io.mindroom.tool_trace"]["version"] == 3
+    assert tool_markers_in_text(rep_wire) == prepared_rep.content
+
+    # 4. Team slots with consecutive leading and mid-paragraph calls strip cleanly to v3.
+    team = TeamStreamPresentation.new(["alpha", "beta"], ["Alpha", "Beta"], show_tool_calls=True)
+    for cid, name in (("t1", "read_file"), ("t2", "shell")):
+        call = ToolExecution(tool_call_id=cid, tool_name=name, tool_args={}, result="ok").call
+        team.start_tool(call, member_id="alpha")
+        team.complete_tool(call, member_id="alpha")
+    team.append_member("alpha", "Done.")
+    team.append_member("beta", "Checking.")
+    for cid, name in (("t3", "read_file"), ("t4", "shell")):
+        call = ToolExecution(tool_call_id=cid, tool_name=name, tool_args={}, result="ok").call
+        team.start_tool(call, member_id="beta")
+        team.complete_tool(call, member_id="beta")
+    team.append_member("beta", "Found it.")
+    team.append_consensus("Agreed.")
+    team_content = format_message_with_mentions(
+        config,
+        paths,
+        team.render_body(finished=True),
+        extra_content=build_tool_trace_content(team.tool_trace),
+    )
+    team_wire = tool_markers_out_of_text(team_content)
+    assert team_wire["io.mindroom.tool_trace"]["version"] == 3
+    assert "🔧" not in team_wire["body"]
+    assert team_wire["body"] == (
+        "🤝 **Team Response** (Alpha, Beta):\n\n"
+        "**Alpha**:\n\nDone.\n\n"
+        "**Beta**: Checking.\n\nFound it.\n\n"
+        "\n**Team Consensus**:\n\nAgreed."
+    )
+    assert tool_markers_in_text(team_wire) == team_content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "deltas",
+    [
+        ["🔧 `read` [1]", " is literal."],
+        ["```\n🔧 `x` [1]", "\n```"],
+        ["🔧 `x` [1]", "\n", "next"],
+    ],
+)
+async def test_marker_shaped_prose_joins_as_plain_text_however_its_deltas_split(
+    tmp_path: Path,
+    deltas: list[str],
+) -> None:
+    """With no tool event between them, deltas that look like a marker join as they came, in every kind of reply."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!room:localhost", None, "$src"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        show_tool_calls=True,
+        **reply_hooks(),
+    )
+    await _consume_streaming_chunks_for_test(_sending_client_mock(), _aiter(*map(TextDelta, deltas)), streaming)
+    collected, _ = await collect_streamed_response_content(
+        _aiter(*map(TextDelta, deltas)),
+        presentation=CollectedStreamPresentation(show_tool_calls=True),
+    )
+    team = TeamStreamPresentation.new(["alpha"], ["Alpha"], show_tool_calls=True)
+    for delta in deltas:
+        team.append_member_run("alpha", "run-1", delta)
+        team.append_consensus(delta)
+
+    assert streaming.accumulated_text == collected == team.per_member["alpha"] == team.consensus == "".join(deltas)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("snapshot", "expected"),
+    [
+        pytest.param(
+            "Example:\n\n```\n🔧 `read` [1] ⏳\n```",
+            "Example:\n\n```\n🔧 `read` [1] ⏳\n```\n\n🔧 `read` [1]",
+            id="fenced-quote",
+        ),
+        pytest.param(
+            "Example:\r\n\r\n🔧 `read` [1] ⏳\r\n\r\nend",
+            "Example:\r\n\r\n🔧 `read` [1] ⏳\r\n\r\nend\n\n🔧 `read` [1]",
+            id="crlf-quote",
+        ),
+        pytest.param("🔧 `read` [1] ⏳\n\nDoc", "🔧 `read` [1]\n\nDoc", id="own-marker-first"),
+        pytest.param("Doc\n\n🔧 `read` [1] ⏳", "Doc\n\n🔧 `read` [1]", id="own-marker-last"),
+        # As a collected reply writes the marker of a call below text that ends in a CRLF blank line.
+        pytest.param(
+            "Doc\r\n\r\n\n🔧 `read` [1] ⏳\n\nAfter",
+            "Doc\r\n\r\n\n🔧 `read` [1]\n\nAfter",
+            id="own-marker-below-crlf-blank-line",
+        ),
+    ],
+)
+async def test_a_replacement_snapshot_holds_its_pending_call_as_one_marker_paragraph(
+    tmp_path: Path,
+    snapshot: str,
+    expected: str,
+) -> None:
+    """A snapshot that only quotes its pending call's marker gets the call's own, which alone the completion marks."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    replacement = ReplacementStreamingResponse(
+        target=MessageTarget.resolve("!room:localhost", None, "$src"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        show_tool_calls=True,
+        **reply_hooks(),
+    )
+    call = ToolExecution(tool_call_id="call-1", tool_name="read", tool_args={}, result="ok").call
+
+    await _consume_streaming_chunks_for_test(
+        _sending_client_mock(),
+        _aiter(ToolStarted(call), StructuredStreamChunk(content=snapshot), ToolCompleted(call)),
+        replacement,
+    )
+
+    assert replacement.accumulated_text == expected
+
+
+def test_newlines_dropped_after_a_tool_call_do_not_count_as_received_text(tmp_path: Path) -> None:
+    """Only appended characters count toward the next edit; an empty append still marks a presentation change."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!room:localhost", None, "$src"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        show_tool_calls=True,
+        **reply_hooks(),
+    )
+    streaming._append_incremental_text("Checking.")
+    streaming._append_tool_marker("🔧 `read` [1] ⏳")
+    counted, delta_at = streaming.chars_since_last_update, streaming.last_delta_at
+    assert counted == len("Checking.\n\n🔧 `read` [1] ⏳")
+
+    streaming._append_incremental_text("\r\n")
+    assert (streaming.chars_since_last_update, streaming.last_delta_at) == (counted, delta_at)
+
+    streaming.last_delta_at = None
+    streaming._append_incremental_text("")
+    assert streaming.chars_since_last_update == counted
+    assert streaming.last_delta_at is not None
+
+    streaming._append_incremental_text("\nDone")
+    assert streaming.accumulated_text == "Checking.\n\n🔧 `read` [1] ⏳\n\nDone"
+    assert streaming.chars_since_last_update == len(streaming.accumulated_text)

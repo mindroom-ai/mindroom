@@ -59,7 +59,7 @@ if TYPE_CHECKING:
 
     from mindroom.delegation.state import DelegationState
     from mindroom.history.interrupted_replay import InterruptedReplaySnapshot
-    from mindroom.history.storage import FoldBasis, _ChunkBasis
+    from mindroom.history.storage import ChunkBasis, FoldBasis
     from mindroom.history.types import HistoryScope
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.store import ConversationStore, SaveOutcome
@@ -331,7 +331,7 @@ class StoreBackend(Driver):
         return append_compaction_chunk(
             self.store,
             session=session,
-            basis=cast("_ChunkBasis", basis),
+            basis=cast("ChunkBasis", basis),
             included_run_ids=run_ids,
             summary=summary,
         )

@@ -100,7 +100,6 @@ def load_scope_session_from_storage(
 
 
 def load_scope_session(
-    *,
     scope: HistoryScope,
     session_id: str,
     runtime_paths: RuntimePaths,

@@ -17,6 +17,7 @@ from mindroom.tool_approval_grants import (
 )
 
 from . import approval_calls, approval_cards, outbox
+from .membership_state import current_active_membership_epoch as _epoch
 from .models import DeliveryStage
 
 if TYPE_CHECKING:
@@ -60,14 +61,6 @@ def lock(transaction: Transaction, principal_id: str) -> None:
         "UPDATE approval_grant_locks SET principal_id = principal_id WHERE principal_id = ?",
         (principal_id,),
     )
-
-
-def _epoch(transaction: Transaction, principal_id: str, room_id: str) -> int | None:
-    row = transaction.fetchone(
-        "SELECT membership_epoch, departure_fenced FROM room_membership WHERE principal_id = ? AND room_id = ?",
-        (principal_id, room_id),
-    )
-    return 0 if row is None else None if row["departure_fenced"] else int(row["membership_epoch"])
 
 
 def offer(

@@ -13,8 +13,10 @@ from typing import TYPE_CHECKING
 import pytest
 
 from mindroom.config.resolution import entity_model_name
-from mindroom.history.runtime import _compact_before_reply, resolve_entity_preparation_inputs
+from mindroom.history.runtime import _compact_stored_scope, resolve_entity_preparation_inputs
+from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import read_scope_state, with_force_compaction
+from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.session_storage.agent_storage import create_session_storage
@@ -23,7 +25,6 @@ from tests.agno_parity.golden_files import render
 from tests.agno_parity.prompt_scenarios import SCENARIOS, Recorder, call_dict, load_golden, normalize
 from tests.conftest import seed_session
 from tests.fakes.scripted_model import ScriptedModel
-from tests.history_helpers import _reported
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -82,27 +83,32 @@ async def test_the_compaction_summary_request_equals_the_golden(tmp_path: Path) 
     recorder = Recorder(responder=scenario.responder)
 
     with recorder.installed():
-        outcome = await _compact_before_reply(
-            None,
-            _reported,
-            storage=storage,
-            session=session,
+        result = await _compact_stored_scope(
+            ScopeSessionContext(
+                HistoryScope(kind="agent", scope_id=session.owner_id),
+                storage,
+                session,
+                session.session_id,
+                lambda: storage,
+            ),
+            inputs,
+            ScriptedModel([]),
+            turn.config,
+            turn.runtime_paths,
             state=read_scope_state(session),
-            resolved_inputs=inputs,
             history_budget=None,
             max_summary_tokens=None,
             before_tokens=0,
-            model=ScriptedModel([]),
-            config=turn.config,
-            runtime_paths=turn.runtime_paths,
+            runs_before=1,
+            lifecycle=None,
         )
 
     summary_request = golden["requests"][-1]
     requests = normalize([call_dict(call) for call in recorder.ordered_calls()], tmp_path)
     assert requests == [summary_request]
     assert render(requests) == render([summary_request])
-    assert outcome is not None
-    assert outcome.compacted_run_count == 1
+    assert result.outcome is not None
+    assert result.outcome.compacted_run_count == 1
     stored = storage.load_session(session.session_id)
     assert stored is not None
     assert stored.summary is not None

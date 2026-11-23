@@ -17,6 +17,7 @@ from mindroom.approval.inbound import handle_tool_approval_response_event
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState, RunPhase
 from mindroom.config.resolution import entity_timezone
+from mindroom.contacts.turns import contact_room
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.email_invites.receiver import register_email_invite_receiver, revoke_orphaned_sends
 from mindroom.event_journal.identity import journal_principal_id
@@ -86,7 +87,10 @@ from .delivery_gateway import (
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .entity_rooms import get_rooms_for_entity
 from .event_journal import (
+    AdmissionResult,
+    EventClass,
     EventKind,
+    InboundEvent,
     PrincipalStore,
 )
 from .inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
@@ -540,6 +544,7 @@ class AgentBot:
                 replies_ended=self._replies_ended,
                 on_runtime_source=lambda event: self._response_runner.handoff_runtime_source(event),
                 before_room_event=self._refresh_room_settings,
+                runtime_source_parked=lambda event: self._response_runner.runtime_source_parked(event),
             ),
             room_for_id=self._room_for_journal_event,
             # Resolved late: the ingress validator, which owns the trust rule, is built after the dispatcher.
@@ -1026,6 +1031,32 @@ class AgentBot:
             follow_up_event(key, follow_up_id, sender_id=self.matrix_id.full_id, now_ms=now_ms),
         )
         self._journal_dispatcher.wake()
+
+    async def admit_compaction(self, target: MessageTarget, requester_id: str) -> bool:
+        """Give a joined target a durable fold, except in contact rooms, where the flag suffices."""
+        if self.client is None or target.room_id not in self.client.rooms:
+            return False
+        if contact_room(self.config, self.runtime_paths, target.room_id, self.agent_name) is not None:
+            return False
+        origin = target.reply_to_event_id
+        assert origin is not None
+        store, source = self.journal_principal(), f"compact:{origin}:{self.agent_name}"
+        result = await store.admit(
+            InboundEvent(
+                event_id=source,
+                room_id=target.room_id,
+                thread_id=target.resolved_thread_id,
+                kind=EventKind.COMPACTION,
+                event_class=EventClass.ACTIONABLE,
+                sender=self.matrix_id.full_id,
+                origin_server_ts=int(time.time() * 1000),
+                source={"requester_id": requester_id, "origin_event_id": origin},
+            ),
+        )
+        if result is not AdmissionResult.ADMITTED:
+            return result is AdmissionResult.DUPLICATE and await store.is_pending(source)
+        self._journal_dispatcher.wake()
+        return True
 
     def _build_reply_turn_owners(self, deps: ReplyTurnDeps) -> None:
         """Build one reply turn's owners so the dependency between them runs one way.

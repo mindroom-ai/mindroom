@@ -248,9 +248,18 @@ class CollectedStreamPresentation:
     def show_text(self, content: str) -> None:
         """Apply one text chunk: it replaces the collected text in a stream of whole documents, else continues it."""
         if self.replaces_text:
-            self.response_text = content
+            self._replace_text(content)
             return
         self.append_text(content)
+
+    def _replace_text(self, content: str) -> None:
+        """Replace the collected text; a paragraph break stays pending only where the new text ends at its tool call."""
+        ending = content.rstrip("\r\n")
+        last_line = ending.rsplit("\n", maxsplit=1)[-1]
+        at_marker = self.show_tool_calls and last_line in _trace_marker_lines(self.tool_trace)
+        unchanged = ending == self.response_text.rstrip("\r\n")
+        self.separate_next_text = at_marker or (self.separate_next_text and unchanged)
+        self.response_text = content
 
     def append_text(self, content: object | None) -> None:
         """Append one provider content delta when it is non-empty."""
@@ -259,7 +268,7 @@ class CollectedStreamPresentation:
             content,
             separate=self.separate_next_text,
         )
-        if content:
+        if str(content or "").strip("\r\n"):
             self.separate_next_text = False
 
     def start_tool(self, call: ReportedCall, *, origin: ToolCallOrigin | None = None) -> None:
@@ -272,9 +281,8 @@ class CollectedStreamPresentation:
             return
         self.tool_trace.append(trace_entry)
         if self.show_tool_calls:
-            self.response_text += text
-        elif self.response_text:
-            self.separate_next_text = True
+            self.response_text = append_stream_text(self.response_text, text, marker=True)
+        self.separate_next_text = bool(self.response_text)
 
     def visible_tool_count(self) -> int:
         """Return how many tool calls the reply shows so far."""
@@ -306,9 +314,9 @@ class CollectedStreamPresentation:
 
     def show_document(self, chunk: StructuredStreamChunk) -> None:
         """Replace the collected presentation with a document the stream sent whole; one without a trace keeps it."""
-        self.response_text = chunk.content
         if chunk.tool_trace is not None:
             self.tool_trace = list(chunk.tool_trace)
+        self._replace_text(chunk.content)
         self.document_state = chunk.presentation_state
 
     def final_text(self) -> str:
@@ -920,36 +928,40 @@ def renumbered_tool_trace(body: str, trace: Sequence[ToolTraceEntry]) -> tuple[s
     return remap_visible_tool_marker_indices(body, index_map), entries
 
 
-def append_stream_text(existing_text: str, content: object | None, *, separate: bool = False) -> str:
-    """Append one delta while preserving explicit and visible-tool boundaries."""
-    if not content:
-        return existing_text
-    delta = str(content)
-    last_line = existing_text.rsplit("\n", maxsplit=1)[-1].rstrip("\r")
-    needs_separator = separate or is_visible_tool_marker_line(last_line)
-    separator = ""
-    if existing_text and not delta.startswith(("\n", "\r")) and needs_separator:
-        if existing_text.endswith(("\n\n", "\r\n\r\n")):
-            separator = ""
-        elif existing_text.endswith(("\n", "\r")):
-            separator = "\n"
-        else:
-            separator = "\n\n"
-    return f"{existing_text}{separator}{delta}"
+def append_stream_text(
+    existing_text: str,
+    content: object | None,
+    *,
+    separate: bool = False,
+    marker: bool = False,
+) -> str:
+    """Append one delta, or a tool ``marker``; that or ``separate`` puts it one blank line below any text before it.
+
+    A separated delta loses the newlines it opens with, and one of newlines alone adds nothing, so its caller keeps
+    separating until a delta holds other text.
+    """
+    delta = str(content or "")
+    if not ((separate or marker) and existing_text):
+        return existing_text + delta
+    delta = delta.lstrip("\r\n")
+    # Matrix gets a marker as a v3 position only when an LF blank line precedes it, so a CRLF one serves text alone.
+    if not delta or existing_text.endswith("\n\n" if marker else ("\n\n", "\n\r\n")):
+        return existing_text + delta
+    return f"{existing_text}{'\n' if existing_text.endswith('\n') else '\n\n'}{delta}"
+
+
+def _trace_marker_lines(tool_trace: Sequence[ToolTraceEntry]) -> tuple[str, ...]:
+    """Return the marker line of each trace slot, in order."""
+    return tuple(
+        _tool_marker_line(entry.tool_name, index, pending=entry.type == "tool_call_started")
+        for index, entry in enumerate(tool_trace, start=1)
+    )
 
 
 def tool_markers_match_trace(text: str, tool_trace: Sequence[ToolTraceEntry]) -> bool:
     """Return whether visible marker lines exactly match the ordered trace slots."""
     visible_markers = tuple(line.strip() for line in text.splitlines() if is_visible_tool_marker_line(line))
-    expected_markers = tuple(
-        _tool_marker_line(entry.tool_name, index, pending=entry.type == "tool_call_started")
-        for index, entry in enumerate(tool_trace, start=1)
-    )
-    return visible_markers == expected_markers
-
-
-def _format_tool_marker(tool_name: str, tool_index: int | None, *, pending: bool) -> str:
-    return f"\n\n{_tool_marker_line(tool_name, tool_index, pending=pending)}\n\n"
+    return visible_markers == _trace_marker_lines(tool_trace)
 
 
 def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
@@ -989,7 +1001,7 @@ def _format_tool_started(
         args_preview=args_preview or None,
         truncated=truncated,
     )
-    return _format_tool_marker(tool_name, tool_index, pending=True), trace
+    return _tool_marker_line(tool_name, tool_index, pending=True), trace
 
 
 def format_tool_combined(
@@ -1015,7 +1027,7 @@ def format_tool_combined(
         truncated=truncated,
         is_error=is_error,
     )
-    return _format_tool_marker(tool_name, tool_index, pending=False), trace
+    return _tool_marker_line(tool_name, tool_index, pending=False), trace
 
 
 def complete_pending_tool_block(accumulated_text: str, tool_name: str, tool_index: int) -> str:

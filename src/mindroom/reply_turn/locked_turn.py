@@ -19,6 +19,7 @@ from mindroom.background_tasks import create_background_task
 from mindroom.config.resolution import memory_backend
 from mindroom.constants import CONTINUED_RUNS_METADATA_KEY
 from mindroom.contacts.turns import contact_room
+from mindroom.conversation_resolver import read_fresh_thread_history
 from mindroom.conversation_state_writer import session_started_on_creation
 from mindroom.delivery_gateway import ResponseIdentity
 from mindroom.entity_resolution import current_internal_sender_ids
@@ -331,14 +332,8 @@ class LockedTurns:
         exclude_event_id: str | None = None,
     ) -> ResponseRequest:
         """Refresh model-facing thread history once this turn owns the lifecycle lock."""
-        if request.thread_id is None:
-            return request
-
         try:
-            refreshed_history = await self.deps.resolver.fetch_thread_history(
-                request.room_id,
-                request.thread_id,
-            )
+            refreshed_history = await read_fresh_thread_history(self.deps.resolver, request.response_envelope.target)
         except Exception as exc:
             if request.requires_model_history_refresh:
                 raise
@@ -349,6 +344,8 @@ class LockedTurns:
                 error=str(exc),
             )
             return replace(request, requires_model_history_refresh=True)
+        if refreshed_history is None:
+            return request
         if exclude_event_id is not None:
             filtered_history = [message for message in refreshed_history if message.event_id != exclude_event_id]
             if len(filtered_history) != len(refreshed_history):

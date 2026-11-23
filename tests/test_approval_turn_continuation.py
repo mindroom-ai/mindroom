@@ -929,7 +929,7 @@ async def test_approved_run_streams_progress_from_its_saved_presentation(
     contents = [chunk.content for chunk in published]
     assert contents[0] == saved.response_text
     resumed = [content for content in contents if content != saved.response_text]
-    assert resumed[0] == "Adding first.\n\n🔧 `add` [1]\n\n"
+    assert resumed[0] == "Adding first.\n\n🔧 `add` [1]"
     assert all("🔧 `add` [1] ⏳" not in content for content in resumed)
     if outcome == "pause":
         # The gated call is announced as it is planned, so the pending marker reaches the room before the pause.
@@ -1727,7 +1727,7 @@ async def test_fresh_attempt_pause_publishes_its_progress_before_returning_the_p
 
     assert isinstance(result, PausedAttempt)
     assert result.run_id == "run-fresh"
-    assert published == ["Checked. Next, publishing.", "Checked. Next, publishing.\n\n🔧 `publish_report` [1] ⏳\n\n"]
+    assert published == ["Checked. Next, publishing.", "Checked. Next, publishing.\n\n🔧 `publish_report` [1] ⏳"]
     assert result.response_text == published[-1].rstrip()
 
 

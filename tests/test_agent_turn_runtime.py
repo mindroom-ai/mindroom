@@ -2035,8 +2035,9 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
 
     await runner.generate_response(_request())
 
-    body = runner.deps.runtime.client.room_send.await_args.kwargs["content"]["body"]
-    assert body.split("\n\n")[-1].startswith("[assistant] ⚠️ Error: agent run ")
+    content = runner.deps.runtime.client.room_send.await_args.kwargs["content"]
+    body = content.get("m.new_content", content)["body"]
+    assert body.startswith("[assistant] ⚠️ Error: agent run ")
     assert body.endswith(" paused on ['touch'] without an approval to ask for")
     assert probe.calls == []
     session = reply.storage.load_session(SESSION_ID)

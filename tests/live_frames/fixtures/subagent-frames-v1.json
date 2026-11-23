@@ -105,7 +105,7 @@
         "activity": ""
       },
       "after": {
-        "md": "Looking it up. Checking the tags.\n\n🔧 `run_shell_command` [1] ⏳\n\n",
+        "md": "Looking it up. Checking the tags.\n\n🔧 `run_shell_command` [1] ⏳",
         "reasoning": "",
         "tools": [
           {
@@ -145,8 +145,8 @@
           "md": {
             "at": 33,
             "del": 0,
-            "ins": "\n\n🔧 `run_shell_command` [1] ⏳\n\n",
-            "len": 65
+            "ins": "\n\n🔧 `run_shell_command` [1] ⏳",
+            "len": 63
           },
           "tools": {
             "len": 1,
@@ -168,7 +168,7 @@
     {
       "name": "the run waits for an approval: a meta change is a snapshot",
       "before": {
-        "md": "Looking it up. Checking the tags.\n\n🔧 `run_shell_command` [1] ⏳\n\n",
+        "md": "Looking it up. Checking the tags.\n\n🔧 `run_shell_command` [1] ⏳",
         "reasoning": "",
         "tools": [
           {
@@ -182,7 +182,7 @@
         "activity": ""
       },
       "after": {
-        "md": "Looking it up. Checking the tags.\n\n🔧 `run_shell_command` [1] ⏳\n\n",
+        "md": "Looking it up. Checking the tags.\n\n🔧 `run_shell_command` [1] ⏳",
         "reasoning": "",
         "tools": [
           {
@@ -220,7 +220,7 @@
           "task": "Find when version 2 shipped."
         },
         "snapshot": {
-          "md": "Looking it up. Checking the tags.\n\n🔧 `run_shell_command` [1] ⏳\n\n",
+          "md": "Looking it up. Checking the tags.\n\n🔧 `run_shell_command` [1] ⏳",
           "reasoning": "",
           "tools": [
             {
@@ -240,7 +240,7 @@
     {
       "name": "the run ends: a snapshot with its result",
       "before": {
-        "md": "Looking it up. Checking the tags.\n\n🔧 `run_shell_command` [1] ⏳\n\n",
+        "md": "Looking it up. Checking the tags.\n\n🔧 `run_shell_command` [1] ⏳",
         "reasoning": "",
         "tools": [
           {
