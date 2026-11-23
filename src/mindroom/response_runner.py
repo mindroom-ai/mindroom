@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
@@ -23,7 +23,8 @@ from mindroom.ai_run_metadata import (
 from mindroom.ai_runtime import reply_ended_for_follow_up
 from mindroom.approval.response import continuation_response_kind, continuation_target
 from mindroom.authorization import ReplyMembershipPendingError
-from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.background_tasks import run_blocking_until_complete, run_coroutine_until_complete
+from mindroom.bot_runtime_view import RunPhase
 from mindroom.config.resolution import cheap_model as agent_cheap_model
 from mindroom.config.resolution import entity_timezone, show_reasoning, show_tool_calls
 from mindroom.constants import (
@@ -37,6 +38,7 @@ from mindroom.constants import (
     TURN_INTENT_RUN_METADATA_KEY,
 )
 from mindroom.contacts.turns import contact_room, contact_turn_instructions, contact_turn_tools
+from mindroom.conversation_resolver import DegradedThreadHistoryError, read_fresh_thread_history
 from mindroom.conversation_state_writer import ReplySession
 from mindroom.delegation.background import job_acknowledgers
 from mindroom.delegation.cost import carried_receipts, receipts_metadata
@@ -52,12 +54,16 @@ from mindroom.final_delivery import (
     Suppression,
     TurnProgress,
 )
+from mindroom.history.manual import resolve_manual_compaction_plan
 from mindroom.history.reply_compactions import ReplyCompactionLifecycle, ReplyCompactions
-from mindroom.history.storage import has_queued_force_compaction
+from mindroom.history.runtime import compact_scope_now
+from mindroom.history.session_context import load_scope_session, load_scrubbed_scope_session
+from mindroom.history.storage import has_queued_force_compaction, read_scope_state
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.judgment.cold_cache import idle_seconds_before_turn, select_cold_cache_model
 from mindroom.matrix.guarded_rooms import allowed_send, guarded_room
 from mindroom.matrix.presence import should_use_streaming
+from mindroom.message_target import MessageTarget
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.orchestration.runtime import (
     classify_cancel_source,
@@ -67,6 +73,7 @@ from mindroom.orchestration.runtime import (
 from mindroom.participation import ParticipationGate
 from mindroom.participation_judgment import create_participation_decider
 from mindroom.post_response_effects import ResponseOutcome
+from mindroom.providers import registry as provider_registry
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
     TEAM_PLACEHOLDER,
@@ -106,6 +113,7 @@ from mindroom.reply_turn.request import (
     ResponseRequest,
     correlation_id_for_request,
     merge_response_extra_content,
+    requester_remains_authorized,
     response_typing_indicator,
 )
 from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
@@ -174,7 +182,6 @@ if TYPE_CHECKING:
     from mindroom.hooks import EnrichmentItem
     from mindroom.knowledge.search import AgentKnowledge
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.message_target import MessageTarget
     from mindroom.mid_turn import MidTurnGate
     from mindroom.post_response_effects import PostResponseEffectsDeps
     from mindroom.reply_turn.inbox import InboxResponses
@@ -191,6 +198,7 @@ if TYPE_CHECKING:
 
 # How many restarts may cut one turn short before its replay stops continuing from the stopped attempts' own messages.
 _NATIVE_RECOVERY_LIMIT = 2
+_COMPACTION_DEFERRED = "Couldn't compact now. Try /compact again later."
 
 
 def _paused_with_committed_presentation(
@@ -768,13 +776,17 @@ class ResponseRunner:
         dict[EventKind, Callable[[ResponseRunner, JournalEvent], Coroutine[Any, Any, None]]]
     ] = {
         EventKind.JOB_FOLLOW_UP: lambda self, event: self._run_job_follow_up(event),
+        EventKind.COMPACTION: lambda self, event: self._run_compaction(event),
     }
 
     async def handoff_runtime_source(self, event: JournalEvent) -> None:
         """Hand a runtime source to a detached response owner; its reply, or that owner, settles it.
 
-        The dispatcher hands over only a source no live owner holds.
+        The dispatcher hands over only a source no live owner holds. One that parked while the dispatcher prepared
+        the handoff gets no owner here, so a stop never finds a task it registered after draining began.
         """
+        if self.runtime_source_parked(event):
+            return
         self.inbox.track_inbox_response(
             self._RUNTIME_SOURCE_HANDLERS[event.kind](self, event),
             name=f"{event.kind}:{event.event_id}",
@@ -783,6 +795,10 @@ class ResponseRunner:
             recovery_proof_ready=lambda: True,
         )
 
+    def runtime_source_parked(self, event: JournalEvent) -> bool:
+        """Return whether a runtime source waits for this runtime to accept work again: a fold starts in no drain."""
+        return event.kind is EventKind.COMPACTION and self.deps.runtime.phase is not RunPhase.ACCEPTING
+
     async def _run_job_follow_up(self, event: JournalEvent) -> None:
         """Run the turn a follow-up asks for, then settle a follow-up no reply took."""
         fate = await self._generate_job_follow_up(
@@ -790,6 +806,88 @@ class ResponseRunner:
         )
         if isinstance(fate, Unclaimed):
             await self.deps.settle_ignored_sources((event.event_id,))
+
+    async def _run_compaction(self, event: JournalEvent) -> None:
+        origin, requester = event.source.get("origin_event_id"), event.source.get("requester_id")
+        if not isinstance(origin, str) or not origin or not isinstance(requester, str) or not requester:
+            self.deps.logger.warning("invalid_compaction_source", source=event.event_id)
+            await self.deps.settle_ignored_sources((event.event_id,))
+            return
+        target = MessageTarget.resolve(event.room_id, event.thread_id, origin)
+        try:
+            fold = partial(self._fold_compaction, target, requester, origin, event.event_id)
+            notice = await self.lifecycle_coordinator.run_locked(target, self.deps.runtime, fold)
+        except ResponseAdmissionRefusedError:
+            raise  # Replacement must replay the pending source.
+        except Exception as error:
+            if not isinstance(error, ReplyMembershipPendingError | DegradedThreadHistoryError):
+                self.deps.logger.exception("manual_compaction_preparation_failed", source=event.event_id)
+            notice = _COMPACTION_DEFERRED
+        if notice:
+            with suppress(Exception):  # Best-effort notice only; transport failure must not retry this row.
+                if await self._compaction_epoch(event.room_id, origin, event.event_id) is not None:
+                    await self.deps.delivery_gateway.send_text(
+                        SendTextRequest(target, notice, skip_mentions=True, extra_content={"msgtype": "m.notice"}),
+                    )
+        await self.deps.settle_ignored_sources((event.event_id,))
+
+    async def _compaction_epoch(self, room: str, origin: str, source: str, *, wait: bool = False) -> int | None:
+        store = self.deps.replies.store
+        try:
+            async with asyncio.timeout(3 if wait else None):
+                while (owner := await store.admitted_membership_owner(origin)) is None and wait:  # noqa: ASYNC110
+                    await asyncio.sleep(0.05)
+        except TimeoutError:
+            return None
+        row_owner = await store.admitted_membership_owner(source)
+        epoch = await store.active_membership_epoch(room)
+        return epoch if owner == row_owner == (room, epoch) else None
+
+    async def _fold_compaction(self, target: MessageTarget, requester: str, origin: str, source: str) -> str | None:  # noqa: PLR0911
+        runtime = self.deps.runtime
+        config, paths = runtime.config, self.deps.runtime_paths
+        store, room, thread = self.deps.replies.store, target.room_id, target.resolved_thread_id
+        if not requester_remains_authorized(
+            requester,
+            room,
+            owner_entity_name=self.deps.agent_name,
+            config=config,
+            runtime_paths=paths,
+            membership_index=runtime.agent_reply_memberships,
+        ):
+            return None
+        scope = self.deps.state_writer.history_scope()
+        identity = self.deps.tool_runtime.build_execution_identity(target=target, user_id=requester)
+        due = await run_blocking_until_complete(self._read_queued_forced_compaction, target.session_id, scope, identity)
+        if not due:
+            return None
+        if await store.room_history_recovery(room) is not None:
+            return _COMPACTION_DEFERRED
+        if (epoch := await self._compaction_epoch(room, origin, source, wait=True)) is None:
+            return None
+        await read_fresh_thread_history(self.deps.resolver, target, strict=True)
+        budget = TurnBudget(self.deps.runtime.orchestrator.budgets, requester, log_fallback=False)
+        plan = resolve_manual_compaction_plan(scope, config, paths, room, thread, budget)
+        if isinstance(plan, str):
+            return _COMPACTION_DEFERRED
+        model_name, inputs = plan
+        load = partial(load_scope_session, scope, target.session_id, paths, config, identity)
+        context, _ = await load_scrubbed_scope_session(load, partial(self.deps.redacted_history_events, target))
+        if context.session is None or not read_scope_state(context.session).force_compact_before_next_run:
+            return None
+        if await store.room_history_recovery(room) is not None or epoch != await store.active_membership_epoch(room):
+            return _COMPACTION_DEFERRED
+        build = partial(provider_registry.build_model_provider, config, paths, model_name, execution_identity=identity)
+        tool_context = self.deps.tool_runtime.build_turn_context(
+            target,
+            user_id=requester,
+            active_model_name=model_name,
+            turn_id=origin,
+        )
+        lifecycle = MatrixCompactionLifecycle(self.deps.delivery_gateway, target, origin)
+        with tool_runtime_context(tool_context):
+            empty = await compact_scope_now(context, inputs, build, lifecycle, config, paths)
+        return "Nothing to compact." if empty else None
 
     async def _follow_up_due(self, request: ResponseRequest) -> bool:
         """Decide under the conversation lock whether a follow-up still has jobs to report.
@@ -859,7 +957,6 @@ class ResponseRunner:
 
     async def _has_queued_forced_compaction(
         self,
-        *,
         session_id: str,
         scope: HistoryScope,
         execution_identity: ToolExecutionIdentity | None,
@@ -869,23 +966,13 @@ class ResponseRunner:
         Every turn pays for this before its placeholder is sent, so it reads
         one session row, without its runs, on a thread.
         """
-        return await asyncio.to_thread(
-            self._read_queued_forced_compaction,
-            session_id=session_id,
-            scope=scope,
-            execution_identity=execution_identity,
-        )
-
-    def _read_queued_forced_compaction(
-        self,
-        *,
-        session_id: str,
-        scope: HistoryScope,
-        execution_identity: ToolExecutionIdentity | None,
-    ) -> bool:
         try:
-            storage = self.deps.state_writer.create_storage(execution_identity, scope=scope)
-            return has_queued_force_compaction(storage, session_id)
+            return await asyncio.to_thread(
+                self._read_queued_forced_compaction,
+                session_id=session_id,
+                scope=scope,
+                execution_identity=execution_identity,
+            )
         except Exception as error:
             self.deps.logger.warning(
                 "forced_compaction_placeholder_check_failed",
@@ -894,6 +981,15 @@ class ResponseRunner:
                 exception_type=error.__class__.__name__,
             )
             return False
+
+    def _read_queued_forced_compaction(
+        self,
+        session_id: str,
+        scope: HistoryScope,
+        execution_identity: ToolExecutionIdentity | None,
+    ) -> bool:
+        storage = self.deps.state_writer.create_storage(execution_identity, scope=scope)
+        return has_queued_force_compaction(storage, session_id)
 
     async def _prepare_request_after_lock(
         self,
@@ -1223,11 +1319,7 @@ class ResponseRunner:
         if (
             placeholder_message is None
             or existing_event_id(request) is not None
-            or await self._has_queued_forced_compaction(
-                session_id=target.session_id,
-                scope=history_scope,
-                execution_identity=execution_identity,
-            )
+            or await self._has_queued_forced_compaction(target.session_id, history_scope, execution_identity)
         ):
             return None
         handle = current_span()

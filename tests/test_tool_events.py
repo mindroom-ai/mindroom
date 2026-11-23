@@ -15,6 +15,7 @@ from mindroom.tool_system.events import (
     StreamingToolTracker,
     ToolTraceEntry,
     _format_tool_started,
+    append_stream_text,
     build_tool_trace_content,
     complete_pending_tool_block,
     deserialize_tool_trace,
@@ -107,8 +108,7 @@ def test_format_tool_started_uses_plain_marker_and_truncates() -> None:
         tool_index=1,
     )
 
-    assert text.startswith("\n\n🔧 `save_file` [1]")
-    assert text.endswith("\n\n")
+    assert text == "🔧 `save_file` [1] ⏳"
     assert "🔧" in text
     assert "`save_file`" in text
     assert "[1]" in text
@@ -125,8 +125,7 @@ def test_format_tool_combined_with_result() -> None:
     """Combined formatting should produce a completed plain marker and trace metadata."""
     text, trace = format_tool_combined("run_shell_command", {"cmd": "pwd"}, "/app", tool_index=2)
 
-    assert text.startswith("\n\n🔧 `run_shell_command` [2]")
-    assert text.endswith("\n\n")
+    assert text == "🔧 `run_shell_command` [2]"
     assert "<validation>" not in text
     assert "`run_shell_command`" in text
     assert "[2]" in text
@@ -179,8 +178,7 @@ def test_format_tool_combined_truncates_long_result() -> None:
     """Combined formatting should truncate long results."""
     text, trace = format_tool_combined("run_shell_command", {}, "done " + ("y" * 5000))
 
-    assert text.startswith("\n\n🔧 `run_shell_command`")
-    assert text.endswith("\n\n")
+    assert text == "🔧 `run_shell_command`"
     assert trace.type == "tool_call_completed"
     assert trace.result_preview is not None
     assert trace.truncated is True
@@ -285,7 +283,7 @@ def test_format_tool_combined_with_none_result() -> None:
     """Combined formatting should handle missing results."""
     text, trace = format_tool_combined("save_file", {}, None, tool_index=1)
 
-    assert text == "\n\n🔧 `save_file` [1]\n\n"
+    assert text == "🔧 `save_file` [1]"
     assert trace.type == "tool_call_completed"
     assert trace.tool_name == "save_file"
     assert trace.result_preview is None
@@ -296,10 +294,69 @@ def test_format_tool_combined_with_empty_string_result() -> None:
     """Combined formatting should treat empty results as no-result."""
     text, trace = format_tool_combined("save_file", {"file": "a.py"}, "", tool_index=1)
 
-    assert text == "\n\n🔧 `save_file` [1]\n\n"
+    assert text == "🔧 `save_file` [1]"
     assert trace.type == "tool_call_completed"
     assert trace.result_preview is None
     assert trace.truncated is False
+
+
+@pytest.mark.parametrize(
+    ("existing", "delta", "expected"),
+    [
+        ("Before", "After", "Before\n\nAfter"),
+        ("Before\n", "After", "Before\n\nAfter"),
+        ("Before\n\n\n", "After", "Before\n\n\nAfter"),
+        ("Before\r\n", "After", "Before\r\n\nAfter"),
+        ("Before\r\n\r\n", "After", "Before\r\n\r\nAfter"),
+        ("Before\n\r\n", "After", "Before\n\r\nAfter"),
+        ("Before\r", "After", "Before\r\n\nAfter"),
+        ("Before", "\nAfter", "Before\n\nAfter"),
+        ("Before", "\r\n\r\n\nAfter", "Before\n\nAfter"),
+        ("Before", "\r\n", "Before"),
+        ("", "\nAfter", "\nAfter"),
+    ],
+)
+def test_separated_stream_text_starts_one_blank_line_below_the_text_before_it(
+    existing: str,
+    delta: str,
+    expected: str,
+) -> None:
+    """A separated delta adds only the newlines a blank line still lacks, in place of the ones it opens with."""
+    assert append_stream_text(existing, delta, separate=True) == expected
+
+
+@pytest.mark.parametrize(
+    ("existing", "expected"),
+    [
+        ("", "🔧 `read` [1] ⏳"),
+        ("Doc", "Doc\n\n🔧 `read` [1] ⏳"),
+        ("Doc\n\n", "Doc\n\n🔧 `read` [1] ⏳"),
+        ("Doc\r\n", "Doc\r\n\n🔧 `read` [1] ⏳"),
+        ("Doc\r\n\r\n", "Doc\r\n\r\n\n🔧 `read` [1] ⏳"),
+        ("Doc\n\r\n", "Doc\n\r\n\n🔧 `read` [1] ⏳"),
+    ],
+)
+def test_a_tool_marker_stands_below_an_lf_blank_line(existing: str, expected: str) -> None:
+    """A CRLF blank line does not serve a marker: Matrix gets it as a v3 position only below an LF one."""
+    assert append_stream_text(existing, "🔧 `read` [1] ⏳", marker=True) == expected
+
+
+@pytest.mark.parametrize(
+    "deltas",
+    [
+        ["🔧 `read` [1]", " is literal."],
+        ["```\n🔧 `x` [1]", "\n```"],
+        ["🔧 `x` [1]", "\n", "next"],
+        ["🔧 `x` [1] ⏳\r\n", "\r\nnext"],
+    ],
+)
+def test_stream_text_that_looks_like_a_marker_joins_as_any_other_text(deltas: list[str]) -> None:
+    """Only a caller that appended a tool call separates the next delta; the look of the text before it never does."""
+    text = ""
+    for delta in deltas:
+        text = append_stream_text(text, delta)
+
+    assert text == "".join(deltas)
 
 
 def test_complete_pending_tool_block_replaces_pending() -> None:
@@ -546,7 +603,7 @@ def test_build_tool_trace_content_redacts_raw_trace_entries() -> None:
 def test_format_tool_started_with_empty_args() -> None:
     """Tool start formatting should handle empty argument maps."""
     text, trace = _format_tool_started("save_file", {}, tool_index=1)
-    assert text == "\n\n🔧 `save_file` [1] ⏳\n\n"
+    assert text == "🔧 `save_file` [1] ⏳"
     assert trace.type == "tool_call_started"
     assert trace.tool_name == "save_file"
     assert trace.args_preview is None

@@ -1782,7 +1782,7 @@ class TestAgentBot(AgentBotTestBase):
 
         assert delivery.event_id == "$response1"
         content = bot.client.room_send.await_args.kwargs["content"]["m.new_content"]
-        assert content["body"].endswith("Final answer")
+        assert content["body"] == "Final answer"
         assert content[TOOL_TRACE_CONTENT_KEY]["events"] == [
             {
                 "type": "tool_call_completed",
@@ -1790,8 +1790,8 @@ class TestAgentBot(AgentBotTestBase):
                 "args_preview": "cmd=git status",
                 "result_preview": "clean",
                 "tool_call_id": "call-1",
-                # The call's marker opened the reply after two blank lines, before its first block.
-                "body_line": 2,
+                # The call's marker opens the reply, before its first line and block.
+                "body_line": 0,
                 "at": 0,
             },
         ]

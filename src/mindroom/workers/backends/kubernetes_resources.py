@@ -87,6 +87,9 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _READY_POLL_INTERVAL_SECONDS = 1.0
+_HEALTHZ_TIMEOUT_SECONDS = 5.0
+_HEALTHZ_FIRST_CONNECT_TIMEOUT_SECONDS = 0.5
+_HEALTHZ_RETRY_INTERVAL_SECONDS = 0.2
 _DELETE_POLL_INTERVAL_SECONDS = 0.2
 _HOSTNAME_ENV = "HOSTNAME"
 _MERGE_PATCH_CONTENT_TYPE = "application/merge-patch+json"
@@ -1049,19 +1052,24 @@ class KubernetesResourceManager:
         """Return the first successful ``/healthz`` answer from one worker through its Service."""
         healthz_url = f"{service_host(worker_id, self.config.namespace, self.config.worker_port)}/healthz"
         deadline = time.time() + timeout_seconds
-        with httpx.Client(timeout=min(5.0, timeout_seconds)) as client:
-            while True:
-                # The Service can still route nowhere for a moment after its Deployment turns ready.
+        # A Service drops connections until its Endpoints propagate, so the first try gives up on connecting fast,
+        # and each later one allows a slower handshake, up to the time a whole answer may take.
+        connect_timeout = _HEALTHZ_FIRST_CONNECT_TIMEOUT_SECONDS
+        with httpx.Client(timeout=_HEALTHZ_TIMEOUT_SECONDS) as client:
+            # The clock decides after each try whether there is another, and no try gets more than the time left.
+            while (remaining := deadline - time.time()) > 0:
+                answer_timeout = min(_HEALTHZ_TIMEOUT_SECONDS, remaining)
+                timeout = httpx.Timeout(answer_timeout, connect=min(connect_timeout, answer_timeout))
                 try:
-                    response = client.get(healthz_url)
+                    response = client.get(healthz_url, timeout=timeout)
                 except httpx.HTTPError:
                     response = None
                 if response is not None and response.is_success:
                     return response
-                if time.time() >= deadline:
-                    msg = f"Kubernetes worker '{worker_id}' did not answer its health check within {timeout_seconds:.0f}s."
-                    raise WorkerStartTimeoutError(msg)
-                time.sleep(_READY_POLL_INTERVAL_SECONDS)
+                connect_timeout = min(connect_timeout * 2, _HEALTHZ_TIMEOUT_SECONDS)
+                time.sleep(max(min(_HEALTHZ_RETRY_INTERVAL_SECONDS, deadline - time.time()), 0.0))
+        msg = f"Kubernetes worker '{worker_id}' did not answer its health check within {timeout_seconds:.0f}s."
+        raise WorkerStartTimeoutError(msg)
 
     def _apply_object(
         self,
@@ -1213,7 +1221,7 @@ class KubernetesResourceManager:
         startup_manifest_hash = self._startup_manifest_hash(
             worker_key=worker_key,
             state_subpath=state_subpath,
-            tool_validation_snapshot=launch.tool_validation_snapshot,
+            launch=launch,
         )
         template = self._pod_template(
             worker_key=worker_key,
@@ -1374,7 +1382,7 @@ class KubernetesResourceManager:
         startup_manifest_hash = self.write_startup_manifest(
             worker_key=worker_key,
             state_subpath=state_subpath,
-            tool_validation_snapshot=launch.tool_validation_snapshot,
+            launch=launch,
         )
         template = self._pod_template(
             worker_key=worker_key,
@@ -1490,12 +1498,13 @@ class KubernetesResourceManager:
         *,
         worker_key: str,
         state_subpath: str,
-        tool_validation_snapshot: Mapping[str, object],
+        launch: WorkerLaunchConfig,
     ) -> str:
         """Return the content hash of one worker's startup manifest without writing it."""
         return dedicated_worker_startup_manifest_hash(
             self._worker_runtime_paths(worker_key=worker_key, state_subpath=state_subpath),
-            tool_validation_snapshot=tool_validation_snapshot,
+            tool_validation_snapshot=launch.tool_validation_snapshot,
+            eager_setup_plugins=launch.worker_preload_plugins,
         )
 
     def write_startup_manifest(
@@ -1503,13 +1512,14 @@ class KubernetesResourceManager:
         *,
         worker_key: str,
         state_subpath: str,
-        tool_validation_snapshot: Mapping[str, object],
+        launch: WorkerLaunchConfig,
     ) -> str:
         """Write one worker's startup manifest into its state directory and return the manifest's hash."""
         return write_dedicated_worker_startup_manifest(
             (self.storage_root / state_subpath).resolve(),
             self._worker_runtime_paths(worker_key=worker_key, state_subpath=state_subpath),
-            tool_validation_snapshot=tool_validation_snapshot,
+            tool_validation_snapshot=launch.tool_validation_snapshot,
+            eager_setup_plugins=launch.worker_preload_plugins,
         )
 
     def _worker_layout(self, state_subpath: str) -> DedicatedWorkerLayout:

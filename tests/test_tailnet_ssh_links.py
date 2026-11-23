@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
@@ -46,6 +47,7 @@ from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerSshEndpoint
 from mindroom.workers.protocol import ExecuteRequest
 from tests.access_schema_support import membership_index
 from tests.conftest import bind_runtime_paths
+from tests.test_kubernetes_worker_backend import _answer_worker_setup, _backend, _run_on_one_clock
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -259,6 +261,33 @@ async def test_connect_order(
     assert manager.specs == [WorkerSpec(link.worker_key, private_agent_names=private_names)]
     assert (tmp_path / "ssh" / "authorized_keys").read_text() == f"restrict,pty {PUBLIC_KEY}\n"
     assert (tmp_path / "ssh" / "ssh_host_ed25519_key").read_text() == link.host_key
+
+
+@pytest.mark.asyncio
+async def test_a_connect_does_not_wait_for_the_setup_of_a_kubernetes_worker_that_just_started(
+    config: Config,
+    paths: RuntimePaths,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An SSH link needs a worker that answers and not its tool runtime, so it goes on once a cold worker is healthy."""
+    link = _link(paths)
+    _wire_connect(monkeypatch, tmp_path, link)
+    backend, _apps_api, _core_api = _backend(applied_config=config)
+    clock = _run_on_one_clock(monkeypatch)
+    _answer_worker_setup(backend, lambda: "preparing")
+    monkeypatch.setattr(links, "lease_configured_primary_worker_manager", lambda _paths: nullcontext(backend))
+    # The shell route of a worker that runs touches it, as the stand-in of `_wire_connect` cannot for this backend.
+    monkeypatch.setattr(
+        links,
+        "worker_call",
+        lambda *_args, **_kwargs: replace(_worker_call(link.worker_key), handle=backend.touch_worker(link.worker_key)),
+    )
+
+    host, port = await _connect(config, paths, link.id)
+
+    assert (host, port) == (f"{backend._worker_id(link.worker_key)}.chat.svc.cluster.local", 2222)
+    assert clock.monotonic() == 0.0
 
 
 @pytest.mark.asyncio

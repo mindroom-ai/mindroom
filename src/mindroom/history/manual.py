@@ -6,6 +6,7 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.history.policy import describe_compaction_unavailability, resolve_history_execution_plan
+from mindroom.history.runtime import HistoryPreparationInputs
 from mindroom.history.session_context import create_scope_session_storage, scope_session_database_path
 from mindroom.history.storage import new_scope_session, set_force_compaction
 from mindroom.logging_config import get_logger
@@ -104,23 +105,9 @@ async def schedule_compaction_before_next_reply(
 
     ``thread_id`` lets the thread's saved model choice decide the model when no ``active_model_name`` is given.
     """
-    # An agent scope's id is its agent; an ad-hoc team has no authored settings of its own.
-    entity_name = scope.scope_id if scope.kind == "agent" else config.configured_team_name(scope.scope_id)
-    runtime_model = resolve_turn_model(
-        config,
-        runtime_paths,
-        ModelScope(entity=entity_name, room_id=room_id, thread_id=thread_id, explicit=active_model_name),
-        budget,
-    )
-    execution_plan = resolve_history_execution_plan(
-        config=config,
-        history_settings=config.resolve_scope(entity_name).history_settings,
-        active_model_name=runtime_model.model_name,
-        active_context_window=runtime_model.context_window,
-    )
-    unavailable = describe_compaction_unavailability(execution_plan)
-    if unavailable is not None:
-        return unavailable
+    plan = resolve_manual_compaction_plan(scope, config, runtime_paths, room_id, thread_id, budget, active_model_name)
+    if isinstance(plan, str):
+        return plan
 
     # The flag merges into the metadata the stored row holds, in the database's lane as the session's other writes
     # run; a new session names that row, which the write creates when the scope has none yet. No run save writes
@@ -141,3 +128,31 @@ async def schedule_compaction_before_next_reply(
         scope=scope.key,
     )
     return None
+
+
+def resolve_manual_compaction_plan(
+    scope: HistoryScope,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    room_id: str | None,
+    thread_id: str | None,
+    budget: TurnBudget | None,
+    active_model_name: str | None = None,
+) -> tuple[str, HistoryPreparationInputs] | str:
+    """Resolve the model and history policy without touching session storage."""
+    # An agent scope's id is its agent; an ad-hoc team has no authored settings of its own.
+    entity_name = scope.scope_id if scope.kind == "agent" else config.configured_team_name(scope.scope_id)
+    model = resolve_turn_model(
+        config,
+        runtime_paths,
+        ModelScope(entity=entity_name, room_id=room_id, thread_id=thread_id, explicit=active_model_name),
+        budget,
+    )
+    settings = config.resolve_scope(entity_name).history_settings
+    plan = resolve_history_execution_plan(
+        config=config,
+        history_settings=settings,
+        active_model_name=model.model_name,
+        active_context_window=model.context_window,
+    )
+    return describe_compaction_unavailability(plan) or (model.model_name, HistoryPreparationInputs(settings, plan))

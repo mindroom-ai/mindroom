@@ -545,6 +545,96 @@ def test_slow_template_warmup_survives_request_timeouts(tmp_path: Path) -> None:
     assert len(spawned) == 1
 
 
+def _manager_whose_launch_waits(
+    tmp_path: Path,
+    waits_for: str,
+    *,
+    template_preload: str | None = None,
+) -> tuple[_SandboxForkserver, threading.Event, threading.Event]:
+    """Return a stub manager whose template launch for interpreter ``waits_for`` stalls until it is released."""
+    script = tmp_path / "stub_template.py"
+    script.write_text(_STUB_TEMPLATE, encoding="utf-8")
+    launching = threading.Event()
+    may_launch = threading.Event()
+
+    def _command(python_executable: str, socket_path: str) -> list[str]:
+        if python_executable == waits_for:
+            launching.set()
+            may_launch.wait(timeout=6)
+        return [python_executable, str(script), socket_path]
+
+    manager = _SandboxForkserver(template_command=_command, template_preload=template_preload)
+    return manager, launching, may_launch
+
+
+def test_a_stalled_template_launch_does_not_delay_a_request_for_a_warm_template(tmp_path: Path) -> None:
+    """Starting one interpreter's template holds nothing that a request for another, warm template needs."""
+    other_python = tmp_path / "other-python"
+    other_python.symlink_to(sys.executable)
+    manager, launching, may_launch = _manager_whose_launch_waits(tmp_path, str(other_python))
+
+    def warm_other() -> None:
+        # Whether that template then starts is not what this test is about.
+        with suppress(ForkserverError):
+            manager.warm(str(other_python), None, 30.0)
+
+    stalled = threading.Thread(target=warm_other)
+    try:
+        assert _stub_execute(manager).returncode == 0
+        stalled.start()
+        assert launching.wait(timeout=10)
+
+        started_at = time.monotonic()
+        assert _stub_execute(manager).returncode == 0
+        answered_in = time.monotonic() - started_at
+    finally:
+        may_launch.set()
+        stalled.join(timeout=30)
+        manager.shutdown()
+
+    assert answered_in < 3.0
+
+
+def test_a_preloading_template_launched_while_its_manager_shut_down_is_ended(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Giving a preload up never waits for a launch in progress, and ends the template that launch brings."""
+    manager, launching, may_launch = _manager_whose_launch_waits(tmp_path, sys.executable, template_preload="{}")
+    launched: list[sandbox_forkserver_module._Template] = []
+    spawn = _SandboxForkserver._spawn_template
+
+    def recording_spawn(self: _SandboxForkserver, **kwargs: object) -> sandbox_forkserver_module._Template:
+        launched.append(spawn(self, **kwargs))
+        return launched[-1]
+
+    monkeypatch.setattr(_SandboxForkserver, "_spawn_template", recording_spawn)
+    errors: list[BaseException] = []
+
+    def warm() -> None:
+        try:
+            manager.warm(None, None, 30.0)
+        except ForkserverStartupError as exc:
+            errors.append(exc)
+
+    warming = threading.Thread(target=warm)
+    warming.start()
+    try:
+        assert launching.wait(timeout=10)
+        started_at = time.monotonic()
+        manager.shutdown()
+        shut_down_in = time.monotonic() - started_at
+    finally:
+        may_launch.set()
+        warming.join(timeout=30)
+
+    assert shut_down_in < 3.0
+    assert len(errors) == 1
+    (template,) = launched
+    assert template.process.wait(timeout=10) is not None
+    assert not template.runtime_dir.exists()
+
+
 def test_template_startup_failure_retries_after_cooldown() -> None:
     """A transient startup failure must not disable the forkserver forever."""
     attempts: list[str] = []

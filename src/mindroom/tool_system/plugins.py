@@ -599,6 +599,41 @@ def refresh_plugins(config: Config, runtime_paths: RuntimePaths) -> ConfigPlugin
     return config_plugins(config, runtime_paths)
 
 
+def worker_preload_plugin_paths(config: Config, runtime_paths: RuntimePaths) -> tuple[str, ...]:
+    """Return the configured paths of ``config``'s leading enabled plugins whose manifests set ``worker_preload``.
+
+    Plugins import in config order, so one that follows an enabled plugin that does not opt in is not preloaded.
+    Neither is one under ``~``, which a call with another HOME reads as another directory than the worker did when it
+    started; every other path is read against the config's directory or the installed packages, the same in each call.
+    """
+    opted: list[str] = []
+    for entry in config.plugins:
+        if not entry.enabled:
+            continue
+        try:
+            if Path(entry.path).as_posix().startswith("~"):  # As ``expanduser`` reads it: ``./~/x`` is ``~/x`` too.
+                break
+            root = plugin_imports._resolve_plugin_root(entry.path, runtime_paths)
+            if not plugin_imports._load_plugin_base(root).worker_preload:
+                break
+        except Exception:  # The load that follows reports a plugin that does not resolve.
+            break
+        opted.append(entry.path)
+    return tuple(opted)
+
+
+def preload_plugins(config: Config, runtime_paths: RuntimePaths) -> bool:
+    """Import ``config``'s plugins for the processes forked from this one, which reuse them as long as it runs.
+
+    Returns False when one of them did not load, which leaves this process unfit to fork from.
+    """
+    with _PLUGIN_LOCK:
+        plugins, skipped, _ = _load_plugins(config, runtime_paths, previous=None, primary_modules=False)
+        if not skipped:
+            publish_plugins(_installed_generation(plugins))
+    return not skipped
+
+
 def candidate_tool_registry(
     config: Config,
     runtime_paths: RuntimePaths,

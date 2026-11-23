@@ -68,6 +68,7 @@ class _WorkerSeccompProfile(TypedDict):
 
 
 _DEFAULT_READY_TIMEOUT_SECONDS = 60.0
+_DEFAULT_SETUP_TIMEOUT_SECONDS = 180.0
 _DEFAULT_WORKER_PORT = 8766
 _DEFAULT_IMAGE_PULL_POLICY = "IfNotPresent"
 _DEFAULT_STORAGE_SUBPATH_PREFIX = "workers"
@@ -97,6 +98,7 @@ _STORAGE_MOUNT_PATH_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_m
 _STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
 _IDLE_TIMEOUT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["idle_timeout"]
 _READY_TIMEOUT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["ready_timeout"]
+_SETUP_TIMEOUT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["setup_timeout"]
 _NAME_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["name_prefix"]
 _NODE_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["node_name"]
 _COLOCATE_WITH_CONTROL_PLANE_NODE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["colocate_with_control_plane_node"]
@@ -501,6 +503,8 @@ class KubernetesWorkerBackendConfig:
     named_worker_max_age_seconds: float = _DEFAULT_NAMED_WORKER_MAX_AGE_SECONDS
     # How many named workers may run at once for every requester and agent together.
     named_workers_max: int = _DEFAULT_NAMED_WORKERS_MAX
+    # How long a call waits for a ready worker to finish preparing itself before it runs in the worker as it is.
+    setup_timeout_seconds: float = _DEFAULT_SETUP_TIMEOUT_SECONDS
     tailnet_ssh_release_id: str | None = None
 
     def __post_init__(self) -> None:
@@ -656,6 +660,7 @@ class KubernetesWorkerBackendConfig:
                 _DEFAULT_NAMED_WORKER_MAX_AGE_SECONDS,
             ),
             named_workers_max=configured_named_workers_max(runtime_paths),
+            setup_timeout_seconds=read_float_env(env, _SETUP_TIMEOUT_ENV, _DEFAULT_SETUP_TIMEOUT_SECONDS),
         )
 
 
@@ -743,6 +748,8 @@ def kubernetes_backend_config_signature(
         _DEFAULT_NAMED_WORKERS_MAX,
     ):
         signature = (*signature, f"named-workers:{stable_signature_json(named_workers)}")
+    if config.setup_timeout_seconds != _DEFAULT_SETUP_TIMEOUT_SECONDS:
+        signature = (*signature, f"setup-timeout:{config.setup_timeout_seconds}")
     return signature
 
 

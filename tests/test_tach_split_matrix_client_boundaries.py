@@ -52,6 +52,8 @@ RUNTIME_PROTOCOL_IMPORTERS = {
 BOT_RUNTIME_VIEW_ALLOWED_IMPORTERS = {
     "mindroom.bot",
     "mindroom.reply_turn.inbox",
+    "mindroom.response_lifecycle",
+    "mindroom.response_runner",
     "mindroom.turns.dispatch",
 }
 

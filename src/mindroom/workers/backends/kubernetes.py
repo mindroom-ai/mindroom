@@ -84,6 +84,8 @@ from .kubernetes_config import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
+    import httpx
+
     from mindroom.constants import RuntimePaths
 
 __all__ = [
@@ -105,6 +107,8 @@ _ORPHANED_STATE_GRACE_SECONDS = 300.0
 _STATE_IDENTITY_PATH = (".runtime", "startup_manifest.json")
 _STATE_IDENTITY_FIELD_PATH = ("runtime_paths", "process_env", SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"])
 _PULL_POLICY_DOCS_URL = "https://docs.mindroom.chat/deployment/kubernetes/#worker-settings"
+_SETUP_POLL_INTERVAL_SECONDS = 1.0
+_SETUP_HEALTH_TIMEOUT_SECONDS = 5.0
 _CACHED_IMAGE_HINT = (
     "A replacement pod reported the same protocol, so with a mutable tag such as ':latest' its node may still "
     f"hold an older copy: use this release's tag or set the worker image pull policy to Always ({_PULL_POLICY_DOCS_URL})."
@@ -115,6 +119,15 @@ _RESTART_RUNTIME_HINT = (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _reported_setup(health: httpx.Response) -> object:
+    """Return the state of its eager setup that a worker's health answer reports, or None when it reports none."""
+    try:
+        payload = health.json()
+    except ValueError:
+        return None
+    return payload.get("setup") if isinstance(payload, dict) else None
 
 
 @contextmanager
@@ -240,6 +253,8 @@ class KubernetesWorkerBackend:
         config.pop("named_worker_idle_timeout_seconds")
         config.pop("named_worker_max_age_seconds")
         config.pop("named_workers_max")
+        # The primary's own wait, which no worker depends on.
+        config.pop("setup_timeout_seconds")
         # The SSH release ID only labels interactive workers, not script worker authority.
         config.pop("tailnet_ssh_release_id")
         return {
@@ -276,6 +291,8 @@ class KubernetesWorkerBackend:
         self._progress = WorkerWarmupProgress(self.backend_name)
         self._ready_workers: dict[str, _ReadyWorkerCacheEntry] = {}
         self._ready_workers_lock = threading.Lock()
+        # The setup wait of each worker's latest start, which the tool callers of that worker share.
+        self._setup_waits: dict[str, tuple[threading.Lock, list[tuple[str, WorkerStartReporter, httpx.Response]]]] = {}
         # When each worker directory was first seen without a Deployment, infinity for one no pass removes.
         self._stateless_since: dict[str, float] = {}
 
@@ -293,15 +310,39 @@ class KubernetesWorkerBackend:
     ) -> WorkerHandle:
         """Resolve or start the worker backing the given worker key, from the launch applied when its lock is held."""
         # A caller waiting behind another's start of this worker is sent that start's progress.
-        with self._progress.subscribed(spec.worker_key, progress_sink), self._worker_locks.for_key(spec.worker_key):
-            launch = self._current_launch()
-            timestamp = time.time() if now is None else now
-            cached_handle = self._reuse_cached_ready_worker(spec, launch, now=timestamp)
-            if cached_handle is not None:
-                return cached_handle
-            return self._provision_worker_locked(spec, launch, timestamp=timestamp)
+        with self._progress.subscribed(spec.worker_key, progress_sink):
+            with self._worker_locks.for_key(spec.worker_key):
+                launch = self._current_launch()
+                timestamp = time.time() if now is None else now
+                handle = self._reuse_cached_ready_worker(spec, launch, now=timestamp)
+                if handle is None:
+                    handle = self._provision_worker_locked(spec, launch, timestamp=timestamp)
+            # Outside the worker's lock, so a caller that only shows the worker goes on while tool callers wait here.
+            if spec.wait_for_setup and (setup := self._setup_waits.get(spec.worker_key)) is not None:
+                started_at = time.monotonic()
+                lock, due = setup
+                with lock:  # The first tool caller waits for the setup; a later one waits here until that ended.
+                    try:
+                        if due:
+                            self._wait_for_worker_setup(*due.pop())
+                    finally:
+                        handle = self._end_setup_wait(spec.worker_key, setup, time.monotonic() - started_at) or handle
+            return handle
 
-    def _provision_worker_locked(  # noqa: C901, PLR0915
+    def _end_setup_wait(self, worker_key: str, setup: object, waited_seconds: float) -> WorkerHandle | None:
+        """Record a worker as used now that its setup wait hands it to a caller, then forget the wait."""
+        try:
+            return self.touch_worker(worker_key) if waited_seconds >= _SETUP_POLL_INTERVAL_SECONDS else None
+        except Exception as exc:
+            # A start records no use after the worker is ready, so whatever keeps this one unwritten changes nothing.
+            logger.warning("Worker %s was not recorded as used after its setup: %s", worker_log_id(worker_key), exc)
+            return None
+        finally:
+            with self._worker_locks.for_key(worker_key):  # Where a start publishes its wait, so a newer one stays.
+                if self._setup_waits.get(worker_key) is setup:
+                    del self._setup_waits[worker_key]
+
+    def _provision_worker_locked(  # noqa: C901, PLR0912, PLR0915
         self,
         spec: WorkerSpec,
         launch: WorkerLaunchConfig,
@@ -387,7 +428,10 @@ class KubernetesWorkerBackend:
                 )
                 if reporter is not None:
                     reporter.mark("pod_ready")
-                if not self._ready_worker_needs_replacement(worker_id, is_replacement=replacing_stale_worker):
+                health = self._compatible_worker_health(worker_id, is_replacement=replacing_stale_worker)
+                if health is not None:
+                    if reporter is not None:
+                        reporter.mark("healthy")
                     break
                 # A mutable tag such as `:latest` keeps an older pod running after an upgrade, and
                 # the template is unchanged, so only a new pod pulls the tag again under `Always`.
@@ -417,7 +461,9 @@ class KubernetesWorkerBackend:
                 raise
             raise WorkerBackendError(failure_reason) from exc
 
-        if reporter is not None:
+        if reporter is not None and spec.wait_for_setup:
+            self._setup_waits[worker_key] = (threading.Lock(), [(worker_id, reporter, health)])
+        elif reporter is not None:  # A caller that only shows the worker needs it to answer, not to run tools.
             reporter.finish(None)
         final_deployment_annotations = {
             **dict(deployment.metadata.annotations or {}),
@@ -444,10 +490,40 @@ class KubernetesWorkerBackend:
         )
         return handle
 
-    def _ready_worker_needs_replacement(self, worker_id: str, *, is_replacement: bool) -> bool:
-        """Return whether the ready worker speaks another protocol, refusing a replacement that still does."""
+    def _wait_for_worker_setup(self, worker_id: str, reporter: WorkerStartReporter, health: httpx.Response) -> None:
+        """Wait while a worker that just started reports it is still preparing itself, reporting that as progress.
+
+        The worker is ready already and prepares on its first call whatever is still missing, so the call goes on when
+        the setup ends, fails, outlasts ``setup_timeout_seconds``, or the worker reports no setup at all.
+        """
+        reporter.preparing()
+        deadline = time.monotonic() + self.config.setup_timeout_seconds
+        try:
+            while (setup := _reported_setup(health)) == "preparing":
+                time.sleep(min(_SETUP_POLL_INTERVAL_SECONDS, max(deadline - time.monotonic(), 0.0)))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                try:
+                    health = self._resources.read_worker_health(
+                        worker_id,
+                        timeout_seconds=min(_SETUP_HEALTH_TIMEOUT_SECONDS, remaining),
+                    )
+                except WorkerBackendError:
+                    break
+            if setup is not None and setup != "ready":
+                logger.warning("Worker %s did not finish its setup (%s); its first call prepares it", worker_id, setup)
+        finally:
+            reporter.finish(None)
+
+    def _compatible_worker_health(self, worker_id: str, *, is_replacement: bool) -> httpx.Response | None:
+        """Return the ready worker's health answer, or None when it speaks another protocol and gets replaced.
+
+        A replacement that still speaks another protocol is refused.
+        """
+        health = self._resources.read_worker_health(worker_id, timeout_seconds=self.config.ready_timeout_seconds)
         mismatch = ready_worker_protocol_mismatch(
-            self._resources.read_worker_health(worker_id, timeout_seconds=self.config.ready_timeout_seconds),
+            health,
             worker=f"Kubernetes worker image '{self.config.image}'",
             # Under `Always` kubelet resolves the tag on every start, so no node can serve an older cached copy.
             older_worker_hint=None if self.config.image_pull_policy == "Always" else _CACHED_IMAGE_HINT,
@@ -456,10 +532,10 @@ class KubernetesWorkerBackend:
         if mismatch is not None and is_replacement:
             # A worker is replaced once; a replacement that still mismatches fails the request.
             raise WorkerBackendError(mismatch.error)
-        return mismatch is not None
+        return health if mismatch is None else None
 
     def touch_worker(self, worker_key: str, *, now: float | None = None) -> WorkerHandle | None:
-        """Refresh last-used metadata for one existing worker."""
+        """Refresh last-used metadata for one existing worker, never moving its last use back."""
         timestamp = time.time() if now is None else now
         with self._worker_locks.for_key(worker_key):
             cached_handle = self._touch_cached_worker(worker_key, now=timestamp)
@@ -473,7 +549,7 @@ class KubernetesWorkerBackend:
 
             annotations = resources.with_lifecycle_transition(
                 deployment.metadata.annotations or {},
-                lambda state: touch_worker_lifecycle(state, now=timestamp),
+                lambda state: touch_worker_lifecycle(state, now=max(timestamp, state.last_used_at)),
                 now=timestamp,
             )
             self._resources.patch_deployment(worker_id, annotations=annotations)
@@ -586,7 +662,7 @@ class KubernetesWorkerBackend:
             self._resources.write_startup_manifest(
                 worker_key=worker_key,
                 state_subpath=state_subpath,
-                tool_validation_snapshot=launch.tool_validation_snapshot,
+                launch=launch,
             )
 
     def _require_retirement_deployment(self, worker_id: str, worker_key: str, state_subpath: str) -> None:
@@ -664,6 +740,9 @@ class KubernetesWorkerBackend:
         removed, because its next start replaces it anyway. One an earlier process created is removed at once, pod
         and all: no reply can reach it, and until it is gone it counts against the limits of those that start.
         """
+        if handle.worker_key in self._setup_waits:
+            # A tool caller that waits for this worker's setup is using it now, which leaves its age as it is.
+            handle = replace(handle, last_used_at=now, status="ready" if handle.status == "idle" else handle.status)
         named = pinned_worker_kind(handle.worker_key) == "named"
         if named and handle.created_at < self._process_started_at:
             return "retire"
@@ -1064,7 +1143,7 @@ class KubernetesWorkerBackend:
 
     def _patch_cached_worker_usage(self, entry: _ReadyWorkerCacheEntry, *, now: float) -> WorkerHandle | None:
         # A cached worker was ready when cached, so its touch writes it as ready without reading its Deployment.
-        lifecycle = mark_worker_ready(entry.lifecycle, now=now)
+        lifecycle = mark_worker_ready(entry.lifecycle, now=max(now, entry.lifecycle.last_used_at))
         exists = self._resources.patch_deployment_annotations(
             entry.worker_id,
             annotations=resources.usage_annotations(lifecycle),

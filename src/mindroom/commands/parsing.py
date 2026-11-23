@@ -27,7 +27,7 @@ class CommandType(Enum):
     CONFIG = "config"  # Configuration command
     DESKTOP = "desktop"  # Requester-scoped Desktop pairing
     MODE = "mode"
-    COMPACT = "compact"  # Compact context before the next reply
+    COMPACT = "compact"  # Compact context now
     MODEL = "model"  # Per-thread model override command
     ROOM_MODEL = "room_model"  # Room-level model override command
     THREAD_MODE = "thread_mode"  # Room-level thread mode override command
@@ -47,7 +47,7 @@ _COMMAND_DOCS = {
     ),
     CommandType.COMPACT: (
         "/compact [agent_or_team]",
-        "Compact the agents' context before their next reply in this conversation",
+        "Compact context now, after any in-progress reply in this conversation",
     ),
     CommandType.SCHEDULE: ("/schedule <task>", "Schedule a task"),
     CommandType.LIST_SCHEDULES: ("/list_schedules", "List scheduled tasks"),

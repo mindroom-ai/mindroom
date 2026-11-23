@@ -534,7 +534,8 @@ def drop_replays(
 
 
 def end_entity_replies(transaction: Transaction, ends: Callable[[str], bool], *, now_ns: int) -> int:
-    """End the open replies of entities with no bot any more, without writing to Matrix."""
+    """End the open replies and settle the runtime sources of entities with no bot any more; nothing goes to Matrix."""
+    journal.settle_runtime_sources_of(transaction, ends)
     ended = 0
     for principal_id, found in reply_messages.open_replies(transaction):
         if not ends(found.entity_name):

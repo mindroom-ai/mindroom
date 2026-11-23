@@ -51,6 +51,7 @@ from mindroom.tool_system.events import (
     FailedReply,
     StreamingToolTracker,
     StructuredStreamChunk,
+    append_stream_text,
     complete_pending_tool_block,
     remap_visible_tool_marker_indices,
     serialize_tool_trace,
@@ -656,6 +657,9 @@ class StreamingResponse:
     # Frames start once the reply's event shows this stream: its adopted placeholder or its first progress write.
     _shows_stream: bool = field(default=False, init=False, repr=False)
     _transport_ended: bool = field(default=False, init=False, repr=False)
+    _has_hidden_tool_calls: bool = field(default=False, init=False, repr=False)
+    # Whether the next text starts a paragraph of its own, as text after a tool call does, shown or hidden.
+    _separate_next_text: bool = field(default=False, init=False, repr=False)
     # Set when the stream yields a handled FailedReply, so final ai_run reports status="error" even without run metrics.
     _saw_failed_reply: bool = field(default=False, init=False, repr=False)
 
@@ -707,11 +711,8 @@ class StreamingResponse:
         return len(self.tool_trace) if self.show_tool_calls else 0
 
     def has_progress(self) -> bool:
-        """Return whether the reply produced any text or tool call yet, a resumed attempt's included.
-
-        A hidden tool call leaves its gap in the text (``_ensure_hidden_tool_gap``).
-        """
-        return bool(self.accumulated_text or self.tool_trace)
+        """Return whether the reply produced any text or tool call yet, a resumed attempt's included."""
+        return bool(self.accumulated_text or self.tool_trace or self._has_hidden_tool_calls)
 
     @property
     def live_active(self) -> bool:
@@ -767,11 +768,23 @@ class StreamingResponse:
             *_merge_tool_trace(self.tool_trace[resumed_count:], incoming),
         ]
 
-    def _append_incremental_text(self, new_chunk: str) -> None:
-        """Append additive streaming text regardless of snapshot replacement mode."""
-        self.accumulated_text += new_chunk
-        self.chars_since_last_update += len(new_chunk)
+    def _append_incremental_text(self, new_chunk: str, *, marker: bool = False) -> None:
+        """Append additive streaming text regardless of snapshot replacement mode; a tool ``marker`` is a paragraph."""
+        separate = self._separate_next_text
+        updated = append_stream_text(self.accumulated_text, new_chunk, separate=separate, marker=marker)
+        added = len(updated) - len(self.accumulated_text)
+        if new_chunk and not added:
+            # Newlines alone after a tool call add nothing, and the text after them still starts its paragraph.
+            return
+        if new_chunk:
+            self._separate_next_text = marker
+        self.accumulated_text = updated
+        self.chars_since_last_update += added
         self.last_delta_at = time.time()
+
+    def _append_tool_marker(self, marker: str) -> None:
+        """Append a visible tool marker, which the text after it starts a paragraph below."""
+        self._append_incremental_text(marker, marker=True)
 
     def _mark_nonadditive_text_mutation(self) -> None:
         """Count a visible in-place text change that did not append characters as one received character."""
@@ -779,9 +792,9 @@ class StreamingResponse:
         self.last_delta_at = time.time()
 
     def _ensure_hidden_tool_gap(self) -> None:
-        """Insert a single placeholder gap for hidden tool calls."""
-        if not self.accumulated_text.endswith("\n\n"):
-            self._append_incremental_text("\n\n")
+        """Count a hidden tool call as progress; the text after it starts a paragraph below the text before it."""
+        self._has_hidden_tool_calls = True
+        self._separate_next_text = bool(self.accumulated_text)
 
     def _current_update_interval(self, current_time: float) -> float:
         """Return the current throttling interval.
@@ -1694,8 +1707,9 @@ async def _apply_visible_text_chunk(
     apply_chunk(text_chunk)
     if replacement_suffixes and streaming.replaces_text:
         for suffix in replacement_suffixes:
-            if suffix not in streaming.accumulated_text:
-                streaming._append_incremental_text(suffix)
+            # A pending marker the snapshot holds as a paragraph is the call's own; one it quotes elsewhere is not.
+            if f"\n\n{suffix}\n\n" not in f"\n\n{streaming.accumulated_text}\n\n":
+                streaming._append_tool_marker(suffix)
     completion = _queue_delivery_request(
         delivery_queue,
         force_refresh=force_refresh,
@@ -1777,7 +1791,7 @@ async def _consume_streaming_chunks(  # noqa: C901, PLR0912, PLR0915
                     streaming,
                     delivery_queue,
                     text_chunk,
-                    apply_chunk=streaming._append_incremental_text,
+                    apply_chunk=streaming._append_tool_marker,
                     boundary_refresh=True,
                     wait_for_capture=(
                         streaming.replaces_text and streaming.matching_inflight_nonterminal_capture() is None

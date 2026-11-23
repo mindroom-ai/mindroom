@@ -39,8 +39,10 @@ from mindroom.config.voice import VoiceConfig, VoiceSTTConfig
 from mindroom.custom_tools import claude_agent
 from mindroom.custom_tools.dynamic_workflow import _run_room_agent_turn
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
-from mindroom.history.runtime import _compact_before_reply, resolve_entity_preparation_inputs
+from mindroom.history.runtime import _compact_stored_scope, resolve_entity_preparation_inputs
+from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import read_scope_state, with_force_compaction
+from mindroom.history.types import HistoryScope
 from mindroom.knowledge.chunk_context import chunk_contexts
 from mindroom.knowledge_graph.clients import MindRoomLLMClient
 from mindroom.knowledge_graph.usage import UsageTarget, usage_target
@@ -66,7 +68,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.voice import handler as voice_handler
 from tests.conftest import bind_runtime_paths, install_model_providers, seed_session, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, usage
-from tests.history_helpers import _forced_compaction_context, _make_config, _reported, _session
+from tests.history_helpers import _forced_compaction_context, _make_config, _session
 from tests.identity_helpers import persist_actual_entity_accounts
 from tests.turn_model_helpers import turn_model
 
@@ -398,21 +400,26 @@ async def _compaction_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         active_model_name=entity_model_name(config, "test_agent"),
         active_context_window=None,
     )
-    outcome = await _compact_before_reply(
-        None,
-        _reported,
-        storage=storage,
-        session=session,
+    result = await _compact_stored_scope(
+        ScopeSessionContext(
+            HistoryScope(kind="agent", scope_id=session.owner_id),
+            storage,
+            session,
+            session.session_id,
+            lambda: storage,
+        ),
+        inputs,
+        ScriptedModel([]),
+        config,
+        paths,
         state=read_scope_state(session),
-        resolved_inputs=inputs,
         history_budget=None,
         max_summary_tokens=None,
         before_tokens=0,
-        model=ScriptedModel([]),
-        config=config,
-        runtime_paths=paths,
+        runs_before=1,
+        lifecycle=None,
     )
-    assert outcome is not None
+    assert result.outcome is not None
     return paths.storage_root
 
 

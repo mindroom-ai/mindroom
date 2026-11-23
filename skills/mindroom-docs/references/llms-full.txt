@@ -3265,7 +3265,7 @@ An agent or team in the room answers `!reply_mode`, so the command works in any 
 
 ## Room Settings
 
-A room's moderators can change these settings in the room itself, without editing `config.yaml`.
+Members with permission to write room state can change these settings in the room itself, without editing `config.yaml`.
 Each is an `io.mindroom.room_settings` state event with the state key below and content `{"value": "<value>"}`; content `{}` clears it.
 
 | State key | Value | What it sets | Chat command |
@@ -3275,12 +3275,14 @@ Each is an `io.mindroom.room_settings` state event with the state key below and 
 | `model` | A `models:` key, or `key@level` for one of its [reasoning levels](https://docs.mindroom.chat/configuration/models/#reasoning-levels) | The room's [default model](https://docs.mindroom.chat/configuration/models/#model-overrides-in-chat) for every agent and team and for routing, over `room_models` | [`!room_model`](https://docs.mindroom.chat/configuration/models/#room_model) |
 | `thread_summary_model` | A `models:` key, or `key@level` | The model that writes the room's [thread titles](https://docs.mindroom.chat/tools/matrix-and-attachments/#automatic-thread-summaries), over `room_thread_summary_models` | None |
 | `thread_summary_instructions` | Text | Extra rules for the room's [thread titles](https://docs.mindroom.chat/tools/matrix-and-attachments/#automatic-thread-summaries) | None |
+| `agent_instructions` | Text (up to 2,000 characters) | Extra instructions passed to every agent and team answering in the room (rendered through `ROOM_INSTRUCTIONS_TEMPLATE`; grants no permissions) | None |
 
 MindRoom Chat sets them from the room settings dialog, and any client may send the events.
-They fall under the room's `state_default` power level (normally 50), so moderators and admins can change them there, and agent tools cannot write them.
+They fall under the room's `state_default` power level (normally 50, i.e., moderators and admins by default) unless the room sets a power level for `io.mindroom.room_settings`, and agent tools cannot write them.
 The chat commands set the same events through a MindRoom account in the room, for Matrix room admins only.
 A `model` or `thread_summary_model` that names no model in `models:` is ignored until the config defines that model, and `!room_model` reports it as unavailable.
 Agents take a changed `reply_mode`, `thread_mode`, or `model` as soon as their sync shows it, and read them again before handling a room's next event when the last read is more than ten minutes old; the two thread title settings are read each time a title is written.
+`agent_instructions` is read on each chat turn and each cascaded or Live-delegated call reply, while Realtime and Live direct-speech sessions read it at call start (from the call's originating room when started from a chat room or thread), so an edit applies to those direct-speech sessions from the next call.
 The settings live in the room, so they also apply to a room without a `rooms` entry.
 A `!reply_mode`, `!thread_mode`, or `!room_model` override an older MindRoom stored under `mindroom_data/tracking` moves into the room's setting the first time an agent reads a room that has none.
 
@@ -3721,11 +3723,14 @@ Add the `compact_context` tool to an agent's `tools` to let it request compactio
 The request runs before the next reply in the same conversation and always uses text compaction.
 It requires a summary model with a `context_window` and the same 2,000-token summary input budget; otherwise the tool returns `Error: Compaction is unavailable for this scope because ...` with the reason.
 
-You can request the same compaction from chat with `/compact` (or `!compact`).
+From chat, use `/compact` (or `!compact`) to compact now without another message.
 `/compact <agent_or_team>` requests it for one agent or configured team; `/compact` alone requests it for all of them.
 Both forms only reach agents and configured teams you may address that already have a conversation here.
 The conversation is the thread, or the whole room for an agent or team in room mode; for a thread-mode agent, send it inside the thread.
-The reply has one line per agent or team, with the reason when compaction is unavailable for it.
+The command acknowledges each target. Targets report estimated history tokens before and after compaction in separate notices.
+If a reply is in progress or waiting for approval, compaction waits behind it. Replies queued behind compaction wait for it to finish.
+In a target's contact room, compaction still runs before its next reply instead of sending a separate notice.
+If the target's recent room history has not synced or needs repair, the immediate fold is skipped and the request stays pending for its next reply.
 
 ## Team History and Compaction
 
@@ -5551,7 +5556,7 @@ This page lists every command and fully covers `/help`, `/hi`, and `/config`; th
 | `/cancel_job <id\|all>` | Cancel a background job by the short ID `/jobs` shows, or all of them in this thread, or in the whole room when sent outside any thread | [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
 | `/desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one agent | [Desktop](https://docs.mindroom.chat/tools/desktop/#desktop) |
 | `/mode <agent> minimal\|standard\|show\|reset` | Switch one agent between standard tools and a Bash-only interface | [Minimal Agent Mode](https://docs.mindroom.chat/tools/agent-cli/#mode) |
-| `/compact [agent_or_team]` | Compact context before the next reply in this conversation (bare `/compact` applies to every agent or configured team you may address that has a conversation here) | [History](https://docs.mindroom.chat/configuration/history/#manual-compaction) |
+| `/compact [agent_or_team]` | Compact context now, after any in-progress reply (bare `/compact` applies to every agent or configured team you may address that has a conversation here) | [History](https://docs.mindroom.chat/configuration/history/#manual-compaction) |
 | `/model [name\|name@level\|list\|reset]` | Show or switch the model used in the current thread | [Models](https://docs.mindroom.chat/configuration/models/#model) |
 | `/room_model [name\|name@level\|list\|reset]` | Show the room model default or switch it (set/reset require a room admin) | [Models](https://docs.mindroom.chat/configuration/models/#room_model) |
 | `/thread_mode [room\|thread\|reset\|show]` | Show or switch the thread mode used in the current room (set/reset require a room admin) | [Threads](https://docs.mindroom.chat/configuration/threads/#thread_mode) |
@@ -19002,12 +19007,12 @@ The [mindroom-ai](https://github.com/mindroom-ai) organization maintains these o
 | [thread-goal-plugin](https://github.com/mindroom-ai/thread-goal-plugin) | Hooks and tools | Per-thread goals stored in Matrix room state that survive context compaction and restarts. |
 | [thread-worktree-plugin](https://github.com/mindroom-ai/thread-worktree-plugin) | Hooks and tools | Ties a thread to a git worktree in Matrix room state and tells the agent that tied it to work there on every turn. |
 | [pull-request-plugin](https://github.com/mindroom-ai/pull-request-plugin) | Hooks and tools | Links GitHub pull requests to a thread in Matrix room state, by a tool and automatically when an agent creates one. |
-| [workloop-plugin](https://github.com/mindroom-ai/workloop-plugin) | Hooks and tools | External workloop; not needed for per-thread todo plans and auto-poke, which MindRoom provides natively. |
 | [openviking-plugin](https://github.com/mindroom-ai/openviking-plugin) | Hooks and tools | Long-term memory through [OpenViking](https://github.com/volcengine/OpenViking) with automatic extraction, recall, and compaction archiving. |
 | [error-notifier-plugin](https://github.com/mindroom-ai/error-notifier-plugin) | Hooks | Posts a short, redacted alert to one Matrix room when MindRoom logs an error, with a suggested fix when it knows one. |
 | [injection-guard-plugin](https://github.com/mindroom-ai/injection-guard-plugin) | Hooks | Checks tool results with outside text for prompt injection with a [judgment backend](https://docs.mindroom.chat/configuration/threads/#judgment-backends) before the model reads them. |
 | [deep-research-plugin](https://github.com/mindroom-ai/deep-research-plugin) | Tools | Bounded, multi-round web research on the agent's own model that returns cited reports. |
 
+The archived `workloop-plugin` is replaced by MindRoom's built-in [`todo`](https://docs.mindroom.chat/tools/project-management/#todo) toolkit for per-thread plans.
 MindRoom now has a built-in [`thread_snooze`](https://docs.mindroom.chat/tools/matrix-and-attachments/#thread_snooze) toolkit, so remove `thread-snooze-plugin` from `plugins` when you upgrade.
 Its `thread_snooze` tool name collides with the built-in toolkit, so MindRoom does not load the plugin, and the built-in toolkit replaces it.
 
@@ -19202,7 +19207,8 @@ Other `mindroom` modules can change in any release.
   "lifecycle_module": "lifecycle.py",
   "origin_module": "origin.py",
   "skills": ["skills"],
-  "reserved_namespaces": ["com.example.my_plugin."]
+  "reserved_namespaces": ["com.example.my_plugin."],
+  "worker_preload": false
 }
 ```
 
@@ -19218,6 +19224,7 @@ Other `mindroom` modules can change in any release.
 | `origin_module` | string | no | Relative path to the module defining `router`, a FastAPI `APIRouter` served on the plugin's own hosts, and optionally `async def serves(label)`; see [Origins of your own](#origins-of-your-own) |
 | `skills` | list of strings | no | Relative directories containing skill subdirectories |
 | `reserved_namespaces` | list of non-empty strings | no | Prefixes of the Matrix event types and content keys that only the plugin writes; see [Reserved namespaces](#reserved-namespaces) |
+| `worker_preload` | boolean | no | `true` imports the plugin once per Kubernetes worker instead of in every tool call; default `false`; see [Importing once per worker](#importing-once-per-worker) |
 
 Every declared module file and skill directory must exist.
 Unknown fields are ignored.
@@ -19745,6 +19752,27 @@ Call a sub-toolkit's functions through `toolkit_functions(toolkit)` from `mindro
 A function that runs in a worker is async, so await a function `inspect.iscoroutinefunction` reports and run any other off the event loop, for example with `asyncio.to_thread`.
 A tool that calls other tools this way must itself be async.
 Calling `toolkit.functions[name]` directly skips all of that: the validation, the output file, and the worker.
+
+### Importing once per worker
+
+A tool call that runs in a Kubernetes worker imports the configured plugins in a fresh process, so every call pays for those imports again.
+A plugin whose manifest sets `"worker_preload": true` is imported once when the worker starts, and the calls in that worker reuse it.
+Plugins import in the order of `plugins:`, so list the plugins that set it first: one that follows an enabled plugin without the setting is imported by each call.
+A plugin configured by a path under `~` is not imported once: a call can run with another home directory than the worker started with, so MindRoom imports that plugin, and every plugin listed after it, in each call.
+Setting it promises that the plugin's files and the packages it uses do not change while a worker runs, and that importing its tools, hooks, and OAuth modules:
+
+- Reads nothing a call sets: the import runs before any call, in the worker's own working directory and environment, without the call's `.mindroom/worker-env.sh` values or per-call environment.
+- Leaves no thread running and no file, socket, or database connection open, because every later call would share it.
+- Starts no other process, because MindRoom cannot be sure to end one that detached itself when it gives the import up.
+- Keeps no state that must differ between calls, such as a cache, a counter, or a seeded random generator other than Python's `random`.
+- Finishes within 60 seconds, for all the worker's plugins that set it together.
+
+MindRoom does not look for changes while a worker runs: the worker keeps the plugin, and the packages it imported, as they were when it started.
+An edited file or an upgraded package is certain to take effect only once the worker restarts, which happens after its idle timeout stopped it, after it was retired, or after a config change replaced it.
+A worker whose plugins break the second or fifth promise, or fail to import, logs the warning [`sandbox_forkserver_plugin_preload_failed`](https://docs.mindroom.chat/deployment/operational-log-events/#sandbox_forkserver_plugin_preload_failed) with the reason, and all its calls import their plugins themselves, as without the setting.
+So do the calls of a worker whose own copy of a plugin does not set `worker_preload`, or lacks the plugin.
+A call imports its plugins itself as well when its config does not begin with the plugins the worker imported, in the same order and under the same paths.
+Every other plugin, and every plugin in a Docker worker or the shared sandbox runner, is imported by each call.
 
 ## OAuth providers
 
@@ -21605,7 +21633,7 @@ async def inject_room_tags(ctx: SystemEnrichContext) -> None:
 Items are rendered in a `<mindroom_system_context>` block, with `"stable"` items first and `"volatile"` items last, each group sorted by key.
 `persist` has no effect here because system enrichment always applies to the current turn only.
 Changing the system prompt invalidates more of the provider's prompt cache, so use `system:enrich` only for room- or turn-scoped instructions that need system-level priority, and `message:enrich` with `persist=False` for live data.
-The key `matrix_message_target` is reserved; MindRoom replaces hook items that use it.
+The keys `matrix_message_target` and `room_instructions` are reserved; MindRoom replaces or drops hook items that use them.
 
 ## Enrichment in minimal mode
 
@@ -23410,6 +23438,7 @@ Further options, such as extra labels, annotations, volumes, containers, and the
 | `workers.kubernetes.storageSubpathPrefix` | `MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX` | `workers` | Storage directory for worker-local caches |
 | `workers.kubernetes.port` | `MINDROOM_KUBERNETES_WORKER_PORT` | `8766` | Internal Service and container port |
 | `workers.kubernetes.readyTimeoutSeconds` | `MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS` | `60` | How long the primary waits for a worker to become ready |
+| _(`env.extra`)_ | `MINDROOM_KUBERNETES_WORKER_SETUP_TIMEOUT_SECONDS` | `180` | How long a call then waits for a worker that just started to finish preparing itself, before it runs anyway |
 | `workers.kubernetes.idleTimeoutSeconds` | `MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS` | `1800` | Idle time before a worker may scale to zero |
 | `workers.cleanupIntervalSeconds` | `MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS` | Chart: `30`; otherwise `0` (no automatic cleanup) | How often idle-worker cleanup runs |
 | `workers.kubernetes.reconcilePodTemplates` | `MINDROOM_KUBERNETES_WORKER_RECONCILE_POD_TEMPLATES` | `true` | Recreate workers whose image, env, or resources changed |
@@ -23427,6 +23456,11 @@ Further options, such as extra labels, annotations, volumes, containers, and the
 
 Changing the image, environment, resources, or RuntimeClass recreates scaled-down workers on the next cleanup pass and running workers on their next use, so no manual recycling is needed; finish active work before changing them.
 Before selecting a RuntimeClass, verify that its handler is available on every eligible worker node and supports the configured storage driver, access mode, and mount behavior.
+
+A worker that just started is ready as soon as it answers, and then prepares its Python environment, shell, and tool runtime in the background.
+The call that started it shows `worker <name>: preparing (<n>s)` while it waits for that, for at most the setup timeout; a preparation that fails or takes longer never fails the worker, and the call then prepares what is missing itself.
+A command that streams its output, as `workers run` does, and a viewer that only shows the worker do not wait for that: the worker launches such a command itself, without the tool runtime.
+The tool runtime imports the plugins that set [`worker_preload`](https://docs.mindroom.chat/plugins/#importing-once-per-worker) once for all the worker's calls.
 
 Each worker's `/tmp` is disk-backed, and exceeding its size limit evicts that worker pod rather than refusing writes.
 `MINDROOM_KUBERNETES_WORKER_TMP_SIZE_LIMIT` (for example `4Gi`) also requests and limits the same amount of container `ephemeral-storage`, which clusters such as GKE Autopilot otherwise cap at 1 GiB.
@@ -26224,11 +26258,12 @@ A call to a ready worker logs nothing, and calls that wait for the same start sh
 | `scope` | The worker's [scope](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes): `shared`, `user`, `user_agent`, or `unscoped` for an agent without `worker_scope` |
 | `agent_name` | Agent the worker serves, as its worker key spells it, or `null` for a `user` worker, which serves every agent on that scope |
 | `outcome` | `ready`, `timeout` for a worker that did not become ready within the backend's ready timeout, or `error` |
-| `wait_ms` | Milliseconds from finding the worker not ready until it answered its health check, or until its start failed |
-| `pod_ready_ms` | Kubernetes only: milliseconds from the same point until Kubernetes reported the worker's pod ready, which covers applying or scaling up its Deployment, scheduling, image pull, and container start; the rest of `wait_ms` is the first health check through the worker's Service |
+| `wait_ms` | Milliseconds from finding the worker not ready until the call could run in it, or until its start failed |
+| `pod_ready_ms` | Kubernetes only: milliseconds from the same point until Kubernetes reported the worker's pod ready, which covers applying or scaling up its Deployment, scheduling, image pull, and container start |
+| `healthy_ms` | Kubernetes only: milliseconds from the same point until the worker answered its health check through its Service; the rest of `wait_ms` is the wait for the worker to [prepare itself](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings), at most the setup timeout |
 
 ```json
-{"worker": "3f9c2a7b1d4e8f60", "backend": "kubernetes", "kind": "tool", "scope": "user_agent", "agent_name": "code", "outcome": "ready", "wait_ms": 14211.6, "pod_ready_ms": 13190.2, "event": "worker_cold_start", "logger": "mindroom.workers.progress", "level": "info", "timestamp": "2026-01-01T12:00:14.211Z"}
+{"worker": "3f9c2a7b1d4e8f60", "backend": "kubernetes", "kind": "tool", "scope": "user_agent", "agent_name": "code", "outcome": "ready", "wait_ms": 31870.4, "pod_ready_ms": 13190.2, "healthy_ms": 14211.6, "event": "worker_cold_start", "logger": "mindroom.workers.progress", "level": "info", "timestamp": "2026-01-01T12:00:31.870Z"}
 ```
 
 ```text
@@ -26237,9 +26272,45 @@ alert on  count of logs where event = "worker_cold_start" and outcome != "ready"
 ```
 
 A high `pod_ready_ms` points at scheduling or image pulls: check for pending worker pods, node scale-up, and the worker image pull policy.
-A large gap between `pod_ready_ms` and `wait_ms` points at the worker's Service or a network policy between the primary and its workers.
+A large gap between `pod_ready_ms` and `healthy_ms` points at the worker's Service or a network policy between the primary and its workers.
+A large gap between `healthy_ms` and `wait_ms` is the worker creating its Python environment and starting its tool runtime: check the worker's CPU limit, its storage, and how many workers started at once; a gap as long as the setup timeout means the setup did not finish, and the worker's [`sandbox_worker_eager_setup_failed`](#sandbox_worker_eager_setup_failed) record names the reason.
 Many `tool` records for the same `worker` mean it is used less often than its idle timeout, such as [`workers.kubernetes.idleTimeoutSeconds`](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings), so it scales down between uses.
 A `timeout` means the worker did not become ready within [`workers.kubernetes.readyTimeoutSeconds`](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings) or `MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS`; the call that waited fails, and for a tool call a [`tool_call_failed`](#tool_call_failed) record carries the error.
+
+### `sandbox_worker_eager_setup_failed`
+
+Logged by a Kubernetes worker, in its own pod's log, when the setup it runs at startup fails or does not finish within 180 seconds.
+The worker stays up: its first call prepares what is missing and reports its own error, so that call is as slow as it was before workers prepared themselves.
+A worker that was to import plugins ahead of its calls gives that up too, and also logs [`sandbox_forkserver_plugin_preload_failed`](#sandbox_forkserver_plugin_preload_failed).
+
+| Field | Meaning |
+|-------|---------|
+| `error` | The failure's message, or its exception type when it has none, such as `TimeoutError` for a setup that outlasted its limit |
+
+```json
+{"error": "No space left on device", "event": "sandbox_worker_eager_setup_failed", "logger": "mindroom.api.sandbox_runner", "level": "warning", "timestamp": "2026-01-01T12:00:00.000Z"}
+```
+
+Alert on any record.
+Check the worker's storage and its CPU limit, and how many workers started at once.
+A worker image without `uv`, or whose Python lacks a bundled pip wheel, logs this whenever a worker has to create its Python environment, because only `uv` creates it within a time limit; the first call then creates it, as before.
+
+### `sandbox_forkserver_plugin_preload_failed`
+
+Logged by a Kubernetes worker, in its own pod's log, once, when it gives up importing the plugins that set [`worker_preload`](https://docs.mindroom.chat/plugins/#importing-once-per-worker) ahead of its calls.
+The import raised, took longer than 60 seconds, or left a thread or an open file behind, the worker's own copy of a plugin does not set `worker_preload`, the worker's setup failed or took too long, or the process that held the imported plugins ended later.
+Calls still work, and each imports its plugins itself until the worker restarts.
+
+| Field | Meaning |
+|-------|---------|
+| `error` | Why the worker gave the preload up, which for an import that raised is the exception |
+
+```json
+{"error": "ImportError: No module named 'missing'", "event": "sandbox_forkserver_plugin_preload_failed", "logger": "mindroom.api.sandbox_forkserver", "level": "warning", "timestamp": "2026-01-01T12:00:00.000Z"}
+```
+
+Alert on any record, since every tool call in that worker pays the plugin's import time again.
+Fix what `error` names, or remove `worker_preload` from the plugin's manifest.
 
 ### `oauth_credentials_refresh_failed`
 

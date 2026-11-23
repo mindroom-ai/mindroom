@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import errno
 import hashlib
@@ -13,6 +14,7 @@ import tempfile
 import threading
 import time
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import asdict, replace
@@ -35,11 +37,14 @@ from mindroom.constants import (
     resolve_primary_runtime_paths,
     sandbox_startup_manifest_path,
     startup_manifest_sha256,
+    write_startup_manifest,
 )
 from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.runtime_env_policy import CREDENTIALS_ENCRYPTION_KEY_ENV
 from mindroom.script_runs.models import script_worker_key_for_run
 from mindroom.shared_directories.store import add_shared_directory_member, create_shared_directory
+from mindroom.tool_system import sandbox_proxy as sandbox_proxy_module
+from mindroom.tool_system.runtime_context import CallOutputStream, call_progress_sink_scope
 from mindroom.tool_system.worker_proxy_client import record_proxy_response_failure_for_worker
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -47,6 +52,7 @@ from mindroom.tool_system.worker_routing import (
     private_instance_scope_root_path,
     resolve_unscoped_worker_key,
     resolve_worker_key,
+    resolve_worker_target,
     subagent_worker_key,
     worker_dir_name,
     worker_id_for_key,
@@ -1082,6 +1088,7 @@ def test_kubernetes_backend_ensures_worker_service_deployment_and_auth_secret(tm
         committed_runtime,
         tool_validation_snapshot=_TEST_TOOL_VALIDATION_SNAPSHOT,
         public_runtime=True,
+        eager_setup_plugins=[],
     )
     assert deployment["spec"]["template"]["spec"]["securityContext"] == {
         "runAsUser": 1000,
@@ -2724,6 +2731,7 @@ def test_kubernetes_backend_renders_configured_annotations_on_worker_pod_templat
         committed_runtime,
         tool_validation_snapshot=_TEST_TOOL_VALIDATION_SNAPSHOT,
         public_runtime=True,
+        eager_setup_plugins=[],
     )
     assert annotations[ANNOTATION_WORKER_KEY] != "user-supplied-value"
     assert annotations[_ANNOTATION_STARTUP_MANIFEST_HASH] != "user-supplied-value"
@@ -5685,6 +5693,7 @@ def test_kubernetes_maintenance_reconciles_against_the_launch_it_is_given(tmp_pa
         ),
         tool_validation_snapshot=updated_snapshot,
         public_runtime=True,
+        eager_setup_plugins=[],
     )
 
 
@@ -6364,7 +6373,8 @@ def test_kubernetes_worker_health_read_waits_for_a_successful_answer(monkeypatch
         def __exit__(self, *_args: object) -> None:
             return None
 
-        def get(self, url: str) -> httpx.Response:
+        def get(self, url: str, *, timeout: httpx.Timeout) -> httpx.Response:
+            assert timeout.connect is not None
             urls.append(url)
             answer = answers.pop(0)
             if isinstance(answer, httpx.HTTPError):
@@ -6398,7 +6408,7 @@ def test_kubernetes_worker_health_read_times_out(monkeypatch: pytest.MonkeyPatch
         def __exit__(self, *_args: object) -> None:
             return None
 
-        def get(self, _url: str) -> httpx.Response:
+        def get(self, _url: str, *, timeout: httpx.Timeout) -> httpx.Response:  # noqa: ARG002
             message = "connection refused"
             raise httpx.ConnectError(message)
 
@@ -6411,6 +6421,767 @@ def test_kubernetes_worker_health_read_times_out(monkeypatch: pytest.MonkeyPatch
             "mindroom-worker-abc",
             timeout_seconds=0.01,
         )
+
+
+def test_kubernetes_worker_health_read_allows_a_slower_handshake_on_each_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The first try gives up connecting after 0.5 s; later ones wait longer, so a 0.8 s handshake still answers."""
+    backend, _apps_api, _core_api = _backend()
+    connect_timeouts: list[float] = []
+    handshake_seconds = [0.8]
+
+    class _SlowHandshakeClient:
+        def __init__(self, *, timeout: float | httpx.Timeout) -> None:
+            self.timeout = httpx.Timeout(timeout)
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, _url: str, *, timeout: httpx.Timeout | None = None) -> httpx.Response:
+            connect = (timeout or self.timeout).connect
+            assert connect is not None
+            connect_timeouts.append(connect)
+            if connect < handshake_seconds[0]:
+                message = "handshake timed out"
+                raise httpx.ConnectTimeout(message)
+            return httpx.Response(200, json={"status": "ok"})
+
+    monkeypatch.setattr(kubernetes_resources_module.httpx, "Client", _SlowHandshakeClient)
+    monkeypatch.setattr(kubernetes_resources_module.time, "sleep", lambda _seconds: None)
+    read_health = kubernetes_resources_module.KubernetesResourceManager.read_worker_health
+
+    assert read_health(backend._resources, "mindroom-worker-abc", timeout_seconds=60.0).status_code == 200
+    assert connect_timeouts == [0.5, 1.0]
+
+    # The handshake never gets longer than a whole answer may take, as before.
+    connect_timeouts.clear()
+    handshake_seconds[0] = 5.0
+    assert read_health(backend._resources, "mindroom-worker-abc", timeout_seconds=60.0).status_code == 200
+    assert connect_timeouts == [0.5, 1.0, 2.0, 4.0, 5.0]
+
+
+@pytest.mark.parametrize(
+    ("budget_seconds", "handshake_seconds", "expected_connect_timeouts"),
+    [
+        # A budget shorter than the first step: the attempt gets what there is.
+        (0.4, 0.35, [0.4]),
+        (6.0, 1.8, [0.5, 1.0, 2.0]),
+        # An attempt never gets more than the time that is left.
+        (7.0, 2.5, [0.5, 1.0, 2.0, pytest.approx(2.9)]),
+    ],
+    ids=["short-budget", "escalated", "capped-by-time-left"],
+)
+def test_kubernetes_worker_health_read_gives_each_attempt_its_step_or_the_time_left(
+    monkeypatch: pytest.MonkeyPatch,
+    budget_seconds: float,
+    handshake_seconds: float,
+    expected_connect_timeouts: list[float],
+) -> None:
+    """Each try may take its step, which doubles, or the time that is left when that is less."""
+    backend, _apps_api, _core_api = _backend()
+    clock = _ControlledMonotonicClock()
+    connect_timeouts: list[float] = []
+
+    class _SlowHandshakeClient:
+        def __init__(self, *, timeout: float | httpx.Timeout) -> None:
+            self.timeout = httpx.Timeout(timeout)
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, _url: str, *, timeout: httpx.Timeout | None = None) -> httpx.Response:
+            timeout = timeout or self.timeout
+            connect = timeout.connect
+            assert connect is not None
+            # No part of a try may take longer than the read has left.
+            time_left = budget_seconds - clock.monotonic()
+            assert max(connect, timeout.read or 0.0, timeout.write or 0.0, timeout.pool or 0.0) <= time_left + 1e-9
+            connect_timeouts.append(connect)
+            clock.advance_to(clock.monotonic() + min(connect, handshake_seconds))
+            if connect < handshake_seconds:
+                message = "handshake timed out"
+                raise httpx.ConnectTimeout(message)
+            return httpx.Response(200, json={"status": "ok"})
+
+    monkeypatch.setattr(kubernetes_resources_module.httpx, "Client", _SlowHandshakeClient)
+    monkeypatch.setattr(
+        kubernetes_resources_module,
+        "time",
+        SimpleNamespace(time=clock.monotonic, sleep=lambda seconds: clock.advance_to(clock.monotonic() + seconds)),
+    )
+
+    response = kubernetes_resources_module.KubernetesResourceManager.read_worker_health(
+        backend._resources,
+        "mindroom-worker-abc",
+        timeout_seconds=budget_seconds,
+    )
+
+    assert response.status_code == 200
+    assert connect_timeouts == expected_connect_timeouts
+    assert clock.monotonic() <= budget_seconds
+
+
+def _health_read_on_a_clock(
+    monkeypatch: pytest.MonkeyPatch,
+    answer: Callable[[float], httpx.Response | httpx.HTTPError],
+    *,
+    sleep_overshoot_seconds: float = 0.0,
+) -> tuple[_ControlledMonotonicClock, list[float]]:
+    """Answer each health-check try at once with ``answer(now)``, on a clock that only sleeps advance."""
+    clock = _ControlledMonotonicClock()
+    attempts: list[float] = []
+
+    class _InstantClient:
+        def __init__(self, *, timeout: float | httpx.Timeout) -> None:
+            self.timeout = httpx.Timeout(timeout)
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, _url: str, *, timeout: httpx.Timeout | None = None) -> httpx.Response:
+            timeout = timeout or self.timeout
+            # A socket refuses a timeout that is not positive.
+            assert min(timeout.connect or 0.0, timeout.read or 0.0, timeout.write or 0.0, timeout.pool or 0.0) > 0
+            attempts.append(clock.monotonic())
+            answered = answer(clock.monotonic())
+            if isinstance(answered, httpx.HTTPError):
+                raise answered
+            return answered
+
+    def sleep(seconds: float) -> None:
+        clock.advance_to(clock.monotonic() + seconds + sleep_overshoot_seconds)
+
+    monkeypatch.setattr(kubernetes_resources_module.httpx, "Client", _InstantClient)
+    monkeypatch.setattr(kubernetes_resources_module, "time", SimpleNamespace(time=clock.monotonic, sleep=sleep))
+    return clock, attempts
+
+
+def test_kubernetes_worker_health_read_retries_fast_failures_until_its_budget_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Service that refuses or answers 503 at once is asked again for the whole budget, not for a few tries."""
+    backend, _apps_api, _core_api = _backend()
+
+    def answer(now: float) -> httpx.Response | httpx.HTTPError:
+        if now >= 1.95:
+            return httpx.Response(200, json={"status": "ok"})
+        return httpx.ConnectError("connection refused") if int(now * 10) % 2 else httpx.Response(503)
+
+    clock, attempts = _health_read_on_a_clock(monkeypatch, answer)
+
+    response = kubernetes_resources_module.KubernetesResourceManager.read_worker_health(
+        backend._resources,
+        "mindroom-worker-abc",
+        timeout_seconds=5.0,
+    )
+
+    assert response.status_code == 200
+    assert clock.monotonic() == pytest.approx(2.0)
+    assert len(attempts) == 11
+
+
+def test_kubernetes_worker_health_read_fails_cleanly_when_a_pause_outlasts_its_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A read whose time ran out while it paused fails as a timeout, without one more try on less than no time."""
+    backend, _apps_api, _core_api = _backend()
+    # A primary that stalls sleeps far longer than it asked to.
+    clock, attempts = _health_read_on_a_clock(
+        monkeypatch,
+        lambda _now: httpx.ConnectError("connection refused"),
+        sleep_overshoot_seconds=0.9,
+    )
+
+    with pytest.raises(WorkerStartTimeoutError, match="did not answer its health check"):
+        kubernetes_resources_module.KubernetesResourceManager.read_worker_health(
+            backend._resources,
+            "mindroom-worker-abc",
+            timeout_seconds=1.0,
+        )
+
+    assert attempts == [0.0]
+    assert clock.monotonic() >= 1.0
+
+
+def test_kubernetes_worker_health_read_fails_when_its_budget_ends(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A worker that never completes a handshake fails the read at its budget, not one whole attempt later."""
+    backend, _apps_api, _core_api = _backend()
+    clock = _ControlledMonotonicClock()
+
+    class _NeverConnectsClient:
+        def __init__(self, *, timeout: float | httpx.Timeout) -> None:
+            self.timeout = httpx.Timeout(timeout)
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def get(self, _url: str, *, timeout: httpx.Timeout | None = None) -> httpx.Response:
+            connect = (timeout or self.timeout).connect
+            assert connect is not None
+            clock.advance_to(clock.monotonic() + connect)
+            message = "handshake timed out"
+            raise httpx.ConnectTimeout(message)
+
+    monkeypatch.setattr(kubernetes_resources_module.httpx, "Client", _NeverConnectsClient)
+    monkeypatch.setattr(
+        kubernetes_resources_module,
+        "time",
+        SimpleNamespace(time=clock.monotonic, sleep=lambda seconds: clock.advance_to(clock.monotonic() + seconds)),
+    )
+
+    with pytest.raises(WorkerStartTimeoutError, match="did not answer its health check within 6s"):
+        kubernetes_resources_module.KubernetesResourceManager.read_worker_health(
+            backend._resources,
+            "mindroom-worker-abc",
+            timeout_seconds=6.0,
+        )
+
+    assert clock.monotonic() == pytest.approx(6.0)
+
+
+def _answer_worker_setup(backend: KubernetesWorkerBackend, setup: Callable[[], str | None]) -> None:
+    """Answer each health read with a ready worker whose eager setup is in the state ``setup()`` returns."""
+
+    def _read(_self: object, _worker_id: str, *, timeout_seconds: float) -> httpx.Response:
+        assert timeout_seconds > 0
+        state = setup()
+        payload = {"status": "ok", "mindroom_version": "test", "worker_protocol": WORKER_PROTOCOL_VERSION}
+        return httpx.Response(200, json=payload if state is None else {**payload, "setup": state})
+
+    backend._resources.read_worker_health = MethodType(_read, backend._resources)
+
+
+def _run_on_one_clock(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    wall_starts_at: float | None = None,
+) -> _ControlledMonotonicClock:
+    """Make the setup wait and its progress reports read one clock, which a sleep advances at once.
+
+    With ``wall_starts_at``, the backend's wall clock reads that time plus what the clock advanced.
+    """
+    clock = _ControlledMonotonicClock()
+    monkeypatch.setattr(progress_module, "time", SimpleNamespace(monotonic=clock.monotonic))
+    monkeypatch.setattr(
+        kubernetes_backend_module,
+        "time",
+        SimpleNamespace(
+            time=time.time if wall_starts_at is None else lambda: wall_starts_at + clock.monotonic(),
+            monotonic=clock.monotonic,
+            sleep=lambda seconds: clock.advance_to(clock.monotonic() + seconds),
+        ),
+    )
+    return clock
+
+
+def test_kubernetes_backend_waits_for_a_slow_worker_setup_as_progress_and_never_fails_the_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A setup far longer than the ready timeout is reported as ``preparing``, and the worker stays ready."""
+    backend, _apps_api, _core_api = _backend()
+    clock = _run_on_one_clock(monkeypatch)
+    # Slower than the 5 s ready timeout of this backend and the 60 s default: a burst of 32 workers took 70 to 88 s.
+    _answer_worker_setup(backend, lambda: "preparing" if clock.monotonic() < 88.0 else "ready")
+    events: list[WorkerReadyProgress] = []
+
+    with capture_logs() as logs:
+        handle = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0, progress_sink=events.append)
+
+    assert handle.status == "ready"
+    assert handle.failure_count == 0
+    (cold_start,) = _cold_start_records(logs)
+    # The record tells the wait for the worker's answer from the wait for its setup.
+    assert cold_start["healthy_ms"] < 1000.0
+    assert cold_start["wait_ms"] >= 88000.0
+    phases = [event.phase for event in events]
+    assert phases[0] == "cold_start"
+    assert phases[-1] == "ready"
+    assert set(phases[1:-1]) == {"preparing"}
+    assert len(phases[1:-1]) == 17
+    assert events[-1].elapsed_seconds >= 88.0
+    assert backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=11.0).status == "ready"
+
+
+@pytest.mark.parametrize("setup", ["preparing", "failed", None], ids=["never-finishes", "failed", "not-reported"])
+def test_kubernetes_backend_runs_the_call_whatever_the_worker_setup_does(
+    monkeypatch: pytest.MonkeyPatch,
+    setup: str | None,
+) -> None:
+    """A setup that outlasts its budget or fails, or a worker reporting none, leaves a ready worker for the call."""
+    backend, _apps_api, _core_api = _backend()
+    clock = _run_on_one_clock(monkeypatch)
+    _answer_worker_setup(backend, lambda: setup)
+
+    handle = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert handle.status == "ready"
+    assert handle.failure_count == 0
+    # Only a setup that keeps running is waited for, and only for the setup budget.
+    assert clock.monotonic() == pytest.approx(180.0 if setup == "preparing" else 0.0)
+
+
+def test_kubernetes_backend_ends_the_wait_for_a_worker_setup_with_its_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The last sleep and the last health read of the wait both end when the setup budget does."""
+    backend, _apps_api, _core_api = _backend()
+    backend.config = replace(backend.config, setup_timeout_seconds=2.5)
+    clock = _run_on_one_clock(monkeypatch)
+    reads: list[tuple[float, float]] = []
+
+    def _read(_self: object, _worker_id: str, *, timeout_seconds: float) -> httpx.Response:
+        if reads:
+            # A worker that is busy preparing answers slowly.
+            clock.advance_to(clock.monotonic() + min(timeout_seconds, 0.4))
+        reads.append((clock.monotonic(), timeout_seconds))
+        payload = {"status": "ok", "mindroom_version": "test", "worker_protocol": WORKER_PROTOCOL_VERSION}
+        return httpx.Response(200, json={**payload, "setup": "preparing"})
+
+    backend._resources.read_worker_health = MethodType(_read, backend._resources)
+
+    handle = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert handle.status == "ready"
+    assert clock.monotonic() == pytest.approx(2.5)
+    # The first read is the ready check; each later one answered within the budget.
+    assert [answered_at for answered_at, _timeout in reads[1:]] == [pytest.approx(1.4), pytest.approx(2.5)]
+    assert [timeout for _answered_at, timeout in reads[1:]] == [pytest.approx(1.5), pytest.approx(0.1)]
+
+
+def test_kubernetes_backend_does_not_wait_for_the_setup_when_the_caller_only_shows_the_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opening a Computer needs a worker that answers, not its tool runtime, so it goes on at once, as before."""
+    backend, _apps_api, _core_api = _backend()
+    clock = _run_on_one_clock(monkeypatch)
+    _answer_worker_setup(backend, lambda: "preparing")
+    events: list[WorkerReadyProgress] = []
+    spec = replace(_spec(_TEST_SCOPED_WORKER_KEY_A), wait_for_setup=False)
+
+    handle = backend.ensure_worker(spec, now=10.0, progress_sink=events.append)
+
+    assert handle.status == "ready"
+    assert clock.monotonic() == 0.0
+    assert "preparing" not in [event.phase for event in events]
+
+
+@pytest.mark.parametrize("streamed", [True, False])
+def test_kubernetes_backend_starts_a_streamed_command_once_its_cold_worker_answers(
+    monkeypatch: pytest.MonkeyPatch,
+    streamed: bool,
+) -> None:
+    """The runner launches a streamed command itself, so ``workers run`` does not wait for the setup other calls use."""
+    backend, _apps_api, _core_api = _backend()
+    clock = _run_on_one_clock(monkeypatch)
+    _answer_worker_setup(backend, lambda: "preparing")
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session-1",
+    )
+    target = resolve_worker_target("user", "code", execution_identity=identity, tenant_id=None, account_id=None)
+    loop = asyncio.new_event_loop()
+
+    try:
+        with call_progress_sink_scope(None, stream=CallOutputStream(loop) if streamed else None):
+            _route, handle = sandbox_proxy_module.worker_route(
+                runtime_paths=backend.runtime_paths,
+                runtime_config=None,
+                tool_name="shell",
+                function_name="run_shell_command",
+                worker_target=target,
+                worker_manager=backend,
+                base_dir=None,
+            )
+    finally:
+        loop.close()
+
+    assert handle is not None
+    assert handle.status == "ready"
+    assert clock.monotonic() == pytest.approx(0.0 if streamed else 180.0)
+
+
+def test_kubernetes_backend_lets_a_caller_that_only_shows_a_worker_pass_a_tool_caller_waiting_for_its_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The setup wait holds no lock: a viewer goes on once the worker answers, and every tool caller still waits."""
+    backend, _apps_api, _core_api = _backend()
+    monkeypatch.setattr(kubernetes_backend_module, "_SETUP_POLL_INTERVAL_SECONDS", 0.01)
+    waiting, finished = threading.Event(), threading.Event()
+    reads: list[str] = []
+
+    def setup() -> str:
+        reads.append("ready" if finished.is_set() else "preparing")
+        if len(reads) > 1:  # The first read is the ready check; each later one is a tool caller's setup wait.
+            waiting.set()
+        return reads[-1]
+
+    _answer_worker_setup(backend, setup)
+    spec = _spec(_TEST_SCOPED_WORKER_KEY_A)
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        try:
+            tool_call = pool.submit(backend.ensure_worker, spec, now=10.0)
+            assert waiting.wait(10)
+            viewer = pool.submit(backend.ensure_worker, replace(spec, wait_for_setup=False), now=11.0)
+            assert viewer.result(timeout=3).status == "ready"
+            later_tool_call = pool.submit(backend.ensure_worker, spec, now=12.0)
+            time.sleep(0.2)
+            assert not tool_call.done()
+            assert not later_tool_call.done()
+        finally:
+            finished.set()
+        assert tool_call.result(timeout=10).status == "ready"
+        assert later_tool_call.result(timeout=10).status == "ready"
+    # The later tool caller waited behind the first one's wait, without reading the worker's health once more.
+    assert reads.count("ready") == 1
+
+
+def test_kubernetes_idle_cleanup_leaves_a_worker_whose_tool_caller_waits_for_its_setup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A setup that outlasts the idle timeout is use, and the worker's idle time starts when its caller gets it."""
+    backend, _apps_api, _core_api = _backend(idle_timeout_seconds=60.0)
+    clock = _run_on_one_clock(monkeypatch, wall_starts_at=10.0)
+    cleaned_during_the_wait: list[list[str]] = []
+
+    def setup() -> str:
+        if clock.monotonic() >= 90.0:
+            return "ready"
+        if clock.monotonic() >= 70.0 and not cleaned_during_the_wait:
+            # Idle cleanup runs 70 s after the worker started, which is longer than the idle timeout.
+            cleaned = backend.cleanup_idle_workers(now=10.0 + clock.monotonic())
+            cleaned_during_the_wait.append([handle.worker_key for handle in cleaned])
+        return "preparing"
+
+    _answer_worker_setup(backend, setup)
+
+    handle = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert cleaned_during_the_wait == [[]]
+    assert handle.status == "ready"
+    assert handle.last_used_at == pytest.approx(100.0)
+    assert [worker.status for worker in backend.list_workers(now=100.0)] == ["ready"]
+    # The worker is idle 60 s after the wait handed it to its caller, not 60 s after it started.
+    assert backend.cleanup_idle_workers(now=159.0) == []
+    assert [worker.worker_key for worker in backend.cleanup_idle_workers(now=161.0)] == [_TEST_SCOPED_WORKER_KEY_A]
+
+
+def test_kubernetes_backend_records_a_worker_as_used_at_the_time_its_setup_wait_hands_it_over(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The worker's idle time starts when its caller gets it, however long the start before the wait took."""
+    backend, _apps_api, _core_api = _backend()
+    clock = _run_on_one_clock(monkeypatch, wall_starts_at=10.0)
+    _answer_worker_setup(backend, lambda: "ready" if clock.monotonic() >= 50.0 else "preparing")
+    apply_service = backend._resources.apply_service
+
+    def slow_apply_service(*args: object, **kwargs: object) -> object:
+        clock.advance_to(clock.monotonic() + 30.0)
+        return apply_service(*args, **kwargs)
+
+    backend._resources.apply_service = slow_apply_service
+
+    handle = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A))
+
+    # The start took 30 s and the setup wait 20 s more.
+    assert handle.last_used_at == pytest.approx(60.0)
+    assert [worker.last_used_at for worker in backend.list_workers(now=60.0)] == [pytest.approx(60.0)]
+
+
+def test_kubernetes_backend_keeps_a_later_use_of_a_worker_when_its_setup_wait_ends(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The end of a setup wait never moves a worker's last use back, as behind a use a viewer recorded meanwhile."""
+    backend, _apps_api, _core_api = _backend()
+    clock = _run_on_one_clock(monkeypatch, wall_starts_at=10.0)
+    spec = _spec(_TEST_SCOPED_WORKER_KEY_A)
+    viewed: list[float] = []
+
+    def setup() -> str:
+        if clock.monotonic() >= 5.0:
+            return "ready"
+        if clock.monotonic() >= 2.0 and not viewed:
+            # The wait ends at 15.0 on the backend's clock; the viewer's clock is ahead of it.
+            viewed.append(20.0)
+            assert backend.ensure_worker(replace(spec, wait_for_setup=False), now=20.0).last_used_at == 20.0
+        return "preparing"
+
+    _answer_worker_setup(backend, setup)
+
+    handle = backend.ensure_worker(spec)
+
+    assert viewed == [20.0]
+    assert handle.last_used_at == 20.0
+    assert [worker.last_used_at for worker in backend.list_workers(now=20.0)] == [20.0]
+
+
+@pytest.mark.parametrize("failure", ["refused", "unreachable", "backend"])
+def test_kubernetes_backend_returns_the_ready_worker_when_recording_its_use_after_the_setup_wait_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure: str,
+) -> None:
+    """Recording the use is an extra; whatever keeps it from being written, the caller gets the ready worker."""
+    import urllib3  # noqa: PLC0415
+
+    backend, apps_api, _core_api = _backend()
+    clock = _run_on_one_clock(monkeypatch, wall_starts_at=10.0)
+    _answer_worker_setup(backend, lambda: "ready" if clock.monotonic() >= 3.0 else "preparing")
+    patch_deployment = apps_api.patch_namespaced_deployment
+    errors: dict[str, Exception] = {
+        "refused": _FakeApiError(503),
+        # What the client raises when it cannot reach the API server at all.
+        "unreachable": urllib3.exceptions.MaxRetryError(None, "/apis/apps/v1", OSError("Connection refused")),
+        "backend": WorkerBackendError("The cluster answered with something this backend cannot use."),
+    }
+
+    def unavailable_after_the_wait(*args: object, **kwargs: object) -> object:
+        if clock.monotonic() >= 3.0:
+            raise errors[failure]
+        return patch_deployment(*args, **kwargs)
+
+    apps_api.patch_namespaced_deployment = unavailable_after_the_wait
+
+    with caplog.at_level("WARNING", logger=kubernetes_backend_module.__name__):
+        handle = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A))
+
+    assert handle.status == "ready"
+    assert backend._setup_waits == {}
+    assert ["was not recorded as used after its setup" in message for message in caplog.messages] == [True]
+
+
+def test_kubernetes_cleanup_ends_a_named_worker_at_its_maximum_age_while_a_tool_caller_waits_for_its_setup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A caller that waits for the setup uses the worker, which spares it the idle timeout and not its maximum age."""
+    backend, _apps_api, _core_api = _named_backend(
+        tmp_path,
+        named_worker_idle_timeout_seconds=20.0,
+        named_worker_max_age_seconds=50.0,
+    )
+    clock = _run_on_one_clock(monkeypatch, wall_starts_at=10.0)
+    spec = _named_spec()
+    cleaned: dict[float, list[str]] = {}
+
+    def setup() -> str:
+        if clock.monotonic() >= 70.0:
+            return "ready"
+        for at in (30.0, 60.0):
+            if clock.monotonic() >= at and at not in cleaned:
+                handles = backend.cleanup_idle_workers(now=10.0 + clock.monotonic())
+                cleaned[at] = [handle.worker_key for handle in handles]
+        return "preparing"
+
+    _answer_worker_setup(backend, setup)
+
+    backend.ensure_worker(spec, now=10.0)
+
+    # After 30 s the worker is past its idle timeout only; after 60 s it is past its maximum age.
+    assert cleaned == {30.0: [], 60.0: [spec.worker_key]}
+
+
+def test_kubernetes_backend_publishes_and_forgets_a_setup_wait_under_the_workers_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A start publishes its wait under the worker's lock, so a wait that ends there never forgets a newer start's."""
+    backend, _apps_api, _core_api = _backend()
+    clock = _run_on_one_clock(monkeypatch)
+    changes: list[tuple[str, bool]] = []
+
+    class _RecordedWaits(dict[str, object]):
+        def __setitem__(self, key: str, value: object) -> None:
+            changes.append(("published", backend._worker_locks.for_key(key).locked()))
+            super().__setitem__(key, value)
+
+        def __delitem__(self, key: str) -> None:
+            changes.append(("forgotten", backend._worker_locks.for_key(key).locked()))
+            super().__delitem__(key)
+
+    backend._setup_waits = _RecordedWaits()
+    _answer_worker_setup(backend, lambda: "ready" if clock.monotonic() >= 3.0 else "preparing")
+
+    backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert changes == [("published", True), ("forgotten", True)]
+
+
+@pytest.mark.parametrize("newer_start", [False, True])
+def test_kubernetes_backend_forgets_a_setup_wait_that_ended_but_not_the_wait_of_a_newer_start(
+    monkeypatch: pytest.MonkeyPatch,
+    newer_start: bool,
+) -> None:
+    """A wait that ended is no longer use; a start of the same worker that began meanwhile keeps its own wait."""
+    backend, _apps_api, _core_api = _backend()
+    clock = _run_on_one_clock(monkeypatch)
+    newer_wait = (threading.Lock(), [])
+
+    def setup() -> str:
+        if clock.monotonic() >= 3.0:
+            return "ready"
+        if newer_start and clock.monotonic() > 0.0:
+            backend._setup_waits[_TEST_SCOPED_WORKER_KEY_A] = newer_wait
+        return "preparing"
+
+    _answer_worker_setup(backend, setup)
+
+    backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert backend._setup_waits == ({_TEST_SCOPED_WORKER_KEY_A: newer_wait} if newer_start else {})
+
+
+def test_kubernetes_backend_ends_the_report_of_a_start_whose_setup_wait_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Whatever ends the setup wait, the start is reported and logged as over, and the wait is no longer use."""
+    backend, _apps_api, _core_api = _backend()
+    _run_on_one_clock(monkeypatch)
+    reads: list[float] = []
+
+    def _read(_self: object, _worker_id: str, *, timeout_seconds: float) -> httpx.Response:
+        reads.append(timeout_seconds)
+        if len(reads) > 1:
+            msg = "The health read broke."
+            raise RuntimeError(msg)
+        payload = {"status": "ok", "mindroom_version": "test", "worker_protocol": WORKER_PROTOCOL_VERSION}
+        return httpx.Response(200, json={**payload, "setup": "preparing"})
+
+    backend._resources.read_worker_health = MethodType(_read, backend._resources)
+
+    with capture_logs() as logs, pytest.raises(RuntimeError, match="The health read broke"):
+        backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    assert len(_cold_start_records(logs)) == 1
+    assert backend._setup_waits == {}
+
+
+def test_kubernetes_backend_reuses_a_ready_worker_whether_or_not_its_caller_waits_for_the_setup() -> None:
+    """Whether a caller waits for the setup says nothing about the worker, so it never makes a ready worker stale."""
+    backend, apps_api, _core_api = _backend()
+    spec = _spec(_TEST_SCOPED_WORKER_KEY_A)
+    backend.ensure_worker(spec, now=10.0)
+    reads_after_ensure = len(apps_api.read_names)
+
+    handle = backend.ensure_worker(replace(spec, wait_for_setup=False), now=11.0)
+
+    assert handle.status == "ready"
+    assert replace(spec, wait_for_setup=False) == spec
+    assert len(apps_api.read_names) == reads_after_ensure
+
+
+def test_kubernetes_backend_marks_a_worker_healthy_when_it_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``healthy_ms`` ends with the worker's answer, not with what the primary records about the worker afterwards."""
+    backend, _apps_api, _core_api = _backend()
+    clock = _run_on_one_clock(monkeypatch)
+    answered_at: list[float] = []
+
+    def setup() -> str:
+        answered_at.append(clock.monotonic())
+        return "ready"
+
+    _answer_worker_setup(backend, setup)
+    patch_deployment = backend._resources.patch_deployment
+
+    def slow_patch_deployment(*args: object, **kwargs: object) -> object:
+        clock.advance_to(clock.monotonic() + 5.0)
+        return patch_deployment(*args, **kwargs)
+
+    backend._resources.patch_deployment = slow_patch_deployment
+
+    with capture_logs() as logs:
+        backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+
+    (cold_start,) = _cold_start_records(logs)
+    assert cold_start["healthy_ms"] == pytest.approx(answered_at[0] * 1000.0)
+    assert cold_start["wait_ms"] >= cold_start["healthy_ms"] + 5000.0
+
+
+def test_kubernetes_backend_reads_the_setup_timeout() -> None:
+    """The setup budget defaults to 180 s and follows ``MINDROOM_KUBERNETES_WORKER_SETUP_TIMEOUT_SECONDS``."""
+    base_env = {
+        "MINDROOM_KUBERNETES_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+        "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "mindroom-storage",
+    }
+
+    def config(env: dict[str, str]) -> KubernetesWorkerBackendConfig:
+        runtime_paths = resolve_primary_runtime_paths(
+            config_path=Path("config.yaml"),
+            storage_path=_default_storage_root(),
+            process_env={**base_env, **env},
+        )
+        return KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+
+    assert config({}).setup_timeout_seconds == 180.0
+    assert config({"MINDROOM_KUBERNETES_WORKER_SETUP_TIMEOUT_SECONDS": "45"}).setup_timeout_seconds == 45.0
+
+
+def _manifest_and_template_hash(backend: KubernetesWorkerBackend, apps_api: _FakeAppsApi) -> tuple[dict, str]:
+    handle = backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
+    state_root = backend.storage_root / str(handle.debug_metadata["state_subpath"])
+    manifest = json.loads(sandbox_startup_manifest_path(state_root).read_text(encoding="utf-8"))
+    annotations = apps_api.created_bodies[0]["spec"]["template"]["metadata"]["annotations"]
+    return manifest, annotations[_ANNOTATION_STARTUP_MANIFEST_HASH]
+
+
+def test_kubernetes_startup_manifest_and_template_ignore_plugins_that_do_not_opt_in() -> None:
+    """Adding or disabling a plugin that is imported per call changes no worker's template, as before."""
+    storage_root = _default_storage_root()
+
+    def backend_with(plugins: list[dict[str, object]]) -> tuple[KubernetesWorkerBackend, _FakeAppsApi]:
+        runtime_paths = resolve_primary_runtime_paths(config_path=Path("config.yaml"), storage_path=storage_root)
+        backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths, applied_config=Config(plugins=plugins))
+        return backend, apps_api
+
+    without_plugins = _manifest_and_template_hash(*backend_with([]))
+    with_plugins = _manifest_and_template_hash(
+        *backend_with([{"path": "./plugins/enabled"}, {"path": "./plugins/disabled", "enabled": False}]),
+    )
+
+    assert with_plugins[0]["eager_setup_plugins"] == []
+    assert with_plugins == without_plugins
+    # A manifest written without the list, as the Docker backend writes it, leaves the worker preparing lazily.
+    other_manifest = write_startup_manifest(
+        Path(tempfile.mkdtemp()),
+        backend_with([])[0].runtime_paths,
+        public_runtime=True,
+    )
+    assert "eager_setup_plugins" not in json.loads(other_manifest.read_text(encoding="utf-8"))
+
+
+def test_kubernetes_startup_manifest_lists_the_plugins_that_opt_in() -> None:
+    """Only the plugins the primary found to set ``worker_preload`` reach a worker's manifest."""
+    backend, apps_api, _core_api = _backend()
+    _BACKEND_LAUNCHES[backend] = replace(_launch_of(backend), worker_preload_plugins=("./plugins/opted",))
+
+    manifest, _template_hash = _manifest_and_template_hash(backend, apps_api)
+
+    assert manifest["eager_setup_plugins"] == ["./plugins/opted"]
+
+
+def test_kubernetes_script_recovery_signature_ignores_the_setup_timeout() -> None:
+    """A setting that only times the primary's wait never revokes the scripts an earlier release started."""
+    backend, _apps_api, _core_api = _backend()
+    signature = backend.script_recovery_signature()
+
+    assert "setup_timeout_seconds" not in backend._script_recovery_payload()["config"]
+    object.__setattr__(backend.config, "setup_timeout_seconds", 45.0)
+    assert backend.script_recovery_signature() == signature
 
 
 def test_kubernetes_backend_progress_respects_real_elapsed_time(

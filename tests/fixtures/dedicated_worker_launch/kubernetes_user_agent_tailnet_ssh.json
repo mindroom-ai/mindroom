@@ -24,8 +24,8 @@
           "mindroom.ai/worker-status": "starting",
           "mindroom.ai/last-started-at": "10.0",
           "mindroom.ai/failure-reason": "",
-          "mindroom.ai/template-hash": "81f50591a17d1fdd07493356b283de25afb4739c8eb8020e3ece7eb0bb7ac0a8",
-          "mindroom.ai/workspace-template-hash": "81f50591a17d1fdd07493356b283de25afb4739c8eb8020e3ece7eb0bb7ac0a8",
+          "mindroom.ai/template-hash": "ba5bc2b9489756183f2474759aba79235fa6220efa6d49bbbd1e05d0558d72c7",
+          "mindroom.ai/workspace-template-hash": "ba5bc2b9489756183f2474759aba79235fa6220efa6d49bbbd1e05d0558d72c7",
           "mindroom.ai/private-agent-names": "[\"desk\"]"
         }
       },
@@ -52,7 +52,7 @@
             },
             "annotations": {
               "mindroom.ai/worker-key": "v1:tenant-123:user_agent:~@alice:example.org:desk",
-              "mindroom.ai/startup-manifest-hash": "208bd09375fade422782d904b80b3fbe98a44e2996555add26d2013b8ca1b975",
+              "mindroom.ai/startup-manifest-hash": "1e9239429e1593e38deebd5312f16541f9ab30dedbdd95cf8941f7e33724728c",
               "mindroom.ai/runner-token-hash": "13250c4da4df02b1b1bc7e56dfbaf083129c501210cee59b2c94d8fd5a7cb2cc"
             }
           },
@@ -348,8 +348,8 @@
             "mindroom.ai/worker-status": "ready",
             "mindroom.ai/last-started-at": "10.0",
             "mindroom.ai/failure-reason": "",
-            "mindroom.ai/template-hash": "81f50591a17d1fdd07493356b283de25afb4739c8eb8020e3ece7eb0bb7ac0a8",
-            "mindroom.ai/workspace-template-hash": "81f50591a17d1fdd07493356b283de25afb4739c8eb8020e3ece7eb0bb7ac0a8",
+            "mindroom.ai/template-hash": "ba5bc2b9489756183f2474759aba79235fa6220efa6d49bbbd1e05d0558d72c7",
+            "mindroom.ai/workspace-template-hash": "ba5bc2b9489756183f2474759aba79235fa6220efa6d49bbbd1e05d0558d72c7",
             "mindroom.ai/private-agent-names": "[\"desk\"]"
           }
         }
@@ -357,6 +357,7 @@
     ]
   ],
   "manifest": {
+    "eager_setup_plugins": [],
     "runtime_paths": {
       "config_path": "/srv/mindroom-golden/config.yaml",
       "env_file_values": {},
