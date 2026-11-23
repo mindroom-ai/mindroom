@@ -120,41 +120,32 @@ async def handle_workflow_answer(
     return outcome
 
 
-def _chosen(found: dict[str, tuple[str, str] | None], text: str) -> tuple[str, tuple[str, str], str] | str:
-    """Return the ID and the place of the open question that `!answer`'s *text* answers, and the answer; else why none."""
-    match = _ANSWER.fullmatch(text)
-    named, answer = (match.group(1), match.group(2).strip()) if match else (None, "")
-    if not answer or (named is None and _ANSWER.fullmatch(f"{answer} x").group(1)):  # type: ignore[union-attr]
-        # No answer at all, or an ID alone: an ID is no answer to the only open question.
-        return "Use !answer <id> <answer>."
-    if named is None and len(found) != 1:
-        several = f"Several questions are open: {', '.join(found)}. Use !answer <id> <answer>."
-        return several if found else "No open question for you in this thread."
-    qid = named or next(iter(found))
-    if (asked := found.get(qid)) is None:
-        shared = "Several questions are open. Answer on the card of the one you mean."
-        return shared if qid in found else f"Question {qid} is no longer open."
-    return qid, asked, answer
-
-
 async def answer_command(engine: WorkflowEngine, *, room_id: str, thread_id: str | None, sender: str, text: str) -> str:
     """Answer an open question of *sender* in this thread for `!answer [id] <answer>`, and return the reply.
 
     The ID names one question; without it the answer goes to the sender's only open question here. An option is
     answered by its number or its text.
     """
-    found: dict[str, tuple[str, str] | None] = {}
-    runs = engine.store.list_runs(owner_user_id=sender, room_id=room_id, include_finished=False)
-    for run in runs:
-        for node in engine.store.nodes(run.run_id, light=True) if run.thread_root_event_id == thread_id else ():
-            if _open(node):
-                qid = question_id(run.run_id, node.seq, node.generation)
-                # An ID that two open questions share names neither: nothing is answered by a guess.
-                found[qid] = None if qid in found else (run.run_id, node.key)
-    chosen = _chosen(found, text.strip())
-    if isinstance(chosen, str):
-        return chosen
-    qid, (run_id, key), answer = chosen
+    match = _ANSWER.fullmatch(text.strip())
+    named, answer = (match.group(1), match.group(2).strip()) if match else (None, "")
+    if not answer or (named is None and _ANSWER.fullmatch(f"{answer} x").group(1)):  # type: ignore[union-attr]
+        return "Use !answer <id> <answer>."
+    matches = [
+        (qid, run.run_id, node.key)
+        for run in engine.store.list_runs(owner_user_id=sender, room_id=room_id, include_finished=False)
+        if run.thread_root_event_id == thread_id
+        for node in engine.store.nodes(run.run_id, light=True)
+        if _open(node) and named in {None, (qid := question_id(run.run_id, node.seq, node.generation))}
+    ]
+    if not matches:
+        return f"Question {named} is no longer open." if named else "No open question for you in this thread."
+    if len(matches) > 1:
+        return (
+            "Several questions are open. Use !answer <id> <answer> with the ID shown on the card."
+            if named is None
+            else "Several questions are open. Answer on the card of the one you mean."
+        )
+    qid, run_id, key = matches[0]
     node = cast("WorkflowNode", engine.store.get_node(run_id, key))
     options = [str(option) for option in node.request.get("options") or ()]
     if options:

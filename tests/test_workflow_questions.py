@@ -364,7 +364,7 @@ async def test_answer_command_answers_by_id_by_number_and_alone(stack: WorkflowS
     here = {"room_id": _ROOM, "thread_id": _THREAD, "sender": _ALICE}
 
     several = await answer_command(stack.engine, text="2", **here)
-    assert several == f"Several questions are open: {first}, {second}. Use !answer <id> <answer>."
+    assert several == "Several questions are open. Use !answer <id> <answer> with the ID shown on the card."
     assert _node_state(stack) == (WorkflowNodeState.WAITING, "user")
     assert await answer_command(stack.engine, text=f"{first} 3", **here) == "Answer with one of: 1. Yes 2. No."
     assert await answer_command(stack.engine, text=f"{first} 2", **here) == f"Answered {first}: No."
