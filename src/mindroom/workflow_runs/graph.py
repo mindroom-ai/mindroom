@@ -30,7 +30,7 @@ _COUNTED = ("queued", "running", "waiting", "completed", "failed")
 _USAGE = ("input_tokens", "output_tokens", "tool_calls", "cost_usd")
 # A call that was cancelled or may have run is counted with the failed ones wherever calls are counted by status.
 _AS_FAILED = frozenset({WorkflowNodeState.FAILED, WorkflowNodeState.CANCELLED, WorkflowNodeState.INDETERMINATE})
-_AGENT_KINDS = frozenset({"agent", "turn"})
+AGENT_KINDS = frozenset({"agent", "turn"})
 
 type _Row = dict[str, Any]
 
@@ -105,7 +105,6 @@ def graph_meta(
 
 
 def graph_rows(
-    run: WorkflowRun,
     nodes: Iterable[WorkflowNode],
     usage_by_node: Mapping[str, Mapping[str, object]],
     edges: Iterable[tuple[str, str, int]],
@@ -113,12 +112,11 @@ def graph_rows(
     *,
     inside: Mapping[str, Mapping[str, int]] | None = None,
 ) -> Graph:
-    """Return the rows of the current view of *run*: its phases, groups, calls, message edges and newest log lines.
+    """Return the rows of the current view of a run: its phases, groups, calls, message edges and newest log lines.
 
     A group counts every call in it, at any depth. *inside* gives, by the key of the group of a run inside this
     one, how many calls of that run are in each state. A call's error is cut to 200 characters.
     """
-    del run
     current = [node for node in nodes if not node.stale]
     ids = {node.key: f"n{node.seq}" for node in current}
     phases = list(dict.fromkeys(node.phase for node in current if node.phase))
@@ -170,7 +168,7 @@ def graph_rows(
                 "subagent": links.get("subagent_id"),
                 "job": links.get("job_id"),
                 "session": node.session_key,
-                "turns": int(links.get("turn", 1)) if node.kind in _AGENT_KINDS else 0,
+                "turns": int(links.get("turn", 1)) if node.kind in AGENT_KINDS else 0,
                 "started_at": _epoch(node.started_at),
                 "ended_at": _epoch(node.ended_at),
                 "cached": node.cached,

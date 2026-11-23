@@ -2562,6 +2562,7 @@ depends_on = ["mindroom.workflow_runs.models", "mindroom.workflow_runs.replay"]
 [[interfaces]]
 from = ["mindroom.workflow_runs.graph"]
 expose = [
+    "AGENT_KINDS",
     "LOG_LINES",
     "REPLACE",
     "Graph",

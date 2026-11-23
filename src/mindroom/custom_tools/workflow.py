@@ -45,7 +45,6 @@ from mindroom.workflow_runs.models import (
     TERMINAL_RUN_STATES,
     WorkflowNodeState,
     WorkflowRun,
-    WorkflowRunState,
     new_workflow_run_id,
 )
 from mindroom.workflow_runs.store import WorkflowRunNotFoundError, WorkflowRunStoreError, owned_run
@@ -136,12 +135,6 @@ _NEEDS_JOBS = "Workflows need background tool jobs. Set background_tool_jobs.ena
 
 
 _FAILED = frozenset({WorkflowNodeState.FAILED, WorkflowNodeState.INDETERMINATE})
-_JOB_STATUS: dict[WorkflowRunState, Literal["completed", "failed", "cancelled", "interrupted"]] = {
-    WorkflowRunState.COMPLETED: "completed",
-    WorkflowRunState.FAILED: "failed",
-    WorkflowRunState.CANCELLED: "cancelled",
-    WorkflowRunState.INTERRUPTED: "interrupted",
-}
 
 
 class WorkflowTools(Toolkit, ManagedJobToolkit):
@@ -237,7 +230,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         """
         engine, context = _runtime()
         run = _owned(engine, context, run_id)
-        listed = await asyncio.to_thread(engine.store.nodes, run.run_id)
+        listed = await asyncio.to_thread(engine.store.nodes, run.run_id, light=True)
         shown = {"active": LIVE_NODE_STATES, "failed": _FAILED, "all": frozenset(WorkflowNodeState)}[nodes]
         # What each call used, over every time it ran; a call that asked no model has none.
         used = await asyncio.to_thread(engine.store.node_usage, run.run_id)
@@ -711,8 +704,11 @@ def workflow_limits(context: ToolRuntimeContext, agent_name: str) -> WorkflowLim
 
 async def _workflow_job_outcome(engine: WorkflowEngine, run: WorkflowRun) -> BackgroundOutcome:
     """Return how the job of an ended run ends: with what the run delivers."""
+    if run.state not in TERMINAL_RUN_STATES:
+        raise ValueError(run.state)
+    status = cast('Literal["completed", "failed", "cancelled", "interrupted"]', run.state.value)
     text = await engine.delivery(run)
-    return BackgroundOutcome(_JOB_STATUS[run.state], text, encode_result_payload(ToolResultPayload(value=text)))
+    return BackgroundOutcome(status, text, encode_result_payload(ToolResultPayload(value=text)))
 
 
 def _public_node(node: WorkflowNode) -> dict[str, object]:

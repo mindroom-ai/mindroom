@@ -102,7 +102,7 @@ def _fits(meta: dict[str, object]) -> Any:  # noqa: ANN401
 def _fitted(nodes: Iterable[WorkflowNode], edges: Iterable[tuple[str, str, int]] = (), log: Iterable[str] = ()) -> Any:  # noqa: ANN401
     nodes = list(nodes)
     meta = graph_meta(_RUN, nodes, _USAGE, large=False)
-    snapshot = fit_snapshot(graph_rows(_RUN, nodes, {}, edges, log), fits=_fits(meta))
+    snapshot = fit_snapshot(graph_rows(nodes, {}, edges, log), fits=_fits(meta))
     assert _fits(meta)(snapshot)
     return meta, snapshot
 
@@ -123,7 +123,7 @@ def test_label_is_name_or_first_prompt_line_redacted_and_cut() -> None:
 def test_row_shows_a_name_as_it_shows_a_label() -> None:
     """A row's name is what a person reads, as its label is: without a credential and in 80 characters at most."""
     named = [_node(1, name="reader api_key=sk-inventedinventedinvented1234"), _node(2, name="x" * 500), _node(3)]
-    secret, long, plain = graph_rows(_RUN, named, {}, [], []).nodes
+    secret, long, plain = graph_rows(named, {}, [], []).nodes
 
     assert ("sk-invented" in secret["name"], len(long["name"]), plain["name"]) == (False, 80, None)
 
@@ -176,7 +176,7 @@ def test_rows_have_exactly_the_pinned_fields() -> None:
         links={"agent": "watcher", "model": "default", "delegation_id": "del", "subagent_id": "sub", "job_id": "job"},
     )
     used = {"input_tokens": 7, "output_tokens": 3, "tool_calls": 1, "cost_usd": 0.12, "cost_unknown": False}
-    graph = graph_rows(_RUN, [group, call], {call.key: used}, [("n2", "n2", 3)], ["a line"])
+    graph = graph_rows([group, call], {call.key: used}, [("n2", "n2", 3)], ["a line"])
 
     assert graph.phases == ["Audit"]
     assert graph.groups == [
@@ -275,7 +275,7 @@ def test_groups_that_do_not_fit_fold_into_their_parent() -> None:
         nodes.append(_group(depth + 1, f"{lane}@0"))
         lane = f"{lane}/0:p0"
     nodes.append(_node(2001, f"{lane}@0", state=WorkflowNodeState.COMPLETED))
-    whole = graph_rows(_RUN, nodes, {}, [], [])
+    whole = graph_rows(nodes, {}, [], [])
     meta, snapshot = _fitted(nodes)
     kept = len(snapshot["groups"])
 
@@ -292,7 +292,7 @@ def test_groups_that_do_not_fit_fold_into_their_parent() -> None:
 def test_groups_that_fit_are_all_kept_with_their_calls() -> None:
     """A graph that fits keeps every group, also the innermost, and each call names its own."""
     nodes = [_group(1, "@0"), _group(2, "/0:p0@0"), _node(3, "/0:p0/0:p0@0", state=WorkflowNodeState.RUNNING)]
-    whole = graph_rows(_RUN, nodes, {}, [], [])
+    whole = graph_rows(nodes, {}, [], [])
     _, snapshot = _fitted(nodes)
 
     assert (len(whole.groups), snapshot["groups"], snapshot["omitted"]["groups"]) == (2, whole.groups, 0)
@@ -366,7 +366,7 @@ def test_huge_log_and_500_long_phase_names_with_no_nodes_fall_back_to_counts_and
 def test_long_texts_are_cut_in_the_frame_and_not_in_the_run() -> None:
     """A title and a phase name are cut to 80 characters, and the log to its last 20 lines of 200 characters."""
     nodes = [_node(1, phase="p" * 300)]
-    graph = graph_rows(_RUN, nodes, {}, [], ["l" * 900] * 50)
+    graph = graph_rows(nodes, {}, [], ["l" * 900] * 50)
     meta = graph_meta(WorkflowRun(**{**_fields(_RUN), "title": "t" * 300}), nodes, _USAGE, large=False)
 
     assert graph.phases == ["p" * 80]
@@ -419,7 +419,7 @@ def test_run_inside_a_run_is_a_group_under_the_call_that_started_it() -> None:
     """The group of a nested run names the call it is under, and counts the calls it is told the run has."""
     call = _node(1, state=WorkflowNodeState.RUNNING)
     nested = _group(2, "@1/wf-" + "b" * 32, op="workflow", group_key="@1", lane="@1", idx=0)
-    graph = graph_rows(_RUN, [call, nested], {}, [], [], inside={nested.key: Counter(completed=2, failed=1, queued=4)})
+    graph = graph_rows([call, nested], {}, [], [], inside={nested.key: Counter(completed=2, failed=1, queued=4)})
 
     assert graph.groups == [
         {"id": "n2", "kind": "workflow", "phase": None, "parent": "n1", "total": 7, "done": 2, "failed": 1},

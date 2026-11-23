@@ -22,7 +22,15 @@ from mindroom.matrix.event_types import WORKFLOW_RUN_CONTENT_KEY
 from mindroom.redaction import redact_sensitive_text
 from mindroom.workflow_runs.engine import WorkflowLimits
 from mindroom.workflow_runs.faults import capture
-from mindroom.workflow_runs.graph import LOG_LINES, Graph, fit_snapshot, graph_meta, graph_rows, projected_cost_usd
+from mindroom.workflow_runs.graph import (
+    AGENT_KINDS,
+    LOG_LINES,
+    Graph,
+    fit_snapshot,
+    graph_meta,
+    graph_rows,
+    projected_cost_usd,
+)
 from mindroom.workflow_runs.models import (
     TERMINAL_RUN_STATES,
     UNSETTLED_NODE_STATES,
@@ -50,7 +58,6 @@ _REFRESH_SECONDS = 10.0
 _SETTLE_SECONDS = 0.25
 _LARGE_RUN_AGENTS = 25
 _LARGE = "Large run: {agents} agents, about ${projected:.2f} projected."
-_AGENT_KINDS = frozenset({"agent", "turn"})
 _ERROR_CHARS = 200
 
 type _Built = tuple[WorkflowRun, list[WorkflowNode], dict[str, Any], Graph]
@@ -189,7 +196,7 @@ class RunViews:
             self._forget(run_id)
             return
         run, nodes, usage, graph = built
-        agents = sum(node.kind in _AGENT_KINDS for node in nodes)
+        agents = sum(node.kind in AGENT_KINDS for node in nodes)
         access = self.engine.authorize(run)
         notice = (access[1] if isinstance(access, tuple) else WorkflowLimits()).large_run_notice_usd
         large = run.large or agents > _LARGE_RUN_AGENTS or 0 < notice < usage["projected_cost_usd"]
@@ -290,7 +297,7 @@ class RunViews:
         nodes = store.nodes(run_id, light=True)
         used = store.node_usage(run_id)
         usage = self.engine.run_usage(run_id)
-        open_agents = sum(node.kind in _AGENT_KINDS and node.state in UNSETTLED_NODE_STATES for node in nodes)
+        open_agents = sum(node.kind in AGENT_KINDS and node.state in UNSETTLED_NODE_STATES for node in nodes)
         usage["projected_cost_usd"] = projected_cost_usd(store.turn_costs(run_id), open_agents, usage["cost_usd"])
         inside = {
             f"{child.parent_node_key}/{child.run_id}": Counter(
@@ -298,7 +305,7 @@ class RunViews:
             )
             for child in store.child_runs(run_id)
         }
-        graph = graph_rows(run, nodes, used, [], store.log(run_id, LOG_LINES), inside=inside)
+        graph = graph_rows(nodes, used, [], store.log(run_id, LOG_LINES), inside=inside)
         return run, nodes, usage, graph
 
     async def _card(self, run: WorkflowRun, meta: dict[str, Any], graph: Graph, client: nio.AsyncClient) -> bool:

@@ -56,7 +56,7 @@ def _publish(room: FrameRoom, nodes: list[WorkflowNode], *, log: tuple[str, ...]
         _RUN if not run else type(_RUN)(**{**{name: getattr(_RUN, name) for name in _RUN.__dataclass_fields__}, **run})
     )
     meta = graph_meta(changed, nodes, _USAGE, large=False)
-    graph = graph_rows(changed, nodes, {}, [], log)
+    graph = graph_rows(nodes, {}, [], log)
     publish_run(
         FRAME_ACCOUNT,
         FRAME_ROOM_ID,

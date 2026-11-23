@@ -7,9 +7,9 @@ no float, and it is measured as the edit it is or will get, which carries its co
 from __future__ import annotations
 
 import asyncio
-from functools import partial
 from typing import TYPE_CHECKING, Any
 
+from mindroom.budgets.pricing import format_cost_usd
 from mindroom.matrix.client_delivery import build_edit_event_content, edit_message_result, send_message_result
 from mindroom.matrix.large_messages import fits_one_event
 from mindroom.matrix.message_builder import build_message_content
@@ -36,7 +36,7 @@ def clip(text: str, chars: int) -> str:
 def _signable(value: object) -> object:
     """Return *value* as an event a homeserver signs may hold it: a float as a decimal string of six places at most."""
     if isinstance(value, float):
-        return f"{value:.6f}".rstrip("0").rstrip(".")
+        return format_cost_usd(value)
     if isinstance(value, dict):
         return {name: _signable(part) for name, part in value.items()}
     return [_signable(part) for part in value] if isinstance(value, list | tuple) else value
@@ -86,8 +86,13 @@ async def send_notice(
     """
     for wait in (*retries, None):
         if event_id is None:
-            send = partial(send_message_result, client, run.room_id, message, operation="send_workflow_notice")
-            sent = await send(transaction_id=transaction_id)
+            sent = await send_message_result(
+                client,
+                run.room_id,
+                message,
+                operation="send_workflow_notice",
+                transaction_id=transaction_id,
+            )
         else:
             sent = await edit_message_result(client, run.room_id, event_id, message, message["body"])
         if sent is not None:
