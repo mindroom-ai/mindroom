@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
+from mindroom.active_runs import pause_current_active_run
 from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.custom_tools.job import JobTools
@@ -482,6 +483,7 @@ async def _run_managed_call(
             approval_timeout=current_approval_wait_timeout(),
             # Without a budget of its own, a call waits its function's default for its work, approvals aside.
             work_timeout=_default_wait(function) if background_after is None else None,
+            pause_on_human_wait=pause_current_active_run,
         )
         if waited.claim is None:
             value, error = format_job_handle(waited.job), None

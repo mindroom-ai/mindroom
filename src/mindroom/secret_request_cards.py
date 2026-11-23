@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
+from mindroom.active_runs import pause_current_active_run
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result
 from mindroom.matrix.message_builder import build_message_content
@@ -301,8 +302,12 @@ async def _job_awaits_requester(runtime_paths: RuntimePaths) -> AsyncIterator[No
     it here. Outside a job, the Stop cancels the call itself.
     """
     job_id = current_job_id()
-    runtime = None if job_id is None else get_background_runtime(runtime_paths)
-    if job_id is None or runtime is None:
+    if job_id is None:
+        with pause_current_active_run():
+            yield
+        return
+    runtime = get_background_runtime(runtime_paths)
+    if runtime is None:
         yield
         return
     async with runtime.human_decision_wait(job_id):

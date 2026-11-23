@@ -5247,6 +5247,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.bot"
 depends_on = [
+    "mindroom.active_runs",
     "mindroom.contacts.turns",
     "mindroom.email_invites.receiver",
     "mindroom.agent_cli.cli_approval_waits",
@@ -6047,6 +6048,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.secret_request_cards"
 depends_on = [
+    "mindroom.active_runs",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix_openid",
     "mindroom.origins",
@@ -9512,6 +9514,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.tool_jobs.execution"
 depends_on = [
+    "mindroom.active_runs",
     "mindroom.agent_loop",
     "mindroom.custom_tools.delegate",
     "mindroom.custom_tools.job",
@@ -9775,6 +9778,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.job"
 depends_on = [
+    "mindroom.active_runs",
     "mindroom.tool_jobs.consumption",
     "mindroom.tool_jobs.control",
     "mindroom.tool_jobs.conversation",
@@ -10118,6 +10122,7 @@ expose = ["MindRoomWebBrowserTools"]
 [[modules]]
 path = "mindroom.agent_cli.cli_approval_waits"
 depends_on = [
+    "mindroom.active_runs",
     "mindroom.agent_cli.events",
     "mindroom.agent_cli.lifetime",
     "mindroom.approval.continuation_rules",
@@ -10779,3 +10784,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.matrix.state_failures"
 depends_on = []
+
+[[modules]]
+path = "mindroom.active_runs"
+depends_on = ["mindroom.matrix.state_failures"]

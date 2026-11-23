@@ -6,6 +6,7 @@ import inspect
 import json
 from typing import TYPE_CHECKING, Any, Literal
 
+from mindroom.active_runs import pause_current_active_run
 from mindroom.tool_jobs.consumption import consume_tool_job, job_failure, job_failure_text
 from mindroom.tool_jobs.control import waiting_on_jobs
 from mindroom.tool_jobs.conversation import current_approval_wait_timeout, current_ended_jobs
@@ -194,6 +195,7 @@ class JobTools(Toolkit):
                         timeout=wait_timeout,
                         # A job awaiting a human decision holds the reply no longer than the gated call itself does.
                         approval_timeout=current_approval_wait_timeout(),
+                        pause_on_human_wait=pause_current_active_run,
                     )
                 if waited.claim is not None:
                     return await _claimed_result(runtime, waited.job, waited.claim)

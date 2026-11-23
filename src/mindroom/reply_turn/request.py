@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.active_runs import ActiveRunLease, ActiveRunPublisher
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.config.participation import ParticipationConfig
@@ -209,6 +210,7 @@ async def response_typing_indicator(
     response_run_id: str | None,
     participation: ParticipationGate | None = None,
     contact_receipt: Callable[[], Awaitable[None]] | None = None,
+    active_runs: ActiveRunPublisher | None = None,
 ) -> AsyncIterator[None]:
     """Expose typing only for a response whose progress may be visible, which a quiet one's never is.
 
@@ -221,15 +223,25 @@ async def response_typing_indicator(
         return
 
     @asynccontextmanager
-    async def show_progress() -> AsyncIterator[None]:
+    async def show_progress(lease: ActiveRunLease | None = None) -> AsyncIterator[None]:
         if request.contact is not None and contact_receipt is not None:
             await contact_receipt()
             yield
             return
-        async with typing_indicator(
-            client,
-            request.room_id,
-            log_context=_response_typing_log_context(request, response_run_id=response_run_id),
+        run_cm = (
+            nullcontext()
+            if active_runs is None
+            else active_runs.track(request.room_id, request.thread_id)
+            if lease is None
+            else active_runs.activate(lease)
+        )
+        async with (
+            run_cm,
+            typing_indicator(
+                client,
+                request.room_id,
+                log_context=_response_typing_log_context(request, response_run_id=response_run_id),
+            ),
         ):
             yield
 
@@ -238,20 +250,26 @@ async def response_typing_indicator(
             yield
         return
     finished = asyncio.Event()
+    lease_cm = (
+        active_runs.track(request.room_id, request.thread_id, active=False)
+        if active_runs is not None and request.contact is None
+        else nullcontext()
+    )
+    async with lease_cm as lease:
 
-    async def approved_progress() -> None:
-        if await participation.wait_for_approval():
-            async with show_progress():
-                await finished.wait()
+        async def approved_progress() -> None:
+            if await participation.wait_for_approval():
+                async with show_progress(lease):
+                    await finished.wait()
 
-    task = asyncio.create_task(approved_progress())
-    try:
-        yield
-    finally:
-        finished.set()
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
+        task = asyncio.create_task(approved_progress())
+        try:
+            yield
+        finally:
+            finished.set()
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
 
 @dataclass(frozen=True)
