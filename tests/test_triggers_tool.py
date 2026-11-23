@@ -1176,6 +1176,43 @@ async def test_unified_triggers_schema_size_and_required_arg_validation(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_triggers_rejects_unsupported_parameters_per_action(tmp_path: Path) -> None:
+    """Passing parameters unsupported by an action returns an error and creates no trigger."""
+    _record_rooms(tmp_path)
+    tool = TriggersTools()
+    with tool_runtime_context(_context(tmp_path)):
+        watch_thread_res = _payload(
+            await tool.triggers(
+                action="watch_thread",
+                prompt="Notify me",
+                triage_provider="typesafe",
+                triage_instructions="Only prod",
+            ),
+        )
+        assert watch_thread_res["status"] == "error"
+        assert watch_thread_res["message"] == (
+            "Unsupported parameter(s) for triggers(action='watch_thread'): triage_instructions, triage_provider"
+        )
+        assert ReactiveTriggerStore(_runtime_paths(tmp_path)).list_triggers() == []
+
+        list_res = _payload(await tool.triggers(action="list", prompt="unexpected"))
+        assert list_res["status"] == "error"
+        assert list_res["message"] == "Unsupported parameter(s) for triggers(action='list'): prompt"
+
+        delete_res = _payload(await tool.triggers(action="delete", trigger_id="x", enabled=False))
+        assert delete_res["status"] == "error"
+        assert delete_res["message"] == "Unsupported parameter(s) for triggers(action='delete'): enabled"
+
+        bool_defaults_res = _payload(
+            await tool.triggers(action="delete", trigger_id="x", new_thread=True, include_disabled=False),
+        )
+        assert bool_defaults_res["status"] == "error"
+        assert bool_defaults_res["message"] == (
+            "Unsupported parameter(s) for triggers(action='delete'): include_disabled, new_thread"
+        )
+
+
+@pytest.mark.asyncio
 async def test_list_returns_safe_authorized_event_sources_metadata(tmp_path: Path) -> None:
     """Action `list` returns sorted authorized event_sources metadata without secrets, keys, or unauthorized sources."""
     _record_rooms(tmp_path)
@@ -2201,6 +2238,34 @@ def test_explicit_triggers_rule_and_same_decision_glob_load_under_require_approv
         }
         loaded = Config.validate_with_runtime(data, _runtime_paths(tmp_path))
         assert loaded.tool_approval.rules[0].match == match
+
+
+def test_retired_trigger_approval_rule_changing_timeout_days_fails(tmp_path: Path) -> None:
+    """A retired trigger rule with a different effective timeout_days than `triggers` fails config load."""
+    data = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "agents": {"a": {"display_name": "A", "tools": ["triggers"]}},
+        "tool_approval": {
+            "default": "require_approval",
+            "timeout_days": 7,
+            "rules": [{"match": "delete_trigger", "action": "require_approval", "timeout_days": 1}],
+        },
+    }
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match=r"tool_approval\.rules\[0\]\.match 'delete_trigger' .*delete_trigger is now triggers",
+    ):
+        Config.validate_with_runtime(data, _runtime_paths(tmp_path))
+
+    same_timeout = {
+        **data,
+        "tool_approval": {
+            "default": "require_approval",
+            "timeout_days": 7,
+            "rules": [{"match": "delete_trigger", "action": "require_approval", "timeout_days": 7}],
+        },
+    }
+    assert Config.validate_with_runtime(same_timeout, _runtime_paths(tmp_path)).tool_approval.timeout_days == 7.0
 
 
 @pytest.mark.asyncio

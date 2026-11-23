@@ -1551,7 +1551,13 @@ class Config(BaseModel):
             raise ToolConfigOverrideError(msg)
         if (
             any(entry.name == "triggers" for _, entry in entries)
-            and (trigger_error := retired_trigger_approval_error(self.tool_approval.rules, self.tool_approval.default))
+            and (
+                trigger_error := retired_trigger_approval_error(
+                    self.tool_approval.rules,
+                    self.tool_approval.default,
+                    self.tool_approval.timeout_days,
+                )
+            )
             is not None
         ):
             raise ToolConfigOverrideError(trigger_error)

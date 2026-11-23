@@ -16,6 +16,8 @@ if TYPE_CHECKING:
         def action(self) -> str | None: ...
         @property
         def script(self) -> str | None: ...
+        @property
+        def timeout_days(self) -> float | None: ...
 
 # LEGACY_COMPAT: Scalar knowledge_base agent configuration.
 # Legacy format: Agent config accepted scalar knowledge_base instead of knowledge_bases.
@@ -305,6 +307,7 @@ def approval_rule_a_file_rename_escapes(globs: Sequence[str], offered_elsewhere:
 #   tests/test_triggers_tool.py::test_approval_rules_that_decide_triggers_load,
 #   tests/test_triggers_tool.py::test_retired_trigger_approval_check_skips_configs_without_triggers,
 #   tests/test_triggers_tool.py::test_retired_trigger_approval_rule_weakening_require_approval_default_fails,
+#   tests/test_triggers_tool.py::test_retired_trigger_approval_rule_changing_timeout_days_fails,
 #   tests/test_triggers_tool.py::test_retired_trigger_include_exclude_overrides_fail_config_load.
 RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
     "watch_room": "triggers",
@@ -318,15 +321,43 @@ RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
 }
 
 
-def retired_trigger_approval_error(rules: Sequence[_ApprovalRule], default: str) -> str | None:
+def _effective_approval_decision(
+    rule: _ApprovalRule | None,
+    *,
+    default: str,
+    default_timeout_days: float,
+) -> tuple[str | None, str | None, float | None]:
+    if rule is None:
+        return (default, None, None if default == "auto_approve" else default_timeout_days)
+    timeout_days = (
+        None
+        if rule.action == "auto_approve"
+        else (rule.timeout_days if rule.timeout_days is not None else default_timeout_days)
+    )
+    return (rule.action, rule.script, timeout_days)
+
+
+def retired_trigger_approval_error(
+    rules: Sequence[_ApprovalRule],
+    default: str,
+    default_timeout_days: float = 7.0,
+) -> str | None:
     """Return a migration error when approval rules decide `triggers` differently from a retired trigger function."""
     first_new = next((index for index, rule in enumerate(rules) if fnmatchcase("triggers", rule.match)), None)
     if first_new is not None and rules[first_new].match == "triggers":
         return None
-    new_decision = (rules[first_new].action, rules[first_new].script) if first_new is not None else (default, None)
+    new_decision = _effective_approval_decision(
+        rules[first_new] if first_new is not None else None,
+        default=default,
+        default_timeout_days=default_timeout_days,
+    )
     for old in RETIRED_TRIGGER_FUNCTIONS:
         first_old = next((index for index, rule in enumerate(rules) if fnmatchcase(old, rule.match)), None)
-        old_decision = (rules[first_old].action, rules[first_old].script) if first_old is not None else (default, None)
+        old_decision = _effective_approval_decision(
+            rules[first_old] if first_old is not None else None,
+            default=default,
+            default_timeout_days=default_timeout_days,
+        )
         if old_decision != new_decision:
             if first_old is not None:
                 return (

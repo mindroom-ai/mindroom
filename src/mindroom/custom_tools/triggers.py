@@ -132,6 +132,63 @@ _UPDATABLE_FIELDS: tuple[str, ...] = (
     "once",
     "enabled",
 )
+_COMMON_REACTIVE_PARAMS: frozenset[str] = frozenset(
+    {
+        "trigger_id",
+        "prompt",
+        "description",
+        "target_agent",
+        "target_room_id",
+        "target_thread_id",
+        "new_thread",
+        "thread_key",
+        "once",
+        "max_fires_per_hour",
+        "cooldown_seconds",
+        "expires_in_hours",
+    },
+)
+_TRIAGE_PARAMS: frozenset[str] = frozenset(
+    {
+        "triage_instructions",
+        "triage_model",
+        "triage_provider",
+        "triage_threshold",
+    },
+)
+_ACTION_ALLOWED_PARAMS: dict[str, frozenset[str]] = {
+    "watch_room": _COMMON_REACTIVE_PARAMS
+    | _TRIAGE_PARAMS
+    | frozenset({"room_id", "thread_id", "senders", "pattern", "include_bots"}),
+    "watch_thread": _COMMON_REACTIVE_PARAMS | frozenset({"room_id", "thread_id", "tag", "transition"}),
+    "subscribe_event": _COMMON_REACTIVE_PARAMS | _TRIAGE_PARAMS | frozenset({"source_id", "kind", "match"}),
+    "create": frozenset(
+        {
+            "trigger_id",
+            "public_key",
+            "key_id",
+            "description",
+            "target_agent",
+            "target_room_id",
+            "target_thread_id",
+            "new_thread",
+            "allowed_kinds",
+            "replay_window_seconds",
+            "max_body_bytes",
+        },
+    ),
+    "list": frozenset({"include_disabled"}),
+    "update": frozenset({"trigger_id", *_UPDATABLE_FIELDS}),
+    "set_enabled": frozenset({"trigger_id", "enabled"}),
+    "delete": frozenset({"trigger_id"}),
+    "rotate_key": frozenset({"trigger_id", "public_key", "key_id"}),
+    "history": frozenset({"trigger_id", "limit"}),
+    "test": frozenset({"trigger_id", "text", "actor", "kind", "sample_data"}),
+}
+_NON_NONE_PARAM_DEFAULTS: dict[str, object] = {
+    "new_thread": False,
+    "include_disabled": True,
+}
 
 
 type _TriggerParams = Mapping[str, Any]
@@ -715,6 +772,12 @@ class TriggersTools(Toolkit):
             handler = handlers.get(action)
             if handler is None:
                 return self._payload("error", message=f"Unsupported triggers action: {action!r}")
+            supplied = {key for key, value in args.items() if value is not _NON_NONE_PARAM_DEFAULTS.get(key)}
+            if unsupported := sorted(supplied - _ACTION_ALLOWED_PARAMS[action]):
+                return self._payload(
+                    "error",
+                    message=f"Unsupported parameter(s) for triggers(action={action!r}): {', '.join(unsupported)}",
+                )
             return await handler(context, args)
         except _TOOL_ERRORS as exc:
             return self._payload("error", message=str(exc))
