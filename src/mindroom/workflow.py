@@ -183,7 +183,7 @@ class _Gateway:
                 # A plain 500 that repeats is a fault of MindRoom, not a restart: any other 5xx says to try again.
                 faults = faults + 1 if exc.code == http.client.INTERNAL_SERVER_ERROR else 0
                 if exc.code < http.client.INTERNAL_SERVER_ERROR or faults > _MAX_SERVER_FAULTS:
-                    raise _refusal(exc, sent_bytes=len(data or b"")) from None
+                    raise _refusal(exc, route=route, sent_bytes=len(data or b"")) from None
             except (urllib.error.URLError, OSError, http.client.HTTPException):
                 pass
             # A restarting gateway looks like this; the node's outcome is saved there, so asking again is safe.
@@ -211,7 +211,7 @@ class _Gateway:
         self._request("POST", "finish", {"result": result} if error is None else {"error": error})
 
 
-def _refusal(exc: urllib.error.HTTPError, *, sent_bytes: int) -> BaseException:
+def _refusal(exc: urllib.error.HTTPError, *, route: str, sent_bytes: int) -> BaseException:
     """Turn a refusal into what the script should see; a superseded attempt must stop acting."""
     if exc.code == http.client.CONFLICT:
         return SystemExit(_SUPERSEDED_EXIT_CODE)
@@ -222,8 +222,17 @@ def _refusal(exc: urllib.error.HTTPError, *, sent_bytes: int) -> BaseException:
     details: dict[str, object] = answer if isinstance(answer, dict) else {}
     if exc.code == http.client.REQUEST_ENTITY_TOO_LARGE:
         size = details.get("bytes", sent_bytes)
+        raw_limit = details.get("limit")
+        if isinstance(raw_limit, int) and raw_limit > 0:
+            limit = f"{raw_limit // (1024 * 1024)} MiB" if raw_limit % (1024 * 1024) == 0 else f"{raw_limit:,} bytes"
+        else:
+            limit = "1 MiB"
+        if route == "finish":
+            return WorkflowError(
+                f"Report is {size:,} bytes, limit {limit}. Write the full output to a workspace file and return a summary or the path.",
+            )
         return WorkflowError(
-            f"Prompt is {size:,} bytes, limit 1 MiB. Write the inputs to a workspace file and pass the path.",
+            f"Request is {size:,} bytes, limit {limit}. Write the inputs to a workspace file and pass the path.",
         )
     return WorkflowError(f"MindRoom refused the request ({exc.code}): {details.get('detail', exc.reason)}")
 

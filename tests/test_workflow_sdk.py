@@ -323,8 +323,18 @@ def test_oversized_request_says_to_use_a_file(gateway: FakeWorkflowGateway, sdk:
     with pytest.raises(sdk.WorkflowError) as raised:
         sdk.tool("files", "write", text="x")
     assert str(raised.value) == (
-        "Prompt is 1,403,112 bytes, limit 1 MiB. Write the inputs to a workspace file and pass the path."
+        "Request is 1,403,112 bytes, limit 1 MiB. Write the inputs to a workspace file and pass the path."
     )
+
+
+@pytest.mark.usefixtures("in_main")
+def test_oversized_finish_report_names_report_and_actual_limit(gateway: FakeWorkflowGateway, sdk: ModuleType) -> None:
+    """An over-limit finish report reports the actual report limit rather than a 1 MiB prompt."""
+    gateway.refuse = (413, {"bytes": 9_000_000, "limit": 8 * 1024 * 1024})
+    with pytest.raises(sdk.WorkflowError) as raised:
+        sdk._gateway().finish(result="x")
+    assert "Report is 9,000,000 bytes, limit 8 MiB." in str(raised.value)
+    assert "Prompt" not in str(raised.value)
 
 
 @pytest.mark.usefixtures("in_main")
