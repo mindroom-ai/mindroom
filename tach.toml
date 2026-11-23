@@ -9407,6 +9407,7 @@ visibility = [
     "mindroom.delegation.recovery",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.response_runner",
+    "mindroom.tool_jobs.consumption",
     "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.conversation",
     "mindroom.tool_jobs.execution_authority",
@@ -9555,6 +9556,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.tool_jobs.execution_authority",
     "mindroom.tool_jobs.results",
+    "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.tool_function",
     "mindroom.session_storage.lanes",
     "mindroom.delegation.cost",
@@ -9778,6 +9780,7 @@ depends_on = [
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.agno_toolkits",
     "mindroom.tool_system.authoring",
+    "mindroom.tool_system.output_files",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_function",
 ]
