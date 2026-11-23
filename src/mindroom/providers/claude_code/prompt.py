@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.messages import is_media_follow_up, stable_serialize, system_text, tool_result_view
 from mindroom.providers.anthropic.wire import image_block
+from mindroom.providers.claude_code.tool_naming import called_name
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -43,12 +44,12 @@ def _history_blocks(message: Message, provider: str, names: dict[str, str]) -> l
     """Return one earlier message as tagged text; the images of a user message or a tool result stay real blocks.
 
     No ``<`` of the message stays one, so nothing it says reads as a tag. ``names`` holds each tool call's tool,
-    which names its result.
+    which names its result. Tools are named as Claude calls them, since Claude copies the names it sees here.
     """
     if message.role == "tool":
         result = tool_result_view(message)
         name = names.get(result.call_id or "", result.name)
-        output = {"id": result.call_id, "name": name, "output": result.content}
+        output = {"id": result.call_id, "name": called_name(name) if name else name, "output": result.content}
         if result.is_error:
             output["is_error"] = True
         return [_text(f"<tool-result>\n{_json(output)}\n</tool-result>"), *_images(message, provider)]
@@ -60,7 +61,7 @@ def _history_blocks(message: Message, provider: str, names: dict[str, str]) -> l
         _json(
             {
                 "id": call["id"],
-                "name": call["function"]["name"],
+                "name": called_name(call["function"]["name"]),
                 "input": _arguments(call["function"].get("arguments")),
             },
         )

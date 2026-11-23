@@ -33,8 +33,9 @@ from mindroom.claude_sdk_process import ClaudeProcess, user_message
 from mindroom.llm.errors import AuthenticationFailed, ProviderError, ProviderUnavailable
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root
-from mindroom.providers.claude_code.bridge import SERVER_NAME, TOOL_PREFIX, ToolBridge, tool_names
+from mindroom.providers.claude_code.bridge import ToolBridge, tool_names
 from mindroom.providers.claude_code.launcher import CLI_ENV, KEEP_ENV
+from mindroom.providers.claude_code.tool_naming import SERVER_NAME, TOOL_PREFIX
 from mindroom.runtime_shutdown import close_at_process_shutdown
 
 if TYPE_CHECKING:
