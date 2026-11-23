@@ -4471,3 +4471,33 @@ async def test_a_route_lookup_gives_up_at_its_page_bound(tmp_path: Path) -> None
 
     assert await gateway.sent_route(_ROOM_ID, ["$question"]) is None
     assert requests.await_count == 10
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("http_status", "expect_warning"),
+    [(502, True), (503, True), (504, True), (403, False), (None, False)],
+)
+async def test_durable_send_transient_http_status_logs_deferred_warning(
+    tmp_path: Path,
+    http_status: int | None,
+    expect_warning: bool,
+) -> None:
+    """A durable send failing with 502/503/504 logs deferred warning with http_status; others stay error."""
+    gateway = _gateway(tmp_path)
+    gateway.deps.runtime.client.room_send = AsyncMock(
+        return_value=nio.RoomSendError("unknown error", room_id=_ROOM_ID, http_status=http_status),
+    )
+    target = MessageTarget.resolve(_ROOM_ID, None, "$cause")
+    result = await gateway.send_text(SendTextRequest(target=target, response_text="hello", delivery_turn_id="$cause"))
+    assert result is None
+    if expect_warning:
+        gateway.deps.logger.warning.assert_called_once()
+        args, kwargs = gateway.deps.logger.warning.call_args
+        assert "outbox recovery" in args[0]
+        assert kwargs["http_status"] == http_status
+        gateway.deps.logger.error.assert_not_called()
+    else:
+        gateway.deps.logger.error.assert_called_once()
+        _, kwargs = gateway.deps.logger.error.call_args
+        assert kwargs["http_status"] == http_status

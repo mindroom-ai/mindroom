@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, cast
 from uuid import uuid4
 
 import nio
-from aiohttp import ClientResponse
 from nio import crypto
 from nio.api import Api
 from nio.exceptions import OlmTrustError
@@ -25,7 +24,12 @@ from mindroom.matrix.large_messages import (
 )
 from mindroom.matrix.media import durable_session_closed, prepare_media_upload, upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_thread_relation
-from mindroom.matrix.state_failures import StateFailure, state_failure
+from mindroom.matrix.state_failures import (
+    StateFailure,
+    is_transient_homeserver_status,
+    response_http_status,
+    state_failure,
+)
 from mindroom.matrix_identifiers import has_agent_username
 from mindroom.timing import emit_timing_event
 from mindroom.tool_system.events import tool_markers_out_of_text
@@ -130,7 +134,12 @@ def _log_matrix_delivery_exception(
     cache_bypass: bool,
 ) -> None:
     """Log one local Matrix send/edit exception without exposing device details."""
-    log = logger.warning if durable_session_closed(client) else logger.error
+    shutdown_fenced = (
+        durable_session_closed(client)
+        or getattr(client, "process_shutdown_transport_fenced", False) is True
+        or type(error).__name__ == "_MatrixTransportShutdownError"
+    )
+    log = logger.warning if shutdown_fenced else logger.error
     log(
         "matrix_message_delivery_exception",
         room_id=room_id,
@@ -535,10 +544,8 @@ async def _send_resolved_message(
         return DeliveredMatrixEvent(event_id=str(response.event_id), content_sent=content_sent)
     failure_kind = MatrixDeliveryFailureKind.UNEXPECTED_RESPONSE
     failure_detail = str(response)
-    status = None
+    status = response_http_status(response)
     if isinstance(response, nio.RoomSendError):
-        transport = response.transport_response
-        status = transport.status if isinstance(transport, ClientResponse) else None
         if response.status_code == "M_TOO_LARGE":
             failure_kind = MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE
             failure_detail = response.message
@@ -554,10 +561,12 @@ async def _send_resolved_message(
         outcome="error",
         error=str(response),
     )
-    logger.error(
+    log = logger.warning if is_transient_homeserver_status(status) else logger.error
+    log(
         "matrix_message_send_failed",
         room_id=room_id,
         error=str(response),
+        http_status=status,
         cache_bypass=cache_bypass,
     )
     return MatrixDeliveryFailure(failure_kind, failure_detail, status)

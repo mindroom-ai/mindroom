@@ -2819,6 +2819,7 @@ depends_on = [
     "mindroom.event_journal",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.room_history_reads",
+    "mindroom.matrix.state_failures",
     "mindroom.event_journal.matrix_delivery",
     "mindroom.reply_lifecycle",
     "mindroom.reply_presentation",

@@ -1527,7 +1527,8 @@ class StreamingResponse:
                         progress=progress,
                     ):
                         return True
-                    logger.error("Failed to edit streaming message", attempt=attempt)
+                    log = logger.error if is_final else logger.warning
+                    log("Failed to edit streaming message", attempt=attempt)
             except Exception:
                 logger.warning(
                     "Streaming update attempt raised an exception",
