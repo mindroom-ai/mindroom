@@ -68,9 +68,9 @@ The examples below use [Pocket ID](https://pocket-id.org/) as a concrete self-ho
     > [!WARNING]
     > `mindroom-stack` defaults to open local registration (`TUWUNEL_ALLOW_REGISTRATION: "true"`) and grants local users access to the shell-enabled `Mind` agent.
     > Adding an identity provider does not turn off password registration, and hiding Chat's Register link does not enforce it server-side.
-    > Before exposing the stack beyond localhost, restrict agent access in `config/config.yaml` and close open registration in one of two ways (turning off registration alone stops MindRoom from creating new password-based agent accounts):
+    > Before exposing the stack beyond localhost, restrict agent access in `config/config.yaml`, limit who can create accounts through SSO (at your IdP, or via the provider's `registration = false` or `registration_rules`), and close open password registration in one of two ways (turning off registration alone stops MindRoom from creating new password-based agent accounts):
     >
-    > - Keep password-based agents with token-gated registration: set `TUWUNEL_REGISTRATION_TOKEN` (or `TUWUNEL_REGISTRATION_TOKEN_FILE`) and the matching `MATRIX_REGISTRATION_TOKEN`, and unset `TUWUNEL_YES_I_AM_VERY_VERY_SURE_I_WANT_AN_OPEN_REGISTRATION_SERVER_PRONE_TO_ABUSE`.
+    > - Keep password-based agents with token-gated registration: add `TUWUNEL_REGISTRATION_TOKEN` (or `TUWUNEL_REGISTRATION_TOKEN_FILE`) and `TUWUNEL_YES_I_AM_VERY_VERY_SURE_I_WANT_AN_OPEN_REGISTRATION_SERVER_PRONE_TO_ABUSE: "false"` to `services.tuwunel.environment`, and the matching `MATRIX_REGISTRATION_TOKEN` to `services.mindroom.environment`.
     > - Or switch MindRoom to [`appservice` mode](#disabling-password-login-sso-only) before setting `TUWUNEL_ALLOW_REGISTRATION: "false"` (and optionally `TUWUNEL_AUTHENTICATION__LOGIN__WITH_PASSWORD: "false"` for SSO-only sign-in).
 
 === "Kubernetes (Helm)"
@@ -126,7 +126,7 @@ Turning off password login on Tuwunel (`authentication.login.with_password = fal
           regex: "^@mindroom_.*:example\\.com$"
     ```
 
-2. Point Tuwunel at the directory holding that `.yaml` file via `appservice_dir = "/etc/tuwunel/appservices"` (`TUWUNEL_APPSERVICE_DIR="/etc/tuwunel/appservices"`).
+2. Mount or place that `.yaml` file in a directory readable by Tuwunel and set `appservice_dir = "/etc/tuwunel/appservices"` (`TUWUNEL_APPSERVICE_DIR="/etc/tuwunel/appservices"`).
 3. Configure MindRoom with `MATRIX_MANAGED_ACCOUNT_AUTH=appservice` and `MATRIX_APPSERVICE_TOKEN` (or `MATRIX_APPSERVICE_TOKEN_FILE`) matching `as_token`, and leave `MATRIX_REGISTRATION_TOKEN` unset.
 4. Disable password login on Tuwunel:
 
@@ -142,7 +142,7 @@ On Kubernetes, see [Passwordless MindRoom Accounts](https://github.com/mindroom-
 ## MindRoom Chat
 
 MindRoom Chat supports custom OIDC providers out of the box on web, iOS, and Android through Matrix's `m.login.sso` flow (including SSO interactive authentication for sensitive actions).
-Every custom provider Tuwunel advertises on `/_matrix/client/v3/login` appears automatically as a **Continue with `<name>`** button, along with its `mxc://` `icon` if configured in Tuwunel (Apple, Google, and GitHub use MindRoom Chat's built-in marks, and Apple uses **Sign in with Apple**).
+Every custom provider Tuwunel advertises on `/_matrix/client/v3/login` appears automatically as a **Continue with `<name>`** button (custom `mxc://` `icon` images display only if the homeserver serves unauthenticated media, which Tuwunel disables by default; Apple, Google, and GitHub use MindRoom Chat's bundled marks, and Apple uses **Sign in with Apple**).
 
 Optional settings in MindRoom Chat's `config.json` (`client-config.json` in `mindroom-stack`):
 
@@ -191,5 +191,5 @@ Choose the dashboard authentication boundary that matches your deployment:
 
 - **API key + optional Chat sign-in:** Keep `MINDROOM_API_KEY` set whenever no upstream auth proxy fronts MindRoom; unsetting it leaves the dashboard in open standalone mode instead of SSO-only mode.
   With `TUWUNEL_MINDROOM_OPENID_AUDIENCE=true` (default in `mindroom-stack`), `MINDROOM_PUBLIC_URL` set to the MindRoom portal origin (`CLIENT_MINDROOM_URL` in `mindroom-stack`), and any public self-hosted Chat origin listed in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, users signed in to MindRoom Chat via OIDC who have access to at least one agent or its credentials (other than `access.current_room_members`, which does not apply in a browser) can open `/connections` using Matrix OpenID tokens, and accounts in `administrators` can also reach dashboard routes from that session (see [Connections Portal](../connections-portal.md#sessions-and-dashboard-access)).
-- **OIDC auth proxy:** Place an OIDC-capable reverse proxy that attaches a signed JWT (such as `oauth2-proxy` backed by Pocket ID, or [Cloudflare Access](cloudflare-access.md)) in front of MindRoom and enable [Trusted Upstream Browser Auth](trusted-upstream-auth.md) (`MINDROOM_TRUSTED_UPSTREAM_*`).
+- **OIDC auth proxy:** Place an OIDC-capable reverse proxy that attaches a raw signed JWT header without a `Bearer ` prefix (such as `oauth2-proxy` backed by Pocket ID, or [Cloudflare Access](cloudflare-access.md)) in front of MindRoom and enable [Trusted Upstream Browser Auth](trusted-upstream-auth.md) (`MINDROOM_TRUSTED_UPSTREAM_*`).
   Unless `MINDROOM_CONNECTIONS_AGENT` (a private agent with `private.per: user` or `user_agent`) is set, every user admitted by the proxy gets dashboard operator access, so either restrict the proxy policy to operators or set `MINDROOM_CONNECTIONS_AGENT` to limit the dashboard to `administrators` (see [Security Boundary](trusted-upstream-auth.md#security-boundary)).
