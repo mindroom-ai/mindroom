@@ -7,7 +7,6 @@ import base64
 import http.client
 import importlib
 import json
-import os
 import re
 import threading
 import time
@@ -4026,16 +4025,12 @@ async def test_non_openrouter_gemini_routes_keep_plain_text_tool_results(
 
 def test_openrouter_gemini_upstream_issue_still_open() -> None:
     """Fail once OpenRouterTeam/docs#815 closes so we re-probe and revert the Gemini tool-result wrapper."""
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "mindroom-tests",
-    }
-    token = (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or "").strip()
-    if token and "\r" not in token and "\n" not in token:
-        headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(
         "https://api.github.com/repos/OpenRouterTeam/docs/issues/815",
-        headers=headers,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "mindroom-tests",
+        },
     )
     try:
         with urllib.request.urlopen(request, timeout=5) as response:  # noqa: S310
