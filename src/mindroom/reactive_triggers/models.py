@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
+import regex
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 TRIGGER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -18,163 +18,6 @@ FiringStatus = Literal["pending", "triaged_no", "claimed", "delivered", "failed"
 def generate_trigger_id() -> str:
     """Return a newly generated route-safe reactive trigger identifier."""
     return f"tr_{uuid4().hex[:12]}"
-
-
-_UNSAFE_REGEX_MESSAGE = "Pattern is unsafe: nested quantifiers, backreferences, and lookarounds are not allowed"
-_BRACE_QUANTIFIER_RE = re.compile(r"\{(?:(\d+)(?:,(\d*))?|,(\d+))\}")
-_INLINE_FLAG_CHARS = frozenset("aiLmsux-")
-
-
-@dataclass(slots=True)
-class _RegexGroupFrame:
-    """Tracks quantifier and alternation presence inside one regex group."""
-
-    has_quantifier: bool = False
-    has_alternation: bool = False
-
-
-def validate_safe_regex_pattern(pattern: str) -> None:
-    """Reject regex constructs prone to catastrophic backtracking (ReDoS)."""
-    stack: list[_RegexGroupFrame] = []
-    index = 0
-    length = len(pattern)
-    while index < length:
-        index = _step_regex_safety_token(pattern, index, stack)
-
-
-def _step_regex_safety_token(pattern: str, index: int, stack: list[_RegexGroupFrame]) -> int:
-    """Validate and advance past one regex token at index."""
-    char = pattern[index]
-    if char == "\\":
-        if index + 1 < len(pattern) and "1" <= pattern[index + 1] <= "9":
-            raise ValueError(_UNSAFE_REGEX_MESSAGE)
-        next_index = index + 2
-    elif char == "[":
-        next_index = _consume_char_class(pattern, index)
-    elif char == "(":
-        next_index = _consume_group_open(pattern, index, stack)
-    elif char == ")":
-        next_index = _consume_group_close(pattern, index, stack)
-    elif char == "|":
-        if stack:
-            stack[-1].has_alternation = True
-        next_index = index + 1
-    else:
-        quantifier = _consume_quantifier(pattern, index)
-        if quantifier is not None:
-            if stack:
-                stack[-1].has_quantifier = True
-            next_index = quantifier[0]
-        else:
-            next_index = index + 1
-    return next_index
-
-
-def _consume_char_class(pattern: str, start: int) -> int:
-    """Advance past a regex character class [...], treating inner metacharacters literally."""
-    index = start + 1
-    length = len(pattern)
-    if index < length and pattern[index] == "^":
-        index += 1
-    if index < length and pattern[index] == "]":
-        index += 1
-    while index < length:
-        if pattern[index] == "\\":
-            index += 2
-            continue
-        if pattern[index] == "]":
-            return index + 1
-        index += 1
-    return length
-
-
-def _consume_quantifier(pattern: str, start: int) -> tuple[int, bool] | None:
-    """Parse a quantifier at start, returning (end_index, is_repeating) or None."""
-    length = len(pattern)
-    if start >= length:
-        return None
-    char = pattern[start]
-    if char in ("+", "*", "?"):
-        end = start + 1
-        is_repeating = char in ("+", "*")
-    elif char == "{":
-        match = _BRACE_QUANTIFIER_RE.match(pattern, start)
-        if match is None:
-            return None
-        end = match.end()
-        first, second, only_upper = match.groups()
-        if only_upper is not None:
-            is_repeating = int(only_upper) > 1
-        elif second is None:
-            is_repeating = int(first) > 1
-        elif second == "":
-            is_repeating = True
-        else:
-            is_repeating = int(second) > 1
-    else:
-        return None
-    if end < length and pattern[end] in ("?", "+"):
-        end += 1
-    return end, is_repeating
-
-
-def _consume_group_open(pattern: str, start: int, stack: list[_RegexGroupFrame]) -> int:
-    """Handle ( and (?...) group openers, rejecting lookarounds and named backreferences."""
-    length = len(pattern)
-    if start + 1 >= length or pattern[start + 1] != "?":
-        stack.append(_RegexGroupFrame())
-        return start + 1
-    rest = pattern[start + 2 :]
-    if rest.startswith(("=", "!", "<=", "<!", "P=", "(")):
-        raise ValueError(_UNSAFE_REGEX_MESSAGE)
-    if rest.startswith("#"):
-        close_idx = pattern.find(")", start + 3)
-        return length if close_idx == -1 else close_idx + 1
-    if rest.startswith((":", ">")):
-        stack.append(_RegexGroupFrame())
-        return start + 3
-    if rest.startswith("P<"):
-        close_idx = pattern.find(">", start + 4)
-        stack.append(_RegexGroupFrame())
-        return length if close_idx == -1 else close_idx + 1
-    return _consume_inline_flag_group(pattern, start + 2, stack)
-
-
-def _consume_inline_flag_group(pattern: str, flag_start: int, stack: list[_RegexGroupFrame]) -> int:
-    """Handle (?ims...) inline flags and (?ims:...) scoped flag groups."""
-    index = flag_start
-    length = len(pattern)
-    while index < length and pattern[index] in _INLINE_FLAG_CHARS:
-        if pattern[index] == "x":
-            raise ValueError(_UNSAFE_REGEX_MESSAGE)
-        index += 1
-    if index < length and pattern[index] == ")":
-        return index + 1
-    if index < length and pattern[index] == ":":
-        stack.append(_RegexGroupFrame())
-        return index + 1
-    stack.append(_RegexGroupFrame())
-    return flag_start
-
-
-def _consume_group_close(pattern: str, start: int, stack: list[_RegexGroupFrame]) -> int:
-    """Close a regex group, enforcing nested-quantifier and quantified-alternation bans."""
-    index = start + 1
-    if not stack:
-        return index
-    frame = stack.pop()
-    quantifier = _consume_quantifier(pattern, index)
-    if quantifier is not None:
-        index, is_repeating = quantifier
-        if is_repeating and (frame.has_quantifier or frame.has_alternation):
-            raise ValueError(_UNSAFE_REGEX_MESSAGE)
-        if stack:
-            stack[-1].has_quantifier = True
-            stack[-1].has_alternation = stack[-1].has_alternation or frame.has_alternation
-    elif stack:
-        stack[-1].has_quantifier = stack[-1].has_quantifier or frame.has_quantifier
-        stack[-1].has_alternation = stack[-1].has_alternation or frame.has_alternation
-    return index
 
 
 def _strip_non_empty(value: str, *, field_name: str) -> str:
@@ -231,11 +74,10 @@ class RoomMessageSourceSpec(BaseModel):
             msg = "pattern must not be empty"
             raise ValueError(msg)
         try:
-            re.compile(value)
-        except re.error as exc:
+            regex.compile(value, regex.IGNORECASE)
+        except regex.error as exc:
             msg = f"Invalid regular expression pattern: {exc}"
             raise ValueError(msg) from exc
-        validate_safe_regex_pattern(value)
         return value
 
 

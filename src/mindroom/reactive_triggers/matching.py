@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
+
+import regex
 
 from mindroom.constants import SOURCE_KIND_KEY
 from mindroom.dispatch_source import EXTERNAL_TRIGGER_SOURCE_KIND, REACTIVE_TRIGGER_SOURCE_KIND
 from mindroom.logging_config import get_logger
-from mindroom.reactive_triggers.models import validate_safe_regex_pattern
 from mindroom.requester_identity import equivalent_requester_ids
 
 if TYPE_CHECKING:
@@ -27,6 +27,7 @@ REACTIVE_TRIGGER_ID_KEY = "io.mindroom.reactive_trigger.id"
 REACTIVE_TRIGGER_DEDUPE_KEY = "io.mindroom.reactive_trigger.dedupe_key"
 _EXTERNAL_TRIGGER_ID_KEY = "io.mindroom.external_trigger.id"
 _MAX_PATTERN_SEARCH_CHARS = 4_096
+_PATTERN_SEARCH_TIMEOUT_SECONDS = 0.05
 _MISSING = object()
 
 
@@ -57,7 +58,7 @@ def matches_room_message(
     ):
         return False
     if spec.pattern is not None:
-        return _matches_safe_pattern(spec.pattern, event.text or "")
+        return _matches_bounded_pattern(spec.pattern, event.text or "", room_id=spec.room_id)
     return True
 
 
@@ -89,13 +90,31 @@ def _matches_configured_senders(
     )
 
 
-def _matches_safe_pattern(pattern: str, text: str) -> bool:
-    """Defensively validate pattern safety and search a bounded text prefix."""
+def _matches_bounded_pattern(pattern: str, text: str, *, room_id: str) -> bool:
+    """Search a bounded text prefix using regex with an explicit timeout."""
     try:
-        validate_safe_regex_pattern(pattern)
-        return re.search(pattern, text[:_MAX_PATTERN_SEARCH_CHARS], re.IGNORECASE) is not None
-    except (ValueError, re.error):
-        logger.warning("Rejected unsafe or invalid reactive trigger regex pattern during matching", exc_info=True)
+        return (
+            regex.search(
+                pattern,
+                text[:_MAX_PATTERN_SEARCH_CHARS],
+                flags=regex.IGNORECASE,
+                timeout=_PATTERN_SEARCH_TIMEOUT_SECONDS,
+            )
+            is not None
+        )
+    except TimeoutError:
+        logger.warning(
+            "Reactive trigger regex pattern timed out",
+            room_id=room_id,
+            pattern_length=len(pattern),
+        )
+        return False
+    except regex.error:
+        logger.warning(
+            "Invalid reactive trigger regex pattern during matching",
+            room_id=room_id,
+            pattern_length=len(pattern),
+        )
         return False
 
 

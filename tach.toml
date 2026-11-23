@@ -10777,7 +10777,6 @@ depends_on = [
 path = "mindroom.reactive_triggers.matching"
 depends_on = [
     "mindroom.constants",
-    "mindroom.reactive_triggers.models",
 ]
 
 [[modules]]

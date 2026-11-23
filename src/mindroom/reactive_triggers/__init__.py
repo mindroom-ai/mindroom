@@ -28,7 +28,6 @@ from mindroom.reactive_triggers.models import (
     TriggerSourceSpec,
     TriggerTargetSpec,
     generate_trigger_id,
-    validate_safe_regex_pattern,
 )
 from mindroom.reactive_triggers.store import (
     ClaimResult,
@@ -72,5 +71,4 @@ __all__ = (
     "is_reactive_trigger_event_content",
     "matches_external_event",
     "matches_room_message",
-    "validate_safe_regex_pattern",
 )

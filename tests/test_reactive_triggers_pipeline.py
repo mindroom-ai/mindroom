@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
@@ -50,7 +51,6 @@ from mindroom.reactive_triggers import (
     is_reactive_trigger_event_content,
     matches_external_event,
     matches_room_message,
-    validate_safe_regex_pattern,
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 
@@ -1122,53 +1122,47 @@ async def test_dispatch_reactive_trigger_new_thread_and_thread_key_binding(
 
 
 # ---------------------------------------------------------------------------
-# Fix Round 1 tests: ReDoS guard, UTF-8 triage budget, origin room & guards
+# Regex timeout protection, UTF-8 triage budget, origin room & dispatch guards
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    "unsafe_pattern",
+    ("pattern", "adversarial_text"),
     [
-        r"(a+)+$",
-        r"(\w+\s?)+$",
-        r"(a|aa)+$",
-        r"(?=foo)",
-        r"(?!foo)",
-        r"(?<=foo)",
-        r"(?<!foo)",
-        r"(foo)\1",
-        r"(?P<x>foo)(?P=x)",
-        r"(?:a|b){2,5}",
-        r"((?:a+))+$",
+        (r".*.*.*Z", ("a" * 4_000) + "!"),
+        (r"(a+)+$", ("a" * 40) + "!"),
     ],
 )
-def test_unsafe_regex_patterns_rejected_by_model_and_matching(
+def test_matches_room_message_times_out_cleanly_on_catastrophic_regex(
     tmp_path: Path,
-    unsafe_pattern: str,
+    pattern: str,
+    adversarial_text: str,
 ) -> None:
-    """ReDoS-prone patterns, backreferences, and lookarounds are rejected at model and match time."""
-    expected_msg = "Pattern is unsafe: nested quantifiers, backreferences, and lookarounds are not allowed"
-    with pytest.raises(ValueError, match=re.escape(expected_msg)):
-        validate_safe_regex_pattern(unsafe_pattern)
-
-    with pytest.raises(ValidationError, match=re.escape(expected_msg)):
-        RoomMessageSourceSpec(room_id=_ROOM_A, pattern=unsafe_pattern)
-
-    # Defensive guard in matches_room_message refuses unsafe patterns even if constructed bypassing validation.
+    """Adversarial regexes abort via timeout well under 0.5s and return False."""
     config = _config(tmp_path)
-    spec = RoomMessageSourceSpec.model_construct(room_id=_ROOM_A, pattern=unsafe_pattern, senders=[])
-    assert not matches_room_message(
-        spec,
-        _room_event(room_id=_ROOM_A, text="a" * 80 + "!"),
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
+    spec = RoomMessageSourceSpec(room_id=_ROOM_A, pattern=pattern)
+    event = _room_event(room_id=_ROOM_A, text=adversarial_text)
+
+    started = time.monotonic()
+    matched = matches_room_message(spec, event, config=config, runtime_paths=runtime_paths_for(config))
+    elapsed = time.monotonic() - started
+
+    assert matched is False
+    assert elapsed < 0.5
 
 
-def test_safe_regex_patterns_pass_and_text_is_clipped_to_4096_chars(tmp_path: Path) -> None:
-    """Safe patterns compile and match within the 4,096-character search window."""
+def test_matches_room_message_handles_invalid_regex_and_clips_text_to_4096_chars(tmp_path: Path) -> None:
+    """Normal patterns including quantified alternations match within 4,096 chars; invalid regex fails closed."""
     config = _config(tmp_path)
     runtime_paths = runtime_paths_for(config)
+
+    spec_group_alt = RoomMessageSourceSpec(room_id=_ROOM_A, pattern=r"(?:foo|bar)+")
+    assert matches_room_message(
+        spec_group_alt,
+        _room_event(room_id=_ROOM_A, text="FOOBAR detected"),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
 
     spec_alt = RoomMessageSourceSpec(room_id=_ROOM_A, pattern=r"urgent|outage|sev[12]")
     assert matches_room_message(
@@ -1193,6 +1187,17 @@ def test_safe_regex_patterns_pass_and_text_is_clipped_to_4096_chars(tmp_path: Pa
     # Match within the first 4,096 chars succeeds.
     in_window_event = _room_event(room_id=_ROOM_A, text=("x" * 4_000) + " deploy failed")
     assert matches_room_message(spec_deploy, in_window_event, config=config, runtime_paths=runtime_paths)
+
+    # Invalid regex syntax is rejected at model validation and fails closed defensively during matching.
+    with pytest.raises(ValidationError, match="Invalid regular expression pattern"):
+        RoomMessageSourceSpec(room_id=_ROOM_A, pattern="[unclosed")
+    bad_spec = RoomMessageSourceSpec.model_construct(room_id=_ROOM_A, pattern="[unclosed", senders=[])
+    assert not matches_room_message(
+        bad_spec,
+        _room_event(room_id=_ROOM_A, text="hello"),
+        config=config,
+        runtime_paths=runtime_paths,
+    )
 
 
 def test_origin_target_requires_same_source_and_target_room() -> None:
