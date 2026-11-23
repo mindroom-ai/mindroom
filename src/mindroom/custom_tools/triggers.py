@@ -26,6 +26,7 @@ from mindroom.external_triggers.store import (
     ExternalTriggerStoreError,
     ExternalTriggerTarget,
 )
+from mindroom.logging_config import get_logger
 from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.matrix.state import resolve_room_id
 from mindroom.reactive_triggers.external_sources import (
@@ -62,6 +63,8 @@ if TYPE_CHECKING:
     from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+
+logger = get_logger(__name__)
 
 _MAX_EXPIRES_IN_HOURS = 8760.0
 _TOOL_ERRORS = (
@@ -365,6 +368,7 @@ class TriggersTools(Toolkit):
     def _record_payload(record: ExternalTriggerRecord) -> dict[str, object]:
         return {
             "trigger_id": record.trigger_id,
+            "trigger_kind": "direct",
             "enabled": record.enabled,
             "auth": record.auth,
             "delivery_mode": record.delivery_mode,
@@ -779,7 +783,12 @@ class TriggersTools(Toolkit):
 
             normalized_source_id = source_id.strip()
             source_config = policy.event_sources.get(normalized_source_id)
-            if source_config is None:
+            if source_config is None or not is_source_subscriber_allowed(
+                source_config,
+                context.requester_id,
+                context.config,
+                context.runtime_paths,
+            ):
                 allowed_source_ids = sorted(
                     sid
                     for sid, cfg in policy.event_sources.items()
@@ -787,21 +796,14 @@ class TriggersTools(Toolkit):
                 )
                 if allowed_source_ids:
                     msg = (
-                        f"Unknown event source {normalized_source_id!r}. "
+                        f"Event source {normalized_source_id!r} is unavailable. "
                         f"Available event sources: {', '.join(allowed_source_ids)}"
                     )
                 else:
-                    msg = f"Unknown event source {normalized_source_id!r}. No event sources are available to you."
+                    msg = (
+                        f"Event source {normalized_source_id!r} is unavailable. No event sources are available to you."
+                    )
                 raise ValueError(msg)
-
-            if not is_source_subscriber_allowed(
-                source_config,
-                context.requester_id,
-                context.config,
-                context.runtime_paths,
-            ):
-                msg = "You are not authorized to subscribe to this event source."
-                raise ReactiveTriggerStoreError(msg)
 
             source_spec = ExternalEventSourceSpec(
                 source_id=normalized_source_id,
@@ -954,14 +956,24 @@ class TriggersTools(Toolkit):
             external_store: ExternalTriggerStore,
             reactive_store: ReactiveTriggerStore,
         ) -> str:
-            owner_user_id = None if self._is_admin(context) else context.requester_id
-            external_records = external_store.list_records(owner_user_id=owner_user_id)
+            if self._is_admin(context):
+                external_records = external_store.list_records(owner_user_id=None)
+                reactive_records = reactive_store.list_triggers(
+                    owner_user_id=None,
+                    include_disabled=include_disabled,
+                )
+            else:
+                owner_ids = set(equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths))
+                external_records = [
+                    record for record in external_store.list_records() if record.owner_user_id in owner_ids
+                ]
+                reactive_records = [
+                    record
+                    for record in reactive_store.list_triggers(include_disabled=include_disabled)
+                    if record.owner_user_id in owner_ids
+                ]
             if not include_disabled:
                 external_records = [record for record in external_records if record.enabled]
-            reactive_records = reactive_store.list_triggers(
-                owner_user_id=owner_user_id,
-                include_disabled=include_disabled,
-            )
             external_payloads = [self._record_payload(record) for record in external_records]
             reactive_payloads = [self._reactive_record_payload(record) for record in reactive_records]
             return self._payload(
@@ -1002,6 +1014,12 @@ class TriggersTools(Toolkit):
                 msg = f"external trigger not found: {trigger_id}"
                 raise ExternalTriggerStoreError(msg)
             self._require_reactive_owner_or_admin(context, reactive_record)
+            was_disabled = not reactive_record.enabled
+            if enabled and was_disabled and isinstance(reactive_record.source, RoomMessageSourceSpec):
+                reactive_store.advance_room_cursor(
+                    trigger_id,
+                    RoomCursor(created_ts=int(time.time() * 1000), logical_event_id=""),
+                )
             updated = reactive_store.set_enabled(trigger_id, enabled)
             if updated is None:
                 msg = f"external trigger not found: {trigger_id}"
@@ -1316,12 +1334,22 @@ async def _read_initial_room_cursor(
     if reader is None:
         reader = context.conversation_reader
 
+    started = RoomCursor(created_ts=int(now * 1000), logical_event_id="")
     if reader is not None and hasattr(reader, "latest_room_cursor"):
         try:
             latest = await reader.latest_room_cursor(room_id)
         except Exception:
+            logger.warning(
+                "Failed to read latest room cursor for reactive trigger; falling back to current timestamp",
+                room_id=room_id,
+                exc_info=True,
+            )
             latest = None
         if latest is not None:
-            return RoomCursor(created_ts=latest.created_ts, logical_event_id=latest.logical_event_id)
+            journal_head = RoomCursor(created_ts=latest.created_ts, logical_event_id=latest.logical_event_id)
+            return max(
+                (started, journal_head),
+                key=lambda cursor: (cursor.created_ts, cursor.logical_event_id),
+            )
 
-    return RoomCursor(created_ts=int(now * 1000), logical_event_id="")
+    return started

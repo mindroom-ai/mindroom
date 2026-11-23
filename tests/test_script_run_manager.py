@@ -1062,6 +1062,17 @@ async def test_launch_rejects_an_allowlist_naming_filesystem_by_an_old_name(tmp_
                 limits=ScriptRunLimits(allowed_tools=(old_name,)),
             )
 
+    manager.toolkit_name_resolver = lambda _context: frozenset({"calculator", "triggers"})
+    with pytest.raises(
+        ScriptRunManagerError,
+        match=r"toolkit names: external_trigger_manager\. .*name triggers instead of external_trigger_manager",
+    ):
+        await manager.run(
+            _context(tmp_path),
+            source="print('ok')\n",
+            limits=ScriptRunLimits(allowed_tools=("external_trigger_manager",)),
+        )
+
 
 @pytest.mark.asyncio
 async def test_launch_rejects_unknown_allowed_toolkit_before_durable_work(tmp_path: Path) -> None:

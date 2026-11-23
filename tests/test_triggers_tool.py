@@ -209,9 +209,10 @@ def _payload(raw: str) -> dict[str, Any]:
 async def test_watch_room_creates_rule_with_origin_default_cursor_and_notify(tmp_path: Path) -> None:
     """watch_room defaults to target_thread_id='origin' in same room, stores journal cursor, and notifies runtime."""
     _record_rooms(tmp_path)
+    ahead_ts = int(time.time() * 1000) + 5_000
     reader = make_conversation_reader_mock()
     reader.latest_room_cursor = AsyncMock(
-        return_value=ConversationCursor(created_ts=1_700_000_000_123, logical_event_id="$latest:example.org"),
+        return_value=ConversationCursor(created_ts=ahead_ts, logical_event_id="$latest:example.org"),
     )
     orchestrator = _make_orchestrator()
     tool = TriggersTools()
@@ -257,7 +258,7 @@ async def test_watch_room_creates_rule_with_origin_default_cursor_and_notify(tmp
     store = ReactiveTriggerStore(_runtime_paths(tmp_path))
     cursor = store.get_room_cursor(trigger["trigger_id"])
     assert cursor is not None
-    assert cursor.created_ts == 1_700_000_000_123
+    assert cursor.created_ts == ahead_ts
     assert cursor.logical_event_id == "$latest:example.org"
     orchestrator.reactive_triggers.notify_work.assert_called_once()
 
@@ -503,10 +504,10 @@ async def test_subscribe_event_authorization_and_validation(tmp_path: Path) -> N
         )
 
     assert missing["status"] == "error"
-    assert "github" in missing["message"]
+    assert missing["message"] == "Event source 'nope' is unavailable. Available event sources: github"
     assert "secret_ops" not in missing["message"]
     assert unauthorized["status"] == "error"
-    assert unauthorized["message"] == "You are not authorized to subscribe to this event source."
+    assert unauthorized["message"] == "Event source 'secret_ops' is unavailable. Available event sources: github"
     assert bad_repo["status"] == "error"
     assert bad_event["status"] == "error"
     assert ok["status"] == "ok", ok
@@ -546,7 +547,9 @@ async def test_unified_list_disable_delete_and_rotate(tmp_path: Path) -> None:
         assert listed["status"] == "ok"
         assert {item["trigger_id"] for item in listed["triggers"]} == {"direct-1", "reactive-1"}
         assert [item["trigger_id"] for item in listed["external_triggers"]] == ["direct-1"]
+        assert listed["external_triggers"][0]["trigger_kind"] == "direct"
         assert [item["trigger_id"] for item in listed["reactive_triggers"]] == ["reactive-1"]
+        assert listed["reactive_triggers"][0]["trigger_kind"] == "reactive"
 
         rotate_reactive = _payload(tool.rotate_trigger_key("reactive-1", public_key=_PUBLIC_KEY))
         assert rotate_reactive["status"] == "error"
@@ -733,3 +736,133 @@ def test_config_canonicalizes_external_trigger_manager_and_prohibits_defer() -> 
                     },
                 },
             )
+
+
+@pytest.mark.asyncio
+async def test_watch_room_initial_cursor_clamps_older_journal_head_and_logs_read_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """watch_room never sets an initial cursor older than now_ms, preserves newer heads, and logs cursor read errors."""
+    _record_rooms(tmp_path)
+    tool = TriggersTools()
+    now_ms = int(time.time() * 1000)
+    older_ts = now_ms - 60_000
+    ahead_ts = now_ms + 30_000
+
+    # Older journal head -> clamped forward to now_ms with empty logical_event_id
+    older_reader = make_conversation_reader_mock()
+    older_reader.latest_room_cursor = AsyncMock(
+        return_value=ConversationCursor(created_ts=older_ts, logical_event_id="$older:example.org"),
+    )
+    before_older_ms = int(time.time() * 1000)
+    with tool_runtime_context(_context(tmp_path, conversation_reader=older_reader)):
+        older_res = _payload(await tool.watch_room(prompt="Watch older", trigger_id="cursor-older"))
+    assert older_res["status"] == "ok", older_res
+
+    # Newer journal head ahead of now_ms -> preserved
+    ahead_reader = make_conversation_reader_mock()
+    ahead_reader.latest_room_cursor = AsyncMock(
+        return_value=ConversationCursor(created_ts=ahead_ts, logical_event_id="$ahead:example.org"),
+    )
+    with tool_runtime_context(_context(tmp_path, conversation_reader=ahead_reader)):
+        ahead_res = _payload(await tool.watch_room(prompt="Watch ahead", trigger_id="cursor-ahead"))
+    assert ahead_res["status"] == "ok", ahead_res
+
+    # Failing latest_room_cursor -> warning logged and falls back to now_ms
+    failing_reader = make_conversation_reader_mock()
+    failing_reader.latest_room_cursor = AsyncMock(side_effect=RuntimeError("journal offline"))
+    warning_mock = MagicMock()
+    monkeypatch.setattr("mindroom.custom_tools.triggers.logger.warning", warning_mock)
+    before_fail_ms = int(time.time() * 1000)
+    with tool_runtime_context(_context(tmp_path, conversation_reader=failing_reader)):
+        fail_res = _payload(await tool.watch_room(prompt="Watch fail", trigger_id="cursor-fail"))
+    assert fail_res["status"] == "ok", fail_res
+    warning_mock.assert_called_once()
+
+    store = ReactiveTriggerStore(_runtime_paths(tmp_path))
+    older_cursor = store.get_room_cursor("cursor-older")
+    assert older_cursor is not None
+    assert older_cursor.created_ts >= before_older_ms
+    assert older_cursor.logical_event_id == ""
+
+    ahead_cursor = store.get_room_cursor("cursor-ahead")
+    assert ahead_cursor is not None
+    assert ahead_cursor.created_ts == ahead_ts
+    assert ahead_cursor.logical_event_id == "$ahead:example.org"
+
+    fail_cursor = store.get_room_cursor("cursor-fail")
+    assert fail_cursor is not None
+    assert fail_cursor.created_ts >= before_fail_ms
+    assert fail_cursor.logical_event_id == ""
+
+
+@pytest.mark.asyncio
+async def test_list_triggers_includes_equivalent_requester_aliases(tmp_path: Path) -> None:
+    """Non-admin list_triggers returns triggers owned by any equivalent alias of the requester."""
+    _record_rooms(tmp_path)
+    config = _config()
+    config.authorization.aliases = {"@owner:example.org": ["@bridge-owner:example.org"]}
+    tool = TriggersTools()
+
+    with tool_runtime_context(_context(tmp_path, requester_id="@owner:example.org", config=config)):
+        assert _payload(await tool.create_trigger("alias-direct", public_key=_PUBLIC_KEY))["status"] == "ok"
+        assert _payload(await tool.watch_room(prompt="Alias watch", trigger_id="alias-reactive"))["status"] == "ok"
+
+    with tool_runtime_context(_context(tmp_path, requester_id="@bridge-owner:example.org", config=config)):
+        listed = _payload(tool.list_triggers())
+
+    assert listed["status"] == "ok", listed
+    assert {item["trigger_id"] for item in listed["triggers"]} == {"alias-direct", "alias-reactive"}
+    assert [item["trigger_id"] for item in listed["external_triggers"]] == ["alias-direct"]
+    assert [item["trigger_id"] for item in listed["reactive_triggers"]] == ["alias-reactive"]
+
+
+@pytest.mark.asyncio
+async def test_reenabling_disabled_room_message_trigger_advances_cursor_forward(tmp_path: Path) -> None:
+    """Re-enabling a paused room_message trigger advances a stale cursor to now_ms without regressing newer cursors."""
+    _record_rooms(tmp_path)
+    tool = TriggersTools()
+    store = ReactiveTriggerStore(_runtime_paths(tmp_path))
+
+    with tool_runtime_context(_context(tmp_path)):
+        created = _payload(await tool.watch_room(prompt="Pause test", trigger_id="paused-watch"))
+        assert created["status"] == "ok", created
+        assert _payload(tool.disable_trigger("paused-watch", enabled=False))["status"] == "ok"
+
+    # Simulate an old cursor from days ago by rewriting the cursor row in SQLite directly
+    with store._write_transaction() as conn:
+        conn.execute(
+            "UPDATE room_cursors SET created_ts = ?, logical_event_id = ? WHERE trigger_id = ?",
+            (1_000_000, "$stale:example.org", "paused-watch"),
+        )
+    stale_cursor = store.get_room_cursor("paused-watch")
+    assert stale_cursor is not None
+    assert stale_cursor.created_ts == 1_000_000
+
+    before_reenable_ms = int(time.time() * 1000)
+    with tool_runtime_context(_context(tmp_path)):
+        reenabled = _payload(tool.disable_trigger("paused-watch", enabled=True))
+    assert reenabled["status"] == "ok", reenabled
+    assert reenabled["trigger"]["enabled"] is True
+
+    advanced_cursor = store.get_room_cursor("paused-watch")
+    assert advanced_cursor is not None
+    assert advanced_cursor.created_ts >= before_reenable_ms
+    assert advanced_cursor.logical_event_id == ""
+
+    # If the cursor is already ahead of now_ms, re-enabling preserves the newer cursor
+    ahead_ts = int(time.time() * 1000) + 60_000
+    with tool_runtime_context(_context(tmp_path)):
+        assert _payload(tool.disable_trigger("paused-watch", enabled=False))["status"] == "ok"
+    with store._write_transaction() as conn:
+        conn.execute(
+            "UPDATE room_cursors SET created_ts = ?, logical_event_id = ? WHERE trigger_id = ?",
+            (ahead_ts, "$future:example.org", "paused-watch"),
+        )
+    with tool_runtime_context(_context(tmp_path)):
+        assert _payload(tool.disable_trigger("paused-watch", enabled=True))["status"] == "ok"
+    kept_cursor = store.get_room_cursor("paused-watch")
+    assert kept_cursor is not None
+    assert kept_cursor.created_ts == ahead_ts
+    assert kept_cursor.logical_event_id == "$future:example.org"
