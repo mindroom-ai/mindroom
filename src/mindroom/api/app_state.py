@@ -74,6 +74,8 @@ class ExternalTriggerRuntime:
     # It posts the trigger it answers, under its own run phase and the runtime's admission gate.
     target_bot: Callable[[str], AgentBot | None]
     config_generation: int
+    # Optional callback to wake the reactive trigger delivery loop after durable event-source enqueue.
+    on_reactive_event: Callable[[], None] | None = None
 
 
 @dataclass

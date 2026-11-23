@@ -1863,6 +1863,8 @@ depends_on = [
     "mindroom.delivery_replay",
     "mindroom.external_triggers.executor",
     "mindroom.matrix.client_room_admin",
+    "mindroom.reactive_triggers.external_sources",
+    "mindroom.reactive_triggers.store",
     "mindroom.response_admission",
 ]
 
@@ -10757,6 +10759,7 @@ depends_on = []
 path = "mindroom.reactive_triggers"
 depends_on = [
     "mindroom.reactive_triggers.dispatch",
+    "mindroom.reactive_triggers.external_sources",
     "mindroom.reactive_triggers.matching",
     "mindroom.reactive_triggers.models",
     "mindroom.reactive_triggers.store",
@@ -10795,4 +10798,12 @@ depends_on = [
     "mindroom.matrix.room_reconciliation",
     "mindroom.reactive_triggers.matching",
     "mindroom.reactive_triggers.store",
+]
+
+[[modules]]
+path = "mindroom.reactive_triggers.external_sources"
+depends_on = [
+    "mindroom.delivery_replay",
+    "mindroom.reactive_triggers.matching",
+    "mindroom.reactive_triggers.models",
 ]

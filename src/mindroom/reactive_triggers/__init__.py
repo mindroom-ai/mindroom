@@ -1,9 +1,21 @@
-"""Reactive triggers core models, SQLite store, matching, triage, and dispatch."""
+"""Reactive triggers core models, SQLite store, matching, triage, dispatch, and external sources."""
 
 from mindroom.reactive_triggers.dispatch import (
     DispatchResult,
     build_reactive_trigger_body,
     dispatch_reactive_trigger,
+)
+from mindroom.reactive_triggers.external_sources import (
+    ExternalSourceAuthError,
+    ExternalSourceBadRequestError,
+    ExternalSourceForbiddenError,
+    ExternalSourceReplayError,
+    ExternalSourceUnavailableError,
+    fan_out_external_event,
+    is_source_subscriber_allowed,
+    validate_subscription_against_source,
+    verify_and_normalize_ed25519_event,
+    verify_and_normalize_github_webhook,
 )
 from mindroom.reactive_triggers.matching import (
     REACTIVE_TRIGGER_DEDUPE_KEY,
@@ -46,6 +58,11 @@ __all__ = (
     "ClaimResult",
     "DispatchResult",
     "ExternalEventSourceSpec",
+    "ExternalSourceAuthError",
+    "ExternalSourceBadRequestError",
+    "ExternalSourceForbiddenError",
+    "ExternalSourceReplayError",
+    "ExternalSourceUnavailableError",
     "FiringRecord",
     "FiringStatus",
     "ReactiveTriggerDuplicateError",
@@ -67,8 +84,13 @@ __all__ = (
     "build_reactive_trigger_body",
     "dispatch_reactive_trigger",
     "evaluate_triage",
+    "fan_out_external_event",
     "generate_trigger_id",
     "is_reactive_trigger_event_content",
+    "is_source_subscriber_allowed",
     "matches_external_event",
     "matches_room_message",
+    "validate_subscription_against_source",
+    "verify_and_normalize_ed25519_event",
+    "verify_and_normalize_github_webhook",
 )
