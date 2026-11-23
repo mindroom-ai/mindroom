@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import shutil
 import sqlite3
-import time
 from contextlib import contextmanager
 from dataclasses import asdict, fields, replace
 from datetime import datetime
@@ -13,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.durable_write import create_directory_durable, write_json_file_durable
 from mindroom.script_runs.models import utc_timestamp
+from mindroom.sqlite_utils import begun, enter_wal
 from mindroom.workflow_runs.models import (
     LIVE_NODE_STATES,
     LIVE_RUN_STATES,
@@ -87,7 +87,8 @@ class WorkflowRunStore:
         # Told the run of each write that changed what the run shows, after the write is saved, on the writer's thread.
         self.on_change: Callable[[str], None] | None = None
         self.directory.mkdir(parents=True, exist_ok=True)
-        self._enter_wal()
+        with self._connection() as connection:
+            enter_wal(connection, timeout_seconds=_BUSY_TIMEOUT_SECONDS)
         self._migrate()
 
     def reserve_run(
@@ -534,24 +535,6 @@ class WorkflowRunStore:
                 connection.execute("DELETE FROM workflow_schema")
                 connection.execute("INSERT INTO workflow_schema (version) VALUES (?)", (len(_MIGRATIONS),))
 
-    def _enter_wal(self) -> None:
-        """Switch the database to WAL, which it then keeps, when the store opens.
-
-        SQLite refuses this one statement at once, without waiting out the busy timeout, while
-        another opener holds the database, so it is retried within the same bound.
-        """
-        deadline = time.monotonic() + _BUSY_TIMEOUT_SECONDS
-        with self._connection() as connection:
-            while True:
-                try:
-                    connection.execute("PRAGMA journal_mode = WAL")
-                except sqlite3.OperationalError as error:
-                    if error.sqlite_errorcode != sqlite3.SQLITE_BUSY or time.monotonic() >= deadline:
-                        raise
-                    time.sleep(0.05)
-                else:
-                    return
-
     @contextmanager
     def _connection(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.database_path, isolation_level=None, timeout=_BUSY_TIMEOUT_SECONDS)
@@ -566,15 +549,8 @@ class WorkflowRunStore:
     @contextmanager
     def _write_transaction(self, changed: str | None = None) -> Iterator[sqlite3.Connection]:
         """Run one write; *changed* is the run whose view the write changes, told to `on_change` once it is saved."""
-        with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                yield connection
-            except BaseException:
-                connection.execute("ROLLBACK")
-                raise
-            else:
-                connection.execute("COMMIT")
+        with self._connection() as connection, begun(connection, write=True):
+            yield connection
         if changed is not None and self.on_change is not None:
             self.on_change(changed)
 
