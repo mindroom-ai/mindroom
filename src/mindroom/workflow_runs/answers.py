@@ -57,8 +57,7 @@ async def answer_question(
         run = engine.store.get_run(run_id)
     except WorkflowRunNotFoundError:
         return "no_longer_open"
-    seq = int(node_id[1:]) if node_id[:1] == "n" and len(node_id) < 20 and node_id[1:].isdecimal() else 0
-    node = engine.store.node_by_seq(run_id, seq)
+    node = engine.store.node_by_id(run_id, node_id)
     if sender != run.owner_user_id or (room_id, thread_id) != (run.room_id, run.thread_root_event_id):
         return "not_for_you" if sender != run.owner_user_id else "wrong_place"
     if node is None or node.kind != "ask" or card_event_id != node.links.get("event_id"):

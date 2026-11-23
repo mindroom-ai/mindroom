@@ -108,8 +108,11 @@ def test_put_node_assigns_stable_sequence(tmp_path: Path) -> None:
     assert (first.seq, second.seq, again.seq) == (1, 2, 1)
     assert _saved(store).request == first.request
     assert _saved(store).result == {"big": "x" * 200_000}
-    assert store.node_by_seq(run.run_id, 2) == second
-    assert store.node_by_seq(run.run_id, 3) is None
+    assert store.node_by_id(run.run_id, "n2") == second
+    assert store.node_by_id(run.run_id, "n3") is None
+    assert store.node_by_id(run.run_id, "n02") is None
+    assert store.node_by_id(run.run_id, "n0") is None
+    assert store.node_by_id(run.run_id, "n" + "9" * 20) is None
     assert store.get_node(run.run_id, "@9") is None
 
 
@@ -369,8 +372,6 @@ def test_update_run_changes_named_fields_only(tmp_path: Path) -> None:
         finished_at="2026-11-19T12:00:00Z",
     )
     assert store.get_run(run.run_id) == updated
-    assert store.run_for_script("script-" + "1" * 32) == updated
-    assert store.run_for_script("script-" + "2" * 32) is None
     with pytest.raises(WorkflowRunNotFoundError):
         set_run(store, _RUN_B, attempt=1)
     with pytest.raises(WorkflowRunStoreError, match="no_such_field"):

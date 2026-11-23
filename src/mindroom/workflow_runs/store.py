@@ -221,11 +221,6 @@ class WorkflowRunStore:
             params.extend(_TERMINAL_STATE_VALUES)
         return self._select_runs(" AND ".join(clauses) or "1", params)
 
-    def run_for_script(self, script_run_id: str) -> WorkflowRun | None:
-        """Return the run whose current attempt is the script run *script_run_id*."""
-        runs = self._select_runs("script_run_id = ?", [script_run_id])
-        return runs[0] if runs else None
-
     def unshown_runs(self) -> list[str]:
         """Return the runs with a card of their own whose card does not say how they ended: all that have not, too."""
         runs = self._select_runs("parent_run_id IS NULL AND attempt > 0 AND card_epoch IS NOT epoch", ())
@@ -301,8 +296,11 @@ class WorkflowRunStore:
         nodes = self._select_nodes("run_id = ? AND key = ?", (run_id, key))
         return nodes[0] if nodes else None
 
-    def node_by_seq(self, run_id: str, seq: int) -> WorkflowNode | None:
-        """Return the node with the public ID `n<seq>`, if the run has one."""
+    def node_by_id(self, run_id: str, node_id: str) -> WorkflowNode | None:
+        """Return the node with canonical display ID `n<seq>` in *run_id*, if one exists."""
+        seq = int(node_id[1:]) if len(node_id) < 20 and node_id[1:].isdecimal() else 0
+        if not (0 < seq < 2**63 and node_id == f"n{seq}"):
+            return None
         nodes = self._select_nodes("run_id = ? AND seq = ?", (run_id, seq))
         return nodes[0] if nodes else None
 

@@ -1576,7 +1576,7 @@ class WorkflowEngine:
         run = await self._current_run(attempt)
         report = partial(self.store.update_run, run.run_id, run.epoch, when=SERVED_RUN_STATES)
         await asyncio.to_thread(partial(report, result=result, error=error, finished_at=utc_timestamp()))
-        self._spawn(run.run_id, self._observe_exit(attempt.run_id))
+        self._spawn(run.run_id, self._observe_exit(run.run_id, attempt.run_id))
 
     def settle_from_handle(self, node: WorkflowNode, epoch: int) -> WorkflowNodeState:
         """Settle a node an ended attempt left unsettled from the broker receipt its handle names; return its state.
@@ -1638,9 +1638,7 @@ class WorkflowEngine:
         return run
 
     def _node(self, run_id: str, node_id: str) -> WorkflowNode:
-        seq = int(node_id[1:]) if node_id[1:].isdecimal() else 0
-        # Only the ID a call is shown with names it: `n` and its sequence number, written as `get_workflow` writes it.
-        node = self.store.node_by_seq(run_id, seq) if node_id == f"n{seq}" and seq < 2**63 else None
+        node = self.store.node_by_id(run_id, node_id)
         if node is None:
             msg = f"Run {run_id} has no call {node_id}."
             raise LookupError(msg)
@@ -1734,15 +1732,16 @@ class WorkflowEngine:
                 now -= (datetime.now(UTC) - datetime.fromisoformat(ended)).total_seconds()
         return {"runtime_seconds_left": max(0.0, run.runtime_seconds_left - max(0.0, now - since))}
 
-    async def _observe_exit(self, script_run_id: str) -> None:
+    async def _observe_exit(self, run_id: str, script_run_id: str) -> None:
         """End the run soon after its script reported: look for the exit instead of waiting for the next pass."""
         for delay in _EXIT_POLL_SECONDS:
             await asyncio.sleep(delay)
             if (await self.scripts.reconcile_durable(run_id=script_run_id)).state in TERMINAL_SCRIPT_RUN_STATES:
                 # Only the run that reported: another run's ended attempt is the next pass's to judge.
-                run = await asyncio.to_thread(self.store.run_for_script, script_run_id)
-                if run is not None:
-                    await self.settle(run)
+                with suppress(WorkflowRunNotFoundError):
+                    run = await asyncio.to_thread(self.store.get_run, run_id)
+                    if run.script_run_id == script_run_id:
+                        await self.settle(run)
                 break
 
     async def _stop_agents(self, run: WorkflowRun) -> None:
