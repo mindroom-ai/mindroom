@@ -592,6 +592,7 @@ class ReactiveTriggerStore:
         trigger_ids: Collection[str] | None = None,
         owner_user_id: str | None = None,
         owner_user_ids: Collection[str] | None = None,
+        before_id: int | None = None,
         limit: int = 20,
     ) -> list[FiringRecord]:
         """Return recent firing ledger rows ordered by id DESC, optionally scoped by trigger or owner."""
@@ -623,6 +624,10 @@ class ReactiveTriggerStore:
             placeholders = ", ".join("?" for _ in unique_trigger_ids)
             clauses.append(f"f.trigger_id IN ({placeholders})")
             params.extend(unique_trigger_ids)
+
+        if before_id is not None:
+            clauses.append("f.id < ?")
+            params.append(before_id)
 
         where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         query = f"SELECT f.* FROM trigger_firings f{join_sql}{where_sql} ORDER BY f.id DESC LIMIT ?"  # noqa: S608

@@ -56,10 +56,10 @@ from mindroom.config.legacy_access import (
 )
 from mindroom.config.legacy_fields import (
     RETIRED_PROMPT_NAMES,
-    RETIRED_TOOL_FUNCTION_RENAMES,
-    approval_rule_a_rename_escapes,
+    approval_rule_a_file_rename_escapes,
     drop_retired_fields,
     rename_legacy_knowledge_reranker,
+    retired_trigger_approval_error,
 )
 from mindroom.config.matrix import (
     EventJournalConfig,
@@ -1539,28 +1539,22 @@ class Config(BaseModel):
         # why-lazy: catalog pulls runtime tool registry paths and loads agents+tools at config import.
         from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
 
+        elsewhere = {
+            function
+            for name in tools
+            if name != "filesystem" and (metadata := tools.get(name)) is not None
+            for function in metadata.function_names or ()
+        }
         globs = [rule.match for rule in self.tool_approval.rules]
-        actions = [rule.action for rule in self.tool_approval.rules]
-        triggers_enabled = any(entry.name == "triggers" for _, entry in entries)
-        for toolkit_name, renames in RETIRED_TOOL_FUNCTION_RENAMES:
-            if toolkit_name == "triggers" and not triggers_enabled:
-                continue
-            elsewhere = {
-                function
-                for name in tools
-                if name != toolkit_name and (metadata := tools.get(name)) is not None
-                for function in metadata.function_names or ()
-            }
-            if (
-                escaped := approval_rule_a_rename_escapes(
-                    globs,
-                    renames,
-                    elsewhere,
-                    actions=actions if toolkit_name == "triggers" else None,
-                    default=self.tool_approval.default if toolkit_name == "triggers" else None,
-                )
-            ) is not None:
-                raise ToolConfigOverrideError(escaped)
+        if (escaped := approval_rule_a_file_rename_escapes(globs, elsewhere)) is not None:
+            msg = f"{escaped}, which another rule or the default now decides; rewrite the rules for the new names."
+            raise ToolConfigOverrideError(msg)
+        if (
+            any(entry.name == "triggers" for _, entry in entries)
+            and (trigger_error := retired_trigger_approval_error(self.tool_approval.rules, self.tool_approval.default))
+            is not None
+        ):
+            raise ToolConfigOverrideError(trigger_error)
 
     def _validate_tailnet_ssh_tools(self, tools: ToolRegistry) -> None:
         """Refuse an SSH opt-in when the turn can offer another toolkit's shell instead."""

@@ -13,7 +13,6 @@ import nio
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.authorization import (
     ReplyMembershipPendingError,
-    administrators_pass_access,
     is_sender_allowed_for_agent_reply_in_room,
 )
 from mindroom.background_tasks import run_blocking_until_complete
@@ -972,13 +971,9 @@ class TriggersTools(Toolkit):
                 direct_error="In-place update is only supported for reactive triggers.",
             ),
         )
-        self._require_reactive_owner_or_admin(context, existing)
         actor_ids = equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths)
-        if existing.owner_user_id not in actor_ids and not administrators_pass_access(
-            context.config,
-            existing.target.agent,
-        ):
-            msg = "only its owner can update a trigger for a personal or created agent, or a team with one"
+        if existing.owner_user_id not in actor_ids:
+            msg = "Only the trigger owner can update a reactive trigger; administrators can use set_enabled or delete."
             raise ReactiveTriggerStoreError(msg)
 
         now = time.time()
@@ -1106,6 +1101,7 @@ class TriggersTools(Toolkit):
 
         external_store = ExternalTriggerStore(context.runtime_paths)
         reactive_store = ReactiveTriggerStore(context.runtime_paths)
+        owner_ids = set(equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths))
         is_admin = self._is_admin(context)
         room_access_cache: dict[str, bool] = {}
 
@@ -1124,30 +1120,46 @@ class TriggersTools(Toolkit):
                 ),
             )
             self._require_reactive_owner_or_admin(context, record, verb="viewed")
-            if not is_admin and not await self._has_source_access_for_history(
-                context,
-                record,
-                room_access_cache=room_access_cache,
-            ):
-                msg = f"You no longer have access to the source for trigger {record.trigger_id}."
-                raise ReactiveTriggerStoreError(msg)
-            fetch_limit = (
-                _MAX_HISTORY_LIMIT
-                if not is_admin and isinstance(record.source, ExternalEventSourceSpec)
-                else clamped_limit
-            )
-            firings = await run_blocking_until_complete(
-                partial(reactive_store.list_firings, trigger_id=stripped_id, limit=fetch_limit),
-            )
-            if is_admin:
-                firings = [firing for firing in firings if firing.rule_uid == record.rule_uid]
+            if not is_admin:
+                if not await self._has_source_access_for_history(
+                    context,
+                    record,
+                    room_access_cache=room_access_cache,
+                ):
+                    msg = f"You no longer have access to the source for trigger {record.trigger_id}."
+                    raise ReactiveTriggerStoreError(msg)
+                firings = await self._list_owner_history(
+                    context,
+                    reactive_store,
+                    limit=clamped_limit,
+                    room_access_cache=room_access_cache,
+                    trigger_record=record,
+                )
+                serialized = [_firing_summary_payload(firing) for firing in firings]
             else:
-                firings = [firing for firing in firings if self._firing_allowed_for_history(context, record, firing)][
-                    :clamped_limit
+                firings = await run_blocking_until_complete(
+                    partial(reactive_store.list_firings, trigger_id=stripped_id, limit=clamped_limit),
+                )
+                firings = [firing for firing in firings if firing.rule_uid == record.rule_uid]
+                owner_has_access = record.owner_user_id in owner_ids and await self._has_source_access_for_history(
+                    context,
+                    record,
+                    room_access_cache=room_access_cache,
+                )
+                serialized = [
+                    _firing_summary_payload(
+                        firing,
+                        include_event=owner_has_access and self._firing_allowed_for_history(context, record, firing),
+                    )
+                    for firing in firings
                 ]
         elif is_admin:
-            firings = await run_blocking_until_complete(
-                partial(reactive_store.list_firings, limit=clamped_limit),
+            serialized = await self._list_admin_history(
+                context,
+                reactive_store,
+                owner_ids=owner_ids,
+                limit=clamped_limit,
+                room_access_cache=room_access_cache,
             )
         else:
             firings = await self._list_owner_history(
@@ -1156,9 +1168,48 @@ class TriggersTools(Toolkit):
                 limit=clamped_limit,
                 room_access_cache=room_access_cache,
             )
+            serialized = [_firing_summary_payload(firing) for firing in firings]
 
-        serialized = [_firing_summary_payload(firing) for firing in firings]
         return self._payload("ok", action="history", firings=serialized, count=len(serialized))
+
+    async def _list_admin_history(
+        self,
+        context: ToolRuntimeContext,
+        reactive_store: ReactiveTriggerStore,
+        *,
+        owner_ids: set[str],
+        limit: int,
+        room_access_cache: dict[str, bool],
+    ) -> list[dict[str, object]]:
+        firings = await run_blocking_until_complete(
+            partial(reactive_store.list_firings, limit=limit),
+        )
+        referenced_ids = {firing.trigger_id for firing in firings}
+        owned_rules = (
+            await run_blocking_until_complete(
+                partial(reactive_store.list_triggers_with_firings, owner_user_ids=owner_ids),
+            )
+            if referenced_ids
+            else []
+        )
+        allowed_owned_rules: dict[str, ReactiveTriggerRecord] = {}
+        for rule in owned_rules:
+            if rule.trigger_id in referenced_ids and await self._has_source_access_for_history(
+                context,
+                rule,
+                room_access_cache=room_access_cache,
+            ):
+                allowed_owned_rules[rule.trigger_id] = rule
+        return [
+            _firing_summary_payload(
+                firing,
+                include_event=(
+                    (owned_rule := allowed_owned_rules.get(firing.trigger_id)) is not None
+                    and self._firing_allowed_for_history(context, owned_rule, firing)
+                ),
+            )
+            for firing in firings
+        ]
 
     async def _list_owner_history(
         self,
@@ -1167,37 +1218,52 @@ class TriggersTools(Toolkit):
         *,
         limit: int,
         room_access_cache: dict[str, bool],
+        trigger_record: ReactiveTriggerRecord | None = None,
     ) -> list[FiringRecord]:
-        owner_ids = equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths)
-        candidate_rules = await run_blocking_until_complete(
-            partial(reactive_store.list_triggers_with_firings, owner_user_ids=owner_ids),
-        )
-        allowed_rules: dict[str, ReactiveTriggerRecord] = {}
-        for candidate in candidate_rules:
-            if await self._has_source_access_for_history(
-                context,
-                candidate,
-                room_access_cache=room_access_cache,
-            ):
-                allowed_rules[candidate.trigger_id] = candidate
-        if not allowed_rules:
-            return []
-        has_external = any(isinstance(rule.source, ExternalEventSourceSpec) for rule in allowed_rules.values())
-        fetch_limit = _MAX_HISTORY_LIMIT if has_external else limit
-        raw_firings = await run_blocking_until_complete(
-            partial(
-                reactive_store.list_firings,
-                owner_user_ids=owner_ids,
-                trigger_ids=allowed_rules,
-                limit=fetch_limit,
-            ),
-        )
-        return [
-            firing
-            for firing in raw_firings
-            if (rule := allowed_rules.get(firing.trigger_id)) is not None
-            and self._firing_allowed_for_history(context, rule, firing)
-        ][:limit]
+        owner_ids: set[str] | None = None
+        if trigger_record is not None:
+            allowed_rules = {trigger_record.trigger_id: trigger_record}
+        else:
+            resolved_owner_ids = equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths)
+            owner_ids = resolved_owner_ids
+            candidate_rules = await run_blocking_until_complete(
+                partial(reactive_store.list_triggers_with_firings, owner_user_ids=resolved_owner_ids),
+            )
+            allowed_rules = {}
+            for candidate in candidate_rules:
+                if await self._has_source_access_for_history(
+                    context,
+                    candidate,
+                    room_access_cache=room_access_cache,
+                ):
+                    allowed_rules[candidate.trigger_id] = candidate
+            if not allowed_rules:
+                return []
+
+        batch_size = max(limit, 50)
+        visible: list[FiringRecord] = []
+        before_id: int | None = None
+        while len(visible) < limit:
+            batch = await run_blocking_until_complete(
+                partial(
+                    reactive_store.list_firings,
+                    trigger_id=trigger_record.trigger_id if trigger_record is not None else None,
+                    trigger_ids=None if trigger_record is not None else allowed_rules,
+                    owner_user_ids=owner_ids,
+                    before_id=before_id,
+                    limit=batch_size,
+                ),
+            )
+            for firing in batch:
+                rule = allowed_rules.get(firing.trigger_id)
+                if rule is not None and self._firing_allowed_for_history(context, rule, firing):
+                    visible.append(firing)
+                    if len(visible) >= limit:
+                        break
+            if len(batch) < batch_size:
+                break
+            before_id = batch[-1].id
+        return visible
 
     async def _test_trigger(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
         resolved_trigger_id = _require_non_empty_arg(args["trigger_id"], "trigger_id", "test")
@@ -1387,7 +1453,21 @@ def _truncate_preview(text: str | None, limit: int) -> str | None:
     return f"{text[: limit - 3]}..."
 
 
-def _firing_summary_payload(firing: FiringRecord) -> dict[str, object]:
+def _firing_summary_payload(firing: FiringRecord, *, include_event: bool = True) -> dict[str, object]:
+    event_payload: dict[str, object] | None = (
+        {
+            "source_type": firing.event.source_type,
+            "kind": firing.event.kind,
+            "actor": firing.event.actor,
+            "event_id": firing.event.event_id,
+            "room_id": firing.event.room_id,
+            "thread_id": firing.event.thread_id,
+            "title": firing.event.title,
+            "text": _truncate_preview(firing.event.text, _HISTORY_TEXT_PREVIEW_CHARS),
+        }
+        if include_event
+        else None
+    )
     return {
         "id": firing.id,
         "trigger_id": firing.trigger_id,
@@ -1399,16 +1479,7 @@ def _firing_summary_payload(firing: FiringRecord) -> dict[str, object]:
         "attempt_count": firing.attempt_count,
         "created_at": firing.created_at,
         "updated_at": firing.updated_at,
-        "event": {
-            "source_type": firing.event.source_type,
-            "kind": firing.event.kind,
-            "actor": firing.event.actor,
-            "event_id": firing.event.event_id,
-            "room_id": firing.event.room_id,
-            "thread_id": firing.event.thread_id,
-            "title": firing.event.title,
-            "text": _truncate_preview(firing.event.text, _HISTORY_TEXT_PREVIEW_CHARS),
-        },
+        "event": event_payload,
     }
 
 

@@ -1022,7 +1022,10 @@ def test_list_firings_filters_orders_desc_and_clamps_limit(tmp_path: Path) -> No
     store.enqueue_firing("r_bob", "$b1", _make_event(event_id="$b1"))
     store.enqueue_firing("r_alice", "$a2", _make_event(event_id="$a2"))
 
-    assert [f.dedupe_key for f in store.list_firings()] == ["$a2", "$b1", "$a1"]
+    all_firings = store.list_firings()
+    assert [f.dedupe_key for f in all_firings] == ["$a2", "$b1", "$a1"]
+    assert [f.dedupe_key for f in store.list_firings(before_id=all_firings[0].id)] == ["$b1", "$a1"]
+    assert [f.dedupe_key for f in store.list_firings(owner_user_id=_OWNER, before_id=all_firings[0].id)] == ["$a1"]
     assert [f.dedupe_key for f in store.list_firings(owner_user_id=_OWNER)] == ["$a2", "$a1"]
     assert [f.dedupe_key for f in store.list_firings(owner_user_id="@bob:example.org")] == ["$b1"]
     assert [f.dedupe_key for f in store.list_firings(trigger_id="r_alice", limit=1)] == ["$a2"]

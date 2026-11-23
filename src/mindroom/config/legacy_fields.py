@@ -7,6 +7,15 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+    from typing import Protocol
+
+    class _ApprovalRule(Protocol):
+        @property
+        def match(self) -> str: ...
+        @property
+        def action(self) -> str | None: ...
+        @property
+        def script(self) -> str | None: ...
 
 # LEGACY_COMPAT: Scalar knowledge_base agent configuration.
 # Legacy format: Agent config accepted scalar knowledge_base instead of knowledge_bases.
@@ -257,17 +266,39 @@ _RETIRED_FILE_SETTINGS = {
 }
 
 
+# LEGACY_COMPAT: Approval rules written for Agno FileTools function names.
+# Legacy format: a tool_approval.rules[].match glob matching save_file, replace_file_chunk, read_file_chunk,
+#   list_files, search_files, or search_content, the functions of Agno's FileTools.
+# Last legacy release: v2026.11.447; replacement: unreleased; the filesystem toolkit names them write_file,
+#   edit_file, read_file, ls, find_files, and grep.
+# Handling: Reject the rules when the first one matching a retired name is not the first one matching its
+#   replacement, unless another registered toolkit still offers the retired name, naming that rule and the
+#   replacement, so the rule that decided a call still decides it.
+# Coverage:
+#   tests/test_filesystem_tool_config.py::test_an_approval_rule_that_stops_deciding_a_renamed_function_fails,
+#   tests/test_filesystem_tool_config.py::test_an_earlier_approval_rule_that_takes_the_replacement_from_its_gate_fails,
+#   tests/test_filesystem_tool_config.py::test_approval_rules_that_decide_the_new_names_as_they_did_the_old_load.
+def approval_rule_a_file_rename_escapes(globs: Sequence[str], offered_elsewhere: Collection[str]) -> str | None:
+    """Return the rule that decided a retired file function but not its replacement, as text, or None."""
+    for old, new in RETIRED_FILE_FUNCTIONS.items():
+        first_old, first_new = (
+            next((index for index, glob in enumerate(globs) if fnmatchcase(name, glob)), None) for name in (old, new)
+        )
+        if old not in offered_elsewhere and first_old is not None and first_old != first_new:
+            return f"tool_approval.rules[{first_old}].match {globs[first_old]!r} decided {old}; {old} is now {new}"
+    return None
+
+
 # LEGACY_COMPAT: Retired individual functions of the triggers (external_trigger_manager) toolkit.
 # Legacy format: triggers / external_trigger_manager exposed 8 separate functions (watch_room, watch_thread,
 #   subscribe_event, create_trigger, list_triggers, disable_trigger, delete_trigger, rotate_trigger_key), which
 #   could appear in tool_approval.rules[].match globs or include_tools/exclude_tools overrides.
 # Last legacy release: v2026.11.480; replacement: unreleased; all 8 were collapsed into a single `triggers`
 #   function taking an `action` parameter.
-# Handling: When the config enables `triggers` (or its alias `external_trigger_manager`), reject
-#   tool_approval.rules when the first rule matching a retired name is not the first rule matching `triggers`,
-#   or when a non-exact glob matching `triggers` weakens `tool_approval.default: require_approval` for a retired
-#   function (unless another registered toolkit still offers the retired name); also reject include_tools or
-#   exclude_tools naming a retired trigger function on a triggers entry, naming `triggers`.
+# Handling: When the config enables `triggers` (or its alias `external_trigger_manager`), allow configs with an
+#   explicit exact `triggers` rule deciding `triggers`, and otherwise reject tool_approval.rules when any retired
+#   function's effective decision differs from `triggers`'s effective decision (regardless of other toolkits);
+#   also reject include_tools or exclude_tools naming a retired trigger function on a triggers entry, naming `triggers`.
 # Coverage:
 #   tests/test_triggers_tool.py::test_an_approval_rule_that_stops_deciding_a_retired_trigger_function_fails,
 #   tests/test_triggers_tool.py::test_an_earlier_approval_rule_that_takes_triggers_from_a_retired_gate_fails,
@@ -285,60 +316,30 @@ RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
     "delete_trigger": "triggers",
     "rotate_trigger_key": "triggers",
 }
-RETIRED_TOOL_FUNCTION_RENAMES: tuple[tuple[str, Mapping[str, str]], ...] = (
-    ("filesystem", RETIRED_FILE_FUNCTIONS),
-    ("triggers", RETIRED_TRIGGER_FUNCTIONS),
-)
 
 
-# LEGACY_COMPAT: Approval rules written for retired file or trigger function names.
-# Legacy format: a tool_approval.rules[].match glob matching a retired Agno FileTools function name or one of the
-#   8 retired triggers toolkit function names.
-# Last legacy release: v2026.11.447 (file), v2026.11.480 (triggers); replacement: unreleased; filesystem exposes
-#   write_file, edit_file, read_file, ls, find_files, and grep, and triggers exposes the unified `triggers` function.
-# Handling: Reject the rules when the first one matching a retired name is not the first one matching its
-#   replacement, unless another registered toolkit still offers the retired name, naming that rule and the
-#   replacement, so the rule that decided a call still decides it.
-# Coverage:
-#   tests/test_filesystem_tool_config.py::test_an_approval_rule_that_stops_deciding_a_renamed_function_fails,
-#   tests/test_filesystem_tool_config.py::test_an_earlier_approval_rule_that_takes_the_replacement_from_its_gate_fails,
-#   tests/test_filesystem_tool_config.py::test_approval_rules_that_decide_the_new_names_as_they_did_the_old_load,
-#   tests/test_triggers_tool.py::test_an_approval_rule_that_stops_deciding_a_retired_trigger_function_fails,
-#   tests/test_triggers_tool.py::test_an_earlier_approval_rule_that_takes_triggers_from_a_retired_gate_fails,
-#   tests/test_triggers_tool.py::test_approval_rules_that_decide_triggers_load.
-def approval_rule_a_rename_escapes(
-    globs: Sequence[str],
-    renames: Mapping[str, str],
-    offered_elsewhere: Collection[str],
-    *,
-    actions: Sequence[str | None] | None = None,
-    default: str | None = None,
-) -> str | None:
-    """Return the rule that decided a retired function (or weakens the default for its replacement), or None."""
-    for old, new in renames.items():
-        if old in offered_elsewhere:
-            continue
-        first_old, first_new = (
-            next((index for index, glob in enumerate(globs) if fnmatchcase(name, glob)), None) for name in (old, new)
-        )
-        if first_old is not None and first_old != first_new:
-            return (
-                f"tool_approval.rules[{first_old}].match {globs[first_old]!r} decided {old}; {old} is now {new}, "
-                "which another rule or the default now decides; rewrite the rules for the new names."
-            )
-        if (
-            default == "require_approval"
-            and actions is not None
-            and first_old is None
-            and first_new is not None
-            and globs[first_new] != new
-            and actions[first_new] != default
-        ):
-            return (
-                f"tool_approval.rules[{first_new}].match {globs[first_new]!r} now decides {new}, "
-                f"weakening tool_approval.default {default!r} that previously decided {old}; "
-                f"rewrite the rules for {new}."
-            )
+def retired_trigger_approval_error(rules: Sequence[_ApprovalRule], default: str) -> str | None:
+    """Return a migration error when approval rules decide `triggers` differently from a retired trigger function."""
+    first_new = next((index for index, rule in enumerate(rules) if fnmatchcase("triggers", rule.match)), None)
+    if first_new is not None and rules[first_new].match == "triggers":
+        return None
+    new_decision = (rules[first_new].action, rules[first_new].script) if first_new is not None else (default, None)
+    for old in RETIRED_TRIGGER_FUNCTIONS:
+        first_old = next((index for index, rule in enumerate(rules) if fnmatchcase(old, rule.match)), None)
+        old_decision = (rules[first_old].action, rules[first_old].script) if first_old is not None else (default, None)
+        if old_decision != new_decision:
+            if first_old is not None:
+                return (
+                    f"tool_approval.rules[{first_old}].match {rules[first_old].match!r} decided {old}; "
+                    f"{old} is now triggers, which now gets a different approval decision; "
+                    "rewrite the rules for triggers."
+                )
+            if first_new is not None:
+                return (
+                    f"tool_approval.rules[{first_new}].match {rules[first_new].match!r} now decides triggers, "
+                    f"changing tool_approval.default {default!r} that previously decided {old}; "
+                    "rewrite the rules for triggers."
+                )
     return None
 
 
