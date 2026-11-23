@@ -138,7 +138,7 @@ calls:
   profiles:
     openai-live:
       backend: live
-      model: gpt-live-1
+      model: gpt-live-1.1
       credentials_service: openai-live
       voice: marin
       agent_model: chat

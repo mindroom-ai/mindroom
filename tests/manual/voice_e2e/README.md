@@ -32,7 +32,7 @@ calls:
   profiles:
     live:
       backend: live
-      model: gpt-live-1
+      model: gpt-live-1.1
       credentials_service: openai
       voice: marin
   agents:
