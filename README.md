@@ -395,6 +395,7 @@ Every command also works with `!` instead of `/` (`!help`), including in clients
 - `/edit_schedule <id> <task>` - Edit an existing scheduled task
 - `/jobs` - List the background jobs running here
 - `/cancel_job <id|all>` - Cancel a background job, or all of them here
+- `/answer [id] <answer>` - Answer a question a workflow run asked you
 - `/config <operation>` - Manage configuration
 - `/desktop [setup|status|confirm|rotate|disconnect]` - Manage your Desktop target
 - `/mode <agent> minimal|standard|show|reset` - Switch one agent between standard tools and a Bash-only interface
