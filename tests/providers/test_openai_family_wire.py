@@ -11,6 +11,7 @@ import os
 import re
 import threading
 import time
+import urllib.error
 import urllib.request
 from copy import deepcopy
 from dataclasses import replace
@@ -4029,7 +4030,8 @@ def test_openrouter_gemini_upstream_issue_still_open() -> None:
         "Accept": "application/vnd.github+json",
         "User-Agent": "mindroom-tests",
     }
-    if token := os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN"):
+    token = (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or "").strip()
+    if token and "\r" not in token and "\n" not in token:
         headers["Authorization"] = f"Bearer {token}"
     request = urllib.request.Request(
         "https://api.github.com/repos/OpenRouterTeam/docs/issues/815",
@@ -4038,10 +4040,12 @@ def test_openrouter_gemini_upstream_issue_still_open() -> None:
     try:
         with urllib.request.urlopen(request, timeout=5) as response:  # noqa: S310
             payload = json.load(response)
+    except urllib.error.HTTPError as exc:
+        pytest.skip(f"Could not check OpenRouterTeam/docs#815: HTTP {exc.code}")
     except (OSError, http.client.HTTPException, ValueError) as exc:
-        pytest.skip(f"Could not check OpenRouterTeam/docs#815: {exc}")
+        pytest.skip(f"Could not check OpenRouterTeam/docs#815: {type(exc).__name__}")
     if not isinstance(payload, dict) or not isinstance(state := payload.get("state"), str):
-        pytest.skip(f"Unexpected GitHub API payload for OpenRouterTeam/docs#815: {payload!r}")
+        pytest.skip("Unexpected GitHub API payload for OpenRouterTeam/docs#815")
     assert state == "open", (
         "OpenRouterTeam/docs#815 is no longer open "
         f"(state={state!r}, state_reason={payload.get('state_reason')!r}). "
