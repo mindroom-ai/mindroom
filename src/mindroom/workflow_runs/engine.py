@@ -1550,8 +1550,9 @@ class WorkflowEngine:
         live = node is not None and node.generation == generation and node.state in LIVE_NODE_STATES
         if live and (runtime := self.agents()) is not None:
             # A Stop of the run's own job ends the run at its next pass: until then nothing of the run goes on.
-            owner, jobs = self.store.get_run(run_id).job_id, runtime.jobs.retained_jobs()
-            live = not any(job.job_id == owner and job.status in _STOPPED_JOB_STATUSES for job in jobs)
+            owner = self.store.get_run(run_id).job_id
+            job = runtime.jobs.retained_job(owner) if owner is not None else None
+            live = job is None or job.status not in _STOPPED_JOB_STATUSES
         prompt = node.request.get("prompt") if node is not None and live else None
         if not isinstance(prompt, str) or node is None:
             return None
@@ -1879,9 +1880,8 @@ def _tool_grant(request: dict[str, object]) -> tuple[ScriptToolGrant, dict[str, 
 
 def _works(runtime: AgentRuntime | None, job_id: str) -> bool:
     """Return whether the job still works in *runtime*."""
-    return runtime is not None and any(
-        job.job_id == job_id and job.status not in TERMINAL_STATUSES for job in runtime.jobs.retained_jobs()
-    )
+    job = None if runtime is None else runtime.jobs.retained_job(job_id)
+    return job is not None and job.status not in TERMINAL_STATUSES
 
 
 def _timeout(meta: dict[str, object]) -> float | None:

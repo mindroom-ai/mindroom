@@ -158,7 +158,8 @@ async def launch_child(
     """
     owner = parse_tool_execution_identity_payload(run.execution_identity)
     earlier = node.handle.ref if turn > 1 and node.handle is not None else None
-    previous = next((delegation_child(job) for job in jobs.retained_jobs() if job.job_id == earlier), None)
+    known = jobs.retained_job(earlier) if earlier is not None else None
+    previous = None if known is None else delegation_child(known)
     # A further turn whose first child is no longer kept starts an agent that never saw the task.
     prompt = _first_prompt(node) if correction is None else correction
     prompt = prompt if correction is None or previous is not None else f"{_first_prompt(node)}\n\n{correction}"
@@ -291,7 +292,7 @@ async def await_child(  # noqa: C901
     jobs, job_id = runtime.jobs, node.handle.ref
     owner = parse_tool_execution_identity_payload(run.execution_identity)
     wait = partial(jobs.wait, job_id, owner=owner, depth=run.depth)
-    if all(job.job_id != job_id for job in jobs.retained_jobs()):
+    if jobs.retained_job(job_id) is None:
         # The one place where a handle without the mark proves something, since here the runtime can be read: a
         # job it never admitted did nothing. One it has since deleted may have done anything.
         kind = "indeterminate" if may_have_written(None if node.handle.dispatched else False) else "interrupted"

@@ -452,8 +452,8 @@ async def _resume_job(
     The one check of a resume. A call or an event delivered again names the job that already holds what was
     accepted, and is checked no more.
     """
-    known = next((job.adapter for job in runtime.retained_jobs() if job.job_id == job_id), None)
-    accepted = known and known.get("resume")
+    known = runtime.retained_job(job_id)
+    accepted = known.adapter.get("resume") if known is not None else None
     run, request = await _resumption(engine, context, arguments, limits, accepted, owner=job_id)
     return _run_job(engine, run, job_id, context, limits, after=after, resume=request)
 
@@ -656,22 +656,19 @@ async def continued_workflow_job(job: BackgroundJob) -> JobSpec | BackgroundOutc
 def workflow_job_standing(runtime_paths: RuntimePaths, job_id: str) -> str:
     """Return what the job runtime knows of a run's job now: read when its run is judged, never ahead of that.
 
-    `unknown` while there is no job runtime to ask, `absent` when it holds no such job, `waiting` for a job a restart
-    stopped that is not granted again and cannot cancel its run yet, `stopping` once a cancel was requested, `live`
-    otherwise while unfinished. An ended job was `stopped` by a Stop or a denial, or `ended` in any other way; one
-    whose end is not saved yet is unfinished, since a restart would find it so and deliver its report again.
+    `unknown` while there is no job runtime to ask, `absent` when it holds no such job, `stopped` for a saved Stop
+    or denial, `ended` for any other saved terminal outcome, and `held` for any other known job (unfinished or whose
+    end is not saved yet, since a restart would find it unfinished and deliver its report again).
     """
     runtime = get_background_runtime(runtime_paths)
     if runtime is None:
         return "unknown"
-    job = next((job for job in runtime.retained_jobs() if job.job_id == job_id), None)
+    job = runtime.retained_job(job_id)
     if job is None:
         return "absent"
     if job.status in TERMINAL_STATUSES and runtime.outcome_saved(job_id):
         return "stopped" if job.status in ("cancelled", "denied") else "ended"
-    if job.status == "cancel_requested":
-        return "stopping"
-    return "waiting" if any(waiting.job_id == job_id for waiting in runtime.awaiting_continuation()) else "live"
+    return "held"
 
 
 def workflow_job_admission(runtime_paths: RuntimePaths, job_id: str) -> asyncio.Lock:

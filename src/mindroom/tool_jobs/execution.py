@@ -487,7 +487,7 @@ async def _run_managed_call(
                     span_stopped=None if span is None else span.stopped,
                 )
             except BaseException:
-                if job.refused is not None and all(known.job_id != job_id for known in runtime.retained_jobs()):
+                if job.refused is not None and runtime.retained_job(job_id) is None:
                     # No job has this ID, so nothing owns what preparing it wrote: a refused or cancelled start
                     # takes it back, and holds the lock until it is gone.
                     await wait_for_future_until_complete(asyncio.ensure_future(job.refused()))

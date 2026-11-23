@@ -468,6 +468,11 @@ class ToolJobRuntime:
         """Return every job this runtime retains, unfiltered by access, for the coordinator's own passes."""
         return tuple(entry.job for entry in self._entries.values())
 
+    def retained_job(self, job_id: str) -> BackgroundJob | None:
+        """Return the retained job with *job_id*, or None if not retained."""
+        entry = self._entries.get(job_id)
+        return None if entry is None else entry.job
+
     def outcome_saved(self, job_id: str) -> bool:
         """Return whether the journal holds the job as it is here; false while an outcome that failed to save waits."""
         return self._entries[job_id].saved
