@@ -397,3 +397,35 @@ async def test_schema_and_output_path_are_refused_together(stack: WorkflowStack)
     assert (failed.value.kind, model.requests) == ("schema", [])
     assert str(failed.value) == "schema and output_path cannot be used together: return the value and write it."
     assert list(stack.tmp_path.rglob("answer.txt")) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("keyword", "reference"),
+    [("$ref", "#/allOf/missing"), ("$dynamicRef", "#/allOf/missing"), ("$ref", "#/allOf/-")],
+)
+async def test_invalid_local_reference_fails_at_submit_without_queueing(
+    stack: WorkflowStack,
+    keyword: str,
+    reference: str,
+) -> None:
+    """An invalid local pointer fails with kind `schema` before queueing, even while the run's slot is busy."""
+    await stack.start(max_concurrent=1)
+    gate = asyncio.Event()
+    model = stack.child_script([Await(gate.wait), *answer(_GOOD)])
+    first = await stack.submit("@0", "agent", _ASK)
+    assert first.state == "running"
+
+    bad = {"allOf": [{"type": "object"}], keyword: reference}
+    receipt = await stack.submit("@1", "agent", {"prompt": "Check.", "schema": bad})
+    node = stack.store.get_node(stack.run_id, "@1")
+
+    expected = f"schema is not valid JSON Schema: reference {reference!r} does not resolve."
+    assert receipt.state == "failed"
+    assert receipt.error == {"kind": "schema", "message": expected}
+    assert node is not None
+    assert (node.state, node.handle) == (WorkflowNodeState.FAILED, None)
+
+    gate.set()
+    assert await stack.result("@0", "agent", _ASK) == {"ok": True}
+    assert len(model.requests) == 1

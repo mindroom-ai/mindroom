@@ -44,6 +44,7 @@ from mindroom.workflow_runs.agent_nodes import (
     AgentNotReadyError,
     AgentRuntime,
     await_child,
+    check_agent_schema,
     delegated_request,
     launch_child,
 )
@@ -793,6 +794,8 @@ class WorkflowEngine:
         if isinstance(access, str):
             # Refused: nothing ran, and the node ends as it is submitted, below.
             node = replace(node, state=WorkflowNodeState.FAILED, error={"kind": "failed", "message": access})
+        elif shown == "agent" and (bad_schema := _schema_failure(asked)) is not None:
+            node = replace(node, state=WorkflowNodeState.FAILED, error={"kind": "schema", "message": bad_schema})
         elif shown == "agent":
             lanes.mark(key)
             start = partial(self._enter, run, node, partial(self._dispatch_agent, run, timeout=_timeout(meta)))
@@ -1942,6 +1945,15 @@ def _indeterminate(node: WorkflowNode, said: object = None) -> _Outcome:
 def _unless_proven(node: WorkflowNode, started: bool | None, safe: _Outcome, said: object = None) -> _Outcome:
     """Return how a node that ended without a result ends: as *safe* to run again only if its record proves that."""
     return _indeterminate(node, said) if may_have_written(started) else safe
+
+
+def _schema_failure(request: dict[str, object]) -> str | None:
+    """Return why an agent call's schema cannot be used, or None when it is valid or absent."""
+    try:
+        check_agent_schema(request)
+    except AgentNodeError as exc:
+        return str(exc)
+    return None
 
 
 def _turn_outcome(

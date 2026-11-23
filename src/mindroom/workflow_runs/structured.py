@@ -61,7 +61,7 @@ def check_schema(schema: object) -> None:
     for reference in _references(schema):
         try:
             inside = reference.startswith("#") and resolver.lookup(reference)
-        except Unresolvable:
+        except (Unresolvable, LookupError, ValueError, TypeError):
             raise SchemaError(_INVALID.format(reason=f"reference {reference!r} does not resolve")) from None
         if not inside:
             raise SchemaError(_INVALID.format(reason=f"reference {reference!r} is not inside the schema"))
