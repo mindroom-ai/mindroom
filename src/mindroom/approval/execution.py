@@ -14,7 +14,7 @@ from mindroom.agent_cli.cli_approval_recovery import CliFollowUpTurn, continue_c
 from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agents import create_agent
 from mindroom.ai import agent_run_metadata_content, run_delegated_child_response, stream_agent_response
-from mindroom.ai_run_metadata import prior_usage_by_run
+from mindroom.ai_run_metadata import model_payload, prior_usage_by_run
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import ResumeRunner
 from mindroom.approval.tool_owners import (
@@ -29,7 +29,7 @@ from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
 from mindroom.llm.events import TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.runs import RunRecord, RunStatus
-from mindroom.reply_scope import current_reply_event_id, current_span_stopped
+from mindroom.reply_scope import current_reply_event_id, current_span, current_span_stopped
 from mindroom.response_turn import (
     CompletedApprovalRun,
     CompletedAttempt,
@@ -158,6 +158,12 @@ def _reconcile_agent_tools(presentation: CollectedStreamPresentation, response: 
         elif tool.tool_call_id not in completed_call_ids:
             # Repeated terminal completions must not match older public slots by name.
             presentation.complete_tool(tool.call)
+
+
+def note_reply_model(config: Config, model_name: str) -> None:
+    """Name the model the current span's reply runs on, which its live writes and error notes carry."""
+    if (handle := current_span()) is not None:
+        handle.reply_model = model_payload(config, model_name)
 
 
 def continuation_model(config: Config, runtime_paths: RuntimePaths, continuation: ApprovalContinuation) -> TurnModel:
@@ -367,6 +373,8 @@ async def _stream_continuation_turn(
         sinks=TurnSinks(
             run_metadata_collector=run_metadata,
             on_completed=completed.append,
+            on_model_resolved=partial(note_reply_model, config),
+            active_model=lambda: span_handle.reply_model if (span_handle := current_span()) is not None else None,
             subagent_cost=subagent_cost,
             response_event_id=current_reply_event_id,
             stopped_by_user=current_span_stopped,
@@ -480,6 +488,8 @@ class AgentApprovalExecution:
         )
         # The build and the resumed run use one model, even if a room or thread override changes meanwhile.
         model = continuation_model(config, self.runtime_paths, continuation)
+        # A continuation stored without its model learns it here, before the resume shows any progress.
+        note_reply_model(config, model.model_name)
         build = await asyncio.to_thread(
             create_agent,
             continuation.entity_name,

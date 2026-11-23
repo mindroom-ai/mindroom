@@ -1504,6 +1504,7 @@ visibility = [
 path = "mindroom.approval.continuation_runner"
 depends_on = [
     "mindroom.agent_cli.cli_approval_waits",
+    "mindroom.ai_run_metadata",
     "mindroom.approval.continuation_rules",
     "mindroom.approval.execution",
     "mindroom.approval.failure",
@@ -2802,6 +2803,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.delivery_gateway"
 depends_on = [
+    "mindroom.ai_run_metadata",
     "mindroom.cancellation",
     "mindroom.failure_text",
     "mindroom.response_lifecycle",
@@ -6368,6 +6370,7 @@ visibility = ["mindroom.streaming"]
 [[modules]]
 path = "mindroom.streaming"
 depends_on = [
+    "mindroom.ai_run_metadata",
     "mindroom.constants",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.legacy_streaming",
