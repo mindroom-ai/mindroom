@@ -30,6 +30,7 @@ from mindroom.delegation.state import (
     SubagentPersona,
 )
 from mindroom.delegation.targets import resolve_fresh_target
+from mindroom.llm.messages import CUT_OFF_TEXT_KEY, is_own_model_message
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, JobAccessError
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
@@ -45,6 +46,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.llm.runs import RunRecord, ToolExecution
+    from mindroom.llm.usage import RunMetrics
     from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.workflow_runs.models import WorkflowNode, WorkflowRun
@@ -365,25 +367,22 @@ async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[Child
     prices = model_prices(runtime.config)
     for run in records[: len(records) - (record is not None)]:
         # What a run that a restart cut short spent, with what the subagents it had received cost: the child that
-        # went on after it carries neither. A run without usage made no request, which costs nothing.
+        # went on after it carries neither. Skip only when the record proves no model work happened; any evidenced
+        # work without usage stays unknown (`cost_usd=None`).
         used = turn_usage(prior_usage_of(run), run.metrics)
-        has_tokens = used is not None and bool(used.tokens.input_tokens or used.tokens.output_tokens or used.details)
-        own = run_cost_usd(used, model_provider=run.model_provider, model_id=run.model, prices=prices)
-        usage[f"{EARLIER_TURN}{run.run_id}"] = _spent(run, own if has_tokens else 0)
+        if _did_model_work(run, used):
+            own = run_cost_usd(used, model_provider=run.model_provider, model_id=run.model, prices=prices)
+            usage[f"{EARLIER_TURN}{run.run_id}"] = _spent(run, own)
         if (theirs := resumed_subagent_cost(run.metadata).usd) is not None:
             # An entry of its own, as below: a turn without a price keeps what its subagents are known to have cost.
             usage[f"{EARLIER_TURN}sub:{run.run_id}"] = {"cost_usd": theirs}
     if record is not None:
         # The child's cost is its own and its subagents' together: a cost that is theirs alone prices none of its own.
         cost, theirs = child.cost_usd, child.subagents_cost_usd
-        entry = _spent(record, cost if cost is None or theirs is None else None if cost == theirs else cost - theirs)
-        if (
-            job.status == "completed"
-            or entry["input_tokens"]
-            or entry["output_tokens"]
-            or entry["cost_usd"] is not None
-        ):
-            usage[1] = entry
+        own = cost if cost is None or theirs is None else None if cost == theirs else cost - theirs
+        used = turn_usage(prior_usage_of(record), record.metrics)
+        if job.status == "completed" or own is not None or _did_model_work(record, used):
+            usage[1] = _spent(record, own)
         if theirs is not None:
             usage[f"sub:{child.delegation_id}"] = {"cost_usd": theirs}
         if child.subagents_cost_unknown:
@@ -403,6 +402,15 @@ async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[Child
     if may_have_written(None if unread else bool(made)):
         return ("indeterminate", text), usage
     return ((job.status, text) if job.status in ("cancelled", "failed") else ("interrupted", _INTERRUPTED)), usage
+
+
+def _did_model_work(run: RunRecord, used: RunMetrics | None) -> bool:
+    """Return whether *run* shows any model work: usage, tool activity, content, or an answered/cut-off model message."""
+    if (used is not None and (used.reported or used.details)) or run.tools or run.content:
+        return True
+    return any(
+        is_own_model_message(message) or CUT_OFF_TEXT_KEY in (message.provider_data or {}) for message in run.messages
+    )
 
 
 def _spent(run: RunRecord, cost: float | None) -> dict[str, object]:

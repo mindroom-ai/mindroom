@@ -2595,6 +2595,7 @@ depends_on = [
     "mindroom.delegation.recovery",
     "mindroom.delegation.state",
     "mindroom.delegation.targets",
+    "mindroom.llm",
     "mindroom.runtime_resolution",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.output_files",

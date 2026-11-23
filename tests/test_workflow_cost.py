@@ -15,6 +15,7 @@ import pytest
 import pytest_asyncio
 
 from mindroom.config.models import ModelPricing
+from mindroom.llm.events import TextDelta
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
@@ -22,7 +23,7 @@ from mindroom.workflow_runs.models import WorkflowNodeState
 from mindroom.workflow_runs.store import SupersededAttemptError
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
 from tests.tool_job_helpers import wait_for_status
-from tests.workflow_helpers import WorkflowStack, workflow_stack
+from tests.workflow_helpers import NodeFailed, WorkflowStack, workflow_stack
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -303,3 +304,48 @@ async def test_completed_turn_around_restart_stays_generation_one_with_one_ledge
     with pytest.raises(SupersededAttemptError):
         stack.store.add_usage(stack.run_id, "@0", 2, 1, 1, {"cost_usd": 0.10}, epoch=0)
     assert _ledger(stack) == [("@0", 1, "1")]
+
+
+@pytest.mark.asyncio
+async def test_failed_unmetered_turn_after_a_tool_call_keeps_its_call_and_unknown_cost(
+    unpriced: WorkflowStack,
+) -> None:
+    """An unpriced turn that answered with a tool call and no tokens before failing keeps its row and unknown cost."""
+
+    async def boom() -> None:
+        msg = "second request failed"
+        raise RuntimeError(msg)
+
+    unpriced.child_script(calls(tool_call("append", "c1", line="a")), [Await(boom), *answer("never")])
+
+    with pytest.raises(NodeFailed) as stopped:
+        await unpriced.result("@0", "agent", _PROMPT)
+
+    assert (stopped.value.kind, unpriced.counting_tool.lines) == ("indeterminate", ["a"])
+    assert _ledger(unpriced) == [("@0", 1, "1")]
+    used = unpriced.engine.run_usage(unpriced.run_id)
+    assert (used["tool_calls"], used["cost_usd"], used["cost_unknown"]) == (1, 0.0, True)
+
+
+@pytest.mark.asyncio
+async def test_cut_short_stream_with_output_and_no_usage_report_keeps_cost_unknown(stack: WorkflowStack) -> None:
+    """A turn interrupted after streaming text and before usage reporting stays unknown instead of pricing at zero."""
+    stack.continues = lambda job: job.kind == "delegation"
+    streamed = asyncio.Event()
+
+    async def hold() -> None:
+        streamed.set()
+        await asyncio.Event().wait()
+
+    stack.child_script([TextDelta("partial output"), Await(hold), *answer("never")])
+    await stack.submit("@0", "agent", _PROMPT)
+    await asyncio.wait_for(streamed.wait(), 5)
+
+    await stack.restart()
+    assert await stack.recover() == [stack.run_id]
+    stack.child_script(answer("continued", _usd(0.20)))
+    await stack.continue_agents()
+    assert await stack.result("@0", "agent", _PROMPT) == "continued"
+
+    assert _costs(stack) == (pytest.approx(0.20), pytest.approx(0.20), True)
+    assert stack.store.turn_costs(stack.run_id) == [pytest.approx(0.20)]
