@@ -25,6 +25,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.segmented_messages import SEGMENT_COUNT_KEY
+from mindroom.mid_turn import MidTurnMode, coalesced_mid_turn_mode, mid_turn_mode
 from mindroom.model_selection import THREAD_MODEL_CONTENT_KEY, parse_thread_model_choice
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.timestamp_formatting import normalize_timestamp_ms
@@ -151,6 +152,8 @@ class PreparedTurn:
     # agent. A live read, not a snapshot: dispatch asks after awaiting its context, and a message admitted
     # meanwhile counts.
     queues_other_run: Callable[[RunIdentity], bool]
+    # Combined composer mid-turn mode of the batch for lock-race notice registration.
+    mid_turn_mode: MidTurnMode = MidTurnMode.AUTO
 
 
 _COALESCED_MESSAGES_INTRO = (
@@ -533,4 +536,7 @@ def build_prepared_turn(
         selection=next((event.selection for event in ordered_pending_events if event.selection is not None), None),
         queued_follow_up_notices=queued_follow_up_notices,
         queues_other_run=queues_other_run,
+        mid_turn_mode=coalesced_mid_turn_mode(
+            tuple(mid_turn_mode(pending_event.event.source.get("content")) for pending_event in ordered_pending_events),
+        ),
     )

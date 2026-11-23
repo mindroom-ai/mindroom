@@ -16,7 +16,12 @@ from mindroom.authorization import ensure_room_membership_synced
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig, _VoiceLLMConfig
-from mindroom.constants import ATTACHMENT_IDS_KEY, SUBMISSION_CONTENT_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
+from mindroom.constants import (
+    ATTACHMENT_IDS_KEY,
+    MID_TURN_MODE_KEY,
+    SUBMISSION_CONTENT_KEY,
+    VOICE_RAW_AUDIO_FALLBACK_KEY,
+)
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.media import Audio
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
@@ -870,6 +875,7 @@ class TestVoiceHandler:
                 "body": "voice.ogg",
                 "msgtype": "m.audio",
                 SUBMISSION_CONTENT_KEY: marker,
+                MID_TURN_MODE_KEY: "steer",
                 THREAD_MODEL_CONTENT_KEY: pick,
             },
         }
@@ -887,6 +893,7 @@ class TestVoiceHandler:
         )
 
         assert prepared.source["content"][SUBMISSION_CONTENT_KEY] == marker
+        assert prepared.source["content"][MID_TURN_MODE_KEY] == "steer"
         if is_edit:
             assert THREAD_MODEL_CONTENT_KEY not in prepared.source["content"]
         else:

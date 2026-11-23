@@ -12,11 +12,10 @@ from itertools import islice
 from typing import TYPE_CHECKING, Any
 
 from mindroom.cancellation import request_task_cancel
-from mindroom.constants import SUBMISSION_CONTENT_KEY
+from mindroom.constants import MID_TURN_MODE_KEY, SUBMISSION_CONTENT_KEY
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import VOICE_SOURCE_KIND, source_kind_bypasses_coalescing
 from mindroom.logging_config import get_logger
-from mindroom.mid_turn import MID_TURN_MODE_KEY
 from mindroom.model_selection import THREAD_MODEL_CONTENT_KEY
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.runtime_shutdown import (

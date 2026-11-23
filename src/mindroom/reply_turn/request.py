@@ -13,6 +13,7 @@ from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.constants import ATTACHMENT_IDS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.matrix.typing import typing_indicator
+from mindroom.mid_turn import MidTurnMode
 from mindroom.response_sources import ResponseSources
 
 if TYPE_CHECKING:
@@ -125,6 +126,7 @@ class ResponseRequest:
     payload_preparation: ResponsePayloadPreparation | None = None
     current_timestamp_ms: float | None = None
     current_prompt_is_structured: bool = False
+    mid_turn_mode: MidTurnMode = MidTurnMode.AUTO
     # Runs once the response holds its conversation's lock, so its dispatcher knows the turn left the lane.
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
     # Which sources became terminal while the request waited for its lock: deleted, or answered elsewhere.

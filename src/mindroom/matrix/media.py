@@ -15,7 +15,7 @@ from nio import crypto
 from nio.durable.transport import HttpError, ResponseTooLarge, Transport
 from nio.http import TransportResponse
 
-from mindroom.constants import RETAINED_MEDIA_MAX_BYTES, SUBMISSION_CONTENT_KEY
+from mindroom.constants import MID_TURN_MODE_KEY, RETAINED_MEDIA_MAX_BYTES, SUBMISSION_CONTENT_KEY
 from mindroom.llm.media import canonical_mime_type
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_file import encrypted_file_content
@@ -424,6 +424,8 @@ def carried_media_content(event: nio.RoomMessageMedia | nio.RoomEncryptedMedia) 
     carried = {key: content[key] for key in ("m.mentions", "m.relates_to") if isinstance(content.get(key), dict)}
     if SUBMISSION_CONTENT_KEY in content:
         carried[SUBMISSION_CONTENT_KEY] = content[SUBMISSION_CONTENT_KEY]
+    if MID_TURN_MODE_KEY in content:
+        carried[MID_TURN_MODE_KEY] = content[MID_TURN_MODE_KEY]
     # A voice event rebuilt for dispatch can get a new relation; check the original.
     if THREAD_MODEL_CONTENT_KEY in content and not EventInfo.from_event(source).is_edit:
         carried[THREAD_MODEL_CONTENT_KEY] = content[THREAD_MODEL_CONTENT_KEY]
