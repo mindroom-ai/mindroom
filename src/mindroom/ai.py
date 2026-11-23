@@ -1353,7 +1353,7 @@ async def _stream_agent_attempt_chunks(
     except ResponsePausedForApproval:
         raise
     except Exception as e:
-        logger.exception("Error starting streaming AI response")
+        logger.warning("Error starting streaming AI response", exc_info=True)
         state.error = e
 
 
@@ -1405,10 +1405,11 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 on_model_resolved=sinks.on_model_resolved,
             )
         except Exception as e:
-            logger.exception("Error preparing agent", agent=agent_name)
             if skipped := skip_unapproved_attempt(ctx.participation, reason="preparation_failed"):
+                logger.exception("Error preparing agent", agent=agent_name)
                 yield AttemptResolved(skipped)
                 return
+            logger.warning("Error preparing agent", agent=agent_name, exc_info=True)
             yield AttemptResolved(HandledAttempt(FailedReply(error_text(e), e)))
             return
         prepared_run = run_context.prepared_run
@@ -1428,6 +1429,11 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         record = state.terminal.record
         if state.error is not None:
             if skipped := skip_unapproved_attempt(ctx.participation, reason="run_failed_before_decision"):
+                logger.error(
+                    "Streaming AI response failed before participation decision",
+                    agent=agent_name,
+                    exc_info=state.error,
+                )
                 yield AttemptResolved(skipped)
             else:
                 failure_text = error_text(state.error)

@@ -26,6 +26,7 @@ from mindroom.llm.provider import TextDelta
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
+from mindroom.participation import ParticipationGate
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.streaming import _INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
@@ -401,26 +402,53 @@ class TestAIErrorDisplay:
         bot.logger.exception.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_failed_streaming_turn_logs_one_error_with_warning_traceback(
+    @pytest.mark.parametrize("case", ["normal", "gated_skip", "start_failure", "prep_failure"])
+    async def test_failed_streaming_turn_logs_one_error_with_traceback(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        case: str,
     ) -> None:
-        """A failed streaming turn logs exactly one ERROR (agent_error) plus the traceback at WARNING."""
+        """Every streaming failure path logs exactly one ERROR record and preserves the traceback."""
         bot = _mock_bot()
         unique_room_send_responses(bot.client)
-        model = ScriptedModel([[RateLimited("rate limited", provider="OpenRouter")]])
-        install_model_providers(monkeypatch, {"default": model})
+        err = RateLimited("rate limited", provider="OpenRouter")
+        install_model_providers(monkeypatch, {"default": ScriptedModel([[err]])})
         _build_response_runner(bot)
+        request = _response_request()
+        if case == "gated_skip":
+            monkeypatch.setattr(
+                "mindroom.response_runner._participation_for_request",
+                lambda *_args, **_kwargs: ParticipationGate(),
+            )
+            monkeypatch.setattr("mindroom.ai._start_agent_run", MagicMock(side_effect=err))
+        if case == "start_failure":
+            monkeypatch.setattr("mindroom.ai._start_agent_run", MagicMock(side_effect=RuntimeError("start boom")))
+        if case == "prep_failure":
+            monkeypatch.setattr(
+                "mindroom.ai._prepare_agent_run_context",
+                AsyncMock(side_effect=RuntimeError("prep boom")),
+            )
 
         with capture_logs() as logs:
-            await _respond(bot, _response_request(), streaming=True)
+            await _respond(bot, request, streaming=True)
 
         error_logs = [entry for entry in logs if entry["log_level"] == "error"]
-        assert [entry["event"] for entry in error_logs] == ["agent_error"]
-        stream_warnings = [entry for entry in logs if entry["event"] == "Error during streaming AI response"]
-        assert len(stream_warnings) == 1
-        assert stream_warnings[0]["log_level"] == "warning"
-        assert stream_warnings[0].get("exc_info") is True
+        if case == "gated_skip":
+            assert [entry["event"] for entry in error_logs] == [
+                "Streaming AI response failed before participation decision",
+            ]
+            assert error_logs[0].get("exc_info") is err
+        else:
+            assert [entry["event"] for entry in error_logs] == ["agent_error"]
+            expected_warning = {
+                "normal": "Error during streaming AI response",
+                "start_failure": "Error starting streaming AI response",
+                "prep_failure": "Error preparing agent",
+            }[case]
+            warnings = [entry for entry in logs if entry["event"] == expected_warning]
+            assert len(warnings) == 1
+            assert warnings[0]["log_level"] == "warning"
+            assert warnings[0].get("exc_info") is True
 
         with capture_logs() as non_streaming_logs:
             get_user_friendly_error_message(RuntimeError("boom"), "test_agent")
