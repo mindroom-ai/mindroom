@@ -273,9 +273,25 @@ async def test_subagent_prefix_resolves_only_unique_owned_handle(tmp_path: Path)
     assert foreign_id not in message
     assert deeper_id not in message
 
-    # Symlink refusal still applies during prefix resolution.
-    symlink_prefix = "deadbeef"
-    symlink_path = subagent_sessions_dir(paths) / f"{symlink_prefix}{'0' * 24}.json"
-    symlink_path.symlink_to(subagent_sessions_dir(paths) / f"{own_first}.json")
+    # Corrupt, missing-key, and symlinked sibling files sharing a prefix are skipped silently without aborting lookup.
+    clean_prefix = "deadbeef"
+    clean_own = f"{clean_prefix}{'1' * 24}"
+    await save_child(clean_own, owner)
+    sessions_root = subagent_sessions_dir(paths)
+    (sessions_root / f"{clean_prefix}{'2' * 24}.json").write_text("{not valid json")
+    (sessions_root / f"{clean_prefix}{'3' * 24}.json").write_text("{}")
+    (sessions_root / f"{clean_prefix}{'4' * 24}.json").symlink_to(sessions_root / f"{own_first}.json")
+    assert await resolve_subagent_id(clean_prefix, owner=owner, runtime_paths=paths, depth=0) == clean_own
+
+    # A symlinked handle alone is never resolved or followed.
+    only_symlink_prefix = "cafebabe"
+    (sessions_root / f"{only_symlink_prefix}{'0' * 24}.json").symlink_to(sessions_root / f"{own_first}.json")
+    with pytest.raises(SubagentSessionError, match="not available"):
+        await resolve_subagent_id(only_symlink_prefix, owner=owner, runtime_paths=paths, depth=0)
+
+    # A symlink on the resolved handle's lock file is still refused when loading it.
+    lock_path = sessions_root / f"{clean_own}.lock"
+    lock_path.unlink(missing_ok=True)
+    lock_path.symlink_to(sessions_root / f"{own_first}.json")
     with pytest.raises(SubagentSessionError, match="symlinks"):
-        await resolve_subagent_id(symlink_prefix, owner=owner, runtime_paths=paths, depth=0)
+        await load_subagent(clean_own, owner=owner, config=config, runtime_paths=paths, depth=0)

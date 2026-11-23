@@ -457,25 +457,14 @@ class ToolJobRuntime:
         """Whether a caller owns a job it may still access."""
         return self._owns(entry.job, owner, depth) and self._grant(entry.job) == "allowed"
 
-    def _resolve_entry(
-        self,
-        job_id: str,
-        owner: ToolExecutionIdentity,
-        depth: int,
-        *,
-        include_pending: bool = False,
-    ) -> _Entry | None:
+    def _resolve_entry(self, job_id: str, owner: ToolExecutionIdentity, depth: int) -> _Entry | None:
         if (entry := self._entries.get(job_id)) is not None or not _JOB_PREFIX_PATTERN.fullmatch(job_id):
             return entry
         group = self._by_conversation.get(_conversation_key(self._canonical_owner(owner)), {})
-        grants = ("allowed", "pending") if include_pending else ("allowed",)
         ids = sorted(
             cid
             for cid, item in group.items()
-            if cid.startswith(job_id)
-            and not _returned_inline(item)
-            and self._owns(item.job, owner, depth)
-            and self._grant(item.job) in grants
+            if cid.startswith(job_id) and not _returned_inline(item) and self._visible(item, owner, depth)
         )
         if len(ids) > 1:
             msg = f'Job ID prefix "{job_id}" matches several jobs in this conversation: {", ".join(ids)}. Pass the full ID.'
@@ -497,7 +486,7 @@ class ToolJobRuntime:
         call that may have run.
         """
         self._ensure_open()
-        entry = self._resolve_entry(job_id, owner, depth, include_pending=True)
+        entry = self._resolve_entry(job_id, owner, depth)
         if entry is None or not self._owns(entry.job, owner, depth):
             raise JobUnavailableError(_UNAVAILABLE)
         grant = self._grant(entry.job)
@@ -916,6 +905,7 @@ class ToolJobRuntime:
         retained = False
         async with self._lock:
             entry, readable = self._waited_entry(job_id, owner, depth)
+            job_id = entry.job.job_id
             if not readable and claim is not None and entry.claim == claim:
                 # A wait that cannot read its job returns no claim, so it gives back the one it was handed.
                 entry.claim = None
@@ -932,7 +922,7 @@ class ToolJobRuntime:
         try:
             while True:
                 async with self._lock:
-                    _, readable = self._waited_entry(entry.job.job_id, owner, depth)
+                    _, readable = self._waited_entry(job_id, owner, depth)
                     if not readable:
                         return _JobWait(await self._snapshot(entry))
                     if entry.job.status in TERMINAL_STATUSES:

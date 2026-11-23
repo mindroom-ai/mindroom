@@ -2631,3 +2631,106 @@ async def test_job_wait_and_cancel_accept_unique_owned_hex_prefix(tmp_path: Path
         release.set()
         release_background_tool_jobs(paths, instance)
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_prefix_wait_timeout_releases_claim_for_followup_and_collect(tmp_path: Path) -> None:
+    """A timed-out prefix wait on a running job releases its claim under the full ID so completion still delivers."""
+    runtime = await tool_job_runtime(tmp_path)
+    paths = _runtime_paths(tmp_path)
+    config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        agents={"leader": AgentConfig(display_name="Leader")},
+    )
+    context = _delegate_runtime_context(config, paths)
+    owner = context.execution_identity
+    assert owner is not None
+    prefix = "1234abcd"
+    full_id = f"{prefix}{'0' * 56}"
+    release = asyncio.Event()
+
+    async def running_op() -> BackgroundOutcome:
+        await release.wait()
+        return BackgroundOutcome(
+            "completed",
+            "finished",
+            result_payload=encode_result_payload(ToolResultPayload(value="finished")),
+        )
+
+    instance = pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
+    tools = JobTools(paths)
+    try:
+        await start_job(runtime, full_id, tool_name="tool", depth=0, adapter={}, owner=owner, operation=running_op)
+        with tool_runtime_context(context):
+            timed_out = await tools.job("wait", job_id=prefix, wait_timeout=0.01)
+            assert full_id in str(timed_out)
+        # Claim must have been released using the resolved full ID.
+        assert runtime.awaited_job_ids() == frozenset()
+
+        release.set()
+        await wait_for_status(runtime, full_id, "completed")
+        key = ConversationKey(
+            recipient=owner.recipient,
+            room_id=owner.room_id or "",
+            thread_id=owner.resolved_thread_id,
+            requester_id=owner.requester_id or "",
+            silent=False,
+        )
+        ended = await runtime.ended_jobs(key)
+        assert [job.job_id for job in ended] == [full_id]
+        with tool_runtime_context(context):
+            assert await tools.job("wait", job_id=prefix, wait_timeout=0) == "finished"
+    finally:
+        release.set()
+        release_background_tool_jobs(paths, instance)
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_job_prefix_resolution_ignores_pending_grant_jobs(tmp_path: Path) -> None:
+    """Prefix lookup resolves only allowed-grant jobs; exact-ID wait on pending jobs keeps main's release behavior."""
+    pending_ids: set[str] = set()
+    runtime = await tool_job_runtime(
+        tmp_path,
+        grant=lambda job: "pending" if job.job_id in pending_ids else "allowed",
+    )
+    owner = job_owner()
+    shared_prefix = "feedface"
+    allowed_id = f"{shared_prefix}{'1' * 56}"
+    pending_id = f"{shared_prefix}{'2' * 56}"
+    only_pending_prefix = "0badf00d"
+    only_pending_id = f"{only_pending_prefix}{'3' * 56}"
+    pending_ids.update({pending_id, only_pending_id})
+
+    async def done_op() -> BackgroundOutcome:
+        return BackgroundOutcome(
+            "completed",
+            "ok",
+            result_payload=encode_result_payload(ToolResultPayload(value="ok")),
+        )
+
+    try:
+        # Start while allowed, then mark pending to simulate membership refresh in flight.
+        pending_ids.clear()
+        for jid in (allowed_id, pending_id, only_pending_id):
+            await start_job(runtime, jid, tool_name="tool", depth=0, adapter={}, owner=owner, operation=done_op)
+            await wait_for_status(runtime, jid, "completed")
+        pending_ids.update({pending_id, only_pending_id})
+
+        # Shared prefix must resolve cleanly to the allowed job without disclosing the pending job's ID.
+        waited = await runtime.wait(shared_prefix, owner=owner, depth=0, timeout=0)
+        assert waited.job.job_id == allowed_id
+        assert waited.claim is not None
+        await runtime.release_wait(waited.job.job_id, waited.claim)
+
+        # Prefix matching only a pending job is unavailable.
+        with pytest.raises(JobAccessError):
+            await runtime.wait(only_pending_prefix, owner=owner, depth=0, timeout=0)
+
+        # Exact ID on a pending job keeps main's behavior: released snapshot with no claim, not refused.
+        exact_pending = await runtime.wait(only_pending_id, owner=owner, depth=0, timeout=0)
+        assert exact_pending.job.job_id == only_pending_id
+        assert exact_pending.claim is None
+    finally:
+        await runtime.shutdown()
