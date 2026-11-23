@@ -2,6 +2,7 @@
 
 # ruff: noqa: ANN001, ANN002, ANN003, ANN202, ARG001, D103, PLR0915
 
+import re
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -169,6 +170,7 @@ def test_explicit_mode_keeps_standard_factory_default(tmp_path: Path) -> None:
     turn = _turn(minimal)
     system = system_text(turn.system_messages)
     assert "Required short rule" in system
+    assert "shell (run_shell_command)" in system
     assert "Long authored role" not in system
     assert "Long authored instruction" not in system
     assert turn.context_documents["role"].endswith("Long authored role")
@@ -340,7 +342,40 @@ def test_minimal_prompt_keeps_context_with_custom_instructions(instructions: lis
         assert message.endswith(instructions[0])
 
 
+def test_minimal_roster_names_toolkit_functions_and_call_syntax() -> None:
+    message = minimal_system_message(
+        agent_name="helper",
+        display_name="Helper",
+        toolkit_names=["shell", "filesystem", "mcp_x", "filesystem"],
+        toolkit_functions={
+            "filesystem": ["read_file", "edit_file"],
+            "shell": ["run_shell_command"],
+        },
+        instructions=[],
+    )
+    lines = message.splitlines()
+    assert (
+        "Tools callable through mindroom-agent, by toolkit: "
+        "filesystem (read_file, edit_file), mcp_x, shell (run_shell_command)"
+    ) in lines
+    assert (
+        "Call one with `mindroom-agent tools call TOOLKIT.FUNCTION '<json arguments>'`; "
+        "`mindroom-agent tools describe TOOLKIT.FUNCTION` shows its arguments."
+    ) in lines
+
+
 def test_minimal_context_roster_is_bounded() -> None:
+    toolkit_names = [f"toolkit_{number}" for number in range(20)]
+    names_only = minimal_system_message(
+        agent_name="helper",
+        display_name="Helper",
+        toolkit_names=toolkit_names,
+        toolkit_functions={name: [f"very_long_function_name_{i}" for i in range(10)] for name in toolkit_names},
+        instructions=[],
+    )
+    assert f"Toolkits callable through mindroom-agent: {', '.join(sorted(toolkit_names))}" in names_only.splitlines()
+    assert "mindroom-agent tools call TOOLKIT.FUNCTION '<json arguments>'" in names_only
+    assert len(names_only) < 2600
 
     message = minimal_system_message(
         agent_name="helper",
@@ -350,6 +385,7 @@ def test_minimal_context_roster_is_bounded() -> None:
     )
     assert len(message) < 2600
     assert "1000 toolkits" in message
+    assert "mindroom-agent tools call TOOLKIT.FUNCTION '<json arguments>'" in message
 
 
 def test_minimal_context_file_list_is_bounded() -> None:
@@ -878,10 +914,18 @@ async def test_every_cli_toolkit_answers_to_its_own_tool_name(
         )
     assert "done" in result.text
     assert offered_tools(provider.requests[0]) == ["bash"]
-    assert (
-        f"Toolkits callable through mindroom-agent: {roster}"
-        in str(provider.requests[0].messages[0].content).splitlines()
+    roster_line = next(
+        line
+        for line in str(provider.requests[0].messages[0].content).splitlines()
+        if line.startswith("Tools callable through mindroom-agent, by toolkit: ")
     )
+    assert (
+        re.sub(r" \([^)]*\)", "", roster_line.removeprefix("Tools callable through mindroom-agent, by toolkit: "))
+        == roster
+    )
+    assert "attachments (list_attachments," in roster_line
+    if "openclaw_compat" in tools:
+        assert "edit_file" in roster_line
     assert set(roster.split(", ")) <= offered
     # A preset offers no functions of its own.
     assert "openclaw_compat" not in offered

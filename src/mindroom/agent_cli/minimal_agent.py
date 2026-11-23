@@ -110,11 +110,21 @@ def minimal_turn(
     document.
     """
     surface = build.surface
+    toolkit_functions: dict[str, list[str]] = {}
+    for toolkit in build.spec.toolkits:
+        for function in toolkit.functions:
+            toolkit_name = function.registered_toolkit or function.toolkit
+            if toolkit_name is None:
+                continue
+            functions = toolkit_functions.setdefault(toolkit_name, [])
+            if function.name not in functions:
+                functions.append(function.name)
     bootstrap = minimal_system_message(
         agent_name=build.spec.id,
         display_name=build.spec.name,
         identity=surface.identity,
         toolkit_names=surface.toolkit_names,
+        toolkit_functions=toolkit_functions,
         instructions=surface.minimal_instructions,
         context_files=surface.context_files,
         skill_names=[skill.name for skill in surface.skills],

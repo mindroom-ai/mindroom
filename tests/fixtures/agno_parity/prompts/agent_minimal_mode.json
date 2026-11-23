@@ -51,7 +51,7 @@
       },
       "messages": [
         {
-          "content": "You are Operator (operator) in minimal mode.\nBash starts in your workspace.\nFile memory: `MEMORY.md`, `memory/`.\nOther tools and full agent context: mindroom-agent --help.\nToolkits callable through mindroom-agent: calculator, scheduler, shell\nPrefer read-only commands.",
+          "content": "You are Operator (operator) in minimal mode.\nBash starts in your workspace.\nFile memory: `MEMORY.md`, `memory/`.\nOther tools and full agent context: mindroom-agent --help.\nTools callable through mindroom-agent, by toolkit: calculator (add, subtract, multiply, divide, exponentiate, factorial, is_prime, square_root), scheduler (schedule, schedule_tool_call, run_scheduled_call, edit_schedule, list_schedules, cancel_schedule), shell (run_shell_command)\nCall one with `mindroom-agent tools call TOOLKIT.FUNCTION '<json arguments>'`; `mindroom-agent tools describe TOOLKIT.FUNCTION` shows its arguments.\nPrefer read-only commands.",
           "role": "system"
         },
         {

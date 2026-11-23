@@ -164,7 +164,11 @@ def _bootstrap(build: AgentBuild) -> str:
 
 def _roster(system_message: str) -> str:
     """Return the bootstrap line naming the toolkits a minimal agent calls through mindroom-agent."""
-    rosters = [line for line in system_message.splitlines() if line.startswith("Toolkits callable")]
+    rosters = [
+        line
+        for line in system_message.splitlines()
+        if line.startswith(("Tools callable through mindroom-agent", "Toolkits callable"))
+    ]
     assert len(rosters) == 1, system_message
     return rosters[0]
 
