@@ -133,6 +133,7 @@ class RequestOverrides:
     """
 
     temperature: float | None = None
+    max_tokens: int | None = None
     caller_retries: bool = False
     prompt_cache: bool = True
     omit_thinking_setting: bool = False

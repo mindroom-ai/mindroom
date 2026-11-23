@@ -159,6 +159,8 @@ class OllamaProvider:
         options = dict(settings.options or {})
         if request.overrides.temperature is not None:
             options["temperature"] = request.overrides.temperature
+        if request.overrides.max_tokens is not None:
+            options["num_predict"] = request.overrides.max_tokens
         authored = {
             "format": settings.format,
             "options": options or None,

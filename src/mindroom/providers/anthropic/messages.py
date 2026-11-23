@@ -376,11 +376,16 @@ class ClaudeProvider:
         """Return the model's authored request parameters with the request's overrides applied."""
         settings, overrides = self.settings, request.overrides
         params: dict[str, Any] = {}
-        if settings.max_tokens:
-            params["max_tokens"] = settings.max_tokens
+        max_tokens = settings.max_tokens if overrides.max_tokens is None else overrides.max_tokens
+        if max_tokens:
+            params["max_tokens"] = max_tokens
         if settings.thinking and not overrides.omit_thinking_setting:
             # A null field is unset, so an authored null ``block_binding`` is no binding on every route.
-            params["thinking"] = {key: value for key, value in settings.thinking.items() if value is not None}
+            thinking = {key: value for key, value in settings.thinking.items() if value is not None}
+            budget = thinking.get("budget_tokens")
+            if overrides.max_tokens is not None and isinstance(budget, int) and budget >= overrides.max_tokens:
+                params["max_tokens"] = budget + overrides.max_tokens
+            params["thinking"] = thinking
         if settings.output_config:
             params["output_config"] = dict(settings.output_config)
         if settings.stop_sequences:

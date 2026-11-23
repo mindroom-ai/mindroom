@@ -6,13 +6,14 @@ import asyncio
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
+from mindroom.providers.openai.settings import ChatSettings, ResponsesSettings
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping
 
     from openai import AsyncOpenAI
 
     from mindroom.llm.provider import Capabilities, RequestOverrides
-    from mindroom.providers.openai.settings import ChatSettings, ResponsesSettings
 
 __all__ = ["SDKClients", "request_settings", "with_large_fields_untyped"]
 
@@ -59,6 +60,13 @@ def request_settings[S: (ChatSettings, ResponsesSettings)](
     The route's own rules then apply to the override, such as Codex dropping every temperature; a model that leaves
     sampling to the provider (``provider_default_sampling``) ignores it.
     """
-    if capabilities.provider_default_sampling or overrides.temperature is None:
-        return settings
-    return replace(settings, temperature=overrides.temperature)
+    updates: dict[str, Any] = {}
+    if not capabilities.provider_default_sampling and overrides.temperature is not None:
+        updates["temperature"] = overrides.temperature
+    if overrides.max_tokens is not None:
+        if isinstance(settings, ChatSettings):
+            field_name = "max_completion_tokens" if settings.max_completion_tokens is not None else "max_tokens"
+            updates[field_name] = overrides.max_tokens
+        else:
+            updates["max_output_tokens"] = overrides.max_tokens
+    return replace(settings, **updates) if updates else settings
