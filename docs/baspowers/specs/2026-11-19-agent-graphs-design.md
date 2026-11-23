@@ -46,7 +46,7 @@ Six functions.
 start_workflow(source=None, path=None, name=None, args=None, title=None, max_concurrent=16, max_cost_usd=None, resource_profile=None)
 get_workflow(run_id, nodes="active", messages=False)
 cancel_workflow(run_id)
-resume_workflow(run_id, source=None, path=None, rerun=None)
+resume_workflow(run_id, source=None, path=None, rerun=None, max_cost_usd=None)
 list_workflow_runs()
 save_workflow(run_id, name, description=None)
 ```
@@ -136,7 +136,7 @@ Args:
     args: JSON object passed to main(args).
     title: Three to six words shown on the run's card.
     max_concurrent: How many agents run at once. Raise it for large fan-outs.
-    max_cost_usd: Pause and ask the user when the run has spent this much.
+    max_cost_usd: Stop the run when it has spent this much; resume it with a higher limit.
     resource_profile: Worker size for the script itself.
 ```
 
@@ -145,7 +145,7 @@ Args:
 ```text
 get_workflow: Return a run's status, cost, open questions, failed calls and nodes. nodes is "active" (default), "failed" or "all"; messages=True adds peer messages and shared state.
 cancel_workflow: Stop a run and its agents. Finished calls stay saved, so resume_workflow can continue it.
-resume_workflow: Continue a stopped or failed run, or run a finished one again; saved calls are reused as start_workflow explains. Pass source or path to run an edited script, and rerun=[node ids] to make calls run again, such as one that ended indeterminate.
+resume_workflow: Continue a stopped or failed run, or run a finished one again; saved calls are reused as start_workflow explains. Pass source or path to run an edited script, rerun=[node ids] to make calls run again, such as one that ended indeterminate, and a higher max_cost_usd to continue a run stopped at its cost limit.
 list_workflow_runs: List this conversation's recent runs and your saved workflows (name, description, args).
 save_workflow: Save a run's script as workflows/<name>.py so start_workflow(name=...) can run it again.
 ```
@@ -517,7 +517,7 @@ Workflow agents keep `matrix_message`, so they can post in the originating threa
 5. **Approvals.** A workflow agent that needs an approval shows the existing approval card, named after that agent; its chip and the run turn to Waiting for you.
    The run waits for the decision; the operator's card expiry (`tool_approval.timeout_days`, 7 days by default) still applies, and an expired card counts as a denial of that call.
 6. **Large run notice.** When a run has scheduled more than 25 agents or its projected cost passes 10 USD, the card shows `Large run` once, with the projection; it never pauses the run.
-   With `max_cost_usd` the run pauses at that amount and asks: continue with the same amount again, or stop.
+   With `max_cost_usd` the run stops at that amount (`interrupted` with `Stopped at the cost limit ($X of $Y).`) and continues on Resume with a higher `max_cost_usd` (amended 2026-11-23).
 7. **End.** The card turns Done, Failed, Cancelled or Interrupted with totals, a failed run's first error line, and "3 failed" when a finished run caught failures; the calling agent replies with the report.
    The card of a finished run still opens its graph.
 8. **Cancel and resume.** Stop on the card, the jobs bar or the panel, `!cancel_job`, or asking the agent all cancel the run.
@@ -550,7 +550,7 @@ A node has a **generation**: 1 at first, and one higher each time the node is ru
 A redelivered request, a restart and a reattach never change the generation.
 
 Run states: `starting`, `running`, `waiting` (no node can run until a person acts), `completed`, `failed`, `cancelled`, `interrupted`.
-Node states: `queued`, `running`, `waiting` (on `approval`, `user`, `budget` or `peer`), `completed`, `failed`, `cancelled`, `indeterminate`.
+Node states: `queued`, `running`, `waiting` (on `approval`, `user` or `peer`), `completed`, `failed`, `cancelled`, `indeterminate` (amended 2026-11-23: `budget` wait removed).
 
 The store is SQLite at `<control_root>/workflow_runs/workflow_runs.sqlite3` with a schema version and explicit migrations from the first release.
 Tables: `workflow_runs`, `workflow_nodes`, `workflow_usage`, `workflow_messages`, `workflow_cursors`, `workflow_peer_calls`, `workflow_state`, `workflow_sources` and `workflow_log`.
@@ -732,7 +732,7 @@ The script broker's per-run lock becomes a per-run semaphore of size 1 for plain
   The broker has claimed such a call but its effect has not started, which the receipt records, so after a restart the replay runs it as the next generation and asks again; a denial or an expired card raises `ToolError(kind="denied")`.
 - **Operator policy is unchanged.** Workflow attempts use the operator's live `tool_approval` default and rules for script `tool()` calls, exactly what the owner's own turn would get; they do not use the pre-approval list that plain scripts build.
   The functions a script may call are resolved live from the owner's tools, at launch and at each call.
-- **Budget.** With `max_cost_usd`, reaching the amount starts no new node, lets running ones finish, and asks through a system `ask` node.
+- **Budget (amended 2026-11-23).** With `max_cost_usd`, reaching the amount starts no new node (including in nested runs under an ancestor's limit), lets running ones finish, and ends the run `interrupted` with `Stopped at the cost limit ($X of $Y).` Resuming a run at its limit requires a higher `max_cost_usd`.
 - The run is `waiting` when nothing runs and nothing queued may start until a person acts; the script simply stays blocked in its poll.
 - **Lifetime.** A run may work for `max_runtime_hours` (default 72, configurable, 0 for no limit); time spent `waiting` for a person does not count.
   The engine alone enforces it: the script runtime's own wall-clock limit for a workflow attempt is a fixed 30 days, and an attempt that reaches it while the run has working time left is resumed automatically, so a run that waits for a person for months continues when the answer comes.
@@ -759,7 +759,7 @@ A cache hit adds nothing.
 A turn on a model with no price is counted as unknown, and the totals then read "at least".
 The projection is `spent + average cost of all finished turns x (running + queued agent nodes)`; failed turns and schema corrections are in the average, and it only knows calls the script has already made.
 The large-run notice (more than 25 agent nodes, or a projection over `large_run_notice_usd`, default 10) is advisory.
-There is no hard cap by default; `max_cost_usd` pauses on the whole-run sum and asks.
+There is no hard cap by default; `max_cost_usd` stops the run (and any nested run under it) on the whole-run sum as `interrupted`, and Resume continues it with a higher `max_cost_usd` (amended 2026-11-23).
 Existing budgets apply unchanged: each child turn passes through the requester's budget monitor.
 
 ### Saved workflows

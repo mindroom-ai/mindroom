@@ -58,12 +58,12 @@ Do not rely on an after-call hook running exactly once for a workflow call.
 start_workflow(source=None, path=None, args=None, title=None, max_concurrent=16, resource_profile=None, max_cost_usd=None)
 get_workflow(run_id, nodes="active")
 cancel_workflow(run_id)
-resume_workflow(run_id, source=None, path=None, rerun=None)
+resume_workflow(run_id, source=None, path=None, rerun=None, max_cost_usd=None)
 ```
 
 - `start_workflow` takes exactly one of `source` (inline Python) or `path` (a file in the agent's workspace) and returns `{job_id, run_id, status, title}` at once.
   The report reaches the agent through the [background job](agent-orchestration.md#background-jobs) of the run, in full; a failed run delivers the last 4 KiB of the script's output and traceback.
-  `max_cost_usd` pauses the run at that cost and asks the requester; see [Cost Limit](#cost-limit).
+  `max_cost_usd` stops the run as `interrupted` at that cost so it can be resumed with a higher limit; see [Cost Limit](#cost-limit).
 - `get_workflow` returns the run's status, attempt, node counts, usage, waiting and failed calls, and the calls `nodes` selects: `active`, `failed`, or `all`.
   For a run that has ended it also returns `result`: the report, or why the run has none.
   See [Cost](#cost) for `usage`.
@@ -287,19 +287,18 @@ A script can start agents and runs through `tool()` as well.
 
 Nothing caps what a run costs unless its start names a limit: `start_workflow(..., max_cost_usd=5)`.
 
-- When `cost_usd`, the sum over every attempt and every run inside the run, reaches the limit, no further agent or tool call starts.
-  Calls that already run finish, and calls the script makes meanwhile wait as `queued`.
-- The run's requester is asked once, as with [`ask_user`](#questions): `This run has spent $5.20 of its $5.00 limit. Continue?` with the options `Continue with $5.00 more` and `Stop`.
+- When `cost_usd`, the sum over every attempt and every run inside the run, reaches the limit, no further call starts.
+  Calls that already run finish, and once nothing of the run is working any more, the run ends `interrupted` with `Stopped at the cost limit ($X of $Y).` on its card and in its delivered report.
   An amount under a cent is written with up to six decimal places.
-- `Continue with $5.00 more` adds the original amount to the limit and starts the waiting calls; at the next limit the run asks again.
-  `Stop` cancels the run, and its finished calls stay saved.
-- The run shows `waiting` once nothing of it works any more.
-- A resume keeps the run's limit and what it has cost, so a run that was stopped at its limit asks again before it starts a call.
-  A saved answer that a resume reuses costs nothing and does not move the limit; a call that runs again does.
-- A turn on a model without a price adds nothing to `cost_usd`, so a limit cannot hold a run of unpriced models.
-- The limit is checked when a call would start and when an agent's turn ended, so the run can pass it by what the calls that were running cost.
-  A further turn of a [`schema`](#structured-output) call is new spending too: at the limit it waits as `queued` until the requester continues.
-  The check reads what the run has spent, so it holds after a resume and after a restart of MindRoom.
+- A nested run is under its ancestors' limits too: before starting new work, it checks every ancestor run that has a `max_cost_usd`.
+  Once an ancestor is over its limit, the nested run starts no new call, lets its running calls finish, and ends `interrupted` with that reason, and the parent then stops at its limit.
+- To continue a run stopped at its cost limit, call `resume_workflow(run_id, max_cost_usd=...)` (or send `io.mindroom.workflow_control` with `{"run": "<run id>", "action": "resume", "max_cost_usd": ...}`) with a limit above what the run has spent.
+  Resume replays from stored results as any resume does; saved answers cost nothing, while calls that run again add to `cost_usd`.
+  Resuming a run that has reached its limit without a higher `max_cost_usd` is refused with `Run <id> has already spent $<spent> (limit $<limit>). Pass max_cost_usd above $<spent> to resume it.`
+- A turn on a model without a price adds nothing to `cost_usd`, so a limit cannot stop a run of unpriced models.
+- The limit is checked before starting new work and when a call ends, so the run can pass it by what the calls already running cost.
+  A further turn of a [`schema`](#structured-output) call is new spending too: at the limit it does not start, and the run ends `interrupted`.
+  The check reads what the run has spent from the store, so it holds after a resume and after a restart of MindRoom.
 
 A run is marked `large` once it has more than 25 agent calls, or once its projected cost passes the `large_run_notice_usd` of the agent's `workflow` tool entry (10 by default, 0 turns the cost test off).
 The mark is advisory: the run's log says `Large run: <n> agents, about $<projected> projected.`, its card is edited at once, and nothing is paused.
@@ -332,8 +331,9 @@ A snapshot is sent first, every ten seconds, at the run's end, and whenever a ro
 A graph too large for one event keeps the calls that wait for a person first, then failed, running and queued ones, then the newest completed ones, and counts the rest in `omitted`.
 Room state lists the run as one job, with its IDs only: no title, label or phase is written there, and the jobs of the run's agents are not listed.
 
-MindRoom Chat's Resume button sends `io.mindroom.workflow_control` with `{"run": "<run id>", "action": "resume"}` in the run's thread.
-It resumes the run as `resume_workflow(run_id)` does, with a new job, when the run's requester sent it in the run's room and thread.
+MindRoom Chat's Resume button sends `io.mindroom.workflow_control` with `{"run": "<run id>", "action": "resume"}` (and optionally `"max_cost_usd"`) in the run's thread.
+It resumes the run as `resume_workflow(run_id, max_cost_usd=...)` does, with a new job, when the run's requester sent it in the run's room and thread.
+For a run stopped at its cost limit, a Resume control without a `max_cost_usd` above what the run spent changes nothing; pass a higher `max_cost_usd` on the control event or call `resume_workflow(run_id, max_cost_usd=...)`.
 The report of that job is delivered in the thread when the run ends, as the report of any job nobody waits for.
 The bot that posts a run's cards also takes these events and the answers to its questions: for a run that a team's member started in the team, that is the team's bot.
 Anything else, such as another person's event, another action, or a run that has not ended, changes nothing.
@@ -363,7 +363,7 @@ def main(args):
 - A function may make several calls, one after the other, and may itself call `foreach` or `parallel`.
 - There is no limit on the number of items.
   The run's `max_concurrent`, 16 unless `start_workflow` was given another number, is how many agent and tool calls of the run work at the same time; the others wait `queued` and start in the order they were made.
-  A call that waits for an approval holds no place, so the next queued call starts, and it takes a place again when its decision is in.
+  A call that waits for an approval keeps its concurrency place until it finishes, so queued calls wait for a free place.
   A queued call has started nothing: when the run is cancelled it never starts, and after a restart the next attempt runs it.
   An agent that kept working over a restart goes on at once, so for that time the run may work on more calls than its limit.
   `foreach(items, fn, max_concurrent=4)` and `parallel(fns, max_concurrent=4)` hold one fan-out to fewer.
@@ -420,6 +420,7 @@ A call that may have written (a tool that raised, an agent that made tool calls)
   Check its effect, then name it in `rerun`, for example `resume_workflow(run_id, rerun=["n4"])`, to run it again; `get_workflow(run_id, nodes="failed")` lists the IDs.
   Only an ID exactly as listed names a call; any other is refused with `Run <id> has no call x1.` and nothing changes.
 - `source` or `path` replaces the script before the attempt starts; give at most one.
+- `max_cost_usd` sets the run's cost limit for the next attempt; when the run stopped at its cost limit, it must exceed what the run has spent.
 - A call named in `rerun`, and the calls after one that ran again, stay marked until they have run, also when an interruption ends the attempt first.
 - Every attempt runs in the room and thread the run was started in, also when `resume_workflow` is called from another one by the same requester; the report goes to where it was called.
 
