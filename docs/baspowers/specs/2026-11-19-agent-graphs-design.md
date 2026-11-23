@@ -708,7 +708,7 @@ A turn that changes in the middle starts a fresh child whose first prompt carrie
 
 `foreach` and `parallel` run their functions on threads in the script (one per item, at most 256 active per call; more items are fed as threads free up, and a lane blocked in a call that waits for a person or a message does not count).
 The limit that matters is in the gateway: one limit per run, `max_concurrent` (default 16, any value the caller asks for unless the operator set a ceiling).
-It counts running `agent`, `turn` and `tool` nodes across all lanes of that run; a node that waits for a person or for a peer message does not count.
+It counts active `agent`, `turn` and `tool` nodes across all lanes of that run, including while waiting on a human approval; `ask_user` questions and peer-message waits do not count.
 The script broker's per-run lock becomes a per-run semaphore of size 1 for plain scripts (no change) and of the run's limit for workflows, so `tool()` and `shell()` calls in parallel lanes run in parallel.
 `max_concurrent_runs` (default 8 per requester and agent) counts top-level runs only.
 
@@ -728,7 +728,7 @@ The script broker's per-run lock becomes a per-run semaphore of size 1 for plain
   Follow-up turn: the gated call never ran, so the child is continued as a running job is and told which calls finished; it makes the gated call again and a new card appears.
   `indeterminate`: only when it cannot be excluded that a call of the child started and was not recorded.
   A child that waits in its own `ask_user` is marked so on its job, because both waits share one job status.
-- **Approvals of a script `tool()` call.** The broker's card path tells the engine, so the node is `waiting` on `approval` and gives up its slot.
+- **Approvals of a script `tool()` call.** The broker's card path tells the engine, so the node is `waiting` on `approval` while keeping its concurrency slot.
   The broker has claimed such a call but its effect has not started, which the receipt records, so after a restart the replay runs it as the next generation and asks again; a denial or an expired card raises `ToolError(kind="denied")`.
 - **Operator policy is unchanged.** Workflow attempts use the operator's live `tool_approval` default and rules for script `tool()` calls, exactly what the owner's own turn would get; they do not use the pre-approval list that plain scripts build.
   The functions a script may call are resolved live from the owner's tools, at launch and at each call.

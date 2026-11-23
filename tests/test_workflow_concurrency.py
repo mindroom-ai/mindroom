@@ -14,11 +14,14 @@ from typing import TYPE_CHECKING
 import pytest
 import pytest_asyncio
 
+from mindroom.approval import manager as approval_manager
+from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.engine import WorkflowLimits
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
-from tests.fakes.scripted_model import Await, answer
+from tests.fakes.scripted_model import Await, answer, calls, tool_call
+from tests.tool_job_helpers import JobApprovalCards
 from tests.workflow_helpers import NodeFailed, WorkflowStack, tool_args, workflow_stack
 
 if TYPE_CHECKING:
@@ -102,58 +105,76 @@ async def test_engine_runs_at_most_max_concurrent_nodes(stack: WorkflowStack) ->
 
 
 @pytest.mark.asyncio
-async def test_waiting_node_frees_its_slot_and_takes_one_again(gated: WorkflowStack) -> None:
-    """A call that waits for a person holds no place, so the next call works; once it goes on it holds one again."""
-    stack = gated
-    await stack.start(max_concurrent=1)
-    stack.resolver.hold_approvals = asyncio.Event()
-    written = asyncio.Event()
-    stack.counting_tool.after_effect = written.wait
-
-    first = await stack.submit("@0", "tool", _append("a"))
-    await stack.until(lambda: _states(stack) == [_WAITING])
-    # The only place is free while the first call waits for its approval.
-    assert await stack.result("@1", "tool", _COUNT) == 1
-
-    stack.resolver.hold_approvals.set()
-    await stack.until(lambda: stack.counting_tool.lines == ["a"])
-    third = await stack.submit("@2", "tool", _COUNT)
-    assert (third.state, _states(stack)) == ("queued", [_RUNNING, _COMPLETED, _QUEUED])
-    written.set()
-
-    assert ((await _settled(stack, first)).result, (await _settled(stack, third)).result) == ("appended", 3)
-
-
-@pytest.mark.asyncio
-async def test_approved_tool_waits_for_a_free_slot_before_running(gated: WorkflowStack) -> None:
-    """A tool whose approval arrives while another call holds the only slot queues until that slot is free."""
+async def test_tool_approval_holds_slot_until_done(gated: WorkflowStack) -> None:
+    """A tool call waiting on approval keeps its concurrency slot, so the next call queues until it finishes."""
     stack = gated
     await stack.start(max_concurrent=1)
     approver = asyncio.Event()
+    written = asyncio.Event()
     second_started = asyncio.Event()
-    release_second = asyncio.Event()
     stack.resolver.hold_approvals = approver
+    stack.counting_tool.after_effect = written.wait
 
-    async def hold_second() -> None:
+    async def mark_second() -> None:
         second_started.set()
-        await release_second.wait()
 
-    stack.child_script([Await(hold_second), *answer("ok")])
+    stack.child_script([Await(mark_second), *answer("ok")])
     first = await stack.submit("@0", "tool", _append("a"))
     await stack.until(lambda: _states(stack) == [_WAITING])
     second = await stack.submit("@1", "agent", {"prompt": "other work"})
-    await asyncio.wait_for(second_started.wait(), 8)
+    await asyncio.sleep(0.05)
+    assert (second.state, second_started.is_set(), _states(stack)) == ("queued", False, [_WAITING, _QUEUED])
+    assert stack.store.get_run(stack.run_id).state is WorkflowRunState.WAITING
 
     try:
         approver.set()
-        await stack.until(lambda: _states(stack) == [_QUEUED, _RUNNING])
-        await asyncio.sleep(0.05)
-        assert (stack.counting_tool.lines, _states(stack)) == ([], [_QUEUED, _RUNNING])
+        await stack.until(lambda: stack.counting_tool.lines == ["a"])
+        assert (second_started.is_set(), _states(stack)) == (False, [_RUNNING, _QUEUED])
     finally:
-        release_second.set()
+        written.set()
 
-    assert ((await _settled(stack, second)).result, (await _settled(stack, first)).result) == ("ok", "appended")
-    assert stack.counting_tool.lines == ["a"]
+    assert ((await _settled(stack, first)).result, (await _settled(stack, second)).result) == ("appended", "ok")
+    assert (second_started.is_set(), stack.counting_tool.lines) == (True, ["a"])
+
+
+@pytest.mark.asyncio
+async def test_agent_approval_holds_slot_until_done(gated: WorkflowStack, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An agent waiting on approval keeps its concurrency slot, so another agent stays queued until it finishes."""
+    stack = gated
+    cards = JobApprovalCards(asyncio.get_running_loop().create_future(), stack.jobs.journal)
+    monkeypatch.setattr(approval_manager, "get_approval_store", lambda: cards)
+    await stack.start(max_concurrent=1)
+    written = asyncio.Event()
+    second_started = asyncio.Event()
+    stack.counting_tool.after_effect = written.wait
+
+    async def mark_second() -> None:
+        second_started.set()
+
+    stack.child_script(
+        calls(tool_call("append", "c1", line="a")),
+        answer("done"),
+        [Await(mark_second), *answer("other")],
+    )
+    first = await stack.submit("@0", "agent", {"prompt": "first"})
+    await stack.until(lambda: _states(stack) == [_WAITING])
+    second = await stack.submit("@1", "agent", {"prompt": "second"})
+    await asyncio.sleep(0.05)
+    assert (second.state, second_started.is_set(), _states(stack)) == ("queued", False, [_WAITING, _QUEUED])
+    assert stack.store.get_run(stack.run_id).state is WorkflowRunState.WAITING
+
+    try:
+        cards.decision.set_result(BackgroundApprovalDecision("approved", None))
+        await stack.until(lambda: stack.counting_tool.lines == ["a"])
+        await stack.until(lambda: _states(stack) == [_RUNNING, _QUEUED])
+        assert not second_started.is_set()
+    finally:
+        if not cards.decision.done():
+            cards.decision.cancel()
+        written.set()
+
+    assert ((await _settled(stack, first)).result, (await _settled(stack, second)).result) == ("done", "other")
+    assert (second_started.is_set(), stack.counting_tool.lines) == (True, ["a"])
 
 
 @pytest.mark.asyncio

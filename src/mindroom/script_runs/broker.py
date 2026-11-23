@@ -457,8 +457,7 @@ class ScriptToolBroker:
 
         The stored receipt holds the tool's whole result, whatever its size, so the node can be settled from it later.
         *waits* is told `approval` when the call starts to wait for a person's decision, and None when it has one.
-        The attempt's calls execute side by side: its run's engine holds them to the run's limit, and it alone knows
-        which of them wait for a person and so hold no place.
+        The attempt's calls execute side by side: its run's engine holds them to the run's limit.
         """
         request = ScriptToolCallRequest(run.run_id, call_id, grant, arguments)
         # The call's task is created in here and keeps the context it is created in.
