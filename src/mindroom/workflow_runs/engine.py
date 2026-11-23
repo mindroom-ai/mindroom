@@ -768,8 +768,9 @@ class WorkflowEngine:
         lane, index = split_key(key)
         generation = 1 if saved is None else saved.generation + 1
         # A script's `tool("delegate", ...)` is the agent call it stands for, with a gate before it.
-        delegated = kind == "tool" and request.args.get("toolkit") == "delegate"
-        shown, asked = ("agent", delegated_request(_tool_grant(request.args)[1])) if delegated else (kind, request.args)
+        grant, arguments = _tool_grant(request.args) if kind == "tool" else (None, request.args)
+        delegated = grant is not None and grant.toolkit_name == "delegate"
+        shown, asked = ("agent", delegated_request(arguments)) if delegated else (kind, request.args)
         node = WorkflowNode(
             run_id=run.run_id,
             key=key,
@@ -788,7 +789,7 @@ class WorkflowEngine:
             started_at=utc_timestamp(),
         )
         # Before a tool call is saved or sent anywhere, whether it is a tool's or an agent's behind a gate.
-        access = self.authorize(run, _tool_grant(request.args)[0]) if kind == "tool" else ()
+        access = self.authorize(run, grant) if grant is not None else ()
         if access is None:
             raise ScriptRuntimeUnavailableError(_OWNER_NOT_READY)
         if isinstance(access, str):
@@ -796,15 +797,18 @@ class WorkflowEngine:
             node = replace(node, state=WorkflowNodeState.FAILED, error={"kind": "failed", "message": access})
         elif shown == "agent" and (bad_schema := _schema_failure(asked)) is not None:
             node = replace(node, state=WorkflowNodeState.FAILED, error={"kind": "schema", "message": bad_schema})
+        elif delegated and grant is not None and grant.function_name != RUN_SUBAGENT:
+            refused = {"kind": "refused", "message": _NO_SESSIONS.format(function=grant.function_name)}
+            node = replace(node, state=WorkflowNodeState.FAILED, error=refused)
         elif shown == "agent":
             start = partial(self._enter, run, node, partial(self._dispatch_agent, run, timeout=_timeout(meta)))
-            return await (self._ask_gate(run, attempt, node, *_tool_grant(request.args)) if delegated else start())
-        elif kind == "tool":
+            return await (self._ask_gate(run, attempt, node, (grant, arguments)) if grant is not None else start())
+        elif grant is not None:
             same_as = None
             if previous is not None and not cached:
                 # A check that runs on every resume, also one whose arguments were edited, in a lane that was clean.
                 same_as = result_digest(await asyncio.to_thread(self.store.whole_result, previous))
-            start = partial(self._dispatch_tool, run, attempt, same_as=same_as)
+            start = partial(self._dispatch_tool, run, attempt, tool_call=(grant, arguments), same_as=same_as)
             return await self._enter(run, node, start, dirty_after=same_as is None)
         elif kind == "ask":
             options = [str(option) for option in request.args.get("options") or ()]
@@ -929,8 +933,6 @@ class WorkflowEngine:
                 if saved is None or saved.generation != node.generation or saved.handle is None:
                     self._leave(run.run_id, node.key)
                 raise
-        if node.kind == "tool":
-            _tool_grant(node.request)
         queued = replace(node, state=WorkflowNodeState.QUEUED)
         queued = await asyncio.to_thread(partial(self.store.put_node, queued, run.epoch, dirty_after=dirty_after))
         places.queued.append((queued.key, partial(dispatch, queued, queued=True)))
@@ -984,29 +986,16 @@ class WorkflowEngine:
         run: WorkflowRun,
         attempt: ScriptRunRecord,
         node: WorkflowNode,
-        grant: ScriptToolGrant,
-        arguments: dict[str, object],
+        tool_call: tuple[ScriptToolGrant, dict[str, object]],
     ) -> NodeReceipt:
         """Save the agent call a script made through `tool()`, and ask the broker whether that tool call may be made.
 
         The node is saved as a queued one is, with no handle: nothing is started before the gate answers, so a
         restart or a stop meanwhile finds a call that never ran. The caller holds the run's lock.
         """
-        if grant.function_name != RUN_SUBAGENT:
-            refused = {"kind": "refused", "message": _NO_SESSIONS.format(function=grant.function_name)}
-            node = replace(node, state=WorkflowNodeState.FAILED, error=refused, ended_at=node.started_at)
-            return _receipt(await asyncio.to_thread(partial(self.store.put_node, node, run.epoch, dirty_after=True)))
-        node = replace(node, state=WorkflowNodeState.QUEUED)
-        node = await asyncio.to_thread(partial(self.store.put_node, node, run.epoch, dirty_after=True))
-        gate = partial(
-            self.broker.execute_for_workflow,
-            attempt,
-            call_id=uuid5(NAMESPACE_OID, f"{run.run_id}:{node.key}:{node.generation}").hex,
-            grant=grant,
-            arguments=arguments,
-            waits=partial(self._node_waits, node, run.epoch),
-            gate_only=True,
-        )
+        queued = replace(node, state=WorkflowNodeState.QUEUED)
+        node = await asyncio.to_thread(partial(self.store.put_node, queued, run.epoch, dirty_after=True))
+        gate = partial(self._broker_outcome, attempt, node, run.epoch, tool_call, gate_only=True)
         self._spawn(run.run_id, self._start_gated(run, node, gate))
         return _receipt(node)
 
@@ -1014,13 +1003,10 @@ class WorkflowEngine:
         self,
         run: WorkflowRun,
         node: WorkflowNode,
-        gate: Callable[[], Awaitable[ScriptCallRecord]],
+        gate: Callable[[], Awaitable[_Outcome]],
     ) -> None:
         """Start the agent of a call the broker let pass, in its turn among the run's calls; a refusal is its end."""
-        try:
-            outcome = _call_outcome(node, await _within_rate(gate))
-        except (ScriptRunStoreError, ScriptRuntimeUnavailableError) as exc:
-            outcome = WorkflowNodeState.FAILED, None, {"kind": "failed", "message": str(exc)}
+        outcome = await gate()
         async with self._condition(run.run_id):
             now = await asyncio.to_thread(self.store.get_run, run.run_id)
             if now.epoch != run.epoch or run.run_id in self._stopping:
@@ -1139,6 +1125,7 @@ class WorkflowEngine:
         attempt: ScriptRunRecord,
         node: WorkflowNode,
         *,
+        tool_call: tuple[ScriptToolGrant, dict[str, object]],
         same_as: str | None,
         queued: bool = False,
     ) -> NodeReceipt:
@@ -1148,7 +1135,6 @@ class WorkflowEngine:
         without, it ran because a rule said so, and its lane is dirty whatever it answers. The attempt's epoch is
         the run's here, and the call's task keeps it. A *queued* node is saved already and gets its handle.
         """
-        grant, arguments = _tool_grant(node.request)
         call_id = uuid5(NAMESPACE_OID, f"{run.run_id}:{node.key}:{node.generation}").hex
         # Saved before the dispatch, so a crash after the tool ran reads the broker's receipt for this call.
         handle = DispatchHandle("broker", f"{attempt.run_id}:{call_id}", dispatched=False, same_as=same_as)
@@ -1160,14 +1146,7 @@ class WorkflowEngine:
                 raise SupersededAttemptError(_RUN_ENDED)
         else:
             node = await asyncio.to_thread(partial(self.store.put_node, node, run.epoch, dirty_after=same_as is None))
-        call = partial(
-            self.broker.execute_for_workflow,
-            attempt,
-            call_id=call_id,
-            grant=grant,
-            arguments=arguments,
-            waits=partial(self._node_waits, node, run.epoch),
-        )
+        call = partial(self._broker_outcome, attempt, node, run.epoch, tool_call, call_id=call_id)
         # The call has its task before anything else may fail: a saved call nobody runs would never end.
         self._spawn(run.run_id, self._run_tool_node(node, run.epoch, call))
         # A run that waited for a person works again from here.
@@ -1669,21 +1648,47 @@ class WorkflowEngine:
             raise LookupError(msg)
         return node
 
+    async def _broker_outcome(
+        self,
+        attempt: ScriptRunRecord,
+        node: WorkflowNode,
+        epoch: int,
+        tool_call: tuple[ScriptToolGrant, dict[str, object]],
+        *,
+        call_id: str | None = None,
+        gate_only: bool = False,
+    ) -> _Outcome:
+        """Run one broker call for *node* within the rate limit and return its node outcome."""
+        cid = call_id or uuid5(NAMESPACE_OID, f"{node.run_id}:{node.key}:{node.generation}").hex
+        waits = partial(self._node_waits, node, epoch)
+        call = partial(
+            self.broker.execute_for_workflow,
+            attempt,
+            call_id=cid,
+            grant=tool_call[0],
+            arguments=tool_call[1],
+            waits=waits,
+            gate_only=gate_only,
+        )
+        while True:
+            try:
+                return _call_outcome(node, await call())
+            except ScriptCallRateLimitError:
+                await asyncio.sleep(_RATE_WAIT_SECONDS)
+            except (ScriptRunStoreError, ScriptRuntimeUnavailableError) as exc:
+                return WorkflowNodeState.FAILED, None, {"kind": "failed", "message": str(exc)}
+
     async def _run_tool_node(
         self,
         node: WorkflowNode,
         epoch: int,
-        call: Callable[[], Awaitable[ScriptCallRecord]],
+        call: Callable[[], Awaitable[_Outcome]],
     ) -> None:
         """Run one tool call and settle its node."""
-        outcome: _Outcome
         # A `start_workflow` this call makes starts a run inside this one, under this node.
         _CALLING_NODE.set((node.run_id, node.key, node.generation))
         try:
-            outcome = _call_outcome(node, await _within_rate(call))
-        except (ScriptRunStoreError, ScriptRuntimeUnavailableError) as exc:
-            # Refused before any claim: a revoked attempt, a broker that takes no calls now.
-            outcome = WorkflowNodeState.FAILED, None, {"kind": "failed", "message": str(exc)}
+            outcome = await call()
         finally:
             self._leave(node.run_id, node.key)
         dirty = _changed(node, outcome)
@@ -1852,15 +1857,6 @@ class WorkflowEngine:
             key = f"{child.parent_node_key}/{child.run_id}"
             settle = partial(self.store.settle_node, outer.run_id, key, 1, outer.epoch, state=end, error=error)
             await asyncio.to_thread(settle)
-
-
-async def _within_rate(call: Callable[[], Awaitable[ScriptCallRecord]]) -> ScriptCallRecord:
-    """Make a call of the broker, again each moment while its attempt's minute has no room for it: nothing was claimed."""
-    while True:
-        try:
-            return await call()
-        except ScriptCallRateLimitError:
-            await asyncio.sleep(_RATE_WAIT_SECONDS)
 
 
 def _changed(node: WorkflowNode, outcome: _Outcome) -> bool:
