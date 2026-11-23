@@ -127,7 +127,7 @@ class ThreadModelTools(Toolkit):
         # later turns, and this turn cannot continue on one added since.
         current = context.current_config
         switchable = context.config.models.keys() & current.models.keys()
-        if model_name not in switchable:
+        if model_name not in context.config.models or model_name not in current.models:
             reason = unsupported_level_message(current.models, model_name)
             return self._payload(
                 "error",

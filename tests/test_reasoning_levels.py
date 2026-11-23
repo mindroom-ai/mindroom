@@ -172,11 +172,28 @@ def test_runtime_validation_distinguishes_an_unsupported_level_from_an_unknown_m
 
     with pytest.raises(
         ConfigRuntimeValidationError,
-        match=r"^Unknown model for agents\.code\.model: unsupported level 'high' for plain; supported: none\. Configured models:",
+        match=r"^Invalid model for agents\.code\.model: unsupported level 'high' for plain; supported: none\. Configured models:",
     ):
         Config.validate_with_runtime(data("plain@high"), runtime_paths)
-    with pytest.raises(ConfigRuntimeValidationError, match=r"^Unknown model for agents\.code\.model: 'nope@high'\."):
+    with pytest.raises(ConfigRuntimeValidationError, match=r"^Invalid model for agents\.code\.model: 'nope@high'\."):
         Config.validate_with_runtime(data("nope@high"), runtime_paths)
+
+
+@pytest.mark.parametrize(
+    ("extra", "field"),
+    [
+        ({"budgets": {"fallback_model": "sol@xhigh", "monthly_limit_usd": 1}}, "budgets fallback_model"),
+        ({"defaults": {"cheap_model": "sol@xhigh"}}, r"defaults\.cheap_model"),
+        ({"memory": {"auto_flush": {"extractor": {"model": "sol@xhigh"}}}}, r"memory\.auto_flush\.extractor\.model"),
+    ],
+    ids=["budgets-fallback", "defaults-cheap", "memory-extractor"],
+)
+def test_config_field_validators_name_supported_levels(extra: dict[str, Any], field: str) -> None:
+    with pytest.raises(
+        ValidationError,
+        match=rf"{field}: unsupported level 'xhigh' for sol; supported: low, medium, high",
+    ):
+        Config.model_validate({"models": {"sol": _sol()}, **extra})
 
 
 # --- Applying a level to a route ----------------------------------------------------------------------------
