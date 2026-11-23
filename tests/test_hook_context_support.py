@@ -251,6 +251,32 @@ async def test_state_querier_skips_steward_on_absent_event_when_joined(config: C
 
 
 @pytest.mark.asyncio
+async def test_state_querier_falls_back_to_steward_on_non_not_found_error_when_joined(config: Config) -> None:
+    """A joined bot's non-M_NOT_FOUND read error still falls back to the room's steward."""
+    steward = _peer(config, "general")
+    steward.client.room_get_state_event.return_value = SimpleNamespace(content={"goal": "ship it"})
+    agent_client = _client()
+    agent_client.rooms = {"!room:localhost": SimpleNamespace()}
+    agent_client.room_get_state_event.return_value = nio.RoomGetStateEventError(
+        message="service unavailable",
+        status_code="M_UNKNOWN",
+        http_status=503,
+    )
+    bindings = _hook_support(config, "code", client=agent_client, steward=steward).bindings()
+    assert bindings.room_state_querier is not None
+
+    result = await bindings.room_state_querier("!room:localhost", "io.mindroom.thread_goal", "$thread")
+
+    assert result == {"goal": "ship it"}
+    agent_client.room_get_state_event.assert_awaited_once_with("!room:localhost", "io.mindroom.thread_goal", "$thread")
+    steward.client.room_get_state_event.assert_awaited_once_with(
+        "!room:localhost",
+        "io.mindroom.thread_goal",
+        "$thread",
+    )
+
+
+@pytest.mark.asyncio
 async def test_state_without_a_usable_steward_is_a_failed_read_and_write(config: Config) -> None:
     """A room with no steward, or one that is stopping or closed its client, reads no state and writes none."""
     closed = _peer(config, "general")

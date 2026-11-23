@@ -6,8 +6,6 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     import nio
 
     from .types import HookRoomStatePutter, HookRoomStateQuerier
@@ -79,18 +77,24 @@ def build_hook_room_state_putter(
 
 
 def chain_hook_room_state_queriers(
-    primary: HookRoomStateQuerier | None,
+    client: nio.AsyncClient,
     fallback: HookRoomStateQuerier,
-    *,
-    is_authoritative: Callable[[str], bool] | None = None,
 ) -> HookRoomStateQuerier:
-    """Return a room-state querier that falls back on ``None`` unless *is_authoritative* claims the room."""
-    if primary is None:
-        return fallback
+    """Query *client* first; fall back unless *client* is joined and got ``M_NOT_FOUND``."""
 
     async def _query(room_id: str, event_type: str, state_key: str | None) -> dict[str, Any] | None:
-        result = await primary(room_id, event_type, state_key)
-        if result is not None or (is_authoritative is not None and is_authoritative(room_id)):
+        import nio  # noqa: PLC0415
+
+        if state_key is not None:
+            resp = await client.room_get_state_event(room_id, event_type, state_key)
+            if not isinstance(resp, nio.RoomGetStateEventError):
+                return resp.content
+            if resp.status_code == "M_NOT_FOUND" and room_id in client.rooms:
+                return None
+            return await fallback(room_id, event_type, state_key)
+
+        result = await _query_hook_room_state(client, room_id, event_type, None)
+        if result is not None:
             return result
         return await fallback(room_id, event_type, state_key)
 
