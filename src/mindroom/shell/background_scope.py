@@ -29,7 +29,7 @@ _LOG_MAX_BYTES = 4 * 1024 * 1024
 _LOG_MAX_AGE_SECONDS = 24 * 3600
 _LOG_MAX_FILES = 64
 _LOG_RECENT_PROTECT_SECONDS = 5 * 60
-_BACKGROUND_LOG_NAME_RE = re.compile(r"^\d+-[0-9a-f]{8,32}\.log$")
+_BACKGROUND_LOG_NAME_RE = re.compile(r"^\d+-(?:[0-9a-f]{8}|[0-9a-f]{32})\.log$")
 
 StopReason = Literal["timeout", "scope_ended", "stopped"]
 
@@ -273,6 +273,20 @@ def bind_shell_background_scope(scope: ShellBackgroundScope | None) -> Iterator[
         _SHELL_BACKGROUND_SCOPE.reset(token)
 
 
+async def close_shell_background_scope_shielded(scope: ShellBackgroundScope) -> None:
+    """Close *scope* completely even if cancellation arrives mid-cleanup, re-raising any cancellation after."""
+    close_task = asyncio.create_task(scope.close())
+    cancelled: asyncio.CancelledError | None = None
+    while not close_task.done():
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+    await close_task
+    if cancelled is not None:
+        raise cancelled
+
+
 @contextlib.asynccontextmanager
 async def shell_background_scope() -> AsyncIterator[ShellBackgroundScope]:
     """Create, bind, and close a fresh turn-scoped shell background owner."""
@@ -281,16 +295,7 @@ async def shell_background_scope() -> AsyncIterator[ShellBackgroundScope]:
         with bind_shell_background_scope(scope):
             yield scope
     finally:
-        close_task = asyncio.create_task(scope.close())
-        cancelled: asyncio.CancelledError | None = None
-        while not close_task.done():
-            try:
-                await asyncio.shield(close_task)
-            except asyncio.CancelledError as exc:
-                cancelled = exc
-        await close_task
-        if cancelled is not None:
-            raise cancelled
+        await close_shell_background_scope_shielded(scope)
 
 
 def _open_log_dir_fd(log_dir: Path) -> int:

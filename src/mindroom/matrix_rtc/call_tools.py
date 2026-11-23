@@ -56,7 +56,11 @@ from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.types import ConversationSession
-from mindroom.shell.background_scope import ShellBackgroundScope, bind_shell_background_scope
+from mindroom.shell.background_scope import (
+    ShellBackgroundScope,
+    bind_shell_background_scope,
+    close_shell_background_scope_shielded,
+)
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agent_tools import room_turn_offers
 from mindroom.tool_system.invocation import CallResult, ToolCallContext, client_tool_result, run_tool_call
@@ -705,16 +709,7 @@ class _CallConnections:
 async def _close_call_tooling(shell_scope: ShellBackgroundScope, connections: _CallConnections) -> None:
     """Stop any backgrounded shell processes and close connected toolkits for one realtime call."""
     try:
-        close_task = asyncio.create_task(shell_scope.close())
-        cancelled: asyncio.CancelledError | None = None
-        while not close_task.done():
-            try:
-                await asyncio.shield(close_task)
-            except asyncio.CancelledError as exc:
-                cancelled = exc
-        await close_task
-        if cancelled is not None:
-            raise cancelled
+        await close_shell_background_scope_shielded(shell_scope)
     finally:
         await connections.close()
 

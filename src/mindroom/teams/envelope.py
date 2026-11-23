@@ -60,6 +60,7 @@ from mindroom.response_turn import (
     stream_with_llm_request_log_context,
 )
 from mindroom.run_storage import bind_turn_session, scope_run_storage
+from mindroom.shell.background_scope import shell_background_scope
 from mindroom.teams.attempt import TeamAttempt
 from mindroom.teams.leader import LeaderRun
 from mindroom.teams.members import (
@@ -270,7 +271,7 @@ def _leader_run(
     )
 
 
-def run_prepared_team(
+async def run_prepared_team(
     built: BuiltTeam,
     prepared: PreparedTeamExecution,
     *,
@@ -293,13 +294,17 @@ def run_prepared_team(
         compaction_lifecycle=None,
         turn_recorder=None,
     )
-    return leader.start(
-        prepared.run_input(MediaInputs()),
-        run_id=str(uuid4()),
-        user_id=user_id,
-        metadata=prepared.run_metadata,
-        records=None,
-    )
+    async with shell_background_scope():
+        events = leader.start(
+            prepared.run_input(MediaInputs()),
+            run_id=str(uuid4()),
+            user_id=user_id,
+            metadata=prepared.run_metadata,
+            records=None,
+        )
+        async with closing_async_stream(events):
+            async for event in events:
+                yield event
 
 
 # ---------------------------------------------------------------------------

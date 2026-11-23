@@ -1393,3 +1393,34 @@ async def test_background_log_sweep_filters_generated_names_and_kill_all_trailer
     log_path = Path(registry[result.handle].log_path or "")
     kill_all_records(registry)
     assert "[MindRoom: stopped]" in log_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_auto_backgrounded_natural_exit_preserves_detached_nohup_child(tmp_path: Path) -> None:
+    """An auto-backgrounded command that exits naturally leaves detached nohup children alive."""
+    workspace, fn = _workspace_shell_entrypoint(tmp_path)
+    detached_pid_file = workspace / "detached.pid"
+    cmd = f"sleep 0.35; nohup sleep 30 >/dev/null 2>&1 & echo $! > {detached_pid_file}; exit 0"
+    detached_pid: int | None = None
+    try:
+        with patch("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.15):
+            async with shell_background_scope() as scope:
+                result = await fn.entrypoint(["bash", "-c", cmd])
+                assert isinstance(result, str)
+                assert "Still running after 0.15s" in result
+                assert len(scope.records) == 1
+                record = next(iter(scope.records.values()))
+                assert record._monitor_task is not None
+                await asyncio.wait_for(record._monitor_task, timeout=5.0)
+                assert record.finished
+                assert record.return_code == 0
+                detached_pid = int(detached_pid_file.read_text(encoding="utf-8").strip())
+                os.kill(detached_pid, 0)
+                log_text = Path(record.log_path or "").read_text(encoding="utf-8")
+                assert "[MindRoom: exited with code 0]" in log_text
+        # Still alive after the scope closes cleanly because the parent command already exited naturally.
+        os.kill(detached_pid, 0)
+    finally:
+        if detached_pid is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(detached_pid, signal.SIGKILL)

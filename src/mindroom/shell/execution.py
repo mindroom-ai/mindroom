@@ -1379,6 +1379,7 @@ async def _monitor_process(
     """Wait for a backgrounded process to exit (or hit max_runtime_seconds) and update its record."""
     tracked = record if record is not None else registry.get(handle)
     log_file = tracked._log_file if tracked is not None else None
+    natural_exit = False
     try:
         timeout_seconds = (
             None
@@ -1387,6 +1388,7 @@ async def _monitor_process(
         )
         try:
             await _await_process_exit(process, timeout_seconds=timeout_seconds)
+            natural_exit = tracked is None or tracked._stop_reason is None
         except TimeoutError:
             if tracked is not None and tracked._stop_reason is None:
                 tracked._stop_reason = "timeout"
@@ -1402,8 +1404,9 @@ async def _monitor_process(
                     _done, pending = await asyncio.wait([stdout_reader, stderr_reader], timeout=2.0)
                     capture.incomplete |= bool(pending)
             finally:
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    os.killpg(process.pid, signal.SIGKILL)
+                if not natural_exit or log_file is None:
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
+                        os.killpg(process.pid, signal.SIGKILL)
             drain_timeout = _POST_EXIT_READER_GRACE_SECONDS if log_file is not None else 2.0
             await asyncio.wait([stdout_reader, stderr_reader], timeout=drain_timeout)
             await _cancel_pending_tasks(stdout_reader, stderr_reader)
