@@ -902,7 +902,6 @@ depends_on = []
 visibility = [
     "mindroom.agent_cli.cli_approval_recovery",
     "mindroom.response_turn",
-    "mindroom.delegation.direct",
     "mindroom.delegation.execution",
 ]
 
@@ -8681,7 +8680,6 @@ depends_on = [
     "mindroom.delegation.sessions",
     "mindroom.response_turn",
     "mindroom.failure_text",
-    "mindroom.turn_continuation",
 ]
 
 [[modules]]

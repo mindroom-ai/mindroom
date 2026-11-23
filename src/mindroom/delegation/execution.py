@@ -30,7 +30,6 @@ from mindroom.delegation.lifecycle import (
     observe_child_event,
     prepare_child_turn,
     reserve_child_turn,
-    run_child_across_reloads,
     running_child_id,
     settle_child_response,
     start_child_turn,
@@ -86,7 +85,7 @@ from mindroom.tool_system.runtime_context import (
     tool_runtime_context,
 )
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
-from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT, continuation_decision_from_tools, stopped_calls
+from mindroom.turn_continuation import continuation_decision_from_tools, stopped_calls
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
@@ -450,15 +449,13 @@ async def _start_child_envelope(
     result = None
     toolkit_owners = {}
     try:
-        result = await run_child_across_reloads(
-            run_child,
+        result = await run_child(
             child,
             prompt=prompt,
             config=config,
             runtime_paths=runtime_paths,
             refresh_scheduler=refresh_scheduler,
             prior_usage=prior_usage,
-            follow_ups=TURN_CONTINUATION_LIMIT,
         )
     except ResponsePausedForApproval as suspension:
         # The paused attempt published its run id and model when it started, through ``run_child``.
