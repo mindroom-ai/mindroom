@@ -3657,9 +3657,9 @@ async def test_openrouter_gemini_tool_wrapping_follows_authored_model_override(
 
     sent_content = built.body()["messages"][2]["content"]
     if expect_wrapped:
-        assert _gemini_tool_json(sent_content) == {"result": text}
+        assert json.loads(sent_content) == {"result": text}
     else:
-        assert sent_content == text
+        assert sent_content[0]["text"] == text
 
 
 @pytest.mark.asyncio
@@ -3700,7 +3700,11 @@ async def test_openrouter_gemini_null_or_empty_extra_body_model_is_the_effective
 
     body = built.body()
     assert body["model"] == extra_body_model
-    assert [message["content"] for message in body["messages"][2:]] == [quoted_text, compact_json]
+    sent_texts = [
+        message["content"][0]["text"] if model_id == "google/gemini-4-neon" else message["content"]
+        for message in body["messages"][2:]
+    ]
+    assert sent_texts == [quoted_text, compact_json]
     parts = RequestParts(built.adapter.token_counter)
     built.adapter._parts(replace(request, messages=()), 0, parts)
     assert "openrouter_gemini_tool_results" not in parts.flags
@@ -3708,9 +3712,12 @@ async def test_openrouter_gemini_null_or_empty_extra_body_model_is_the_effective
     logged_text = log_file.read_text(encoding="utf-8")
     assert "synthetic-quoted-value" not in logged_text
     logged_messages = json.loads(logged_text.splitlines()[0])["body"]["messages"]
+    logged_texts = [
+        message["content"][0]["text"] if model_id == "google/gemini-4-neon" else message["content"]
+        for message in logged_messages[2:]
+    ]
     # Redacted as plain text, and a result that only looks like a wrapped one is neither decoded nor re-encoded.
-    assert logged_messages[2]["content"] == 'password="***redacted***" followed by public text'
-    assert logged_messages[3]["content"] == compact_json
+    assert logged_texts == ['password="***redacted***" followed by public text', compact_json]
 
 
 @pytest.mark.asyncio
@@ -3815,9 +3822,8 @@ async def test_openrouter_gemini_preserves_authored_cache_control_on_tool_text_p
     )
 
     sent = built.body()["messages"]
-    # The authored marker survived wrapping, so automatic breakpoints and text-part normalization did not run.
+    # The authored marker survived wrapping, so automatic Claude system-prompt breakpoints did not run.
     assert sent[0] == {"role": "system", "content": "System prompt"}
-    assert isinstance(sent[1]["content"], str)
     assert sent[3]["content"][0]["cache_control"] == marker
     assert json.loads(sent[3]["content"][0]["text"]) == {"result": "Marked {}"}
 

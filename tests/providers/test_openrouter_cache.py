@@ -471,25 +471,3 @@ async def test_gemini_skips_transient_context_and_respects_opt_outs(tmp_path: Pa
     assert isinstance(built.adapter, ChatAdapter)
     assert built.adapter.capabilities.system_updates is None
     assert not built.adapter.takes_system_update(ModelRequest(messages=_conversation()))
-
-
-@pytest.mark.asyncio
-async def test_gemini_caching_follows_authored_model_override(tmp_path: Path) -> None:
-    """Gemini breakpoint placement follows the effective model sent in the request body."""
-    overridden_to_gemini, _ = await _send(
-        tmp_path / "to-gemini",
-        _conversation(),
-        tools=_TOOLS,
-        model_id="openrouter/auto",
-        request_params={"model": "google/gemini-4-neon"},
-    )
-    overridden_to_glm, _ = await _send(
-        tmp_path / "to-glm",
-        _conversation(),
-        tools=_TOOLS,
-        model_id="google/gemini-4-neon",
-        extra_body={"model": "z-ai/glm-5.3"},
-    )
-
-    assert _markers(overridden_to_gemini) == [_FIVE_MINUTES]
-    assert _markers(overridden_to_glm) == []

@@ -44,33 +44,27 @@ class OpenRouterPromptCache:
     """Automatic prompt-cache placement for one OpenRouter upstream family."""
 
     cache_control: dict[str, str]
-    message_rungs: int
-    mark_system: bool
-    mark_tools: bool
+    full_ladder: bool
 
 
 def openrouter_prompt_cache(
-    model_id: str | None,
+    model_id: str,
     *,
     cache_system_prompt: bool,
     extended_cache_time: bool,
 ) -> OpenRouterPromptCache | None:
     """Return the breakpoint plan for an Anthropic- or Gemini-routed model, or None when caching does not apply."""
-    if not cache_system_prompt or not model_id:
+    if not cache_system_prompt:
         return None
     if model_id.startswith(_ANTHROPIC_MODEL_PREFIXES):
         return OpenRouterPromptCache(
             cache_control=prompt_cache_control(extended_cache_time=extended_cache_time),
-            message_rungs=MESSAGE_RUNG_COUNT,
-            mark_system=True,
-            mark_tools=True,
+            full_ladder=True,
         )
     if is_openrouter_gemini_model(model_id):
         return OpenRouterPromptCache(
             cache_control=prompt_cache_control(extended_cache_time=False),
-            message_rungs=_GEMINI_MESSAGE_RUNG_COUNT,
-            mark_system=False,
-            mark_tools=False,
+            full_ladder=False,
         )
     return None
 
@@ -139,15 +133,16 @@ def request_kwargs_with_prompt_cache(
     system_count = 0
     while system_count < len(prepared) and prepared[system_count].get("role") in _SYSTEM_ROLES:
         system_count += 1
-    if system_count and prompt_cache.mark_system:
+    if system_count and prompt_cache.full_ladder:
         prepared[0] = _with_marked_system_prompt(prepared[0], system, cache_control)
 
     # Keep the text-part form even after a marker moves so the cached prefix stays byte-identical.
     candidates = [_with_text_part_content(message) for message in prepared[system_count:]]
-    prepared[system_count:] = mark_message_cache_rungs(candidates, cache_control, prompt_cache.message_rungs)
+    rung_budget = MESSAGE_RUNG_COUNT if prompt_cache.full_ladder else _GEMINI_MESSAGE_RUNG_COUNT
+    prepared[system_count:] = mark_message_cache_rungs(candidates, cache_control, rung_budget)
     prepared_kwargs = {**request_kwargs, "messages": prepared}
 
-    if prompt_cache.mark_tools:
+    if prompt_cache.full_ladder:
         marked_tools, tools_marked = mark_last_tool(request_kwargs.get("tools"), cache_control)
         if tools_marked:
             prepared_kwargs["tools"] = marked_tools
