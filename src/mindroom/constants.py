@@ -58,6 +58,7 @@ CONTROL_STATE_PATH_ENV = runtime_env_policy.CONTROL_STATE_PATH_ENV
 _RUNTIME_PATH_ENV_KEYS = frozenset({"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH", CONTROL_STATE_PATH_ENV})
 _SANDBOX_STARTUP_MANIFEST_RELATIVE_PATH = Path(".runtime") / "startup_manifest.json"
 STARTUP_MANIFEST_EAGER_SETUP_PLUGINS = "eager_setup_plugins"
+STARTUP_MANIFEST_SANDBOX_MOUNT = "sandbox_mount"
 _CONFIG_PATH_PLACEHOLDER_PATTERN = re.compile(r"\$(?:\{(?P<braced>[A-Z0-9_]+)\}|(?P<bare>[A-Z0-9_]+))")
 
 # Bash bookkeeping vars that change every time printenv runs and are never
@@ -447,11 +448,14 @@ def _serialize_startup_manifest(
     tool_validation_snapshot: Mapping[str, object] | None = None,
     public_runtime: bool = False,
     eager_setup_plugins: Sequence[str] | None = None,
+    sandbox_mount: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Return one JSON-compatible startup manifest for sandbox runners.
 
     ``eager_setup_plugins`` asks the runner to prepare itself when its container starts, and lists the enabled plugin
     paths it may then import once for all its calls; None leaves the runner preparing itself on its first request.
+    ``sandbox_mount`` pins a sandboxed worker's mounted workspace path and inode; omitted when None so non-sandboxed
+    manifests and hashes remain byte-identical.
     """
     return {
         "runtime_paths": serialize_public_runtime_paths(runtime_paths)
@@ -459,6 +463,7 @@ def _serialize_startup_manifest(
         else serialize_runtime_paths(runtime_paths),
         "tool_validation_snapshot": dict(tool_validation_snapshot or {}),
         **({} if eager_setup_plugins is None else {STARTUP_MANIFEST_EAGER_SETUP_PLUGINS: list(eager_setup_plugins)}),
+        **({} if sandbox_mount is None else {STARTUP_MANIFEST_SANDBOX_MOUNT: dict(sandbox_mount)}),
     }
 
 
@@ -468,6 +473,7 @@ def _startup_manifest_json(
     tool_validation_snapshot: Mapping[str, object] | None = None,
     public_runtime: bool = False,
     eager_setup_plugins: Sequence[str] | None = None,
+    sandbox_mount: Mapping[str, object] | None = None,
 ) -> str:
     """Return one deterministic JSON string for sandbox-runner startup state."""
     return json.dumps(
@@ -476,6 +482,7 @@ def _startup_manifest_json(
             tool_validation_snapshot=tool_validation_snapshot,
             public_runtime=public_runtime,
             eager_setup_plugins=eager_setup_plugins,
+            sandbox_mount=sandbox_mount,
         ),
         separators=(",", ":"),
         sort_keys=True,
@@ -488,6 +495,7 @@ def startup_manifest_sha256(
     tool_validation_snapshot: Mapping[str, object] | None = None,
     public_runtime: bool = False,
     eager_setup_plugins: Sequence[str] | None = None,
+    sandbox_mount: Mapping[str, object] | None = None,
 ) -> str:
     """Return one stable content hash for sandbox-runner startup state."""
     payload = _startup_manifest_json(
@@ -495,6 +503,7 @@ def startup_manifest_sha256(
         tool_validation_snapshot=tool_validation_snapshot,
         public_runtime=public_runtime,
         eager_setup_plugins=eager_setup_plugins,
+        sandbox_mount=sandbox_mount,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -511,6 +520,7 @@ def write_startup_manifest(
     tool_validation_snapshot: Mapping[str, object] | None = None,
     public_runtime: bool = False,
     eager_setup_plugins: Sequence[str] | None = None,
+    sandbox_mount: Mapping[str, object] | None = None,
 ) -> Path:
     """Write one sandbox-runner startup manifest and return its path."""
     manifest_path = sandbox_startup_manifest_path(storage_root)
@@ -522,6 +532,7 @@ def write_startup_manifest(
             tool_validation_snapshot=tool_validation_snapshot,
             public_runtime=public_runtime,
             eager_setup_plugins=eager_setup_plugins,
+            sandbox_mount=sandbox_mount,
         ),
     )
     return manifest_path

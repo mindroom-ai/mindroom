@@ -100,6 +100,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.workers.backend import WorkerBackend
     from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
+    from mindroom.workers.models import WorkerSandboxConfig
     from mindroom.workers.runtime import PrimaryWorkerManagerLease
 
 _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
@@ -332,6 +333,37 @@ def worker_route(
     its backend knows none. The shared runner starts nothing, so its worker is ensured either way.
     ``named`` routes the request to the worker its call names instead of the agent's normal worker.
     """
+    route, worker_handle, _admitted_sandbox = _worker_route_with_sandbox(
+        runtime_paths=runtime_paths,
+        runtime_config=runtime_config,
+        tool_name=tool_name,
+        function_name=function_name,
+        worker_target=worker_target,
+        worker_manager=worker_manager,
+        base_dir=base_dir,
+        progress_sink=progress_sink,
+        start=start,
+        named=named,
+    )
+    return route, worker_handle
+
+
+_default_worker_route = worker_route
+
+
+def _worker_route_with_sandbox(
+    *,
+    runtime_paths: RuntimePaths,
+    runtime_config: Config | None,
+    tool_name: str,
+    function_name: str,
+    worker_target: ResolvedWorkerTarget | None,
+    worker_manager: WorkerBackend,
+    base_dir: str | None,
+    progress_sink: ProgressSink | None = None,
+    start: bool = True,
+    named: NamedWorkerCall | None = None,
+) -> tuple[WorkerRoute, WorkerHandle | None, WorkerSandboxConfig | None]:
     worker_scope = worker_target.worker_scope if worker_target is not None else None
     execution_identity = worker_target.execution_identity if worker_target is not None else None
     routing_agent_name = worker_target.routing_agent_name if worker_target is not None else None
@@ -407,7 +439,7 @@ def worker_route(
         config_snapshot=runner_config_snapshot(runtime_paths, runtime_config),
         base_dir=route_base_dir,
     )
-    return route, worker_handle
+    return route, worker_handle, spec.sandbox if spec is not None else None
 
 
 def _ensure_route_worker(
@@ -854,6 +886,16 @@ def _worker_call_arguments(
     return [_worker_argument_value(arg) for arg in args], cast("dict[str, object]", _worker_argument_value(kwargs))
 
 
+def _reject_readonly_sandbox_output_path(
+    *,
+    has_output_path: bool,
+    sandbox: WorkerSandboxConfig | None,
+) -> None:
+    if has_output_path and sandbox is not None and sandbox.mount_read_only:
+        msg = "mindroom_output_path cannot write into a read-only sandbox mount."
+        raise NamedWorkerError(msg)
+
+
 def _build_execute_request(
     stand_ins: WorkerStandIns,
     *,
@@ -876,31 +918,41 @@ def _build_execute_request(
     runtime_config = stand_ins.runtime_config
     # The tool's workspace travels as the request's workspace, which the worker confines before acting in it.
     has_output_path = normalize_output_path_argument(wire_kwargs.get(OUTPUT_PATH_ARGUMENT)) is not None
-    if has_output_path and named is not None and named.sandbox is not None and named.sandbox.mount_read_only:
-        msg = "mindroom_output_path cannot write into a read-only sandbox mount."
-        raise NamedWorkerError(msg)
+    _reject_readonly_sandbox_output_path(
+        has_output_path=has_output_path,
+        sandbox=named.sandbox if named is not None else None,
+    )
     init_overrides = dict(stand_ins.tool_init_overrides or {})
     base_dir = init_overrides.pop("base_dir", None)
-    route, worker_handle = worker_route(
-        runtime_paths=runtime_paths,
-        runtime_config=runtime_config,
-        tool_name=tool_name,
-        function_name=function_name,
-        worker_target=worker_target,
-        worker_manager=worker_manager,
-        base_dir=str(base_dir) if base_dir is not None else None,
-        progress_sink=progress_sink,
-        start=start,
-        named=named,
-    )
-    admitted_sandbox = (
-        (named.admitted_sandbox(worker_handle.worker_key) if worker_handle is not None else None) or named.sandbox
-        if named is not None
-        else None
-    )
-    if has_output_path and admitted_sandbox is not None and admitted_sandbox.mount_read_only:
-        msg = "mindroom_output_path cannot write into a read-only sandbox mount."
-        raise NamedWorkerError(msg)
+    resolved_base_dir = str(base_dir) if base_dir is not None else None
+    if worker_route is _default_worker_route:
+        route, worker_handle, admitted_sandbox = _worker_route_with_sandbox(
+            runtime_paths=runtime_paths,
+            runtime_config=runtime_config,
+            tool_name=tool_name,
+            function_name=function_name,
+            worker_target=worker_target,
+            worker_manager=worker_manager,
+            base_dir=resolved_base_dir,
+            progress_sink=progress_sink,
+            start=start,
+            named=named,
+        )
+    else:
+        route, worker_handle = worker_route(
+            runtime_paths=runtime_paths,
+            runtime_config=runtime_config,
+            tool_name=tool_name,
+            function_name=function_name,
+            worker_target=worker_target,
+            worker_manager=worker_manager,
+            base_dir=resolved_base_dir,
+            progress_sink=progress_sink,
+            start=start,
+            named=named,
+        )
+        admitted_sandbox = named.sandbox if named is not None else None
+    _reject_readonly_sandbox_output_path(has_output_path=has_output_path, sandbox=admitted_sandbox)
     sandboxed = admitted_sandbox is not None
     config_overrides = dict(stand_ins.tool_config_overrides or {})
     if sandboxed:

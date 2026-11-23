@@ -32,6 +32,7 @@ from structlog.testing import capture_logs
 from mindroom.config.main import Config, load_config
 from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
+    STARTUP_MANIFEST_SANDBOX_MOUNT,
     RuntimePaths,
     deserialize_runtime_paths,
     resolve_primary_runtime_paths,
@@ -8686,3 +8687,145 @@ def test_kubernetes_sandbox_reconcile_preserves_sandbox_and_blocks_extra_label(t
             "readOnly": True,
         },
     ]
+
+
+def test_kubernetes_sandbox_startup_manifest_pins_mount_inode(tmp_path: Path) -> None:
+    """Startup manifest pins sandbox_mount path + inode for mount_dir and omits it otherwise."""
+    storage_root = tmp_path / "storage"
+    mounted_dir = storage_root / "agents" / "general" / "workspace" / "scratch" / "job1"
+    mounted_dir.mkdir(parents=True)
+    expected_ino = os.lstat(mounted_dir).st_ino
+    user_agent_key = "v1:tenant-123:user_agent:@alice:example.org:general"
+    runtime_paths = resolve_primary_runtime_paths(config_path=Path("config.yaml"), storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    mounted_key = named_worker_key(user_agent_key, "a" * 32)
+    mounted_sandbox = WorkerSandboxConfig(mount_dir="scratch/job1", mount_read_only=True)
+    mounted_handle = backend.ensure_worker(
+        WorkerSpec(
+            mounted_key,
+            private_agent_names=frozenset(),
+            state_scope_worker_key=user_agent_key,
+            sandbox=mounted_sandbox,
+            mirror_grantable_credentials=False,
+        ),
+        now=10.0,
+    )
+    mounted_manifest = _load_startup_manifest(backend, worker_key=mounted_key)
+    assert mounted_manifest[STARTUP_MANIFEST_SANDBOX_MOUNT] == {
+        "path": "/app/worker/agents/general/workspace/scratch/job1",
+        "ino": expected_ino,
+    }
+
+    deployment = apps_api.deployments[mounted_handle.worker_id]
+    assert (
+        backend._resources.deployment_template_drifted(
+            deployment,
+            worker_key=mounted_key,
+            worker_id=mounted_handle.worker_id,
+            state_subpath=backend._state_subpath(mounted_key),
+            launch=_launch_of(backend),
+            private_agent_names=frozenset(),
+            state_scope_worker_key=user_agent_key,
+            sandbox=mounted_sandbox,
+        )
+        is False
+    )
+    # Swapping the directory changes its inode and is detected as template drift.
+    mounted_dir.rename(mounted_dir.with_name("job1-old"))
+    mounted_dir.mkdir()
+    assert os.lstat(mounted_dir).st_ino != expected_ino
+    assert (
+        backend._resources.deployment_template_drifted(
+            deployment,
+            worker_key=mounted_key,
+            worker_id=mounted_handle.worker_id,
+            state_subpath=backend._state_subpath(mounted_key),
+            launch=_launch_of(backend),
+            private_agent_names=frozenset(),
+            state_scope_worker_key=user_agent_key,
+            sandbox=mounted_sandbox,
+        )
+        is True
+    )
+
+    # Empty-scratch sandbox and ordinary non-sandboxed worker omit sandbox_mount.
+    scratch_key = named_worker_key(user_agent_key, "b" * 32)
+    backend.ensure_worker(
+        WorkerSpec(
+            scratch_key,
+            private_agent_names=frozenset(),
+            state_scope_worker_key=user_agent_key,
+            sandbox=WorkerSandboxConfig(),
+            mirror_grantable_credentials=False,
+        ),
+        now=10.0,
+    )
+    assert STARTUP_MANIFEST_SANDBOX_MOUNT not in _load_startup_manifest(backend, worker_key=scratch_key)
+
+    backend.ensure_worker(WorkerSpec(user_agent_key, private_agent_names=frozenset()), now=10.0)
+    assert STARTUP_MANIFEST_SANDBOX_MOUNT not in _load_startup_manifest(backend, worker_key=user_agent_key)
+
+
+def test_kubernetes_sandbox_pod_filters_extra_env_and_authenticated_proxy_urls(tmp_path: Path) -> None:
+    """Sandbox pods keep only safe infra vars and credential-free proxies; ordinary workers stay unchanged."""
+    storage_root = tmp_path / "storage"
+    (storage_root / "agents" / "general" / "workspace").mkdir(parents=True)
+    user_agent_key = "v1:tenant-123:user_agent:@alice:example.org:general"
+    runtime_paths = resolve_primary_runtime_paths(config_path=Path("config.yaml"), storage_path=storage_root)
+    extra_env = {
+        "HTTP_PROXY": "http://egress.cluster.local:3128",
+        "https_proxy": "https://egress.cluster.local:8443",
+        "ALL_PROXY": "socks5://egress.cluster.local:1080",
+        "NO_PROXY": "localhost,127.0.0.1,.svc",
+        "no_proxy": "localhost",
+        "SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt",
+        "TZ": "UTC",
+        "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "240",
+        "HTTPS_PROXY": "http://user:secret@proxy.internal:3128",
+        "http_proxy": "token@proxy.internal:3128",
+        "all_proxy": "http://[::1",
+        "CUSTOM_API_SECRET": "top-secret-value",
+        "MINDROOM_CUSTOM_EXTRA": "should-be-dropped-on-sandbox",
+    }
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths, extra_env=extra_env)
+
+    sandbox_key = named_worker_key(user_agent_key, "e" * 32)
+    backend.ensure_worker(
+        WorkerSpec(
+            sandbox_key,
+            private_agent_names=frozenset(),
+            state_scope_worker_key=user_agent_key,
+            sandbox=WorkerSandboxConfig(),
+            mirror_grantable_credentials=False,
+        ),
+        now=10.0,
+    )
+    sandbox_body = apps_api.created_bodies[-1]
+    sandbox_env = {
+        entry["name"]: entry.get("value") for entry in sandbox_body["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert sandbox_env["HTTP_PROXY"] == "http://egress.cluster.local:3128"
+    assert sandbox_env["https_proxy"] == "https://egress.cluster.local:8443"
+    assert sandbox_env["ALL_PROXY"] == "socks5://egress.cluster.local:1080"
+    assert sandbox_env["NO_PROXY"] == "localhost,127.0.0.1,.svc"
+    assert sandbox_env["no_proxy"] == "localhost"
+    assert sandbox_env["SSL_CERT_FILE"] == "/etc/ssl/certs/ca-certificates.crt"
+    assert sandbox_env["TZ"] == "UTC"
+    assert sandbox_env["MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS"] == "240"
+    for stripped in ("HTTPS_PROXY", "http_proxy", "all_proxy", "CUSTOM_API_SECRET", "MINDROOM_CUSTOM_EXTRA"):
+        assert stripped not in sandbox_env
+    sandbox_manifest_env = _load_startup_manifest(backend, worker_key=sandbox_key)["runtime_paths"]["process_env"]
+    assert "MINDROOM_CUSTOM_EXTRA" not in sandbox_manifest_env
+    assert sandbox_manifest_env["MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS"] == "240"
+    assert "top-secret-value" not in json.dumps(sandbox_manifest_env)
+
+    backend.ensure_worker(WorkerSpec(user_agent_key, private_agent_names=frozenset()), now=10.0)
+    ordinary_body = apps_api.created_bodies[-1]
+    ordinary_env = {
+        entry["name"]: entry.get("value") for entry in ordinary_body["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    for key, value in extra_env.items():
+        assert ordinary_env[key] == value
+    ordinary_manifest_env = _load_startup_manifest(backend, worker_key=user_agent_key)["runtime_paths"]["process_env"]
+    assert ordinary_manifest_env["MINDROOM_CUSTOM_EXTRA"] == "should-be-dropped-on-sandbox"

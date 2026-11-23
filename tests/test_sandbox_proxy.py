@@ -926,6 +926,7 @@ def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
         "extra_env_passthrough": None,
         "run_as_job": False,
         "stream_io": False,
+        "sandbox": False,
     }
     assert captured["headers"] == {"x-mindroom-sandbox-token": "test-token"}
 

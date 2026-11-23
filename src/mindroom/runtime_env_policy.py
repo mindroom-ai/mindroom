@@ -6,6 +6,7 @@ import fnmatch
 from collections.abc import Mapping  # noqa: TC003 - public annotations support typing.get_type_hints().
 from types import MappingProxyType
 from typing import cast
+from urllib.parse import urlsplit
 
 __all__ = [
     "AWS_ENV_BY_KEY",
@@ -37,6 +38,7 @@ __all__ = [
     "WORKER_BACKEND_ENV",
     "WORKER_COMPUTER_ENABLED_ENV",
     "credentials_encryption_key_value",
+    "is_credential_free_proxy_url",
     "is_isolated_worker_runtime_env_name",
     "is_public_worker_startup_env_name",
     "is_runtime_control_env_name",
@@ -53,7 +55,9 @@ __all__ = [
     "sandbox_runner_startup_process_env",
     "sandbox_shell_system_env",
     "sandbox_subprocess_system_env",
+    "sandbox_worker_extra_env",
     "shell_passthrough_env",
+    "strip_authenticated_proxy_env",
     "worker_extra_env",
 ]
 
@@ -581,6 +585,69 @@ def sandbox_shell_system_env(env: Mapping[str, str]) -> Mapping[str, str]:
         "Mapping[str, str]",
         MappingProxyType({key: value for key, value in env.items() if key in _SANDBOX_SHELL_SYSTEM_ENV_NAMES}),
     )
+
+
+_SANDBOX_PROXY_URL_ENV_NAMES = frozenset(
+    {
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    },
+)
+_PROXY_URL_ENV_LOWER_NAMES = frozenset({"http_proxy", "https_proxy", "all_proxy"})
+_SANDBOX_SAFE_EXTRA_ENV_NAMES = frozenset(
+    {
+        "NO_PROXY",
+        "no_proxy",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "CURL_CA_BUNDLE",
+        "REQUESTS_CA_BUNDLE",
+        "GIT_SSL_CAINFO",
+        "NODE_EXTRA_CA_CERTS",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        SANDBOX_RUNTIME_ENV_BY_KEY["runner_subprocess_timeout_seconds"],
+    },
+)
+
+
+def is_credential_free_proxy_url(value: str) -> bool:
+    """Return whether ``value`` parses as a proxy URL without embedded credentials."""
+    stripped = value.strip()
+    if not stripped or any(ch.isspace() for ch in stripped):
+        return False
+    target = stripped if "://" in stripped else f"http://{stripped}"
+    try:
+        parsed = urlsplit(target)
+        _ = parsed.port
+    except ValueError:
+        return False
+    return bool(parsed.hostname) and parsed.username is None and parsed.password is None
+
+
+def sandbox_worker_extra_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Return only safe, credential-free infrastructure extra env vars for sandboxed worker pods."""
+    return {
+        key: value
+        for key, value in worker_extra_env(env).items()
+        if key in _SANDBOX_SAFE_EXTRA_ENV_NAMES
+        or (key in _SANDBOX_PROXY_URL_ENV_NAMES and is_credential_free_proxy_url(value))
+    }
+
+
+def strip_authenticated_proxy_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Strip any proxy env var (case-insensitive) carrying credentials or an unparseable value."""
+    return {
+        key: value
+        for key, value in env.items()
+        if key.lower() not in _PROXY_URL_ENV_LOWER_NAMES or is_credential_free_proxy_url(value)
+    }
 
 
 def sandbox_subprocess_system_env(env: Mapping[str, str]) -> Mapping[str, str]:

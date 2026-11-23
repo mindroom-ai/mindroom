@@ -62,6 +62,7 @@ from mindroom.workers.models import (
     WorkerHandle,
     WorkerLaunchConfig,
     WorkerMaintenanceResult,
+    WorkerSandboxConfig,
     WorkerSpec,
     WorkerSshEndpoint,
     WorkerStatus,
@@ -381,7 +382,7 @@ class KubernetesWorkerBackend:
         auth_secret_applied = False
         try:
             if existing is None and pinned_worker_kind(worker_key) is not None:
-                self._prepare_pinned_state(worker_key, state_subpath, launch)
+                self._prepare_pinned_state(worker_key, state_subpath, launch, sandbox=spec.sandbox)
             # kubelet resolves the read-only mirror subPath when the pod starts, so the
             # primary validates and creates the worker's credential directories first.
             get_runtime_credentials_manager(self.runtime_paths).for_worker(worker_key)
@@ -638,7 +639,14 @@ class KubernetesWorkerBackend:
             msg = f"Failed to retire Kubernetes worker '{worker_log_id(worker_key)}': {exc}"
             raise WorkerBackendError(msg) from exc
 
-    def _prepare_pinned_state(self, worker_key: str, state_subpath: str, launch: WorkerLaunchConfig) -> None:
+    def _prepare_pinned_state(
+        self,
+        worker_key: str,
+        state_subpath: str,
+        launch: WorkerLaunchConfig,
+        *,
+        sandbox: WorkerSandboxConfig | None = None,
+    ) -> None:
         """Finish an interrupted retirement, then record ownership before provisioning credentials."""
         prefix, _, name = state_subpath.rpartition("/")
         with open_worker_state_root(
@@ -664,6 +672,7 @@ class KubernetesWorkerBackend:
                 worker_key=worker_key,
                 state_subpath=state_subpath,
                 launch=launch,
+                sandbox=sandbox,
             )
 
     def _require_retirement_deployment(self, worker_id: str, worker_key: str, state_subpath: str) -> None:

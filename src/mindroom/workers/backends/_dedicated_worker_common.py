@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -44,8 +45,10 @@ __all__ = [
     "SharedDirectoryMount",
     "agent_names_addressed_by_worker_key",
     "build_backend_config_signature",
+    "normalize_sandbox_mount_dir",
     "plan_scoped_workspace_mounts",
     "plan_shared_directory_mounts",
+    "resolve_sandbox_mount_target",
     "resolve_state_scope_worker_key",
     "retire_pinned_worker",
     "stable_json_digest",
@@ -83,6 +86,7 @@ class ScopedWorkspaceMount:
     local_path: Path
     worker_visible_path: Path
     read_only: bool = False
+    ino: int | None = None
 
 
 def resolve_state_scope_worker_key(worker_key: str, state_scope_worker_key: str | None) -> str:
@@ -211,6 +215,34 @@ def _scoped_workspaces(
     return workspaces
 
 
+def normalize_sandbox_mount_dir(mount_dir: str) -> str:
+    """Validate and normalize one workspace-relative sandbox ``mount_dir``."""
+    if "\x00" in mount_dir:
+        msg = "mount_dir must not contain NUL bytes."
+        raise ValueError(msg)
+    return agent_workspace_relative_path(mount_dir).as_posix()
+
+
+def resolve_sandbox_mount_target(
+    *,
+    storage_root: Path,
+    workspaces: tuple[Path, ...],
+    mount_dir: str,
+    validate: bool = True,
+) -> tuple[Path, int | None]:
+    """Resolve one sandbox ``mount_dir`` relative to ``storage_root`` and optionally pin its inode."""
+    if len(workspaces) != 1:
+        msg = "Sandbox mount_dir requires a single agent workspace."
+        raise ValueError(msg)
+    normalized = normalize_sandbox_mount_dir(mount_dir)
+    workspace_rel = workspaces[0].relative_to(storage_root)
+    target_rel = workspace_rel if normalized == "." else workspace_rel / normalized
+    if not validate:
+        return target_rel, None
+    with open_directory_within_root(storage_root, target_rel, create=False) as fd:
+        return target_rel, os.fstat(fd).st_ino
+
+
 def _plan_sandbox_workspace_mounts(
     *,
     worker_key: str,
@@ -221,23 +253,17 @@ def _plan_sandbox_workspace_mounts(
 ) -> tuple[ScopedWorkspaceMount, ...]:
     if sandbox.mount_dir is None:
         return ()
-    if len(workspaces) != 1:
-        msg = f"Sandboxed mount_dir requires a single agent workspace: {worker_log_id(worker_key)}"
-        raise WorkerBackendError(msg)
-    if "\x00" in sandbox.mount_dir:
-        msg = "Sandbox mount_dir must not contain NUL bytes."
-        raise WorkerBackendError(msg)
     try:
-        normalized = agent_workspace_relative_path(sandbox.mount_dir).as_posix()
+        target_rel, ino = resolve_sandbox_mount_target(
+            storage_root=storage_root,
+            workspaces=workspaces,
+            mount_dir=sandbox.mount_dir,
+            validate=True,
+        )
     except ValueError as exc:
-        msg = f"Invalid sandbox mount_dir: {exc}"
+        msg = f"Invalid sandbox mount_dir for {worker_log_id(worker_key)}: {exc}"
         raise WorkerBackendError(msg) from exc
-    workspace_rel = workspaces[0].relative_to(storage_root)
-    target_rel = workspace_rel if normalized == "." else workspace_rel / normalized
-    try:
-        with open_directory_within_root(storage_root, target_rel, create=False):
-            pass
-    except (OSError, ValueError) as exc:
+    except OSError as exc:
         msg = f"Sandbox mount_dir '{sandbox.mount_dir}' must exist as a real directory without symlinks."
         raise WorkerBackendError(msg) from exc
     return (
@@ -245,6 +271,7 @@ def _plan_sandbox_workspace_mounts(
             storage_root / target_rel,
             worker_visible_shared_storage_root / target_rel,
             read_only=sandbox.mount_read_only,
+            ino=ino,
         ),
     )
 

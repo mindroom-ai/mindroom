@@ -22,10 +22,8 @@ from typing import TYPE_CHECKING, cast
 from mindroom.background_tasks import create_background_task
 from mindroom.config.resolution import agent_policy
 from mindroom.logging_config import get_logger
-from mindroom.path_confinement import open_directory_within_root
 from mindroom.tool_jobs.resources import current_response_resources
 from mindroom.tool_system.worker_routing import (
-    agent_workspace_relative_path,
     named_worker_key,
     pinned_worker_state_scope_key,
     resolved_worker_key_scope,
@@ -35,6 +33,10 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers.backend import RetiringWorkerBackend, WorkerBackendError
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
+from mindroom.workers.backends._dedicated_worker_common import (
+    normalize_sandbox_mount_dir,
+    resolve_sandbox_mount_target,
+)
 from mindroom.workers.backends.kubernetes_config import NAMED_WORKERS_MAX_ENV, configured_named_workers_max
 from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES, WorkerSandboxConfig
 from mindroom.workers.runtime import idle_worker_cleanup_runs, lease_configured_primary_worker_manager
@@ -274,11 +276,8 @@ def _parse_sandbox_config(
         raise NamedWorkerError(msg)
     normalized_mount_dir: str | None = None
     if isinstance(mount_dir, str):
-        if "\x00" in mount_dir:
-            msg = "mount_dir must not contain NUL bytes."
-            raise NamedWorkerError(msg)
         try:
-            normalized_mount_dir = agent_workspace_relative_path(mount_dir).as_posix()
+            normalized_mount_dir = normalize_sandbox_mount_dir(mount_dir)
         except ValueError as exc:
             msg = f"Invalid mount_dir: {exc}"
             raise NamedWorkerError(msg) from exc
@@ -311,21 +310,21 @@ def sandbox_mount_relative_path(
         policies,
         private_agent_names=private_agent_names or frozenset(),
     )
-    if len(workspaces) != 1:
-        msg = "Sandbox mount_dir requires a single agent workspace."
-        raise NamedWorkerError(msg)
-    workspace_rel = workspaces[0].relative_to(root)
-    target_rel = workspace_rel if sandbox.mount_dir == "." else workspace_rel / sandbox.mount_dir
-    if validate:
-        try:
-            with open_directory_within_root(root, target_rel, create=False):
-                pass
-        except FileNotFoundError as exc:
-            msg = f"Sandbox mount_dir '{sandbox.mount_dir}' does not exist in the agent workspace."
-            raise NamedWorkerError(msg) from exc
-        except (OSError, ValueError) as exc:
-            msg = f"Sandbox mount_dir '{sandbox.mount_dir}' must be a real directory without symlinks."
-            raise NamedWorkerError(msg) from exc
+    try:
+        target_rel, _ = resolve_sandbox_mount_target(
+            storage_root=root,
+            workspaces=workspaces,
+            mount_dir=sandbox.mount_dir,
+            validate=validate,
+        )
+    except FileNotFoundError as exc:
+        msg = f"Sandbox mount_dir '{sandbox.mount_dir}' does not exist in the agent workspace."
+        raise NamedWorkerError(msg) from exc
+    except OSError as exc:
+        msg = f"Sandbox mount_dir '{sandbox.mount_dir}' must be a real directory without symlinks."
+        raise NamedWorkerError(msg) from exc
+    except ValueError as exc:
+        raise NamedWorkerError(str(exc)) from exc
     return target_rel
 
 
