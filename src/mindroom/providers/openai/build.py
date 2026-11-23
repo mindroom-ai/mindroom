@@ -118,6 +118,7 @@ _CHAT_ROUTES: dict[str, _ChatRoute] = {
         base_url=OPENROUTER_BASE_URL_DEFAULT,
         api_key_env=PROVIDER_ENV_KEYS["openrouter"],
         accepted=CHAT_FIELDS | {"models", "cache_system_prompt", "extended_cache_time"},
+        omitted_media=frozenset(),
     ),
     "deepseek": _ChatRoute(
         base_url=DEEPSEEK_BASE_URL_DEFAULT,
@@ -539,7 +540,7 @@ def _build_responses(
     reset_scope = f"{identity.provider}:{model_id}:{endpoint}" if openrouter else None
     capabilities = Capabilities(
         structured_output="native",
-        omitted_media=frozenset({"audio", "video"}),
+        omitted_media=frozenset({"audio"}) if openrouter else frozenset({"audio", "video"}),
         url_media=frozenset({"file", "image"}),
         native_tool_search=openai_native_tool_search_supported(route_key, model_id, base_url=base_url),
         native_compaction=_native_compaction_supported(model_id, endpoint, store, settings, openrouter=openrouter),

@@ -18,15 +18,17 @@ from mindroom.llm.media import canonical_mime_type, file_text, image_mime_type, 
 from mindroom.providers.media_files import read_media_bytes
 
 if TYPE_CHECKING:
-    from mindroom.llm.media import Audio, File, Image
+    from mindroom.llm.media import Audio, File, Image, Video
 
 __all__ = [
     "chat_audio_part",
     "chat_file_part",
     "chat_image_part",
+    "chat_video_part",
     "file_part_name",
     "responses_file_part",
     "responses_image_part",
+    "responses_video_part",
 ]
 
 
@@ -79,6 +81,45 @@ def chat_audio_part(audio: Audio, *, provider: str) -> dict[str, Any] | None:
         "type": "input_audio",
         "input_audio": {"data": base64.b64encode(data).decode("utf-8"), "format": audio_format},
     }
+
+
+def _video_mime_type(video: Video) -> str:
+    if (declared := canonical_mime_type(video.mime_type)) and declared.startswith("video/"):
+        return declared
+    if video.format and (fmt := video.format.strip().lstrip(".").lower()):
+        named = named_mime_type(f"video.{fmt}")
+        return named if named and named.startswith("video/") else f"video/{fmt}"
+    if video.filepath and (named := named_mime_type(video.filepath)) and named.startswith("video/"):
+        return named
+    return "video/mp4"
+
+
+def _video_url(video: Video, provider: str) -> str | None:
+    if video.url is not None:
+        return video.url
+    if video.filepath is None:
+        data = video.content
+    else:
+        data = read_media_bytes(video.filepath, media_id=video.id, kind="video", provider=provider)
+    if not data:
+        return None
+    return f"data:{_video_mime_type(video)};base64,{base64.b64encode(data).decode('utf-8')}"
+
+
+def chat_video_part(video: Video, *, provider: str) -> dict[str, Any] | None:
+    """Return a Chat Completions ``video_url`` part, or None for an empty video."""
+    url = _video_url(video, provider)
+    if url is None:
+        return None
+    return {"type": "video_url", "video_url": {"url": url}}
+
+
+def responses_video_part(video: Video, *, provider: str) -> dict[str, Any] | None:
+    """Return a Responses ``input_video`` part, or None for an empty video."""
+    url = _video_url(video, provider)
+    if url is None:
+        return None
+    return {"type": "input_video", "video_url": url}
 
 
 def _content_bytes(file: File, provider: str) -> bytes | None:
