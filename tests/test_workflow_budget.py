@@ -381,7 +381,66 @@ async def test_nested_run_with_lower_own_limit_stops_without_stopping_parent(sta
 
     stack.run_id = parent
     await _settled(stack, "@0")
+    parent_launch = stack.store.get_node(parent, "@0")
+    assert parent_launch is not None
+    assert parent_launch.state is WorkflowNodeState.CANCELLED
+    assert parent_launch.error is not None
+    assert parent_launch.error["kind"] == "interrupted"
     assert stack.store.get_run(parent).state is WorkflowRunState.RUNNING
     assert await stack.result("@1", "agent", {"prompt": "Parent continues."}) == "done"
     assert len(model.requests) == 2
     assert stack.store.get_run(parent).state is WorkflowRunState.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_raising_parent_limit_continues_stopped_nested_child(stack: WorkflowStack) -> None:
+    """Raising a parent's cost limit continues the same stopped child and delivers its real report with 2 turns total."""
+    inner_source = "def main(args):\n    return 'inner'\n"
+    launch = tool_args("workflow", "start_workflow", source=inner_source)
+    await stack.start(max_cost_usd=0.10, max_concurrent=1)
+    parent = stack.run_id
+    model = stack.child_script(answer("first", _usd(0.20)), answer("next", _usd(0.20)))
+
+    await stack.submit("@0", "tool", launch)
+    await stack.until(lambda: [run.state for run in stack.store.child_runs(parent)] == [WorkflowRunState.RUNNING])
+    [child] = stack.store.child_runs(parent)
+
+    stack.run_id = child.run_id
+    assert await stack.result("@0", "agent", {"prompt": "First"}) == "first"
+    await stack.until(lambda: stack.store.get_run(child.run_id).state is WorkflowRunState.INTERRUPTED)
+
+    stack.run_id = parent
+    await stack.until(lambda: stack.store.get_run(parent).state is WorkflowRunState.INTERRUPTED)
+    stopped_node = stack.store.get_node(parent, "@0")
+    assert stopped_node is not None
+    assert stopped_node.state is not WorkflowNodeState.COMPLETED
+    assert len(model.requests) == 1
+
+    await stack.call("resume_workflow", run_id=parent, max_cost_usd=1.0, call_id="raise-parent-limit")
+    await stack.until(lambda: stack.store.get_run(parent).attempt == 2)
+
+    replayed = await stack.submit("@0", "tool", launch)
+    assert replayed.cached is False
+    await stack.until(
+        lambda: (
+            stack.store.get_run(child.run_id).state is WorkflowRunState.RUNNING
+            and stack.store.get_run(child.run_id).attempt == 2
+        ),
+    )
+    assert [run.run_id for run in stack.store.child_runs(parent)] == [child.run_id]
+
+    stack.run_id = child.run_id
+    first_replayed = await stack.submit("@0", "agent", {"prompt": "First"})
+    assert (first_replayed.cached, first_replayed.result) == (True, "first")
+    second = await stack.result("@1", "agent", {"prompt": "Second"})
+    assert second == "next"
+    await stack.finish_attempt(result=f"{first_replayed.result}{second}")
+
+    stack.run_id = parent
+    await _settled(stack, "@0")
+    parent_node = stack.store.get_node(parent, "@0")
+    assert parent_node is not None
+    assert (parent_node.state, parent_node.result) == (WorkflowNodeState.COMPLETED, "firstnext")
+    await stack.finish_attempt(result=parent_node.result)
+    assert stack.store.get_run(parent).result == "firstnext"
+    assert len(model.requests) == 2

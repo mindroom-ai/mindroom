@@ -45,6 +45,7 @@ from mindroom.workflow_runs.models import (
     TERMINAL_RUN_STATES,
     WorkflowNodeState,
     WorkflowRun,
+    WorkflowRunState,
     new_workflow_run_id,
 )
 from mindroom.workflow_runs.store import WorkflowRunNotFoundError, WorkflowRunStoreError, owned_run
@@ -217,8 +218,16 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         # A run inside a run is found by its script, which is read once, here, for its key and for the run.
         text = None if outer is None else await _source(engine, context, arguments)
         origin = _inline_origin(context) if text is None else nested_key(outer, text, arguments.get("args"))
-        reserve = partial(self._reserve, engine, context, origin, arguments, outer=outer, source=text)
-        return await engine.delivery(await engine.attend(origin, reserve, context, self.limits))
+        stopped = (
+            _resumable_child(engine, outer, text, arguments)
+            if outer is not None and text is not None and running_child_run() is None
+            else None
+        )
+        if stopped is not None and outer is not None:
+            action = partial(self._continue_child, engine, context, origin, outer, stopped, arguments)
+        else:
+            action = partial(self._reserve, engine, context, origin, arguments, outer=outer, source=text)
+        return await engine.delivery(await engine.attend(origin, action, context, self.limits))
 
     async def get_workflow(self, run_id: str, nodes: Literal["active", "failed", "all"] = "active") -> str:
         """Return a run's status, cost, open questions, failed calls and nodes. nodes is "active" (default), "failed" or "all".
@@ -432,6 +441,44 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         if outer is not None and created:
             await engine.nest(run)
         return run
+
+    async def _continue_child(
+        self,
+        engine: WorkflowEngine,
+        context: ToolRuntimeContext,
+        origin: str,
+        outer: tuple[str, str, int],
+        child: WorkflowRun,
+        arguments: Mapping[str, Any],
+    ) -> WorkflowRun:
+        """Reopen an interrupted nested run under its outer node and refresh its group node."""
+        reopened = await engine.reopen(
+            child.run_id,
+            context,
+            max_cost_usd=_validated_max_cost_usd(arguments.get("max_cost_usd")),
+            limits=self.limits,
+            owner=origin,
+            epoch=child.epoch,
+            persona=ceiling(context, engine.store.get_run(outer[0]).persona),
+        )
+        await engine.nest(reopened)
+        return reopened
+
+
+def _resumable_child(
+    engine: WorkflowEngine,
+    outer: tuple[str, str, int],
+    source: bytes,
+    arguments: Mapping[str, Any],
+) -> WorkflowRun | None:
+    """Return the latest interrupted nested run of *outer*'s node with matching script and args, if any."""
+    digest, args = hashlib.sha256(source).hexdigest(), arguments.get("args")
+    children = [
+        child
+        for child in engine.store.child_runs(outer[0])
+        if child.parent_node_key == outer[1] and child.source_digest == digest and child.args == args
+    ]
+    return children[0] if children and children[0].state is WorkflowRunState.INTERRUPTED else None
 
 
 async def _resume_job(

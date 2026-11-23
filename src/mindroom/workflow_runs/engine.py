@@ -1058,14 +1058,17 @@ class WorkflowEngine:
         The group names the run, so the end of the outer run ends it, and it is part of the attempt it began in.
         """
         outer = self.store.get_run(str(child.parent_run_id))
+        key = f"{child.parent_node_key}/{child.run_id}"
+        existing = self.store.get_node(outer.run_id, key)
         group = WorkflowNode(
             run_id=outer.run_id,
-            key=f"{child.parent_node_key}/{child.run_id}",
+            key=key,
             kind="group",
             lane=str(child.parent_node_key),
             idx=0,
             digest=child.source_digest,
             request={"op": "workflow"},
+            generation=1 if existing is None else existing.generation + 1,
             state=WorkflowNodeState.RUNNING,
             handle=DispatchHandle("run", child.run_id, dispatched=True),
             attempt=outer.attempt,
@@ -1603,6 +1606,8 @@ class WorkflowEngine:
             except ScriptRunNotFoundError:
                 started = None
             outcome = _unless_proven(node, started, (WorkflowNodeState.FAILED, None, _INTERRUPTED))
+        if outcome[0] is WorkflowNodeState.COMPLETED and (interrupted := self._nested_interrupted(node)) is not None:
+            outcome = interrupted
         state, result, error = outcome
         settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
         settle(state=state, result=result, error=error, dirty_after=_changed(node, outcome))
@@ -1691,6 +1696,10 @@ class WorkflowEngine:
         _CALLING_NODE.set((node.run_id, node.key, node.generation))
         try:
             outcome = await call()
+            if outcome[0] is WorkflowNodeState.COMPLETED:
+                interrupted = await asyncio.to_thread(self._nested_interrupted, node)
+                if interrupted is not None:
+                    outcome = interrupted
             dirty = _changed(node, outcome)
             await hold("before_settle")
             state, result, error = outcome
@@ -1858,8 +1867,18 @@ class WorkflowEngine:
         with suppress(SupersededAttemptError, WorkflowRunStoreError):
             outer = self.store.get_run(str(child.parent_run_id))
             key = f"{child.parent_node_key}/{child.run_id}"
-            settle = partial(self.store.settle_node, outer.run_id, key, 1, outer.epoch, state=end, error=error)
+            group = self.store.get_node(outer.run_id, key)
+            generation = 1 if group is None else group.generation
+            settle = partial(self.store.settle_node, outer.run_id, key, generation, outer.epoch, state=end, error=error)
             await asyncio.to_thread(settle)
+
+    def _nested_interrupted(self, node: WorkflowNode) -> _Outcome | None:
+        """Return a non-completed outcome when *node* ran a nested run that ended interrupted."""
+        children = [child for child in self.store.child_runs(node.run_id) if child.parent_node_key == node.key]
+        if not children or children[0].state is not WorkflowRunState.INTERRUPTED:
+            return None
+        reason = children[0].error or f"Nested run {children[0].run_id} ended interrupted."
+        return WorkflowNodeState.CANCELLED, None, {"kind": "interrupted", "message": reason}
 
 
 def _changed(node: WorkflowNode, outcome: _Outcome) -> bool:
