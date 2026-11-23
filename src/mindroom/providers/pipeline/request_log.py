@@ -69,8 +69,11 @@ def _is_openrouter_gemini_request(provider: str, body: Mapping[str, Any], model_
     )
 
 
-def _decode_wrapped_tool_text(text: str) -> dict[str, str] | None:
-    """Return the decoded ``{"result": ...}`` or ``{"error": ...}`` dict for a wrapped tool string, else None."""
+def _decode_wrapped_tool_text(text: str) -> dict[str, str | list[str]] | None:
+    """Return the decoded ``{"result": ...}`` or ``{"error": ...}`` dict for a wrapped tool string, else None.
+
+    Its value is the result's text, or the list of the texts of a result with several text parts.
+    """
     if not text.startswith("{"):
         return None
     try:
@@ -80,7 +83,8 @@ def _decode_wrapped_tool_text(text: str) -> dict[str, str] | None:
     if not isinstance(decoded, dict) or len(decoded) != 1:
         return None
     ((key, inner),) = decoded.items()
-    if key not in _WRAPPED_TOOL_RESULT_KEYS or not isinstance(inner, str):
+    is_text = isinstance(inner, str) or (isinstance(inner, list) and all(isinstance(item, str) for item in inner))
+    if key not in _WRAPPED_TOOL_RESULT_KEYS or not is_text:
         return None
     return {key: inner}
 

@@ -66,6 +66,7 @@ from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import ResponsesStream
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.media import FALLBACK_MARKER
+from mindroom.redaction import redact_sensitive_data
 from mindroom.token_counting.counts import count
 from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, RequestParts
 from tests.history_helpers import stamp_request_identity
@@ -3703,7 +3704,7 @@ async def test_openrouter_gemini_null_or_empty_extra_body_model_is_the_effective
 
 @pytest.mark.asyncio
 async def test_openrouter_gemini_wraps_multimodal_and_multipart_tool_results(tmp_path: Path) -> None:
-    """Attached media stays beside one JSON-wrapped text part, and multi-text parts coalesce before wrapping."""
+    """Attached media stays beside one JSON-wrapped text part, and several text parts wrap as a list of their texts."""
     built = _Built(tmp_path, {"provider": "openrouter", "id": "google/gemini-4-neon", "api_key": "k"}, _chat_reply())
     assistant = Message(role="assistant", content="", tool_calls=_calls("call_1", "call_2", "call_3", "call_4"))
     image_part = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
@@ -3737,7 +3738,7 @@ async def test_openrouter_gemini_wraps_multimodal_and_multipart_tool_results(tmp
     assert sent[2]["content"][0]["type"] == "text"
     assert json.loads(sent[2]["content"][0]["text"]) == {"result": "Caption {}"}
     assert sent[2]["content"][1]["type"] == "image_url"
-    assert json.loads(sent[3]["content"]) == {"result": "Part 1\nPart 2 {a: 1}"}
+    assert json.loads(sent[3]["content"]) == {"result": ["Part 1", "Part 2 {a: 1}"]}
     assert sent[4]["content"][0]["type"] == "text"
     assert json.loads(sent[4]["content"][0]["text"]) == {"result": "Before {}"}
     assert sent[4]["content"][1] == image_part
@@ -3825,32 +3826,41 @@ async def test_openrouter_gemini_request_log_redacts_secrets_inside_wrapped_tool
 
 
 @pytest.mark.asyncio
-async def test_openrouter_gemini_request_log_redacts_a_secret_joined_after_an_api_key_message(tmp_path: Path) -> None:
-    """Joining text parts puts a secret assignment right after an API-key message, and the log still hides its value."""
+async def test_openrouter_gemini_request_log_redacts_each_text_part_of_a_multipart_tool_result(tmp_path: Path) -> None:
+    """The wrapper keeps each text part apart, so the log redacts a part as it would unwrapped.
+
+    Redacted as one joined text, the API-key message of the first part would take the key or the opening quote of
+    the second part for the credential and leave the real value in the open.
+    """
     log_dir = tmp_path / "request-logs"
     built = _Built(tmp_path, {"provider": "openrouter", "id": "google/gemini-4-neon", "api_key": "k"}, _chat_reply())
     provider = pipeline_provider(built.adapter, log_dir=log_dir)
-    assistant = Message(role="assistant", content="", tool_calls=[_CALL])
-    result = Message(
-        role="tool",
-        content=[
-            {"type": "text", "text": "Invalid API key provided:"},
-            {"type": "text", "text": "password: synthetic-canary-value"},
-        ],
-        tool_call_id="call_1",
-        tool_name="get_weather",
-    )
+    message = "Invalid API key provided:"
+    secrets = ["password: synthetic-canary-1", 'password="synthetic-canary-2"', "API key: synthetic-canary-3"]
+    redacted = ["password: ***redacted***", 'password="***redacted***"', "API key: ***redacted***"]
+    call_ids = [f"call_{number}" for number in range(1, len(secrets) + 1)]
+    assistant = Message(role="assistant", content="", tool_calls=_calls(*call_ids))
+    results = [
+        Message(
+            role="tool",
+            content=[{"type": "text", "text": message}, {"type": "text", "text": secret}],
+            tool_call_id=call_id,
+            tool_name="get_weather",
+        )
+        for call_id, secret in zip(call_ids, secrets, strict=True)
+    ]
 
-    await complete(provider, ModelRequest(messages=[_user(), assistant, result]))
+    await complete(provider, ModelRequest(messages=[_user(), assistant, *results]))
 
-    assert json.loads(built.body()["messages"][2]["content"]) == {
-        "result": "Invalid API key provided:\npassword: synthetic-canary-value",
-    }
+    sent = [json.loads(sent_message["content"]) for sent_message in built.body()["messages"][2:]]
+    assert sent == [{"result": [message, secret]} for secret in secrets]
     (log_file,) = log_dir.glob("llm-requests-*.jsonl")
     logged_text = log_file.read_text(encoding="utf-8")
-    assert "synthetic-canary-value" not in logged_text
-    logged_content = json.loads(logged_text.splitlines()[0])["body"]["messages"][2]["content"]
-    assert json.loads(logged_content) == {"result": "Invalid API key provided:\npassword: ***redacted***"}
+    assert "synthetic-canary" not in logged_text
+    logged_messages = json.loads(logged_text.splitlines()[0])["body"]["messages"][2:]
+    logged = [json.loads(logged_message["content"]) for logged_message in logged_messages]
+    # Each part reads as it does redacted alone, the message included.
+    assert logged == [{"result": [redact_sensitive_data(message), hidden]} for hidden in redacted]
 
 
 @pytest.mark.asyncio

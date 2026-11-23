@@ -122,9 +122,12 @@ def chat_stop_reason(finish_reason: str | None) -> StopReason | None:
 _REASONING_DETAIL_TEXT = {"reasoning.text": "text", "reasoning.summary": "summary"}
 
 
-def _gemini_tool_result_json(text: str, *, is_error: bool) -> str:
-    """Encode a tool result's text as a JSON object so OpenRouter forwards it intact to Gemini ``functionResponse``."""
-    return json.dumps({"error": text} if is_error else {"result": text}, ensure_ascii=False)
+def _gemini_tool_result_json(value: str | list[str], *, is_error: bool) -> str:
+    """Encode a tool result's text, or the texts of its several text parts, as a JSON object.
+
+    OpenRouter forwards a JSON object intact to Gemini ``functionResponse``.
+    """
+    return json.dumps({"error": value} if is_error else {"result": value}, ensure_ascii=False)
 
 
 def _wrap_gemini_tool_result(result: ToolResultView) -> str | list[Any]:
@@ -135,8 +138,9 @@ def _wrap_gemini_tool_result(result: ToolResultView) -> str | list[Any]:
     (``providers/gemini/wire.py``) and keeps every character intact. A tool output that is already valid JSON is
     wrapped too, as on that wire, so OpenRouter's JavaScript ``JSON.parse`` never rounds its integers beyond 53 bits
     or drops its formatting and duplicate keys. When the content is a list of content parts, OpenRouter concatenates
-    text parts before parsing, so text parts are joined into one wrapped text part while non-text parts and extra
-    part metadata (such as authored ``cache_control``) stay intact.
+    text parts before parsing, so the text parts become one wrapped text part while non-text parts and extra part
+    metadata (such as authored ``cache_control``) stay intact. Several text parts are wrapped as the list of their
+    texts, not joined, so the request log redacts each text apart as it does the parts of an unwrapped result.
     """
     content = result.content
     if isinstance(content, str):
@@ -150,8 +154,8 @@ def _wrap_gemini_tool_result(result: ToolResultView) -> str | list[Any]:
             other_parts.append(part)
     if not text_parts:
         return content
-    joined = "\n".join(part["text"] for part in text_parts)
-    wrapped = _gemini_tool_result_json(joined, is_error=result.is_error)
+    texts = [part["text"] for part in text_parts]
+    wrapped = _gemini_tool_result_json(texts[0] if len(texts) == 1 else texts, is_error=result.is_error)
     extra_fields = {key: value for part in text_parts for key, value in part.items() if key not in {"type", "text"}}
     if not other_parts and not extra_fields:
         return wrapped

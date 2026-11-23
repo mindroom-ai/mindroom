@@ -10,7 +10,7 @@ import unicodedata
 from collections import OrderedDict
 from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass, fields, is_dataclass
-from functools import lru_cache, partial
+from functools import lru_cache
 from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -695,20 +695,11 @@ def _redact_prose_token(match: re.Match[str]) -> str:
     return _redact_matched_token(match)
 
 
-def _redact_phrase_token(match: re.Match[str], *, prose: bool) -> str:
-    """Hide the value a credential phrase labels, whatever it looks like, except the words kept here.
-
-    The key of a secret assignment is kept, as ``password`` in ``Invalid API key provided: password: hunter2``: the
-    assignment scan hides its value, which hiding the key would leave in the open. Authored prose also keeps what
-    ``_redact_prose_token`` keeps, and other text a prose word after a bare "API key" or "bearer".
-    """
-    token = match.group("token")
-    assignment = _ASSIGNMENT_PREFIX_PATTERN.match(match.string, match.start("token"))
-    if assignment and assignment.end("key") == match.end("token") and _classify_key(token).is_secret:
-        return match.group(0)
-    if prose:
-        return _redact_prose_token(match)
-    if _BARE_CREDENTIAL_PHRASE_PATTERN.fullmatch(match.group("prefix")) and _PROSE_WORD_PATTERN.fullmatch(token):
+def _redact_phrase_token(match: re.Match[str]) -> str:
+    """Keep a prose word after a bare "API key" or "bearer"; a labeled value is hidden whatever it looks like."""
+    if _BARE_CREDENTIAL_PHRASE_PATTERN.fullmatch(match.group("prefix")) and _PROSE_WORD_PATTERN.fullmatch(
+        match.group("token"),
+    ):
         return match.group(0)
     return _redact_matched_token(match)
 
@@ -764,7 +755,7 @@ def _redact_sensitive_text(value: str, *, max_length: int | None, prose: bool = 
     redacted = redact_private_keys(bounded_value) if has_private_key else bounded_value
     redacted = URL_PATTERN.sub(_redact_url_match, redacted) if has_url else redacted
     redact_token = _redact_prose_token if prose else _redact_matched_token
-    redact_phrase_token = partial(_redact_phrase_token, prose=prose)
+    redact_phrase_token = _redact_prose_token if prose else _redact_phrase_token
     if has_bearer:
         redacted = _BEARER_TOKEN_PATTERN.sub(redact_phrase_token, redacted)
     if has_api_key_message:
