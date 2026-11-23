@@ -1000,6 +1000,7 @@ class TurnDispatcher:
             envelope=envelope,
             current_prompt_is_structured=turn.current_prompt_is_structured,
             stopped_reply=turn.stopped_reply,
+            mid_turn_mode=turn.mid_turn_mode,
             scheduled_history_budget=_scheduled_history_budget_for_dispatch(event, origin.intent),
             scheduled_model=_scheduled_model_for_dispatch(event, origin.intent),
         )
@@ -1120,6 +1121,7 @@ class TurnDispatcher:
                 payload_preparation=payload_preparation,
                 current_timestamp_ms=current_timestamp_ms,
                 current_prompt_is_structured=dispatch.current_prompt_is_structured,
+                mid_turn_mode=dispatch.mid_turn_mode,
                 pipeline_timing=dispatch_timing,
                 on_lifecycle_lock_acquired=on_lifecycle_lock_acquired,
                 prepare_source_turn=lambda history: self.deps.turn_store.prepare_pending_response_source(

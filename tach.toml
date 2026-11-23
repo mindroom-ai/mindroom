@@ -3504,6 +3504,7 @@ path = "mindroom.reply_turn.request"
 depends_on = [
     "mindroom.constants",
     "mindroom.matrix.typing",
+    "mindroom.mid_turn",
     "mindroom.response_sources",
 ]
 visibility = [
@@ -6529,6 +6530,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.dispatch_callback_outcome",
     "mindroom.dispatch_recovery_context",
+    "mindroom.mid_turn",
     "mindroom.turns.queued_notice",
 ]
 visibility = ["mindroom.bot"]
@@ -6620,6 +6622,7 @@ depends_on = [
     "mindroom.managed_room_notice",
     "mindroom.matrix.room_membership",
     "mindroom.matrix.rooms",
+    "mindroom.mid_turn",
     "mindroom.responder_availability",
     "mindroom.room_settings",
     "mindroom.runtime_protocols",
@@ -10014,12 +10017,15 @@ depends_on = ["mindroom.config.judgment", "mindroom.config.schema_hints"]
 
 [[modules]]
 path = "mindroom.mid_turn"
-depends_on = ["mindroom.judgment.state", "mindroom.tool_system.events"]
+depends_on = ["mindroom.constants", "mindroom.judgment.state", "mindroom.tool_system.events"]
 visibility = [
     "mindroom.ai_runtime",
     "mindroom.mid_turn_judgment",
+    "mindroom.reply_turn.request",
     "mindroom.response_lifecycle",
+    "mindroom.turn_policy",
     "mindroom.turns.ingress",
+    "mindroom.voice.ingress",
 ]
 
 [[modules]]

@@ -23,6 +23,7 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.managed_room_notice import managed_room_notice, responder_display_names
 from mindroom.matrix.room_membership import cached_joined_member_ids
 from mindroom.matrix.rooms import is_dm_room
+from mindroom.mid_turn import MidTurnMode
 from mindroom.responder_availability import filter_materializable_responders
 from mindroom.room_settings import REPLY_MODE, SettingRead, event_read_failed, refresh_room_setting
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
@@ -91,6 +92,7 @@ class PreparedDispatch:
     current_prompt_is_structured: bool = False
     # Whether this turn's message cut the running response short: its requester's Steer or the judge's "cannot wait".
     stopped_reply: bool = False
+    mid_turn_mode: MidTurnMode = MidTurnMode.AUTO
     scheduled_history_budget: ScheduledHistoryBudget | None = None
     scheduled_model: str | None = None
 

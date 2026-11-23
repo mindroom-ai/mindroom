@@ -538,6 +538,7 @@ class ResponseRunner:
                             ),
                             locked_operation=lambda: self._run_locked_ending_span(request, locked_operation),
                             signal_queued_message=signal_queued_message and not request.quiet,
+                            mid_turn_mode=request.mid_turn_mode,
                         )
                         handle = current_span()
                         if handle is not None and not handle.exited:

@@ -45,6 +45,7 @@ from mindroom.mid_turn import (
     MidTurnMode,
     MidTurnOutcome,
     QueuedMessage,
+    coalesced_mid_turn_mode,
     mid_turn_mode,
 )
 from mindroom.mid_turn_judgment import create_mid_turn_gate
@@ -55,11 +56,12 @@ from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.tool_jobs.consumption import set_consumption_storage
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
-from mindroom.tool_jobs.follow_ups import follow_up_jobs
+from mindroom.tool_jobs.follow_ups import follow_up_envelope, follow_up_jobs
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.turn_origin import SenderKind, TurnIntent
 from tests.agent_loop.helpers import collect, context, external, gated, spec, toolkit
 from tests.conftest import install_model_providers, make_visible_message, request_envelope, test_runtime_paths
 from tests.cpu_budget_helpers import cpu_budget
@@ -1942,6 +1944,86 @@ def test_the_gate_knows_the_requester_only_of_a_reply_a_person_asked_for(
     )
     assert gate is not None
     assert gate.requester_id == requester
+
+
+def test_job_follow_up_binds_human_requester_on_gate_without_interactive_prompt_permission(tmp_path: Path) -> None:
+    """A human-requested job follow-up binds its requester on the gate without interrupting other turns."""
+    config = Config.model_validate(
+        {
+            "models": {"default": {"provider": "synthetic", "id": "test"}},
+            "agents": {
+                "test_agent": {
+                    "display_name": "Test",
+                    "mid_turn": {"judgment": {"provider": "llm", "model": "default"}},
+                },
+            },
+        },
+    )
+    key = ConversationKey(
+        recipient="test_agent",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        requester_id=_REQUESTER,
+        silent=False,
+    )
+    human_follow_up = follow_up_envelope(
+        key,
+        follow_up_id="job-follow-up:1",
+        sender_id="@mindroom_test_agent:localhost",
+        prompt="Background job finished.",
+    )
+    assert human_follow_up.origin.intent is TurnIntent.JOB_FOLLOW_UP
+    assert not human_follow_up.origin.may_answer_interactive_prompt
+    assert human_follow_up.origin.active_human_requester_id == _REQUESTER
+
+    managed_follow_up = replace(
+        human_follow_up,
+        origin=replace(
+            human_follow_up.origin,
+            requester_kind=SenderKind.MANAGED_ENTITY,
+            requester_entity_name="helper",
+        ),
+    )
+    assert managed_follow_up.origin.active_human_requester_id is None
+
+    paths = test_runtime_paths(tmp_path)
+    human_gate = create_mid_turn_gate(
+        config,
+        paths,
+        human_follow_up,
+        prompt="Background job finished.",
+        has_media=False,
+    )
+    managed_gate = create_mid_turn_gate(
+        config,
+        paths,
+        managed_follow_up,
+        prompt="Background job finished.",
+        has_media=False,
+    )
+    assert human_gate is not None
+    assert human_gate.requester_id == _REQUESTER
+    assert managed_gate is not None
+    assert managed_gate.requester_id is None
+
+
+@pytest.mark.parametrize(
+    ("modes", "expected"),
+    [
+        ((), MidTurnMode.AUTO),
+        ((MidTurnMode.QUEUE,), MidTurnMode.QUEUE),
+        ((MidTurnMode.QUEUE, MidTurnMode.QUEUE), MidTurnMode.QUEUE),
+        ((MidTurnMode.QUEUE, MidTurnMode.AUTO), MidTurnMode.AUTO),
+        ((MidTurnMode.QUEUE, MidTurnMode.STEER), MidTurnMode.STEER),
+        ((MidTurnMode.AUTO, MidTurnMode.STEER), MidTurnMode.STEER),
+    ],
+)
+def test_coalesced_mid_turn_mode_combines_batch_modes(
+    modes: tuple[MidTurnMode, ...],
+    expected: MidTurnMode,
+) -> None:
+    """Any Steer steers; all Queue queues; any other mix falls back to Auto."""
+    assert coalesced_mid_turn_mode(modes) is expected
 
 
 _QUESTION = "What is the capital of France?"

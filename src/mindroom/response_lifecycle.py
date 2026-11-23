@@ -535,9 +535,15 @@ class ResponseLifecycleCoordinator:
     async def reserve_response_lifecycle(
         self,
         response_envelope: MessageEnvelope,
+        *,
+        mid_turn_mode: MidTurnMode = MidTurnMode.AUTO,
     ) -> _ResponseLifecycleReservation:
         """Reserve FIFO admission on one canonical lifecycle before response preparation."""
-        reservation = self._begin_response_turn(response_envelope, signal_queued_message=True)
+        reservation = self._begin_response_turn(
+            response_envelope,
+            signal_queued_message=True,
+            mid_turn_mode=mid_turn_mode,
+        )
         try:
             await reservation._wait_until_reserved()
         except BaseException:
@@ -550,6 +556,7 @@ class ResponseLifecycleCoordinator:
         response_envelope: MessageEnvelope,
         *,
         signal_queued_message: bool,
+        mid_turn_mode: MidTurnMode = MidTurnMode.AUTO,
     ) -> _ResponseLifecycleReservation:
         """Begin one reply's turn on its conversation; a newer human message tells the running reply it waits."""
         conversation = self._conversation_for(response_envelope.target)
@@ -561,6 +568,7 @@ class ResponseLifecycleCoordinator:
                 conversation=conversation,
                 response_envelope=response_envelope,
                 signal_queued_message=signal_queued_message,
+                mid_turn_mode=mid_turn_mode,
             ),
         )
 
@@ -652,6 +660,7 @@ class ResponseLifecycleCoordinator:
         conversation: _Conversation,
         response_envelope: MessageEnvelope,
         signal_queued_message: bool,
+        mid_turn_mode: MidTurnMode = MidTurnMode.AUTO,
     ) -> str | None:
         existing_turn = conversation.begin_response_turn()
         if not (signal_queued_message and existing_turn):
@@ -662,6 +671,7 @@ class ResponseLifecycleCoordinator:
             response_envelope.source_event_id,
             text=message_text_for_judgment(response_envelope),
             requester_id=response_envelope.requester_id,
+            mode=mid_turn_mode,
         ):
             return None
         return response_envelope.source_event_id
@@ -701,12 +711,17 @@ class ResponseLifecycleCoordinator:
         locked_operation: Callable[[], Awaitable[_LockedResponseResult]],
         signal_queued_message: bool = True,
         mid_turn_gate: MidTurnGate | None = None,
+        mid_turn_mode: MidTurnMode = MidTurnMode.AUTO,
     ) -> _LockedResponseResult:
         """Run one locked response operation with shared queued-message bookkeeping."""
         self._assert_target_matches_envelope(target, response_envelope)
         reservation = _current_response_lifecycle_reservation.get()
         if reservation is None:
-            reservation = self._begin_response_turn(response_envelope, signal_queued_message=signal_queued_message)
+            reservation = self._begin_response_turn(
+                response_envelope,
+                signal_queued_message=signal_queued_message,
+                mid_turn_mode=mid_turn_mode,
+            )
         else:
             reservation._consume(self, target)
             # This response now owns the reservation locally. Descendant tasks
@@ -721,9 +736,7 @@ class ResponseLifecycleCoordinator:
                 pipeline_timing.mark("lock_acquired")
             reservation._consume_notice()
             conversation.mid_turn_gate = mid_turn_gate
-            conversation.bind_active_requester(
-                response_envelope.requester_id if self._should_signal_queued_message(response_envelope) else None,
-            )
+            conversation.bind_active_requester(response_envelope.origin.active_human_requester_id)
             if mid_turn_gate is not None:
                 mid_turn_gate.on_stop = conversation.mark_stopped_reply
             with (
