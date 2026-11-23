@@ -206,7 +206,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         Args:
             source: Inline Python source.
             path: Workspace-relative path of a Python file.
-            name: Name of a saved workflow.
+            name: Name of a saved workflow; list_workflow_runs shows them and their args.
             args: JSON object passed to main(args).
             title: Three to six words shown on the run's card.
             max_concurrent: How many agents run at once. Raise it for large fan-outs.
@@ -371,9 +371,12 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
     async def save_workflow(self, run_id: str, name: str, description: str | None = None) -> str:
         """Save a run's script as workflows/<name>.py so start_workflow(name=...) can run it again.
 
+        A saved file documents itself for list_workflow_runs with its module docstring's first line and an optional
+        literal `ARGS = {"arg": "meaning"}`.
+
         Args:
             run_id: The run's ID, as start_workflow returned it.
-            name: Name of the saved workflow (lowercase letters, digits, hyphens, underscores).
+            name: Name of the saved workflow (1 to 64 lowercase letters, digits, hyphens, or underscores, starting with a letter or digit).
             description: Optional one-line description added as the file's docstring when it has none.
 
         """

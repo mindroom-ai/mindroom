@@ -528,7 +528,7 @@ Its description is the first line of its module docstring, and an optional top-l
   Saving the exact same content again succeeds; if the file already exists with different content, it refuses with `workflows/<name>.py already exists with different content. Pick another name or edit the file.`
 - `start_workflow(name=...)` reads `workflows/<name>.py` through the same confined, no-follow path check as `path=` and snapshots the bytes at start, so later edits do not affect a running attempt.
 - Inside a script, `run(name, args=None)` fetches `workflows/<name>.py` from the workflow gateway, which snapshots the file's bytes and SHA-256 once per attempt.
-  Every `run(name)` call in the same attempt executes those same bytes inside a child lane under a `group` node whose digest includes that hash; editing the file before a resume changes the group's hash and reruns the group and what follows it.
+  Every `run(name)` call in the same attempt executes those same bytes inside a child lane under a `group` node whose digest includes that hash; editing the file before a resume changes the group's hash so calls after the group rerun, while unchanged calls before the first edit inside the child lane are still reused.
   `run(name, args)` is an inline call inside the current run and adds no delegation depth.
 - `!workflows` (or `/workflows`) lists the caller's recent workflow runs in the current conversation and the saved workflows of workflow-enabled agents in the room.
 - Saved workflows are workspace code, like skills: anyone who can make that agent write workspace files can create or edit them, and agents that share a workspace share its `workflows/` directory.

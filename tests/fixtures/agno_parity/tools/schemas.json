@@ -30701,7 +30701,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Name of a saved workflow."
+              "description": "Name of a saved workflow; list_workflow_runs shows them and their args."
             },
             "args": {
               "anyOf": [
@@ -30948,7 +30948,7 @@
       },
       {
         "name": "save_workflow",
-        "description": "Save a run's script as workflows/<name>.py so start_workflow(name=...) can run it again.",
+        "description": "Save a run's script as workflows/<name>.py so start_workflow(name=...) can run it again.\nA saved file documents itself for list_workflow_runs with its module docstring's first line and an optional\nliteral `ARGS = {\"arg\": \"meaning\"}`.",
         "parameters": {
           "type": "object",
           "properties": {
@@ -30958,7 +30958,7 @@
             },
             "name": {
               "type": "string",
-              "description": "Name of the saved workflow (lowercase letters, digits, hyphens, underscores)."
+              "description": "Name of the saved workflow (1 to 64 lowercase letters, digits, hyphens, or underscores, starting with a letter or digit)."
             },
             "description": {
               "anyOf": [
