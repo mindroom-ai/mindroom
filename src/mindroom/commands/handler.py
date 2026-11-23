@@ -43,7 +43,7 @@ from mindroom.matrix.room_membership import room_membership_is_complete
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import MODEL_SELECTION_CONTENT_KEY
 from mindroom.requester_identity import is_platform_administrator, resolve_human_requester_alias
-from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.scheduling.errors import SchedulingError, refused_for_power
 from mindroom.scheduling.tasks import (
     SchedulingRuntime,
@@ -68,6 +68,7 @@ from mindroom.tool_system.worker_routing import build_requester_execution_identi
 from mindroom.workflow_runs.answers import answer_command
 from mindroom.workflow_runs.graph import redacted_title
 from mindroom.workflow_runs.saved import SavedWorkflow, list_saved
+from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Sequence
@@ -199,13 +200,19 @@ async def _workflows_command(
                     runtime_paths=context.runtime_paths,
                     requester_id=requester_user_id,
                 )
-                workspace = resolve_agent_runtime(
+                storage = resolve_agent_storage(
                     name,
                     context.config,
                     context.runtime_paths,
                     execution_identity=identity,
-                    create=False,
-                ).workspace.root
+                )
+                workspace = resolve_agent_workspace_from_state_path(
+                    name,
+                    context.config,
+                    runtime_paths=context.runtime_paths,
+                    state_storage_path=storage.state_root,
+                    use_state_storage_path=storage.execution.policy.private_workspace_enabled,
+                ).root
                 with suppress(OSError, ValueError):
                     saved.extend((name, item) for item in list_saved(workspace))
         return _format_workflows_listing(runs, saved)

@@ -579,6 +579,56 @@ def main(args):
     assert "- watcher: `triage`: Triage incoming issues. (args: `repo`)" in reply
 
 
+@pytest.mark.asyncio
+async def test_workflow_listings_and_source_reads_preserve_workspace_symlinks(tool_stack: WorkflowStack) -> None:
+    """Listing workflows and reading saved workflow sources must not reconcile or unlink workspace symlinks."""
+    workspace = tool_stack.context.agent_workspace_root(create=True)
+    save_source(
+        workspace,
+        "triage",
+        b'"""Triage incoming issues."""\ndef main(args):\n    return 1\n',
+    )
+    notes = workspace / "notes"
+    notes.mkdir()
+    knowledge_dir = workspace / "knowledge"
+    knowledge_dir.mkdir(exist_ok=True)
+    shortcut = knowledge_dir / "current"
+    shortcut.symlink_to("../notes")
+
+    agent_mid = entity_ids(tool_stack.context.config, tool_stack.context.runtime_paths)["watcher"]
+
+    async def candidates(_room: object, _requester: str) -> list[object]:
+        return [agent_mid]
+
+    ctx = SimpleNamespace(
+        workflow_engine=tool_stack.engine,
+        config=tool_stack.context.config,
+        runtime_paths=tool_stack.context.runtime_paths,
+        responder_candidates_for_room=candidates,
+    )
+    room = SimpleNamespace(room_id=tool_stack.context.room_id)
+
+    reply = await _workflows_command(
+        ctx,  # type: ignore[arg-type]
+        room,  # type: ignore[arg-type]
+        tool_stack.context.requester_id,
+        tool_stack.context.resolved_thread_id,
+    )
+    assert "- watcher: `triage`" in reply
+    assert shortcut.is_symlink()
+    assert str(shortcut.readlink()) == "../notes"
+
+    listed = json.loads(await tool_stack.call("list_workflow_runs"))
+    assert [item["name"] for item in listed["saved"]] == ["triage"]
+    assert shortcut.is_symlink()
+    assert str(shortcut.readlink()) == "../notes"
+
+    raw = await tool_stack.engine.resolve_source(tool_stack.context, {"name": "triage"})
+    assert b"Triage incoming issues." in raw
+    assert shortcut.is_symlink()
+    assert str(shortcut.readlink()) == "../notes"
+
+
 def test_an_agent_may_have_both_toolkits() -> None:
     """Config validation accepts an agent with both `workflow` and `dynamic_workflow`, and their functions are disjoint."""
     config = Config(

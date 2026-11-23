@@ -1184,7 +1184,7 @@ def _worker_workspace(context: ToolRuntimeContext, worker: WorkerHandle) -> Path
 
 def _read_workspace_source(context: ToolRuntimeContext, relative_path: str) -> bytes:
     """Read one script source, cut one byte past the limit, through no-follow workspace descriptors."""
-    workspace = context.agent_workspace_root(create=True)
+    workspace = context.agent_workspace_root(create=False)
     relative = Path(relative_path)
     if relative.is_absolute() or relative == Path() or ".." in relative.parts:
         msg = "Script source path must stay within the workspace root."
