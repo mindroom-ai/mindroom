@@ -33,7 +33,7 @@ from mindroom.coalescing.ingress_lanes import LaneDelivery, ReceiptLaneKey
 from mindroom.coalescing.policy import pending_events_sent_together, submission_marker
 from mindroom.commands.parsing import CommandType
 from mindroom.config.main import Config
-from mindroom.constants import SUBMISSION_CONTENT_KEY
+from mindroom.constants import DURABLE_DELIVERY_ID_KEY, SUBMISSION_CONTENT_KEY
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active, turn_dispatch_recovery_scope
 from mindroom.dispatch_source import (
@@ -43,7 +43,6 @@ from mindroom.dispatch_source import (
     VOICE_SOURCE_KIND,
     source_kind_bypasses_coalescing,
 )
-from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.execution_preparation import _messages_with_current_prompt
 from mindroom.matrix.segmented_messages import SEGMENT_COUNT_KEY
 from mindroom.mid_turn import MID_TURN_MODE_KEY

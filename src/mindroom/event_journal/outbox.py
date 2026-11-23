@@ -29,11 +29,12 @@ from collections.abc import Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
+from mindroom.constants import DURABLE_DELIVERY_ID_KEY
 from mindroom.interactive_models import INTERACTIVE_PROMPT_KEY
 
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id, matrix_user_of_principal
 from .membership_state import claim_membership_epoch
-from .models import DURABLE_DELIVERY_ID_KEY, DeliveryStage, MatrixDelivery, ReplyRowFacts, UnreadableMatrixDelivery
+from .models import DeliveryStage, MatrixDelivery, ReplyRowFacts, UnreadableMatrixDelivery
 
 if TYPE_CHECKING:
     from .backend import Row, Transaction

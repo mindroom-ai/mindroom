@@ -39,9 +39,6 @@ class IngestionConsumer:  # noqa: D101
     stream_id: UUID | None
 
 
-DURABLE_DELIVERY_ID_KEY = "io.mindroom.delivery_id"
-
-
 class EventClass(StrEnum):
     """Whether an admitted event may start semantic work.
 

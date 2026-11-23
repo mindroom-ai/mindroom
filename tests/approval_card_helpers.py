@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+from mindroom.constants import DURABLE_DELIVERY_ID_KEY
 from mindroom.event_journal import ApprovalCardView, CallKey, DeliveryStage, RecordedApprovalDecision
-from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 
 if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalDecisionMetadata, DecisionStatus, PrincipalStore

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import nio
 import pytest
 
-from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
+from mindroom.constants import DURABLE_DELIVERY_ID_KEY
 from mindroom.matrix.room_history_reads import (
     _MAX_EXACT_DELIVERY_SCAN_PAGES,
     UnresolvedOpaqueRoomHistoryError,

@@ -2665,6 +2665,35 @@ class TestSidecarResolution:
         ]
         assert page.refresh_pending == ()
 
+    async def test_an_edit_whose_attachment_holds_its_replacement_alone_installs_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A reply row wrapped as an edit only when it was sent had uploaded its replacement, not the edit."""
+        original = raw("$m", "first answer", ts=1_000)
+        preview = self._sidecar_source("$e1", "The edit beg [continues]", "mxc://s/edit", ts=2_000)
+        # As a claimed row is wrapped: the fallback repeats the preview, sidecar reference included.
+        wrapped = build_edit_event_content(
+            event_id="$m",
+            new_content=preview["content"],
+            new_text=preview["content"]["body"],
+        )
+        edit = {**preview, "content": wrapped}
+        await admit_all(alice, [original, edit])
+        client = FakeClient(
+            events={"$m": original},
+            relations={"$m": [edit]},
+            sidecars={"mxc://s/edit": json.dumps({"msgtype": "m.text", "body": "The edit, whole"})},
+        )
+        reader = await self._reader(alice, client)
+
+        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [dict(message.content) for message in page.messages] == [
+            {"msgtype": "m.text", "body": "The edit, whole"},
+        ]
+        assert page.refresh_pending == ()
+
     async def test_an_unreadable_edit_with_a_nested_edit_layer_settles_once(
         self,
         alice: PrincipalStore,
@@ -3397,6 +3426,35 @@ class TestRepliesWithToolCalls:
         held = {m.logical_event_id: m.content for m in page.messages}
         for ts, case in enumerate(_SENT_CASES, start=2):
             assert held[f"$reply{ts}"] == {**_sent(case), **thread}
+
+    @pytest.mark.parametrize("sender", [AGENT, ALICE])
+    async def test_a_refreshed_v3_sidecar_restores_markers_only_for_an_agent_sender(
+        self,
+        alice: PrincipalStore,
+        sender: str,
+    ) -> None:
+        """Sidecar refresh passes the revision sender so any v3 attachment restores markers for agent senders alone."""
+        thread = {"m.relates_to": {"rel_type": "m.thread", "event_id": "$root"}}
+        built, held = reply_with_calls("Before.\n\n🔧 `shell` [1]\n\nAfter.", 1)
+        preview = {
+            "msgtype": "m.file",
+            "body": "Before. [Message continues in attached file]",
+            "url": "mxc://s/v3sidecar",
+            "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+            **thread,
+        }
+        event = {**raw("$m", "", sender=sender, ts=2_000), "content": preview}
+        client = FakeClient(
+            events={"$root": raw("$root", "root"), "$m": event},
+            relations={"$root": [event]},
+            sidecars={"mxc://s/v3sidecar": json.dumps({**held, **thread})},
+        )
+        reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
+
+        page = await reader.read_strict(room_id=ROOM, thread_id="$root", limit=10)
+
+        expected = {**(built if sender == AGENT else held), **thread}
+        assert page.messages[-1].content == expected
 
     async def test_a_hydrated_thread_fills_its_pages_as_a_synced_one_does(
         self,

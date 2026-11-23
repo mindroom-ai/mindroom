@@ -4,8 +4,7 @@ import random
 
 import pytest
 
-from mindroom.constants import COMPACTIONS_CONTENT_KEY, REASONING_CONTENT_KEY
-from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
+from mindroom.constants import COMPACTIONS_CONTENT_KEY, DURABLE_DELIVERY_ID_KEY, REASONING_CONTENT_KEY
 from mindroom.matrix.large_messages import calculate_event_size
 from mindroom.matrix.message_builder import build_matrix_edit_content, build_message_content, markdown_to_html
 from mindroom.matrix.segmented_messages import (

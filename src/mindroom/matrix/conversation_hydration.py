@@ -1525,7 +1525,7 @@ class ConversationHydrator:
             edits_only=True,
         )
         revision = _reduce_current_revision(projected, relations.events)
-        content = await self._resolved_content(revision.event_id, revision.content)
+        content = await self._resolved_content(revision.event_id, revision.sender, revision.content)
         hidden = unreadable.newest_hidden_revision
         if hidden is not None and is_newer_revision(hidden, (revision.origin_server_ts, revision.event_id)):
             # Only the sender's own edit can replace what is on screen, so no
@@ -1564,6 +1564,7 @@ class ConversationHydrator:
     async def _resolved_content(
         self,
         event_id: str,
+        sender: str,
         content: Mapping[str, object],
     ) -> Mapping[str, object]:
         """Return one revision's whole text, fetching its sidecar when it has one.
@@ -1588,7 +1589,7 @@ class ConversationHydrator:
         if not holds_unresolved_sidecar(content):
             return content
         resolved = await resolve_event_source_content(
-            {"event_id": event_id, "content": dict(content)},
+            {"event_id": event_id, "sender": sender, "content": dict(content)},
             self._client(),
         )
         resolved_content = resolved.get("content")

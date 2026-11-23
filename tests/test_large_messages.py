@@ -60,6 +60,7 @@ _SIDECAR_UPLOAD_FALLBACK_TEXT = _SIDECAR_UPLOAD_FALLBACK_INDICATOR.strip()
 
 class _UploadClient:
     olm = None
+    user_id = "@sender:server"
     device_id = "DEVICE"
 
     def __init__(self, upload_result: object | BaseException) -> None:
