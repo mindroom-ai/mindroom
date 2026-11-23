@@ -16,6 +16,7 @@ from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import stream_agent_response
 from mindroom.ai_run_metadata import (
     ai_run_extra_content_from_metadata,
+    build_streaming_ai_run_metadata_content,
     model_payload,
     streaming_ai_run_content,
     with_prior_usage,
@@ -461,7 +462,7 @@ class ResponseRunner:
         sending its own; it names the model the answer's turn resolves for ``requester_id``.
         """
         model_name = self._agent_placeholder_model_name(target, requester_id=requester_id, explicit=None)
-        return streaming_ai_run_content(model_payload(self.deps.runtime.config, model_name))
+        return build_streaming_ai_run_metadata_content(self.deps.runtime.config, model_name)
 
     @property
     def in_flight_response_count(self) -> int:
