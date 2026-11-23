@@ -6,6 +6,8 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import nio
 
     from .types import HookRoomStatePutter, HookRoomStateQuerier
@@ -79,14 +81,16 @@ def build_hook_room_state_putter(
 def chain_hook_room_state_queriers(
     primary: HookRoomStateQuerier | None,
     fallback: HookRoomStateQuerier,
+    *,
+    is_authoritative: Callable[[str], bool] | None = None,
 ) -> HookRoomStateQuerier:
-    """Return a room-state querier that falls back on Matrix error responses."""
+    """Return a room-state querier that falls back on ``None`` unless *is_authoritative* claims the room."""
     if primary is None:
         return fallback
 
     async def _query(room_id: str, event_type: str, state_key: str | None) -> dict[str, Any] | None:
         result = await primary(room_id, event_type, state_key)
-        if result is not None:
+        if result is not None or (is_authoritative is not None and is_authoritative(room_id)):
             return result
         return await fallback(room_id, event_type, state_key)
 

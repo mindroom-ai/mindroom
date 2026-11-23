@@ -198,11 +198,15 @@ class HookContextSupport:
         return _room_poster_sender(self.runtime.orchestrator)
 
     def room_state_querier(self) -> HookRoomStateQuerier:
-        """Return the room-state querier bound into hook contexts: this bot's own client, else the room's steward."""
+        """Return the room-state querier bound into hook contexts: this bot's own client, falling back to the room's steward only when not joined."""
         client = self.runtime.client
+        steward = _steward_state_querier(self.runtime.orchestrator)
+        if client is None:
+            return steward
         return chain_hook_room_state_queriers(
-            None if client is None else build_hook_room_state_querier(client),
-            _steward_state_querier(self.runtime.orchestrator),
+            build_hook_room_state_querier(client),
+            steward,
+            is_authoritative=lambda room_id: room_id in client.rooms,
         )
 
     def room_state_putter(self) -> HookRoomStatePutter:

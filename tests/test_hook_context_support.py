@@ -204,8 +204,10 @@ async def test_state_putter_falls_back_to_steward(config: Config, agent_in_room:
     router_client.room_get_state_event.return_value = SimpleNamespace(content={"name": "Router Lobby"})
     agent_client = _client()
     if agent_in_room:
+        agent_client.rooms = {"!room:localhost": SimpleNamespace()}
         agent_client.room_get_state_event.return_value = SimpleNamespace(content={"name": "Agent Lobby"})
     else:
+        agent_client.rooms = {}
         agent_client.room_get_state_event.return_value = nio.RoomGetStateEventError(message="forbidden")
         agent_client.room_put_state.return_value = nio.RoomPutStateError(message="forbidden")
     owner = _peer(config, ROUTER_AGENT_NAME)
@@ -226,6 +228,26 @@ async def test_state_putter_falls_back_to_steward(config: Config, agent_in_room:
     assert agent_client.room_put_state.await_args_list == [put_state]
     assert router_client.room_get_state_event.await_args_list == ([] if agent_in_room else [get_state])
     assert router_client.room_put_state.await_args_list == ([] if agent_in_room else [put_state])
+
+
+@pytest.mark.asyncio
+async def test_state_querier_skips_steward_on_absent_event_when_joined(config: Config) -> None:
+    """A joined bot's missing state event is authoritative and does not fall back to the room's steward."""
+    steward = _peer(config, "general")
+    agent_client = _client()
+    agent_client.rooms = {"!room:localhost": SimpleNamespace()}
+    agent_client.room_get_state_event.return_value = nio.RoomGetStateEventError(
+        message="not found",
+        status_code="M_NOT_FOUND",
+    )
+    bindings = _hook_support(config, "code", client=agent_client, steward=steward).bindings()
+    assert bindings.room_state_querier is not None
+
+    result = await bindings.room_state_querier("!room:localhost", "io.mindroom.thread_goal", "$thread")
+
+    assert result is None
+    agent_client.room_get_state_event.assert_awaited_once_with("!room:localhost", "io.mindroom.thread_goal", "$thread")
+    steward.client.room_get_state_event.assert_not_awaited()
 
 
 @pytest.mark.asyncio
