@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import sys
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -257,6 +258,41 @@ def test_sdk_run_calls_main_in_a_child_lane(gateway: FakeWorkflowGateway, sdk: M
         "source_sha256": hashlib.sha256(helper_source).hexdigest(),
     }
     assert gateway.nodes[0]["meta"]["members"] == ["/0:run"]
+
+
+@pytest.mark.usefixtures("in_main")
+def test_sdk_run_registers_module_for_future_annotations_and_dataclass(
+    gateway: FakeWorkflowGateway,
+    sdk: ModuleType,
+) -> None:
+    """`run(name)` registers its module in `sys.modules` during exec/main and removes it on exit."""
+    gateway.sources["dc"] = (
+        b"from __future__ import annotations\n"
+        b"from dataclasses import dataclass\n"
+        b"@dataclass\n"
+        b"class Item:\n"
+        b"    label: str\n"
+        b"def main(args):\n"
+        b"    return Item(label=args['label']).label\n"
+    )
+    assert sdk.run("dc", {"label": "ok"}) == "ok"
+    assert not any(name.startswith("__workflow_run_dc") for name in sys.modules)
+
+
+@pytest.mark.usefixtures("in_main")
+def test_sdk_run_passes_omitted_args_as_none(gateway: FakeWorkflowGateway, sdk: ModuleType) -> None:
+    """`run(name)` passes `args` unchanged (None when omitted, {} when passed explicitly)."""
+    gateway.sources["echo"] = b"def main(args):\n    return ('none' if args is None else args)\n"
+    assert sdk.run("echo") == "none"
+    assert sdk.run("echo", {}) == {}
+
+
+@pytest.mark.usefixtures("in_main")
+def test_sdk_run_stops_at_depth_limit(gateway: FakeWorkflowGateway, sdk: ModuleType) -> None:
+    """A self-calling saved workflow fails cleanly at the nested run() depth limit."""
+    gateway.sources["loop"] = b"from mindroom.workflow import run\ndef main(args):\n    return run('loop')\n"
+    with pytest.raises(sdk.WorkflowError, match="depth"):
+        sdk.run("loop")
 
 
 @pytest.mark.asyncio

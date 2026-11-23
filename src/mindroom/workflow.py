@@ -68,6 +68,7 @@ _NO_MAIN = "Define def main(args): and return the report. MindRoom calls it."
 _BAD_OPTIONS = "options must be a list of strings, such as ['Yes', 'No']."
 # How many lanes of one foreach() or parallel() run at once in the script; the run's own limit is the gateway's.
 _MAX_ACTIVE_LANES = 256
+_MAX_RUN_DEPTH = 8
 # How many failures a PartialFailure names in its message; `errors` holds them all.
 _MAX_NAMED_FAILURES = 5
 _NOT_FUNCTIONS = (
@@ -421,12 +422,8 @@ def _fan_out(
     lane, key = _current_lane(), _next_key()
     members = [f"{lane.path}/{key.rpartition('@')[2]}:{name}" for name in names]
     positional = items is not None and any(name.startswith("p") for name in names)
-    meta = {"cached": True, "phase": lane.phase, "members": members}
     args: dict[str, object] = {"op": op, "positional": True} if positional else {"op": op}
-    group = _gateway().submit(key, "group", args, {name: value for name, value in meta.items() if value is not None})
-    if group["state"] != "completed":
-        # The key holds a call that may have run, which no lane of a fan-out there may run again unasked.
-        raise _failure(group, ToolError)
+    _submit_group(key, args, lane, members)
     active = min(len(calls), max_concurrent or _MAX_ACTIVE_LANES, _MAX_ACTIVE_LANES) or 1
     lanes = _Lanes(threading.Semaphore(active), [None] * len(calls))
     threads: list[threading.Thread] = []
@@ -543,24 +540,34 @@ def random() -> float:
     return float(cast("float", _call("value", {"op": "random"})))
 
 
-def run(name: str, args: object = None) -> object:
-    """Run the saved workflow `workflows/<name>.py` inside this run and return what its main(args) returns."""
-    lane = _current_lane()
-    raw, sha256 = _gateway().source(name)
-    key = _next_key()
-    child_path = f"{lane.path}/{key.rpartition('@')[2]}:run"
-    meta: dict[str, object] = {"cached": True, "phase": lane.phase, "members": [child_path]}
+def _submit_group(key: str, args: dict[str, object], lane: _Lane, members: list[str]) -> None:
+    meta: dict[str, object] = {"cached": True, "phase": lane.phase, "members": members}
     group = _gateway().submit(
         key,
         "group",
-        {"op": "run", "name": name, "source_sha256": sha256},
+        args,
         {field_name: value for field_name, value in meta.items() if value is not None},
     )
     if group["state"] != "completed":
+        # The key holds a call that may have run, which no lane of a group there may run again unasked.
         raise _failure(group, ToolError)
-    module = types.ModuleType(f"__workflow_run_{name}__")
+
+
+def run(name: str, args: object = None) -> object:
+    """Run the saved workflow `workflows/<name>.py` inside this run and return what its main(args) returns."""
+    lane = _current_lane()
+    if lane.path.count(":run") >= _MAX_RUN_DEPTH:
+        msg = f"Nested run() depth limit ({_MAX_RUN_DEPTH}) exceeded."
+        raise WorkflowError(msg)
+    raw, sha256 = _gateway().source(name)
+    key = _next_key()
+    child_path = f"{lane.path}/{key.rpartition('@')[2]}:run"
+    _submit_group(key, {"op": "run", "name": name, "source_sha256": sha256}, lane, [child_path])
+    module_name = f"__workflow_run_{name}_{child_path}__"
+    module = types.ModuleType(module_name)
     module.__file__ = f"workflows/{name}.py"
     saved_lane = _local.lane
+    sys.modules[module_name] = module
     try:
         _local.lane = None
         _local.loading = True
@@ -572,9 +579,10 @@ def run(name: str, args: object = None) -> object:
         if not callable(main):
             raise WorkflowError(_NO_MAIN)
         _local.lane = _Lane(child_path, phase=lane.phase)
-        return main({} if args is None else args)
+        return main(args)
     finally:
         _local.lane = saved_lane
+        sys.modules.pop(module_name, None)
 
 
 def run_workflow(source_path: str) -> None:
