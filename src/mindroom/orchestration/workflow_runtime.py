@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 from mindroom.constants import runtime_matrix_homeserver
 from mindroom.custom_tools.workflow import (
@@ -28,7 +28,6 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle
-    from mindroom.script_runs.models import ScriptRunRecord
     from mindroom.workflow_runs.engine import ResumeAccess
     from mindroom.workflow_runs.models import WorkflowRun
 
@@ -82,7 +81,7 @@ class WorkflowRuntimeLifecycle:
 
     def _served_by(self, run: WorkflowRun) -> str | None:
         """Return the name of the running bot that serves a run: the team's for a run of its member, as it posts."""
-        bot = self.script_runtime.resolver.serving_bot(cast("ScriptRunRecord", run))
+        bot = self.script_runtime.resolver.serving_bot(run)
         return None if bot is None else bot.agent_name
 
     def _access(self, run: WorkflowRun) -> ResumeAccess:
@@ -94,7 +93,7 @@ class WorkflowRuntimeLifecycle:
         that the live configuration no longer has, or no longer gives the `workflow` toolkit, is revoked whatever
         its bot does, and so is a run in a room its synced bot is no longer in.
         """
-        resolver, owner = self.script_runtime.resolver, cast("ScriptRunRecord", run)
+        resolver = self.script_runtime.resolver
         config = self.script_runtime.config_provider()
         if config is not None and (
             run.agent_name not in config.agents
@@ -104,11 +103,11 @@ class WorkflowRuntimeLifecycle:
         try:
             # The same answer every call of the run's attempts gets: the bot that serves the run in its room, and the
             # requester's access to the run's agent.
-            authorized = resolver.is_authorized(owner, require_resolved_membership=True)
+            authorized = resolver.is_authorized(run, require_resolved_membership=True)
             if authorized is None:
                 return "pending"
             if authorized:
-                context = resolver.resolve(owner, correlation_id=f"workflow:{run.run_id}")
+                context = resolver.resolve(run, correlation_id=f"workflow:{run.run_id}")
                 return context, workflow_limits(context, run.agent_name)
         except ValueError:
             # The saved identity names another owner than the run's: nothing confirms the access.

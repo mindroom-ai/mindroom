@@ -75,6 +75,9 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.workers.backend import WorkerBackend
+    from mindroom.workflow_runs.models import WorkflowRun
+
+    type _OwnedRun = ScriptRunRecord | WorkflowRun
 
 logger = get_logger(__name__)
 
@@ -204,7 +207,7 @@ class _LiveScriptRuntimeResolver:
 
     def is_authorized(
         self,
-        run: ScriptRunRecord,
+        run: _OwnedRun,
         *,
         config: Config | None = None,
         require_resolved_membership: bool = False,
@@ -218,7 +221,7 @@ class _LiveScriptRuntimeResolver:
             return None
         current_config = bot.config if config is None else config
         entities = {run.agent_name}
-        if _of_workflow(run):
+        if run.entry == "workflow":
             # A run acts through the bot that serves it, which must still be in the run's room, and its requester
             # must still reach the run's agent as well as that bot's: an agent's bot is no grant for another agent.
             joined = bot_in_room(bot, run.room_id)
@@ -238,14 +241,14 @@ class _LiveScriptRuntimeResolver:
             for entity in sorted(entities)
         )
 
-    def serving_bot(self, run: ScriptRunRecord, config: Config | None = None) -> AgentBot | None:
+    def serving_bot(self, run: _OwnedRun, config: Config | None = None) -> AgentBot | None:
         """Return the running bot that answers for *run*, None while it or the bot of the run's agent is not running."""
         bot = self.bot_provider(run.agent_name)
-        if bot is not None and bot.running and _of_workflow(run):
+        if bot is not None and bot.running and run.entry == "workflow":
             bot = self.bot_provider(_serving_entity(run, config or bot.config))
         return bot if bot is not None and bot.running else None
 
-    def resolve(self, run: ScriptRunRecord, *, correlation_id: str) -> ToolRuntimeContext:
+    def resolve(self, run: _OwnedRun, *, correlation_id: str) -> ToolRuntimeContext:
         """Rebuild a context only from the exact durable Matrix execution identity."""
         identity = _run_execution_identity(run)
         if (
@@ -1238,27 +1241,20 @@ def build_script_runtime(
     )
 
 
-def _of_workflow(run: ScriptRunRecord) -> bool:
-    """Return whether *run* is a workflow run, which the workflow lifecycle asks for, or an attempt of one."""
-    return getattr(run, "workflow_run_id", run.run_id) is not None
+def _serving_entity(run: _OwnedRun, config: Config) -> str:
+    """Return whose bot and whose access answer for a workflow *run* or attempt.
 
-
-def _serving_entity(run: ScriptRunRecord, config: Config) -> str:
-    """Return whose bot and whose access answer for *run*: its agent, or the one its agent's turn ran through.
-
-    Only for a workflow run, or an attempt of one. A member of a configured team that started it in that team is
-    reached through the team, and an agent that another agent ran as its child through that agent: the run saved
-    that bot as its transport, so the same bot rebuilds its context. A plain script is its agent's own.
+    A member of a configured team that started it in that team is reached through the team, and an agent that another
+    agent ran as its child through that agent: the run saved that bot as its transport, so the same bot rebuilds its
+    context.
     """
-    if not _of_workflow(run):
-        return run.agent_name
     recipient = _run_execution_identity(run).recipient
     team = config.teams.get(recipient)
     through = recipient in config.agents if team is None else run.agent_name in team.agents
     return recipient if through else run.agent_name
 
 
-def _run_execution_identity(run: ScriptRunRecord) -> ToolExecutionIdentity:
+def _run_execution_identity(run: _OwnedRun) -> ToolExecutionIdentity:
     """Parse the durable Matrix execution identity a run was launched with."""
     return parse_tool_execution_identity_payload(
         run.execution_identity,

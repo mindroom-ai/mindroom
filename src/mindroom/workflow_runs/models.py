@@ -6,7 +6,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Literal
+from typing import ClassVar, Literal
 from uuid import uuid4
 
 from mindroom.script_runs.models import utc_timestamp
@@ -74,6 +74,7 @@ class DispatchHandle:
 class WorkflowRun:
     """One durable workflow run: its owner, script, options and current attempt."""
 
+    entry: ClassVar[Literal["workflow"]] = "workflow"
     run_id: str
     agent_name: str
     owner_user_id: str
