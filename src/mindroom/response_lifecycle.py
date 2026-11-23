@@ -437,7 +437,7 @@ class QueuedHumanNoticeReservation:
         """Stop counting this message as waiting for the running response; idempotent."""
         if not self._active:
             return
-        # A follow-up a requester split held back releases its notice before it dispatches, and still answers.
+        # A follow-up a requester split held back releases its notice when the prior turn acquires its lock, and still answers.
         self._stopped_reply = self._source_event_id in self._state.stopped_reply_event_ids
         self._explicit_steer = self._source_event_id in self._state.requester_steer_event_ids
         self._state.consume_waiting_human_message(self._source_event_id)
@@ -701,17 +701,42 @@ class ResponseLifecycleCoordinator:
         locked_operation: Callable[[], Awaitable[_LockedResponseResult]],
         signal_queued_message: bool = True,
         mid_turn_gate: MidTurnGate | None = None,
+        notices: tuple[QueuedHumanNoticeReservation, ...] = (),
+        queued_follow_up_notices: tuple[QueuedHumanNoticeReservation, ...] = (),
     ) -> _LockedResponseResult:
-        """Run one locked response operation with shared queued-message bookkeeping."""
-        self._assert_target_matches_envelope(target, response_envelope)
-        reservation = _current_response_lifecycle_reservation.get()
-        if reservation is None:
-            reservation = self._begin_response_turn(response_envelope, signal_queued_message=signal_queued_message)
-        else:
-            reservation._consume(self, target)
-            # This response now owns the reservation locally. Descendant tasks
-            # must acquire their own lifecycle instead of inheriting this one-shot claim.
-            _current_response_lifecycle_reservation.set(None)
+        """Run one locked response operation with shared queued-message bookkeeping.
+
+        ``notices`` are this turn's own waiting-message reservations; they stay
+        active across lock wait and are released once this turn acquires the
+        lock (or in ``finally`` if lock acquisition never completes).
+        ``queued_follow_up_notices`` belong to follow-ups held back behind this
+        turn in the ``active_follow_up`` gate and are released only once this
+        turn acquires the lock, before binding the active requester or running
+        ``locked_operation``.
+        """
+        notices_released = False
+
+        def release_turn_notices() -> None:
+            nonlocal notices_released
+            if notices_released:
+                return
+            notices_released = True
+            for notice in notices:
+                notice.release()
+
+        try:
+            self._assert_target_matches_envelope(target, response_envelope)
+            reservation = _current_response_lifecycle_reservation.get()
+            if reservation is None:
+                reservation = self._begin_response_turn(response_envelope, signal_queued_message=signal_queued_message)
+            else:
+                reservation._consume(self, target)
+                # This response now owns the reservation locally. Descendant tasks
+                # must acquire their own lifecycle instead of inheriting this one-shot claim.
+                _current_response_lifecycle_reservation.set(None)
+        except BaseException:
+            release_turn_notices()
+            raise
         conversation = reservation._conversation
         try:
             if pipeline_timing is not None:
@@ -720,6 +745,9 @@ class ResponseLifecycleCoordinator:
             if pipeline_timing is not None:
                 pipeline_timing.mark("lock_acquired")
             reservation._consume_notice()
+            release_turn_notices()
+            for notice in queued_follow_up_notices:
+                notice.release()
             conversation.mid_turn_gate = mid_turn_gate
             conversation.bind_active_requester(
                 response_envelope.requester_id if self._should_signal_queued_message(response_envelope) else None,
@@ -738,6 +766,7 @@ class ResponseLifecycleCoordinator:
                     # The Steers it latched keep their reason for their own follow-ups.
                     conversation.bind_active_requester(None)
         finally:
+            release_turn_notices()
             await reservation.release()
 
 

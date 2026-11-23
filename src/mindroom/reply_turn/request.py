@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.media_inputs import MediaInputs
     from mindroom.participation import ParticipationGate
+    from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_payload_preparation import ResponsePayloadPreparation
     from mindroom.skill_learning.capture import SkillReviewCapture
     from mindroom.timing import DispatchPipelineTiming
@@ -127,6 +128,12 @@ class ResponseRequest:
     current_prompt_is_structured: bool = False
     # Runs once the response holds its conversation's lock, so its dispatcher knows the turn left the lane.
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
+    # This turn's own queued-human notices, held across pre-lock dispatch until the conversation lock is acquired
+    # (or released on early failure/cancellation before lock acquisition).
+    notices: tuple[QueuedHumanNoticeReservation, ...] = ()
+    # Queued-human notices of follow-ups held back behind this turn in the active_follow_up gate,
+    # released only once this turn acquires its conversation lock so they do not interrupt it.
+    queued_follow_up_notices: tuple[QueuedHumanNoticeReservation, ...] = ()
     # Which sources became terminal while the request waited for its lock: deleted, or answered elsewhere.
     prepare_source_turn: Callable[[Sequence[ResolvedVisibleMessage]], Coroutine[Any, Any, SourcePreparation]] | None = (
         None

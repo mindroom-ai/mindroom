@@ -140,12 +140,14 @@ class PreparedTurn:
     payload: DispatchPayloadMetadata
     current_prompt_is_structured: bool
     media_events: tuple[MediaDispatchEvent, ...]
-    # The batch's per-event claims and queued notices, which dispatch replaces and releases.
+    # The batch's per-event claims (replaced by dispatch) and queued notices (held across pre-lock
+    # preparation until lock acquisition, or released if dispatch exits before taking the lock).
     claims: tuple[TurnClaim, ...]
     notices: tuple[QueuedHumanNoticeReservation, ...]
     selection: InteractiveSelectionDispatch | None
-    # The queued notices of follow-ups still waiting behind this batch when it flushed, which dispatch
-    # releases with its own. Only a batch of an active response's follow-ups has any.
+    # The queued notices of follow-ups still waiting behind this batch when it flushed, released only
+    # once this turn acquires the conversation lock (left intact if this turn exits before the lock).
+    # Only a batch of an active response's follow-ups has any.
     queued_follow_up_notices: tuple[QueuedHumanNoticeReservation, ...]
     # Whether this turn's queue still holds a run other than the given run identity's own messages for this
     # agent. A live read, not a snapshot: dispatch asks after awaiting its context, and a message admitted

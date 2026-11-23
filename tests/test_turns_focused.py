@@ -330,7 +330,11 @@ class _RecordingResponseRunner:
         self.requests.append(request)
         self.response_started.set()
         if self.pre_lock_error is not None:
+            for notice in request.notices:
+                notice.release()
             raise self.pre_lock_error
+        for notice in (*request.notices, *request.queued_follow_up_notices):
+            notice.release()
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         if (fate := await _suppressed_before_reply(request)) is not None:
@@ -352,7 +356,11 @@ class _RecordingResponseRunner:
         team_mode: str,  # noqa: ARG002
     ) -> SourceFate:
         if self.pre_lock_error is not None:
+            for notice in request.notices:
+                notice.release()
             raise self.pre_lock_error
+        for notice in (*request.notices, *request.queued_follow_up_notices):
+            notice.release()
         if request.on_lifecycle_lock_acquired is not None:
             request.on_lifecycle_lock_acquired()
         if (fate := await _suppressed_before_reply(request)) is not None:
