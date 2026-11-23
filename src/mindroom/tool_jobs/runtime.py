@@ -40,6 +40,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, parse_too
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+    from contextlib import AbstractContextManager
 
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import EventJournalStore, SavedToolJob, ToolJobStore
@@ -408,6 +409,27 @@ class _WorkAllowance:
             self.left -= now - self.since
         self.since, self.paused = now, job.status == "awaiting_approval"
         return None if self.paused else now + self.left
+
+
+class _HumanWaitPause:
+    """Enter a caller-supplied pause context while an awaited job is ``awaiting_approval``."""
+
+    def __init__(self, factory: Callable[[], AbstractContextManager[None]] | None) -> None:
+        self._factory = factory
+        self._active: AbstractContextManager[None] | None = None
+
+    def update(self, *, awaiting: bool) -> None:
+        if awaiting and self._active is None and self._factory is not None:
+            cm = self._factory()
+            cm.__enter__()
+            self._active = cm
+        elif not awaiting and self._active is not None:
+            self.close()
+
+    def close(self) -> None:
+        if self._active is not None:
+            active, self._active = self._active, None
+            active.__exit__(None, None, None)
 
 
 async def _changed_or_released(
@@ -942,6 +964,7 @@ class ToolJobRuntime:
         claim: JobClaim | None = None,
         approval_timeout: float | None = None,
         work_timeout: float | None = None,
+        pause_on_human_wait: Callable[[], AbstractContextManager[None]] | None = None,
     ) -> _JobWait:
         """Wait without cancelling execution, keeping or taking the outcome's claim unless another waiter has.
 
@@ -971,6 +994,7 @@ class ToolJobRuntime:
         # One message waiter spans the loop, so a job change never cancels the judgment it may be awaiting.
         message: asyncio.Future[None] | None = None
         released = False
+        human_wait_pause = _HumanWaitPause(pause_on_human_wait)
         try:
             while True:
                 async with self._lock:
@@ -990,11 +1014,14 @@ class ToolJobRuntime:
                     remaining = min(ends) - now if ends else None
                     if released or (remaining is not None and remaining <= 0):
                         return _JobWait(await self._snapshot(entry))
+                    awaiting = entry.job.status == "awaiting_approval"
                     changed = entry.changed
+                human_wait_pause.update(awaiting=awaiting)
                 if message is None and human is not None:
                     message = asyncio.ensure_future(human.wait())
                 released = await _changed_or_released(changed, message, timeout=remaining)
         finally:
+            human_wait_pause.close()
             if message is not None:
                 message.cancel()
             if not retained:

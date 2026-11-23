@@ -175,6 +175,7 @@ from .response_admission import ResponseAdmissionRefusedError, admitted_response
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 
+    from mindroom.active_runs import ActiveRunPublisher
     from mindroom.agent_cli.cli_approval_waits import CliWaiters
     from mindroom.approval.continuation_runner import ApprovalContinuationRunner
     from mindroom.config.main import Config
@@ -435,6 +436,7 @@ class ResponseRunner:
     lifecycle_coordinator: ResponseLifecycleCoordinator = field(repr=False)
     # Which sources a response waits on in place for a minimal-mode approval.
     cli_waiters: CliWaiters = field(repr=False)
+    active_runs: ActiveRunPublisher | None = field(default=None, repr=False)
     # Own count, distinct from the shared gate's process-wide total: callers like
     # the todo-poke idle check ask whether *this* entity is busy.
     _in_flight_response_count: int = field(default=0, init=False)
@@ -2144,6 +2146,7 @@ class ResponseRunner:
                 request,
                 response_run_id=turn.run_id,
                 participation=participation,
+                active_runs=self.active_runs,
             ):
                 transport_outcome = await self.deps.delivery_gateway.deliver_stream(
                     StreamingDeliveryRequest(
@@ -2247,6 +2250,7 @@ class ResponseRunner:
                 participation=runtime.participation,
                 # A contact turn never streams, so only this collected delivery shows its receipt.
                 contact_receipt=lambda: self._send_contact_receipt(request),
+                active_runs=self.active_runs,
             ):
                 with tool_runtime_context(runtime.tool_context):
                     response_text = await collect()
