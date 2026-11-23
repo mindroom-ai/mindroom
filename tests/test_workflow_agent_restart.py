@@ -119,12 +119,7 @@ async def test_running_agent_is_continued_not_restarted_and_its_node_attaches(st
     assert await stack.result("@0", "agent", _PROMPT) == "done"
     node, [job] = _node(stack), _node_jobs(stack)
     assert (node.generation, node.attempt, stack.counting_tool.lines) == (1, 2, ["a"])
-    assert (job.job_id, job.adapter["workflow"], job.adapter["node"], job.adapter["generation"]) == (
-        before.job_id,
-        stack.run_id,
-        "@0",
-        1,
-    )
+    assert job.job_id == before.job_id
     child = delegation_child(job)
     assert (child.subagent_id, child.workflow_run_id, child.workflow_node_key, child.workflow_generation) == (
         delegation_child(before).subagent_id,

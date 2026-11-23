@@ -79,7 +79,6 @@ async def test_agent_node_runs_a_child_job_and_saves_the_raw_answer_and_usage(st
     job, child = stack.node_job("@0"), delegation_child(stack.node_job("@0"))
     assert (node.state, node.generation, node.label) == (WorkflowNodeState.COMPLETED, 1, "Say hi")
     assert (job.kind, job.depth, job.status, job.consumed) == ("delegation", 0, "completed", True)
-    assert (job.adapter["workflow"], job.adapter["node"], job.adapter["generation"]) == (stack.run_id, "@0", 1)
     assert (child.workflow_run_id, child.workflow_node_key, child.workflow_generation) == (stack.run_id, "@0", 1)
     assert (child.task, child.depth, child.child_agent_name) == ("Say hi", 1, "watcher")
     ids = {"job_id": job.job_id, "delegation_id": child.delegation_id, "subagent_id": child.subagent_id}

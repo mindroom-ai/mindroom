@@ -202,9 +202,8 @@ def _record_continuation_adapter(
         spec.adapter.update({key: value for key, value in job.adapter.items() if key != "child"})
         return
     spec.adapter.update({_CONTINUATIONS_KEY: continuations, _PROMPT_KEY: prompt})
-    if "workflow" in job.adapter:
+    if child.workflow_run_id is not None:
         # The job stays the call of its workflow run, which reads what each run of the call used and did.
-        spec.adapter.update({key: job.adapter[key] for key in ("workflow", "node", "generation")})
         spec.adapter[SPENT_RUNS_KEY] = [*dict.fromkeys([*job.adapter.get(SPENT_RUNS_KEY, ()), child.run_id])]
         # The run keeps the call's prompt, so the job, whose every snapshot repeats its adapter, keeps a mark
         # in its place.
@@ -358,17 +357,17 @@ async def _continuation_prompt(
         sent = sent.replace(_CALL_PROMPT_MARK, original_prompt(child))
     if child.delegation_id != delegation_child(job).delegation_id:
         return sent
-    if run is None and child.workflow_run_id is not None:
+    if run is None:
         # The call of a workflow run goes on only on proof that its turn called no tool, which no run is not. A job
         # that still waited for the runs its prompt names is: its turn had not begun.
-        return sent if job.adapter.get("wait") == _WAITS_FOR_RUN else None
-    if run is None or not is_recovered_run(run):
+        return sent if child.workflow_run_id is None or job.adapter.get("wait") == _WAITS_FOR_RUN else None
+    if not is_recovered_run(run):
         # The turn of a workflow run's agent that waited for approvals was settled as it stood: the calls it asked
         # about never ran, and it goes on while no other call of it is left without an end.
-        results = [tool.result for tool in run.tools or ()] if run is not None else []
+        results = [tool.result for tool in run.tools or ()]
         waited = child.workflow_run_id is not None and RESTART_INTERRUPTION_REASON in results and None not in results
         if not waited:
-            return None if run is not None and run.tools else sent
+            return None if run.tools else sent
     nested = await _nested_runs(child, run)
     if nested is None:
         return None

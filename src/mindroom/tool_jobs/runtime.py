@@ -183,7 +183,8 @@ def is_workflow_node_job(job: BackgroundJob) -> bool:
     Such a job is no job of its own to anyone: it is in no list, no room state, no follow-up turn and no notice,
     also when it ended while MindRoom was down.
     """
-    return job.kind != "workflow" and "workflow" in job.adapter
+    child = job.adapter.get("child")
+    return job.kind == "delegation" and isinstance(child, dict) and bool(child.get("workflow_run_id"))
 
 
 def waited_for_approval(job: BackgroundJob) -> bool:

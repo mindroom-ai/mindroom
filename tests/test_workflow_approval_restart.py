@@ -359,8 +359,6 @@ async def test_ordinary_subagent_approval_wait_at_a_restart_is_unchanged(gated: 
     cards = await _waiting_on_two_cards(gated, decided=False)
     job = gated.node_job("@0")
     # Arranged: the same job without what marks it as a run's call, saved as a subagent's own job is.
-    for mark in ("workflow", "node", "generation"):
-        job.adapter.pop(mark)
     job.adapter["child"] = {**job.adapter["child"], "workflow_run_id": None, "workflow_node_key": None}
     await gated.jobs.save_adapter(job.job_id)
 

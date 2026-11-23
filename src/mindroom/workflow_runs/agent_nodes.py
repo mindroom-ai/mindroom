@@ -240,8 +240,6 @@ async def launch_child(
         )
         if isinstance(spec, str):
             raise AgentNodeError(spec)
-        # What tells the job of a run's call from a job of its own: the run reports it, and nothing else lists it.
-        spec.adapter.update(workflow=run.run_id, node=node.key, generation=node.generation)
         work_until = None if timeout is None else time.time() + timeout
         handle = DispatchHandle("job", job_id, dispatched=False, work_until=work_until)
         links = {"job_id": job_id, "delegation_id": child.delegation_id, "subagent_id": child.subagent_id}
