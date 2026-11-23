@@ -4,24 +4,17 @@ from __future__ import annotations
 
 import base64
 import binascii
+import ipaddress
 import re
 from typing import Annotated, Literal
 
-from cryptography.exceptions import UnsupportedAlgorithm
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from cryptography.hazmat.primitives.serialization import (
-    Encoding,
-    PublicFormat,
-    load_pem_public_key,
-    load_ssh_public_key,
-)
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-
-from mindroom.matrix.identity import valid_matrix_server_name
 
 _ENV_VAR_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _GITHUB_REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _EVENT_SOURCE_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_SERVER_DNS_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9-]{1,63}$")
+_SERVER_IPV6_LITERAL_PATTERN = re.compile(r"^[0-9A-Fa-f:.]{2,45}$")
 _ED25519_PUBLIC_KEY_BYTES = 32
 
 
@@ -37,13 +30,55 @@ def _validate_non_empty_list_items(values: list[str], *, field_name: str) -> lis
     return [_strip_non_empty(item, field_name=field_name) for item in values]
 
 
+def _is_valid_port(port: str) -> bool:
+    return 1 <= len(port) <= 5 and port.isascii() and port.isdecimal() and 1 <= int(port) <= 65535
+
+
+def _is_valid_unbracketed_server_host(host: str) -> bool:
+    if not host or len(host) > 255:
+        return False
+    try:
+        ipaddress.IPv4Address(host)
+    except ValueError:
+        return all(_SERVER_DNS_LABEL_PATTERN.fullmatch(label) is not None for label in host.split("."))
+    return True
+
+
+def _is_valid_bracketed_ipv6_server_name(server_name: str) -> bool:
+    closing_bracket_index = server_name.find("]")
+    if closing_bracket_index == -1:
+        return False
+    ipv6_literal = server_name[1:closing_bracket_index]
+    remainder = server_name[closing_bracket_index + 1 :]
+    if remainder and (not remainder.startswith(":") or not _is_valid_port(remainder[1:])):
+        return False
+    if _SERVER_IPV6_LITERAL_PATTERN.fullmatch(ipv6_literal) is None:
+        return False
+    try:
+        ipaddress.IPv6Address(ipv6_literal)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_valid_matrix_server_name(server_name: str) -> bool:
+    if not server_name:
+        return False
+    if server_name.startswith("["):
+        return _is_valid_bracketed_ipv6_server_name(server_name)
+    if ":" in server_name:
+        host, port = server_name.rsplit(":", 1)
+        return _is_valid_unbracketed_server_host(host) and _is_valid_port(port)
+    return _is_valid_unbracketed_server_host(server_name)
+
+
 def _is_valid_matrix_user_id(user_id: str) -> bool:
     if not user_id.startswith("@") or ":" not in user_id:
         return False
     localpart, server_name = user_id[1:].split(":", 1)
     if not localpart or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in localpart):
         return False
-    return valid_matrix_server_name(server_name)
+    return _is_valid_matrix_server_name(server_name)
 
 
 def _validate_matrix_user_ids(values: list[str], *, field_name: str) -> list[str]:
@@ -65,6 +100,10 @@ def _decode_strict_base64(value: str) -> bytes | None:
 
 
 def _raw_ed25519_public_key_bytes(key: object) -> bytes | None:
+    # Deferred: cryptography's SSH serialization loads bcrypt, which slim config entry points must not load.
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey  # noqa: PLC0415
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat  # noqa: PLC0415
+
     if not isinstance(key, Ed25519PublicKey):
         return None
     return key.public_bytes(Encoding.Raw, PublicFormat.Raw)
@@ -83,6 +122,10 @@ def _public_key_bytes_from_openssh(value: str) -> bytes | None:
         encoded_key = f"ssh-ed25519 {value}".encode()
     else:
         return None
+    # Deferred: cryptography's SSH serialization loads bcrypt, which slim config entry points must not load.
+    from cryptography.exceptions import UnsupportedAlgorithm  # noqa: PLC0415
+    from cryptography.hazmat.primitives.serialization import load_ssh_public_key  # noqa: PLC0415
+
     try:
         key = load_ssh_public_key(encoded_key)
     except (ValueError, UnsupportedAlgorithm):
@@ -91,6 +134,10 @@ def _public_key_bytes_from_openssh(value: str) -> bytes | None:
 
 
 def _public_key_bytes_from_pem(value: str) -> bytes | None:
+    # Deferred: keep cryptography out of top-level config imports for slim entry points.
+    from cryptography.exceptions import UnsupportedAlgorithm  # noqa: PLC0415
+    from cryptography.hazmat.primitives.serialization import load_pem_public_key  # noqa: PLC0415
+
     try:
         key = load_pem_public_key(value.encode("utf-8"))
     except (ValueError, UnsupportedAlgorithm):

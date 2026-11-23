@@ -503,21 +503,13 @@ class TriggersTools(Toolkit):
                     RoomCursor(created_ts=int(time.time() * 1000), logical_event_id=""),
                     expected_rule_uid=reactive_record.rule_uid,
                 )
-            elif isinstance(reactive_record.source, ThreadTagSourceSpec):
-                if refreshed_tag_present is not None:
-                    reactive_store.update_thread_checkpoint_and_enqueue(
-                        trigger_id,
-                        tag_present=refreshed_tag_present,
-                        state_event_id=None,
-                        expected_rule_uid=reactive_record.rule_uid,
-                    )
-                else:
-                    msg = (
-                        "Re-enabling a thread_tag trigger requires async "
-                        "TriggersTools.disable_trigger(trigger_id, enabled=True) "
-                        "so the live tag baseline can be refreshed."
-                    )
-                    raise ReactiveTriggerStoreError(msg)
+            elif isinstance(reactive_record.source, ThreadTagSourceSpec) and refreshed_tag_present is not None:
+                reactive_store.update_thread_checkpoint_and_enqueue(
+                    trigger_id,
+                    tag_present=refreshed_tag_present,
+                    state_event_id=None,
+                    expected_rule_uid=reactive_record.rule_uid,
+                )
         updated = reactive_store.set_enabled(trigger_id, enabled, expected_rule_uid=reactive_record.rule_uid)
         if updated is None:
             msg = f"external trigger not found: {trigger_id}"
@@ -525,11 +517,6 @@ class TriggersTools(Toolkit):
         if enabled:
             self._notify_reactive_service(context)
         return self._payload("ok", action="set_enabled", trigger=self._reactive_record_payload(updated))
-
-    def _disable_trigger_sync(self, trigger_id: str, *, enabled: bool) -> str:
-        return self._with_stores(
-            lambda ctx, ext, rea: self._apply_set_enabled_sync(ctx, ext, rea, trigger_id, enabled=enabled),
-        )
 
     async def watch_room(
         self,

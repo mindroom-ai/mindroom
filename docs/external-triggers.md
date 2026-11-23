@@ -13,7 +13,7 @@ Use them for:
 - **Single-use [agent callbacks](#agent-callbacks)**, created with the `callback_manager` tool, to give a background task a Bash/curl script that wakes the originating agent and thread once.
 
 `triggers` is the canonical toolkit name.
-`external_trigger_manager` remains a backward-compatible alias in `config.yaml` and Python imports, so existing configurations and `create_trigger` workflows keep working unchanged.
+`external_trigger_manager` remains a backward-compatible alias in `config.yaml`, so existing configurations and `create_trigger` workflows keep working unchanged.
 
 Triggers are created and managed by tool calls in a live Matrix conversation, not in `config.yaml` (except shared [external event sources](#shared-external-event-sources), which admins declare under `external_trigger_policy.event_sources`).
 Trigger records are stored in the primary runtime's [control state](deployment/storage.md#data-persistence) (`reactive_triggers.db` for reactive triggers, alongside direct trigger records and replay claims).

@@ -67,7 +67,6 @@ _DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
         "contacts",
         "delegate",
         "dynamic_tools",
-        "external_trigger_manager",
         "self_config",
         "skill_manage",
         "triggers",
@@ -79,7 +78,7 @@ def lazy_loading_prohibited_reason(tool_name: str) -> str | None:
     """Return why an entry for ``tool_name`` may not set defer or initial, or None when it may."""
     if tool_name in TOOL_PRESETS:
         return f"'{tool_name}' is a preset and cannot be deferred; defer/initial are only valid on individual tools."
-    if tool_name in _DEFER_PROHIBITED_CONTROL_TOOLS:
+    if canonical_tool_name(tool_name) in _DEFER_PROHIBITED_CONTROL_TOOLS:
         return (
             f"'{tool_name}' is a control-plane tool and cannot be deferred; "
             "defer/initial are only valid on runtime tools."

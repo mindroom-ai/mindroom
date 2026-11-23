@@ -709,7 +709,6 @@ Matrix sync callback
 | `reactive_triggers/external_sources.py` | Verification, payload normalization (including canonical `allowed_repos` casing), subscriber authorization, and SQLite fan-out for shared `github` (HMAC-SHA256) and `ed25519` event sources served at `POST /api/event-sources/{source_id}` |
 | `reactive_triggers/service.py` | `ReactiveTriggerService` runtime coordinator: room message `SupervisedLoop` poller, live `com.mindroom.thread.tags` observer, startup/reload room reconciliation, and async triage/delivery drainer with retry backoff |
 | `custom_tools/triggers.py` | Local-only unified `triggers` toolkit (`watch_room`, `watch_thread`, `subscribe_event`, `create_trigger`, `list_triggers`, `disable_trigger`, `delete_trigger`, `rotate_trigger_key`) managing both reactive triggers and direct signed webhooks |
-| `custom_tools/external_trigger_manager.py` | Backward-compatible alias re-exporting `TriggersTools` as `ExternalTriggerManagerTools` |
 | `tools/triggers.py` | Tool-catalog registration and discovery metadata for the unified `triggers` toolkit (`external_trigger_manager` alias declared in `config/tool_aliases.py`) |
 
 ## Persistent State

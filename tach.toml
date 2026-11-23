@@ -10868,21 +10868,9 @@ depends_on = [
 ]
 
 [[modules]]
-path = "mindroom.custom_tools.external_trigger_manager"
-depends_on = [
-    "mindroom.custom_tools.triggers",
-]
-
-[[modules]]
 path = "mindroom.tools.triggers"
 depends_on = [
     "mindroom.custom_tools.triggers",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.registration",
-]
-
-[[modules]]
-path = "mindroom.tools.external_trigger_manager"
-depends_on = [
-    "mindroom.custom_tools.external_trigger_manager",
 ]

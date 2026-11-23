@@ -103,6 +103,7 @@ def test_external_trigger_policy_rejects_defaults_above_caps() -> None:
     [
         "@alice:example.org",
         "@alice:matrix.example.org:8448",
+        "@alice:127.0.0.1:8448",
         "@alice:[::1]:8448",
         "@alice:[2001:db8::1]",
     ],
@@ -134,9 +135,11 @@ def test_event_source_subscribers_accept_valid_matrix_server_names(subscriber: s
         "@:example.org",
         "@alice:",
         "@alice:bad host",
+        "@alice:example.org:0",
         "@alice:example.org:99999",
         "@ali ce:example.org",
         "@alice:[::1",
+        "@alice:[::1]:",
     ],
 )
 def test_event_source_subscribers_reject_invalid_matrix_user_ids(subscriber: str) -> None:
