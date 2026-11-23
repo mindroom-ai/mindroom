@@ -1396,3 +1396,17 @@ async def test_failed_agent_turn_does_not_write_output_path(stack: WorkflowStack
     written = list(stack.tmp_path.rglob("trial-review.txt"))
     assert len(written) == 1
     assert "final report" in written[0].read_text()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra", [{}, {"output_path": "   "}])
+async def test_large_workflow_agent_answer_is_not_auto_saved_to_workspace(
+    stack: WorkflowStack,
+    extra: dict[str, object],
+) -> None:
+    """A large workflow agent answer stays in the workflow store and is not auto-saved to mindroom_tool_outputs."""
+    text = "fictional report paragraph.\n" * 2500
+    stack.child_script(answer(text, chunk=50_000))
+
+    assert await stack.result("@0", "agent", {"prompt": "Generate a dummy report.", **extra}) == text
+    assert list(stack.tmp_path.rglob("mindroom_tool_outputs")) == []

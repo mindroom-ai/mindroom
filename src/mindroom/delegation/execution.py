@@ -78,6 +78,7 @@ from mindroom.tool_system.output_files import (
     ToolOutputFilePolicy,
     ToolOutputFileRequest,
     finalize_tool_output_file,
+    normalize_output_path_argument,
     prepare_tool_output_file,
 )
 from mindroom.tool_system.runtime_context import (
@@ -775,12 +776,17 @@ def delegation_call_job(
     resumed = None
     if paused is not None:
         resumed = _ChildOutcome(paused[0], {(agent, tool): toolkit for agent, tool, toolkit in paused[1]})
-    output_request = _prepare_delegation_output(
-        owner,
-        config,
-        runtime_paths,
-        arguments.get(OUTPUT_PATH_ARGUMENT),
-        tool_name=tool_name,
+    output_path = normalize_output_path_argument(arguments.get(OUTPUT_PATH_ARGUMENT))
+    output_request = (
+        None
+        if child.workflow_run_id is not None and output_path is None
+        else _prepare_delegation_output(
+            owner,
+            config,
+            runtime_paths,
+            output_path,
+            tool_name=tool_name,
+        )
     )
     if isinstance(output_request, str):
         return output_request
