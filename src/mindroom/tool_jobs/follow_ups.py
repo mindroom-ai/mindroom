@@ -139,15 +139,14 @@ def _held_job_label(job: BackgroundJob) -> str:
     return f"{fence}{padded}{fence} ({job.job_id[:_SHORT_JOB_ID_LENGTH]})"
 
 
-def held_notice(key: ConversationKey, jobs: Sequence[BackgroundJob], mention: str = "") -> tuple[str, str]:
+def held_notice(key: ConversationKey, jobs: Sequence[BackgroundJob]) -> tuple[str, str]:
     """Return the transaction ID and markdown of the notice that the limit holds ``jobs``; follow-ups start at streak 1."""
     noun = "job" if len(jobs) == 1 else "jobs"
-    lead = f"{mention} " if mention else ""
     labels = ", ".join(_held_job_label(job) for job in jobs[:_MAX_HELD_NOTICE_JOBS])
     if (remaining := len(jobs) - _MAX_HELD_NOTICE_JOBS) > 0:
         labels = f"{labels}, and {remaining} more"
     text = (
-        f"{lead}⏸️ {len(jobs)} background {noun} finished while I was paused after "
+        f"⏸️ {len(jobs)} background {noun} finished while I was paused after "
         f"{_FOLLOW_UP_LIMIT} automatic follow-ups in a row without a message from you: "
         f"{labels}. Reply here to let me continue."
     )

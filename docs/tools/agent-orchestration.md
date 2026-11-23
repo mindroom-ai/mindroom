@@ -343,7 +343,7 @@ Ended jobs that no reply collected get one follow-up: a new message in the conve
 A follow-up waits until the conversation is free and never interrupts a running reply, and a reply that collected the jobs first leaves it nothing to do.
 Cancelled jobs and a silent schedule's jobs get no follow-up, so a cancel never makes the agent speak; the next standard reply (not a minimal-mode one) collects cancelled jobs like any other, and a silent schedule's next run hears of its own.
 Work that follow-ups start can chain at most 20 follow-ups without a human message; after that, its results wait for the next human message, whose reply hears of them.
-The agent then posts one message in the conversation mentioning the requester, naming each waiting job (its subagent title or tool name and 8-character job ID, up to 5) and explaining that it paused after 20 automatic follow-ups in a row without a human message; mentioning only the requester notifies them without starting a new turn.
+The agent then posts one notice in the conversation naming each waiting job (its subagent title or tool name and 8-character job ID, up to 5) and explaining that it paused after 20 automatic follow-ups in a row without a human message, which starts no turn of its own.
 Another requester's reply in a shared room never hears of these results.
 A tool's job a restart interrupted is reported as interrupted, with a warning that it may have partly run, and is never run again on its own; a subagent's job [continues instead](#running-subagents).
 

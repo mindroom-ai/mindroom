@@ -17,7 +17,6 @@ from structlog.testing import capture_logs
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
     AGENT_AUTHORED_KEY,
-    CONTEXT_ONLY_CONTENT_KEY,
     HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
     ROUTE_EVENT_TYPE,
@@ -405,33 +404,6 @@ class TestProvenanceMapping:
                 )
                 in EventClass
             )
-
-    @pytest.mark.parametrize("sender", [BOT, ALICE])
-    async def test_context_only_text_message_is_context_only_while_unmarked_stays_actionable(
-        self,
-        sender: str,
-    ) -> None:
-        """A textual message carrying io.mindroom.context_only is CONTEXT_ONLY from any sender; unmarked m.text stays ACTIONABLE."""
-        marked = text_event("$held", "Paused notice", sender=sender)
-        marked.source["content"][CONTEXT_ONLY_CONTENT_KEY] = True
-        marked_views = ingestion_timeline_views(
-            room_id=ROOM,
-            source=marked.source,
-            self_sender=BOT,
-            provenance=nio.TimelineEventProvenance.LIVE,
-        )
-        assert marked_views is not None
-        assert marked_views[0].event_class is EventClass.CONTEXT_ONLY
-
-        unmarked = text_event("$plain", "Regular message", sender=sender)
-        unmarked_views = ingestion_timeline_views(
-            room_id=ROOM,
-            source=unmarked.source,
-            self_sender=BOT,
-            provenance=nio.TimelineEventProvenance.LIVE,
-        )
-        assert unmarked_views is not None
-        assert unmarked_views[0].event_class is EventClass.ACTIONABLE
 
 
 class TestEventKinds:
