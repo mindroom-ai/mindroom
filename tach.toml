@@ -1289,6 +1289,7 @@ visibility = [
     "mindroom.providers.gemini",
     "mindroom.providers.openai",
     "mindroom.providers.registry",
+    "mindroom.usage.provider_limits",
 ]
 
 [[modules]]
@@ -9987,11 +9988,32 @@ visibility = ["mindroom.session_storage.legacy_agno3_conversion", "mindroom.sess
 [[modules]]
 path = "mindroom.usage.legacy_usage_storage"
 depends_on = []
-visibility = []
+visibility = ["mindroom.usage.provider_limits"]
 
 [[modules]]
 path = "mindroom.usage.limit_store"
 depends_on = []
+
+[[modules]]
+path = "mindroom.usage.provider_probes"
+depends_on = [
+    "mindroom.providers.claude_code",
+    "mindroom.providers.openai",
+    "mindroom.usage.limit_store",
+]
+visibility = ["mindroom.usage.provider_limits"]
+
+[[modules]]
+path = "mindroom.usage.provider_limits"
+depends_on = [
+    "mindroom.config.schema_hints",
+    "mindroom.providers.credentials",
+    "mindroom.providers.identity",
+    "mindroom.providers.names",
+    "mindroom.usage.legacy_usage_storage",
+    "mindroom.usage.limit_store",
+    "mindroom.usage.provider_probes",
+]
 
 # Shared judgment leaves; no dependency on the response pipeline.
 [[modules]]
