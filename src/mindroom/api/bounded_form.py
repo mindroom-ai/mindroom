@@ -34,7 +34,7 @@ async def read_bounded_body(request: Request, *, max_bytes: int) -> bytes:
         raise RequestBodyTooLargeError(too_large_message) from None
 
 
-def parse_multipart_fields(body: bytes, boundary: bytes) -> dict[str, bytes]:
+def _parse_multipart_fields(body: bytes, boundary: bytes) -> dict[str, bytes]:
     """Return each part of a multipart form by its name (first occurrence), parsed strictly in memory."""
     fields: dict[str, bytes] = {}
     header_name = bytearray()
@@ -85,4 +85,4 @@ async def parse_multipart_form(request: Request, *, max_bytes: int) -> dict[str,
     if content_type != b"multipart/form-data" or not boundary:
         msg = "Send the request as multipart/form-data."
         raise InvalidMultipartFormError(msg)
-    return parse_multipart_fields(await read_bounded_body(request, max_bytes=max_bytes), boundary)
+    return _parse_multipart_fields(await read_bounded_body(request, max_bytes=max_bytes), boundary)

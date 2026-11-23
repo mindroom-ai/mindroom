@@ -10761,7 +10761,7 @@ depends_on = [
     "mindroom.api.auth",
     "mindroom.api.bounded_form",
     "mindroom.api.config_lifecycle",
-    "mindroom.constants",
+    "mindroom.entity_resolution",
     "mindroom.helper_usage",
     "mindroom.plugin_http",
     "mindroom.voice.handler",

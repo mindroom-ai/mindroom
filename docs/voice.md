@@ -119,9 +119,10 @@ Clients with a Matrix client session can dictate directly into the message compo
 Dictation is enabled whenever `voice.dictation` is `true`, or when `voice.dictation` is unset and `voice.enabled` is `true`, provided `voice.stt` resolves an endpoint and credential.
 
 - `GET /api/dictation/v1/status` (optional `?room_id=...`): returns `{"enabled": true, "maxSegmentSeconds": 30, "maxSegmentBytes": 1000000}` for authorized users, or `404` when dictation or STT is unavailable.
-- `POST /api/dictation/v1/transcribe`: accepts `multipart/form-data` strictly in memory with `audio` (16 kHz mono 16-bit PCM WAV, up to 30 seconds and 1,000,000 bytes) and optional `prompt`, `language`, and `room_id`, returning `{"text": "...", "seconds": ...}`.
+- `POST /api/dictation/v1/transcribe` (optional `?room_id=...`): accepts `multipart/form-data` with `audio` (16 kHz mono 16-bit PCM WAV, up to 30 seconds and 1,000,000 bytes) and optional `prompt` and `language`, returning `{"text": "...", "seconds": ...}`.
 
-Dictation audio and transcripts are never written to disk or logged, and provider token usage is recorded under `voice_dictation`.
+MindRoom itself keeps dictation audio strictly in memory and never writes audio or transcripts to disk or logs (if you run behind a reverse proxy such as nginx and require zero proxy-side buffering, disable request buffering, e.g. `proxy_request_buffering off;`).
+Provider token usage is recorded under `voice_dictation` in [usage](usage.md#token-usage).
 
 ## Limitations and Tips
 

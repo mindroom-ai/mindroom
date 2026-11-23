@@ -208,31 +208,48 @@ def test_resolve_stt_connection_handles_providers_and_credentials(
 
 
 @pytest.mark.asyncio
-async def test_transcribe_speech_combines_prompt_and_keeps_trailing_800_chars(
+async def test_transcribe_speech_preserves_operator_prompt_and_skips_diarize(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Caller prompts combine with configured extra_kwargs.prompt and preserve the newest 800 characters."""
+    """Operator extra_kwargs.prompt is preserved (up to 400 chars) with dictation tail <= 800; diarize omits prompt."""
     requests = _patch_stt(monkeypatch, lambda _request: httpx.Response(200, json={"text": "ok"}))
     paths = test_runtime_paths(tmp_path)
 
     await voice_handler.transcribe_speech(b"audio", _config(), paths, prompt="  MindRoom dictation  ")
     await voice_handler.transcribe_speech(b"audio", _config(), paths, prompt="   ")
-    base_prompt = "base " * 120
-    new_prompt = "recent " * 60 + "TAIL"
+    vocab = "Vocabulary: MindRoom, Tuwunel"
+    long_dictation = "recent " * 140 + "TAIL"
     await voice_handler.transcribe_speech(
         b"audio",
-        _config(extra_kwargs={"prompt": base_prompt}),
+        _config(extra_kwargs={"prompt": vocab}),
         paths,
-        prompt=new_prompt,
+        prompt=long_dictation,
+    )
+    huge_base = "OP_START " + "b" * 500
+    await voice_handler.transcribe_speech(
+        b"audio",
+        _config(extra_kwargs={"prompt": huge_base}),
+        paths,
+        prompt=long_dictation,
+    )
+    await voice_handler.transcribe_speech(
+        b"audio",
+        _config(model="gpt-4o-transcribe-diarize", extra_kwargs={"prompt": vocab}),
+        paths,
+        prompt="should be omitted",
     )
 
-    direct, blank, combined = (_form_fields(request) for request in requests)
+    direct, blank, preserved, capped, diarize = (_form_fields(request) for request in requests)
     assert direct["prompt"] == "MindRoom dictation"
     assert "prompt" not in blank
-    assert len(combined["prompt"]) == 800
-    assert combined["prompt"].endswith("TAIL")
-    assert combined["prompt"] == f"{base_prompt.strip()} {new_prompt.strip()}"[-800:]
+    assert preserved["prompt"].startswith(f"{vocab} ")
+    assert preserved["prompt"].endswith("TAIL")
+    assert len(preserved["prompt"]) <= 800
+    assert capped["prompt"].startswith(f"{huge_base[:400]} ")
+    assert capped["prompt"].endswith("TAIL")
+    assert len(capped["prompt"]) <= 800
+    assert "prompt" not in diarize
 
 
 @pytest.mark.asyncio

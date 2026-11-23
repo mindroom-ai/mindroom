@@ -61,6 +61,8 @@ logger = get_logger(__name__)
 _STT_TOTAL_TIMEOUT_SECONDS = 60.0
 _STT_HTTP_TIMEOUT = httpx.Timeout(_STT_TOTAL_TIMEOUT_SECONDS, connect=5.0, write=10.0, pool=5.0)
 _STT_PROMPT_MAX_CHARS = 800
+_STT_BASE_PROMPT_MAX_CHARS = 400
+_STT_MODELS_WITHOUT_PROMPT = frozenset({"gpt-4o-transcribe-diarize"})
 _STT_AUDIO_EXTENSION_BY_MIME_TYPE = {
     "audio/aac": ".aac",
     "audio/flac": ".flac",
@@ -597,6 +599,22 @@ def resolve_stt_connection(config: Config, runtime_paths: RuntimePaths) -> tuple
     return url, api_key
 
 
+def _apply_stt_prompt(form_data: dict[str, object], prompt: str | None) -> None:
+    """Merge an optional dictation prompt with ``extra_kwargs.prompt`` while preserving operator vocabulary."""
+    cleaned_prompt = prompt.strip() if prompt is not None else ""
+    if not cleaned_prompt:
+        return
+    existing_prompt = form_data.get("prompt")
+    base_prompt = existing_prompt.strip() if isinstance(existing_prompt, str) else ""
+    if not base_prompt:
+        form_data["prompt"] = cleaned_prompt[-_STT_PROMPT_MAX_CHARS:]
+        return
+    preserved_base = base_prompt[:_STT_BASE_PROMPT_MAX_CHARS].rstrip()
+    tail_budget = _STT_PROMPT_MAX_CHARS - len(preserved_base) - 1
+    tail = cleaned_prompt[-tail_budget:].lstrip()
+    form_data["prompt"] = f"{preserved_base} {tail}".strip()
+
+
 def _stt_http_timeout(timeout_seconds: float) -> httpx.Timeout:
     """Return an httpx timeout matching ``timeout_seconds`` without widening short connect/write/pool caps."""
     if timeout_seconds == _STT_HTTP_TIMEOUT.read:
@@ -654,12 +672,10 @@ async def transcribe_speech(
         form_data.update(config.voice.stt.extra_kwargs)
         if language is not None:
             form_data["language"] = language
-        cleaned_prompt = prompt.strip() if prompt is not None else ""
-        if cleaned_prompt:
-            existing_prompt = form_data.get("prompt")
-            base_prompt = existing_prompt.strip() if isinstance(existing_prompt, str) else ""
-            combined_prompt = f"{base_prompt} {cleaned_prompt}".strip() if base_prompt else cleaned_prompt
-            form_data["prompt"] = combined_prompt[-_STT_PROMPT_MAX_CHARS:]
+        if config.voice.stt.model in _STT_MODELS_WITHOUT_PROMPT:
+            form_data.pop("prompt", None)
+        else:
+            _apply_stt_prompt(form_data, prompt)
 
         http_timeout = _stt_http_timeout(effective_timeout)
         async with asyncio.timeout(effective_timeout), AsyncExitStack() as stack:

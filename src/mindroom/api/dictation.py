@@ -20,7 +20,7 @@ from mindroom.api.app_state import app_state, ensure_app_state
 from mindroom.api.auth import is_administrator
 from mindroom.api.bounded_form import InvalidMultipartFormError, RequestBodyTooLargeError, parse_multipart_form
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.entity_resolution import prepared_entity_names_by_user_id
 from mindroom.helper_usage import record_system_usage
 from mindroom.logging_config import get_logger
 from mindroom.plugin_http import require_client_user
@@ -39,17 +39,18 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-MAX_SEGMENT_SECONDS = 30
-MAX_SEGMENT_BYTES = 1_000_000
+_MAX_SEGMENT_SECONDS = 30
+_MAX_SEGMENT_BYTES = 1_000_000
 _MAX_FORM_BODY_BYTES = 1_016_384
 _EXPECTED_SAMPLE_RATE = 16_000
 _MAX_PROMPT_BYTES = 1000
 _MAX_LANGUAGE_CHARS = 16
 _LANGUAGE_RE = re.compile(r"^[a-zA-Z]{2,3}(?:-[a-zA-Z0-9]{2,8})*$")
+_BODY_READ_TIMEOUT_SECONDS = 15.0
 _TRANSCRIBE_TIMEOUT_SECONDS = 25.0
 _ACCESS_TIMEOUT_SECONDS = 20.0
 _MAX_IN_FLIGHT_PER_USER = 2
-_MAX_IN_FLIGHT_TOTAL = 4
+_MAX_IN_FLIGHT_TOTAL = 8
 _WINDOW_SECONDS = 60.0
 _MAX_REQUESTS_PER_MINUTE = 30
 _MAX_AUDIO_SECONDS_PER_MINUTE = 180.0
@@ -57,9 +58,10 @@ _CONCURRENCY_RETRY_AFTER_SECONDS = 2
 
 _DICTATION_OFF = "Dictation is not available on this MindRoom."
 _FORBIDDEN = "You are not authorized to use dictation on this MindRoom."
+_MEMBERSHIP_UNAVAILABLE = "Room membership is currently unavailable."
 
-type RefusalCode = Literal["forbidden", "not-found", "invalid", "too-many-requests", "unavailable", "too-large"]
-_STATUS: Mapping[RefusalCode, int] = {
+type _RefusalCode = Literal["forbidden", "not-found", "invalid", "too-many-requests", "unavailable", "too-large"]
+_STATUS: Mapping[_RefusalCode, int] = {
     "invalid": 400,
     "forbidden": 403,
     "not-found": 404,
@@ -72,9 +74,9 @@ _STATUS: Mapping[RefusalCode, int] = {
 class _DictationRefusedError(Exception):
     """Refusal mapped to the standard dictation error JSON envelope."""
 
-    def __init__(self, *, code: RefusalCode, message: str, retry_after: int | None = None) -> None:
+    def __init__(self, *, code: _RefusalCode, message: str, retry_after: int | None = None) -> None:
         super().__init__(message)
-        self.code: RefusalCode = code
+        self.code: _RefusalCode = code
         self.message = message
         self.retry_after = retry_after
 
@@ -102,8 +104,7 @@ class DictationLimiter:
         self._in_flight_by_user: dict[str, int] = {}
         self._history: OrderedDict[str, deque[tuple[float, float]]] = OrderedDict()
 
-    def acquire_slot(self, user_id: str) -> None:
-        """Reserve one in-flight slot for ``user_id`` or refuse with 429."""
+    def _acquire_slot(self, user_id: str) -> None:
         user_in_flight = self._in_flight_by_user.get(user_id, 0)
         if user_in_flight >= self.max_in_flight_per_user:
             raise _DictationRefusedError(
@@ -120,8 +121,7 @@ class DictationLimiter:
         self._in_flight_by_user[user_id] = user_in_flight + 1
         self._in_flight_total += 1
 
-    def release_slot(self, user_id: str) -> None:
-        """Release one previously acquired in-flight slot for ``user_id``."""
+    def _release_slot(self, user_id: str) -> None:
         remaining = self._in_flight_by_user.get(user_id, 0) - 1
         if remaining > 0:
             self._in_flight_by_user[user_id] = remaining
@@ -156,8 +156,7 @@ class DictationLimiter:
                 break
         return max(1, math.ceil(unlock_at - now))
 
-    def check_and_record(self, user_id: str, audio_seconds: float) -> None:
-        """Enforce per-user sliding-window request and audio-duration quotas, then record this segment."""
+    def _check_and_record(self, user_id: str, audio_seconds: float) -> None:
         now = self._clock()
         entries = self._prune_history(user_id, now - self.window_seconds)
         if entries is not None and len(entries) >= self.max_requests_per_minute:
@@ -205,8 +204,7 @@ class _DictationRoute(APIRoute):
 router = APIRouter(prefix="/api/dictation/v1", route_class=_DictationRoute, tags=["dictation"])
 
 
-def dictation_limiter(api_app: FastAPI) -> DictationLimiter:
-    """Return the app's lazily created ``DictationLimiter``."""
+def _dictation_limiter(api_app: FastAPI) -> DictationLimiter:
     state = app_state(api_app)
     if state.dictation_limiter is None:
         state.dictation_limiter = DictationLimiter()
@@ -219,7 +217,7 @@ def _dictation_http_client(api_app: FastAPI) -> httpx.AsyncClient:
     if client is None or client.is_closed:
         client = httpx.AsyncClient(
             timeout=httpx.Timeout(_TRANSCRIBE_TIMEOUT_SECONDS, connect=5.0, write=10.0, pool=5.0),
-            limits=httpx.Limits(max_connections=8, max_keepalive_connections=4),
+            limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
         )
         state.dictation_http_client = client
     return client
@@ -281,48 +279,63 @@ async def _refresh_memberships(refresh: Callable[[], Awaitable[None]]) -> None:
 
 
 async def _read_room_members(
-    room_members: Callable[[str], Awaitable[Mapping[str, str | None]]],
+    room_members: Callable[[str], Awaitable[Mapping[str, str | None]]] | None,
     room_id: str,
-) -> Mapping[str, str | None] | None:
+) -> Mapping[str, str | None]:
+    if room_members is None:
+        raise _DictationRefusedError(code="unavailable", message=_MEMBERSHIP_UNAVAILABLE)
     try:
-        return await room_members(room_id)
+        async with asyncio.timeout(_ACCESS_TIMEOUT_SECONDS):
+            return await room_members(room_id)
     except Exception:
         logger.debug("dictation_room_membership_read_failed", room_id=room_id)
-        return None
+        raise _DictationRefusedError(code="unavailable", message=_MEMBERSHIP_UNAVAILABLE) from None
 
 
 async def _authorized_in_room(
     request: Request,
     user_id: str,
     room_id: str,
-    responders: Sequence[str],
     config: Config,
     runtime_paths: RuntimePaths,
     memberships: AgentReplyMembershipIndex,
 ) -> bool:
     state = app_state(request.app)
-    if state.room_members is None:
-        return False
     members = await _read_room_members(state.room_members, room_id)
-    if members is None or user_id not in members:
+    if user_id not in members:
         return False
-    room_responders = (*responders, ROUTER_AGENT_NAME)
-    if _allowed_any_responder(user_id, room_responders, room_id, config, runtime_paths, memberships)[0]:
+    entity_by_user_id = prepared_entity_names_by_user_id(config, runtime_paths)
+    present_responders = tuple(name for member_id in members if (name := entity_by_user_id.get(member_id)) is not None)
+    if not present_responders:
+        return False
+    allowed, pending = _allowed_any_responder(user_id, present_responders, room_id, config, runtime_paths, memberships)
+    if allowed:
         return True
     embedded = state.embedded
-    if embedded is None:
-        return False
-    resolved = resolve_human_requester_alias(user_id, config, runtime_paths)
-    await _refresh_memberships(
-        lambda: memberships.refresh_until_member(
-            resolved,
+    if embedded is not None:
+        resolved = resolve_human_requester_alias(user_id, config, runtime_paths)
+        await _refresh_memberships(
+            lambda: memberships.refresh_until_member(
+                resolved,
+                room_id,
+                config,
+                runtime_paths,
+                embedded.refresh_agent_reply_memberships_when_needed,
+            ),
+        )
+        allowed, pending = _allowed_any_responder(
+            user_id,
+            present_responders,
             room_id,
             config,
             runtime_paths,
-            embedded.refresh_agent_reply_memberships_when_needed,
-        ),
-    )
-    return _allowed_any_responder(user_id, room_responders, room_id, config, runtime_paths, memberships)[0]
+            memberships,
+        )
+        if allowed:
+            return True
+    if pending:
+        raise _DictationRefusedError(code="unavailable", message=_MEMBERSHIP_UNAVAILABLE)
+    return False
 
 
 async def _authorize_user(
@@ -349,7 +362,7 @@ async def _authorize_user(
         await _refresh_memberships(embedded.refresh_agent_reply_memberships_when_needed)
         if _allowed_any_responder(user_id, responders, None, config, runtime_paths, memberships)[0]:
             return
-    if room_id and await _authorized_in_room(request, user_id, room_id, responders, config, runtime_paths, memberships):
+    if room_id and await _authorized_in_room(request, user_id, room_id, config, runtime_paths, memberships):
         return
     raise _DictationRefusedError(code="forbidden", message=_FORBIDDEN)
 
@@ -369,10 +382,10 @@ def _extract_fields(fields: Mapping[str, bytes]) -> tuple[bytes, float, str | No
     audio = fields.get("audio")
     if audio is None:
         raise _DictationRefusedError(code="invalid", message="Send the audio segment as `audio`.")
-    if len(audio) > MAX_SEGMENT_BYTES:
+    if len(audio) > _MAX_SEGMENT_BYTES:
         raise _DictationRefusedError(
             code="too-large",
-            message=f"The audio segment is larger than {MAX_SEGMENT_BYTES:,} bytes.",
+            message=f"The audio segment is larger than {_MAX_SEGMENT_BYTES:,} bytes.",
         )
     try:
         seconds = wav_seconds(audio, expected_sample_rate=_EXPECTED_SAMPLE_RATE)
@@ -380,10 +393,10 @@ def _extract_fields(fields: Mapping[str, bytes]) -> tuple[bytes, float, str | No
         raise _DictationRefusedError(code="invalid", message=str(error)) from None
     if seconds <= 0:
         raise _DictationRefusedError(code="invalid", message="The audio segment is empty.")
-    if seconds > MAX_SEGMENT_SECONDS:
+    if seconds > _MAX_SEGMENT_SECONDS:
         raise _DictationRefusedError(
             code="too-large",
-            message=f"The audio segment is longer than {MAX_SEGMENT_SECONDS} seconds.",
+            message=f"The audio segment is longer than {_MAX_SEGMENT_SECONDS} seconds.",
         )
 
     prompt = _decode_optional_text(fields, "prompt")
@@ -391,9 +404,23 @@ def _extract_fields(fields: Mapping[str, bytes]) -> tuple[bytes, float, str | No
         raise _DictationRefusedError(code="invalid", message=f"`prompt` must be at most {_MAX_PROMPT_BYTES} bytes.")
 
     language = _decode_optional_text(fields, "language")
-    if language is not None and (len(language) > _MAX_LANGUAGE_CHARS or _LANGUAGE_RE.fullmatch(language) is None):
-        raise _DictationRefusedError(code="invalid", message="`language` must be a valid BCP 47 language tag.")
+    if language is not None:
+        if len(language) > _MAX_LANGUAGE_CHARS or _LANGUAGE_RE.fullmatch(language) is None:
+            raise _DictationRefusedError(code="invalid", message="`language` must be a valid BCP 47 language tag.")
+        language = language.split("-", 1)[0].lower()
     return audio, seconds, prompt, language
+
+
+async def _read_dictation_form(request: Request) -> dict[str, bytes]:
+    try:
+        async with asyncio.timeout(_BODY_READ_TIMEOUT_SECONDS):
+            return await parse_multipart_form(request, max_bytes=_MAX_FORM_BODY_BYTES)
+    except TimeoutError:
+        raise _DictationRefusedError(code="invalid", message="Request body timed out.") from None
+    except RequestBodyTooLargeError as error:
+        raise _DictationRefusedError(code="too-large", message=str(error)) from None
+    except InvalidMultipartFormError as error:
+        raise _DictationRefusedError(code="invalid", message=str(error)) from None
 
 
 @router.get("/status")
@@ -403,31 +430,23 @@ async def dictation_status(request: Request, room_id: str | None = None) -> dict
     snapshot, config = _require_enabled_snapshot(request)
     cleaned_room_id = room_id.strip() or None if room_id is not None else None
     await _authorize_user(request, user.user_id, snapshot, config, room_id=cleaned_room_id)
-    return {"enabled": True, "maxSegmentSeconds": MAX_SEGMENT_SECONDS, "maxSegmentBytes": MAX_SEGMENT_BYTES}
+    return {"enabled": True, "maxSegmentSeconds": _MAX_SEGMENT_SECONDS, "maxSegmentBytes": _MAX_SEGMENT_BYTES}
 
 
 @router.post("/transcribe")
-async def transcribe_dictation(request: Request) -> dict[str, object]:
+async def transcribe_dictation(request: Request, room_id: str | None = None) -> dict[str, object]:
     """Transcribe one bounded 16 kHz mono 16-bit PCM WAV segment strictly in memory."""
     user = await require_client_user(request)
     snapshot, config = _require_enabled_snapshot(request)
-    if not is_access_checked_requester_id(user.user_id, config, snapshot.runtime_paths):
-        raise _DictationRefusedError(code="forbidden", message=_FORBIDDEN)
+    cleaned_room_id = room_id.strip() or None if room_id is not None else None
+    await _authorize_user(request, user.user_id, snapshot, config, room_id=cleaned_room_id)
 
-    limiter = dictation_limiter(request.app)
-    limiter.acquire_slot(user.user_id)
+    limiter = _dictation_limiter(request.app)
+    limiter._acquire_slot(user.user_id)
     try:
-        try:
-            fields = await parse_multipart_form(request, max_bytes=_MAX_FORM_BODY_BYTES)
-        except RequestBodyTooLargeError as error:
-            raise _DictationRefusedError(code="too-large", message=str(error)) from None
-        except InvalidMultipartFormError as error:
-            raise _DictationRefusedError(code="invalid", message=str(error)) from None
-
-        room_id = _decode_optional_text(fields, "room_id")
-        await _authorize_user(request, user.user_id, snapshot, config, room_id=room_id)
+        fields = await _read_dictation_form(request)
         audio, seconds, prompt, language = _extract_fields(fields)
-        limiter.check_and_record(user.user_id, seconds)
+        limiter._check_and_record(user.user_id, seconds)
 
         started_at = time.monotonic()
         transcript = await transcribe_speech(
@@ -442,7 +461,7 @@ async def transcribe_dictation(request: Request) -> dict[str, object]:
         )
         latency_ms = round((time.monotonic() - started_at) * 1000)
     finally:
-        limiter.release_slot(user.user_id)
+        limiter._release_slot(user.user_id)
 
     rounded_seconds = round(seconds, 3)
     if transcript is None:

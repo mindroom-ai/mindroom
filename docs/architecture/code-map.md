@@ -511,11 +511,11 @@ Matrix sync callback
 | `commands/` | Chat command parsing (`!help`, `!schedule`, `!config`, etc.) |
 | `commands/config_commands.py` | Chat-based config commands (`!config`) |
 | `commands/config_confirmation.py` | Interactive config confirmation workflows |
-| `voice/handler.py` | Voice message download, transcription, mention normalization, and ASR cleanup; `transcribe_speech`, the speech-to-text call transcripts share |
+| `voice/handler.py` | Voice message download, transcription, mention normalization, and ASR cleanup; `transcribe_speech`, shared by voice messages, call transcripts, and dictation |
+| `voice/wav.py` | The duration of an uploaded stretch of speech, read from its 16-bit PCM mono WAV header |
 | `voice/openai_realtime_speech.py` | OpenAI text-to-speech through the Realtime API, shared by voice messages, the `openai` toolkit, and cascaded calls |
 | `call_transcripts/service.py` | The rules of a call between people: who is in it, who may join or act on it, Pause, speech and its limits, its end, and each call's one task posting its row, its transcript message and the row's edits for the end and that message; and a call with an agent read as a live call, after any call between people in its room |
 | `call_transcripts/store.py` | The SQLite store of live and recently ended calls between people, their lines until the transcript message is posted, what each call's row was last edited to say, who paused each call, and when each person's app last checked in to each call |
-| `call_transcripts/wav.py` | The duration of an uploaded stretch of speech, read from its 16-bit PCM mono WAV header |
 | `call_transcripts/call_room.py` | MindRoom's side of calls between people, read through each room's steward and posted through its poster: who is in a room, who may post there, display names, the row, its edits and the transcript message, each at most once per call, and the request that the poster title the row's thread from the notes |
 | `call_transcripts/routes.py` | `/api/call-transcripts/v1` for MindRoom Chat with client sessions: join and heartbeat, leave, Pause, speech read into memory only, and the live call with the lines added since the last poll; 404 while call transcripts are off, except the live call in a room an agent answers calls in |
 | `call_transcripts/transcriber.py` | Speech-to-text of one stretch of a call through `transcribe_speech`, recording its usage |

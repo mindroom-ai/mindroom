@@ -26,6 +26,7 @@ from mindroom.agent_reply_membership import (
     _AgentReplyMembershipSnapshot,
     _GrantRoomMembership,
 )
+from mindroom.api import dictation as dictation_module
 from mindroom.api import main
 from mindroom.api.app_state import app_state
 from mindroom.api.client_sessions import client_session_store
@@ -35,7 +36,8 @@ from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig
-from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
+from mindroom.entity_resolution import current_entity_id, persist_offline_entity_accounts
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix_identifiers import agent_username_localpart
 from mindroom.requester_identity import runtime_matrix_domain
@@ -151,7 +153,8 @@ class DictationHarness:
         return hdrs
 
     def publish(self, config: Config) -> None:
-        """Publish ``config`` onto the live API app snapshot."""
+        """Publish ``config`` onto the live API app snapshot and persist entity accounts."""
+        persist_offline_entity_accounts(config, self.runtime_paths)
         publish_api_config(main.app, config)
 
     async def status(self, user_id: str, *, room_id: str | None = None, origin: str | None = CHAT) -> httpx.Response:
@@ -181,11 +184,11 @@ class DictationHarness:
             data["prompt"] = prompt
         if language is not None:
             data["language"] = language
-        if room_id is not None:
-            data["room_id"] = room_id
+        params = {} if room_id is None else {"room_id": room_id}
         return await self.client.post(
             f"{PREFIX}/transcribe",
             headers=self.headers(user_id, origin=origin),
+            params=params,
             files=files or {"unused": ("empty.txt", b"", "text/plain")},
             data=data,
         )
@@ -228,6 +231,8 @@ async def _drive_post(
     path: str,
     headers: dict[str, str],
     chunks: list[bytes],
+    *,
+    stall_after_chunks: bool = False,
 ) -> tuple[int, dict[str, Any], int, dict[str, str]]:
     """Stream one POST chunk by chunk through ``main.app`` and return status, JSON, chunks read, and headers."""
     read = 0
@@ -235,8 +240,14 @@ async def _drive_post(
 
     async def receive() -> Message:
         nonlocal read
+        if read >= len(chunks):
+            await asyncio.Event().wait()
         read += 1
-        return {"type": "http.request", "body": chunks[read - 1], "more_body": read < len(chunks)}
+        return {
+            "type": "http.request",
+            "body": chunks[read - 1],
+            "more_body": stall_after_chunks or read < len(chunks),
+        }
 
     async def send(message: Message) -> None:
         sent.append(message)
@@ -396,18 +407,20 @@ async def test_authorization_covers_admins_agents_teams_room_grants_bots_and_gue
     assert (await api.status(TEAM_USER)).status_code == 200
     _refusal(await api.status(OUTSIDER), 403, "forbidden")
 
-    # MindRoom's own bot accounts are always rejected (even an agent's own account), unread on /transcribe.
+    # Unauthorized humans and MindRoom bot accounts are rejected before acquiring a slot or reading a byte.
     bot_id = MatrixID.from_username(
         agent_username_localpart("assistant", api.runtime_paths),
         runtime_matrix_domain(api.runtime_paths),
     ).full_id
     _refusal(await api.status(bot_id), 403, "forbidden")
-    bot_status, bot_body, bot_chunks, _ = await _drive_post(
-        f"{PREFIX}/transcribe",
-        {**api.headers(bot_id), "Content-Type": "multipart/form-data; boundary=xyz"},
-        [b"x" * 1024],
-    )
-    assert (bot_status, bot_body["code"], bot_chunks) == (403, "forbidden", 0)
+    for denied_user in (OUTSIDER, bot_id):
+        status_code, body, chunks_read, _ = await _drive_post(
+            f"{PREFIX}/transcribe",
+            {**api.headers(denied_user), "Content-Type": "multipart/form-data; boundary=xyz"},
+            [b"x" * 1024],
+        )
+        assert (status_code, body["code"], chunks_read) == (403, "forbidden", 0)
+    assert api.limiter._in_flight_total == 0
 
     # Room-backed grant user succeeds after one membership refresh on pending state.
     grant_user = "@grantmember:localhost"
@@ -418,12 +431,12 @@ async def test_authorization_covers_admins_agents_teams_room_grants_bots_and_gue
     assert (await api.status(grant_user)).status_code == 200
     assert api.refresh_calls == 1
 
-    # Guest in a router room passes only when joined in room_members and allowed by router access.
+    # Guest in a router room passes only when joined in room_members and allowed by a responder in that room.
     api.on_refresh = None
-    api.room_roster[ROOM] = {GUEST: "Guest"}
+    router_id = current_entity_id(ROUTER_AGENT_NAME, api.runtime_paths).full_id
+    api.room_roster[ROOM] = {GUEST: "Guest", router_id: "Router"}
     _seed_memberships(api.memberships, cfg, [(GRANT_ROOM_KEY, GRANT_ROOM_ID, {grant_user}), (None, ROOM, {GUEST})])
     _refusal(await api.status(GUEST), 403, "forbidden")
-    _refusal(await api.status(GUEST, room_id="!unknown:localhost"), 403, "forbidden")
     assert (await api.status(GUEST, room_id=ROOM)).status_code == 200
     assert (await api.transcribe(GUEST, audio=_wav(), room_id=ROOM)).status_code == 200
     _refusal(await api.transcribe(OUTSIDER, audio=_wav(), room_id=ROOM), 403, "forbidden")
@@ -431,8 +444,84 @@ async def test_authorization_covers_admins_agents_teams_room_grants_bots_and_gue
     # Disabling router current_room_members denies the guest even while joined.
     strict_cfg = _base_config(router_current_room_members=False)
     api.publish(strict_cfg)
-    _seed_memberships(api.memberships, strict_cfg, [(None, ROOM, {GUEST})])
+    _seed_memberships(
+        api.memberships,
+        strict_cfg,
+        [(GRANT_ROOM_KEY, GRANT_ROOM_ID, {grant_user}), (None, ROOM, {GUEST})],
+    )
     _refusal(await api.status(GUEST, room_id=ROOM), 403, "forbidden")
+
+
+@pytest.mark.asyncio
+async def test_two_room_guest_only_evaluates_responders_present_in_target_room(api: DictationHarness) -> None:
+    """An agent with current_room_members in room B cannot authorize a guest who is only joined to room A."""
+    room_a, room_b = "!roomA:localhost", "!roomB:localhost"
+    config = Config(
+        administrators=[ADMIN],
+        agents={
+            "agent_a": AgentConfig(
+                display_name="Agent A",
+                access=ResponderAccessConfig(users=[ALICE], current_room_members=False),
+            ),
+            "agent_b": AgentConfig(
+                display_name="Agent B",
+                access=ResponderAccessConfig(current_room_members=True),
+            ),
+        },
+        router=RouterConfig(access=ResponderAccessConfig(current_room_members=False)),
+        voice=VoiceConfig(enabled=True, stt=VoiceSTTConfig(api_key="test-stt-key", model="gpt-transcribe")),
+    )
+    api.publish(config)
+    agent_a_id = current_entity_id("agent_a", api.runtime_paths).full_id
+    agent_b_id = current_entity_id("agent_b", api.runtime_paths).full_id
+    router_id = current_entity_id(ROUTER_AGENT_NAME, api.runtime_paths).full_id
+
+    # Guest is joined to room A (with agent_a and router, both denying); agent_b is only in room B.
+    api.room_roster[room_a] = {GUEST: "Guest", agent_a_id: "Agent A", router_id: "Router"}
+    api.room_roster[room_b] = {agent_b_id: "Agent B"}
+    _seed_memberships(api.memberships, config, [(None, room_a, {GUEST}), (None, room_b, set())])
+
+    _refusal(await api.status(GUEST, room_id=room_a), 403, "forbidden")
+    _refusal(await api.transcribe(GUEST, audio=_wav(), room_id=room_a), 403, "forbidden")
+    assert api.stt_requests == []
+
+    # Once the guest is joined to room B alongside agent_b, room_b authorizes them.
+    api.room_roster[room_b] = {GUEST: "Guest", agent_b_id: "Agent B"}
+    _seed_memberships(api.memberships, config, [(None, room_a, {GUEST}), (None, room_b, {GUEST})])
+    assert (await api.status(GUEST, room_id=room_b)).status_code == 200
+    assert (await api.transcribe(GUEST, audio=_wav(), room_id=room_b)).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_room_membership_lookup_failures_return_503_unavailable(api: DictationHarness) -> None:
+    """Missing or failing room membership lookups return 503 unavailable instead of caching a 403 denial."""
+    # 1. room_members raises HTTPException(503) for an unreadable/unknown room.
+    _refusal(await api.status(GUEST, room_id="!unreadable:localhost"), 503, "unavailable")
+    _refusal(await api.transcribe(GUEST, audio=_wav(), room_id="!unreadable:localhost"), 503, "unavailable")
+
+    # 2. room_members times out.
+    state = app_state(main.app)
+    original_room_members = state.room_members
+
+    async def failing_lookup(_room_id: str) -> dict[str, str | None]:
+        raise TimeoutError
+
+    state.room_members = failing_lookup
+    _refusal(await api.status(GUEST, room_id=ROOM), 503, "unavailable")
+
+    # 3. room_members is missing altogether.
+    state.room_members = None
+    _refusal(await api.status(GUEST, room_id=ROOM), 503, "unavailable")
+
+    # 4. Successful lookup proving the user is not joined returns 403 forbidden.
+    state.room_members = original_room_members
+    api.room_roster[ROOM] = {ALICE: "Alice"}
+    _refusal(await api.status(GUEST, room_id=ROOM), 403, "forbidden")
+
+    # 5. Successful lookup with user + router joined, but unresolved reply memberships -> 503 unavailable.
+    router_id = current_entity_id(ROUTER_AGENT_NAME, api.runtime_paths).full_id
+    api.room_roster[ROOM] = {GUEST: "Guest", router_id: "Router"}
+    _refusal(await api.status(GUEST, room_id=ROOM), 503, "unavailable")
 
 
 @pytest.mark.asyncio
@@ -472,7 +561,8 @@ async def test_transcribe_forwards_fields_records_usage_never_touches_disk_and_n
     assert response.json() == {"text": private_text, "seconds": 1.5}
     assert not api.stt_client.is_closed
     [stt_req] = api.stt_requests
-    assert _form_fields(stt_req) == {"model": "gpt-transcribe", "prompt": private_prompt, "language": "nl-NL"}
+    assert _form_fields(stt_req) == {"model": "gpt-transcribe", "prompt": private_prompt, "language": "nl"}
+
     assert private_text not in str(logs)
     assert private_prompt not in str(logs)
     [debug_log] = [entry for entry in logs if entry.get("event") == "dictation_segment_transcribed"]
@@ -485,6 +575,11 @@ async def test_transcribe_forwards_fields_records_usage_never_touches_disk_and_n
     stored = json.loads(payload)
     assert stored["kind"] == "voice_dictation"
     assert stored["metrics"]["total_tokens"] == 18
+
+    # Additional BCP-47 regional/script tags normalize to their lowercase primary subtag.
+    assert (await api.transcribe(ALICE, audio=_wav(), language="EN-us")).status_code == 200
+    assert (await api.transcribe(ALICE, audio=_wav(), language="zh-Hans-CN")).status_code == 200
+    assert [_form_fields(req)["language"] for req in api.stt_requests[1:]] == ["en", "zh"]
 
 
 @pytest.mark.asyncio
@@ -550,7 +645,11 @@ async def test_transcribe_rejects_wrong_content_type_and_oversized_body_before_o
 async def test_concurrency_limits_admit_before_reading_body_and_release_on_completion(
     api: DictationHarness,
 ) -> None:
-    """Per-user (2) and instance-wide (4) concurrency caps return 429 unread and release slots in finally."""
+    """Per-user (2) and instance-wide (8) concurrency caps return 429 unread and release slots in finally."""
+    bob, carol = "@bob:localhost", "@carol:localhost"
+    cfg = _base_config()
+    cfg.administrators.extend([bob, carol])
+    api.publish(cfg)
     api.stt_gate = asyncio.Event()
     url = f"{PREFIX}/transcribe"
     form = {"Content-Type": "multipart/form-data; boundary=xyz"}
@@ -564,22 +663,43 @@ async def test_concurrency_limits_admit_before_reading_body_and_release_on_compl
     assert (per_user[0], per_user[1]["code"], per_user[2]) == (429, "too-many-requests", 0)
     assert int(per_user[3]["retry-after"]) >= 1
 
-    tasks.extend(
-        [
-            asyncio.create_task(api.transcribe(ADMIN, audio=_wav())),
-            asyncio.create_task(api.transcribe(ADMIN, audio=_wav())),
-        ],
-    )
-    await api.wait_for_stt_requests(4)
+    for user_id in (ADMIN, TEAM_USER, bob):
+        tasks.extend(
+            [
+                asyncio.create_task(api.transcribe(user_id, audio=_wav())),
+                asyncio.create_task(api.transcribe(user_id, audio=_wav())),
+            ],
+        )
+    await api.wait_for_stt_requests(8)
 
-    global_cap = await _drive_post(url, {**api.headers(TEAM_USER), **form}, [b"x" * 4096])
+    global_cap = await _drive_post(url, {**api.headers(carol), **form}, [b"x" * 4096])
     assert (global_cap[0], global_cap[1]["code"], global_cap[2]) == (429, "too-many-requests", 0)
     assert int(global_cap[3]["retry-after"]) >= 1
 
     api.stt_gate.set()
     results = await asyncio.gather(*tasks)
     assert all(res.status_code == 200 for res in results)
-    assert (await api.transcribe(TEAM_USER, audio=_wav())).status_code == 200
+    assert (await api.transcribe(carol, audio=_wav())).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_slow_body_read_times_out_and_releases_concurrency_slot(
+    api: DictationHarness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stalled multipart body times out cleanly and releases the held concurrency slot."""
+    monkeypatch.setattr(dictation_module, "_BODY_READ_TIMEOUT_SECONDS", 0.05)
+    status_code, body, chunks_read, _ = await _drive_post(
+        f"{PREFIX}/transcribe",
+        {**api.headers(ALICE), "Content-Type": "multipart/form-data; boundary=xyz"},
+        [b"--xyz\r\n"],
+        stall_after_chunks=True,
+    )
+    assert status_code == 400
+    assert body == {"error": "Request body timed out.", "code": "invalid"}
+    assert chunks_read == 1
+    assert api.limiter._in_flight_total == 0
+    assert (await api.transcribe(ALICE, audio=_wav())).status_code == 200
 
 
 @pytest.mark.asyncio

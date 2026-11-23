@@ -21,7 +21,7 @@ def wav_seconds(audio: bytes, *, expected_sample_rate: int | None = None) -> flo
             frame_rate = reader.getframerate()
             frames = reader.getnframes()
             body = reader.readframes(frames)
-    except (EOFError, wave.Error) as error:
+    except (EOFError, RuntimeError, wave.Error) as error:
         msg = "The audio is not a WAV with PCM samples."
         raise WavError(msg) from error
     if sample_width != _SAMPLE_WIDTH_BYTES:
