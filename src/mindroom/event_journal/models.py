@@ -70,6 +70,8 @@ class EventKind(StrEnum):
     OPAQUE_HISTORY = "opaque_history"
     # A runtime source, not a Matrix event: background jobs ended that no reply collected.
     JOB_FOLLOW_UP = "job_follow_up"
+    # A target owes a manual history fold, not a reply.
+    COMPACTION = "compaction"
     # A person asks from their client to cancel background jobs.
     JOB_CANCEL = "job_cancel"
     # A person acts on a workflow run from their client: resumes it, or answers its question.
@@ -87,6 +89,8 @@ class EventKind(StrEnum):
 # for every readable kind alike, so a pending reaction or approval can sit
 # in a thread and be mistaken for an unanswered turn.
 TURN_BACKED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.SCHEDULE_TRIGGER, EventKind.ROUTE})
+# Runtime sources admitted by MindRoom itself rather than Matrix sync; nothing for Matrix ingress to parse.
+RUNTIME_SOURCE_KINDS = frozenset({EventKind.JOB_FOLLOW_UP, EventKind.COMPACTION})
 
 
 class SemanticConsumer(StrEnum):
@@ -111,6 +115,7 @@ class AdmissionResult(StrEnum):
 
     ADMITTED = "admitted"
     DUPLICATE = "duplicate"
+    MEMBERSHIP_FENCED = "membership_fenced"
 
 
 class IngestionRecordDisposition(StrEnum):

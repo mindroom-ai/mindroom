@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from mindroom.agent_cli.session import CONFIG_RELOAD_CALL
 from mindroom.agent_loop.model_loop import SendRequest
-from mindroom.ai_run_metadata import model_payload, prior_usage_of, prompt_input_tokens, turn_usage
+from mindroom.ai_run_metadata import model_payload, prior_usage_by_run, prompt_input_tokens, turn_usage
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.budgets.pricing import model_prices, run_cost_usd
@@ -29,7 +29,7 @@ from mindroom.delegation.audit import (
     record_child_response,
     start_child_record,
 )
-from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost
+from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost, stored_receipts
 from mindroom.delegation.personas import caller_toolkit_names, self_only_refusal
 from mindroom.delegation.records import DelegationRecordLimitError
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn, update_subagent_turn_sync
@@ -58,7 +58,7 @@ from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
 from mindroom.workers.placements import dedicated_worker_placement
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
     from typing import TypeGuard
 
     import nio
@@ -246,17 +246,16 @@ async def settle_child_response(
     A finished run's result is what it hands over (``handover_content``), so a failed run's is why it failed, a run
     recovery cancelled hands over why, and a resumed run's is what it wrote before its pause and since, else the
     completion note. A finished turn's usage is the run's with that of the turn's earlier runs, which its record
-    carries (``prior_usage_of``), however many pauses and restarts lay between them. The child's cost prices that
-    usage and adds what the subagent turns whose results the turn received cost (``subagents_cost_usd``), so settling
-    the same run again sets the same cost.
+    carries (``prior_usage_by_run``), however many pauses and restarts lay between them. The child's cost prices that
+    usage and adds what the subagent turns whose results the turn received cost (``price_child``), so settling the
+    same run again sets the same cost.
     """
     if response.run_id != child.run_id or response.session_id != child.session_id:
         msg = "Delegation child response does not match its retained run"
         raise ValueError(msg)
-    tokens, own_usd = _own_usage(response, config)
+    tokens, own_usd = child_own_usage(response, config)
     _publish(child.delegation_id, lambda feed: feed.usage(tokens, own_usd))
-    known = [usd for usd in (own_usd, child.subagents_cost_usd) if usd is not None]
-    child.cost_usd = sum(known) if known else None
+    price_child(child, response, own_usd)
     content = response.handover_content
     if stopped := reload_stopped_child_result(child, response):
         child.status, child.result = "failed", stopped
@@ -291,7 +290,7 @@ async def settle_child_response(
             child,
             config=config,
             runtime_paths=runtime_paths,
-            usage=child_response_usage(response, prior_usage_of(response)),
+            usage=child_response_usage(response, tuple(prior_usage_by_run(response.metadata).values())),
         )
 
 
@@ -321,14 +320,25 @@ async def finish_child_turn(
     return await finish_child_record(child, config=config, runtime_paths=runtime_paths)
 
 
-def _own_usage(record: RunRecord, config: Config) -> tuple[tuple[int, int] | None, float | None]:
+def price_child(child: DelegationChild, response: RunRecord, own_usd: float | None) -> None:
+    """Set what the child's turn cost so far: ``own_usd`` (``child_own_usage``) plus what its subagents cost.
+
+    That is the larger of what the handle kept and what run ``response``'s row stores: a crash leaves either behind.
+    """
+    costs = (child.subagents_cost_usd, SubagentCost(stored_receipts(response.metadata)).usd)
+    child.subagents_cost_usd = max((usd for usd in costs if usd is not None), default=None)
+    known = [usd for usd in (own_usd, child.subagents_cost_usd) if usd is not None]
+    child.cost_usd = sum(known) if known else None
+
+
+def child_own_usage(record: RunRecord, config: Config) -> tuple[tuple[int, int] | None, float | None]:
     """Return the input and output tokens the turn of ``record``'s run has used, its earlier runs included, and their cost.
 
     The input tokens are whole prompts, cached tokens included, so runs on providers that count their cache
     differently compare; the tokens are None for a record without usage. The cost is at ``config``'s prices, None
     when none of the usage is of a priced model, and leaves out what the turn's subagents cost.
     """
-    usage = turn_usage(prior_usage_of(record), record.metrics)
+    usage = turn_usage(tuple(prior_usage_by_run(record.metadata).values()), record.metrics)
     provider, model_id = record.model_provider, record.model
     cost = run_cost_usd(usage, model_provider=provider, model_id=model_id, prices=model_prices(config))
     if usage is None:
@@ -360,7 +370,7 @@ def _publish_usage(observation: ChildRunObservation, config: Config) -> None:
     """Publish what the child's turn has used as its live record counts it, unless the child has moved to a new run."""
     record = observation.running
     if observation.owns(record):
-        _publish(observation.child.delegation_id, lambda feed: feed.usage(*_own_usage(record, config)))
+        _publish(observation.child.delegation_id, lambda feed: feed.usage(*child_own_usage(record, config)))
 
 
 def _publish(delegation_id: str, update: Callable[[ActivityFeed], object]) -> None:
@@ -453,11 +463,13 @@ async def child_run_context(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
+    receipts: Mapping[str, float] | None = None,
 ) -> AsyncIterator[ChildRunObservation]:
     """Observe and audit one child attempt, then settle it even when its last buffered output fails to record.
 
     The attempt is published to its sub-agent sink as it starts and with how it ended, after its settlement, or at once
-    as interrupted when a shutdown stopped it.
+    as interrupted when a shutdown stopped it. ``receipts`` is what a job's continuation after a restart starts from
+    having received; an attempt that resumes a stored run adds what that run's row holds (``_execute_child``).
     """
     audit = await open_child_audit(child, config=config, runtime_paths=runtime_paths)
     parent = _CHILD_RUN.get()
@@ -465,8 +477,7 @@ async def child_run_context(
     # always hides its calls, so the nested child takes its parent's previews instead.
     context = get_tool_runtime_context()
     previews = parent.previews if parent is not None else context is not None and context.tool_calls_shown
-    # The attempt goes on collecting from what the turn's earlier attempts, before its pauses, received.
-    received = SubagentCost(child.subagents_cost_usd, child.subagents_cost_unknown)
+    received = SubagentCost(dict(receipts or {}), unknown=child.subagents_cost_unknown)
     observation = ChildRunObservation(child, audit, parent=parent, previews=previews, subagent_cost=received)
     _open_feed(observation, context)
     token = _CHILD_RUN.set(observation)

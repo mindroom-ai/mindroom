@@ -28,7 +28,12 @@ from mindroom.live_frames.transport import (
 )
 from mindroom.llm.events import ReportedCall
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.events import complete_pending_tool_block, format_tool_started_event, serialize_tool_trace
+from mindroom.tool_system.events import (
+    append_stream_text,
+    complete_pending_tool_block,
+    format_tool_started_event,
+    serialize_tool_trace,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -87,18 +92,14 @@ def _run_docs(snapshot: SubagentSnapshot, *, previews: bool, text_cut: int = 0) 
     ``tools``, which carries previews only when ``previews`` and always the call's ``started_at``. The documents stream
     while the run works.
     """
-    parts: list[str] = []
+    md = ""
     entries: list[ToolTraceEntry] = []
     started: list[float | None] = []
-    after_text = False
     for item in snapshot.items:
         if item.kind == "text":
-            text = item.text[text_cut:]
+            # Text items meet only where a cut or the tool row cap removed what was between them.
+            md = append_stream_text(md, item.text[text_cut:], separate=True)
             text_cut = max(0, text_cut - len(item.text))
-            if text:
-                # Text items meet only where a cut or the tool row cap removed what was between them.
-                parts.append(f"\n\n{text}" if after_text else text)
-                after_text = True
             continue
         assert item.tool is not None
         entries.append(item.tool)
@@ -107,14 +108,13 @@ def _run_docs(snapshot: SubagentSnapshot, *, previews: bool, text_cut: int = 0) 
         marker, _ = format_tool_started_event(call, len(entries))
         if item.state != "running":
             marker = complete_pending_tool_block(marker, item.tool.tool_name, len(entries))
-        parts.append(marker)
-        after_text = False
+        md = append_stream_text(md, marker, marker=True)
     tools = serialize_tool_trace(entries)
     if not previews:
         tools = tuple({"type": entry["type"], "tool_name": entry["tool_name"]} for entry in tools)
     tools = tuple({**entry, "started_at": at} for entry, at in zip(tools, started, strict=True))
     status = "streaming" if snapshot.status in _WORKING_STATUSES else "pending"
-    return LiveDocs(md="".join(parts), reasoning="", tools=tools, status=status, activity="")
+    return LiveDocs(md=md, reasoning="", tools=tools, status=status, activity="")
 
 
 def _run_meta(snapshot: SubagentSnapshot, *, full: bool) -> dict[str, object]:

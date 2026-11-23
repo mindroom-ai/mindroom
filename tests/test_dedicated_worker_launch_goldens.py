@@ -95,6 +95,13 @@ agents:
     model: default
     private:
       per: user_agent
+  desk:
+    display_name: Desk
+    role: Desk test
+    model: default
+    private:
+      per: user_agent
+    tailnet_ssh: true
 knowledge_bases:
   docs:
     path: {knowledge_path}
@@ -111,6 +118,7 @@ _SHARED_KEY = "v1:tenant-123:shared:code"
 _USER_KEY = "v1:tenant-123:user:~@alice:example.org"
 _USER_AGENT_KEY = "v1:tenant-123:user_agent:~@alice:example.org:mind"
 _UNSCOPED_KEY = "v1:tenant-123:unscoped:solo"
+_SSH_KEY = "v1:tenant-123:user_agent:~@alice:example.org:desk"
 _SCRIPT_KEY = script_worker_key_for_run(_USER_AGENT_KEY, f"script-{'a' * 32}")
 
 
@@ -149,6 +157,7 @@ _KUBERNETES_CASES = {
     "shared_with_knowledge": {"worker_key": _SHARED_KEY},
     "user": {"worker_key": _USER_KEY},
     "user_agent_private": {"worker_key": _USER_AGENT_KEY, "private": True},
+    "user_agent_tailnet_ssh": {"worker_key": _SSH_KEY, "private": True, "agent": "desk"},
     "unscoped": {"worker_key": _UNSCOPED_KEY},
     "script_scoped": {
         "worker_key": _SCRIPT_KEY,
@@ -182,11 +191,13 @@ def test_kubernetes_worker_deployment_matches_its_golden(tmp_path: Path, case: s
     worker_key = str(options["worker_key"])
     backend = _kubernetes_backend(tmp_path)
     apps_api = backend._resources.apps_api
+    agent_name = str(options.get("agent", "mind"))
     if options.get("private"):
-        _materialize_private_workspace(backend.storage_root, _USER_AGENT_KEY, "@alice:example.org")
+        workspace_key = str(options.get("state_scope_worker_key", worker_key))
+        _materialize_private_workspace(backend.storage_root, workspace_key, "@alice:example.org", agent_name)
     spec = _kubernetes_spec(
         worker_key,
-        private_agent_names=frozenset({"mind"}),
+        private_agent_names=frozenset({agent_name}),
         state_scope_worker_key=options.get("state_scope_worker_key"),
     )
 
@@ -237,6 +248,7 @@ _DOCKER_CASES = {
     "shared": {"worker_key": _SHARED_KEY},
     "user": {"worker_key": _USER_KEY},
     "user_agent_private": {"worker_key": _USER_AGENT_KEY, "private": True},
+    "user_agent_tailnet_ssh": {"worker_key": _SSH_KEY, "private": True, "agent": "desk"},
     "unscoped": {"worker_key": _UNSCOPED_KEY},
     "script_scoped": {"worker_key": _SCRIPT_KEY, "state_scope_worker_key": _USER_AGENT_KEY, "private": True},
     "computer_runtime_without_host_config": {"worker_key": _SHARED_KEY, "computer": True},
@@ -288,12 +300,14 @@ def test_docker_worker_run_arguments_match_their_golden(
     worker_key = str(options["worker_key"])
     backend, fake_client = _docker_backend_for(monkeypatch, tmp_path, computer=bool(options.get("computer")))
     storage_root = tmp_path / "storage"
+    agent_name = str(options.get("agent", "mind"))
     if options.get("private"):
-        _materialize_private_workspace(storage_root, _USER_AGENT_KEY, "@alice:example.org")
+        workspace_key = str(options.get("state_scope_worker_key", worker_key))
+        _materialize_private_workspace(storage_root, workspace_key, "@alice:example.org", agent_name)
     spec = _docker_spec(
         backend,
         worker_key,
-        private_agent_names=frozenset({"mind"}),
+        private_agent_names=frozenset({agent_name}),
         state_scope_worker_key=options.get("state_scope_worker_key"),
     )
 

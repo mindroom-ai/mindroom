@@ -11,6 +11,7 @@ import nio
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_types import BACKGROUND_JOBS_EVENT_TYPE
+from mindroom.matrix.state_failures import StateFailure, state_failure
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, is_workflow_node_job
 
 if TYPE_CHECKING:
@@ -26,8 +27,6 @@ _MAX_REFUSED_ROOMS = 4096
 # of the event. Allowing 10,240 bytes for that rest (the envelope reserve Tuwunel's admin responder uses for its own
 # messages), each write lists jobs in under half of what remains; a typical job takes about 300 bytes.
 _MAX_LISTED_BYTES = 27_000
-# Refusals the same content meets again: the room does not let the bot write this state, or the event is too large.
-_FINAL_REFUSALS = frozenset({"M_FORBIDDEN", "M_TOO_LARGE"})
 # Most calls end within seconds, and each write is a state event clients keep, so a running job its call still waits for
 # shows only once it has run this long; the worker's periodic pass lists it then. A job waiting on a person or a cancel,
 # one its call left running in the background, and one already listed show at once.
@@ -159,8 +158,11 @@ class JobStatePublisher:
             if isinstance(response, nio.RoomPutStateResponse):
                 self._published[(agent, room_id)] = content
                 self._refused.discard((agent, room_id))
-            elif isinstance(response, nio.RoomPutStateError) and response.status_code in _FINAL_REFUSALS:
-                self._warn_refused(agent, room_id, response.status_code)
+            elif isinstance(response, nio.RoomPutStateError) and (
+                state_failure(response) is StateFailure.REFUSED
+                or (response.status_code == "M_TOO_LARGE" and response.http_status in (None, 413))
+            ):
+                self._warn_refused(agent, room_id, response.status_code or f"HTTP {response.http_status}")
                 self._published[(agent, room_id)] = content
             else:
                 logger.warning("Background jobs state was refused; retrying", room_id=room_id, response=str(response))

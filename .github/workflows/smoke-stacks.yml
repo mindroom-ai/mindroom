@@ -124,6 +124,9 @@ jobs:
       - name: Smoke platform images
         run: python -m scripts.smoke_platform_images
 
+      - name: Smoke Shell-reach SSH and Service patches in kind
+        run: uv run --no-project --with pyyaml python -m cluster.k8s.kind.smoke_tailnet_ssh_worker
+
       - name: Install platform chart
         run: bash cluster/k8s/kind/install_platform.sh
 

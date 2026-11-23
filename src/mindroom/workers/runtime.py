@@ -188,9 +188,12 @@ def current_worker_launch_config(runtime_paths: RuntimePaths) -> WorkerLaunchCon
         ):
             return cached
         epoch = _WORKER_LAUNCH_CONFIG_SOURCE.epoch
+    from mindroom.tool_system.plugins import worker_preload_plugin_paths  # noqa: PLC0415 - as the snapshot's imports.
+
     launch = build_worker_launch_config(
         config,
         tool_validation_snapshot=serialized_dedicated_worker_validation_snapshot(runtime_paths, runtime_config=config),
+        worker_preload_plugins=worker_preload_plugin_paths(config, runtime_paths),
     )
     with _WORKER_LAUNCH_CONFIG_LOCK:
         if _WORKER_LAUNCH_CONFIG_SOURCE.epoch == epoch:
@@ -203,17 +206,23 @@ def build_worker_launch_config(
     config: Config,
     *,
     tool_validation_snapshot: dict[str, dict[str, object]],
+    worker_preload_plugins: tuple[str, ...] = (),
 ) -> WorkerLaunchConfig:
     """Derive one launch config from a validated config and the tool validation snapshot built for it."""
     config_data = worker_config_snapshot(config)
     tool_snapshot_digest = _stable_json_digest(tool_validation_snapshot)
+    digest_parts: dict[str, object] = {"config": config_data, "tools": tool_snapshot_digest}
+    if worker_preload_plugins:
+        # Which plugins opt in depends on their manifests, not on the config.
+        digest_parts["worker_preload_plugins"] = worker_preload_plugins
     return WorkerLaunchConfig(
         config=config,
         config_data=config_data,
         agent_policies=config.get_agent_policies(),
         tool_validation_snapshot=tool_validation_snapshot,
         grantable_credentials=config.get_worker_grantable_credentials(),
-        digest=_stable_json_digest({"config": config_data, "tools": tool_snapshot_digest}),
+        digest=_stable_json_digest(digest_parts),
+        worker_preload_plugins=worker_preload_plugins,
     )
 
 

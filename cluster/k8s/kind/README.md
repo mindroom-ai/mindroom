@@ -152,6 +152,10 @@ kubectl logs -n mindroom-staging -l app=platform-frontend -f
 
 # Deploy and smoke-test a real MindRoom instance
 python -m cluster.k8s.kind.smoke_instance
+
+# Smoke-test worker SSH in TAILNET_SSH_SMOKE_CONTEXT (default kind-mindroom).
+# Requires a kind cluster; creates and deletes only its own namespace.
+uv run --no-project --with pyyaml python -m cluster.k8s.kind.smoke_tailnet_ssh_worker
 ```
 
 ## Clean Up

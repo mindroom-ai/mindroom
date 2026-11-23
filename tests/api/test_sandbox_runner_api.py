@@ -4485,7 +4485,7 @@ def test_sandbox_runner_user_scope_base_dir_reaches_only_user_scope_agent_worksp
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    def fake_create(venv_dir: Path) -> None:
+    def fake_create(venv_dir: Path, _timeout_seconds: float | None = None) -> None:
         (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
         (venv_dir / "bin" / "python").symlink_to(Path(sys.executable))
 
@@ -4942,7 +4942,7 @@ def test_sandbox_runner_worker_file_state_persists_and_is_isolated(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(tmp_path))
     _refresh_runner_app_from_env()
 
-    def fake_create(venv_dir: Path) -> None:
+    def fake_create(venv_dir: Path, _timeout_seconds: float | None = None) -> None:
         (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
         (venv_dir / "bin" / "python").symlink_to(Path(sys.executable))
 
@@ -6141,7 +6141,7 @@ def test_dedicated_worker_mode_uses_mounted_root(
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
     _refresh_runner_app_from_env()
 
-    def fake_create(venv_dir: Path) -> None:
+    def fake_create(venv_dir: Path, _timeout_seconds: float | None = None) -> None:
         (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
         (venv_dir / "bin" / "python").write_text("", encoding="utf-8")
 
@@ -6210,7 +6210,7 @@ def test_dedicated_worker_mode_defaults_missing_worker_key_to_pinned_worker(
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(worker_root))
     _refresh_runner_app_from_env()
 
-    def fake_create(venv_dir: Path) -> None:
+    def fake_create(venv_dir: Path, _timeout_seconds: float | None = None) -> None:
         (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
         (venv_dir / "bin" / "python").write_text("", encoding="utf-8")
 
@@ -6444,7 +6444,7 @@ def test_local_worker_backend_serializes_same_worker_initialization(tmp_path: Pa
     create_call_count = 0
     exceptions: list[Exception] = []
 
-    def fake_create(venv_dir: Path) -> None:
+    def fake_create(venv_dir: Path, _timeout_seconds: float | None = None) -> None:
         nonlocal create_call_count
         with call_count_lock:
             create_call_count += 1
@@ -6501,7 +6501,7 @@ def test_local_worker_backend_and_preparer_share_initialization_lock(tmp_path: P
     create_call_count = 0
     exceptions: list[Exception] = []
 
-    def fake_create(venv_dir: Path) -> None:
+    def fake_create(venv_dir: Path, _timeout_seconds: float | None = None) -> None:
         nonlocal create_call_count
         with call_count_lock:
             create_call_count += 1
@@ -7526,7 +7526,7 @@ def test_python_subprocess_child_ignores_code_planted_in_workspace(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    def _venv_with_real_python(venv_dir: Path) -> None:
+    def _venv_with_real_python(venv_dir: Path, _timeout_seconds: float | None = None) -> None:
         bin_dir = venv_dir / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
         (bin_dir / "python").symlink_to(Path(sys.executable))
@@ -7971,7 +7971,7 @@ def test_workspace_env_hook_overlays_worker_routed_python_default_mode(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    def _venv_with_real_python(venv_dir: Path) -> None:
+    def _venv_with_real_python(venv_dir: Path, _timeout_seconds: float | None = None) -> None:
         bin_dir = venv_dir / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
         (bin_dir / "python").symlink_to(Path(sys.executable))
@@ -8104,7 +8104,7 @@ def test_workspace_env_hook_overlays_python_subprocess(
     monkeypatch.setenv("MINDROOM_STORAGE_PATH", str(storage_root))
     _refresh_runner_app_from_env()
 
-    def _venv_with_real_python(venv_dir: Path) -> None:
+    def _venv_with_real_python(venv_dir: Path, _timeout_seconds: float | None = None) -> None:
         bin_dir = venv_dir / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
         (bin_dir / "python").symlink_to(Path(sys.executable))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import ctypes
 import inspect
 import io
@@ -52,6 +53,7 @@ from mindroom.attachments.ids import normalize_attachment_id
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.browser.call_limit import browser_request_budget_seconds
 from mindroom.config.main import Config, load_config
+from mindroom.config.plugin import PluginEntryConfig
 from mindroom.config.yaml_includes import load_yaml_config_source
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.file_access import agent_file_access
@@ -66,9 +68,11 @@ from mindroom.runtime_env_policy import (
     sandbox_runner_startup_process_env,
 )
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.script_runs.models import script_run_id_from_worker_key
 from mindroom.shell import supervisor as shell_supervisor
-from mindroom.shell.execution import shell_request_budget_seconds
+from mindroom.shell.execution import CommandStdin, shell_request_budget_seconds, stream_command
 from mindroom.terminal.session import SupportsTerminalLaunch, TerminalError, TerminalLaunch
+from mindroom.timing import elapsed_ms_between, elapsed_ms_since
 from mindroom.tool_jobs.control import JobControl, job_control_context, job_owns_execution
 from mindroom.tool_system.agno_toolkits import requires_connect, toolkit_function
 from mindroom.tool_system.catalog import (
@@ -93,7 +97,7 @@ from mindroom.tool_system.output_files import (
     validate_output_path_syntax,
     write_bytes_to_output_path,
 )
-from mindroom.tool_system.plugins import refresh_plugins
+from mindroom.tool_system.plugins import preload_plugins, refresh_plugins, worker_preload_plugin_paths
 from mindroom.tool_system.progress import report_tool_progress, structured_tool_result, tool_progress_reporter
 from mindroom.tool_system.registry import ToolRegistry, builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import decode_attachment_save_bytes, sandbox_proxy_config, to_json_compatible
@@ -113,7 +117,11 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.trafilatura_call_limit import trafilatura_request_budget_seconds
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
 from mindroom.worker_computer.worker_browser import WorkerBrowserRuntime
-from mindroom.workers.backends.local import get_local_worker_manager
+from mindroom.workers.backends.local import (
+    ensure_local_worker_state_locked,
+    get_local_worker_manager,
+    local_worker_state_paths_for_root,
+)
 from mindroom.workers.protocol import (
     WORKER_PROTOCOL_VERSION,
     CancelRequest,
@@ -124,6 +132,8 @@ from mindroom.workers.protocol import (
     LeaseResponse,
     SaveAttachmentRequest,
     SaveAttachmentResponse,
+    StdinRequest,
+    StdinResponse,
     ViewFileRequest,
     ViewFileResponse,
     WorkerFailure,
@@ -139,12 +149,18 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.worker_computer.protocol import BrowserSession
+    from mindroom.workers.backends.local import LocalWorkerStatePaths
 
 logger = get_logger(__name__)
 
 _SUBPROCESS_WORKER_ARG = "--sandbox-subprocess-worker"
 # A spawned request child writes its progress lines to this socket descriptor.
 _PROGRESS_FD_ARG = "--progress-fd"
+# How long a worker's eager setup may run before it counts as failed and the first command prepares what is missing.
+_EAGER_SETUP_BUDGET_SECONDS = 180.0
+# How long a template may spend importing the worker's opt-in plugins, and an eager setup creating the venv.
+_PRELOAD_BUDGET_SECONDS = 60.0
+_EAGER_VENV_TIMEOUT_SECONDS = 120.0
 # How often a spawn-per-call wait looks up from its child to notice a stop or its deadline.
 _SPAWN_POLL_SECONDS = 1.0
 
@@ -346,7 +362,7 @@ def _config_with_available_plugins(
 def load_config_from_startup_runtime() -> tuple[RuntimePaths, Config]:
     """Read the sandbox runner runtime context from explicit startup payload.
 
-    This is the only read of the startup manifest. The runner keeps the result in
+    The startup manifest is read only while the runner starts. The runner keeps the result in
     memory for its lifetime, so the primary rewriting the manifest for a replacement
     pod changes nothing in a runner that is still serving.
     """
@@ -372,6 +388,91 @@ def initialize_sandbox_runner_app(
     # Requests load their own config's plugins; loading the startup config's now reports a broken one at startup.
     refresh_plugins(committed_config, runtime_paths)
     api_app.state.sandbox_runner_context = context
+
+
+def start_eager_worker_setup(app: FastAPI) -> asyncio.Task[None] | None:
+    """Start preparing this dedicated worker in the background when its startup manifest asks for that.
+
+    Only the Kubernetes backend asks, and never for a script worker. ``/healthz`` answers meanwhile and reports the
+    setup's state, and a request prepares whatever a setup that failed or outlasted its budget left undone.
+    """
+    app.state.worker_setup = None
+    runtime_paths = app_runtime_paths(app)
+    worker_key = sandbox_exec.runner_dedicated_worker_key(runtime_paths)
+    if (
+        worker_key is None
+        or script_run_id_from_worker_key(worker_key) is not None
+        or not sandbox_exec.runner_uses_subprocess(runtime_paths)
+        or not os.environ.get(SANDBOX_STARTUP_MANIFEST_PATH_ENV, "").strip()
+    ):
+        return None
+    plugin_paths = _startup_manifest_from_env().get(constants.STARTUP_MANIFEST_EAGER_SETUP_PLUGINS)
+    if not isinstance(plugin_paths, list):
+        return None
+    if plugin_paths:
+        preload = {
+            "config_path": str(runtime_paths.config_path),
+            "storage_root": str(runtime_paths.storage_root),
+            "plugins": plugin_paths,
+            "budget_seconds": _PRELOAD_BUDGET_SECONDS,
+        }
+        sandbox_forkserver.start_preloading_forkserver(json.dumps(preload))
+    app.state.worker_setup = "preparing"
+    return asyncio.create_task(_eager_worker_setup(app, runtime_paths, tuple(plugin_paths)))
+
+
+async def _eager_worker_setup(app: FastAPI, runtime_paths: RuntimePaths, preloaded: tuple[str, ...] = ()) -> None:
+    """Create the worker's venv, then start its shell supervisor and forkserver template together.
+
+    Requests run in the template that preloaded the plugins ``preloaded`` only once all of this succeeded.
+    """
+    started_at = time.monotonic()
+    try:
+        async with asyncio.timeout(_EAGER_SETUP_BUDGET_SECONDS):
+            paths = local_worker_state_paths_for_root(sandbox_exec.runner_dedicated_worker_root(runtime_paths))
+            await asyncio.to_thread(
+                ensure_local_worker_state_locked,
+                paths,
+                venv_timeout_seconds=_EAGER_VENV_TIMEOUT_SECONDS,
+            )
+            steps = [asyncio.to_thread(shell_supervisor.ensure_shell_supervisor)]
+            if sandbox_exec.runner_uses_forkserver(runtime_paths) and sandbox_forkserver.forkserver_supported():
+                budget_seconds = _EAGER_SETUP_BUDGET_SECONDS - (time.monotonic() - started_at)
+                steps.append(asyncio.to_thread(_warm_forkserver_template, paths, budget_seconds))
+            await asyncio.gather(*steps)
+    except asyncio.CancelledError:  # The worker shuts down, and must not wait for a preload that is still importing.
+        sandbox_forkserver.abandon_preload(None)
+        raise
+    except Exception as exc:  # Whatever failed, the first request prepares it and reports its error.
+        app.state.worker_setup = "failed"
+        error = str(exc) or type(exc).__name__
+        logger.warning("sandbox_worker_eager_setup_failed", error=error)
+        sandbox_forkserver.abandon_preload(f"The worker's setup failed: {error}")
+    else:
+        if (preloading := sandbox_forkserver.preloading_forkserver()) is not None:
+            preloading.serves = preloaded
+        app.state.worker_setup = "ready"
+        logger.debug("sandbox_worker_eager_setup_ready", setup_ms=elapsed_ms_since(started_at))
+
+
+def _warm_forkserver_template(paths: LocalWorkerStatePaths, budget_seconds: float) -> None:
+    """Start the template this worker's calls fork from, giving a preload up that fails or outlasts the budget.
+
+    The plain template then starts at once, and keeps importing for the first request when the budget is used up.
+    """
+    python_executable, template_env, _ = sandbox_exec.resolve_subprocess_worker_context(paths)
+    deadline = time.monotonic() + budget_seconds
+    if (preloading := sandbox_forkserver.preloading_forkserver()) is not None:
+        try:
+            preloading.warm(python_executable, template_env, budget_seconds)
+        except sandbox_forkserver.ForkserverError as exc:
+            if sandbox_forkserver.preloading_forkserver() is not preloading:
+                return  # The setup's end or the worker's shutdown gave the preload up, and this setup with it.
+            sandbox_forkserver.abandon_preload(str(exc) or "The preload outlasted the worker's setup budget.")
+        else:
+            return
+    remaining_seconds = max(deadline - time.monotonic(), 1.0)
+    sandbox_forkserver.get_sandbox_forkserver().warm(python_executable, template_env, remaining_seconds)
 
 
 def _freeze_private_agent_names(private_agent_names: list[str] | None) -> frozenset[str] | None:
@@ -595,6 +696,16 @@ def prepare_route(app: FastAPI, route: WorkerRoute) -> _PreparedRoute | WorkerFa
         config=request_runtime_config(app, route.config_snapshot),
         runner_token=context.runner_token,
     )
+
+
+async def _prepare_route_beside_setup(app: FastAPI, route: WorkerRoute) -> _PreparedRoute | WorkerFailure:
+    """Prepare a route as ``prepare_route`` does, without holding up what else the worker answers.
+
+    A worker that is still preparing itself may hold the lock this waits for, so the wait then happens in a thread.
+    """
+    if getattr(app.state, "worker_setup", None) == "preparing":
+        return await asyncio.to_thread(prepare_route, app, route)
+    return prepare_route(app, route)
 
 
 def _prepare_route_with_config(
@@ -1111,8 +1222,7 @@ async def _execute_request_inprocess(call: _ExecuteCall) -> ExecuteResponse:
 def prepare_terminal_launch(app: FastAPI, payload: ExecuteRequest, cwd: str | None) -> TerminalLaunch:
     """Return the interactive shell of a terminal opened with ``payload``, a shell call's request, in ``cwd``.
 
-    The request is prepared as ``/execute`` prepares it and the shell toolkit the call would run is built from it,
-    so the shell gets the environment, workspace and ``PATH`` the call's command would. Blocking.
+    Blocking.
     """
     if payload.tool_name != "shell":
         raise TerminalError(400, "A terminal opens only with a shell call's request.")
@@ -1122,28 +1232,44 @@ def prepare_terminal_launch(app: FastAPI, payload: ExecuteRequest, cwd: str | No
     tools = refresh_plugins(route.config, route.runtime_paths).tools
     try:
         request = _validated_execute_request(payload, tool_metadata=tools.entries)
-        prepared = _prepare_execute_request(_ExecuteCall(request=request, route=route, tools=tools))
-        shell = prepared.request
-        toolkit, _ = _resolve_entrypoint(
-            runtime_paths=prepared.runtime_paths,
-            config=route.config,
-            tools=tools,
-            tool_name=shell.tool_name,
-            function_name=shell.function_name,
-            execution_identity=route.identity,
-            credential_overrides=shell.credential_overrides or None,
-            tool_config_overrides=shell.tool_config_overrides or None,
-            tool_init_overrides=shell.tool_init_overrides or None,
-            runtime_overrides=shell.runtime_overrides or None,
-            worker_scope=shell.worker_scope,
-            routing_agent_name=shell.routing_agent_name,
-            private_agent_names=_freeze_private_agent_names(shell.private_agent_names),
-            tool_output_workspace_root=route.workspace,
+        return _shell_launch(
+            _ExecuteCall(request=request, route=route, tools=tools),
+            lambda toolkit, process_environ: toolkit.terminal_launch(cwd, process_environ=process_environ),
         )
     except HTTPException as exc:
         raise TerminalError(400, str(exc.detail)) from None
     except sandbox_worker_prep.WorkerRequestPreparationError as exc:
         raise TerminalError(400, str(exc)) from None
+
+
+def _shell_launch[Launch](
+    call: _ExecuteCall,
+    launch: Callable[[SupportsTerminalLaunch, Mapping[str, str] | None], Launch],
+) -> Launch:
+    """Return what ``launch`` starts from the shell toolkit ``call``, a shell call, would run.
+
+    The request is prepared as ``/execute`` prepares it and the toolkit is built from it, so what starts gets the
+    environment, workspace and ``PATH`` the call's command would. Blocking.
+    """
+    route = call.route
+    prepared = _prepare_execute_request(call)
+    shell = prepared.request
+    toolkit, _ = _resolve_entrypoint(
+        runtime_paths=prepared.runtime_paths,
+        config=route.config,
+        tools=call.tools,
+        tool_name=shell.tool_name,
+        function_name=shell.function_name,
+        execution_identity=route.identity,
+        credential_overrides=shell.credential_overrides or None,
+        tool_config_overrides=shell.tool_config_overrides or None,
+        tool_init_overrides=shell.tool_init_overrides or None,
+        runtime_overrides=shell.runtime_overrides or None,
+        worker_scope=shell.worker_scope,
+        routing_agent_name=shell.routing_agent_name,
+        private_agent_names=_freeze_private_agent_names(shell.private_agent_names),
+        tool_output_workspace_root=route.workspace,
+    )
     if not isinstance(toolkit, SupportsTerminalLaunch):
         raise TerminalError(400, "This shell cannot start a terminal.")
     # Where /execute runs a shell call in a subprocess, the command sees that subprocess's environment.
@@ -1151,7 +1277,79 @@ def prepare_terminal_launch(app: FastAPI, payload: ExecuteRequest, cwd: str | No
     process_environ = _prepare_subprocess_context(prepared).subprocess_env if in_subprocess else None
     call_environment = ToolEnvironment(values=shell.call_environment, path_prepend=tuple(shell.call_path_prepend))
     with collected_tool_environment(call_environment):
-        return toolkit.terminal_launch(cwd, process_environ=process_environ)
+        return launch(toolkit, process_environ)
+
+
+# The stdin of each running command whose output streams, by its request's ID.
+_command_stdins: dict[str, CommandStdin] = {}
+# A streamed command waits to write more while this many reads of its output wait for the primary.
+_STREAM_QUEUED_FRAMES = 4
+
+
+async def _execute_streamed(call: _ExecuteCall, frames: asyncio.Queue[bytes]) -> ExecuteResponse:
+    """Run a shell call's command, putting its raw output and its exit into ``frames`` as lines of the stream.
+
+    The runner starts the command itself, as it starts a terminal's shell, so the bytes pass no text formatting.
+    The result is what the reply's tool trace shows of the call, and holds none of the output.
+    """
+    request = call.request
+    try:
+        launch, stop_after = await asyncio.to_thread(
+            lambda: _shell_launch(
+                call,
+                lambda toolkit, process_environ: toolkit.command_launch(
+                    *request.args,
+                    process_environ=process_environ,
+                    **request.kwargs,
+                ),
+            ),
+        )
+    except (TerminalError, ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    stdin = CommandStdin()
+    sent = {"out": 0, "err": 0}
+
+    def line(**frame: object) -> bytes:
+        return json.dumps(frame).encode() + b"\n"
+
+    async def on_start() -> None:
+        if request.request_id:
+            _command_stdins[request.request_id] = stdin
+        await frames.put(line(t="started"))
+
+    async def on_output(kind: str, chunk: bytes) -> None:
+        sent[kind] += len(chunk)
+        await frames.put(line(t=kind, b=base64.b64encode(chunk).decode("ascii")))
+
+    async def on_exit(code: int, timed_out: bool) -> None:
+        await frames.put(line(t="exit", code=code, timed_out=timed_out))
+        sent.update(code=code, timed_out=timed_out)
+
+    def on_stopped() -> None:
+        # The command's processes are gone. That takes the place of the output its caller no longer reads.
+        while not frames.empty():
+            frames.get_nowait()
+        frames.put_nowait(line(t="exit", cancelled=True))
+
+    try:
+        await stream_command(
+            list(launch.argv),
+            launch.env,
+            launch.cwd,
+            timeout=stop_after,
+            stdin=stdin,
+            on_start=on_start,
+            on_output=on_output,
+            on_exit=on_exit,
+            on_stopped=on_stopped,
+        )
+    except OSError as exc:
+        return ExecuteResponse(ok=False, error=f"Error: {exc}", failure_kind="tool")
+    finally:
+        _command_stdins.pop(request.request_id or "", None)
+    result = f"Stopped after {stop_after:g}s." if sent["timed_out"] else f"Exit code {sent['code']}"
+    streamed = f"Streamed {sent['out']} bytes of stdout and {sent['err']} bytes of stderr to the caller."
+    return ExecuteResponse(ok=True, result=f"{result}\n{streamed}" if sent["timed_out"] or sent["code"] else streamed)
 
 
 def _cancelled_response() -> ExecuteResponse:
@@ -1178,6 +1376,8 @@ def _parse_subprocess_response(
     # The worker writes the JSON response to stderr after a marker line so that
     # tool stdout (e.g. print() inside python tools) does not corrupt the protocol.
     stderr = completed.stderr or ""
+    if (timing := sandbox_protocol.extract_timing(stderr)) is not None:
+        logger.debug("sandbox_subprocess_child_timing", timing=timing)
     response_json = sandbox_protocol.extract_response_json(stderr)
     if response_json:
         try:
@@ -1197,24 +1397,46 @@ def _parse_subprocess_response(
 def _execute_request_forkserver(
     worker_key: str | None,
     runtime_paths: RuntimePaths,
+    config: Config,
     *,
     subprocess_context: _PreparedSandboxSubprocessContext,
     envelope: str,
     timeout_seconds: float | None,
 ) -> ExecuteResponse | None:
-    """Dispatch one prepared request via the warm template; None means fall back to spawn-per-call."""
-    try:
-        completed = sandbox_forkserver.get_sandbox_forkserver().execute(
+    """Dispatch one prepared request via the warm template; None means fall back to spawn-per-call.
+
+    The request runs in the template that preloaded plugins only when ``config``'s enabled plugins begin with exactly
+    those, as configured, so that every plugin still imports in config order; any other request runs in the plain
+    template, as without a preload. When the preloading template is gone or cannot be reached, which no request has
+    reached then, the plain one runs the request in the time that is left.
+    """
+    started_at = time.monotonic()
+
+    def execute(forkserver: sandbox_forkserver._SandboxForkserver) -> subprocess.CompletedProcess[str]:
+        spent = time.monotonic() - started_at
+        return forkserver.execute(
             python_executable=subprocess_context.python_executable,
             template_env=subprocess_context.template_env,
             request_env=subprocess_context.subprocess_env,
             request_cwd=subprocess_context.subprocess_cwd,
             envelope=envelope,
-            timeout_seconds=timeout_seconds,
-            startup_timeout_seconds=sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths),
+            timeout_seconds=None if timeout_seconds is None else timeout_seconds - spent,
+            startup_timeout_seconds=sandbox_exec.runner_subprocess_timeout_seconds(runtime_paths) - spent,
             bind_stop=sandbox_request_cancellation.bind_request_stop,
             on_progress=report_tool_progress,
         )
+
+    try:
+        completed = None
+        preloading = sandbox_forkserver.preloading_forkserver()
+        enabled = tuple(entry.path for entry in config.plugins if entry.enabled)
+        if preloading is not None and (serves := preloading.serves) and enabled[: len(serves)] == serves:
+            try:
+                completed = execute(preloading)
+            except (sandbox_forkserver.ForkserverStartupError, sandbox_forkserver.ForkserverUnreachableError) as exc:
+                sandbox_forkserver.abandon_preload(str(exc))
+        if completed is None:
+            completed = execute(sandbox_forkserver.get_sandbox_forkserver())
     except sandbox_forkserver.ForkserverTimeoutError:
         return _subprocess_failure_response(worker_key, "Sandbox subprocess timed out.", runtime_paths)
     except sandbox_forkserver.ForkserverStartupError as exc:
@@ -1308,6 +1530,7 @@ def _execute_request_subprocess_sync(call: _ExecuteCall) -> ExecuteResponse:
         forkserver_response = _execute_request_forkserver(
             worker_key,
             runtime_paths,
+            call.route.config,
             subprocess_context=subprocess_context,
             envelope=envelope,
             timeout_seconds=timeout_seconds,
@@ -1471,6 +1694,8 @@ def _run_subprocess_worker_payload(payload: str, report_progress: Callable[[str]
         )
         return 1, "", sandbox_protocol.response_marker_payload(response.model_dump_json())
 
+    stage_ends = [time.monotonic()]
+
     try:
         envelope = sandbox_protocol.parse_subprocess_envelope(payload)
         request = PreparedSandboxRunnerExecuteRequest.model_validate(envelope.request)
@@ -1488,6 +1713,7 @@ def _run_subprocess_worker_payload(payload: str, report_progress: Callable[[str]
         return 1, "", sandbox_protocol.response_marker_payload(response.model_dump_json())
     if sandbox_exec.runner_uses_dedicated_worker(runtime_paths):
         config = _config_with_available_plugins(config, runtime_paths, log_skipped_plugins=True)
+    stage_ends.append(time.monotonic())
 
     # Redirect stdout/stderr during tool execution so tool output doesn't
     # interfere with the protocol marker in the returned response text.
@@ -1498,12 +1724,16 @@ def _run_subprocess_worker_payload(payload: str, report_progress: Callable[[str]
         sys.path.append(str(Path.cwd()))
     job = job_control_context(JobControl()) if request.run_as_job else nullcontext()
     with redirect_stdout(captured_out), redirect_stderr(captured_err), tool_progress_reporter(report_progress), job:
-        # A fresh child loads the request's plugins itself.
+        # A fresh child loads the request's plugins itself, except the ones its template preloaded.
         tools = refresh_plugins(config, runtime_paths).tools
+        stage_ends.append(time.monotonic())
         response = asyncio.run(_execute_prepared_request_inprocess(request, runtime_paths, config, tools))
+        stage_ends.append(time.monotonic())
 
+    stages = zip(("config_ms", "plugins_ms", "tool_ms"), stage_ends, stage_ends[1:], strict=False)
+    timing: dict[str, object] = {stage: elapsed_ms_between(start, end) for stage, start, end in stages}
     tool_output = captured_out.getvalue() + captured_err.getvalue()
-    return 0, tool_output, sandbox_protocol.response_marker_payload(response.model_dump_json())
+    return 0, tool_output, sandbox_protocol.response_marker_payload(response.model_dump_json(), timing=timing)
 
 
 def _spawned_progress_reporter() -> Callable[[str], None]:
@@ -1551,7 +1781,41 @@ def _run_forkserver_template() -> int:
     _ = mcp_registry, tool_system_plugins
     import mindroom.tools  # noqa: F401, PLC0415
 
+    preload = os.environ.pop(sandbox_forkserver.PRELOAD_ENV, None)
+    if preload is not None and (error := _preload_template_plugins(json.loads(preload))) is not None:
+        # An import cannot be undone, so this template ends, and the runner serves from one that never tried it.
+        os.write(2, error.encode())
+        os._exit(1)
     return sandbox_forkserver.serve_template(socket_path, _run_subprocess_worker_payload)
+
+
+def _preload_template_plugins(spec: dict[str, Any]) -> str | None:
+    """Import the worker's opt-in plugins for every request child, and return why the template cannot keep them.
+
+    The kernel ends the template when the import outlasts its budget, also one that never returns to Python.
+    """
+    threads_and_files = sandbox_forkserver.threads_and_open_files()
+    os.write(2, f"Importing the plugins that set worker_preload, for at most {spec['budget_seconds']} s.\n".encode())
+    signal.setitimer(signal.ITIMER_REAL, spec["budget_seconds"])
+    try:
+        runtime_paths = constants.resolve_primary_runtime_paths(
+            config_path=Path(spec["config_path"]),
+            storage_path=Path(spec["storage_root"]),
+            process_env={},
+        )
+        config = Config(plugins=[PluginEntryConfig(path=path) for path in spec["plugins"]])
+        # The primary named these from its own copies; this worker's copies decide, before any of them is imported.
+        if worker_preload_plugin_paths(config, runtime_paths) != tuple(spec["plugins"]):
+            return "A plugin to preload is missing in this worker, or its manifest here does not set worker_preload."
+        if not preload_plugins(config, runtime_paths):
+            return "A plugin that sets worker_preload failed to import."
+    except Exception as exc:  # Whatever a plugin's import raises, the runner gives the preload up.
+        return f"Preloading plugins failed: {exc}"
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+    if sandbox_forkserver.threads_and_open_files() != threads_and_files:
+        return "A plugin that sets worker_preload left a thread running or a file open when it was imported."
+    return None
 
 
 @router.post("/leases")
@@ -1638,7 +1902,7 @@ async def save_attachment_to_worker(  # noqa: PLR0911
     payload: SaveAttachmentRequest,
 ) -> SaveAttachmentResponse | WorkerFailure:
     """Save one context-authorized attachment into the request's workspace."""
-    route = prepare_route(request.app, payload)
+    route = await _prepare_route_beside_setup(request.app, payload)
     if isinstance(route, WorkerFailure):
         return route
     if route.workspace is None:
@@ -1678,7 +1942,7 @@ async def save_attachment_to_worker(  # noqa: PLR0911
 @router.post("/view-file")
 async def view_file_in_worker(request: Request, payload: ViewFileRequest) -> ViewFileResponse | WorkerFailure:
     """View an image only after resolving the request's workspace."""
-    route = prepare_route(request.app, payload)
+    route = await _prepare_route_beside_setup(request.app, payload)
     if isinstance(route, WorkerFailure):
         return route
     if route.workspace is None:
@@ -1831,12 +2095,33 @@ async def cancel_tool_call(payload: CancelRequest) -> CancelResponse | WorkerFai
     return CancelResponse(cancelled=sandbox_request_cancellation.cancel_request(payload.request_id))
 
 
+@router.post("/execute/{request_id}/stdin")
+async def write_command_stdin(request_id: str, payload: StdinRequest) -> StdinResponse | WorkerFailure:
+    """Write the next chunk of a streamed command's stdin, answering once it has left for the command.
+
+    504 says the chunk, or the one before it, has not left yet, and that it is to be sent again.
+    """
+    if (failure := _protocol_failure(payload.protocol)) is not None:
+        return failure
+    stdin = _command_stdins.get(request_id)
+    if stdin is None:
+        return StdinResponse(open=False)
+    try:
+        return StdinResponse(open=await stdin.write(payload.seq, base64.b64decode(payload.b), eof=payload.eof))
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail="The command has not read its stdin yet") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+
+
 @dataclass(frozen=True)
 class _PreparedToolCall:
     execute: Callable[[], Coroutine[object, object, ExecuteResponse]]
     # Persistent browser actions are short and keep their own deadline, and cancelling one closes the shared
     # browser, so they answer in one response that neither a dropped connection nor /execute/cancel stops.
     streamed: bool = True
+    # The lines a call that streams its command's output sends before its result.
+    frames: asyncio.Queue[bytes] | None = None
 
 
 @router.post("/execute", response_model=None)
@@ -1846,7 +2131,7 @@ async def execute_tool_call(request: Request, payload: ExecuteRequest) -> Respon
     A request the runner refuses before the call starts answers at once. The primary stops the call through
     /execute/cancel or by hanging up.
     """
-    route = prepare_route(request.app, payload)
+    route = await _prepare_route_beside_setup(request.app, payload)
     if isinstance(route, WorkerFailure):
         return JSONResponse(route.model_dump(mode="json"))
     call = _prepare_tool_call(request.app, payload, route)
@@ -1866,6 +2151,7 @@ async def execute_tool_call(request: Request, payload: ExecuteRequest) -> Respon
             call.execute,
             keepalive_seconds=EXECUTE_KEEPALIVE_SECONDS,
             failure=_worker_failure,
+            frames=call.frames,
         ),
         media_type="application/x-ndjson",
     )
@@ -1907,7 +2193,15 @@ def _prepare_tool_call(app: FastAPI, payload: ExecuteRequest, route: _PreparedRo
     if (computer := _persistent_browser_runtime(app, request)) is not None:
         return _PreparedToolCall(partial(_execute_worker_browser, computer, call), streamed=False)
 
+    frames: asyncio.Queue[bytes] | None = None
+    if request.stream_io:
+        if (request.tool_name, request.function_name) != ("shell", "run_shell_command"):
+            raise HTTPException(status_code=400, detail="Only a shell command's output streams.")
+        frames = asyncio.Queue(maxsize=_STREAM_QUEUED_FRAMES)
+
     async def dispatch() -> ExecuteResponse:
+        if frames is not None:
+            return await _run_cancellable(_execute_streamed(call, frames))
         # Worker-routed calls also take the subprocess path, so the per-worker virtualenv and worker-specific
         # process environment stay authoritative even when this pod is itself a dedicated worker runtime.
         if (
@@ -1927,7 +2221,7 @@ def _prepare_tool_call(app: FastAPI, payload: ExecuteRequest, route: _PreparedRo
         with job_control_context(JobControl()) if request.run_as_job else nullcontext():
             return await dispatch()
 
-    return _PreparedToolCall(execute)
+    return _PreparedToolCall(execute, frames=frames)
 
 
 async def _run_cancellable(

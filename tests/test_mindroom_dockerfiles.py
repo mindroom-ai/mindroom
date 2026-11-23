@@ -102,6 +102,20 @@ def test_full_mindroom_runtime_image_bundles_browser_runtime_packages() -> None:
     } <= packages
 
 
+def test_full_mindroom_runtime_image_bundles_tailnet_ssh_packages() -> None:
+    """A worker serves tailnet SSH with the image's sshd and SFTP server, and file sync with its rsync."""
+    text = (_REPO_ROOT / "local/instances/deploy/Dockerfile.mindroom").read_text(encoding="utf-8")
+    packages = _apt_install_packages(text.split(" AS final", maxsplit=1)[1])
+
+    assert {"openssh-server", "rsync"} <= packages
+    install = next(
+        line
+        for line in text.replace("\\\n", " ").splitlines()
+        if line.startswith("RUN apt-get ") and "openssh-server" in line
+    )
+    assert re.search(r"openssh-server .*&& rm -f /etc/ssh/ssh_host_\*", install)
+
+
 def test_mindroom_runtime_images_keep_git_ssh_support_when_disabling_recommends() -> None:
     """Git-over-SSH needs an explicit SSH client when apt recommendations are disabled."""
     for dockerfile in _MINDROOM_DOCKERFILES:

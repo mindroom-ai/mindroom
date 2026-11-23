@@ -884,6 +884,6 @@ async def test_hidden_tool_calls_coalesce_placeholder_spacing() -> None:
     accumulated = outcome.rendered_body
     assert event_id is not None
     assert accumulated is not None
-    assert accumulated == "\n\nDone"
+    assert accumulated == "Done"
     bodies = [content.get("m.new_content", content)["body"] for _, _, content in client.messages_sent]
-    assert bodies == ["Thinking...", "\n\nDone"]
+    assert bodies == ["Thinking...", "Done"]

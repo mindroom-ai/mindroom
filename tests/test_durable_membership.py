@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, Mock, create_autospec
 
 import pytest
 from nio.durable import DurableSync
+from nio.durable.transport import HttpError
+from structlog.testing import capture_logs
 
 from mindroom.event_journal import RoomMembershipPosition
 from mindroom.matrix.durable_membership import change_local_membership
@@ -87,3 +89,50 @@ async def test_each_wait_for_a_sync_follows_a_subscription_of_the_rooms_nio_awai
 
     assert await _change(session, target, position, subscribe) is True
     assert steps == expected
+
+
+@pytest.mark.asyncio
+async def test_http_error_at_settled_position_logs_reason_and_returns_false() -> None:
+    """An HTTP failure at a settled position logs status and errcode once and returns False."""
+    session = _session()
+    session.change_membership.side_effect = HttpError(403, "M_FORBIDDEN")
+
+    with capture_logs() as logs:
+        result = await _change(session, "join", None, AsyncMock())
+
+    assert result is False
+    assert [
+        (entry["log_level"], entry["room_id"], entry["target_membership"], entry["http_status"], entry["errcode"])
+        for entry in logs
+        if entry["event"] == "matrix_membership_change_failed"
+    ] == [("warning", ROOM, "join", 403, "M_FORBIDDEN")]
+
+
+@pytest.mark.asyncio
+async def test_http_error_while_admission_moves_retries_and_succeeds() -> None:
+    """An HTTP failure while admission advances retries cleanly without logging a final failure."""
+    session = _session()
+    session.change_membership.side_effect = [HttpError(403, "M_FORBIDDEN"), True]
+    session.wait_for_room_ready.return_value = True
+    read_position = AsyncMock(
+        side_effect=[
+            RoomMembershipPosition("leave", 1),
+            RoomMembershipPosition("leave", 2),
+            RoomMembershipPosition("leave", 2),
+        ],
+    )
+
+    with capture_logs() as logs:
+        result = await change_local_membership(
+            session,
+            account_id="@bot:localhost",
+            room_id=ROOM,
+            target_membership="join",
+            read_position=read_position,
+            admission_progress=asyncio.Event(),
+            subscribe_awaited_rooms=AsyncMock(),
+        )
+
+    assert result is True
+    assert session.change_membership.await_count == 2
+    assert [entry for entry in logs if entry["event"] == "matrix_membership_change_failed"] == []

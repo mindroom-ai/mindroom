@@ -102,6 +102,104 @@ async def test_collect_streamed_response_can_hide_tool_markers() -> None:
     assert trace == []
 
 
+_READ = ToolExecution(tool_call_id="call-1", tool_name="read", tool_args={}, result="ok").call
+_READ_PENDING = "🔧 `read` [1] ⏳"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replaces_text", [False, True])
+@pytest.mark.parametrize(
+    ("show_tool_calls", "events", "expected"),
+    [
+        pytest.param(
+            True,
+            [ToolStarted(_READ), StructuredStreamChunk(_READ_PENDING), ToolCompleted(_READ), TextDelta("Done.")],
+            "🔧 `read` [1]\n\nDone.",
+            id="document-ends-at-the-call-s-marker",
+        ),
+        pytest.param(
+            True,
+            [
+                ToolStarted(_READ),
+                StructuredStreamChunk(
+                    f"Doc\n\n{_READ_PENDING}",
+                    tool_trace=[ToolTraceEntry(type="tool_call_started", tool_name="read")],
+                ),
+                TextDelta("After."),
+            ],
+            f"Doc\n\n{_READ_PENDING}\n\nAfter.",
+            id="document-ends-at-a-marker-of-its-own-trace",
+        ),
+        pytest.param(
+            False,
+            [
+                TextDelta("Before"),
+                ToolStarted(_READ),
+                StructuredStreamChunk("Before"),
+                ToolCompleted(_READ),
+                TextDelta("After"),
+            ],
+            "Before\n\nAfter",
+            id="document-repeats-the-text-before-a-hidden-call",
+        ),
+        pytest.param(
+            False,
+            [
+                TextDelta("Before"),
+                ToolStarted(_READ),
+                StructuredStreamChunk("Before\n"),
+                ToolCompleted(_READ),
+                TextDelta("After"),
+            ],
+            "Before\n\nAfter",
+            id="document-adds-a-newline-to-the-text-before-a-hidden-call",
+        ),
+        pytest.param(
+            False,
+            [
+                TextDelta("Before\n"),
+                ToolStarted(_READ),
+                StructuredStreamChunk("Before"),
+                ToolCompleted(_READ),
+                TextDelta("After"),
+            ],
+            "Before\n\nAfter",
+            id="document-drops-a-newline-from-the-text-before-a-hidden-call",
+        ),
+        pytest.param(
+            True,
+            [ToolStarted(_READ), StructuredStreamChunk(f"{_READ_PENDING}\n\nHel"), TextDelta("lo")],
+            f"{_READ_PENDING}\n\nHello",
+            id="document-continues-past-the-marker",
+        ),
+    ],
+)
+async def test_a_replaced_document_keeps_a_pending_paragraph_break_only_where_it_ends_at_the_tool_call(
+    replaces_text: bool,
+    show_tool_calls: bool,
+    events: list[object],
+    expected: str,
+) -> None:
+    """Text after a whole document starts a paragraph when the document ends at a tool call, else continues it."""
+
+    async def stream() -> AsyncGenerator[object]:
+        for event in events:
+            # A stream of whole documents sends one without a trace as a string.
+            as_text = replaces_text and isinstance(event, StructuredStreamChunk) and event.tool_trace is None
+            yield event.content if as_text else event
+
+    body, _ = await collect_streamed_response_content(
+        stream(),
+        presentation=CollectedStreamPresentation(
+            show_tool_calls=show_tool_calls,
+            track_hidden_tools=True,
+            replaces_text=replaces_text,
+        ),
+    )
+
+    assert body == expected
+
+
 @pytest.mark.asyncio
 async def test_collect_streamed_response_resumes_pending_tool_by_exact_id() -> None:
     """A continuation completes the persisted marker in place and appends later events in order."""
@@ -141,7 +239,7 @@ async def test_collect_streamed_response_resumes_pending_tool_by_exact_id() -> N
         ),
     )
 
-    assert body == ("Before approval.\n\n🔧 `inspect` [1]\nAfter approval.\n\n🔧 `inspect` [2] ⏳\n\n")
+    assert body == ("Before approval.\n\n🔧 `inspect` [1]\n\nAfter approval.\n\n🔧 `inspect` [2] ⏳")
     assert [entry.type for entry in trace] == ["tool_call_completed", "tool_call_started"]
     assert [entry.tool_call_id for entry in trace] == ["call-1", "call-2"]
     assert trace[0].result_preview == "details"

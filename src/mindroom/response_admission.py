@@ -123,10 +123,19 @@ class ResponseAdmissionGate:
 async def admitted_response_decision(
     gate: ResponseAdmissionGate,
     wait_for_admission_or_shutdown: Callable[[], Awaitable[bool]],
+    *,
+    on_deferred: Callable[[], None] | None = None,
+    on_refused: Callable[[], None] | None = None,
 ) -> AsyncIterator[None]:
     """Reserve replacement admission around one final authorization decision and its effects."""
+    deferred = False
     while not gate.admit():
+        if not deferred and on_deferred is not None:
+            on_deferred()
+        deferred = True
         if not await wait_for_admission_or_shutdown():
+            if on_refused is not None:
+                on_refused()
             raise ResponseAdmissionRefusedError
     try:
         yield

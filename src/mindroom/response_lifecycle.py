@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from mindroom import constants
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.background_tasks import create_background_task
+from mindroom.bot_runtime_view import RunPhase
 from mindroom.cancellation import current_task_is_process_shutdown
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.final_delivery import (
@@ -52,6 +53,7 @@ from mindroom.logging_config import get_logger
 from mindroom.message_target import ResponseLifecycleKey
 from mindroom.mid_turn import MidTurnMode, MidTurnOutcome, QueuedMessage, message_text_for_judgment
 from mindroom.post_response_effects import apply_post_response_effects
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.scheduling.scheduled_run_records import record_silent_schedule_result_if_needed
 from mindroom.streaming import strip_matching_visible_tool_markers
 from mindroom.tool_jobs.control import ReplyToolCalls, pending_human_messages_context
@@ -61,6 +63,7 @@ if TYPE_CHECKING:
 
     from structlog.stdlib import BoundLogger
 
+    from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delivery_gateway import ResponseIdentity
@@ -79,26 +82,34 @@ _LockedResponseResult = TypeVar("_LockedResponseResult")
 
 
 @dataclass(slots=True)
-class ResponseLifecycleReservation:
-    """Own an early place in one coordinator's canonical lifecycle lock."""
+class _ResponseLifecycleReservation:
+    """One reply's place in its conversation: a begun turn, its notice to the running reply, and then the lock.
+
+    A reply that reserves its place before it prepares queues for the lock in a task of its own; any other reply
+    waits for the lock where it runs.
+    """
 
     _coordinator: ResponseLifecycleCoordinator
     _lifecycle_key: ResponseLifecycleKey
-    _lifecycle_lock: asyncio.Lock
-    _queued_signal: _QueuedMessageState
+    _conversation: _Conversation
     _notice: str | None
     _ready: asyncio.Event = field(default_factory=asyncio.Event)
     _acquire_task: asyncio.Task[None] | None = None
     _release_task: asyncio.Task[None] | None = None
     _owns_lock: bool = False
     _consumed: bool = False
-    _response_turn_active: bool = True
+    # False for work that is no reply: it takes this place with a pin on the conversation instead of a begun turn.
+    _turn: bool = True
+
+    def __post_init__(self) -> None:
+        if not self._turn:
+            self._conversation.pins += 1
 
     async def _acquire(self) -> None:
         try:
-            if self._lifecycle_lock.locked():
+            if self._conversation.lock.locked():
                 self._ready.set()
-            await self._lifecycle_lock.acquire()
+            await self._conversation.lock.acquire()
             self._owns_lock = True
         finally:
             self._ready.set()
@@ -109,11 +120,7 @@ class ResponseLifecycleReservation:
             self._acquire_task = asyncio.create_task(self._acquire())
         await self._ready.wait()
 
-    def _consume(
-        self,
-        coordinator: ResponseLifecycleCoordinator,
-        target: MessageTarget,
-    ) -> asyncio.Lock:
+    def _consume(self, coordinator: ResponseLifecycleCoordinator, target: MessageTarget) -> None:
         """Transfer this reservation to its exact response lifecycle."""
         if self._coordinator is not coordinator:
             msg = "Response lifecycle reservation belongs to a different coordinator"
@@ -125,42 +132,54 @@ class ResponseLifecycleReservation:
             msg = "Response lifecycle reservation was already consumed"
             raise RuntimeError(msg)
         self._consumed = True
-        return self._lifecycle_lock
 
     async def wait_until_acquired(self) -> None:
-        """Wait until the reservation owns its lifecycle lock."""
-        if self._acquire_task is None:
-            msg = "Response lifecycle reservation has not started"
-            raise RuntimeError(msg)
-        await self._acquire_task
+        """Wait until this place owns its lifecycle lock: in the queue it reserved early, or else right here."""
+        await (self._acquire_task or self._acquire())
 
     def _consume_notice(self) -> None:
         if self._notice is None:
             return
-        self._queued_signal.consume_waiting_human_message(self._notice)
-        self._notice = None
+        self._conversation.consume_waiting_human_message(self._notice)
+        # A place taken where the reply runs withdraws the notice again as it ends: its source may be dispatched
+        # a second time while it is answered, and that is no news to the next reply.
+        if self._acquire_task is not None:
+            self._notice = None
 
     async def _release(self) -> None:
         acquire_task = self._acquire_task
         if acquire_task is not None and not acquire_task.done():
             acquire_task.cancel()
             await asyncio.gather(acquire_task, return_exceptions=True)
+        elif acquire_task is not None and not acquire_task.cancelled():
+            # Nothing may have waited for the lock; a failure to queue for it is collected here instead.
+            acquire_task.exception()
         if self._owns_lock:
             self._owns_lock = False
-            self._lifecycle_lock.release()
+            self._conversation.lock.release()
         self._consume_notice()
-        if self._response_turn_active:
-            self._response_turn_active = False
-            self._queued_signal.finish_response_turn()
+        if self._turn:
+            self._conversation.finish_response_turn()
+        else:
+            self._conversation.pins -= 1
 
     async def release(self) -> None:
-        """Release or cancel this reservation exactly once."""
+        """Release or cancel this place exactly once.
+
+        A place taken where the reply runs is free before this first suspends, so a cancelled reply never returns
+        while it holds the lock. A place reserved early is freed a loop turn later, so ingress already due to run
+        still finds the conversation busy.
+        """
         if self._release_task is None:
-            self._release_task = asyncio.create_task(self._release())
+            release = self._release()
+            if self._acquire_task is None:
+                self._release_task = asyncio.eager_task_factory(asyncio.get_running_loop(), release)
+            else:
+                self._release_task = asyncio.create_task(release)
         await asyncio.shield(self._release_task)
 
 
-_current_response_lifecycle_reservation: ContextVar[ResponseLifecycleReservation | None] = ContextVar(
+_current_response_lifecycle_reservation: ContextVar[_ResponseLifecycleReservation | None] = ContextVar(
     "current_response_lifecycle_reservation",
     default=None,
 )
@@ -168,7 +187,7 @@ _current_response_lifecycle_reservation: ContextVar[ResponseLifecycleReservation
 
 @contextmanager
 def response_lifecycle_reservation_context(
-    reservation: ResponseLifecycleReservation,
+    reservation: _ResponseLifecycleReservation,
 ) -> Iterator[None]:
     """Carry one detached response's lifecycle reservation into execution."""
     token = _current_response_lifecycle_reservation.set(reservation)
@@ -189,9 +208,14 @@ async def _first_of(task: asyncio.Task[bool], event: asyncio.Event) -> None:
 
 
 @dataclass
-class _QueuedMessageState:
-    """Track queued human ingress while one response lifecycle holds the lock."""
+class _Conversation:
+    """One conversation: the lock its replies take in turn, the turns begun on it, and the human messages that wait.
 
+    A begun turn that has not finished, which includes a pending approval, is what makes the conversation busy;
+    the lock only serializes the replies.
+    """
+
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _pending_messages: dict[str, QueuedMessage] = field(default_factory=dict)
     mid_turn_gate: MidTurnGate | None = None
     _active_response_turns: int = 0
@@ -203,6 +227,8 @@ class _QueuedMessageState:
     # The person the reply holding the lock answers, and the waiting messages that person chose to Steer it with.
     active_requester_id: str | None = None
     requester_steer_event_ids: set[str] = field(default_factory=set)
+    # Work that is no reply and waits here without a begun turn; the record, and so its one lock, stays while any does.
+    pins: int = 0
     calls: ReplyToolCalls = field(init=False)
 
     def __post_init__(self) -> None:
@@ -374,7 +400,7 @@ class _QueuedMessageState:
 class QueuedHumanNoticeReservation:
     """Owned reservation for a queued-human notice created before dispatch starts."""
 
-    _state: _QueuedMessageState
+    _state: _Conversation
     _source_event_id: str
     _active: bool = True
     _stopped_reply: bool = False
@@ -422,11 +448,11 @@ class QueuedHumanNoticeReservation:
 class ResponseLifecycleCoordinator:
     """Serialize response turns and signal active turns about queued human ingress."""
 
-    _response_lifecycle_locks: dict[ResponseLifecycleKey, asyncio.Lock] = field(default_factory=dict)
-    _thread_queued_signals: dict[ResponseLifecycleKey, _QueuedMessageState] = field(default_factory=dict)
+    _conversations: dict[ResponseLifecycleKey, _Conversation] = field(default_factory=dict)
     # A pending approval counts as an active response turn of its conversation, by approval,
     # for each paused reply the journal's approval signals report.
     _approval_holds: dict[str, ResponseLifecycleKey] = field(default_factory=dict)
+    _approval_released: asyncio.Event = field(default_factory=asyncio.Event)
     _stop_following_approvals: Callable[[], None] | None = None
     # The sources of the replies a restart cut short. Their replay resumes an answer that began before any turn of
     # this instance, so it never tells the turn it waits behind, such as a job follow-up, that a newer message arrived.
@@ -458,24 +484,27 @@ class ResponseLifecycleCoordinator:
             return
         lifecycle_key = ResponseLifecycleKey(room_id=paused.room_id, thread_id=paused.thread_id)
         self._approval_holds[paused.approval_id] = lifecycle_key
-        self._queued_signal_for_key(lifecycle_key).begin_response_turn()
+        self._conversation_for_key(lifecycle_key).begin_response_turn()
 
     def _release_approval_hold(self, approval_id: str) -> None:
         lifecycle_key = self._approval_holds.pop(approval_id, None)
         if lifecycle_key is not None:
-            self._thread_queued_signals[lifecycle_key].finish_response_turn()
+            self._conversations[lifecycle_key].finish_response_turn()
+            self._approval_released.set()
+            self._approval_released = asyncio.Event()
 
     def approval_holds(self, room_id: str, thread_id: str | None) -> tuple[str, ...]:
         """Return the approvals that hold one conversation."""
         lifecycle_key = ResponseLifecycleKey(room_id=room_id, thread_id=thread_id)
         return tuple(approval_id for approval_id, key in self._approval_holds.items() if key == lifecycle_key)
 
+    def note_edited_source(self, source_event_id: str) -> None:
+        """Count a continued reply's source as news again once its sender edits it."""
+        self.continued_sources -= {source_event_id}
+
     def _has_active_response_for_thread_key(self, lifecycle_key: ResponseLifecycleKey) -> bool:
-        queued_signal = self._thread_queued_signals.get(lifecycle_key)
-        if queued_signal is not None and queued_signal.has_active_response_turn():
-            return True
-        lifecycle_lock = self._response_lifecycle_locks.get(lifecycle_key)
-        return lifecycle_lock.locked() if lifecycle_lock is not None else False
+        conversation = self._conversations.get(lifecycle_key)
+        return conversation is not None and conversation.has_active_response_turn()
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target already has an active turn."""
@@ -483,82 +512,32 @@ class ResponseLifecycleCoordinator:
 
     def has_waiting_messages_from(self, target: MessageTarget, requester_id: str) -> bool:
         """Return whether one requester's messages wait for one canonical conversation's next turn."""
-        queued_signal = self._thread_queued_signals.get(target.lifecycle_key)
-        return queued_signal is not None and any(
-            message.requester_id == requester_id for message in queued_signal.pending_message_snapshot()
+        conversation = self._conversations.get(target.lifecycle_key)
+        return conversation is not None and any(
+            message.requester_id == requester_id for message in conversation.pending_message_snapshot()
         )
 
     def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:
         """Return canonical thread IDs with active response lifecycles in one room."""
-        known_lifecycle_keys = set(self._thread_queued_signals) | set(self._response_lifecycle_locks)
         return frozenset(
             lifecycle_key.thread_id
-            for lifecycle_key in known_lifecycle_keys
-            if lifecycle_key.room_id == room_id and self._has_active_response_for_thread_key(lifecycle_key)
+            for lifecycle_key, conversation in self._conversations.items()
+            if lifecycle_key.room_id == room_id and conversation.has_active_response_turn()
         )
 
     async def wait_for_thread_idle(self, room_id: str, thread_id: str | None) -> None:
-        """Wait until a response lifecycle lock is idle for one room/thread key."""
+        """Wait until no response turn is active for one room/thread key."""
         lifecycle_key = ResponseLifecycleKey(room_id=room_id, thread_id=thread_id)
+        # Rechecked by key: before this waiter resumes, another turn may begin or the entry may be evicted.
         while self._has_active_response_for_thread_key(lifecycle_key):
-            queued_signal = self._thread_queued_signals.get(lifecycle_key)
-            if queued_signal is not None and queued_signal.has_active_response_turn():
-                await queued_signal.wait_until_idle()
-                continue
-            lifecycle_lock = self._response_lifecycle_locks.get(lifecycle_key)
-            if lifecycle_lock is not None and lifecycle_lock.locked():
-                async with lifecycle_lock:
-                    pass
-                continue
-            return
-
-    def _response_lifecycle_lock(self, target: MessageTarget) -> asyncio.Lock:
-        """Return the per-target lock that serializes one response lifecycle."""
-        lock_key = target.lifecycle_key
-        lock = self._response_lifecycle_locks.get(lock_key)
-        if lock is not None:
-            return lock
-        if len(self._response_lifecycle_locks) >= 100:
-            for candidate, candidate_lock in list(self._response_lifecycle_locks.items()):
-                if len(self._response_lifecycle_locks) < 100:
-                    break
-                if candidate_lock.locked():
-                    continue
-                # An unlocked entry is not necessarily an idle one. Queued human
-                # ingress, and a turn that has begun but not yet taken the lock,
-                # both live in the signal rather than the lock, so evicting on
-                # lock state alone silently drops user input.
-                candidate_signal = self._thread_queued_signals.get(candidate)
-                if candidate_signal is not None and (
-                    candidate_signal.has_pending_human_messages() or candidate_signal.has_active_response_turn()
-                ):
-                    continue
-                self._response_lifecycle_locks.pop(candidate, None)
-                self._thread_queued_signals.pop(candidate, None)
-        lock = asyncio.Lock()
-        self._response_lifecycle_locks[lock_key] = lock
-        return lock
+            await self._conversations[lifecycle_key].wait_until_idle()
 
     async def reserve_response_lifecycle(
         self,
         response_envelope: MessageEnvelope,
-    ) -> ResponseLifecycleReservation:
+    ) -> _ResponseLifecycleReservation:
         """Reserve FIFO admission on one canonical lifecycle before response preparation."""
-        target = response_envelope.target
-        lifecycle_lock = self._response_lifecycle_lock(target)
-        queued_signal = self._get_or_create_queued_signal(target)
-        reservation = ResponseLifecycleReservation(
-            _coordinator=self,
-            _lifecycle_key=target.lifecycle_key,
-            _lifecycle_lock=lifecycle_lock,
-            _queued_signal=queued_signal,
-            _notice=self._begin_response_turn_notice(
-                lifecycle_lock=lifecycle_lock,
-                queued_signal=queued_signal,
-                response_envelope=response_envelope,
-                signal_queued_message=True,
-            ),
-        )
+        reservation = self._begin_response_turn(response_envelope, signal_queued_message=True)
         try:
             await reservation._wait_until_reserved()
         except BaseException:
@@ -566,27 +545,59 @@ class ResponseLifecycleCoordinator:
             raise
         return reservation
 
-    def _get_or_create_queued_signal(self, target: MessageTarget) -> _QueuedMessageState:
-        """Return the queued-message signal for one canonical conversation thread."""
-        return self._queued_signal_for_key(target.lifecycle_key)
+    def _begin_response_turn(
+        self,
+        response_envelope: MessageEnvelope,
+        *,
+        signal_queued_message: bool,
+    ) -> _ResponseLifecycleReservation:
+        """Begin one reply's turn on its conversation; a newer human message tells the running reply it waits."""
+        conversation = self._conversation_for(response_envelope.target)
+        return _ResponseLifecycleReservation(
+            _coordinator=self,
+            _lifecycle_key=response_envelope.target.lifecycle_key,
+            _conversation=conversation,
+            _notice=self._begin_response_turn_notice(
+                conversation=conversation,
+                response_envelope=response_envelope,
+                signal_queued_message=signal_queued_message,
+            ),
+        )
 
-    def _queued_signal_for_key(self, lifecycle_key: ResponseLifecycleKey) -> _QueuedMessageState:
-        signal = self._thread_queued_signals.get(lifecycle_key)
-        if signal is not None:
-            return signal
-        signal = _QueuedMessageState()
-        self._thread_queued_signals[lifecycle_key] = signal
-        return signal
+    def _conversation_for(self, target: MessageTarget) -> _Conversation:
+        """Return the record of one canonical conversation thread, made on first use."""
+        return self._conversation_for_key(target.lifecycle_key)
+
+    def _conversation_for_key(self, lifecycle_key: ResponseLifecycleKey) -> _Conversation:
+        conversation = self._conversations.get(lifecycle_key)
+        if conversation is not None:
+            return conversation
+        # The table is capped softly: an entry stays while a turn is begun on it or a human message waits in it.
+        # A held lock always has a begun turn or a pin; checking it too keeps a mistake from making a second lock.
+        if len(self._conversations) >= 100:
+            for key, candidate in list(self._conversations.items()):
+                if not (
+                    candidate.has_pending_human_messages()
+                    or candidate.has_active_response_turn()
+                    or candidate.lock.locked()
+                    or candidate.pins
+                ):
+                    del self._conversations[key]
+                    if len(self._conversations) < 100:
+                        break
+        conversation = _Conversation()
+        self._conversations[lifecycle_key] = conversation
+        return conversation
 
     def visible_progress_callback(
         self,
         target: MessageTarget,
     ) -> Callable[[str, Sequence[ToolTraceEntry]], None] | None:
         """Bind acknowledged Matrix text to the active response's opted-in judge."""
-        signal = self._thread_queued_signals.get(target.lifecycle_key)
-        if signal is None or signal.mid_turn_gate is None:
+        conversation = self._conversations.get(target.lifecycle_key)
+        if conversation is None or conversation.mid_turn_gate is None:
             return None
-        return signal.mid_turn_gate.record_visible_response
+        return conversation.mid_turn_gate.record_visible_response
 
     @staticmethod
     def _should_signal_queued_message(
@@ -624,8 +635,8 @@ class ResponseLifecycleCoordinator:
             return None
         if not self._has_active_response_for_thread_key(target.lifecycle_key):
             return None
-        queued_signal = self._get_or_create_queued_signal(target)
-        if not queued_signal.add_waiting_human_message(
+        conversation = self._conversation_for(target)
+        if not conversation.add_waiting_human_message(
             response_envelope.source_event_id,
             text=transcript if transcript is not None else message_text_for_judgment(response_envelope),
             requester_id=response_envelope.requester_id,
@@ -633,24 +644,21 @@ class ResponseLifecycleCoordinator:
             mode=mode,
         ):
             return None
-        return QueuedHumanNoticeReservation(queued_signal, response_envelope.source_event_id)
+        return QueuedHumanNoticeReservation(conversation, response_envelope.source_event_id)
 
     def _begin_response_turn_notice(
         self,
         *,
-        lifecycle_lock: asyncio.Lock,
-        queued_signal: _QueuedMessageState,
+        conversation: _Conversation,
         response_envelope: MessageEnvelope,
         signal_queued_message: bool,
     ) -> str | None:
-        existing_turn = queued_signal.begin_response_turn()
-        if not signal_queued_message:
-            return None
-        if not (existing_turn or lifecycle_lock.locked()):
+        existing_turn = conversation.begin_response_turn()
+        if not (signal_queued_message and existing_turn):
             return None
         if not self._is_news(response_envelope):
             return None
-        if not queued_signal.add_waiting_human_message(
+        if not conversation.add_waiting_human_message(
             response_envelope.source_event_id,
             text=message_text_for_judgment(response_envelope),
             requester_id=response_envelope.requester_id,
@@ -658,80 +666,31 @@ class ResponseLifecycleCoordinator:
             return None
         return response_envelope.source_event_id
 
-    def _consume_queued_human_notice(
-        self,
-        *,
-        notice: str | None,
-        queued_signal: _QueuedMessageState,
-    ) -> None:
-        if notice is None:
-            return
-        queued_signal.consume_waiting_human_message(notice)
+    async def run_locked[T](self, target: MessageTarget, runtime: BotRuntimeView, op: Callable[[], Awaitable[T]]) -> T:
+        """Run work that is no reply under one conversation's lock, in turn with its replies, through a reply's claim.
 
-    def _start_response_turn(
-        self,
-        *,
-        target: MessageTarget,
-        response_envelope: MessageEnvelope,
-        signal_queued_message: bool,
-        reservation: ResponseLifecycleReservation | None,
-    ) -> tuple[asyncio.Lock, _QueuedMessageState, str | None]:
-        if reservation is not None:
-            return reservation._consume(self, target), reservation._queued_signal, None
-        lifecycle_lock = self._response_lifecycle_lock(target)
-        queued_signal = self._get_or_create_queued_signal(target)
-        notice = self._begin_response_turn_notice(
-            lifecycle_lock=lifecycle_lock,
-            queued_signal=queued_signal,
-            response_envelope=response_envelope,
-            signal_queued_message=signal_queued_message,
-        )
-        return lifecycle_lock, queued_signal, notice
-
-    @staticmethod
-    async def _acquire_response_turn_lock(
-        lifecycle_lock: asyncio.Lock,
-        reservation: ResponseLifecycleReservation | None,
-    ) -> None:
-        if reservation is not None:
-            await reservation.wait_until_acquired()
-            return
-        await lifecycle_lock.acquire()
-
-    def _consume_response_turn_notice(
-        self,
-        *,
-        reservation: ResponseLifecycleReservation | None,
-        notice: str | None,
-        queued_signal: _QueuedMessageState,
-    ) -> None:
-        if reservation is not None:
-            reservation._consume_notice()
-            return
-        self._consume_queued_human_notice(notice=notice, queued_signal=queued_signal)
-
-    @staticmethod
-    async def _release_response_turn_lock(
-        lifecycle_lock: asyncio.Lock,
-        reservation: ResponseLifecycleReservation | None,
-    ) -> None:
-        if reservation is not None:
-            await reservation.release()
-            return
-        lifecycle_lock.release()
-
-    async def _finish_response_turn(
-        self,
-        *,
-        reservation: ResponseLifecycleReservation | None,
-        notice: str | None,
-        queued_signal: _QueuedMessageState,
-    ) -> None:
-        if reservation is not None:
-            await reservation.release()
-            return
-        self._consume_queued_human_notice(notice=notice, queued_signal=queued_signal)
-        queued_signal.finish_response_turn()
+        It begins no turn, so the conversation is not busy, and it waits out a pending approval without holding
+        admission. ``op`` starts only while ``runtime`` accepts work, checked under the lock; only an approval that
+        appears while this waits for the lock makes it wait and admit again.
+        """
+        key = target.lifecycle_key
+        while True:
+            claim = _ResponseLifecycleReservation(self, key, self._conversation_for(target), None, _turn=False)
+            paused = False
+            try:
+                while key in self._approval_holds.values():
+                    if not await runtime.wait_for_admission_or_shutdown(self._approval_released.wait()):
+                        raise ResponseAdmissionRefusedError
+                async with runtime.admission_fence():
+                    await claim.wait_until_acquired()
+                    paused = key in self._approval_holds.values()
+                    if not paused and runtime.phase is RunPhase.ACCEPTING:
+                        return await op()
+            finally:
+                await claim.release()
+            if not paused:  # The runtime stopped accepting, or its admission swallowed what ended this: admit once.
+                raise ResponseAdmissionRefusedError
+            await asyncio.sleep(0)  # Others run before this waits for the approval that appeared.
 
     async def run_locked_response(
         self,
@@ -739,60 +698,47 @@ class ResponseLifecycleCoordinator:
         target: MessageTarget,
         response_envelope: MessageEnvelope,
         pipeline_timing: DispatchPipelineTiming | None,
-        locked_operation: Callable[[MessageTarget], Awaitable[_LockedResponseResult]],
+        locked_operation: Callable[[], Awaitable[_LockedResponseResult]],
         signal_queued_message: bool = True,
         mid_turn_gate: MidTurnGate | None = None,
     ) -> _LockedResponseResult:
         """Run one locked response operation with shared queued-message bookkeeping."""
         self._assert_target_matches_envelope(target, response_envelope)
         reservation = _current_response_lifecycle_reservation.get()
-        lifecycle_lock, queued_signal, notice = self._start_response_turn(
-            target=target,
-            response_envelope=response_envelope,
-            signal_queued_message=signal_queued_message,
-            reservation=reservation,
-        )
-        if reservation is not None:
+        if reservation is None:
+            reservation = self._begin_response_turn(response_envelope, signal_queued_message=signal_queued_message)
+        else:
+            reservation._consume(self, target)
             # This response now owns the reservation locally. Descendant tasks
             # must acquire their own lifecycle instead of inheriting this one-shot claim.
             _current_response_lifecycle_reservation.set(None)
+        conversation = reservation._conversation
         try:
             if pipeline_timing is not None:
                 pipeline_timing.mark("lock_wait_start")
-            await self._acquire_response_turn_lock(lifecycle_lock, reservation)
+            await reservation.wait_until_acquired()
             if pipeline_timing is not None:
                 pipeline_timing.mark("lock_acquired")
-            try:
-                self._consume_response_turn_notice(
-                    reservation=reservation,
-                    notice=notice,
-                    queued_signal=queued_signal,
-                )
-                queued_signal.mid_turn_gate = mid_turn_gate
-                queued_signal.bind_active_requester(
-                    response_envelope.requester_id if self._should_signal_queued_message(response_envelope) else None,
-                )
-                if mid_turn_gate is not None:
-                    mid_turn_gate.on_stop = queued_signal.mark_stopped_reply
-                with (
-                    # A newer human message also releases the reply's tool waits; other queued turns wait for it.
-                    pending_human_messages_context(queued_signal, calls=queued_signal.calls),
-                    queued_message_signal_context(queued_signal, mid_turn_gate=mid_turn_gate),
-                ):
-                    try:
-                        return await locked_operation(target)
-                    finally:
-                        queued_signal.mid_turn_gate = None
-                        # The Steers it latched keep their reason for their own follow-ups.
-                        queued_signal.bind_active_requester(None)
-            finally:
-                await self._release_response_turn_lock(lifecycle_lock, reservation)
-        finally:
-            await self._finish_response_turn(
-                reservation=reservation,
-                notice=notice,
-                queued_signal=queued_signal,
+            reservation._consume_notice()
+            conversation.mid_turn_gate = mid_turn_gate
+            conversation.bind_active_requester(
+                response_envelope.requester_id if self._should_signal_queued_message(response_envelope) else None,
             )
+            if mid_turn_gate is not None:
+                mid_turn_gate.on_stop = conversation.mark_stopped_reply
+            with (
+                # A newer human message also releases the reply's tool waits; other queued turns wait for it.
+                pending_human_messages_context(conversation, calls=conversation.calls),
+                queued_message_signal_context(conversation, mid_turn_gate=mid_turn_gate),
+            ):
+                try:
+                    return await locked_operation()
+                finally:
+                    conversation.mid_turn_gate = None
+                    # The Steers it latched keep their reason for their own follow-ups.
+                    conversation.bind_active_requester(None)
+        finally:
+            await reservation.release()
 
 
 @dataclass

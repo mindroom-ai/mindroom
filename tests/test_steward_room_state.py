@@ -891,6 +891,44 @@ async def test_non_200_roster_get_stops_before_put(
     assert [log["log_level"] for log in logs if log["event"] == "room_accounts_publish_failed"] == [expected_level]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response_kind", "expected_done", "expected_level"),
+    [
+        ("forbidden_503", False, "warning"),
+        ("forbidden_403", True, "debug"),
+    ],
+)
+async def test_put_503_with_m_forbidden_retries_in_accounts_and_binding(
+    room_state: RoomState,
+    response_kind: str,
+    expected_done: bool,
+    expected_level: str,
+) -> None:
+    """A 503 PUT whose body says M_FORBIDDEN retries instead of counting as a permanent refusal."""
+    config, paths, ids, _, _ = room_state
+    steward_id = ids[ROUTER_AGENT_NAME].full_id
+    joined = {identity.full_id: {} for identity in ids.values()}
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        if request.method == "PUT":
+            return _error_http_response(response_kind)
+        if request.path.endswith("/joined_members"):
+            return web.json_response({"joined": joined})
+        return web.json_response({"errcode": "M_NOT_FOUND", "error": "Not found"}, status=404)
+
+    async with _http_state_clients(handle, steward_id) as (steward,):
+        with capture_logs() as logs:
+            accounts_done = await reconcile_room_accounts(steward, config, paths, ROOM_ID)
+            binding_done = await reconcile_room_router_binding(steward, ROOM_ID)
+    assert accounts_done is expected_done
+    assert binding_done is expected_done
+    assert [log["log_level"] for log in logs if log["event"] == "room_accounts_publish_failed"] == [expected_level]
+    assert [log["log_level"] for log in logs if log["event"] == "room_router_binding_publish_failed"] == [
+        expected_level,
+    ]
+
+
 async def _reconcile_accounts_during_bound_bot_stop(
     duties: StewardDuties,
     steward_client: AsyncMock,

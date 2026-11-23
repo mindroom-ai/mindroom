@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 _RESPONSE_MARKER = "__SANDBOX_RESPONSE__"
+_TIMING_MARKER = "__SANDBOX_TIMING__"
 
 
 class SandboxSubprocessEnvelope(BaseModel):
@@ -36,9 +38,21 @@ def parse_subprocess_envelope(payload: str) -> SandboxSubprocessEnvelope:
     return SandboxSubprocessEnvelope.model_validate_json(payload)
 
 
-def response_marker_payload(response_json: str) -> str:
-    """Prefix one response payload with the stderr marker."""
-    return _RESPONSE_MARKER + response_json
+def response_marker_payload(response_json: str, *, timing: dict[str, object] | None = None) -> str:
+    """Prefix one response payload with the stderr marker, after a line of the child's stage timing when given."""
+    timing_line = "" if timing is None else f"{_TIMING_MARKER}{json.dumps(timing)}\n"
+    return f"{timing_line}{_RESPONSE_MARKER}{response_json}"
+
+
+def extract_timing(stderr: str) -> dict[str, object] | None:
+    """Extract the child's stage timing from the line before the marked response, or None without a whole one."""
+    before_response = stderr[: max(stderr.rfind(_RESPONSE_MARKER), 0)]
+    _, found, raw_timing = before_response.rpartition(_TIMING_MARKER)
+    try:
+        timing = json.loads(raw_timing) if found else None
+    except ValueError:
+        return None
+    return timing if isinstance(timing, dict) else None
 
 
 def extract_response_json(stderr: str) -> str | None:

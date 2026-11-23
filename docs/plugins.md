@@ -65,12 +65,12 @@ The [mindroom-ai](https://github.com/mindroom-ai) organization maintains these o
 | [thread-goal-plugin](https://github.com/mindroom-ai/thread-goal-plugin) | Hooks and tools | Per-thread goals stored in Matrix room state that survive context compaction and restarts. |
 | [thread-worktree-plugin](https://github.com/mindroom-ai/thread-worktree-plugin) | Hooks and tools | Ties a thread to a git worktree in Matrix room state and tells the agent that tied it to work there on every turn. |
 | [pull-request-plugin](https://github.com/mindroom-ai/pull-request-plugin) | Hooks and tools | Links GitHub pull requests to a thread in Matrix room state, by a tool and automatically when an agent creates one. |
-| [workloop-plugin](https://github.com/mindroom-ai/workloop-plugin) | Hooks and tools | External workloop; not needed for per-thread todo plans and auto-poke, which MindRoom provides natively. |
 | [openviking-plugin](https://github.com/mindroom-ai/openviking-plugin) | Hooks and tools | Long-term memory through [OpenViking](https://github.com/volcengine/OpenViking) with automatic extraction, recall, and compaction archiving. |
 | [error-notifier-plugin](https://github.com/mindroom-ai/error-notifier-plugin) | Hooks | Posts a short, redacted alert to one Matrix room when MindRoom logs an error, with a suggested fix when it knows one. |
 | [injection-guard-plugin](https://github.com/mindroom-ai/injection-guard-plugin) | Hooks | Checks tool results with outside text for prompt injection with a [judgment backend](configuration/threads.md#judgment-backends) before the model reads them. |
 | [deep-research-plugin](https://github.com/mindroom-ai/deep-research-plugin) | Tools | Bounded, multi-round web research on the agent's own model that returns cited reports. |
 
+The archived `workloop-plugin` is replaced by MindRoom's built-in [`todo`](tools/project-management.md#todo) toolkit for per-thread plans.
 MindRoom now has a built-in [`thread_snooze`](tools/matrix-and-attachments.md#thread_snooze) toolkit, so remove `thread-snooze-plugin` from `plugins` when you upgrade.
 Its `thread_snooze` tool name collides with the built-in toolkit, so MindRoom does not load the plugin, and the built-in toolkit replaces it.
 
@@ -265,7 +265,8 @@ Other `mindroom` modules can change in any release.
   "lifecycle_module": "lifecycle.py",
   "origin_module": "origin.py",
   "skills": ["skills"],
-  "reserved_namespaces": ["com.example.my_plugin."]
+  "reserved_namespaces": ["com.example.my_plugin."],
+  "worker_preload": false
 }
 ```
 
@@ -281,6 +282,7 @@ Other `mindroom` modules can change in any release.
 | `origin_module` | string | no | Relative path to the module defining `router`, a FastAPI `APIRouter` served on the plugin's own hosts, and optionally `async def serves(label)`; see [Origins of your own](#origins-of-your-own) |
 | `skills` | list of strings | no | Relative directories containing skill subdirectories |
 | `reserved_namespaces` | list of non-empty strings | no | Prefixes of the Matrix event types and content keys that only the plugin writes; see [Reserved namespaces](#reserved-namespaces) |
+| `worker_preload` | boolean | no | `true` imports the plugin once per Kubernetes worker instead of in every tool call; default `false`; see [Importing once per worker](#importing-once-per-worker) |
 
 Every declared module file and skill directory must exist.
 Unknown fields are ignored.
@@ -808,6 +810,27 @@ Call a sub-toolkit's functions through `toolkit_functions(toolkit)` from `mindro
 A function that runs in a worker is async, so await a function `inspect.iscoroutinefunction` reports and run any other off the event loop, for example with `asyncio.to_thread`.
 A tool that calls other tools this way must itself be async.
 Calling `toolkit.functions[name]` directly skips all of that: the validation, the output file, and the worker.
+
+### Importing once per worker
+
+A tool call that runs in a Kubernetes worker imports the configured plugins in a fresh process, so every call pays for those imports again.
+A plugin whose manifest sets `"worker_preload": true` is imported once when the worker starts, and the calls in that worker reuse it.
+Plugins import in the order of `plugins:`, so list the plugins that set it first: one that follows an enabled plugin without the setting is imported by each call.
+A plugin configured by a path under `~` is not imported once: a call can run with another home directory than the worker started with, so MindRoom imports that plugin, and every plugin listed after it, in each call.
+Setting it promises that the plugin's files and the packages it uses do not change while a worker runs, and that importing its tools, hooks, and OAuth modules:
+
+- Reads nothing a call sets: the import runs before any call, in the worker's own working directory and environment, without the call's `.mindroom/worker-env.sh` values or per-call environment.
+- Leaves no thread running and no file, socket, or database connection open, because every later call would share it.
+- Starts no other process, because MindRoom cannot be sure to end one that detached itself when it gives the import up.
+- Keeps no state that must differ between calls, such as a cache, a counter, or a seeded random generator other than Python's `random`.
+- Finishes within 60 seconds, for all the worker's plugins that set it together.
+
+MindRoom does not look for changes while a worker runs: the worker keeps the plugin, and the packages it imported, as they were when it started.
+An edited file or an upgraded package is certain to take effect only once the worker restarts, which happens after its idle timeout stopped it, after it was retired, or after a config change replaced it.
+A worker whose plugins break the second or fifth promise, or fail to import, logs the warning [`sandbox_forkserver_plugin_preload_failed`](deployment/operational-log-events.md#sandbox_forkserver_plugin_preload_failed) with the reason, and all its calls import their plugins themselves, as without the setting.
+So do the calls of a worker whose own copy of a plugin does not set `worker_preload`, or lacks the plugin.
+A call imports its plugins itself as well when its config does not begin with the plugins the worker imported, in the same order and under the same paths.
+Every other plugin, and every plugin in a Docker worker or the shared sandbox runner, is imported by each call.
 
 ## OAuth providers
 

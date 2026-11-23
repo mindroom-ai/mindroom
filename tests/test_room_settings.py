@@ -316,6 +316,7 @@ async def test_an_unreadable_room_keeps_an_older_runtimes_override(tmp_path: Pat
     ("status", "answer"),
     [
         (503, {"payload": {"errcode": "M_UNKNOWN", "error": "Service unavailable"}}),
+        (503, {"payload": {"errcode": "M_NOT_FOUND", "error": "Service unavailable"}}),
         (403, {"payload": {"errcode": "M_FORBIDDEN", "error": "Not in the room"}}),
         (502, {"body": "<html>Bad Gateway</html>", "content_type": "text/html"}),
         (200, {"body": "<html>Back soon</html>", "content_type": "text/html"}),
@@ -323,7 +324,16 @@ async def test_an_unreadable_room_keeps_an_older_runtimes_override(tmp_path: Pat
         (200, {"body": "", "content_type": "application/json"}),
         (200, {"body": "[]", "content_type": "application/json"}),
     ],
-    ids=["unavailable", "forbidden", "not-json", "proxy-page", "malformed", "empty", "not-an-object"],
+    ids=[
+        "unavailable",
+        "unavailable-not-found",
+        "forbidden",
+        "not-json",
+        "proxy-page",
+        "malformed",
+        "empty",
+        "not-an-object",
+    ],
 )
 async def test_a_failed_read_nio_decodes_as_an_event_keeps_the_copy_and_the_override(
     tmp_path: Path,
@@ -345,9 +355,10 @@ async def test_a_failed_read_nio_decodes_as_an_event_keeps_the_copy_and_the_over
     client.access_token = "token"  # noqa: S105
     put_state = AsyncMock()
     try:
+        expected_response = nio.RoomGetStateEventResponse if status == 200 else nio.RoomGetStateEventError
         assert isinstance(
             await client.room_get_state_event(ROOM_ID, ROOM_SETTINGS_EVENT_TYPE, setting.key),
-            nio.RoomGetStateEventResponse,
+            expected_response,
         )
         unread = await refresh_room_setting(setting, client, runtime_paths, ROOM_ID, put_state=put_state)
         known = await refresh_room_setting(setting, client, runtime_paths, OTHER_ROOM, force=True, put_state=put_state)

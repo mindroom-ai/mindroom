@@ -1596,7 +1596,7 @@ class TestRoutingRegression:
                     body="can anyone help?",
                 ),
                 room,
-                has_active_response_for_target=alpha_bot._response_runner.has_active_response_for_target,
+                has_active_response_for_target=alpha_bot._response_runner.lifecycle_coordinator.has_active_response_for_target,
             )
 
         assert action.kind == "individual"
@@ -1667,7 +1667,7 @@ class TestRoutingRegression:
                 body="ops, help",
             ),
             room,
-            has_active_response_for_target=bot._response_runner.has_active_response_for_target,
+            has_active_response_for_target=bot._response_runner.lifecycle_coordinator.has_active_response_for_target,
         )
 
         assert action.kind == "reject"

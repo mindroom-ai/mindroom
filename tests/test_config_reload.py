@@ -80,7 +80,6 @@ if TYPE_CHECKING:
     from collections.abc import Set as AbstractSet
 
     from mindroom.constants import RuntimePaths
-    from mindroom.message_target import MessageTarget
     from mindroom.orchestration.entity_fleet import EntityFleet
     from mindroom.orchestration.rooms import RoomSetup
 
@@ -1698,7 +1697,7 @@ async def test_queued_config_reload_waits_for_in_flight_response(
     runner = unwrap_extracted_collaborator(bot._response_runner)
     request = _reply_request(bot.agent_name)
 
-    async def run_response(_target: MessageTarget) -> SourceFate:
+    async def run_response() -> SourceFate:
         response_started.set()
         await release_response.wait()
         return Owned()
@@ -2806,9 +2805,9 @@ async def test_in_flight_response_count_nonzero_during_send_response(
     runner = unwrap_extracted_collaborator(bot._response_runner)
     request = _reply_request(bot.agent_name)
 
-    async def run_response(target: MessageTarget) -> SourceFate:
+    async def run_response() -> SourceFate:
         await bot._delivery_gateway.send_text(
-            SendTextRequest(target=target, response_text="the answer"),
+            SendTextRequest(target=request.response_envelope.target, response_text="the answer"),
         )
         return Owned()
 
@@ -2859,7 +2858,7 @@ async def test_in_flight_response_count_stays_per_entity_across_bots(
     entered = asyncio.Event()
     release = asyncio.Event()
 
-    async def blocked_response(_target: MessageTarget) -> SourceFate:
+    async def blocked_response() -> SourceFate:
         entered.set()
         await release.wait()
         return Owned()
@@ -2910,7 +2909,7 @@ async def test_closed_admission_defers_response_until_gate_reopens(
     admission_gate = bot.orchestrator.response_admission_gate
     response_started = asyncio.Event()
 
-    async def run_response(_target: MessageTarget) -> SourceFate:
+    async def run_response() -> SourceFate:
         response_started.set()
         return Owned()
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -103,10 +104,11 @@ from tests.threading_helpers import seed_hydrated_conversation, seed_thread_hist
 from tests.turn_dispatch_helpers import dispatch_test_turn, nothing_else_queued
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Sequence
+    from collections.abc import Awaitable, Iterator, Sequence
     from pathlib import Path
 
     from mindroom.reply_turn.request import ResponseRequest
+    from mindroom.response_lifecycle import QueuedHumanNoticeReservation, _Conversation
 
 
 @pytest.fixture
@@ -134,6 +136,42 @@ async def _first_of(signal: Awaitable[object], handler: asyncio.Task[None]) -> N
         raise AssertionError(msg)
     finally:
         signal_task.cancel()
+
+
+@contextmanager
+def _running_reply(bot: Any, room_id: str, thread_id: str) -> Iterator[_Conversation]:  # noqa: ANN401
+    """Keep a reply running in one thread, and yield its conversation: a begun turn is what makes it busy."""
+    conversations = bot._response_runner.lifecycle_coordinator
+    target = MessageTarget.resolve(room_id, thread_id, f"{thread_id}-running")
+    conversation = conversations._conversation_for(target)
+    conversation.begin_response_turn()
+    try:
+        assert conversations.has_active_response_for_target(target)
+        yield conversation
+    finally:
+        conversation.finish_response_turn()
+
+
+@contextmanager
+def _watched_notice_reservation(bot: Any) -> Iterator[MagicMock]:  # noqa: ANN401
+    """Record how ingress asks for a notice while the real coordinator decides it.
+
+    The spy's ``return_value`` is what the coordinator last returned: a real notice, or None.
+    """
+    conversations = bot._response_runner.lifecycle_coordinator
+    reserve = conversations.reserve_waiting_human_message
+
+    def decided_for_real(**request: Any) -> QueuedHumanNoticeReservation | None:  # noqa: ANN401
+        spy.return_value = reserve(**request)
+        return spy.return_value
+
+    with patch.object(conversations, "reserve_waiting_human_message", side_effect=decided_for_real) as spy:
+        yield spy
+
+
+def _waiting_event_ids(conversation: _Conversation) -> set[str]:
+    """Return the messages that wait for the reply running on one conversation."""
+    return {message.event_id for message in conversation.pending_message_snapshot()}
 
 
 class TestAgentBot(AgentBotTestBase):
@@ -1460,16 +1498,8 @@ class TestAgentBot(AgentBotTestBase):
                 "_active_thread_ids_for_room",
                 return_value=frozenset({"$thread_root"}),
             ) as mock_active_thread_ids,
-            patch.object(
-                bot._response_runner,
-                "has_active_response_for_target",
-                return_value=True,
-            ),
-            patch.object(
-                bot._response_runner,
-                "reserve_waiting_human_message",
-                return_value=MagicMock(),
-            ) as mock_reserve_waiting_human_message,
+            _running_reply(bot, room.room_id, "$thread_root") as running,
+            _watched_notice_reservation(bot) as mock_reserve_waiting_human_message,
             patch.object(
                 TurnDispatcher,
                 "dispatch_turn",
@@ -1502,6 +1532,9 @@ class TestAgentBot(AgentBotTestBase):
         assert pending_event.claim is not None
         assert pending_event.claim.source_event_ids == {event.event_id}
         assert pending_event.notice is mock_reserve_waiting_human_message.return_value
+        # The coordinator itself reserved it: the follow-up waits for the reply running in its thread.
+        assert pending_event.notice.active
+        assert _waiting_event_ids(running) == {event.event_id}
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("mention_kind", ["other_agent", "joined_human"])
@@ -1545,9 +1578,9 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with (
-            patch.object(bot._response_runner, "has_active_response_for_target", return_value=True),
+            _running_reply(bot, room.room_id, "$thread_root:localhost"),
             patch.object(
-                bot._response_runner,
+                bot._response_runner.lifecycle_coordinator,
                 "reserve_waiting_human_message",
                 return_value=MagicMock(),
             ) as reserve_waiting_human_message,
@@ -1562,6 +1595,10 @@ class TestAgentBot(AgentBotTestBase):
                 coalescing_thread_id="$thread_root:localhost",
             )
             await asyncio.wait_for(ticket.slot.settled.wait(), timeout=1.0)
+            # The reply is still running in the relay's own thread when ingress decides.
+            assert bot._response_runner.lifecycle_coordinator.active_thread_ids_for_room(room.room_id) == {
+                "$thread_root:localhost",
+            }
 
         assert outcome is TurnDispatchOutcome.DEFERRED
         reserve_waiting_human_message.assert_not_called()
@@ -1611,12 +1648,8 @@ class TestAgentBot(AgentBotTestBase):
         )
 
         with (
-            patch.object(bot._response_runner, "has_active_response_for_target", return_value=True),
-            patch.object(
-                bot._response_runner,
-                "reserve_waiting_human_message",
-                return_value=MagicMock(),
-            ) as reserve_waiting_human_message,
+            _running_reply(bot, room.room_id, "$thread_root:localhost") as running,
+            _watched_notice_reservation(bot) as reserve_waiting_human_message,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as admit,
         ):
             ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
@@ -1635,6 +1668,10 @@ class TestAgentBot(AgentBotTestBase):
         ready_result = admit.await_args.kwargs["ready_result"]
         assert isinstance(ready_result, ReadyPendingEvent)
         assert ready_result.pending_event.notice is not None
+        # The coordinator itself reserved it: the handoff waits for the reply running in its thread.
+        assert ready_result.pending_event.notice is reserve_waiting_human_message.return_value
+        assert ready_result.pending_event.notice.active
+        assert _waiting_event_ids(running) == {event.event_id}
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("source_kind", ["hook", "hook_dispatch"])
@@ -1744,16 +1781,8 @@ class TestAgentBot(AgentBotTestBase):
                 "_active_thread_ids_for_room",
                 return_value=frozenset({"$thread_root"}),
             ),
-            patch.object(
-                bot._response_runner,
-                "has_active_response_for_target",
-                return_value=True,
-            ),
-            patch.object(
-                bot._response_runner,
-                "reserve_waiting_human_message",
-                return_value=MagicMock(),
-            ) as mock_reserve_waiting_human_message,
+            _running_reply(bot, room.room_id, "$thread_root") as running,
+            _watched_notice_reservation(bot) as mock_reserve_waiting_human_message,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
             ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
@@ -1786,6 +1815,9 @@ class TestAgentBot(AgentBotTestBase):
         assert pending_event.facts.source_kind == VOICE_SOURCE_KIND
         assert pending_event.event.active_follow_up is False
         assert pending_event.notice is mock_reserve_waiting_human_message.return_value
+        # The coordinator itself reserved it: the voice message waits for the reply running in its thread.
+        assert pending_event.notice.active
+        assert _waiting_event_ids(running) == {voice_event.event_id}
         assert pending_event.claim is turn_claim, "the lane hands the voice claim to the ready event"
         pending_event.close()
         assert not bot._turn_store.has_live_turn_claim(voice_event.event_id)
@@ -1832,8 +1864,8 @@ class TestAgentBot(AgentBotTestBase):
                 "mindroom.inbound_turn_normalizer.InboundTurnNormalizer.prepare_voice_event",
                 new=AsyncMock(return_value=_VoiceNormalizationResult(event=prepared_event)),
             ),
-            patch.object(bot._response_runner, "has_active_response_for_target", return_value=True),
-            patch.object(bot._response_runner, "reserve_waiting_human_message", return_value=MagicMock()) as reserve,
+            _running_reply(bot, room.room_id, "$thread_root") as running,
+            _watched_notice_reservation(bot) as reserve,
             patch("mindroom.voice.ingress.mark_waiting_for_approval") as shows_waiting,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as admit,
         ):
@@ -1846,12 +1878,18 @@ class TestAgentBot(AgentBotTestBase):
                 ticket=ticket,
             )
             await asyncio.wait_for(ticket.slot.settled.wait(), timeout=1.0)
+            # The reply is still running in the voice message's own thread when ingress decides.
+            assert bot._response_runner.lifecycle_coordinator.active_thread_ids_for_room(room.room_id) == {
+                "$thread_root",
+            }
 
         reservation = reserve.return_value
         pending_event = admit.await_args.kwargs["ready_result"].pending_event
         assert reserve.called is waits
         assert (pending_event.notice is reservation) is waits
         assert shows_waiting.called is waits
+        # The coordinator itself decided: only the message that may be for this agent waits for the running reply.
+        assert _waiting_event_ids(running) == ({voice_event.event_id} if waits else set())
         pending_event.close()
 
     @pytest.mark.asyncio
@@ -2011,16 +2049,8 @@ class TestAgentBot(AgentBotTestBase):
                 "_active_thread_ids_for_room",
                 return_value=frozenset({"$thread_root"}),
             ),
-            patch.object(
-                bot._response_runner,
-                "has_active_response_for_target",
-                return_value=True,
-            ),
-            patch.object(
-                bot._response_runner,
-                "reserve_waiting_human_message",
-                return_value=MagicMock(),
-            ) as mock_reserve_waiting_human_message,
+            _running_reply(bot, room.room_id, "$thread_root") as running,
+            _watched_notice_reservation(bot) as mock_reserve_waiting_human_message,
             patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock()) as mock_dispatch,
             patch.object(bot._coalescing_gate, "admit", new=AsyncMock()) as mock_admit,
         ):
@@ -2051,6 +2081,9 @@ class TestAgentBot(AgentBotTestBase):
         assert pending_event.event.active_follow_up is False
         assert pending_event.claim is None
         assert pending_event.notice is mock_reserve_waiting_human_message.return_value
+        # The coordinator itself reserved it: the follow-up waits for the reply running in its thread.
+        assert pending_event.notice.active
+        assert _waiting_event_ids(running) == {sidecar_event.event_id}
 
     @pytest.mark.asyncio
     async def test_execute_dispatch_action_team_defers_placeholder_creation_to_coordinator(

@@ -24,6 +24,7 @@ from mindroom.private_storage.private_instance_identity_store import (
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
+    TAILNET_SSH_SECRET_ENV_NAMES,
     WORKER_BACKEND_ENV,
     WORKER_COMPUTER_ENABLED_ENV,
     credentials_encryption_key_value,
@@ -44,7 +45,12 @@ from mindroom.workers.backends.kubernetes_pod_names import (
     RESERVED_EXTRA_CONTAINER_NAMES,
     RESERVED_EXTRA_VOLUME_NAMES,
 )
-from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES
+from mindroom.workers.models import (
+    LABEL_TAILNET_SSH,
+    LABEL_TAILNET_SSH_RELEASE,
+    SCRIPT_RESOURCE_PROFILE_NAMES,
+    WORKER_SSH_PORT,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -62,6 +68,7 @@ class _WorkerSeccompProfile(TypedDict):
 
 
 _DEFAULT_READY_TIMEOUT_SECONDS = 60.0
+_DEFAULT_SETUP_TIMEOUT_SECONDS = 180.0
 _DEFAULT_WORKER_PORT = 8766
 _DEFAULT_IMAGE_PULL_POLICY = "IfNotPresent"
 _DEFAULT_STORAGE_SUBPATH_PREFIX = "workers"
@@ -91,12 +98,14 @@ _STORAGE_MOUNT_PATH_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_m
 _STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
 _IDLE_TIMEOUT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["idle_timeout"]
 _READY_TIMEOUT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["ready_timeout"]
+_SETUP_TIMEOUT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["setup_timeout"]
 _NAME_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["name_prefix"]
 _NODE_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["node_name"]
 _COLOCATE_WITH_CONTROL_PLANE_NODE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["colocate_with_control_plane_node"]
 _RECONCILE_POD_TEMPLATES_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["reconcile_pod_templates"]
 _EXTRA_ENV_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_env_json"]
 _EXTRA_LABELS_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_labels_json"]
+_TAILNET_SSH_RELEASE_ID_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["tailnet_ssh_release_id"]
 _EXTRA_ANNOTATIONS_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_annotations_json"]
 _EXTRA_CONTAINERS_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_containers_json"]
 _EXTRA_VOLUMES_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_volumes_json"]
@@ -494,11 +503,30 @@ class KubernetesWorkerBackendConfig:
     named_worker_max_age_seconds: float = _DEFAULT_NAMED_WORKER_MAX_AGE_SECONDS
     # How many named workers may run at once for every requester and agent together.
     named_workers_max: int = _DEFAULT_NAMED_WORKERS_MAX
+    # How long a call waits for a ready worker to finish preparing itself before it runs in the worker as it is.
+    setup_timeout_seconds: float = _DEFAULT_SETUP_TIMEOUT_SECONDS
+    tailnet_ssh_release_id: str | None = None
 
     def __post_init__(self) -> None:
         """Validate and normalize Kubernetes configuration."""
         if self.named_workers_max < 0:
             msg = f"{NAMED_WORKERS_MAX_ENV} must be non-negative."
+            raise WorkerBackendError(msg)
+        if reserved_names := TAILNET_SSH_SECRET_ENV_NAMES.intersection(self.extra_env):
+            msg = f"{_EXTRA_ENV_JSON_ENV} cannot set reserved env vars: {', '.join(sorted(reserved_names))}."
+            raise WorkerBackendError(msg)
+        if self.worker_port == WORKER_SSH_PORT:
+            msg = f"{_PORT_ENV} cannot be {WORKER_SSH_PORT}; that port is reserved for SSH."
+            raise WorkerBackendError(msg)
+        for label in (LABEL_TAILNET_SSH, LABEL_TAILNET_SSH_RELEASE):
+            if label in self.extra_labels:
+                msg = f"{_EXTRA_LABELS_JSON_ENV} must not set {label}; MindRoom sets it on eligible workers."
+                raise WorkerBackendError(msg)
+        if (
+            self.tailnet_ssh_release_id is not None
+            and re.fullmatch(r"[0-9a-f]{32}", self.tailnet_ssh_release_id) is None
+        ):
+            msg = f"{_TAILNET_SSH_RELEASE_ID_ENV} must be a 32-character lowercase hex release ID."
             raise WorkerBackendError(msg)
         parts = self.storage_subpath_prefix.split("/")
         if (
@@ -599,6 +627,7 @@ class KubernetesWorkerBackendConfig:
             colocate_with_control_plane_node=read_bool_env(env, _COLOCATE_WITH_CONTROL_PLANE_NODE_ENV, default=False),
             extra_env=read_json_mapping_env(env, _EXTRA_ENV_JSON_ENV),
             extra_labels=read_json_mapping_env(env, _EXTRA_LABELS_JSON_ENV),
+            tailnet_ssh_release_id=read_env(env, _TAILNET_SSH_RELEASE_ID_ENV) or None,
             extra_annotations=read_json_mapping_env(env, _EXTRA_ANNOTATIONS_JSON_ENV),
             extra_containers=_read_extra_containers_env(env),
             extra_volumes=_read_extra_volumes_env(env),
@@ -631,6 +660,7 @@ class KubernetesWorkerBackendConfig:
                 _DEFAULT_NAMED_WORKER_MAX_AGE_SECONDS,
             ),
             named_workers_max=configured_named_workers_max(runtime_paths),
+            setup_timeout_seconds=read_float_env(env, _SETUP_TIMEOUT_ENV, _DEFAULT_SETUP_TIMEOUT_SECONDS),
         )
 
 
@@ -699,6 +729,8 @@ def kubernetes_backend_config_signature(
     )
     if config.runtime_class_name is not None:
         signature = (*signature, f"runtime-class:{config.runtime_class_name}")
+    if config.tailnet_ssh_release_id is not None:
+        signature = (*signature, f"tailnet-ssh-release:{config.tailnet_ssh_release_id}")
     if config.tmp_size_limit is not None:
         signature = (*signature, f"tmp-size-limit:{config.tmp_size_limit}")
     if config.user_resources:
@@ -716,6 +748,8 @@ def kubernetes_backend_config_signature(
         _DEFAULT_NAMED_WORKERS_MAX,
     ):
         signature = (*signature, f"named-workers:{stable_signature_json(named_workers)}")
+    if config.setup_timeout_seconds != _DEFAULT_SETUP_TIMEOUT_SECONDS:
+        signature = (*signature, f"setup-timeout:{config.setup_timeout_seconds}")
     return signature
 
 

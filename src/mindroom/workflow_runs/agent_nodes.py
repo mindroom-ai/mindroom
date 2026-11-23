@@ -11,10 +11,10 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.ai import run_delegated_child_response
-from mindroom.ai_run_metadata import prior_usage_of, turn_usage
+from mindroom.ai_run_metadata import prior_usage_by_run, turn_usage
 from mindroom.budgets.pricing import model_prices, run_cost_usd
 from mindroom.delegation.background import delegation_child
-from mindroom.delegation.cost import resumed_subagent_cost
+from mindroom.delegation.cost import SubagentCost, stored_receipts
 from mindroom.delegation.execution import delegation_call_job
 from mindroom.delegation.lifecycle import (
     DelegationPendingError,
@@ -370,18 +370,18 @@ async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[Child
         # What a run that a restart cut short spent, with what the subagents it had received cost: the child that
         # went on after it carries neither. Skip only when the record proves no model work happened; any evidenced
         # work without usage stays unknown (`cost_usd=None`).
-        used = turn_usage(prior_usage_of(run), run.metrics)
+        used = turn_usage(tuple(prior_usage_by_run(run.metadata).values()), run.metrics)
         if _did_model_work(run, used):
             own = run_cost_usd(used, model_provider=run.model_provider, model_id=run.model, prices=prices)
             usage[f"{EARLIER_TURN}{run.run_id}"] = _spent(run, own)
-        if (theirs := resumed_subagent_cost(run.metadata).usd) is not None:
+        if (theirs := SubagentCost(stored_receipts(run.metadata)).usd) is not None:
             # An entry of its own, as below: a turn without a price keeps what its subagents are known to have cost.
             usage[f"{EARLIER_TURN}sub:{run.run_id}"] = {"cost_usd": theirs}
     if record is not None:
         # The child's cost is its own and its subagents' together: a cost that is theirs alone prices none of its own.
         cost, theirs = child.cost_usd, child.subagents_cost_usd
         own = cost if cost is None or theirs is None else None if cost == theirs else cost - theirs
-        used = turn_usage(prior_usage_of(record), record.metrics)
+        used = turn_usage(tuple(prior_usage_by_run(record.metadata).values()), record.metrics)
         if job.status == "completed" or own is not None or _did_model_work(record, used):
             usage[1] = _spent(record, own)
         if theirs is not None:
@@ -418,7 +418,7 @@ def _did_model_work(run: RunRecord, used: RunMetrics | None) -> bool:
 
 def _spent(run: RunRecord, cost: float | None) -> dict[str, object]:
     """Return the ledger entry of one run of an agent's turn: its tokens, its calls, and *cost*."""
-    used = turn_usage(prior_usage_of(run), run.metrics)
+    used = turn_usage(tuple(prior_usage_by_run(run.metadata).values()), run.metrics)
     return {
         "input_tokens": used.tokens.input_tokens if used is not None else 0,
         "output_tokens": used.tokens.output_tokens if used is not None else 0,

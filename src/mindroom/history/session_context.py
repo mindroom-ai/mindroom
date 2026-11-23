@@ -6,8 +6,9 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING
 
+from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import resolve_session_state_root
-from mindroom.history.storage import new_scope_session
+from mindroom.history.storage import new_scope_session, remove_history_of_redacted_events
 from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope
 from mindroom.session_storage.agent_storage import (
@@ -18,7 +19,7 @@ from mindroom.session_storage.agent_storage import (
 from mindroom.session_storage.schema import TableNames
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
     from pathlib import Path
 
     from mindroom.config.main import Config
@@ -87,8 +88,18 @@ def resolve_bound_team_scope(
     return HistoryScope(kind="team", scope_id=team_scope_id)
 
 
+def load_scope_session_from_storage(
+    scope: HistoryScope,
+    session_id: str,
+    storage_factory: Callable[[], ConversationStore],
+) -> ScopeSessionContext:
+    """Open one scope's conversation store and load its session context."""
+    storage = storage_factory()
+    session = storage.load_session(session_id)
+    return ScopeSessionContext(scope, storage, session, session_id, storage_factory, session_exists=session is not None)
+
+
 def load_scope_session(
-    *,
     scope: HistoryScope,
     session_id: str,
     runtime_paths: RuntimePaths,
@@ -103,16 +114,28 @@ def load_scope_session(
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
     )
-    storage = storage_factory()
-    session = storage.load_session(session_id)
-    return ScopeSessionContext(
-        scope=scope,
-        storage=storage,
-        session=session,
-        session_id=session_id,
-        storage_factory=storage_factory,
-        session_exists=session is not None,
+    return load_scope_session_from_storage(scope, session_id, storage_factory)
+
+
+async def load_scrubbed_scope_session(
+    load_scope: Callable[[], ScopeSessionContext],
+    redacted_history_events: Callable[[tuple[str, ...]], Awaitable[Mapping[str, str | None]]] | None,
+) -> tuple[ScopeSessionContext, list[str]]:
+    """Load one scope session off the event loop, then remove its history derived from events since redacted.
+
+    This is the only cleanup after a redaction: every event the scope's history derives from is checked against the
+    agent's recorded redactions each time the scope is opened, which also covers a message no turn answered but a
+    later turn read as context. Returns the event IDs whose history was removed.
+    """
+    scope_context = await run_blocking_until_complete(load_scope)
+    if redacted_history_events is None or scope_context.session is None:
+        return scope_context, []
+    removed_event_ids = await remove_history_of_redacted_events(
+        scope_context.storage,
+        scope_context.session,
+        redacted_history_events,
     )
+    return scope_context, removed_event_ids
 
 
 def load_bound_scope_session(

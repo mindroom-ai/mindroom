@@ -11,13 +11,13 @@ from typing import TYPE_CHECKING, Any, NamedTuple, NotRequired, TypedDict, Unpac
 from uuid import uuid4
 
 from mindroom.agent_loop.build import tool_owners_by_agent
-from mindroom.ai_run_metadata import prior_usage_of
+from mindroom.ai_run_metadata import prior_usage_by_run
 from mindroom.approval.receipt_readers import add_approval_receipt_reader, approval_receipt_call_ids
 from mindroom.approval.resume import ResumeDecisions, ResumeRunner, approval_decisions, forward_resume
 from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.approval.tool_owners import required_approval_tool_names, validate_approval_tool_owners
 from mindroom.delegation.background import child_snapshot, delegation_job, delegation_outcome
-from mindroom.delegation.cost import receive_subagent_cost, subagent_cost_metadata
+from mindroom.delegation.cost import receive_subagent_cost, stored_receipts, subagent_cost_metadata
 from mindroom.delegation.hooks import after_delegation, before_delegation
 from mindroom.delegation.job_approvals import request_child_approvals
 from mindroom.delegation.lifecycle import (
@@ -229,7 +229,7 @@ async def persist_delegation_state(
     """
     # A run that gets only its delegation key, such as a minimal-mode checkpoint an approval recovery resumes, bypasses
     # the save that stores what its turn's subagents cost, so the key carries it too.
-    changes = {DELEGATION_STATE_KEY: state.to_dict(), **subagent_cost_metadata()}
+    changes = {DELEGATION_STATE_KEY: state.to_dict(), **subagent_cost_metadata(response.metadata)}
     response.metadata = {**(response.metadata or {}), **changes}
     if store is None:
         msg = "Durable delegation requires persisted session storage"
@@ -260,15 +260,17 @@ async def _run_child(
     approval_calls: Sequence[ApprovalCall] | None,
     fresh: bool,
     prompt: str | None = None,
+    receipts: Mapping[str, float] | None = None,
 ) -> _ChildOutcome:
     """Reserve the child and run it in its execution scope; the caller holds its liveness through settlement.
 
     ``approval_calls`` are the decided calls a paused child resumes with, or None when no approval answers it; they
     name the child's calls by its own ids, as ``child_call_id`` gives them, and so does a bound approval receipt within
-    the scope. ``prompt`` is what a fresh child's first response is sent in place of its task.
+    the scope. ``prompt`` is what a fresh child's first response is sent in place of its task, and ``receipts`` what
+    its turn starts from having received.
     """
     await reserve_child_turn(child, owner=caller_identity, runtime_paths=runtime_paths)
-    async with child_run_context(child, config=config, runtime_paths=runtime_paths) as observation:
+    async with child_run_context(child, config=config, runtime_paths=runtime_paths, receipts=receipts) as observation:
         with approval_receipt_call_ids(partial(child_call_id, child.delegation_id)):
             response = await _execute_child(
                 child,
@@ -323,6 +325,8 @@ async def _execute_child(
     if persisted is None:
         msg = "Delegated run was interrupted before retaining an outcome"
         raise RuntimeError(msg)
+    # The attempt goes on collecting from what the turn's earlier attempts, before its pauses, received.
+    observation.subagent_cost.add(stored_receipts(persisted.metadata))
     if persisted.status != RunStatus.paused or approval_calls is None:
         # A retained pause must never acquire ownership from a later reconstruction.
         return _ChildOutcome(persisted, {})
@@ -412,6 +416,7 @@ async def _execute_child(
         )
         if decision.continuation is not None:
             note_child_run_id(child, uuid4().hex, runtime_paths, model_name=decision.continuation.model_name)
+            spent = {} if response.metrics is None else {response.run_id: response.metrics}
             return await _start_child_envelope(
                 child,
                 observation,
@@ -421,7 +426,7 @@ async def _execute_child(
                 prompt=decision.continuation.prompt,
                 refresh_scheduler=refresh_scheduler,
                 # The continuation's runs follow the resumed run and the attempts its turn spent before it.
-                prior_usage=(*prior_usage_of(response), *(() if response.metrics is None else (response.metrics,))),
+                prior_usage=prior_usage_by_run(response.metadata) | spent,
             )
     return _ChildOutcome(response, toolkit_owners)
 
@@ -435,13 +440,13 @@ async def _start_child_envelope(
     *,
     prompt: str,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-    prior_usage: Sequence[RunMetrics] = (),
+    prior_usage: Mapping[str, RunMetrics] | None = None,
 ) -> _ChildOutcome:
     """Run the normal response loop in the child's retained conversation scope.
 
     The outcome is the record the stream of the turn's last run ended with, which ``observation`` kept; a turn whose
     last run handed over none fails with the turn's reply. ``prior_usage`` is the usage of the child's turn before
-    the loop's first run.
+    the loop's first run, by run id.
     """
     result = None
     toolkit_owners = {}
@@ -680,6 +685,7 @@ async def _run_job_child(
     runtime: ToolJobRuntime,
     prompt: str | None,
     paused: _ChildOutcome | None = None,
+    receipts: Mapping[str, float] | None = None,
 ) -> tuple[DelegationTerminalStatus, str]:
     """Start, run, and settle a child inside its job, which asks for its approvals; return its status and text.
 
@@ -723,7 +729,13 @@ async def _run_job_child(
                 )
                 # From here on, recovery after a crash settles the child's audit record from the job's saved child.
                 await runtime.save_adapter(job_id, child=child_snapshot(child))
-            outcome = paused or await run(config=config, approval_calls=None, fresh=True, prompt=prompt)
+            outcome = paused or await run(
+                config=config,
+                approval_calls=None,
+                fresh=True,
+                prompt=prompt,
+                receipts=receipts,
+            )
             while outcome.response.status == RunStatus.paused:
                 calls = await _ask_child_approvals(
                     child,
@@ -784,14 +796,16 @@ def delegation_call_job(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     prompt: str | None = None,
     paused: tuple[RunRecord, Sequence[Sequence[str]]] | None = None,
+    receipts: Mapping[str, float] | None = None,
 ) -> JobSpec | str:
     """Return the job a prepared subagent call runs as, known as its child, or why the call cannot run.
 
     The job runs the child with the call's plugin hooks around it. The child's status decides the job's: the output
     policy shapes only the text, so a saved or redirected failure still fails the job and the call. ``prompt`` is
-    what the child's first response is sent in place of its task, which stays its label; no other child receives it.
-    ``paused`` is the paused run of ``child``'s turn and the owners its job saved (`APPROVAL_TOOLKITS_KEY`): the job
-    then resumes that turn instead of starting one.
+    what the child's first response is sent in place of its task, which stays its label; no other child receives it,
+    nor ``receipts``, what its turn starts from having received (``child_run_context``). ``paused`` is the paused run
+    of ``child``'s turn and the owners its job saved (`APPROVAL_TOOLKITS_KEY`): the job then resumes that turn
+    instead of starting one.
     """
     resumed = None
     if paused is not None:
@@ -830,6 +844,7 @@ def delegation_call_job(
                 runtime=runtime,
                 prompt=prompt,
                 paused=resumed,
+                receipts=receipts,
             )
         except BaseException as error:
             await after_delegation(
@@ -1151,7 +1166,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         # Completed and failed children both close the parent call and its after hook.
         receipt = await finish_child_turn(child, config=config, runtime_paths=runtime_paths)
     # The turn the parent call's answer reaches receives what the child cost.
-    receive_subagent_cost(child.cost_usd)
+    receive_subagent_cost(child.delegation_id, child.cost_usd)
     result = resolve_result(
         _finalize_delegation_output(_child_result_text(child, receipt), output_request),
         failed=child.status != "completed",

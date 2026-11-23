@@ -330,6 +330,25 @@ CORS for `/api/client-sessions`, `/api/plugins`, `/api/plugins/`, `/api/call-tra
 Browsers let only those origins read these paths' responses, with credentials off, and every response carries `Cache-Control: no-store`; behind a proxy that serves MindRoom under a root path, the paths are matched below that root path.
 CORS limits which pages may read a response, not which requests reach MindRoom: a simple request from any origin still reaches a public plugin route.
 
+## Tailnet SSH
+
+[Tailnet SSH](https://docs.mindroom.chat/tailnet-ssh/) grants the reach of the opted-in agent's shell, including shared workers and all files their shells can see.
+It uses the worker-routed shell's responder access predicate without a conversation room; grants only through `access.current_room_members` do not apply.
+The gateway enrolls one persistent node per worker key; its node state and reusable tailnet auth key never reach workers.
+
+A permissive tailnet policy can let any member reach a node's TCP port 22, so the gateway checks the exact `WhoIs` login before contacting the primary and refuses tagged or unmatched peers.
+The primary rechecks the login and agent access before and after waking the exact worker and returns its marked endpoint, never one supplied by the peer.
+The separate gateway listener checks its bearer token before routing or reading a body; only the primary and gateway hold that token.
+The gateway never calls the Docker or Kubernetes control plane.
+
+The primary projects `sshd_config`, the worker's Ed25519 host private key, and `authorized_keys` into the worker read-only; the worker UID can read its host key.
+OpenSSH accepts the union of current admitted requesters' keys for that worker, not a login/key pair, with `restrict,pty` on every key and forwarding disabled.
+Worker code runs as the same UID as the SSH session, so do not forward credentials or trust code from the worker.
+
+Revocation refuses new gateway admissions but does not end established sessions or clear the projection; every admitted connect refreshes the keys.
+Docker never publishes SSH on a wildcard host address, but workers on the same bridge can reach one another's port `2222` directly, where only the projected keys are checked.
+On Kubernetes, the gateway policy denies pod-network ingress and restricts egress; the primary and worker ingress policies are also needed to deny direct access from unrelated pods.
+
 ## Known gaps
 
 These are tracked gaps, not intentional behaviors; fix them rather than documenting around them.

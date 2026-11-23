@@ -175,6 +175,11 @@ class CommandTurnExecutor:
             )
 
         orchestrator = self.deps.runtime.orchestrator
+
+        async def admit_compaction(name: str, target: MessageTarget, requester_id: str) -> bool:
+            bot = orchestrator.agent_bots.get(name)
+            return bot is not None and await bot.admit_compaction(target, requester_id)
+
         context = CommandHandlerContext(
             client=self._client(),
             config=self.deps.runtime.config,
@@ -195,6 +200,7 @@ class CommandTurnExecutor:
             steward_may_write_state=partial(steward_may_write_state, orchestrator.room_steward),
             budget_monitor=orchestrator.budgets,
             workflow_engine=orchestrator.workflow_engine,
+            admit_compaction=admit_compaction,
         )
         await handle_command(
             context=context,

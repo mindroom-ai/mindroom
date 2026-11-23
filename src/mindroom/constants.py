@@ -57,6 +57,7 @@ _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config
 CONTROL_STATE_PATH_ENV = runtime_env_policy.CONTROL_STATE_PATH_ENV
 _RUNTIME_PATH_ENV_KEYS = frozenset({"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH", CONTROL_STATE_PATH_ENV})
 _SANDBOX_STARTUP_MANIFEST_RELATIVE_PATH = Path(".runtime") / "startup_manifest.json"
+STARTUP_MANIFEST_EAGER_SETUP_PLUGINS = "eager_setup_plugins"
 _CONFIG_PATH_PLACEHOLDER_PATTERN = re.compile(r"\$(?:\{(?P<braced>[A-Z0-9_]+)\}|(?P<bare>[A-Z0-9_]+))")
 
 # Bash bookkeeping vars that change every time printenv runs and are never
@@ -445,13 +446,19 @@ def _serialize_startup_manifest(
     *,
     tool_validation_snapshot: Mapping[str, object] | None = None,
     public_runtime: bool = False,
+    eager_setup_plugins: Sequence[str] | None = None,
 ) -> dict[str, object]:
-    """Return one JSON-compatible startup manifest for sandbox runners."""
+    """Return one JSON-compatible startup manifest for sandbox runners.
+
+    ``eager_setup_plugins`` asks the runner to prepare itself when its container starts, and lists the enabled plugin
+    paths it may then import once for all its calls; None leaves the runner preparing itself on its first request.
+    """
     return {
         "runtime_paths": serialize_public_runtime_paths(runtime_paths)
         if public_runtime
         else serialize_runtime_paths(runtime_paths),
         "tool_validation_snapshot": dict(tool_validation_snapshot or {}),
+        **({} if eager_setup_plugins is None else {STARTUP_MANIFEST_EAGER_SETUP_PLUGINS: list(eager_setup_plugins)}),
     }
 
 
@@ -460,6 +467,7 @@ def _startup_manifest_json(
     *,
     tool_validation_snapshot: Mapping[str, object] | None = None,
     public_runtime: bool = False,
+    eager_setup_plugins: Sequence[str] | None = None,
 ) -> str:
     """Return one deterministic JSON string for sandbox-runner startup state."""
     return json.dumps(
@@ -467,6 +475,7 @@ def _startup_manifest_json(
             runtime_paths,
             tool_validation_snapshot=tool_validation_snapshot,
             public_runtime=public_runtime,
+            eager_setup_plugins=eager_setup_plugins,
         ),
         separators=(",", ":"),
         sort_keys=True,
@@ -478,12 +487,14 @@ def startup_manifest_sha256(
     *,
     tool_validation_snapshot: Mapping[str, object] | None = None,
     public_runtime: bool = False,
+    eager_setup_plugins: Sequence[str] | None = None,
 ) -> str:
     """Return one stable content hash for sandbox-runner startup state."""
     payload = _startup_manifest_json(
         runtime_paths,
         tool_validation_snapshot=tool_validation_snapshot,
         public_runtime=public_runtime,
+        eager_setup_plugins=eager_setup_plugins,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -499,6 +510,7 @@ def write_startup_manifest(
     *,
     tool_validation_snapshot: Mapping[str, object] | None = None,
     public_runtime: bool = False,
+    eager_setup_plugins: Sequence[str] | None = None,
 ) -> Path:
     """Write one sandbox-runner startup manifest and return its path."""
     manifest_path = sandbox_startup_manifest_path(storage_root)
@@ -509,6 +521,7 @@ def write_startup_manifest(
             runtime_paths,
             tool_validation_snapshot=tool_validation_snapshot,
             public_runtime=public_runtime,
+            eager_setup_plugins=eager_setup_plugins,
         ),
     )
     return manifest_path
@@ -1113,8 +1126,14 @@ HOOK_SOURCE_RUN_METADATA_KEY = "hook_source"
 TURN_INTENT_RUN_METADATA_KEY = "turn_intent"
 # Run metadata key holding the usage of the attempts the run's turn spent before it, summed, as run metrics are stored.
 PRIOR_USAGE_RUN_METADATA_KEY = "mindroom_prior_usage"
+# Run metadata key holding that usage by the run id of each attempt, so two runs' views of one turn merge by attempt.
+PRIOR_USAGE_BY_RUN_METADATA_KEY = "mindroom_prior_usage_by_run"
 # Run metadata key holding what the subagent turns whose results the run's turn received cost so far, in USD.
 SUBAGENT_COST_RUN_METADATA_KEY = "mindroom_subagent_cost_usd"
+# Run metadata key holding that cost by the delegation id of each received turn, which the sum above totals.
+SUBAGENT_RECEIPTS_RUN_METADATA_KEY = "mindroom_subagent_receipts"
+# The id a turn's carried cost is kept under when it was stored as one sum, without the ids above.
+LEGACY_COST_ID = "legacy"
 MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY = "matrix_message_target"
 MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
 # The recovered runs a turn's replay continued, which its answer's message is linked to as well.

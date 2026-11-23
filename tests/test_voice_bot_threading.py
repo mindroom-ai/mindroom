@@ -59,7 +59,7 @@ from tests.turn_dispatch_helpers import prepared_turn_recorder
 if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-    from mindroom.response_lifecycle import _QueuedMessageState
+    from mindroom.response_lifecycle import _Conversation
     from mindroom.turn_record import TurnRecord
 
 
@@ -541,7 +541,7 @@ async def test_voice_plain_reply_unproven_thread_candidate_is_not_admitted(
         await bot._conversation_resolver.coalescing_thread_id(room, voice_event)
 
 
-async def _waiting(queued_signal: _QueuedMessageState) -> None:
+async def _waiting(queued_signal: _Conversation) -> None:
     """Return once a message waits for the active response."""
     while not queued_signal.has_pending_human_messages():  # noqa: ASYNC110
         await asyncio.sleep(0.001)
@@ -575,7 +575,7 @@ async def test_voice_message_signals_active_turn_once_transcribed(mock_home_bot:
         event_source=voice_event.source,
     )
     lifecycle = unwrap_extracted_collaborator(bot._response_runner).lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal = lifecycle._conversation_for(target)
     prepare_started = asyncio.Event()
     allow_prepare = asyncio.Event()
 
@@ -749,8 +749,8 @@ async def test_voice_message_queued_notice_uses_the_conversation_fixed_before_st
         event_source=normalized_event.source,
     )
     lifecycle = unwrap_extracted_collaborator(bot._response_runner).lifecycle_coordinator
-    pre_stt_signal = lifecycle._get_or_create_queued_signal(pre_stt_target)
-    alternate_signal = lifecycle._get_or_create_queued_signal(alternate_target)
+    pre_stt_signal = lifecycle._conversation_for(pre_stt_target)
+    alternate_signal = lifecycle._conversation_for(alternate_target)
     dispatch_count = 0
 
     async def capture_dispatch(*_args: object, **_kwargs: object) -> None:
@@ -844,7 +844,7 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
         event_source=voice_event.source,
     )
     lifecycle = unwrap_extracted_collaborator(bot._response_runner).lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal = lifecycle._conversation_for(target)
     dispatch_count = 0
     prepare_started = asyncio.Event()
     allow_prepare = asyncio.Event()

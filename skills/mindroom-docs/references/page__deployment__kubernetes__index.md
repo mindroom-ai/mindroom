@@ -155,6 +155,7 @@ Further options, such as extra labels, annotations, volumes, containers, and the
 | `workers.kubernetes.storageSubpathPrefix` | `MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX` | `workers` | Storage directory for worker-local caches |
 | `workers.kubernetes.port` | `MINDROOM_KUBERNETES_WORKER_PORT` | `8766` | Internal Service and container port |
 | `workers.kubernetes.readyTimeoutSeconds` | `MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS` | `60` | How long the primary waits for a worker to become ready |
+| _(`env.extra`)_ | `MINDROOM_KUBERNETES_WORKER_SETUP_TIMEOUT_SECONDS` | `180` | How long a call then waits for a worker that just started to finish preparing itself, before it runs anyway |
 | `workers.kubernetes.idleTimeoutSeconds` | `MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS` | `1800` | Idle time before a worker may scale to zero |
 | `workers.cleanupIntervalSeconds` | `MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS` | Chart: `30`; otherwise `0` (no automatic cleanup) | How often idle-worker cleanup runs |
 | `workers.kubernetes.reconcilePodTemplates` | `MINDROOM_KUBERNETES_WORKER_RECONCILE_POD_TEMPLATES` | `true` | Recreate workers whose image, env, or resources changed |
@@ -172,6 +173,11 @@ Further options, such as extra labels, annotations, volumes, containers, and the
 
 Changing the image, environment, resources, or RuntimeClass recreates scaled-down workers on the next cleanup pass and running workers on their next use, so no manual recycling is needed; finish active work before changing them.
 Before selecting a RuntimeClass, verify that its handler is available on every eligible worker node and supports the configured storage driver, access mode, and mount behavior.
+
+A worker that just started is ready as soon as it answers, and then prepares its Python environment, shell, and tool runtime in the background.
+The call that started it shows `worker <name>: preparing (<n>s)` while it waits for that, for at most the setup timeout; a preparation that fails or takes longer never fails the worker, and the call then prepares what is missing itself.
+A command that streams its output, as `workers run` does, and a viewer that only shows the worker do not wait for that: the worker launches such a command itself, without the tool runtime.
+The tool runtime imports the plugins that set [`worker_preload`](https://docs.mindroom.chat/plugins/#importing-once-per-worker) once for all the worker's calls.
 
 Each worker's `/tmp` is disk-backed, and exceeding its size limit evicts that worker pod rather than refusing writes.
 `MINDROOM_KUBERNETES_WORKER_TMP_SIZE_LIMIT` (for example `4Gi`) also requests and limits the same amount of container `ephemeral-storage`, which clusters such as GKE Autopilot otherwise cap at 1 GiB.

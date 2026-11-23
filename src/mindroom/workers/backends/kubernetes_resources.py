@@ -23,6 +23,7 @@ import os
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -55,6 +56,7 @@ from mindroom.workers.backends._dedicated_worker_common import (
     plan_shared_directory_mounts,
     resolve_state_scope_worker_key,
     stable_json_digest,
+    tailnet_ssh_marked,
     validate_unique_worker_visible_paths,
 )
 from mindroom.workers.backends._lifecycle import WorkerLifecycleState
@@ -71,6 +73,7 @@ from mindroom.workers.backends.kubernetes_pod_names import (
     WORKER_STORAGE_VOLUME_NAME,
     WORKER_TMP_VOLUME_NAME,
 )
+from mindroom.workers.models import LABEL_TAILNET_SSH, LABEL_TAILNET_SSH_RELEASE, WORKER_SSH_PORT
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -84,8 +87,12 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _READY_POLL_INTERVAL_SECONDS = 1.0
+_HEALTHZ_TIMEOUT_SECONDS = 5.0
+_HEALTHZ_FIRST_CONNECT_TIMEOUT_SECONDS = 0.5
+_HEALTHZ_RETRY_INTERVAL_SECONDS = 0.2
 _DELETE_POLL_INTERVAL_SECONDS = 0.2
 _HOSTNAME_ENV = "HOSTNAME"
+_MERGE_PATCH_CONTENT_TYPE = "application/merge-patch+json"
 
 _ANNOTATION_CREATED_AT = "mindroom.ai/created-at"
 _ANNOTATION_LAST_USED_AT = "mindroom.ai/last-used-at"
@@ -285,7 +292,14 @@ class _CoreApiProtocol(Protocol):
 
     def create_namespaced_service(self, namespace: str, body: dict[str, object]) -> object: ...
 
-    def patch_namespaced_service(self, name: str, namespace: str, body: dict[str, object]) -> object: ...
+    def patch_namespaced_service(
+        self,
+        name: str,
+        namespace: str,
+        body: dict[str, object],
+        *,
+        _content_type: str,
+    ) -> object: ...
 
     def delete_namespaced_service(self, name: str, namespace: str) -> None: ...
 
@@ -315,9 +329,14 @@ def _validate_manifest(manifest: dict[str, object]) -> None:
     validated_kubernetes_object(f"V1{kind}", manifest, what=f"The worker {kind} manifest")
 
 
+def service_dns_name(service_name: str, namespace: str) -> str:
+    """Return the cluster-local DNS name of one worker Service."""
+    return f"{service_name}.{namespace}.svc.cluster.local"
+
+
 def service_host(service_name: str, namespace: str, port: int) -> str:
     """Return the cluster-local HTTP root for one worker Service."""
-    return f"http://{service_name}.{namespace}.svc.cluster.local:{port}"
+    return f"http://{service_dns_name(service_name, namespace)}:{port}"
 
 
 def worker_auth_token(shared_token: str | None, worker_key: str) -> str | None:
@@ -712,14 +731,15 @@ class KubernetesResourceManager:
                 return None
             raise
 
-    def apply_service(self, worker_id: str) -> None:
-        """Create-or-patch one worker Service."""
+    def apply_service(self, worker_id: str, *, ssh: bool) -> None:
+        """Create or patch a worker Service, with sshd's port only if marked."""
         self._apply_object(
             read_fn=self._core.read_namespaced_service,
             create_fn=self._core.create_namespaced_service,
-            patch_fn=self._core.patch_namespaced_service,
+            # Replace the port list: strategic merge would leave 2222 after opt-out.
+            patch_fn=partial(self._core.patch_namespaced_service, _content_type=_MERGE_PATCH_CONTENT_TYPE),
             resource_name=worker_id,
-            manifest=self._service_manifest(worker_id),
+            manifest=self._service_manifest(worker_id, ssh=ssh),
         )
 
     def apply_auth_secret(self, *, worker_key: str, worker_id: str) -> None:
@@ -760,10 +780,11 @@ class KubernetesResourceManager:
         state_scope_worker_key: str | None = None,
         resource_profile: str | None = None,
         recreate: bool = False,
-    ) -> bool:
+    ) -> tuple[bool, bool]:
         """Create-or-patch one worker Deployment, recreating it for pod-template drift or when asked.
 
-        Returns whether the Deployment was recreated.
+        Returns whether the Deployment was recreated, and the tailnet SSH mark of the template rendered for it,
+        which the worker's Service follows.
         """
         manifest = self._deployment_manifest(
             worker_key=worker_key,
@@ -776,17 +797,18 @@ class KubernetesResourceManager:
             state_scope_worker_key=state_scope_worker_key,
             resource_profile=resource_profile,
         )
+        desired_metadata = cast("dict[str, object]", manifest.get("metadata", {}))
+        ssh = cast("dict[str, str]", desired_metadata["labels"]).get(LABEL_TAILNET_SSH) == "true"
         existing = self.read_deployment(worker_id)
         if existing is not None:
             existing_annotations = existing.metadata.annotations or {}
-            desired_metadata = cast("dict[str, object]", manifest.get("metadata", {}))
             desired_annotations = cast("dict[str, str]", desired_metadata.get("annotations", {}))
             if (
                 recreate
                 or existing_annotations.get(ANNOTATION_TEMPLATE_HASH) != desired_annotations[ANNOTATION_TEMPLATE_HASH]
             ):
                 self._recreate_deployment(worker_id, manifest, timeout_seconds=self.config.ready_timeout_seconds)
-                return True
+                return True, ssh
         self._apply_object(
             read_fn=self._apps.read_namespaced_deployment,
             create_fn=self._apps.create_namespaced_deployment,
@@ -794,7 +816,7 @@ class KubernetesResourceManager:
             resource_name=worker_id,
             manifest=manifest,
         )
-        return False
+        return False, ssh
 
     def patch_deployment(
         self,
@@ -957,7 +979,7 @@ class KubernetesResourceManager:
             secret_name,
             self.config.namespace,
             body,
-            _content_type="application/merge-patch+json",
+            _content_type=_MERGE_PATCH_CONTENT_TYPE,
         )
 
     def _recreate_deployment(
@@ -1030,19 +1052,24 @@ class KubernetesResourceManager:
         """Return the first successful ``/healthz`` answer from one worker through its Service."""
         healthz_url = f"{service_host(worker_id, self.config.namespace, self.config.worker_port)}/healthz"
         deadline = time.time() + timeout_seconds
-        with httpx.Client(timeout=min(5.0, timeout_seconds)) as client:
-            while True:
-                # The Service can still route nowhere for a moment after its Deployment turns ready.
+        # A Service drops connections until its Endpoints propagate, so the first try gives up on connecting fast,
+        # and each later one allows a slower handshake, up to the time a whole answer may take.
+        connect_timeout = _HEALTHZ_FIRST_CONNECT_TIMEOUT_SECONDS
+        with httpx.Client(timeout=_HEALTHZ_TIMEOUT_SECONDS) as client:
+            # The clock decides after each try whether there is another, and no try gets more than the time left.
+            while (remaining := deadline - time.time()) > 0:
+                answer_timeout = min(_HEALTHZ_TIMEOUT_SECONDS, remaining)
+                timeout = httpx.Timeout(answer_timeout, connect=min(connect_timeout, answer_timeout))
                 try:
-                    response = client.get(healthz_url)
+                    response = client.get(healthz_url, timeout=timeout)
                 except httpx.HTTPError:
                     response = None
                 if response is not None and response.is_success:
                     return response
-                if time.time() >= deadline:
-                    msg = f"Kubernetes worker '{worker_id}' did not answer its health check within {timeout_seconds:.0f}s."
-                    raise WorkerStartTimeoutError(msg)
-                time.sleep(_READY_POLL_INTERVAL_SECONDS)
+                connect_timeout = min(connect_timeout * 2, _HEALTHZ_TIMEOUT_SECONDS)
+                time.sleep(max(min(_HEALTHZ_RETRY_INTERVAL_SECONDS, deadline - time.time()), 0.0))
+        msg = f"Kubernetes worker '{worker_id}' did not answer its health check within {timeout_seconds:.0f}s."
+        raise WorkerStartTimeoutError(msg)
 
     def _apply_object(
         self,
@@ -1098,8 +1125,13 @@ class KubernetesResourceManager:
         self.core_api = cast("_CoreApiProtocol", kubernetes_client.CoreV1Api())
         self.api_exception_cls = cast("type[_ApiStatusError]", kubernetes_exceptions.ApiException)
 
-    def _service_manifest(self, worker_id: str) -> dict[str, object]:
+    def _service_manifest(self, worker_id: str, *, ssh: bool) -> dict[str, object]:
         worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
+        ports: list[dict[str, object]] = [
+            {"name": "api", "port": self.config.worker_port, "targetPort": self.config.worker_port},
+        ]
+        if ssh:
+            ports.append({"name": "ssh", "port": WORKER_SSH_PORT, "targetPort": WORKER_SSH_PORT})
         metadata: dict[str, object] = {
             "name": worker_id,
             "namespace": self.config.namespace,
@@ -1114,13 +1146,7 @@ class KubernetesResourceManager:
             "metadata": metadata,
             "spec": {
                 "selector": worker_labels,
-                "ports": [
-                    {
-                        "name": "api",
-                        "port": self.config.worker_port,
-                        "targetPort": self.config.worker_port,
-                    },
-                ],
+                "ports": ports,
             },
         }
 
@@ -1195,7 +1221,7 @@ class KubernetesResourceManager:
         startup_manifest_hash = self._startup_manifest_hash(
             worker_key=worker_key,
             state_subpath=state_subpath,
-            tool_validation_snapshot=launch.tool_validation_snapshot,
+            launch=launch,
         )
         template = self._pod_template(
             worker_key=worker_key,
@@ -1242,6 +1268,12 @@ class KubernetesResourceManager:
             msg = "A worker auth token is required for Kubernetes workers."
             raise WorkerBackendError(msg)
         template_annotations[_ANNOTATION_RUNNER_TOKEN_HASH] = token_hash
+        container_ports: list[dict[str, object]] = [{"containerPort": self.config.worker_port, "name": "api"}]
+        if tailnet_ssh_marked(worker_key, launch, state_scope_worker_key):
+            worker_labels[LABEL_TAILNET_SSH] = "true"
+            if self.config.tailnet_ssh_release_id is not None:
+                worker_labels[LABEL_TAILNET_SSH_RELEASE] = self.config.tailnet_ssh_release_id
+            container_ports.append({"containerPort": WORKER_SSH_PORT, "name": "ssh"})
         template_spec: dict[str, object] = {
             "serviceAccountName": self.config.service_account_name,
             "automountServiceAccountToken": False,
@@ -1262,7 +1294,7 @@ class KubernetesResourceManager:
                     # A container command replaces the image's tini entrypoint, so name tini here:
                     # PID 1 must reap the children a killed command's process group leaves behind.
                     "command": ["tini", "--", "/app/run-sandbox-runner.sh"],
-                    "ports": [{"containerPort": self.config.worker_port, "name": "api"}],
+                    "ports": container_ports,
                     "env": self._worker_env(
                         worker_key=worker_key,
                         worker_id=worker_id,
@@ -1347,11 +1379,10 @@ class KubernetesResourceManager:
         state_scope_worker_key: str | None = None,
         resource_profile: str | None = None,
     ) -> dict[str, object]:
-        worker_labels = _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)
         startup_manifest_hash = self.write_startup_manifest(
             worker_key=worker_key,
             state_subpath=state_subpath,
-            tool_validation_snapshot=launch.tool_validation_snapshot,
+            launch=launch,
         )
         template = self._pod_template(
             worker_key=worker_key,
@@ -1363,10 +1394,12 @@ class KubernetesResourceManager:
             state_scope_worker_key=state_scope_worker_key,
             resource_profile=resource_profile,
         )
+        # The Deployment carries its pods' labels, the tailnet SSH mark among them; its selector never has the mark.
+        template_labels = cast("dict[str, dict[str, str]]", template["metadata"])["labels"]
         metadata: dict[str, object] = {
             "name": worker_id,
             "namespace": self.config.namespace,
-            "labels": worker_labels,
+            "labels": dict(template_labels),
         }
         owner_reference = self._owner_reference_or_none()
         if owner_reference is not None:
@@ -1395,7 +1428,7 @@ class KubernetesResourceManager:
             "metadata": metadata,
             "spec": {
                 "replicas": replicas,
-                "selector": {"matchLabels": worker_labels},
+                "selector": {"matchLabels": _labels(extra_labels=self.config.extra_labels, worker_id=worker_id)},
                 "template": template,
             },
         }
@@ -1465,12 +1498,13 @@ class KubernetesResourceManager:
         *,
         worker_key: str,
         state_subpath: str,
-        tool_validation_snapshot: Mapping[str, object],
+        launch: WorkerLaunchConfig,
     ) -> str:
         """Return the content hash of one worker's startup manifest without writing it."""
         return dedicated_worker_startup_manifest_hash(
             self._worker_runtime_paths(worker_key=worker_key, state_subpath=state_subpath),
-            tool_validation_snapshot=tool_validation_snapshot,
+            tool_validation_snapshot=launch.tool_validation_snapshot,
+            eager_setup_plugins=launch.worker_preload_plugins,
         )
 
     def write_startup_manifest(
@@ -1478,13 +1512,14 @@ class KubernetesResourceManager:
         *,
         worker_key: str,
         state_subpath: str,
-        tool_validation_snapshot: Mapping[str, object],
+        launch: WorkerLaunchConfig,
     ) -> str:
         """Write one worker's startup manifest into its state directory and return the manifest's hash."""
         return write_dedicated_worker_startup_manifest(
             (self.storage_root / state_subpath).resolve(),
             self._worker_runtime_paths(worker_key=worker_key, state_subpath=state_subpath),
-            tool_validation_snapshot=tool_validation_snapshot,
+            tool_validation_snapshot=launch.tool_validation_snapshot,
+            eager_setup_plugins=launch.worker_preload_plugins,
         )
 
     def _worker_layout(self, state_subpath: str) -> DedicatedWorkerLayout:

@@ -421,6 +421,6 @@ class DelegateTools(Toolkit, ManagedJobToolkit):
         except SubagentSessionError as error:
             return str(error)
         # The turn that made this call receives what the settled child cost.
-        receive_subagent_cost(child.cost_usd)
+        receive_subagent_cost(child.delegation_id, child.cost_usd)
         # The stable child record reference follows the child's answer.
         return f"{result.text}\n\n{result.receipt}" if result.receipt else result.text

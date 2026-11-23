@@ -14,11 +14,12 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom import reply_lifecycle as rl
 from mindroom.ai_runtime import bind_mid_turn_conversation_context
-from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.background_tasks import create_background_task
 from mindroom.config.resolution import memory_backend
+from mindroom.constants import CONTINUED_RUNS_METADATA_KEY
 from mindroom.contacts.turns import contact_room
+from mindroom.conversation_resolver import read_fresh_thread_history
 from mindroom.conversation_state_writer import session_started_on_creation
 from mindroom.delivery_gateway import ResponseIdentity
 from mindroom.entity_resolution import current_internal_sender_ids
@@ -42,6 +43,7 @@ from mindroom.reply_scope import current_span, release_decision, suppress_decisi
 from mindroom.reply_turn.request import (
     correlation_id_for_request,
     reply_authorization_entity_names,
+    requester_remains_authorized,
 )
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
@@ -189,10 +191,11 @@ class LockedTurns:
             membership_turn_id=request.response_envelope.source_event_id,
             queue_memory_persistence=queue_memory_persistence,
             queue_skill_review=queue_skill_review,
+            # A reply that continues runs a restart cut short reports their usage too: undated, so budgets recount.
             notify_response_finished=self.response_finished_notifier(
                 request.sources.logical_source_event_ids,
                 request.user_id,
-                request.requested_at,
+                None if CONTINUED_RUNS_METADATA_KEY in (request.matrix_run_metadata or {}) else request.requested_at,
             ),
             persist_response_event_id=persist_response_event_id,
         )
@@ -282,19 +285,15 @@ class LockedTurns:
     ) -> bool:
         """Recheck one requester after serialized lifecycle admission."""
         requester_id = request.response_envelope.requester_id
-        entity_names = reply_authorization_entity_names(
-            self.deps.runtime.config,
-            self.deps.agent_name,
-            reply_entity_names,
-        )
-        if is_sender_allowed_for_entity_replies_in_room(
+        config = self.deps.runtime.config
+        if requester_remains_authorized(
             requester_id,
-            entity_names,
-            self.deps.runtime.config,
             request.room_id,
-            self.deps.runtime_paths,
-            self.deps.runtime.agent_reply_memberships,
-            require_resolved_membership=True,
+            owner_entity_name=self.deps.agent_name,
+            config=config,
+            runtime_paths=self.deps.runtime_paths,
+            membership_index=self.deps.runtime.agent_reply_memberships,
+            reply_entity_names=reply_entity_names,
         ):
             return True
         self.deps.logger.info(
@@ -302,7 +301,7 @@ class LockedTurns:
             source_event_id=request.response_envelope.source_event_id,
             requester_id=requester_id,
             room_id=request.room_id,
-            entity_names=entity_names,
+            entity_names=reply_authorization_entity_names(config, self.deps.agent_name, reply_entity_names),
         )
         return False
 
@@ -333,14 +332,8 @@ class LockedTurns:
         exclude_event_id: str | None = None,
     ) -> ResponseRequest:
         """Refresh model-facing thread history once this turn owns the lifecycle lock."""
-        if request.thread_id is None:
-            return request
-
         try:
-            refreshed_history = await self.deps.resolver.fetch_thread_history(
-                request.room_id,
-                request.thread_id,
-            )
+            refreshed_history = await read_fresh_thread_history(self.deps.resolver, request.response_envelope.target)
         except Exception as exc:
             if request.requires_model_history_refresh:
                 raise
@@ -351,6 +344,8 @@ class LockedTurns:
                 error=str(exc),
             )
             return replace(request, requires_model_history_refresh=True)
+        if refreshed_history is None:
+            return request
         if exclude_event_id is not None:
             filtered_history = [message for message in refreshed_history if message.event_id != exclude_event_id]
             if len(filtered_history) != len(refreshed_history):

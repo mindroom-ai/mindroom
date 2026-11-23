@@ -122,7 +122,9 @@ class InteractiveSelections:
             selected_value=dispatch.selection.selected_value,
         )
         try:
-            reservation = await self.deps.response_runner.reserve_response_lifecycle(response_envelope)
+            reservation = await self.deps.response_runner.lifecycle_coordinator.reserve_response_lifecycle(
+                response_envelope,
+            )
         except BaseException:
             self.deps.retry_dispatch_sources(response_target.room_id, (source_event_id,))
             raise

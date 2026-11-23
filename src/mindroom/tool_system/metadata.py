@@ -42,7 +42,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.named import named_workers_refusal
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping
+    from collections.abc import Callable, Collection, Iterable, Mapping
 
     from mindroom.config.main import Config
     from mindroom.config.models import FileAccess
@@ -185,7 +185,7 @@ def _validate_text_authored_override_value(
     agent_override_field = _agent_override_field(metadata, field.name)
     try:
         if field.type == "string[]":
-            values = normalize_string_array_override(value, preserve_empty_list=True)
+            values = _normalize_string_array_override(value, preserve_empty_list=True)
             pattern = (field.validation or {}).get("pattern")
             if pattern:
                 if values is None and isinstance(value, str):
@@ -199,7 +199,7 @@ def _validate_text_authored_override_value(
                     raise ToolConfigOverrideError(msg)
             return values
         if agent_override_field is not None and agent_override_field.type == "string[]":
-            normalized = normalize_string_array_override(value)
+            normalized = _normalize_string_array_override(value)
             return None if normalized is None else ", ".join(normalized)
     except TypeError as exc:
         msg = f"{full_path}: {exc}."
@@ -541,7 +541,7 @@ def _pop_implicit_toolkit_filters(
     include_tools, exclude_tools = (
         None
         if name in declared_names
-        else normalize_string_array_override(init_kwargs.pop(name, None), preserve_empty_list=True)
+        else _normalize_string_array_override(init_kwargs.pop(name, None), preserve_empty_list=True)
         for name in ("include_tools", "exclude_tools")
     )
     return include_tools, exclude_tools
@@ -694,6 +694,44 @@ class _ToolSettings:
     tool_init_overrides: dict[str, object] | None
     # The credentials manager the stored settings came from, which the toolkit and its worker calls also use.
     credentials_manager: CredentialsManager | None
+
+
+def offered_functions(
+    metadata: ToolMetadata,
+    settings: Mapping[str, object],
+    *,
+    validate_filters: bool = False,
+) -> tuple[frozenset[str] | None, bool]:
+    """Return the toolkit's functions its settings leave on, and whether one it names as writing is among them.
+
+    A function stays on by Agno's ``all`` or ``enable_<function>``, then the filters. The functions are None when the
+    toolkit declares no function names, as a plugin or MCP server may, and no allowlist names them. A toolkit that
+    names no writing functions writes when it runs code. Request filter validation only when the declared functions
+    and enable flags predict what the constructor registers, as they do for shell.
+    """
+    values = {config_field.name: config_field.default for config_field in metadata.config_fields or ()} | dict(settings)
+    include, exclude = (
+        _normalize_string_array_override(values.get(name), preserve_empty_list=True)
+        for name in ("include_tools", "exclude_tools")
+    )
+
+    def offered(names: Iterable[str], *, validate: bool = False) -> frozenset[str]:
+        enabled = frozenset(name for name in names if values.get("all") or values.get(f"enable_{name}", True))
+        if validate:
+            filtered = _offered_function_names(
+                enabled,
+                include_tools=include,
+                exclude_tools=exclude,
+                declared_functions=frozenset(metadata.function_names or ()),
+            )
+            return enabled if filtered is None else filtered
+        return frozenset(name for name in enabled if tool_name_allowed(name, include=include, exclude=exclude))
+
+    available = metadata.function_names or include
+    functions = None if available is None else offered(available, validate=validate_filters)
+    if not metadata.workspace_writers:
+        return functions, metadata.executes_code
+    return functions, bool(offered(metadata.workspace_writers))
 
 
 def resolve_tool_settings(
@@ -1148,7 +1186,7 @@ def export_tools_metadata(tool_metadata: Mapping[str, ToolMetadata]) -> list[dic
     return tools
 
 
-def normalize_string_array_override(
+def _normalize_string_array_override(
     value: object,
     *,
     preserve_empty_list: bool = False,

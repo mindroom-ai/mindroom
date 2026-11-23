@@ -275,6 +275,13 @@ Matrix sync callback
 | `api/sandbox_runner_scripts.py` | Worker routes that launch, poll, and signal a run under the worker's supervisor |
 | `api/script_gateway.py` | Capability-authenticated HTTP gateway scripts call tools through, and the listener helper the second listeners beside the API share |
 | `api/workflow_gateway.py` | Capability-authenticated routes a workflow attempt's script calls for its run, nodes, results, log, and report, served on both listeners |
+| `tailnet_ssh/store.py` | Primary-only ledger of link IDs, hostnames, and host keys by worker key |
+| `tailnet_ssh/projection.py` | The `sshd_config`, `authorized_keys`, and host key the primary writes into a worker's read-only `.runtime/ssh/` |
+| `tailnet_ssh/links.py` | Lists authorized shell targets by worker, admits connections to the exact worker, and records SSH activity |
+| `tailnet_ssh/session.py` | The worker's sshd `ForceCommand` for interactive shells, commands, and SFTP |
+| `api/tailnet_ssh_gateway.py` | Separate bearer-only listener for link listing, connection admission, and activity reports |
+| `api/worker_ssh.py` | Authenticated runner `/ssh/start` route that stores the worker's shell launch and starts sshd on port 2222 |
+| `config/tailnet_ssh.py` | The operator's exact tailnet login and SSH public keys per Matrix user, including public key validation |
 | `script_sdk.py` | The standard-library `MindRoomTools` client a script calls tools with |
 | `workflow.py` | The standard-library SDK a workflow script imports: lanes and call keys, the gateway client, `tool`, `shell`, `phase`, `log`, and the loader that calls `main(args)` |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
@@ -400,7 +407,7 @@ Matrix sync callback
 | `model_selection.py` | Structured model request/result values and frozen acknowledgement metadata |
 | `model_selection_scope.py` | Current joined membership and readable-root eligibility for model selection |
 | `ai_runtime.py` | The queued-message notice a reply's loop appends after a tool batch, its mid-turn judgment, whether the request a model answered told it to pause, and the empty-response notice |
-| `providers/openai/` | OpenAI-family adapters: one Chat Completions adapter for every OpenAI-compatible route, one Responses adapter for OpenAI and Codex, `build_provider`, the OpenRouter Claude cache ladder, OpenAI server-side tool search tagging, the Responses explicit cache breakpoint on the stable system message and ordered output replay, and the Responses route's request sizing (`replay_estimate.py`) |
+| `providers/openai/` | OpenAI-family adapters: one Chat Completions adapter for every OpenAI-compatible route, one Responses adapter for OpenAI and Codex, `build_provider`, the SDK client that encodes request bodies off the event loop (`sdk_client.py`), the OpenRouter Claude cache ladder, OpenAI server-side tool search tagging, the Responses explicit cache breakpoint on the stable system message and ordered output replay, and the Responses route's request sizing (`replay_estimate.py`) |
 | `providers/openai/legacy_response_replay.py` | The hosted tool-search items that Responses replies stored without an ordered output kept apart, read for replay |
 | `providers/pipeline/` | Stages composed around a provider's `stream()`: the system prompt a conversation holds while its prompt cache is warm, with later changes sent as system prompt updates, one file per conversation under `prompt_holds/` in the agent's state root (`prompt_hold.py`), portable deferred tool search (`llm/tool_search.py`), media fallback, downloads of the media URLs a route does not send (`remote_media.py`), the malformed tool-call guidance retry, stream retry with the idle limit, the typed safeguard refusal, and request logging |
 | `providers/registry.py` | `build_model_provider`, the only way a configured model is built: the dashboard key, the family adapter, and the request pipeline around it with the model's stream idle limit; `check_extra_kwargs` rejects, at config load and without loading a provider SDK, `extra_kwargs` keys the model's route does not accept |
@@ -721,4 +728,5 @@ A database converted from the Agno layout keeps its pre-conversion copy beside i
 `tracking/personal_agents.json` is the roster of agents generated from `personal_agents` templates, read on every config load.
 `tracking/contacts.json` holds the contacts between personal agents and people, written only by the primary.
 `tracking/listening_markers.json` holds where each listening agent has heard each listened room up to.
+`tracking/tailnet_ssh.json` holds link IDs, hostnames, and host private keys by worker key; only the primary writes it, and no worker mounts it.
 `call_transcripts/calls.db` holds live and recently ended calls between people, each call's lines until its transcript message is posted, what each call's row was last edited to say, who paused each call and since when, and when each person's app last checked in to each call.

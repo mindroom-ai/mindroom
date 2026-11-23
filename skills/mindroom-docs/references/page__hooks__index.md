@@ -361,7 +361,7 @@ async def inject_room_tags(ctx: SystemEnrichContext) -> None:
 Items are rendered in a `<mindroom_system_context>` block, with `"stable"` items first and `"volatile"` items last, each group sorted by key.
 `persist` has no effect here because system enrichment always applies to the current turn only.
 Changing the system prompt invalidates more of the provider's prompt cache, so use `system:enrich` only for room- or turn-scoped instructions that need system-level priority, and `message:enrich` with `persist=False` for live data.
-The key `matrix_message_target` is reserved; MindRoom replaces hook items that use it.
+The keys `matrix_message_target` and `room_instructions` are reserved; MindRoom replaces or drops hook items that use them.
 
 ## Enrichment in minimal mode
 

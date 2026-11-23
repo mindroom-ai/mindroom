@@ -45,6 +45,7 @@ from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import (
+    RUNTIME_SOURCE_KINDS,
     TURN_BACKED_KINDS,
     EventKind,
     SemanticConsumer,
@@ -84,7 +85,7 @@ def _needs_turn_replay(event: JournalEvent) -> bool:
     """Return whether replay needs responders and turn recovery semantics."""
     return (
         event.kind in TURN_BACKED_KINDS
-        or event.kind is EventKind.JOB_FOLLOW_UP
+        or event.kind in RUNTIME_SOURCE_KINDS
         or (event.kind is EventKind.REACTION and event.semantic_consumer is SemanticConsumer.INTERACTIVE_REACTION)
     )
 
@@ -115,14 +116,16 @@ class JournalCallbacks:
     turn_has_live_claim: Callable[[str], bool]
     # Delivers what replies left waiting to replay a settled source owe Matrix.
     replies_ended: Callable[[tuple[str, ...]], None]
-    # Hands a follow-up to its response owner, which settles it.
-    on_job_follow_up: Callable[[JournalEvent], Awaitable[None]]
+    # Hands a runtime source to its response owner, which settles it.
+    on_runtime_source: Callable[[JournalEvent], Awaitable[None]]
     on_job_cancel: _JobCancelCallback
     on_rtc: _RtcCallback | None = None
     # What a person's client sends to act on a workflow run; without it such an event is settled unread.
     on_workflow_event: Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[object]] | None = None
     # Awaited with the room of every event whose callback may use what it reads, before that callback runs.
     before_room_event: Callable[[str], Awaitable[object]] | None = None
+    # Whether the owner of a runtime source takes it only once its runtime accepts work again.
+    runtime_source_parked: Callable[[JournalEvent], bool] = lambda _event: False
 
 
 @dataclass
@@ -227,11 +230,21 @@ class JournalDispatcher:
             # A completing callback settles or raises. It never defers, so a
             # deferral for one of these kinds cannot exist to begin with.
             return True
-        if needs_turn_replay and not self._turn_replay_released:
-            # Replay is parked on the fleet, and it is released by draining
-            # rather than by calling back, so nothing here has died.
+        if self._parked(event):
+            # Parked replay is released by draining rather than by calling
+            # back, so nothing here has died.
             return True
         return self._has_live_owner(event.event_id)
+
+    def _parked(self, event: JournalEvent) -> bool:
+        """Return whether one event's replay waits for a release that comes by draining, not by a callback.
+
+        Turn work waits until the orchestrator has started responders, and a runtime source its owner will not
+        start in a runtime that stopped accepting work waits until that runtime accepts work again.
+        """
+        return _needs_turn_replay(event) and (
+            not self._turn_replay_released or self.callbacks.runtime_source_parked(event)
+        )
 
     async def _run_event(self, event: JournalEvent) -> bool:
         """Run one journal event's callback and report whether it may settle.
@@ -249,8 +262,7 @@ class JournalDispatcher:
         can be terminal with nothing durable behind it.
         """
         needs_turn_replay = _needs_turn_replay(event)
-        if needs_turn_replay and not self._turn_replay_released:
-            # Turn work waits until the orchestrator has started responders.
+        if self._parked(event):
             return False
         has_deferrable_owner = needs_turn_replay or event.event_id in self._deferred_reaction_ids
         if has_deferrable_owner and self._has_live_owner(event.event_id):
@@ -269,9 +281,9 @@ class JournalDispatcher:
             return approval_settled
         if self.callbacks.before_room_event is not None and event.kind not in _KINDS_THAT_ONLY_STOP_WORK:
             await self.callbacks.before_room_event(event.room_id)
-        if event.kind is EventKind.JOB_FOLLOW_UP:
+        if event.kind in RUNTIME_SOURCE_KINDS:
             # A runtime source, not a Matrix event: nothing for ingress to parse.
-            await self.callbacks.on_job_follow_up(event)
+            await self.callbacks.on_runtime_source(event)
             return False
         return await self._parse_and_invoke(event, needs_turn_replay=needs_turn_replay)
 
@@ -420,14 +432,19 @@ class JournalDispatcher:
         self.retry_turn_sources(room_id, (event_id,))
 
     def retry_turn_sources(self, room_id: str, event_ids: tuple[str, ...]) -> None:
-        """Return several undelivered turn sources to the worker."""
-        self._release_sources(event_ids)
+        """Return several undelivered turn sources to the worker; one the runner refused stays deferred."""
+        self._release_sources(event_ids, keep=self.callbacks.runtime_source_parked)
         self._worker.wake(room_id=room_id)
 
-    def _release_sources(self, event_ids: tuple[str, ...]) -> None:
-        """Release worker ownership and forget any deferred-reaction markers."""
+    def _release_sources(
+        self,
+        event_ids: tuple[str, ...],
+        *,
+        keep: Callable[[JournalEvent], bool] | None = None,
+    ) -> None:
+        """Release worker ownership, except of the sources ``keep`` parks, and forget any deferred-reaction markers."""
         self._deferred_reaction_ids.difference_update(event_ids)
-        self._worker.release(event_ids)
+        self._worker.release(event_ids, keep=keep)
 
     async def unsettled_event_ids(self) -> frozenset[str]:
         """Return every event that still owes semantic work."""

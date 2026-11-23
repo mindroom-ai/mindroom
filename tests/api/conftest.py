@@ -36,7 +36,7 @@ def _single_line_execute_responses(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("mindroom.api.sandbox_runner.EXECUTE_KEEPALIVE_SECONDS", 3600.0)
 
 
-def fake_local_worker_venv_create(venv_dir: Path) -> None:
+def fake_local_worker_venv_create(venv_dir: Path, _timeout_seconds: float | None = None) -> None:
     """Create the minimal worker venv layout that local worker preparation checks, linked to this interpreter."""
     bin_dir = venv_dir / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)

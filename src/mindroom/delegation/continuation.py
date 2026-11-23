@@ -8,10 +8,13 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from mindroom.ai import run_delegated_child_response
-from mindroom.delegation.background import delegation_child
+from mindroom.ai_run_metadata import prior_usage_by_run
+from mindroom.delegation.background import delegation_child, job_acknowledgers
+from mindroom.delegation.cost import SubagentCost, carried_receipts, merge_by_key
 from mindroom.delegation.execution import delegation_call_job
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
+    child_own_usage,
     delegation_grant,
     original_prompt,
     prepare_child_turn,
@@ -52,6 +55,8 @@ _CONTINUATIONS_KEY = "restart_continuations"
 _PROMPT_KEY = "continuation_prompt"
 # What stands in a saved continuation prompt for the prompt of the workflow run's call, which the run keeps.
 _CALL_PROMPT_MARK = "<<mindroom:workflow-call-prompt>>"
+# What the job's latest continuation started from having received, in case a restart stops it before its run's first row.
+_RECEIPTS_KEY = "continuation_receipts"
 # How many restarts may cut one subagent job short before the next one ends it, in case continuing is what stops it.
 _RESTART_CONTINUATION_LIMIT = 2
 # How much of what the cut-short turn was sent the continuation prompt repeats.
@@ -101,7 +106,7 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
     sent = await _sent_or_resumed(job, child, config, runtime_paths)
     if isinstance(sent, str):
         return sent
-    prompt, paused = sent
+    prompt, paused, run = sent
     tools = config_plugins(config, runtime_paths).tools
     refusal = follow_up_refusal(child.persona, owner.agent_name, config, tools, delegation_depth=job.depth)
     if refusal is not None:
@@ -143,6 +148,9 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
         child.workflow_node_key,
         child.workflow_generation,
     )
+    receipts = _continued_receipts(job, child, run, config, runtime)
+    if receipts is not None:
+        follow_up.cost_usd = follow_up.subagents_cost_usd = SubagentCost(receipts).usd
     arguments = {"subagent_id": child.subagent_id, "message": child.task}
     if OUTPUT_PATH_ARGUMENT in job.adapter:
         arguments[OUTPUT_PATH_ARGUMENT] = job.adapter[OUTPUT_PATH_ARGUMENT]
@@ -163,21 +171,66 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
         runtime_paths=runtime_paths,
         refresh_scheduler=None if orchestrator is None else orchestrator.knowledge_refresh_scheduler,
         paused=paused,
+        receipts=receipts,
     )
-    if not isinstance(spec, str) and paused:
+    if not isinstance(spec, str):
+        _record_continuation_adapter(
+            spec,
+            job,
+            child,
+            prompt=prompt,
+            continuations=continuations + (not for_run),
+            paused=paused is not None,
+            receipts=receipts,
+        )
+    return spec
+
+
+def _record_continuation_adapter(
+    spec: JobSpec,
+    job: BackgroundJob,
+    child: DelegationChild,
+    *,
+    prompt: str,
+    continuations: int,
+    paused: bool,
+    receipts: dict[str, float] | None,
+) -> None:
+    """Populate ``spec.adapter`` with the state a continuation job carries across further restarts."""
+    if paused:
         # The same turn goes on, so the job keeps what it had saved beside its child.
         spec.adapter.update({key: value for key, value in job.adapter.items() if key != "child"})
-    elif not isinstance(spec, str):
-        spec.adapter.update({_CONTINUATIONS_KEY: continuations + (not for_run), _PROMPT_KEY: prompt})
-        if "workflow" in job.adapter:
-            # The job stays the call of its workflow run, which reads what each run of the call used and did.
-            spec.adapter.update({key: job.adapter[key] for key in ("workflow", "node", "generation")})
-            spec.adapter[SPENT_RUNS_KEY] = [*dict.fromkeys([*job.adapter.get(SPENT_RUNS_KEY, ()), child.run_id])]
-            # The run keeps the call's prompt, so the job, whose every snapshot repeats its adapter, keeps a mark
-            # in its place.
-            asked = workflow_call_prompt(child) or _CALL_PROMPT_MARK
-            spec.adapter[_PROMPT_KEY] = prompt.replace(asked, _CALL_PROMPT_MARK)
-    return spec
+        return
+    spec.adapter.update({_CONTINUATIONS_KEY: continuations, _PROMPT_KEY: prompt})
+    if "workflow" in job.adapter:
+        # The job stays the call of its workflow run, which reads what each run of the call used and did.
+        spec.adapter.update({key: job.adapter[key] for key in ("workflow", "node", "generation")})
+        spec.adapter[SPENT_RUNS_KEY] = [*dict.fromkeys([*job.adapter.get(SPENT_RUNS_KEY, ()), child.run_id])]
+        # The run keeps the call's prompt, so the job, whose every snapshot repeats its adapter, keeps a mark
+        # in its place.
+        asked = workflow_call_prompt(child) or _CALL_PROMPT_MARK
+        spec.adapter[_PROMPT_KEY] = prompt.replace(asked, _CALL_PROMPT_MARK)
+    elif receipts is not None:
+        spec.adapter[_RECEIPTS_KEY] = receipts
+
+
+def _continued_receipts(
+    job: BackgroundJob,
+    child: DelegationChild,
+    run: RunRecord | None,
+    config: Config,
+    runtime: ToolJobRuntime,
+) -> dict[str, float] | None:
+    """Return what a non-workflow continuation starts from having received; workflow calls track spent runs by attempt."""
+    if child.workflow_run_id is not None:
+        return None
+    receipts: dict[str, float] = job.adapter.get(_RECEIPTS_KEY) or {}
+    if run is None:
+        return receipts
+    own_usd = child_own_usage(run, config)[1]
+    ran = {**dict.fromkeys(prior_usage_by_run(run.metadata)), run.run_id: run.metadata}
+    received = carried_receipts(ran, job_acknowledgers(runtime.retained_jobs()))
+    return merge_by_key((receipts, received, {} if own_usd is None else {child.delegation_id: own_usd}), float)
 
 
 async def _sent_or_resumed(
@@ -185,7 +238,7 @@ async def _sent_or_resumed(
     child: DelegationChild,
     config: Config,
     runtime_paths: RuntimePaths,
-) -> tuple[str, tuple[RunRecord, Sequence[Sequence[str]]] | None] | str:
+) -> tuple[str, tuple[RunRecord, Sequence[Sequence[str]]] | None, RunRecord | None] | str:
     """Return what the job's next turn is sent, or the paused turn it resumes and its task, or why it does neither.
 
     A paused turn comes with the owners of its calls, which the job saved when it asked about them. A job that
@@ -193,13 +246,16 @@ async def _sent_or_resumed(
     """
     if child.status == "paused":
         owners, run = job.adapter.get(APPROVAL_TOOLKITS_KEY), await paused_for_approval(child, config, runtime_paths)
-        return "its paused turn cannot be resumed" if owners is None or run is None else (child.task, (run, owners))
+        return (
+            "its paused turn cannot be resumed" if owners is None or run is None else (child.task, (run, owners), run)
+        )
     if waited_for_approval(job):
         await supersede_job_approvals(job)
-    prompt = await _continuation_prompt(job, child, config, runtime_paths)
+    run = await read_child_run(child, config, runtime_paths)
+    prompt = await _continuation_prompt(job, child, run, config)
     if prompt is None:
         return "its turn's run holds calls recovery could not finish, as a run paused for a decision or a subagent does"
-    return prompt, None
+    return prompt, None, run
 
 
 def _after_nested_runs(
@@ -284,8 +340,8 @@ async def _stopped_turn(job: BackgroundJob, config: Config, runtime_paths: Runti
 async def _continuation_prompt(
     job: BackgroundJob,
     child: DelegationChild,
+    run: RunRecord | None,
     config: Config,
-    runtime_paths: RuntimePaths,
 ) -> str | None:
     """Return what the child is sent to continue cut-short turn ``child``, or None for a run that cannot continue.
 
@@ -302,7 +358,6 @@ async def _continuation_prompt(
         sent = sent.replace(_CALL_PROMPT_MARK, original_prompt(child))
     if child.delegation_id != delegation_child(job).delegation_id:
         return sent
-    run = await read_child_run(child, config, runtime_paths)
     if run is None and child.workflow_run_id is not None:
         # The call of a workflow run goes on only on proof that its turn called no tool, which no run is not. A job
         # that still waited for the runs its prompt names is: its turn had not begun.

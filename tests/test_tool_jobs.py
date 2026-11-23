@@ -12,9 +12,10 @@ from typing import TYPE_CHECKING, Literal
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.delegation.background import ACKNOWLEDGED_BY, job_acknowledgers
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.mid_turn import MidTurnGate, MidTurnMode
-from mindroom.response_lifecycle import _QueuedMessageState
+from mindroom.response_lifecycle import _Conversation
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs import runtime as runtime_module
@@ -28,6 +29,7 @@ from tests.tool_job_helpers import (
     backdate_job,
     cancel_settled,
     intercept_job_saves,
+    job_child,
     job_owner,
     lookup,
     pending_outcome,
@@ -551,7 +553,7 @@ async def test_finalize_acknowledges_only_claims_whose_call_the_parent_run_saved
             waited = await runtime.wait(job_id, owner=job_owner(), depth=0)
             owner.register(
                 runtime,
-                job_id,
+                waited.job,
                 waited.claim,
                 run_id="parent-run",
                 team=False,
@@ -564,7 +566,82 @@ async def test_finalize_acknowledges_only_claims_whose_call_the_parent_run_saved
         saved = await lookup(runtime, "saved", owner=job_owner(), depth=0)
         unsaved = await lookup(runtime, "unsaved", owner=job_owner(), depth=0)
         assert (saved.consumed, unsaved.consumed) == (True, False)
+        # A tool's job keeps the adapter it was admitted with, which a call that reattaches to it must match.
+        assert saved.adapter == {}
     finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_job_keeps_the_run_that_first_acknowledged_its_outcome(tmp_path: Path) -> None:
+    """The run whose saved result first acknowledged a subagent job stays its acknowledger, over a restart and a reread.
+
+    A tool's job keeps the adapter it was admitted with, which a call that reattaches to it must match.
+    """
+    runtime = await tool_job_runtime(tmp_path)
+    child = {"child": asdict(job_child())}
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved")
+
+    for job_id, kind, adapter in (("subagent", "delegation", child), ("tool", "tool", {"own": 1})):
+        await start_job(
+            runtime,
+            job_id,
+            tool_name="worker",
+            depth=0,
+            kind=kind,
+            adapter=adapter,
+            owner=job_owner(),
+            operation=operation,
+        )
+        waited = await runtime.wait(job_id, owner=job_owner(), depth=0)
+        assert not any(job_acknowledgers([waited.job]).values())
+        acknowledged = {ACKNOWLEDGED_BY: "first-run"} if kind == "delegation" else None
+        await runtime.acknowledge_wait(job_id, waited.claim, adapter=acknowledged)
+    await runtime.shutdown()
+    restored = await tool_job_runtime(tmp_path)
+    try:
+        await restored.recover()
+        reread = await restored.wait("subagent", owner=job_owner(), depth=0)
+        await restored.acknowledge_wait("subagent", reread.claim, adapter={ACKNOWLEDGED_BY: "a-later-reader"})
+        jobs = {job.job_id: job for job in restored.retained_jobs()}
+        assert jobs["subagent"].consumed
+        assert job_acknowledgers(jobs.values()) == {child["child"]["delegation_id"]: "first-run"}
+        assert jobs["subagent"].adapter["child"] == child["child"]
+        assert (jobs["tool"].consumed, jobs["tool"].adapter) == (True, {"own": 1})
+    finally:
+        await restored.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_an_instance_that_runs_no_jobs_reads_the_saved_ones_that_parse_and_owns_none(tmp_path: Path) -> None:
+    """Reading the saved jobs takes none of them over, and a snapshot that does not parse costs the others nothing."""
+    runtime = await tool_job_runtime(tmp_path)
+    journal = tool_job_journal(tmp_path)
+
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "saved")
+
+    try:
+        await start_job(
+            runtime,
+            "kept",
+            tool_name="worker",
+            depth=0,
+            kind="delegation",
+            adapter={"child": asdict(job_child())},
+            owner=job_owner(),
+            operation=operation,
+        )
+        waited = await runtime.wait("kept", owner=job_owner(), depth=0)
+        await runtime._store.accept("unparsable", "{}")
+        assert [(job.job_id, job.consumed) for job in await runtime_module.saved_jobs(journal)] == [("kept", False)]
+        # The runtime still owns the jobs, so its acknowledgement lands, and the next read finds it.
+        await runtime.acknowledge_wait("kept", waited.claim, adapter={ACKNOWLEDGED_BY: "first-run"})
+        assert list(job_acknowledgers(await runtime_module.saved_jobs(journal)).values()) == ["first-run"]
+    finally:
+        await journal.close()
         await runtime.shutdown()
 
 
@@ -1027,7 +1104,7 @@ async def test_message_the_mid_turn_judge_lets_wait_keeps_the_wait(
 ) -> None:
     """A message the judge lets wait is acknowledged and keeps the reply waiting; one it must answer releases it."""
     runtime = await tool_job_runtime(tmp_path)
-    state = _QueuedMessageState()
+    state = _Conversation()
     proceed, acknowledgement = asyncio.Event(), asyncio.Event()
     judged: list[tuple[str | None, ...]] = []
     acknowledged: list[str] = []
@@ -1102,7 +1179,7 @@ async def test_message_the_mid_turn_judge_lets_wait_keeps_the_wait(
 async def test_a_job_change_keeps_the_mid_turn_judgment_its_wait_awaits(tmp_path: Path) -> None:
     """A job that changes while the judge decides keeps that one judgment, whose answer still releases the wait."""
     runtime = await tool_job_runtime(tmp_path)
-    state = _QueuedMessageState()
+    state = _Conversation()
     proceed, judging, answer = asyncio.Event(), asyncio.Event(), asyncio.Event()
     judgments = 0
 
@@ -1152,7 +1229,7 @@ async def test_a_message_waiter_whose_judgment_absorbed_its_cancellation_ends_in
 ) -> None:
     """A cancelled message waiter ends once its judgment returns, so it is never left pending for the GC to destroy."""
     runtime = await tool_job_runtime(tmp_path)
-    state = _QueuedMessageState()
+    state = _Conversation()
     proceed, judging, absorbed, answer = asyncio.Event(), asyncio.Event(), asyncio.Event(), asyncio.Event()
     loop = asyncio.get_running_loop()
     reported: list[str] = []
@@ -1174,7 +1251,7 @@ async def test_a_message_waiter_whose_judgment_absorbed_its_cancellation_ends_in
         return BackgroundOutcome("completed", "done")
 
     def message_waiters() -> list[asyncio.Task[object]]:
-        return [task for task in asyncio.all_tasks() if task.get_coro().__qualname__ == "_QueuedMessageState.wait"]
+        return [task for task in asyncio.all_tasks() if task.get_coro().__qualname__ == "_Conversation.wait"]
 
     state.mid_turn_gate = MidTurnGate(active_text="Do the task", evaluate=evaluate)
     try:
@@ -1215,7 +1292,7 @@ async def test_queue_does_not_release_wait_and_requester_steer_detaches_without_
     """Queue messages leave a job wait blocked; the requester's Steer detaches it unjudged while the job runs on."""
     runtime = await tool_job_runtime(tmp_path)
     requester = "@alice:localhost"
-    state = _QueuedMessageState()
+    state = _Conversation()
     state.bind_active_requester(requester)
     proceed = asyncio.Event()
     attempted = {event_id: asyncio.Event() for event_id in ("$queued", "$later")}
@@ -1579,12 +1656,16 @@ async def test_failed_cancellation_persistence_can_be_retried(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["tool", "delegation"])
 async def test_failed_receipt_save_preserves_the_previous_saved_job(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    kind: str,
 ) -> None:
-    """A receipt save that fails changes nothing saved, and the claim can still acknowledge."""
+    """A receipt save that fails changes nothing saved or current, and the claim can still acknowledge."""
     runtime = await tool_job_runtime(tmp_path)
+    adapter = {"child": asdict(job_child())} if kind == "delegation" else {}
+    acknowledged = {ACKNOWLEDGED_BY: "a-run"} if kind == "delegation" else None
 
     async def operation() -> BackgroundOutcome:
         return BackgroundOutcome("completed", "saved")
@@ -1600,7 +1681,8 @@ async def test_failed_receipt_save_preserves_the_previous_saved_job(
             "atomic",
             tool_name="tool",
             depth=0,
-            adapter={},
+            kind=kind,
+            adapter=dict(adapter),
             owner=job_owner(),
             operation=operation,
         )
@@ -1609,9 +1691,10 @@ async def test_failed_receipt_save_preserves_the_previous_saved_job(
         with monkeypatch.context() as patch:
             intercept_job_saves(patch, before=fail_receipt)
             with pytest.raises(OSError, match="receipt save failed"):
-                await runtime.acknowledge_wait("atomic", waited.claim)
+                await runtime.acknowledge_wait("atomic", waited.claim, adapter=acknowledged)
             assert await saved_jobs(tmp_path) == before
-        await runtime.acknowledge_wait("atomic", waited.claim)
+            assert [job.adapter for job in runtime.retained_jobs()] == [adapter]
+        await runtime.acknowledge_wait("atomic", waited.claim, adapter=acknowledged)
         assert (await saved_jobs(tmp_path))["atomic"].consumed
     finally:
         await runtime.shutdown()

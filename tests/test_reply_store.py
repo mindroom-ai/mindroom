@@ -14,10 +14,13 @@ import pytest
 from mindroom import reply_lifecycle as rl
 from mindroom import reply_scope, turn_store
 from mindroom.event_journal import (
+    RUNTIME_SOURCE_KINDS,
     ApprovalFailure,
     DeliveryStage,
     DepartureSource,
+    EventClass,
     EventKind,
+    InboundEvent,
     PrincipalStore,
     replies,
     reply_messages,
@@ -1818,6 +1821,95 @@ async def test_a_replay_is_superseded_only_once_its_reply_owes_no_row(journal_st
     assert gone.redaction_pending == ("$reply",)
     assert not await principal.is_pending("$source")
     assert await principal.replies.supersede_replay(("$elsewhere",), now_ns=110) is None
+
+
+@pytest.mark.parametrize("kind", sorted(RUNTIME_SOURCE_KINDS))
+async def test_a_removed_entity_s_runtime_sources_settle_unanswered(
+    journal_store: EventJournalStore,
+    kind: EventKind,
+) -> None:
+    """No bot runs a removed entity's runtime source again; another entity's, and Matrix events, keep waiting."""
+    principal, other = journal_store.principal(PRINCIPAL), journal_store.principal("other@alice")
+    for store in (principal, other):
+        await _admit_runtime_source(store, kind, "runtime:1")
+    await admit(principal, "$message")
+
+    assert await journal_store.end_entity_replies(lambda name: name == "agent", now_ns=10) == 0
+
+    assert not await principal.is_pending("runtime:1")
+    settled = await principal.load_event("runtime:1")
+    assert settled is None or settled.source == {}
+    assert await other.is_pending("runtime:1")
+    assert await principal.is_pending("$message")
+
+
+async def _admit_runtime_source(principal: PrincipalStore, kind: EventKind, event_id: str) -> None:
+    await principal.admit(
+        InboundEvent(
+            event_id=event_id,
+            room_id=ROOM,
+            thread_id=None,
+            kind=kind,
+            event_class=EventClass.ACTIONABLE,
+            sender="@agent:example.org",
+            origin_server_ts=1,
+            source={"requester_id": "@user:example.org"},
+        ),
+    )
+
+
+async def test_a_removed_entity_s_approval_held_job_follow_up_stays_for_its_approval(
+    journal_store: EventJournalStore,
+) -> None:
+    """A follow-up paused on an approval is the approval's to settle; the entity that returns still replays it."""
+    principal, second_login = journal_store.principal(PRINCIPAL), journal_store.principal("agent@bob")
+    await _admit_runtime_source(principal, EventKind.JOB_FOLLOW_UP, "job:held")
+    # The entity's other login has a row of the same id that no approval holds.
+    await _admit_runtime_source(second_login, EventKind.JOB_FOLLOW_UP, "job:held")
+    await _admit_runtime_source(principal, EventKind.JOB_FOLLOW_UP, "job:orphan")
+    await _admit_runtime_source(principal, EventKind.COMPACTION, "compaction:orphan")
+    continuation = await paused_for_approval(
+        principal,
+        replace(
+            journal_tests.TestApprovalContinuations.continuation(state="waiting"),
+            sources=ResponseSources(("job:held",), ("job:held",)),
+        ),
+    )
+    assert continuation is not None
+    # The unavailable-owner cleanup has not discarded the approval yet; its failing continuation waits to replay.
+    failure = ApprovalFailure(ApprovalFailureKind.ERROR, "agent removed")
+    assert await principal.approvals.request_approval_failure("approval-1", failure, expected_state="waiting")
+
+    assert await journal_store.end_entity_replies(lambda name: name == "agent", now_ns=10) == 1
+
+    assert await principal.is_pending("job:held")
+    held = await principal.load_event("job:held")
+    assert held is not None
+    assert held.source == {"requester_id": "@user:example.org"}
+    assert not await second_login.is_pending("job:held")
+    assert not await principal.is_pending("job:orphan")
+    assert not await principal.is_pending("compaction:orphan")
+    # The entity is configured again: its new bot is offered the continuation's source, and nothing else.
+    returned = await principal.pending(room_id=ROOM, runtime_generation="gen-returned")
+    assert [event.event_id for event in returned] == ["job:held"]
+    # It never returns: the unavailable-owner cleanup that discards the approval is what settles its source.
+    router = journal_store.principal("router@alice")
+    delivery_id = await router.approvals.enqueue_unavailable_approval_notice(
+        approval_id="approval-1",
+        room_id=ROOM,
+        thread_id="$thread",
+        payload=text("agent removed"),
+    )
+    assert delivery_id is not None
+    await router.claim_matrix_delivery(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
+    await router.acknowledge_matrix_delivery(
+        delivery_id=delivery_id,
+        stage=DeliveryStage.FINAL,
+        event_id="$unavailable",
+        delivered_projections=(),
+    )
+    assert await principal.approvals.discard_unavailable_approval_continuation("approval-1") is not None
+    assert not await principal.is_pending("job:held")
 
 
 async def test_a_coalesced_turn_s_replay_is_superseded_only_once_its_other_messages_settled(

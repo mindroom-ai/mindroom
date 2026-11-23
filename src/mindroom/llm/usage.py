@@ -12,7 +12,7 @@ from time import time
 from typing import TYPE_CHECKING, Any, Self
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
 
     from _typeshed import DataclassInstance
 
@@ -279,6 +279,17 @@ class RunMetrics(_Counts):
         return result
 
 
+def team_run_usage(leader: RunMetrics | None, members: Iterable[RunMetrics | None]) -> RunMetrics | None:
+    """Return a team run's usage: ``leader``'s and ``members``' summed, in the leader's duration, which spans theirs."""
+    metrics = [usage for usage in (leader, *members) if usage is not None]
+    if not metrics:
+        return None
+    total = sum(metrics[1:], metrics[0])
+    if len(metrics) > 1 and leader is not None:
+        total.duration = leader.duration
+    return total
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RequestUsage:
     """The usage one provider request reported: its time, its metrics, and the model that answered it.
@@ -343,4 +354,5 @@ __all__ = [
     "TokenCounts",
     "VoiceDuration",
     "add_usage",
+    "team_run_usage",
 ]

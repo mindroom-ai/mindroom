@@ -17,6 +17,7 @@ from mindroom.approval.inbound import handle_tool_approval_response_event
 from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.bot_runtime_view import BotRuntimeState, RunPhase
 from mindroom.config.resolution import entity_timezone
+from mindroom.contacts.turns import contact_room
 from mindroom.desktop.pairing_receiver import register_desktop_pairing_receiver
 from mindroom.email_invites.receiver import register_email_invite_receiver, revoke_orphaned_sends
 from mindroom.event_journal.identity import journal_principal_id
@@ -87,7 +88,10 @@ from .delivery_gateway import (
 from .edit_regenerator import EditRegenerator, EditRegeneratorDeps
 from .entity_rooms import get_rooms_for_entity
 from .event_journal import (
+    AdmissionResult,
+    EventClass,
     EventKind,
+    InboundEvent,
     PrincipalStore,
 )
 from .inbound_turn_normalizer import InboundTurnNormalizer, InboundTurnNormalizerDeps
@@ -544,8 +548,9 @@ class AgentBot:
                 ),
                 turn_has_live_claim=lambda event_id: self._turn_store.has_live_turn_claim(event_id),
                 replies_ended=self._replies_ended,
-                on_job_follow_up=lambda event: self._response_runner.handoff_job_follow_up(event),
+                on_runtime_source=lambda event: self._response_runner.handoff_runtime_source(event),
                 before_room_event=self._refresh_room_settings,
+                runtime_source_parked=lambda event: self._response_runner.runtime_source_parked(event),
             ),
             room_for_id=self._room_for_journal_event,
             # Resolved late: the ingress validator, which owns the trust rule, is built after the dispatcher.
@@ -776,9 +781,9 @@ class AgentBot:
             dispatch_turn=self._turn_dispatcher.handle_prepared_turn,
             debounce_seconds=lambda: self.config.defaults.coalescing.debounce_ms / 1000,
             is_shutting_down=lambda: not self._accepting_work,
-            wait_for_thread_response_idle=self._response_runner.wait_for_thread_response_idle,
+            wait_for_thread_response_idle=self._response_runner.lifecycle_coordinator.wait_for_thread_idle,
             room_scope_is_single_conversation=self._conversation_resolver.room_is_one_conversation,
-            active_thread_ids_for_room=self._response_runner.active_thread_ids_for_room,
+            active_thread_ids_for_room=self._response_runner.lifecycle_coordinator.active_thread_ids_for_room,
             timestamp_formatter=format_local_timestamp,
             on_dispatch_failure=self._journal_dispatcher.retry_turn_sources,
             on_undelivered_source=self._journal_dispatcher.retry_turn_source,
@@ -1019,11 +1024,11 @@ class AgentBot:
 
     def has_active_response_for_target(self, target: MessageTarget) -> bool:
         """Return whether one canonical conversation target currently has an active turn."""
-        return self._response_runner.has_active_response_for_target(target)
+        return self._response_runner.lifecycle_coordinator.has_active_response_for_target(target)
 
     def active_thread_ids_for_room(self, room_id: str) -> frozenset[str | None]:
         """Return the threads of one room in which this bot holds an active reply."""
-        return self._response_runner.active_thread_ids_for_room(room_id)
+        return self._response_runner.lifecycle_coordinator.active_thread_ids_for_room(room_id)
 
     async def admit_job_follow_up(self, key: ConversationKey, follow_up_id: str) -> None:
         """Admit a follow-up for jobs that ended in one of this bot's conversations, and wake the journal worker."""
@@ -1032,6 +1037,32 @@ class AgentBot:
             follow_up_event(key, follow_up_id, sender_id=self.matrix_id.full_id, now_ms=now_ms),
         )
         self._journal_dispatcher.wake()
+
+    async def admit_compaction(self, target: MessageTarget, requester_id: str) -> bool:
+        """Give a joined target a durable fold, except in contact rooms, where the flag suffices."""
+        if self.client is None or target.room_id not in self.client.rooms:
+            return False
+        if contact_room(self.config, self.runtime_paths, target.room_id, self.agent_name) is not None:
+            return False
+        origin = target.reply_to_event_id
+        assert origin is not None
+        store, source = self.journal_principal(), f"compact:{origin}:{self.agent_name}"
+        result = await store.admit(
+            InboundEvent(
+                event_id=source,
+                room_id=target.room_id,
+                thread_id=target.resolved_thread_id,
+                kind=EventKind.COMPACTION,
+                event_class=EventClass.ACTIONABLE,
+                sender=self.matrix_id.full_id,
+                origin_server_ts=int(time.time() * 1000),
+                source={"requester_id": requester_id, "origin_event_id": origin},
+            ),
+        )
+        if result is not AdmissionResult.ADMITTED:
+            return result is AdmissionResult.DUPLICATE and await store.is_pending(source)
+        self._journal_dispatcher.wake()
+        return True
 
     def _build_reply_turn_owners(self, deps: ReplyTurnDeps) -> None:
         """Build one reply turn's owners so the dependency between them runs one way.
@@ -1657,8 +1688,10 @@ class AgentBot:
 
         Both happen before journal replay, so a message to a held conversation waits for its approval after a restart.
         """
-        self._response_runner.note_continued_sources(await self._reply_runtime.start())
-        self._response_runner.follow_approval_holds(
+        conversations = self._response_runner.lifecycle_coordinator
+        # The sources of the replies an older instance left to continue: their replays are no news.
+        conversations.continued_sources = await self._reply_runtime.start()
+        conversations.follow_approval_holds(
             self._journal_store.approval_signals,
             self._journal_principal_id,
             freed=lambda room_id: self._journal_dispatcher.retry_turn_sources(room_id, ()),
@@ -1925,7 +1958,7 @@ class AgentBot:
         """Release resources after every response owner is terminal."""
         try:
             # Its replacement follows this principal's approvals from here on.
-            self._response_runner.stop_following_approval_holds()
+            self._response_runner.lifecycle_coordinator.stop_following_approval_holds()
             # Each of these owns a resource this bot alone holds, and none of them
             # may skip the others: a lane that already faulted makes the dispatcher's
             # stop raise, which must not leave the ingestion session or the client
