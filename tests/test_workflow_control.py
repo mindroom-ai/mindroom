@@ -86,9 +86,13 @@ async def _control(
     room_id: str = _ROOM,
     thread: str | None = _THREAD,
     agent_name: str | None = None,
+    max_cost_usd: float | None = None,
 ) -> bool:
     """Hand one control event that names the stack's run to an agent's bot, as its journal callback does."""
-    event = _event(WORKFLOW_CONTROL_EVENT_TYPE, {"run": stack.run_id, "action": action}, sender=sender, thread=thread)
+    payload: dict[str, object] = {"run": stack.run_id, "action": action}
+    if max_cost_usd is not None:
+        payload["max_cost_usd"] = max_cost_usd
+    event = _event(WORKFLOW_CONTROL_EVENT_TYPE, payload, sender=sender, thread=thread)
     room = nio.MatrixRoom(room_id, "@mindroom_watcher:example.test")
     return await handle_workflow_control(
         room,
@@ -376,3 +380,20 @@ async def test_workflow_job_whose_run_ended_while_waiting_to_continue_clears_roo
     # No event-loop yield: `_reconcile` publishes room state on the line right after `_continue_stopped_jobs`.
     assert [job.status for job in stack.jobs.retained_jobs()] == ["cancelled"]
     assert _jobs_state_content(stack.jobs.retained_jobs()) == {"jobs": [], "total": 0}
+
+
+@pytest.mark.asyncio
+async def test_resume_control_at_cost_limit_requires_higher_max_cost_usd(stack: WorkflowStack) -> None:
+    """A Resume control on a cost-stopped run refuses without a higher limit and resumes when given one."""
+    await _fail(stack)
+    run = stack.store.get_run(stack.run_id)
+    stack.store.update_run(run.run_id, run.epoch, when=frozenset({run.state}), max_cost_usd=1.0)
+    stack.store.add_usage(run.run_id, "@0", 1, "turn-1", run.attempt, {"cost_usd": 1.2})
+
+    assert await _control(stack) is False
+    assert await _control(stack, max_cost_usd=1.2) is False
+    assert stack.store.get_run(stack.run_id).attempt == 1
+
+    assert await _control(stack, max_cost_usd=2.0) is True
+    await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
+    assert stack.store.get_run(stack.run_id).max_cost_usd == 2.0

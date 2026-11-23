@@ -125,7 +125,7 @@ Where the call cannot be a background job, it waits and returns the report itsel
 A run that completed although calls failed says so in the first line of the report.
 get_workflow(run_id) shows each call and what the run cost: cost_usd for the whole run, attempt_cost_usd for this attempt.
 Nothing caps a run's cost unless you pass max_cost_usd: then, once the run has cost that much, no further call starts,
-running ones finish, and the user is asked whether to continue with the same amount again or to stop.
+running ones finish, and the run ends interrupted; resume it with a higher max_cost_usd.
 An agent that needs an approval waits for the user; it does not fail.
 """
 _OWN_RUN = "A call of a run cannot cancel that run or one it is inside. Return from main() or raise to end the script."
@@ -200,7 +200,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
             title: Three to six words shown on the run's card.
             max_concurrent: How many agents run at once. Raise it for large fan-outs.
             resource_profile: Worker size for the script itself.
-            max_cost_usd: Pause and ask the user before the run spends more than this.
+            max_cost_usd: Stop the run when it has spent this much; resume it with a higher limit.
 
         """
         arguments = {
@@ -286,18 +286,26 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         source: str | None = None,
         path: str | None = None,
         rerun: list[str] | None = None,
+        max_cost_usd: float | None = None,
     ) -> str:
-        """Continue a stopped or failed run, or run a finished one again; saved calls are reused as start_workflow explains. Pass source or path to run an edited script, and rerun=[node ids] to make calls run again, such as one that ended indeterminate.
+        """Continue a stopped or failed run, or run a finished one again; saved calls are reused as start_workflow explains. Pass source or path to run an edited script, rerun=[node ids] to make calls run again, such as one that ended indeterminate, and a higher max_cost_usd to continue a run stopped at its cost limit.
 
         Args:
             run_id: The run's ID, as start_workflow returned it.
             source: Inline Python source that replaces the run's script.
             path: Workspace-relative path of a Python file that replaces the run's script.
             rerun: IDs of saved calls to run again, such as ["n4"].
+            max_cost_usd: New cost limit in USD; must exceed what the run has spent when it stopped at its limit.
 
         """
         engine, context = _waiting_runtime()
-        arguments = {"run_id": run_id, "source": source, "path": path, "rerun": rerun}
+        arguments = {
+            "run_id": run_id,
+            "source": source,
+            "path": path,
+            "rerun": rerun,
+            "max_cost_usd": max_cost_usd,
+        }
         origin = _inline_origin(context)
         run, request = await _resumption(engine, context, arguments, self.limits, owner=origin)
         if run.owner != origin and (report := run.claims.get(origin)) is not None:
@@ -367,12 +375,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         if not isinstance(max_concurrent, int) or max_concurrent < 1:
             msg = "max_concurrent must be a whole number of at least 1."
             raise WorkflowRunStoreError(msg)
-        max_cost = arguments.get("max_cost_usd")
-        if max_cost is not None and (
-            isinstance(max_cost, bool) or not isinstance(max_cost, (int, float)) or not 0 < max_cost < math.inf
-        ):
-            msg = "max_cost_usd must be a positive amount in USD."
-            raise WorkflowRunStoreError(msg)
+        max_cost = _validated_max_cost_usd(arguments.get("max_cost_usd"))
         # The operator's ceiling is the most a start may ask for.
         max_concurrent = min(max_concurrent, self.limits.max_concurrent_agents or max_concurrent)
         placement = workflow_placement(context.config, context.runtime_paths)
@@ -468,12 +471,13 @@ async def _resumption(
     call, took it before, and the write that takes a run refuses it a second time.
     """
     source, path, rerun = arguments.get("source"), arguments.get("path"), arguments.get("rerun") or ()
+    max_cost = _validated_max_cost_usd(arguments.get("max_cost_usd"))
     if source is not None and path is not None:
         raise WorkflowRunStoreError(_AT_MOST_ONE_SOURCE)
     run = _owned(engine, context, str(arguments.get("run_id")))
     if accepted is not None or owner in (run.owner, *run.claims):
         return run, accepted or {}
-    engine.resumable(run.run_id, context, rerun, limits)
+    engine.resumable(run.run_id, context, rerun, limits, max_cost_usd=max_cost)
     delivered = ("absent", "stopped", "ended")
     if run.job_id is not None and workflow_job_standing(context.runtime_paths, run.job_id) not in delivered:
         msg = f"Run {run.run_id} is still delivering its report. Try again in a moment."
@@ -483,7 +487,20 @@ async def _resumption(
     # What the resume may hand on: the turn's persona, and no more than the run its call is made in keeps.
     outer = _outer_call()
     persona = ceiling(context, engine.store.get_run(outer[0]).persona if outer else None)
-    return run, {"source": text, "rerun": list(rerun), "epoch": run.epoch, "persona": persona}
+    request: dict[str, Any] = {"source": text, "rerun": list(rerun), "epoch": run.epoch, "persona": persona}
+    if max_cost is not None:
+        request["max_cost_usd"] = max_cost
+    return run, request
+
+
+def _validated_max_cost_usd(value: object) -> float | None:
+    """Return *value* as a positive finite USD amount, None when omitted, or raise."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value < math.inf:
+        msg = "max_cost_usd must be a positive amount in USD."
+        raise WorkflowRunStoreError(msg)
+    return float(value)
 
 
 async def handle_workflow_event(
@@ -535,7 +552,8 @@ async def handle_workflow_control(
             # The event took the run before, and its job is no longer kept: delivered again, it starts nothing.
             return False
         async with jobs.admission(job_id):
-            job = await _resume_job(workflows, context, {"run_id": run.run_id}, limits, job_id, jobs)
+            arguments = {"run_id": run.run_id, "max_cost_usd": content.get("max_cost_usd")}
+            job = await _resume_job(workflows, context, arguments, limits, job_id, jobs)
             # In the owner's context, which the job's task keeps, as the job of a call's resume has it.
             with tool_runtime_context(context):
                 _, claim = await jobs.start(

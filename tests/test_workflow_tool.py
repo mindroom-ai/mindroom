@@ -1630,7 +1630,7 @@ Where the call cannot be a background job, it waits and returns the report itsel
 A run that completed although calls failed says so in the first line of the report.
 get_workflow(run_id) shows each call and what the run cost: cost_usd for the whole run, attempt_cost_usd for this attempt.
 Nothing caps a run's cost unless you pass max_cost_usd: then, once the run has cost that much, no further call starts,
-running ones finish, and the user is asked whether to continue with the same amount again or to stop.
+running ones finish, and the run ends interrupted; resume it with a higher max_cost_usd.
 An agent that needs an approval waits for the user; it does not fail.
 
 Models: haiku, opus (add an effort as in opus@high).
@@ -1675,10 +1675,16 @@ def test_description_teaches_what_this_release_runs_and_lists_the_configured_mod
     )
     assert (functions["resume_workflow"].description or "").startswith(
         "Continue a stopped or failed run, or run a finished one again; saved calls are reused as start_workflow "
-        "explains. Pass source or path to run an edited script, and rerun=[node ids] to make calls run again, such "
-        "as one that ended indeterminate.",
+        "explains. Pass source or path to run an edited script, rerun=[node ids] to make calls run again, such as "
+        "one that ended indeterminate, and a higher max_cost_usd to continue a run stopped at its cost limit.",
     )
-    assert set(functions["resume_workflow"].parameters["properties"]) == {"run_id", "source", "path", "rerun"}
+    assert set(functions["resume_workflow"].parameters["properties"]) == {
+        "run_id",
+        "source",
+        "path",
+        "rerun",
+        "max_cost_usd",
+    }
 
 
 def test_the_registered_toolkit_takes_its_limits_from_the_agents_tool_entry(stack: WorkflowStack) -> None:

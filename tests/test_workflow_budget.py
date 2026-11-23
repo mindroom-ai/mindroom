@@ -1,4 +1,4 @@
-"""A run's cost limit: what it holds, the question it asks, and the large-run notice (engine harness, priced model)."""
+"""A run's cost limit: stopping at the limit, resuming with a higher limit, and the large-run notice."""
 
 from __future__ import annotations
 
@@ -10,19 +10,17 @@ import pytest
 import pytest_asyncio
 
 from mindroom.config.models import ModelPricing
-from mindroom.matrix.event_types import WORKFLOW_QUESTION_CONTENT_KEY
+from mindroom.matrix.event_types import WORKFLOW_QUESTION_CONTENT_KEY, WORKFLOW_RUN_CONTENT_KEY
 from mindroom.script_runs import manager as manager_module
-from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.script_runs.reasons import PLUGIN_TOOLS_CHANGED
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
-from mindroom.workflow_runs import view as view_module
 from mindroom.workflow_runs.engine import WorkflowLimits
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
 from tests.fakes.scripted_model import Await, answer, usage
-from tests.workflow_helpers import CallFailed, WorkflowStack, tool_args, workflow_stack
+from tests.workflow_helpers import CallFailed, WorkflowStack, workflow_stack
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -30,7 +28,6 @@ if TYPE_CHECKING:
 
     from mindroom.llm.types import MessageMetrics
 
-_CONTINUE, _STOP = "Continue with $1.00 more", "Stop"
 _LIMIT = {"max_cost_usd": 1.0, "max_concurrent": 2}
 
 
@@ -72,6 +69,11 @@ def _questions(stack: WorkflowStack) -> list[dict[str, Any]]:
     return stack.room.carried(WORKFLOW_QUESTION_CONTENT_KEY)
 
 
+def _cards(stack: WorkflowStack) -> list[dict[str, Any]]:
+    assert stack.room is not None
+    return stack.room.carried(WORKFLOW_RUN_CONTENT_KEY)
+
+
 async def _settled(stack: WorkflowStack, *keys: str) -> None:
     done = (WorkflowNodeState.COMPLETED, WorkflowNodeState.FAILED, WorkflowNodeState.CANCELLED)
     await stack.until(lambda: all(stack.store.get_node(stack.run_id, key).state in done for key in keys))
@@ -87,109 +89,137 @@ async def _over_the_limit(stack: WorkflowStack, later: asyncio.Event | None = No
     held = [] if later is None else [Await(later.wait)]
     model = stack.child_script(_turn(1.2), [Await(gate.wait), *_turn()], [*held, *_turn()], [*held, *_turn()])
     assert [await _agent(stack, index) for index in range(4)] == ["running", "running", "queued", "queued"]
-    # The second agent asks its model when its job comes to it, which no call waits for.
-    await stack.until(lambda: "$budget:1" in _states(stack) and len(model.requests) >= 2)
+    await stack.until(lambda: "completed" in _states(stack).values() and len(model.requests) >= 2)
     assert len(model.requests) == 2
     return gate
 
 
-async def _answer(stack: WorkflowStack, key: str, answer: str) -> bool:
-    node = stack.store.get_node(stack.run_id, key)
-    assert node is not None
-    return await stack.engine.answer(stack.run_id, key, node.generation, answer)
-
-
 @pytest.mark.asyncio
-async def test_budget_holds_queued_nodes_and_asks_and_the_run_waits_once_nothing_runs(stack: WorkflowStack) -> None:
-    """At the limit no queued call starts, a running one finishes, and the requester is asked once."""
+async def test_cost_limit_lets_running_calls_finish_starts_no_new_node_and_ends_interrupted(
+    stack: WorkflowStack,
+) -> None:
+    """At the limit no queued or new call starts, running ones finish, and the run ends interrupted with the reason."""
     gate = await _over_the_limit(stack)
     model = stack.models["watcher"]
 
-    # One agent still runs: the run does too.
+    # One agent still runs: the run keeps going and queued or newly submitted calls do not start.
     assert stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING
-    gate.set()
-    await _settled(stack, "@1")
-    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.WAITING)
+    assert await _agent(stack, 4) == "queued"
+    assert len(model.requests) == 2
 
+    gate.set()
+    await _settled(stack, "@0", "@1")
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.INTERRUPTED)
+
+    run = stack.store.get_run(stack.run_id)
+    reason = "Stopped at the cost limit ($1.80 of $1.00)."
+    assert (run.state, run.error) == (WorkflowRunState.INTERRUPTED, reason)
+    assert await stack.engine.delivery(run) == reason
     assert _states(stack) == {
         "@0": "completed",
         "@1": "completed",
-        "@2": "queued",
-        "@3": "queued",
-        "$budget:1": "waiting",
+        "@2": "cancelled",
+        "@3": "cancelled",
+        "@4": "cancelled",
     }
-    (question,) = _questions(stack)
-    assert (question["text"], question["options"], question["status"]) == (
-        "This run has spent $1.20 of its $1.00 limit. Continue?",
-        [_CONTINUE, _STOP],
-        "open",
-    )
+    for key in ("@2", "@3", "@4"):
+        node = stack.store.get_node(stack.run_id, key)
+        assert node is not None
+        assert node.handle is None
+        assert "job_id" not in node.links
     assert len(model.requests) == 2
+    assert _questions(stack) == []
     assert stack.engine.run_usage(stack.run_id)["cost_usd"] == pytest.approx(1.8)
-    # A call the script makes now waits too, whatever places are free.
-    assert await _agent(stack, 4) == "queued"
+
+    await stack.views.show(stack.run_id)
+    assert _cards(stack)[-1]["status"] == "interrupted"
+    assert _cards(stack)[-1]["error"] == reason
 
 
 @pytest.mark.asyncio
-async def test_call_whose_start_was_under_way_when_the_limit_was_reached_waits_again_first(
+async def test_call_whose_start_was_under_way_when_the_limit_was_reached_does_not_start(
     stack: WorkflowStack,
 ) -> None:
-    """A queued call that had got its place just before the run reached its limit starts nothing and keeps its turn."""
+    """A queued call that got its place just before the limit was reached starts nothing and ends the run if idle."""
     gate = await _over_the_limit(stack)
     places = stack.engine._places[stack.run_id]
-    (third, start), fourth = places.queued.popleft(), places.queued[0][0]
-    places.working.add(third)
+    started = False
 
-    await stack.engine._start_queued(stack.run_id, third, start)
+    async def start() -> None:
+        nonlocal started
+        started = True
 
-    assert ([key for key, _ in places.queued], third in places.working) == ([third, fourth], False)
-    assert (_states(stack)[third], len(stack.models["watcher"].requests)) == ("queued", 2)
+    places.working.add("@2")
+    await stack.engine._start_queued(stack.run_id, "@2", start)
+
+    assert (started, "@2" in places.working, len(stack.models["watcher"].requests)) == (False, False, 2)
     gate.set()
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.INTERRUPTED)
 
 
 @pytest.mark.asyncio
-async def test_continue_adds_the_limit_and_releases_queued_nodes(stack: WorkflowStack) -> None:
-    """Continue gives the run its limit once more: the held calls start, and the next limit asks again."""
-    both = asyncio.Event()
-    gate = await _over_the_limit(stack, both)
+async def test_resume_with_higher_limit_continues_and_reuses_completed_nodes(stack: WorkflowStack) -> None:
+    """Resuming without a higher limit is refused; resuming with a higher limit reuses saved nodes and runs the rest."""
+    gate = await _over_the_limit(stack)
     gate.set()
-    await _settled(stack, "@1")
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.INTERRUPTED)
+    assert len(stack.models["watcher"].requests) == 2
 
-    assert await _answer(stack, "$budget:1", _CONTINUE)
-    # Both held calls run before either has spent anything: one that started after the other's 0.60 would be held.
-    await stack.until(lambda: len(stack.models["watcher"].requests) == 4)
-    both.set()
-    await _settled(stack, "@2", "@3")
-    # 1.80 before, and two more turns of 0.60: over the 2.00 the run has now.
-    await stack.until(lambda: _questions(stack)[-1]["text"].endswith("of its $2.00 limit. Continue?"))
+    # Without raising max_cost_usd (or with a limit not above spent), resume is refused.
+    with pytest.raises(CallFailed, match=r"max_cost_usd above \$1\.80"):
+        await stack.call("resume_workflow", run_id=stack.run_id, call_id="resume-same")
+    with pytest.raises(CallFailed, match=r"max_cost_usd above \$1\.80"):
+        await stack.call("resume_workflow", run_id=stack.run_id, max_cost_usd=1.8, call_id="resume-equal")
+    with pytest.raises(CallFailed, match="max_cost_usd must be a positive amount in USD"):
+        await stack.call("resume_workflow", run_id=stack.run_id, max_cost_usd=0, call_id="resume-zero")
+    assert stack.store.get_run(stack.run_id).state is WorkflowRunState.INTERRUPTED
 
-    assert _questions(stack)[-1]["options"] == [_CONTINUE, _STOP]
-    assert (_states(stack)["$budget:1"], _states(stack)["$budget:2"]) == ("completed", "waiting")
-    assert await _agent(stack, 4) == "queued"
+    # Resuming with a higher limit reuses completed nodes without re-running them, then stops at the new limit.
+    handle = json.loads(await stack.call("resume_workflow", run_id=stack.run_id, max_cost_usd=2.5, call_id="resume-up"))
+    await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
+    assert stack.store.get_run(stack.run_id).max_cost_usd == 2.5
+
+    assert (await stack.submit("@0", "agent", {"prompt": "Look into part 0."})).cached is True
+    assert (await stack.submit("@1", "agent", {"prompt": "Look into part 1."})).cached is True
+    assert len(stack.models["watcher"].requests) == 2
+
+    # @2 spends 0.60 -> 2.40 < 2.50, so it finishes and the run stays running.
+    assert await stack.result("@2", "agent", {"prompt": "Look into part 2."}) == "done"
+    assert len(stack.models["watcher"].requests) == 3
+    assert stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING
+
+    # @3 spends 0.60 -> 3.00 >= 2.50, so the run stops interrupted at the new limit.
+    assert await stack.result("@3", "agent", {"prompt": "Look into part 3."}) == "done"
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.INTERRUPTED)
+    run = stack.store.get_run(stack.run_id)
+    assert run.error == "Stopped at the cost limit ($3.00 of $2.50)."
+    assert handle["run_id"] == stack.run_id
 
 
 @pytest.mark.asyncio
-async def test_further_turn_of_an_agent_waits_at_the_limit_as_a_new_call_does(stack: WorkflowStack) -> None:
-    """A turn that corrects an answer is new spending: at the limit it starts only once the requester continues."""
+async def test_further_turn_of_an_agent_stops_at_the_limit_without_starting_correction(stack: WorkflowStack) -> None:
+    """A schema correction turn is new spending: at the limit it does not start and the run ends interrupted."""
     await stack.start(max_cost_usd=0.5, max_concurrent=1)
     good = '```json\n{"ok": true}\n```'
     model = stack.child_script(answer("no json here", _usd(0.6)), answer(good, _usd(0.1)))
     ask = {"prompt": "Does it hold?", "schema": {"type": "object", "required": ["ok"]}}
 
     await stack.submit("@0", "agent", ask)
-    await stack.until(lambda: "$budget:1" in _states(stack))
-    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.WAITING)
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.INTERRUPTED)
 
-    assert (len(model.requests), _states(stack)["@0"]) == (1, "queued")
+    assert len(model.requests) == 1
+    assert _states(stack)["@0"] == "cancelled"
+    assert stack.store.get_run(stack.run_id).error == "Stopped at the cost limit ($0.60 of $0.50)."
     assert stack.engine.run_usage(stack.run_id)["cost_usd"] == pytest.approx(0.6)
-    assert await _answer(stack, "$budget:1", "Continue with $0.50 more")
+
+    await stack.resume(stack.run_id, max_cost_usd=1.0)
     assert await stack.result("@0", "agent", ask) == {"ok": True}
     assert len(model.requests) == 2
 
 
 @pytest.mark.asyncio
-async def test_further_turn_that_a_call_finds_due_waits_at_the_limit(stack: WorkflowStack) -> None:
-    """The call that reads a turn's end itself, as after a restart, starts no further turn over the limit either."""
+async def test_further_turn_that_a_call_finds_due_stops_at_the_limit(stack: WorkflowStack) -> None:
+    """Reconciling a finished turn after a restart starts no correction turn over the limit and ends interrupted."""
     await stack.start(max_cost_usd=0.5, max_concurrent=1)
     gate = asyncio.Event()
     wrong = [Await(gate.wait), *answer("no json here", _usd(0.6))]
@@ -197,7 +227,6 @@ async def test_further_turn_that_a_call_finds_due_waits_at_the_limit(stack: Work
     ask = {"prompt": "Does it hold?", "schema": {"type": "object", "required": ["ok"]}}
     await stack.submit("@0", "agent", ask)
     await stack.until(lambda: len(model.requests) == 1)
-    # The attempt is lost to an interruption of its process, and nothing waits for the agent, whose turn then ends.
     for waiting in stack.engine._tasks.pop(stack.run_id):
         waiting.cancel()
     await stack.scripts.end(stack.attempt.run_id, ScriptRunState.INTERRUPTED, reason=PLUGIN_TOOLS_CHANGED)
@@ -207,123 +236,16 @@ async def test_further_turn_that_a_call_finds_due_waits_at_the_limit(stack: Work
     jobs = stack.jobs.retained_jobs
     await stack.until(lambda: all(job.status in TERMINAL_STATUSES for job in jobs() if job.job_id == job_id))
 
-    for _ in range(3):
-        with pytest.raises(ScriptRuntimeUnavailableError, match="cost limit"):
-            await stack.submit("@0", "agent", ask)
-
+    receipt = await stack.submit("@0", "agent", ask)
+    assert receipt.state == "queued"
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.INTERRUPTED)
     assert len(model.requests) == 1
-    assert "$budget:1" in _states(stack)
-
-
-@pytest.mark.asyncio
-async def test_agent_that_a_tool_call_starts_after_a_resume_waits_at_the_limit(stack: WorkflowStack) -> None:
-    """The limit is read from what the run spent, not from what this primary remembers: a resume keeps it."""
-    await stack.start(**_LIMIT)
-    model = stack.child_script(_turn(1.2), _turn())
-    assert await stack.result("@0", "agent", {"prompt": "Look into part 0."}) == "done"
-    await stack.until(lambda: "$budget:1" in _states(stack))
-    await stack.end_attempt(ScriptRunState.FAILED)
-    await stack.resume(stack.run_id)
-    assert (await stack.submit("@0", "agent", {"prompt": "Look into part 0."})).cached
-
-    delegated = tool_args("delegate", "run_subagent", task="Look into part 1.")
-    assert (await stack.submit("@1", "tool", delegated)).state == "queued"
-    await asyncio.sleep(0.3)
-
-    assert (len(model.requests), _states(stack)["@1"]) == (1, "queued")
-    assert stack.engine.run_usage(stack.run_id)["cost_usd"] == pytest.approx(1.2)
-    assert _questions(stack)[-1]["status"] == "open"
-
-
-@pytest.mark.asyncio
-async def test_cost_question_whose_card_could_not_be_posted_is_posted_without_a_new_call(
-    stack: WorkflowStack,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Nothing of a run that waits at its limit asks again, so the run's views post the question's card."""
-    monkeypatch.setattr(view_module, "_REFRESH_SECONDS", 0.02)
-    monkeypatch.setattr(view_module, "_SETTLE_SECONDS", 0.005)
-    await stack.start(max_cost_usd=1, max_concurrent=1)
-    gate = asyncio.Event()
-    stack.child_script([Await(gate.wait), *_turn(1.2)], _turn())
-    assert [await _agent(stack, index) for index in range(2)] == ["running", "queued"]
-    assert stack.room is not None
-    stack.room.refuse_sends = True
-    gate.set()
-    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.WAITING)
-    stack.views.start()
-    await asyncio.sleep(0.1)
-    assert _questions(stack) == []
-
-    stack.room.refuse_sends = False
-    # The card is in the room first, and then named by the question it is the card of.
-    await stack.until(lambda: "event_id" in stack.store.get_node(stack.run_id, "$budget:1").links)
-    await stack.views.close()
-
-    assert (_questions(stack)[-1]["status"], _states(stack)["@1"]) == ("open", "queued")
-    assert await _answer(stack, "$budget:1", _CONTINUE)
-    await _settled(stack, "@1")
-
-
-@pytest.mark.asyncio
-async def test_nested_run_cost_question_whose_card_could_not_be_posted_is_posted_by_views(
-    stack: WorkflowStack,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A nested run has no card of its own, yet its unsent budget question is retried until the room takes it."""
-    monkeypatch.setattr(view_module, "_REFRESH_SECONDS", 0.02)
-    monkeypatch.setattr(view_module, "_SETTLE_SECONDS", 0.005)
-    await stack.start(max_concurrent=1)
-    outer = stack.run_id
-    inner = await stack.start(
-        max_cost_usd=1,
-        max_concurrent=1,
-        parent_run_id=outer,
-        parent_node_key="@0",
-    )
-    gate = asyncio.Event()
-    stack.child_script([Await(gate.wait), *_turn(1.2)], _turn())
-    assert [await _agent(stack, index) for index in range(2)] == ["running", "queued"]
-    assert stack.room is not None
-    stack.room.refuse_sends = True
-    gate.set()
-    await stack.until(lambda: stack.store.get_run(inner.run_id).state is WorkflowRunState.WAITING)
-    stack.views.start()
-    await asyncio.sleep(0.1)
-    assert _questions(stack) == []
-
-    stack.room.refuse_sends = False
-    await stack.until(lambda: "event_id" in stack.store.get_node(inner.run_id, "$budget:1").links)
-    await stack.views.close()
-
-    assert (_questions(stack)[-1]["run"], _questions(stack)[-1]["status"], _states(stack)["@1"]) == (
-        inner.run_id,
-        "open",
-        "queued",
-    )
-    assert await _answer(stack, "$budget:1", _CONTINUE)
-    await _settled(stack, "@1")
-    """Stop ends the run cancelled. Its limit is not raised: a resume that wants to work is asked again."""
-    gate = await _over_the_limit(stack)
-    gate.set()
-    await _settled(stack, "@1")
-
-    assert await _answer(stack, "$budget:1", _STOP)
-    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.CANCELLED)
-    assert (_states(stack)["@2"], _states(stack)["@3"]) == ("cancelled", "cancelled")
-    # A run that ended is asked nothing more, and holds nothing.
-    assert await stack.engine._over_budget(stack.store.get_run(stack.run_id)) is False
-    assert stack.run_id not in stack.engine._places
-
-    await stack.resume(stack.run_id)
-    assert await _agent(stack, 2) == "queued"
-    assert _questions(stack)[-1]["text"] == "This run has spent $1.80 of its $1.00 limit. Continue?"
-    assert _questions(stack)[-1]["question_id"] != _questions(stack)[0]["question_id"]
+    assert stack.store.get_run(stack.run_id).error == "Stopped at the cost limit ($0.60 of $0.50)."
 
 
 @pytest.mark.asyncio
 async def test_budget_counts_rerun_turns_and_cached_nodes_do_not_move_it(stack: WorkflowStack) -> None:
-    """A saved answer that a resume reuses costs nothing; a call that runs again is paid again, and counts."""
+    """Reusing a saved call spends nothing; rerunning it adds the new turn's cost and stops at the limit."""
     await stack.start(**_LIMIT)
     stack.child_script(_turn(), _turn())
     assert await stack.result("@0", "agent", {"prompt": "Look into it."}) == "done"
@@ -331,44 +253,18 @@ async def test_budget_counts_rerun_turns_and_cached_nodes_do_not_move_it(stack: 
 
     await stack.resume(stack.run_id)
     assert (await stack.submit("@0", "agent", {"prompt": "Look into it."})).cached
-    assert "$budget:1" not in _states(stack)
+    assert stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING
     await stack.end_attempt(ScriptRunState.FAILED)
 
     await stack.resume(stack.run_id, rerun=["n1"])
     assert await stack.result("@0", "agent", {"prompt": "Look into it."}) == "done"
-    await stack.until(lambda: _questions(stack))
-    assert _questions(stack)[-1]["text"] == "This run has spent $1.20 of its $1.00 limit. Continue?"
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.INTERRUPTED)
+    assert stack.store.get_run(stack.run_id).error == "Stopped at the cost limit ($1.20 of $1.00)."
 
 
 @pytest.mark.asyncio
-async def test_open_budget_question_still_holds_the_run_after_a_restart(stack: WorkflowStack) -> None:
-    """What holds the run is saved: the next primary starts none of its calls until the requester answers."""
-    gate = await _over_the_limit(stack)
-    gate.set()
-    await _settled(stack, "@1")
-    stack = await stack.restart()
-    await stack.recover()
-
-    assert await _agent(stack, 2) == "queued"
-    assert len(_questions(stack)) == 1
-    assert await _answer(stack, "$budget:1", _CONTINUE)
-    await stack.until(lambda: _states(stack)["@2"] in ("running", "completed", "failed"))
-
-
-@pytest.mark.asyncio
-async def test_script_cannot_submit_the_cost_questions_key(stack: WorkflowStack) -> None:
-    """The key of the run's own cost question is no key a script's call can have, so no script answers it for itself."""
-    await stack.start(**_LIMIT)
-
-    with pytest.raises(ValueError, match="invalid literal"):
-        await stack.submit("$budget:1", "value", {"op": "now"})
-
-    assert _states(stack) == {}
-
-
-@pytest.mark.asyncio
-async def test_without_a_limit_nothing_pauses(stack: WorkflowStack) -> None:
-    """A run that names no limit spends what its agents cost, and asks nothing."""
+async def test_without_a_limit_nothing_stops(stack: WorkflowStack) -> None:
+    """A run that names no limit spends what its agents cost and keeps running."""
     await stack.start(max_concurrent=2)
     stack.child_script(_turn(1.2), _turn(), _turn())
 
@@ -380,15 +276,14 @@ async def test_without_a_limit_nothing_pauses(stack: WorkflowStack) -> None:
 
 
 @pytest.mark.asyncio
-async def test_question_of_a_limit_under_a_cent_says_the_amounts(stack: WorkflowStack) -> None:
-    """Two decimal places would say `$0.00 of its $0.00 limit`: an amount under a cent keeps its digits."""
+async def test_cost_limit_under_a_cent_formats_amounts(stack: WorkflowStack) -> None:
+    """Amounts under a cent keep up to six decimal places instead of rounding to `$0.00`."""
     await stack.start(max_cost_usd=0.000001, max_concurrent=1)
     stack.child_script(_turn(0.00042))
     assert await stack.result("@0", "agent", {"prompt": "Look into part 0."}) == "done"
-    await stack.until(lambda: bool(_questions(stack)))
+    await stack.until(lambda: stack.store.get_run(stack.run_id).state is WorkflowRunState.INTERRUPTED)
 
-    assert _questions(stack)[-1]["text"] == "This run has spent $0.00042 of its $0.000001 limit. Continue?"
-    assert _questions(stack)[-1]["options"] == ["Continue with $0.000001 more", "Stop"]
+    assert stack.store.get_run(stack.run_id).error == "Stopped at the cost limit ($0.00042 of $0.000001)."
 
 
 @pytest.mark.asyncio

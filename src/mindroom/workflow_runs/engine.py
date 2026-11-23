@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import secrets
 import time
 from collections import Counter, deque
@@ -131,12 +132,7 @@ _NO_MATCH = "Agent '{name}' did not return JSON matching the schema after {turns
 _CORRECTING = "The agent of this call is correcting its answer. Try again in a moment."
 _NOT_ASKED = "The question could not be posted in the run's thread yet. Try again in a moment."
 _NOT_ANSWERED = "The run ended before the question was answered."
-_BUDGET = "$budget:"
-_BUDGET_QUESTION = "This run has spent ${spent} of its ${limit} limit. Continue?"
-_BUDGET_CONTINUE = "Continue with ${amount} more"
-_BUDGET_STOP = "Stop"
-_OVER_BUDGET = "Stopped at the run's cost limit."
-_HELD = "The run waits at its cost limit. Try again in a moment."
+_OVER_BUDGET = "Stopped at the cost limit (${spent} of ${limit})."
 _TOO_MANY_OPTIONS = "A question takes at most 20 options of at most 200 bytes each."
 _NO_SESSIONS = 'A workflow script cannot call delegate.{function} yet. Start a fresh agent with agent() or tool("delegate", "run_subagent", ...).'
 _FILTERED_TURN = "A turn that is limited to some of its agent's tools cannot start or resume a workflow."
@@ -228,15 +224,13 @@ class WorkflowLimits:
 class _Places:
     """The places among one run's working calls: at most `limit` agent and tool calls of the run work at one time.
 
-    A call holds its place from its start to its end, except while it waits for a person. The calls that found no
-    place wait in `queued`, saved as such, in the order they came, each with what starts it.
+    A call holds its place from its start to its end. The calls that found no place wait in `queued`, saved as such,
+    in the order they came, each with what starts it.
     """
 
     limit: int
     working: set[str] = field(default_factory=set)
     queued: deque[tuple[str, Callable[[], Awaitable[object]]]] = field(default_factory=deque)
-    # Whether the run has spent its cost limit: no call starts until its requester chose to continue.
-    held: bool = False
 
 
 # What the saved owner of a run has now in the run's conversation: its live context once access is confirmed,
@@ -494,16 +488,27 @@ class WorkflowEngine:
         caller: ToolRuntimeContext,
         rerun: Sequence[str] = (),
         limits: WorkflowLimits | None = None,
+        *,
+        max_cost_usd: float | None = None,
     ) -> frozenset[str]:
         """Check a resume before anything changes, and return the keys of the calls *rerun* names.
 
-        A live run is refused, an ID that names no call of the run is refused by name, and so is a resume that
-        `admit` gives no attempt now.
+        A live run is refused, an ID that names no call of the run is refused by name, a run that already reached its
+        cost limit requires a higher `max_cost_usd`, and a resume that `admit` gives no attempt now is refused.
         """
         run = self.store.get_run(run_id)
         if run.state not in TERMINAL_RUN_STATES:
             msg = f"Run {run_id} is still running. Cancel it first."
             raise WorkflowRunStoreError(msg)
+        effective_limit = run.max_cost_usd if max_cost_usd is None else max_cost_usd
+        if effective_limit is not None:
+            spent = self.run_usage(run_id)["cost_usd"]
+            if _limit_reached(spent, effective_limit):
+                msg = (
+                    f"Run {run_id} has already spent ${_usd(spent)} (limit ${_usd(effective_limit)}). "
+                    f"Pass max_cost_usd above ${_usd(spent)} to resume it."
+                )
+                raise WorkflowRunStoreError(msg)
         try:
             keys = frozenset(self._node(run_id, str(node_id)).key for node_id in rerun)
         except LookupError as exc:
@@ -519,6 +524,7 @@ class WorkflowEngine:
         *,
         source: str | None = None,
         rerun: Sequence[str] = (),
+        max_cost_usd: float | None = None,
         limits: WorkflowLimits | None = None,
         owner: str | None = None,
         job_id: str | None = None,
@@ -550,13 +556,14 @@ class WorkflowEngine:
             run_id,
             run.epoch if epoch is None else epoch,
             when=TERMINAL_RUN_STATES,
-            rerun=self.resumable(run_id, context, rerun, limits),
+            rerun=self.resumable(run_id, context, rerun, limits, max_cost_usd=max_cost_usd),
             max_active=limits.max_concurrent_runs,
             state=WorkflowRunState.STARTING,
             source=text,
             source_digest=hashlib.sha256(text.encode()).hexdigest(),
             persona=ceiling(context, persona, run.persona),
             previous_source_digest=run.source_digest,
+            max_cost_usd=run.max_cost_usd if max_cost_usd is None else max_cost_usd,
             runtime_seconds_left=limits.max_runtime_hours * 3600 if limits.max_runtime_hours else None,
             idle_resumes=0,
             owner=owner,
@@ -828,9 +835,13 @@ class WorkflowEngine:
             if len(options) > MAX_OPTIONS or any(len(option.encode()) > MAX_OPTION_BYTES for option in options):
                 # Refused before anything waits: a card cannot cut an option short, and must be one event.
                 raise WorkflowRunStoreError(_TOO_MANY_OPTIONS)
-            # A question waits for its answer and holds no place. It is saved before its card is sent, so the card
-            # names the call, and a card that could not be sent is sent when the script asks again.
-            node = replace(node, state=WorkflowNodeState.WAITING, waiting_on="user")
+            # A question waits for its answer and holds no place, unless the run is already over its cost limit.
+            over = await self._check_budget(run)
+            node = replace(
+                node,
+                state=WorkflowNodeState.QUEUED if over else WorkflowNodeState.WAITING,
+                waiting_on=None if over else "user",
+            )
         elif kind == "value":
             node = replace(node, result=_value(request.args))
         elif kind == "error":
@@ -845,7 +856,7 @@ class WorkflowEngine:
         ended_at = None if kind == "ask" else node.started_at
         put = partial(self.store.put_node, replace(node, ended_at=ended_at), epoch, dirty_after=True)
         node = await asyncio.to_thread(put)
-        if kind == "ask":
+        if node.state is WorkflowNodeState.WAITING:
             await self._restate(run.run_id)
         return _receipt(await self._asked(run, node, epoch))
 
@@ -883,11 +894,7 @@ class WorkflowEngine:
             await show_question(client, run, node, status, answer, retries)
 
     async def ask_again(self, run_id: str) -> None:
-        """Post the card of each question of a run that waits without one: a card that could not be sent then.
-
-        Nothing else sends the card of the run's own question at its cost limit, and a script whose other calls
-        wait asks nothing again.
-        """
+        """Post the card of each question of a run that waits without one: a card that could not be sent then."""
         async with self._condition(run_id):
             run = self.store.get_run(run_id)
             for light in self.store.nodes(run_id, light=True) if run.state not in TERMINAL_RUN_STATES else ():
@@ -912,11 +919,6 @@ class WorkflowEngine:
             settle = partial(self.store.settle_node, run_id, key, generation, run.epoch)
             if not await asyncio.to_thread(partial(settle, state=WorkflowNodeState.COMPLETED, result=answer)):
                 return False
-            if key.startswith(_BUDGET) and answer == _BUDGET_STOP:
-                self.cancel_as_task(run_id, reason=_OVER_BUDGET)
-            elif key.startswith(_BUDGET) and not await self._over_budget(run):
-                # The run has its limit once more: the calls it held start.
-                self._leave(run_id, None)
             await self._restate(run_id)
             condition.notify_all()
         # Without the lock, which no send to the room holds up for long.
@@ -936,7 +938,9 @@ class WorkflowEngine:
         A queued call has started nothing and names nothing that could have: it starts when a place is free, in the
         order the calls came. The caller holds the run's lock.
         """
-        if await self._try_place(run, node.key):
+        over, places = await self._check_budget(run), self._places_for(run)
+        if not over and len(places.working) < places.limit:
+            places.working.add(node.key)
             try:
                 return await dispatch(node)
             except BaseException:
@@ -947,19 +951,12 @@ class WorkflowEngine:
                 raise
         queued = replace(node, state=WorkflowNodeState.QUEUED)
         queued = await asyncio.to_thread(partial(self.store.put_node, queued, run.epoch, dirty_after=dirty_after))
-        self._enqueue_place(run, queued.key, partial(dispatch, queued, queued=True))
+        if not over:
+            self._enqueue_place(run, queued.key, partial(dispatch, queued, queued=True))
         return _receipt(queued)
 
     def _places_for(self, run: WorkflowRun) -> _Places:
         return self._places.setdefault(run.run_id, _Places(max(1, run.max_concurrent)))
-
-    async def _try_place(self, run: WorkflowRun, key: str) -> bool:
-        """Take one working place for *key* if *run* has room and is within budget. The caller holds the run's lock."""
-        places = self._places_for(run)
-        if await self._over_budget(run) or len(places.working) >= places.limit:
-            return False
-        places.working.add(key)
-        return True
 
     def _enqueue_place(self, run: WorkflowRun, key: str, start: Callable[[], Awaitable[object]]) -> None:
         """Queue *start* for *key* and start any queued call a free place now admits. The caller holds the run's lock."""
@@ -972,10 +969,18 @@ class WorkflowEngine:
         if places is None:
             return
         places.working.discard(key or "")
-        while places.queued and len(places.working) < places.limit and not self._closed and not places.held:
+        while places.queued and len(places.working) < places.limit and not self._closed:
             queued, start = places.queued.popleft()
             places.working.add(queued)
             self._spawn(run_id, self._start_queued(run_id, queued, start))
+
+    async def _finish_call(self, run_id: str, key: str) -> None:
+        """Release *key* and stop at the cost limit if reached; the caller's `_leave` starts queued work otherwise."""
+        async with self._condition(run_id):
+            if (places := self._places.get(run_id)) is not None:
+                places.working.discard(key)
+            with suppress(WorkflowRunNotFoundError):
+                await self._check_budget(self.store.get_run(run_id))
 
     async def _start_queued(self, run_id: str, key: str, start: Callable[[], Awaitable[object]]) -> None:
         """Start a call that waited for a place, under the run's lock, again while its agent cannot be decided yet."""
@@ -986,12 +991,10 @@ class WorkflowEngine:
                         places = self._places.get(run_id)
                         if places is None or run_id in self._stopping:
                             return
-                        # Read from what the run spent: a resume starts without what an earlier primary remembered.
-                        if await self._over_budget(self.store.get_run(run_id)):
-                            # The run reached its cost limit since this call got its place: it waits again, first.
-                            places.working.discard(key)
-                            places.queued.appendleft((key, start))
+                        places.working.discard(key)
+                        if await self._check_budget(self.store.get_run(run_id)):
                             return
+                        places.working.add(key)
                         await start()
                     break
                 except ScriptRuntimeUnavailableError:
@@ -1039,6 +1042,8 @@ class WorkflowEngine:
                 # The run ended while the gate was open: its end settled the call, and nothing of it starts now.
                 return
             if outcome[0] is WorkflowNodeState.COMPLETED:
+                if await self._check_budget(now):
+                    return
                 start = partial(self._dispatch_agent, run, node, timeout=None, queued=True)
                 self._enqueue_place(run, node.key, start)
             else:
@@ -1253,57 +1258,33 @@ class WorkflowEngine:
         """Wait for the job of an agent node and settle the node as its turn ended, then wake the run's waiters."""
         try:
             await self._settle_agent(run, node, epoch)
-            if run.max_cost_usd is not None:
-                # Before the turn's place goes to the next call: what the turn cost may have used up the run's limit.
-                async with self._condition(node.run_id):
-                    with suppress(SupersededAttemptError):
-                        await self._over_budget(self.store.get_run(node.run_id))
+            await self._finish_call(node.run_id, node.key)
         finally:
             self._leave(node.run_id, node.key)
         await self._notify(node.run_id)
 
-    async def _over_budget(self, run: WorkflowRun) -> bool:
-        """Return whether *run* has spent its cost limit and so starts no call, and ask its requester once then.
+    def _budget_exceeded(self, run: WorkflowRun) -> str | None:
+        """Return the stop reason when *run* has reached its `max_cost_usd`, else None."""
+        if run.max_cost_usd is None:
+            return None
+        spent = self.run_usage(run.run_id)["cost_usd"]
+        return (
+            _OVER_BUDGET.format(spent=_usd(spent), limit=_usd(run.max_cost_usd))
+            if _limit_reached(spent, run.max_cost_usd)
+            else None
+        )
 
-        The limit is `max_cost_usd`, once more for each time the requester chose to continue. The questions are the
-        run's calls `$budget:<n>`, saved as every call is, so a restart holds the run as before. Until the answer
-        the calls that would start wait as queued, and those that run finish. The caller holds the run's lock.
-        """
-        if run.max_cost_usd is None or run.state not in SERVED_RUN_STATES:
+    async def _check_budget(self, run: WorkflowRun) -> bool:
+        """Return whether *run* reached its cost limit; drop queued work and stop once running calls end."""
+        if run.state not in SERVED_RUN_STATES or run.max_cost_usd is None:
             return False
-        number, asked = 1, self.store.get_node(run.run_id, f"{_BUDGET}1")
-        while asked is not None and asked.state is WorkflowNodeState.COMPLETED and asked.result != _BUDGET_STOP:
-            number, asked = number + 1, self.store.get_node(run.run_id, f"{_BUDGET}{number + 1}")
-        spent = (await asyncio.to_thread(self.run_usage, run.run_id))["cost_usd"]
-        places = self._places.setdefault(run.run_id, _Places(max(1, run.max_concurrent)))
-        waits = asked is not None and asked.state is WorkflowNodeState.WAITING
-        places.held = waits or spent >= run.max_cost_usd * number
-        if places.held and not waits:
-            options = [_BUDGET_CONTINUE.format(amount=_usd(run.max_cost_usd)), _BUDGET_STOP]
-            text = _BUDGET_QUESTION.format(spent=_usd(spent), limit=_usd(run.max_cost_usd * number))
-            request: dict[str, object] = {"question": text, "options": options}
-            asked = WorkflowNode(
-                run_id=run.run_id,
-                key=f"{_BUDGET}{number}",
-                kind="ask",
-                lane="",
-                idx=number,
-                digest="",
-                request=request,
-                generation=1 if asked is None else asked.generation + 1,
-                state=WorkflowNodeState.WAITING,
-                waiting_on="user",
-                attempt=run.attempt,
-                label=node_label("ask", request),
-                started_at=utc_timestamp(),
-            )
-            asked = await asyncio.to_thread(partial(self.store.put_node, asked, run.epoch))
-        if places.held and asked is not None:
-            with suppress(ScriptRuntimeUnavailableError):
-                # A card that cannot be sent now is sent with the next look at the limit.
-                await self._asked(run, asked, run.epoch)
-            await self._restate(run.run_id)
-        return places.held
+        if (reason := await asyncio.to_thread(self._budget_exceeded, run)) is None:
+            return False
+        if (places := self._places.get(run.run_id)) is not None:
+            places.queued.clear()
+        if (places is None or not places.working) and run.run_id not in self._stopping:
+            self.cancel_as_task(run.run_id, reason=reason, state=WorkflowRunState.INTERRUPTED, epoch=run.epoch)
+        return True
 
     async def _settle_agent(self, run: WorkflowRun, node: WorkflowNode, epoch: int, *, block: bool = True) -> None:
         """Settle an agent node from its job, once that has ended, for the attempt that began with *epoch*.
@@ -1409,13 +1390,15 @@ class WorkflowEngine:
         """
         saved = self.store.get_node(node.run_id, node.key)
         current = saved.handle if saved is not None and saved.generation == node.generation else None
-        handle, queued = current or cast("DispatchHandle", node.handle), False
+        handle = current or cast("DispatchHandle", node.handle)
         while True:
             left = handle.work_left if handle.work_until is None else max(0.0, handle.work_until - time.time())
             try:
-                if await self._hold_turn(node, epoch, locked=not block, shown=queued):
-                    queued = True
-                    raise AgentNotReadyError(_HELD)  # noqa: TRY301
+                if (
+                    reason := await asyncio.to_thread(self._budget_exceeded, self.store.get_run(node.run_id))
+                ) is not None:
+                    stopped: _Outcome = WorkflowNodeState.CANCELLED, None, {"kind": "cancelled", "message": reason}
+                    return _unless_proven(node, made, stopped)
                 opts = {"timeout": left, "queued": True, "turn": turn, "correction": correction, "made": made}
                 return await self._launch_agent(run, node, epoch, **opts)
             except AgentNotReadyError:
@@ -1425,22 +1408,6 @@ class WorkflowEngine:
             except AgentNodeError as exc:
                 refused: _Outcome = WorkflowNodeState.FAILED, None, {"kind": "refused", "message": str(exc)}
                 return _unless_proven(node, made, refused)
-
-    async def _hold_turn(self, node: WorkflowNode, epoch: int, *, locked: bool, shown: bool) -> bool:
-        """Return whether the run's cost limit holds a further turn of *node* now: it is new spending, as a call is.
-
-        The node then shows as queued, once, so its run waits when nothing else of it works. *locked* says that
-        the caller holds the run's lock.
-        """
-        if locked:
-            return await self._over_budget(self.store.get_run(node.run_id))
-        async with self._condition(node.run_id):
-            held = await self._over_budget(self.store.get_run(node.run_id))
-            if held and not shown:
-                stamp = partial(self.store.update_node, node.run_id, node.key, node.generation, epoch)
-                await asyncio.to_thread(partial(stamp, state=WorkflowNodeState.QUEUED))
-                await self._restate(node.run_id)
-            return held
 
     async def _node_waits(
         self,
@@ -1522,6 +1489,8 @@ class WorkflowEngine:
             await runtime.jobs.request_cancel(job_id)
         try:
             await self._settle_agent(run, node, epoch, block=False)
+            if not stop:
+                await self._check_budget(self.store.get_run(run.run_id))
         except AgentNotReadyError as exc:
             if not stop:
                 # The lock is not held while access resolves: the script's SDK asks again, and a Stop gets in.
@@ -1551,8 +1520,8 @@ class WorkflowEngine:
             if run.state in SERVED_RUN_STATES:
                 states = self.store.node_states(run_id)
                 places = self._places.get(run_id)
-                blocked = places is not None and (places.held or len(places.working) >= places.limit)
-                # A queued call behind a cost hold or full approval-held slots cannot start until a person acts.
+                blocked = places is not None and len(places.working) >= places.limit
+                # A queued call behind full approval-held slots cannot start until a person acts.
                 working = states & UNSETTLED_NODE_STATES - ({WorkflowNodeState.QUEUED} if blocked else set())
                 waits = WorkflowNodeState.WAITING in states and not working
                 state = WorkflowRunState.WAITING if waits else WorkflowRunState.RUNNING
@@ -1722,15 +1691,16 @@ class WorkflowEngine:
         _CALLING_NODE.set((node.run_id, node.key, node.generation))
         try:
             outcome = await call()
+            dirty = _changed(node, outcome)
+            await hold("before_settle")
+            state, result, error = outcome
+            settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
+            # A run that moved on meanwhile reads the call's receipt itself.
+            with suppress(SupersededAttemptError):
+                await asyncio.to_thread(settle, state=state, result=result, error=error, dirty_after=dirty)
+            await self._finish_call(node.run_id, node.key)
         finally:
             self._leave(node.run_id, node.key)
-        dirty = _changed(node, outcome)
-        await hold("before_settle")
-        state, result, error = outcome
-        settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
-        # A run that moved on meanwhile reads the call's receipt itself.
-        with suppress(SupersededAttemptError):
-            await asyncio.to_thread(settle, state=state, result=result, error=error, dirty_after=dirty)
         await self._notify(node.run_id)
 
     async def _watch_time(self, run_id: str, epoch: int, hours: float) -> None:
@@ -1957,6 +1927,11 @@ def _receipt(node: WorkflowNode) -> NodeReceipt:
         error=node.error,
         result_ref=f"results/{node_id}" if spilled else None,
     )
+
+
+def _limit_reached(spent: float, limit: float) -> bool:
+    """Return whether *spent* has reached *limit*, tolerating binary float drift on summed turn costs."""
+    return spent >= limit or math.isclose(spent, limit, rel_tol=1e-9, abs_tol=0.0)
 
 
 def _usd(amount: float) -> str:

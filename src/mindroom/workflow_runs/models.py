@@ -87,7 +87,7 @@ class WorkflowRun:
     args: object
     max_concurrent: int
     max_cost_usd: float | None
-    """What the run may spend before it asks its requester; each "continue" allows as much again."""
+    """What the run may spend before it stops interrupted; resume with a higher limit to continue."""
     resource_profile: str | None
     runtime_seconds_left: float | None
     """Working time left; `None` is no limit."""
