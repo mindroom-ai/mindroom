@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.lifecycle import prepare_child_turn
-from mindroom.delegation.state import SubagentPersona
+from mindroom.delegation.sessions import reserve_subagent_turn
+from mindroom.delegation.state import CONTINUE_SUBAGENT, SubagentPersona
 from mindroom.delegation.targets import resolve_follow_up_target, resolve_fresh_target
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
@@ -152,3 +156,40 @@ def test_a_fresh_call_stores_its_title_short_and_redacted(tmp_path: Path) -> Non
     assert not isinstance(result, str)
     assert len(result.title) <= 80
     assert result.title.startswith("Measure cold start Measure cold start")
+
+
+@pytest.mark.asyncio
+async def test_follow_up_target_resolves_unique_prefix_once_to_full_id(tmp_path: Path) -> None:
+    """A unique 8-char prefix resolves to the full 32-hex subagent ID for follow-up targets, resumes, and managed jobs."""
+    paths, config = _runtime_paths(tmp_path), _config(("file",))
+    context = _delegate_runtime_context(config, paths)
+    owner = context.execution_identity
+    assert owner is not None
+    retained = replace(_retained(paths), status="completed", result="First answer", persona=None)
+    await reserve_subagent_turn(retained, owner=owner, runtime_paths=paths)
+    prefix = retained.subagent_id[:8]
+    common = {"owner": owner, "config": config, "runtime_paths": paths, "depth": 0}
+
+    target = await resolve_follow_up_target({"subagent_id": prefix, "message": "Again"}, **common)
+    assert not isinstance(target, str)
+    assert target.previous_child is not None
+    assert target.previous_child.subagent_id == retained.subagent_id
+
+    resumed = await resolve_follow_up_target({"subagent_id": prefix, "message": "Again"}, retained=retained, **common)
+    assert not isinstance(resumed, str)
+    assert resumed.previous_child == retained
+    with pytest.raises(RuntimeError, match="no longer matches its retained requirement"):
+        await resolve_follow_up_target({"subagent_id": "b" * 8, "message": "Again"}, retained=retained, **common)
+
+    capture = MagicMock(return_value="captured")
+    toolkit = DelegateTools("leader", paths, config, tmp_path, execution_identity=owner)
+    with tool_runtime_context(context), patch("mindroom.custom_tools.delegate.delegation_call_job", capture):
+        result = await toolkit.managed_job(
+            CONTINUE_SUBAGENT,
+            {"subagent_id": prefix, "message": "Again"},
+            job_id="0" * 64,
+            runtime=object(),  # type: ignore[arg-type]
+        )
+    assert result == "captured"
+    assert capture.call_args.args[0].subagent_id == retained.subagent_id
+    assert capture.call_args.kwargs["arguments"]["subagent_id"] == retained.subagent_id

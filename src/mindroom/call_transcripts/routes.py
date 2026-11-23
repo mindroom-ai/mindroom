@@ -16,11 +16,14 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, ValidationError
-from python_multipart.exceptions import MultipartParseError
-from python_multipart.multipart import MultipartParser, parse_options_header
 
 from mindroom.api.app_state import app_state
-from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
+from mindroom.api.bounded_form import (
+    InvalidMultipartFormError,
+    RequestBodyTooLargeError,
+    parse_multipart_form,
+    read_bounded_body,
+)
 from mindroom.call_transcripts.service import MAX_SPEECH_BYTES, CallRefusedError, iso_time
 from mindroom.plugin_http import require_client_user
 
@@ -162,71 +165,25 @@ def _refusal_response(refusal: CallRefusedError) -> JSONResponse:
 
 async def _read_body(request: Request, *, max_bytes: int) -> bytes:
     """Return the request body, read into memory, refusing one larger than ``max_bytes`` before or while reading it."""
-    declared = request.headers.get("content-length", "")
-    too_large = CallRefusedError(code="too-large", message=f"The request is larger than {max_bytes:,} bytes.")
-    if declared.isdigit() and int(declared) > max_bytes:
-        raise too_large
     try:
-        return await collect_bounded_bytes(request.stream(), max_bytes=max_bytes)
-    except ByteLimitExceededError:
-        raise too_large from None
+        return await read_bounded_body(request, max_bytes=max_bytes)
+    except RequestBodyTooLargeError as error:
+        raise CallRefusedError(code="too-large", message=str(error)) from None
 
 
 async def _speech_form(request: Request) -> tuple[bytes, float]:
     """Return a stretch's audio and when it began, in seconds since the epoch, from its multipart form."""
-    content_type, options = parse_options_header(request.headers.get("content-type"))
-    boundary = options.get(b"boundary")
-    if content_type != b"multipart/form-data" or not boundary:
-        raise CallRefusedError(code="invalid", message="Send speech as multipart/form-data.")
-    fields = _form_fields(await _read_body(request, max_bytes=_MAX_SPEECH_BODY_BYTES), boundary)
+    try:
+        fields = await parse_multipart_form(request, max_bytes=_MAX_SPEECH_BODY_BYTES)
+    except InvalidMultipartFormError as error:
+        raise CallRefusedError(code="invalid", message=str(error)) from None
+    except RequestBodyTooLargeError as error:
+        raise CallRefusedError(code="too-large", message=str(error)) from None
     audio = fields.get("audio")
     started_at = fields.get("startedAt")
     if audio is None or started_at is None:
         raise CallRefusedError(code="invalid", message="Send the speech as `audio` and when it began as `startedAt`.")
     return audio, _seconds(started_at)
-
-
-def _form_fields(body: bytes, boundary: bytes) -> dict[str, bytes]:
-    """Return each part of a multipart form by its name, the first of each name, parsed in memory."""
-    fields: dict[str, bytes] = {}
-    header_name = bytearray()
-    header_value = bytearray()
-    data = bytearray()
-    name: str | None = None
-
-    def begin_part() -> None:
-        nonlocal name
-        name = None
-        data.clear()
-
-    def end_header() -> None:
-        nonlocal name
-        if bytes(header_name).strip().lower() == b"content-disposition":
-            name = parse_options_header(bytes(header_value))[1].get(b"name", b"").decode("utf-8", "replace")
-        header_name.clear()
-        header_value.clear()
-
-    def end_part() -> None:
-        if name is not None:
-            fields.setdefault(name, bytes(data))
-
-    parser = MultipartParser(
-        boundary,
-        {
-            "on_part_begin": begin_part,
-            "on_header_field": lambda chunk, start, end: header_name.extend(chunk[start:end]),
-            "on_header_value": lambda chunk, start, end: header_value.extend(chunk[start:end]),
-            "on_header_end": end_header,
-            "on_part_data": lambda chunk, start, end: data.extend(chunk[start:end]),
-            "on_part_end": end_part,
-        },
-    )
-    try:
-        parser.write(body)
-        parser.finalize()
-    except MultipartParseError:
-        raise CallRefusedError(code="invalid", message="The speech's form could not be read.") from None
-    return fields
 
 
 def _seconds(value: bytes) -> float:

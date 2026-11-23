@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import TYPE_CHECKING
 
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
@@ -83,7 +84,14 @@ def _follow_up_streak(source_event_id: str | None) -> int:
     return int(source_event_id.rsplit(":", 1)[1])
 
 
-def follow_up_envelope(key: ConversationKey, *, follow_up_id: str, sender_id: str, prompt: str) -> MessageEnvelope:
+def follow_up_envelope(
+    key: ConversationKey,
+    *,
+    follow_up_id: str,
+    sender_id: str,
+    prompt: str,
+    requester_entity_name: str | None = None,
+) -> MessageEnvelope:
     """Address a follow-up to its conversation, as runtime work on behalf of the jobs' requester."""
     return MessageEnvelope(
         source_event_id=follow_up_id,
@@ -97,9 +105,9 @@ def follow_up_envelope(key: ConversationKey, *, follow_up_id: str, sender_id: st
             transport_sender_id=sender_id,
             requester_id=key.requester_id,
             sender_entity_name=key.recipient,
-            requester_entity_name=None,
+            requester_entity_name=requester_entity_name,
             sender_kind=SenderKind.MANAGED_ENTITY,
-            requester_kind=SenderKind.USER,
+            requester_kind=SenderKind.MANAGED_ENTITY if requester_entity_name is not None else SenderKind.USER,
             intent=TurnIntent.JOB_FOLLOW_UP,
             source_kind=MESSAGE_SOURCE_KIND,
             trust=TurnTrust.TRUSTED_INTERNAL,
@@ -125,8 +133,28 @@ def held_jobs(jobs: Sequence[BackgroundJob]) -> tuple[BackgroundJob, ...]:
     )
 
 
+_MAX_HELD_NOTICE_JOBS = 5
+_SHORT_JOB_ID_LENGTH = 8
+
+
+def _held_job_label(job: BackgroundJob) -> str:
+    child = job.adapter.get("child") if job.kind == "delegation" and isinstance(job.adapter, dict) else None
+    title = child.get("title") if isinstance(child, dict) else None
+    name = title.strip() if isinstance(title, str) and title.strip() else job.tool_name
+    fence = "`" * (max((len(match.group(0)) for match in re.finditer(r"`+", name)), default=0) + 1)
+    padded = f" {name} " if name.startswith("`") or name.endswith("`") else name
+    return f"{fence}{padded}{fence} ({job.job_id[:_SHORT_JOB_ID_LENGTH]})"
+
+
 def held_notice(key: ConversationKey, jobs: Sequence[BackgroundJob]) -> tuple[str, str]:
-    """Return the transaction ID and text of the notice that the limit holds ``jobs``; follow-ups start at streak 1."""
+    """Return the transaction ID and markdown of the notice that the limit holds ``jobs``; follow-ups start at streak 1."""
     noun = "job" if len(jobs) == 1 else "jobs"
-    text = f"⏸️ {len(jobs)} background {noun} finished while I was paused after {_FOLLOW_UP_LIMIT} automatic follow-ups."
-    return _follow_up_event_id(key, jobs, 0), f"{text} Reply here to let me continue."
+    labels = ", ".join(_held_job_label(job) for job in jobs[:_MAX_HELD_NOTICE_JOBS])
+    if (remaining := len(jobs) - _MAX_HELD_NOTICE_JOBS) > 0:
+        labels = f"{labels}, and {remaining} more"
+    text = (
+        f"⏸️ {len(jobs)} background {noun} finished while I was paused after "
+        f"{_FOLLOW_UP_LIMIT} automatic follow-ups in a row without a message from you: "
+        f"{labels}. Reply here to let me continue."
+    )
+    return _follow_up_event_id(key, jobs, 0), text

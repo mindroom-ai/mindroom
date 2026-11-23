@@ -12,6 +12,7 @@ from mindroom.coalescing.ingress_lanes import IngressRetryError
 from mindroom.constants import VOICE_RAW_AUDIO_FALLBACK_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
+from mindroom.mid_turn import mid_turn_mode
 from mindroom.thread_utils import mentions_another_participant
 from mindroom.turns.queued_notice import mark_waiting_for_approval
 
@@ -142,6 +143,7 @@ class VoiceIngress:
                     response_envelope=envelope,
                     mentions_nobody=transcribed and for_another_participant is None,
                     transcript=normalized_event.body if transcribed else None,
+                    mode=mid_turn_mode(event.source.get("content")),
                 )
             ready = ReadyPendingEvent(
                 pending_event=PendingEvent(

@@ -623,12 +623,12 @@ async def _collect_a_job_then_restart(
         await bot.journal_principal().admit(
             follow_up_event(key, _FOLLOW_UP_ID, sender_id="@mindroom_general:localhost", now_ms=2),
         )
-        acknowledge = runtime.acknowledge_wait
+        acknowledge = runtime.acknowledge_waits
         if not acknowledged:
-            monkeypatch.setattr(runtime, "acknowledge_wait", AsyncMock())
+            monkeypatch.setattr(runtime, "acknowledge_waits", AsyncMock(return_value=()))
         await _run_job_turn(monkeypatch, bot, crashed, _collect("collect-1"), _stall("s1"), cut_short=True)
         assert [ended.job_id for ended in await runtime.ended_jobs(key)] == ([] if acknowledged else [job_id])
-        monkeypatch.setattr(runtime, "acknowledge_wait", acknowledge)
+        monkeypatch.setattr(runtime, "acknowledge_waits", acknowledge)
         await _simulate_restart(bot, "gen-2")
     except BaseException:
         await runtime.shutdown()

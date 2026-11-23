@@ -236,20 +236,23 @@ class VisibleResponseReconciler:
         target: MessageTarget,
         response_text: str,
         delivery_turn_id: str,
+        ai_run_content: Mapping[str, Any],
     ) -> tuple[str | None, str | None]:
         """Send an interactive selection's acknowledgement, which creates the reply its answer then edits.
 
         Returns the acknowledgement's event and the span it created for the
         answer to adopt. A retry resolves to the row its first
         attempt recorded, so it neither sends nor creates a second reply.
+        ``ai_run_content`` is the provisional run metadata naming the model the answer runs.
         """
         replies = self.deps.replies
         event_id = await self.deps.delivery_gateway.send_text(
             SendTextRequest(
                 target=target,
                 response_text=response_text,
-                # The answer edits this message, so clients show it working as they do a Thinking placeholder.
-                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+                # The answer edits this message, so clients show it working, and on which model, as they do a
+                # Thinking placeholder.
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING, **ai_run_content},
                 # A placeholder mentions no one.
                 skip_mentions=True,
                 reply_write=await replies.acknowledgement(

@@ -6,7 +6,7 @@ import asyncio
 import fcntl
 import json
 import re
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import asdict, replace
 from typing import TYPE_CHECKING
 
@@ -28,6 +28,8 @@ if TYPE_CHECKING:
 
 _UNAVAILABLE = "Subagent ID is not available in this conversation."
 SUBAGENT_BUSY = "Subagent is busy or awaiting approval. Finish its current turn before sending a follow-up."
+_SUBAGENT_ID_PATTERN = re.compile(r"[a-f0-9]{32}")
+SUBAGENT_PREFIX_PATTERN = re.compile(r"[a-f0-9]{8,31}")
 
 
 class SubagentSessionError(ValueError):
@@ -35,7 +37,7 @@ class SubagentSessionError(ValueError):
 
 
 def _path(subagent_id: str, paths: RuntimePaths) -> Path:
-    if not re.fullmatch(r"[a-f0-9]{32}", subagent_id):
+    if not _SUBAGENT_ID_PATTERN.fullmatch(subagent_id):
         raise SubagentSessionError(_UNAVAILABLE)
     root = subagent_sessions_dir(paths)
     path = root / f"{subagent_id}.json"
@@ -63,6 +65,46 @@ def _read(path: Path, owner: ToolExecutionIdentity) -> DelegationChild:
     if payload["owner"] != _owner(owner):
         raise SubagentSessionError(_UNAVAILABLE)
     return DelegationChild.from_dict(payload["child"])
+
+
+async def resolve_subagent_id(
+    subagent_id: str,
+    *,
+    owner: ToolExecutionIdentity,
+    runtime_paths: RuntimePaths,
+    depth: int,
+) -> str:
+    """Resolve a full 32-hex subagent ID or a unique owned 8..31-hex prefix to the full ID."""
+    if _SUBAGENT_ID_PATTERN.fullmatch(subagent_id):
+        return subagent_id
+    if not SUBAGENT_PREFIX_PATTERN.fullmatch(subagent_id) or not owner.session_id:
+        raise SubagentSessionError(_UNAVAILABLE)
+
+    def resolve() -> str:
+        root = subagent_sessions_dir(runtime_paths)
+        if root.is_symlink():
+            msg = "Subagent storage must not use symlinks."
+            raise SubagentSessionError(msg)
+        matches: list[str] = []
+        for path in sorted(root.glob(f"{subagent_id}*.json")) if root.exists() else ():
+            if not _SUBAGENT_ID_PATTERN.fullmatch(candidate := path.stem):
+                continue
+            with suppress(SubagentSessionError, OSError, KeyError, TypeError, ValueError):
+                child = _read(_path(candidate, runtime_paths), owner)
+                if (
+                    child.subagent_id == candidate
+                    and child.caller_agent_name == owner.agent_name
+                    and child.depth == depth + 1
+                ):
+                    matches.append(candidate)
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            msg = f'Subagent ID prefix "{subagent_id}" matches several subagents in this conversation: {", ".join(matches)}. Pass the full ID.'
+            raise SubagentSessionError(msg)
+        raise SubagentSessionError(_UNAVAILABLE)
+
+    return await asyncio.to_thread(resolve)
 
 
 async def load_subagent(

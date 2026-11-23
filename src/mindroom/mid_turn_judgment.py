@@ -68,7 +68,7 @@ def create_mid_turn_gate(
     return MidTurnGate(
         active_text=None if has_media or message_text_for_judgment(envelope) is None else prompt,
         evaluate=may_finish,
-        requester_id=envelope.requester_id if envelope.origin.may_answer_interactive_prompt else None,
+        requester_id=envelope.origin.active_human_requester_id,
         instructions=settings.instructions,
         on_defer=(
             partial(on_defer, settings.defer_reaction)

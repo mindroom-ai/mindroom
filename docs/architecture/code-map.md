@@ -528,11 +528,11 @@ Matrix sync callback
 | `commands/` | Chat command parsing (`!help`, `!schedule`, `!config`, etc.) |
 | `commands/config_commands.py` | Chat-based config commands (`!config`) |
 | `commands/config_confirmation.py` | Interactive config confirmation workflows |
-| `voice/handler.py` | Voice message download, transcription, mention normalization, and ASR cleanup; `transcribe_speech`, the speech-to-text call transcripts share |
+| `voice/handler.py` | Voice message download, transcription, mention normalization, and ASR cleanup; `transcribe_speech`, shared by voice messages, call transcripts, and dictation |
+| `voice/wav.py` | The duration of an uploaded stretch of speech, read from its 16-bit PCM mono WAV header |
 | `voice/openai_realtime_speech.py` | OpenAI text-to-speech through the Realtime API, shared by voice messages, the `openai` toolkit, and cascaded calls |
 | `call_transcripts/service.py` | The rules of a call between people: who is in it, who may join or act on it, Pause, speech and its limits, its end, and each call's one task posting its row, its transcript message and the row's edits for the end and that message; and a call with an agent read as a live call, after any call between people in its room |
 | `call_transcripts/store.py` | The SQLite store of live and recently ended calls between people, their lines until the transcript message is posted, what each call's row was last edited to say, who paused each call, and when each person's app last checked in to each call |
-| `call_transcripts/wav.py` | The duration of an uploaded stretch of speech, read from its 16-bit PCM mono WAV header |
 | `call_transcripts/call_room.py` | MindRoom's side of calls between people, read through each room's steward and posted through its poster: who is in a room, who may post there, display names, the row, its edits and the transcript message, each at most once per call, and the request that the poster title the row's thread from the notes |
 | `call_transcripts/routes.py` | `/api/call-transcripts/v1` for MindRoom Chat with client sessions: join and heartbeat, leave, Pause, speech read into memory only, and the live call with the lines added since the last poll; 404 while call transcripts are off, except the live call in a room an agent answers calls in |
 | `call_transcripts/transcriber.py` | Speech-to-text of one stretch of a call through `transcribe_speech`, recording its usage |
@@ -718,6 +718,16 @@ Matrix sync callback
 | `slack/watch_delivery.py` | Delivers a Slack event to the personal watches it is for, once Slack confirms the owner can see it and while the watch room may receive it |
 | `slack/watches.py` | Personal Slack watches: the durable store of who receives which Slack mentions and direct messages in which room, the check that a room holds only the owner and MindRoom's accounts and hides earlier messages from people who join later, and the `slack_watch` actions that start, stop, and report a watch |
 | `custom_tools/slack.py` | The `slack` toolkit: personal calls with the requester's own Slack user token, project calls with the app's bot token only in listed channels the bot belongs to; search, recent conversations, read, post, edit, delete, react, workspace downloads and uploads through `slack/files.py`, rendered by `slack/render.py`; in a personal toolkit built for a Matrix room, `slack_watch` runs the watch actions of `slack/watches.py` |
+| `reactive_triggers/` | Durable event-driven reactive triggers in the primary runtime: room messages, thread tag transitions, shared external event sources, tool-less cheap triage, and owner-scoped Matrix wake-agent dispatch |
+| `reactive_triggers/models.py` | Validated Pydantic models for reactive trigger rules, source specs (`room_message`, `thread_tag`, `external_event`), triage specs, target specs, normalized `TriggerEvent`, and firing records |
+| `reactive_triggers/store.py` | Primary-only SQLite store (`<control_state>/reactive_triggers.db`) for reactive trigger rules, monotonic room cursors, thread tag checkpoints, idempotent firing queues, atomic `once`/rate-limit/cooldown claims, and 30-day pruning |
+| `reactive_triggers/matching.py` | Deterministic event matching for room messages (room, thread, alias-aware senders, timeout-bounded regex) and external events (structured field equality), plus trigger loop-protection guards |
+| `reactive_triggers/triage.py` | Strictly tool-less, fail-closed cheap triage over untrusted event payloads via the `judgment` subsystem (`llm`, `typesafe`, and `openai_decisions`) |
+| `reactive_triggers/dispatch.py` | Owner-scoped Matrix wake-agent delivery: re-checks policy, owner authorization, and room membership at fire time, formats `<untrusted_event_data>` payloads, and stamps owner and loop-guard metadata |
+| `reactive_triggers/external_sources.py` | Verification, payload normalization (including canonical `allowed_repos` casing), subscriber authorization, and SQLite fan-out for shared `github` (HMAC-SHA256) and `ed25519` event sources served at `POST /api/event-sources/{source_id}` |
+| `reactive_triggers/service.py` | `ReactiveTriggerService` runtime coordinator: room message `SupervisedLoop` poller, live `com.mindroom.thread.tags` observer, startup/reload room reconciliation, and async triage/delivery drainer with retry backoff |
+| `custom_tools/triggers.py` | Local-only unified `triggers` toolkit (`watch_room`, `watch_thread`, `subscribe_event`, `create_trigger`, `list_triggers`, `disable_trigger`, `delete_trigger`, `rotate_trigger_key`) managing both reactive triggers and direct signed webhooks |
+| `tools/triggers.py` | Tool-catalog registration and discovery metadata for the unified `triggers` toolkit (`external_trigger_manager` alias declared in `config/tool_aliases.py`) |
 
 ## Persistent State
 
@@ -730,3 +740,4 @@ A database converted from the Agno layout keeps its pre-conversion copy beside i
 `tracking/listening_markers.json` holds where each listening agent has heard each listened room up to.
 `tracking/tailnet_ssh.json` holds link IDs, hostnames, and host private keys by worker key; only the primary writes it, and no worker mounts it.
 `call_transcripts/calls.db` holds live and recently ended calls between people, each call's lines until its transcript message is posted, what each call's row was last edited to say, who paused each call and since when, and when each person's app last checked in to each call.
+`control_state/reactive_triggers.db` holds primary-only reactive trigger rules, room message cursors, thread tag checkpoints, and deduplicated firing queues.

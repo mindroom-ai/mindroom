@@ -229,6 +229,7 @@ Coding model training data often lags recent releases, so never trust memorized 
 | Z.ai (OpenRouter) | Flagship | GLM-5.3 | `z-ai/glm-5.3` |
 | OpenAI | Image generation / editing | GPT Image 2.6 Sunburst | `gpt-image-2.6-sunburst` |
 | OpenAI | File transcription | GPT Transcribe | `gpt-transcribe` |
+| OpenAI | Full-duplex voice calls | GPT-Live-1.1 | `gpt-live-1.1` |
 | Google (Vertex AI) | Video generation | Veo 3.1 | `veo-3.1-generate-001` |
 | Qwen | Local 27B | Qwen3.8-27B | `qwen3.8:27b` (Ollama), `unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL` (llama.cpp) |
 | Moonshot Kimi Code login | Frontier via Kimi Code CLI | Kimi K3.1 Pro | `k3.1-pro` |
@@ -238,7 +239,7 @@ Coding model training data often lags recent releases, so never trust memorized 
 | Google (Gemini API) | Image generation / editing | Nano Banana 2.1 | `gemini-nano-banana-2.1` |
 | Google (Gemini API) | Embeddings for `google` | Gemini Embedding 2 | `gemini-embedding-2` |
 
-Model IDs were checked against the provider and Codex model catalogs on November 18, 2026 (Google models on November 20, 2026).
+Model IDs were checked against the provider and Codex model catalogs on November 23, 2026.
 OpenRouter uses `anthropic/claude-fable-5.2`, and the direct Anthropic and Vertex APIs use `claude-fable-5-2`.
 `bedrock_claude` (bedrock-mantle) uses `anthropic.claude-fable-5-1`: Bedrock serves Fable 5.2 only on `bedrock-runtime`.
 Likewise, OpenRouter uses `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5`, and Bedrock uses `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5`.

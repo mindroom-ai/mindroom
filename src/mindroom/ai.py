@@ -91,6 +91,7 @@ from mindroom.response_turn import (
     is_empty_reply,
     pause_without_approval_error,
     paused_attempt_from_response,
+    publish_error_run_metadata,
     replays_as_turn,
     skip_unapproved_attempt,
     stream_response_turn,
@@ -777,10 +778,12 @@ async def _turn_model_and_provider(
     ctx: ResponseTurnContext,
     config: Config,
     runtime_paths: RuntimePaths,
+    on_model_resolved: Callable[[str], None] | None,
 ) -> tuple[TurnModel, ModelProvider]:
     """Resolve the turn's model and build its provider once.
 
     Both run off the event loop: resolution reads thread and room model overrides from disk (#1260).
+    ``on_model_resolved`` hears the model before its provider is built, so a failure from there on names it.
     """
     runtime_model = await asyncio.to_thread(
         resolve_turn_model,
@@ -794,6 +797,8 @@ async def _turn_model_and_provider(
         ),
         None,
     )
+    if on_model_resolved is not None:
+        on_model_resolved(runtime_model.model_name)
     if ctx.reusable_build is not None:
         return runtime_model, ctx.reusable_build.spec.model
     provider = await asyncio.to_thread(
@@ -814,17 +819,19 @@ async def _prepare_agent_and_prompt(
     config: Config,
     scope_context: ScopeSessionContext | None,
     current_event_id: str | None,
+    on_model_resolved: Callable[[str], None] | None = None,
 ) -> _PreparedAgentRun:
     """Prepare the agent build, this turn's system messages (stable, then turn), and its request input.
 
-    Returns the prepared run input plus history bookkeeping for one agent turn.
+    Returns the prepared run input plus history bookkeeping for one agent turn. ``on_model_resolved`` hears the
+    turn's model as soon as it is resolved, before anything is built for it.
     """
     agent_name = ctx.entity_label
     prompt = ctx.prompt
     execution_identity = ctx.execution_identity
     pipeline_timing = ctx.pipeline_timing
 
-    runtime_model, provider = await _turn_model_and_provider(ctx, config, runtime_paths)
+    runtime_model, provider = await _turn_model_and_provider(ctx, config, runtime_paths, on_model_resolved)
 
     def _build_agent() -> tuple[TurnModel, AgentBuild]:
         """Build the agent off the event loop (#1260): it walks workspace scaffolding and reads context files."""
@@ -1009,6 +1016,7 @@ async def _prepare_agent_run_context(
     config: Config,
     scope_context: ScopeSessionContext | None,
     turn_recorder: TurnRecorder,
+    on_model_resolved: Callable[[str], None] | None = None,
 ) -> _AgentRunContext:
     """Prepare one attempt of an agent response, as its ``continuation`` state asks, through metadata assembly."""
     ctx = replace(
@@ -1031,6 +1039,7 @@ async def _prepare_agent_run_context(
         config=config,
         scope_context=scope_context,
         current_event_id=continuation.active_current_event_id,
+        on_model_resolved=on_model_resolved,
     )
     if pipeline_timing is not None:
         pipeline_timing.mark("history_ready", overwrite=True)
@@ -1375,6 +1384,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     try:
         _assert_agent_target(agent_name, config)
     except ValueError as e:
+        publish_error_run_metadata(sinks)
         yield FailedReply(error_text(e), e)
         return
 
@@ -1392,6 +1402,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 config=config,
                 scope_context=run.scope_context,
                 turn_recorder=run.record,
+                on_model_resolved=sinks.on_model_resolved,
             )
         except Exception as e:
             logger.exception("Error preparing agent", agent=agent_name)

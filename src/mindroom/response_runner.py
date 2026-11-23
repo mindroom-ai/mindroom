@@ -14,7 +14,13 @@ from mindroom import reply_lifecycle as rl
 from mindroom.agent_modes import resolve_agent_mode
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai import stream_agent_response
-from mindroom.ai_run_metadata import ai_run_extra_content_from_metadata, with_prior_usage
+from mindroom.ai_run_metadata import (
+    ai_run_extra_content_from_metadata,
+    build_streaming_ai_run_metadata_content,
+    model_payload,
+    streaming_ai_run_content,
+    with_prior_usage,
+)
 from mindroom.ai_runtime import reply_ended_for_follow_up
 from mindroom.approval.response import continuation_response_kind, continuation_target
 from mindroom.authorization import ReplyMembershipPendingError
@@ -23,6 +29,7 @@ from mindroom.bot_runtime_view import RunPhase
 from mindroom.config.resolution import cheap_model as agent_cheap_model
 from mindroom.config.resolution import entity_timezone, show_reasoning, show_tool_calls
 from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
     COMPACTIONS_CONTENT_KEY,
     CONTINUED_RUNS_METADATA_KEY,
     HOOK_SOURCE_RUN_METADATA_KEY,
@@ -37,6 +44,7 @@ from mindroom.conversation_state_writer import ReplySession
 from mindroom.delegation.background import job_acknowledgers
 from mindroom.delegation.cost import carried_receipts, receipts_metadata
 from mindroom.dispatch_source import is_automation_source_kind
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.final_delivery import (
     Cancelled,
@@ -167,6 +175,7 @@ from .response_admission import ResponseAdmissionRefusedError, admitted_response
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Sequence
 
+    from mindroom.active_runs import ActiveRunPublisher
     from mindroom.agent_cli.cli_approval_waits import CliWaiters
     from mindroom.approval.continuation_runner import ApprovalContinuationRunner
     from mindroom.config.main import Config
@@ -324,6 +333,30 @@ def _approve_continued_reply(participation: ParticipationGate | None, request: R
         participation.approve_existing_response()
 
 
+async def _normalize_late_stopped_reply(
+    request: ResponseRequest,
+    participation: ParticipationGate | None,
+) -> tuple[ResponseRequest, ParticipationGate | None]:
+    """Apply a late-latched Steer/judge stop under the lock after turn admission succeeds."""
+    if not any(notice.stopped_reply for notice in request.notices):
+        return request, participation
+    if request.payload_preparation is not None and not request.payload_preparation.dispatch.stopped_reply:
+        request = replace(
+            request,
+            payload_preparation=replace(
+                request.payload_preparation,
+                dispatch=replace(request.payload_preparation.dispatch, stopped_reply=True),
+            ),
+        )
+    if request.participation is not None:
+        deferred_voice = request.on_participation_approved
+        request = replace(request, participation=None, on_participation_approved=None)
+        participation = None
+        if deferred_voice is not None:
+            await deferred_voice()
+    return request, participation
+
+
 class _PostLockRequestPreparationError(RuntimeError):
     """Raised when post-lock request preparation fails before generation starts.
 
@@ -403,6 +436,7 @@ class ResponseRunner:
     lifecycle_coordinator: ResponseLifecycleCoordinator = field(repr=False)
     # Which sources a response waits on in place for a minimal-mode approval.
     cli_waiters: CliWaiters = field(repr=False)
+    active_runs: ActiveRunPublisher | None = field(default=None, repr=False)
     # Own count, distinct from the shared gate's process-wide total: callers like
     # the todo-poke idle check ask whether *this* entity is busy.
     _in_flight_response_count: int = field(default=0, init=False)
@@ -418,6 +452,44 @@ class ResponseRunner:
             monitor=self.deps.runtime.orchestrator.budgets,
             requester_id=request.response_envelope.requester_id,
         )
+
+    def _set_span_reply_model(self, model_name: str | None) -> None:
+        """Record the active model payload on the running span, if any."""
+        if model_name is not None and (handle := current_span()) is not None:
+            handle.reply_model = model_payload(self.deps.runtime.config, model_name)
+
+    def _agent_placeholder_model_name(
+        self,
+        target: MessageTarget,
+        *,
+        requester_id: str | None,
+        explicit: str | None,
+    ) -> str:
+        """Apply the requester's budget without logging fallback to pick the agent placeholder's model."""
+        return resolve_turn_model(
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            ModelScope(
+                entity=self.deps.agent_name,
+                room_id=target.room_id,
+                thread_id=target.resolved_thread_id,
+                explicit=explicit,
+            ),
+            TurnBudget(
+                monitor=self.deps.runtime.orchestrator.budgets,
+                requester_id=requester_id,
+                log_fallback=False,
+            ),
+        ).model_name
+
+    def placeholder_ai_run_content(self, target: MessageTarget, *, requester_id: str | None) -> dict[str, Any]:
+        """Return the provisional run metadata of an agent reply's placeholder that another owner sends.
+
+        An interactive selection's acknowledgement is that placeholder, which the answer then edits instead of
+        sending its own; it names the model the answer's turn resolves for ``requester_id``.
+        """
+        model_name = self._agent_placeholder_model_name(target, requester_id=requester_id, explicit=None)
+        return build_streaming_ai_run_metadata_content(self.deps.runtime.config, model_name)
 
     @property
     def in_flight_response_count(self) -> int:
@@ -538,6 +610,8 @@ class ResponseRunner:
                             ),
                             locked_operation=lambda: self._run_locked_ending_span(request, locked_operation),
                             signal_queued_message=signal_queued_message and not request.quiet,
+                            notices=request.notices,
+                            mid_turn_mode=request.mid_turn_mode,
                         )
                         handle = current_span()
                         if handle is not None and not handle.exited:
@@ -885,7 +959,17 @@ class ResponseRunner:
     def _job_follow_up_request(self, key: ConversationKey, follow_up_id: str) -> ResponseRequest:
         """Build the turn that reports a conversation's ended jobs in a new reply; its start note lists the jobs."""
         prompt = self.deps.runtime.config.get_prompt("BACKGROUND_JOBS_FOLLOW_UP_PROMPT")
-        envelope = follow_up_envelope(key, follow_up_id=follow_up_id, sender_id=self.deps.matrix_full_id, prompt=prompt)
+        requester_entity_name = entity_identity_registry(
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        ).current_entity_name_for_user_id(key.requester_id)
+        envelope = follow_up_envelope(
+            key,
+            follow_up_id=follow_up_id,
+            sender_id=self.deps.matrix_full_id,
+            prompt=prompt,
+            requester_entity_name=requester_entity_name,
+        )
         return ResponseRequest(
             thread_history=(),
             prompt=envelope.body,
@@ -1295,12 +1379,15 @@ class ResponseRunner:
             return None
         handle = current_span()
         assert handle is not None, "a placeholder is its reply's create"
+        extra_content: dict[str, Any] = {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
+        if handle.reply_model is not None:
+            extra_content.update(streaming_ai_run_content(handle.reply_model))
         try:
             placeholder_event_id = await self.deps.delivery_gateway.send_text(
                 SendTextRequest(
                     target=target,
                     response_text=placeholder_message,
-                    extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+                    extra_content=extra_content,
                     # A streamed answer creates its visible message here and
                     # only edits it afterwards, so this send is the one a crash
                     # could duplicate into two answers in the room.
@@ -1493,7 +1580,11 @@ class ResponseRunner:
         except (ReplyMembershipPendingError, RevisionSnapshotChangedError, ResponseAdmissionRefusedError):
             raise
         except Exception as error:
-            if participation is None or participation.decision is not None:
+            if (
+                participation is None
+                or participation.decision is not None
+                or any(notice.stopped_reply for notice in request.notices)
+            ):
                 raise
             participation.decline("preparation_failed")
             return await self._end_unprepared_turn(request, error, participation)
@@ -1575,7 +1666,7 @@ class ResponseRunner:
         )
         if not isinstance(admitted, ResponseRequest):
             return admitted
-        request = admitted
+        request, participation = await _normalize_late_stopped_reply(admitted, participation)
         if team is None:
             _approve_continued_reply(participation, request)
             # The cold-cache judge sees the model before the budget, which the response runtime applies after it.
@@ -1589,6 +1680,11 @@ class ResponseRunner:
                     explicit=request.scheduled_model,
                 ),
                 None,
+            )
+            placeholder_model_name: str | None = self._agent_placeholder_model_name(
+                target,
+                requester_id=request.response_envelope.requester_id,
+                explicit=runtime_model.model_name,
             )
         else:
             team_models = (
@@ -1607,6 +1703,8 @@ class ResponseRunner:
                     self._turn_budget(request),
                 )
             )
+            placeholder_model_name = team_models.team_model_name if team_models is not None else None
+        self._set_span_reply_model(placeholder_model_name)
         placeholder_event_id = await self._send_placeholder(
             request,
             history_scope=history_scope,
@@ -1733,6 +1831,7 @@ class ResponseRunner:
             show_tool_calls=show_tool_calls,
             tool_context=replace(tool_context, tool_calls_shown=show_tool_calls and not request.quiet),
         )
+        self._set_span_reply_model(runtime.active_model_name)
         run_id = str(uuid4())
         mode = TeamMode(team.team_mode)
         team_spec = TeamTurnSpec(
@@ -1952,9 +2051,15 @@ class ResponseRunner:
         # The caller-owned collectors stay live: the gateway snapshots the run metadata as the stream ends.
         run_metadata_content: dict[str, Any] = {}
         tool_trace: list[ToolTraceEntry] = []
+
+        def note_resolved_model(model_name: str) -> None:
+            handle.reply_model = model_payload(self.deps.runtime.config, model_name)
+
         sinks = TurnSinks(
             turn_recorder=recorder,
             run_metadata_collector=run_metadata_content,
+            on_model_resolved=note_resolved_model,
+            active_model=lambda: handle.reply_model,
             response_event_id=current_reply_event_id,
             stopped_by_user=current_span_stopped,
         )
@@ -1965,10 +2070,16 @@ class ResponseRunner:
         def final_extra_content() -> dict[str, Any] | None:
             # A turn that published no run metadata still names the run the record holds.
             fallback = ai_run_extra_content_from_metadata(recorder.run_metadata) or {}
+            published = dict(run_metadata_content)
+            ai_run = published.get(AI_RUN_METADATA_KEY)
+            # A failure that stored no run publishes only its status and model, so the reply keeps the prepared
+            # context and compaction its record holds; a stored run's metadata replaces the record's.
+            if fallback and ai_run is not None and "run_id" not in ai_run:
+                published[AI_RUN_METADATA_KEY] = {**fallback[AI_RUN_METADATA_KEY], **ai_run}
             entries = compactions.content()
             compaction_content = {COMPACTIONS_CONTENT_KEY: entries} if entries is not None else {}
             return merge_response_extra_content(
-                {**fallback, **run_metadata_content, **compaction_content} or None,
+                {**fallback, **published, **compaction_content} or None,
                 request.attachment_ids,
             )
 
@@ -2035,6 +2146,7 @@ class ResponseRunner:
                 request,
                 response_run_id=turn.run_id,
                 participation=participation,
+                active_runs=self.active_runs,
             ):
                 transport_outcome = await self.deps.delivery_gateway.deliver_stream(
                     StreamingDeliveryRequest(
@@ -2138,6 +2250,7 @@ class ResponseRunner:
                 participation=runtime.participation,
                 # A contact turn never streams, so only this collected delivery shows its receipt.
                 contact_receipt=lambda: self._send_contact_receipt(request),
+                active_runs=self.active_runs,
             ):
                 with tool_runtime_context(runtime.tool_context):
                     response_text = await collect()
@@ -2345,6 +2458,7 @@ class ResponseRunner:
             active_model_name=active_model_name,
             participation=participation,
         )
+        self._set_span_reply_model(runtime.active_model_name)
         if request.pipeline_timing is not None:
             request.pipeline_timing.mark("response_runtime_ready")
         # The other side drives a contact turn, so it writes no long-term memory.

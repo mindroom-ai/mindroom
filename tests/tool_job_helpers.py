@@ -93,6 +93,7 @@ if TYPE_CHECKING:
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import ChildResponseRunner
+    from mindroom.event_journal import ToolJobSnapshotUpdate
     from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import RunRecord
     from mindroom.participation import ParticipationGate
@@ -299,7 +300,7 @@ def run_journal_statements_inline(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # The journal's own saves, which every interception wraps however often a test intercepts them.
-_JOURNAL_ACCEPT, _JOURNAL_SAVE = ToolJobStore.accept, ToolJobStore.save
+_JOURNAL_ACCEPT, _JOURNAL_SAVE, _JOURNAL_SAVE_MANY = ToolJobStore.accept, ToolJobStore.save, ToolJobStore.save_many
 # Runs around one job save with its decoded snapshot and payload; raising fails the save, before or after it lands.
 type SaveHook = Callable[[dict[str, Any], object | None], Awaitable[None] | None]
 
@@ -311,7 +312,7 @@ def intercept_job_saves(
     after: SaveHook | None = None,
 ) -> None:
     """Run hooks around every journal save of a job, as a failing or slow database would; no hooks restores saving."""
-    original_accept, original_save = _JOURNAL_ACCEPT, _JOURNAL_SAVE
+    original_accept, original_save, original_save_many = _JOURNAL_ACCEPT, _JOURNAL_SAVE, _JOURNAL_SAVE_MANY
 
     async def hook(callback: SaveHook | None, job_json: str, payload_json: str | None) -> None:
         if callback is not None:
@@ -336,8 +337,16 @@ def intercept_job_saves(
         await original_save(store, job_id, job_json, result_payload_json, approval_end_reason=approval_end_reason)
         await hook(after, job_json, result_payload_json)
 
+    async def save_many(store: ToolJobStore, updates: Sequence[ToolJobSnapshotUpdate]) -> None:
+        for update in updates:
+            await hook(before, update.job_json, update.result_payload_json)
+        await original_save_many(store, updates)
+        for update in updates:
+            await hook(after, update.job_json, update.result_payload_json)
+
     monkeypatch.setattr(ToolJobStore, "accept", accept)
     monkeypatch.setattr(ToolJobStore, "save", save)
+    monkeypatch.setattr(ToolJobStore, "save_many", save_many)
 
 
 async def saved_jobs(storage_root: Path) -> dict[str, BackgroundJob]:

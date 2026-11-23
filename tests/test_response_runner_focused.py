@@ -119,7 +119,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget, ResponseLifecycleKey
-from mindroom.mid_turn import MidTurnGate, MidTurnOutcome, QueuedMessage
+from mindroom.mid_turn import MidTurnGate, MidTurnMode, MidTurnOutcome, QueuedMessage
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
 from mindroom.reply_turn.enrichment import prepare_memory_and_model_context
@@ -183,6 +183,7 @@ from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_model import TurnModel
+from mindroom.turn_origin import SenderKind, TurnIntent
 from mindroom.turn_policy import PreparedDispatch
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import SourcePreparation
@@ -2618,11 +2619,13 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
         conversation: _Conversation,
         response_envelope: MessageEnvelope,
         signal_queued_message: bool,
+        mid_turn_mode: MidTurnMode = MidTurnMode.AUTO,
     ) -> str | None:
         notice = begin_response_turn_notice(
             conversation=conversation,
             response_envelope=response_envelope,
             signal_queued_message=signal_queued_message,
+            mid_turn_mode=mid_turn_mode,
         )
         if response_envelope.source_event_id == "$source":
             resume_entered.set()
@@ -4313,6 +4316,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     assert edit_request.tool_trace == list(committed_trace)
     assert edit_request.extra_content == {
         STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING if expected_text else STREAM_STATUS_PENDING,
+        "io.mindroom.ai_run": {"version": 1, "model": {"config": "large"}},
     }
     assert [
         awaited.kwargs["tool_name"] for awaited in approval_store.prepare_reply_card.await_args_list
@@ -6470,6 +6474,19 @@ async def test_response_lifecycle_reservation_rejects_wrong_target_and_coordinat
     other_target = MessageTarget.resolve("!room:localhost", "$other-thread", "$other")
     reservation = await coordinator.reserve_response_lifecycle(envelope)
 
+    conversation = coordinator._conversation_for(envelope.target)
+    conversation.begin_response_turn()
+    rejected_notice = coordinator.reserve_waiting_human_message(
+        target=envelope.target,
+        response_envelope=_queued_envelope("$waiting-on-rejected"),
+    )
+    assert rejected_notice is not None
+    conversation.finish_response_turn()
+
+    async def _assert_lock_held() -> str:
+        assert conversation.lock.locked()
+        return "owned"
+
     try:
         with response_lifecycle_reservation_context(reservation):
             with pytest.raises(ValueError, match="different coordinator"):
@@ -6478,7 +6495,10 @@ async def test_response_lifecycle_reservation_rejects_wrong_target_and_coordinat
                     response_envelope=envelope,
                     pipeline_timing=None,
                     locked_operation=lambda: asyncio.sleep(0),
+                    notices=(rejected_notice,),
                 )
+            assert not conversation.has_pending_human_messages()
+            assert conversation.lock.locked()
             with pytest.raises(ValueError, match="target does not match"):
                 await coordinator.run_locked_response(
                     target=other_target,
@@ -6486,15 +6506,17 @@ async def test_response_lifecycle_reservation_rejects_wrong_target_and_coordinat
                     pipeline_timing=None,
                     locked_operation=lambda: asyncio.sleep(0),
                 )
+            assert conversation.lock.locked()
             assert (
                 await coordinator.run_locked_response(
                     target=envelope.target,
                     response_envelope=envelope,
                     pipeline_timing=None,
-                    locked_operation=lambda: asyncio.sleep(0, result="owned"),
+                    locked_operation=_assert_lock_held,
                 )
                 == "owned"
             )
+            assert not conversation.lock.locked()
         with response_lifecycle_reservation_context(reservation), pytest.raises(RuntimeError, match="already consumed"):
             await coordinator.run_locked_response(
                 target=envelope.target,
@@ -6503,6 +6525,7 @@ async def test_response_lifecycle_reservation_rejects_wrong_target_and_coordinat
                 locked_operation=lambda: asyncio.sleep(0),
             )
     finally:
+        rejected_notice.release()
         await reservation.release()
 
 
@@ -8997,3 +9020,32 @@ async def test_a_batch_whose_source_ended_answers_the_rest_only_while_no_reply_e
     request_preparer.prepare.assert_not_awaited()
     # Without a reply, the caller settles only the ended source and the rest answer as their own turn.
     assert fate == Unclaimed(UnclaimedReason.TERMINAL_SOURCES, None if reply_exists else preparation)
+
+
+def test_job_follow_up_request_resolves_managed_entity_requester_kind(tmp_path: Path) -> None:
+    """_job_follow_up_request distinguishes managed-entity requesters from humans."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    managed_id = runner.deps.matrix_full_id
+
+    managed_request = runner._job_follow_up_request(
+        ConversationKey("general", "!room:localhost", "$thread", managed_id, silent=False),
+        "job-follow-up:managed",
+    )
+    managed_origin = managed_request.response_envelope.origin
+    assert managed_origin.intent is TurnIntent.JOB_FOLLOW_UP
+    assert managed_origin.requester_entity_name == "general"
+    assert managed_origin.requester_kind is SenderKind.MANAGED_ENTITY
+    assert managed_origin.active_human_requester_id is None
+    assert not managed_origin.may_answer_interactive_prompt
+
+    human_request = runner._job_follow_up_request(
+        ConversationKey("general", "!room:localhost", "$thread", "@user:localhost", silent=False),
+        "job-follow-up:human",
+    )
+    human_origin = human_request.response_envelope.origin
+    assert human_origin.intent is TurnIntent.JOB_FOLLOW_UP
+    assert human_origin.requester_entity_name is None
+    assert human_origin.requester_kind is SenderKind.USER
+    assert human_origin.active_human_requester_id == "@user:localhost"
+    assert not human_origin.may_answer_interactive_prompt

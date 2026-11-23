@@ -318,6 +318,11 @@ class InteractiveSelections:
             # Thinking placeholder every reply starts with.
             response_text=PROGRESS_PLACEHOLDER,
             delivery_turn_id=source_event_id,
+            # The answer sends no placeholder of its own, so this one names the model as that placeholder would.
+            ai_run_content=self.deps.response_runner.placeholder_ai_run_content(
+                response_target,
+                requester_id=facts.run_requester_id,
+            ),
         )
         if not ack_event_id:
             self.deps.logger.error(

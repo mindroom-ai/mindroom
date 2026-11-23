@@ -11,6 +11,7 @@ from unittest.mock import patch
 import pytest
 from pydantic import ValidationError
 
+from mindroom.agent_loop.spec import RunContext  # noqa: TC001 - inspected by toolkit_function schema.
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
@@ -24,13 +25,18 @@ from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs import consumption as consumption_module
-from mindroom.tool_jobs.consumption import ConsumptionOwner, consumption_context, set_consumption_storage
+from mindroom.tool_jobs.consumption import (
+    ConsumptionOwner,
+    consumption_context,
+    session_state_delta,
+    set_consumption_storage,
+)
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
-from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.agno_toolkits import Toolkit, adapt_toolkit
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFilePolicy
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -879,5 +885,122 @@ async def test_pending_outcomes_require_saved_consumption(tmp_path: Path) -> Non
         await runtime.acknowledge_wait("quiet", waited.claim)
         assert pending_outcome(runtime, "quiet") is None
         assert not pending_outcomes(runtime)
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_collect_preserves_concurrent_sibling_session_state_update_and_reports_conflict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sibling tool updating session state between collect's payload reads is preserved and flagged as a conflict."""
+    config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        agents={"leader": AgentConfig(display_name="Leader")},
+    )
+    paths = _runtime_paths(tmp_path)
+    context = _delegate_runtime_context(config, paths)
+    owner = context.execution_identity
+    runtime = await tool_job_runtime(paths.storage_root)
+    pin_background_tool_jobs(context.config, paths)
+    register_background_runtime(paths, runtime)
+    first_read_done = asyncio.Event()
+    sibling_updated = asyncio.Event()
+    original_read = consumption_module.read_result_payload
+
+    async def gated_read(target: ToolJobRuntime, job: BackgroundJob) -> ToolResultPayload:
+        payload = await original_read(target, job)
+        if job.job_id == "job_a":
+            first_read_done.set()
+        elif job.job_id == "job_b":
+            await sibling_updated.wait()
+        return payload
+
+    async def update_state(run_context: RunContext) -> str:
+        await first_read_done.wait()
+        run_context.session_state["shared"] = "from-sibling"
+        run_context.session_state["sibling_only"] = True
+        sibling_updated.set()
+        return "updated"
+
+    outcomes = {
+        "job_a": BackgroundOutcome(
+            "completed",
+            "first-done",
+            result_payload=encode_result_payload(
+                ToolResultPayload(
+                    value="first-done",
+                    state_delta=session_state_delta(
+                        {"shared": "old", "only_first": 0},
+                        {"shared": "from-job-a", "only_first": 1},
+                    ),
+                ),
+            ),
+        ),
+        "job_b": BackgroundOutcome(
+            "completed",
+            "second-done",
+            result_payload=encode_result_payload(
+                ToolResultPayload(
+                    value="second-done",
+                    state_delta=session_state_delta({"only_second": 0}, {"only_second": 2}),
+                ),
+            ),
+        ),
+    }
+    try:
+        for job_id, outcome in outcomes.items():
+
+            async def operation(result: BackgroundOutcome = outcome) -> BackgroundOutcome:
+                return result
+
+            await start_job(runtime, job_id, tool_name="work", depth=0, adapter={}, owner=owner, operation=operation)
+            await wait_for_status(runtime, job_id, "completed")
+
+        def storage_factory() -> ConversationStore:
+            return create_session_storage("leader", config, paths, owner)
+
+        storage = storage_factory()
+        session_state: dict[str, object] = {"shared": "old", "only_first": 0, "only_second": 0}
+        model = ScriptedModel(
+            [
+                calls(
+                    tool_call("job", "collect-call", action="collect"),
+                    tool_call("update_state", "sibling-call"),
+                ),
+                answer("done"),
+            ],
+        )
+        actor = job_actor(*toolkit_job_tools(JobTools(paths), authored_name="job").values())
+        monkeypatch.setattr(consumption_module, "read_result_payload", gated_read)
+
+        @owned_tool_execution(enabled=always_owned)
+        async def run() -> RunRecord:
+            set_consumption_storage(storage_factory)
+            return await run_job_turn(
+                actor,
+                model,
+                "collect",
+                session_id=context.session_id,
+                session_state=session_state,
+                store=storage,
+                generated=adapt_toolkit(Toolkit(name="state", tools=[update_state])).functions,
+            )
+
+        with tool_runtime_context(context):
+            response = await run()
+        collect_result = next(str(tool.result) for tool in response.tools or () if tool.tool_call_id == "collect-call")
+        assert "first-done" in collect_result
+        assert "second-done" in collect_result
+        assert "Session state conflicts: shared" in collect_result
+        assert session_state == {
+            "shared": "from-sibling",
+            "only_first": 1,
+            "only_second": 2,
+            "sibling_only": True,
+        }
+        for job_id in ("job_a", "job_b"):
+            assert (await lookup(runtime, job_id, owner=owner, depth=0)).consumed
     finally:
         await runtime.shutdown()

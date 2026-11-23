@@ -8,12 +8,25 @@ from functools import partial
 from typing import TYPE_CHECKING, Literal
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 
 from mindroom import reply_lifecycle as rl
-from mindroom.config.agent import TeamConfig
+from mindroom.coalescing.batch import PreparedTurn, active_follow_up_coalescing_key, build_prepared_turn
+from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.contacts import ContactsConfig
+from mindroom.config.main import Config
+from mindroom.config.personal_agents import PersonalAgentInstance
+from mindroom.constants import CONVERSATION_CONTENT_KEY, EXACT_MENTIONS_KEY
+from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, update_contacts
 from mindroom.custom_tools.job import JobTools
-from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.dispatch_handoff import PreparedIngress
+from mindroom.dispatch_source import (
+    ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    MESSAGE_SOURCE_KIND,
+    SILENT_SCHEDULE_SOURCE_KIND,
+)
+from mindroom.entity_resolution import current_entity_id
 from mindroom.event_journal.models import EventClass, EventKind, InboundEvent
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
@@ -30,6 +43,7 @@ from mindroom.response_turn import (
     stream_response_turn,
 )
 from mindroom.session_storage.store import ConversationStore
+from mindroom.thread_utils import history_mentioned_user_ids
 from mindroom.tool_jobs.client_cancel import JobCancelRequest, cancel_jobs_command, cancel_room_jobs
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import (
@@ -43,11 +57,16 @@ from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.notices import JobNotices, _turn_start_job_note, job_notice_context
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.turn_policy import DispatchPlan, ResponseAction, TurnPolicy
+from mindroom.turn_record import TurnRecord
+from mindroom.turn_store import TurnClaim
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
+    make_pending_event,
     make_turn_context,
     message_origin,
     patch_response_runner_module,
+    test_runtime_paths,
     unwrap_extracted_collaborator,
 )
 from tests.identity_helpers import persist_entity_accounts
@@ -62,6 +81,7 @@ from tests.tool_job_helpers import (
     tool_job_runtime,
     wait_for_status,
 )
+from tests.turn_dispatch_helpers import nothing_else_queued
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -69,6 +89,7 @@ if TYPE_CHECKING:
 
     from mindroom.bot import AgentBot
     from mindroom.event_journal import JournalEvent, PrincipalStore
+    from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_runner import ResponseRunner
     from mindroom.response_turn import ResponseTurnContext, TurnRunState
     from mindroom.tool_jobs.runtime import ToolJobRuntime
@@ -137,6 +158,9 @@ async def _ended(
     owner: ToolExecutionIdentity | None = None,
     source_event_id: str | None = None,
     reply_id: str | None = None,
+    tool_name: str | None = None,
+    kind: str = "tool",
+    adapter: dict[str, object] | None = None,
 ) -> None:
     """Start a job that ends with ``outcome`` at once, as the turn ``source_event_id`` started it."""
 
@@ -146,9 +170,10 @@ async def _ended(
     await start_job(
         runtime,
         job_id,
-        tool_name=f"tool_{job_id}",
+        tool_name=tool_name or f"tool_{job_id}",
         depth=0,
-        adapter={},
+        kind=kind,
+        adapter={} if adapter is None else adapter,
         owner=owner or job_owner(),
         operation=operation,
         source_event_id=source_event_id,
@@ -380,11 +405,23 @@ async def test_jobs_the_limit_holds_get_one_notice_of_the_agent(tmp_path: Path) 
             client, room_id, content = send.await_args.args
             assert (client, room_id) == (bot.client, key.room_id)
             assert send.await_args.kwargs["operation"] == "send_job_hold"
-            assert content["msgtype"] == "m.notice"
+            assert send.await_args.kwargs["transaction_id"] == _follow_up_event_id(
+                key,
+                [job for job in runtime.retained_jobs() if job.job_id == "capped"],
+                0,
+            )
+            assert content["msgtype"] == "m.text"
+            assert content[CONVERSATION_CONTENT_KEY] is True
+            assert content[EXACT_MENTIONS_KEY] is True
+            assert content["m.mentions"] == {"user_ids": [key.requester_id]}
             assert content["m.relates_to"]["event_id"] == key.thread_id
             assert content["body"] == (
-                "⏸️ 1 background job finished while I was paused after 20 automatic follow-ups. "
+                f"{key.requester_id} ⏸️ 1 background job finished while I was paused after "
+                "20 automatic follow-ups in a row without a message from you: `tool_capped` (capped). "
                 "Reply here to let me continue."
+            )
+            assert (
+                f'<a href="https://matrix.to/#/{key.requester_id}">{key.requester_id}</a>' in content["formatted_body"]
             )
     finally:
         await runtime.shutdown()
@@ -404,8 +441,9 @@ async def test_a_room_level_hold_is_a_conversation_notice(tmp_path: Path) -> Non
             await coordinator._admit_follow_ups(runtime)
             content = send.await_args.args[2]
             assert "m.relates_to" not in content
-            assert content["io.mindroom.conversation"] is True
-            assert content["body"].startswith("⏸️ 2 background jobs finished")
+            assert content[CONVERSATION_CONTENT_KEY] is True
+            assert content["body"].startswith(f"{owner.requester_id} ⏸️ 2 background jobs finished")
+            assert "`tool_capped_a` (capped_a), `tool_capped_b` (capped_b)" in content["body"]
     finally:
         await runtime.shutdown()
 
@@ -1169,3 +1207,278 @@ async def test_a_ready_result_at_the_boundary_does_not_continue_the_turn(tmp_pat
         bot.admit_job_follow_up.assert_awaited_once()
     finally:
         await runtime.shutdown()
+
+
+async def _claimed_human_follow_up_turn(
+    bot: AgentBot,
+    runner: ResponseRunner,
+    key: ConversationKey,
+) -> tuple[PreparedTurn, QueuedHumanNoticeReservation]:
+    """Reserve and claim one active-follow-up human turn as if a prior reply just finished."""
+    room = nio.MatrixRoom(key.room_id, bot.matrix_id.full_id)
+    room.users[key.requester_id] = MagicMock()
+    room.users[bot.matrix_id.full_id] = MagicMock()
+    assert bot.client is not None
+    bot.client.rooms[key.room_id] = room
+    target = _target(thread_id=key.thread_id, reply_to_event_id="$human")
+    lifecycle = runner.lifecycle_coordinator
+    conversation = lifecycle._conversation_for(target)
+    conversation.begin_response_turn()
+    human_envelope = replace(
+        _envelope(target, source_event_id="$human"),
+        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+        origin=message_origin(sender_id=key.requester_id, requester_id=key.requester_id),
+    )
+    notice = lifecycle.reserve_waiting_human_message(target=target, response_envelope=human_envelope)
+    assert notice is not None
+    conversation.finish_response_turn()
+    human_event = PreparedIngress(
+        sender=key.requester_id,
+        event_id="$human",
+        body="Please continue",
+        source={
+            "event_id": "$human",
+            "sender": key.requester_id,
+            "origin_server_ts": 1_000,
+            "content": {
+                "msgtype": "m.text",
+                "body": "Please continue",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": key.thread_id,
+                    "is_falling_back": True,
+                    "m.in_reply_to": {"event_id": key.thread_id},
+                },
+            },
+        },
+        active_follow_up=True,
+    )
+    pending_event = make_pending_event(
+        human_event,
+        room,
+        source_kind=MESSAGE_SOURCE_KIND,
+        requester_user_id=key.requester_id,
+        active_follow_up=True,
+        notice=notice,
+    )
+    turn = build_prepared_turn(
+        active_follow_up_coalescing_key(key.room_id, key.thread_id),
+        [pending_event],
+        queues_other_run=nothing_else_queued,
+    )
+    claim = await bot._turn_dispatcher.deps.turn_store.claim(TurnRecord.create(("$human",), completed=False))
+    assert isinstance(claim, TurnClaim)
+    return replace(turn, claims=(claim,)), notice
+
+
+async def test_follow_up_yields_while_human_turn_prepares_before_lock(tmp_path: Path) -> None:
+    """A human follow-up keeps its notice across pre-lock prep so a racing job follow-up yields instead of stealing the lock."""
+    bot = _bot(tmp_path)
+    await bot._take_over_replies()
+    unique_room_send_responses(bot.client)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = runner.lifecycle_coordinator
+    key = _runner_key(bot)
+    runtime = await _runner_runtime(bot, tmp_path)
+    target = _target(thread_id=key.thread_id, reply_to_event_id="$human")
+    conversation = lifecycle._conversation_for(target)
+    prompts: list[str] = []
+    run_observations: list[tuple[bool, int, set[str]]] = []
+    prep_entered, resume_prep, human_done = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def stream(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        prompts.append(ctx.prompt)
+        run_observations.append(
+            (
+                lifecycle.has_waiting_messages_from(target, key.requester_id),
+                conversation.pending_human_messages,
+                set(conversation.requester_steer_event_ids),
+            ),
+        )
+        yield "Human reply"
+        human_done.set()
+
+    try:
+        await _ended(runtime, "work", BackgroundOutcome("completed", "done"), owner=_runner_owner(key))
+        await _follow_up(bot.journal_principal(), key, "job-follow-up:1")
+        turn, notice = await _claimed_human_follow_up_turn(bot, runner, key)
+        real_prepare = bot._turn_dispatcher._prepare_text_dispatch
+
+        async def paused_prepare(*args: object, **kwargs: object) -> object:
+            prep_entered.set()
+            await resume_prep.wait()
+            return await real_prepare(*args, **kwargs)
+
+        with (
+            patch.object(bot._turn_dispatcher, "_prepare_text_dispatch", side_effect=paused_prepare),
+            patch.object(
+                TurnPolicy,
+                "plan_turn",
+                new=AsyncMock(
+                    return_value=DispatchPlan(kind="respond", response_action=ResponseAction(kind="individual")),
+                ),
+            ),
+            patch_response_runner_module(
+                stream_agent_response=stream,
+                should_use_streaming=AsyncMock(return_value=True),
+                typing_indicator=_noop_typing,
+            ),
+        ):
+            human_task = asyncio.create_task(bot._turn_dispatcher.handle_prepared_turn(turn))
+            await asyncio.wait_for(prep_entered.wait(), timeout=2.0)
+            try:
+                # While the human turn is paused in pre-lock dispatch prep, its notice is still active.
+                assert notice.active
+                assert lifecycle.has_waiting_messages_from(target, key.requester_id)
+                follow_up_request = runner._job_follow_up_request(key, "job-follow-up:1")
+                assert not await runner._follow_up_due(follow_up_request)
+                assert await runner._generate_job_follow_up(follow_up_request) == Unclaimed(UnclaimedReason.NOT_DUE)
+                assert prompts == []
+                assert notice.active
+            finally:
+                resume_prep.set()
+            await asyncio.wait_for(human_task, timeout=5.0)
+            await asyncio.wait_for(human_done.wait(), timeout=5.0)
+            await asyncio.gather(*list(runner.inbox._inbox_response_tasks))
+
+        assert (prompts, run_observations) == (["Please continue"], [(False, 0, set())])
+        assert not notice.active
+        assert not conversation.has_pending_human_messages()
+    finally:
+        await runtime.shutdown()
+
+
+async def _post_held_jobs(
+    tmp_path: Path,
+    specs: list[tuple[str, str, str | None]],
+    *,
+    owner: ToolExecutionIdentity | None = None,
+    config: Config | None = None,
+) -> dict[str, object]:
+    runtime = await tool_job_runtime(tmp_path)
+    coordinator = job_coordinator(tmp_path, runtime, _admitting_bot())
+    if config is not None:
+        coordinator.config_provider = lambda: config
+    job_owner_id = owner or job_owner()
+    last = _follow_up_event_id(_key(job_owner_id), [], _FOLLOW_UP_LIMIT)
+    try:
+        with patch(_SEND, AsyncMock()) as send:
+            for job_id, tool_name, title in specs:
+                kind = "delegation" if title is not None else "tool"
+                adapter = {"child": {"title": title}} if title is not None else None
+                await _ended(
+                    runtime,
+                    job_id,
+                    BackgroundOutcome("completed", "done"),
+                    owner=job_owner_id,
+                    source_event_id=last,
+                    tool_name=tool_name,
+                    kind=kind,
+                    adapter=adapter,
+                )
+            await coordinator._admit_follow_ups(runtime)
+            send.assert_awaited_once()
+            return send.await_args.args[2]
+    finally:
+        await runtime.shutdown()
+
+
+async def test_held_notice_names_subagent_title_caps_list_and_keeps_mentions_exact(tmp_path: Path) -> None:
+    """Held notices list titles or tool names + 8-char IDs, cap at 5, and mention only a human requester."""
+    config, paths = Config(agents={"general": AgentConfig(display_name="General")}), test_runtime_paths(tmp_path)
+    persist_entity_accounts(config, paths)
+    general_id = current_entity_id("general", paths).full_id
+    title = f"Review @general and [{general_id}](https://matrix.to/#/{general_id}) design"
+    specs = [
+        ("c6256cac" + "1" * 56, "research", title),
+        ("d4e5f607" + "2" * 56, "research", ""),
+        *((f"{idx:08x}" + "a" * 56, f"run_tool_{idx}", None) for idx in range(5)),
+    ]
+    requester = job_owner().requester_id
+    content = await _post_held_jobs(tmp_path, specs, config=config)
+    assert (content["msgtype"], content[EXACT_MENTIONS_KEY], content["m.mentions"]) == (
+        "m.text",
+        True,
+        {"user_ids": [requester]},
+    )
+    assert f"`{title}` (c6256cac), `research` (d4e5f607)" in str(content["body"])
+    assert ", and 2 more." in str(content["body"])
+    assert history_mentioned_user_ids(content, config, paths) == [requester]
+
+
+async def test_held_notice_escapes_markdown_html_and_backticks_in_titles(tmp_path: Path) -> None:
+    """Markdown, HTML, and backticks in job titles render as literal code spans without links or formatting."""
+    tricky = "**x** [a](https://e.x) <b>y</b> [@general](https://matrix.to/#/@mindroom_general:example.org) ``tick``"
+    formatted = str((await _post_held_jobs(tmp_path, [("a1b2c3d4" + "0" * 56, "research", tricky)]))["formatted_body"])
+    requester = job_owner().requester_id
+    pill = f'<p><a href="https://matrix.to/#/{requester}">{requester}</a> '
+    assert formatted.startswith(pill)
+    assert not any(tag in formatted.removeprefix(pill) for tag in ("<a ", "<strong>", "<b>"))
+    assert (
+        "<code>**x** [a](https://e.x) &lt;b&gt;y&lt;/b&gt; "
+        "[@general](https://matrix.to/#/@mindroom_general:example.org) ``tick``</code>"
+    ) in formatted
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["managed_agent", "bot_account", "remote_agent", "team_remote_agent", "contact_room", "team_human"],
+)
+async def test_held_notice_mention_policy(tmp_path: Path, case: str) -> None:
+    """Only human requesters outside contact rooms get an m.text mention; agents, bots, remotes, and contacts stay m.notice."""
+    paths = test_runtime_paths(tmp_path)
+    config = Config(
+        agents={
+            "parent": AgentConfig(
+                display_name="Parent",
+                contacts=ContactsConfig(remote_agents=["@mindroom_*:other.org"]),
+            ),
+            "general": AgentConfig(display_name="General"),
+        },
+        teams={"squad": TeamConfig(display_name="Squad", role="Lead", agents=["parent"])},
+        bot_accounts=["@ci_bot:test"],
+    )
+    persist_entity_accounts(config, paths)
+    owner = job_owner()
+    if case == "managed_agent":
+        owner = replace(owner, requester_id=current_entity_id("general", paths).full_id)
+    elif case == "bot_account":
+        owner = replace(owner, requester_id="@ci_bot:test")
+    elif case == "remote_agent":
+        owner = replace(owner, requester_id="@mindroom_dana:other.org")
+    elif case == "team_remote_agent":
+        owner = replace(owner, transport_agent_name="squad", requester_id="@mindroom_dana:other.org")
+    elif case == "contact_room":
+        config._personal_agent_instances = {
+            "parent": PersonalAgentInstance(template="mind", user_id="@alice:test", matrix_username=None),
+        }
+        assert owner.room_id is not None
+        update_contacts(
+            paths,
+            lambda book: book.contacts.append(
+                ContactRecord(
+                    id="c1",
+                    status="active",
+                    requester=ContactParty(kind="agent", id="parent", owner="@alice:test"),
+                    target=ContactParty(kind="person", id="@bob:test", owner="@bob:test"),
+                    reason="Chat",
+                    requester_side=ContactSide(),
+                    target_side=ContactSide(),
+                    origin_room_id="!origin:test",
+                    origin_thread_id=None,
+                    room_id=owner.room_id,
+                ),
+            ),
+        )
+    elif case == "team_human":
+        owner = replace(owner, transport_agent_name="squad")
+
+    content = await _post_held_jobs(tmp_path, [("a1b2c3d4" + "0" * 56, "research", None)], owner=owner, config=config)
+    expected_msgtype = "m.text" if case == "team_human" else "m.notice"
+    expected_mentions = [owner.requester_id] if case == "team_human" else []
+    assert (content["msgtype"], content[EXACT_MENTIONS_KEY], content["m.mentions"]) == (
+        expected_msgtype,
+        True,
+        {"user_ids": expected_mentions},
+    )
+    assert str(content["body"]).startswith(f"{owner.requester_id} ⏸️" if case == "team_human" else "⏸️")

@@ -23,6 +23,7 @@ async def send_matrix_message(
     content: dict[str, Any],
     *,
     message_type: str = "m.room.message",
+    transaction_id: str | None = None,
 ) -> DeliveredMatrixEvent | None:
     """Send already-built Matrix content, late-binding to avoid an import cycle."""
     # why-lazy: client_delivery imports config through Matrix formatting helpers during facade startup.
@@ -33,6 +34,7 @@ async def send_matrix_message(
         room_id,
         content,
         message_type=message_type,
+        transaction_id=transaction_id,
     )
 
 

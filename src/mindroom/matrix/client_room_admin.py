@@ -16,6 +16,7 @@ import nio
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_types import (
+    ACTIVE_RUNS_EVENT_TYPE,
     AUTO_APPROVE_WINDOWS_EVENT_TYPE,
     BACKGROUND_JOBS_EVENT_TYPE,
     CALL_MEMBER_EVENT_TYPE,
@@ -49,6 +50,7 @@ _MANAGED_ROOM_EVENT_POWER_LEVELS = {
     CALL_MEMBER_EVENT_TYPE: 0,
     # Matrix lets a user write a state key that starts with @ only when it is that user's own ID.
     BACKGROUND_JOBS_EVENT_TYPE: 0,
+    ACTIVE_RUNS_EVENT_TYPE: 0,
     MINDROOM_SERVER_EVENT_TYPE: 0,
     # The room's steward publishes the room's !auto_approve windows and MindRoom accounts, with whatever power it has.
     AUTO_APPROVE_WINDOWS_EVENT_TYPE: 0,

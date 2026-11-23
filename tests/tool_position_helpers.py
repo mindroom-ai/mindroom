@@ -6,13 +6,17 @@ import json
 from pathlib import Path
 from typing import Any
 
+from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.tool_system.events import tool_markers_out_of_text
 
 _TRACE_KEY = "io.mindroom.tool_trace"
-_CASES = json.loads((Path(__file__).parent / "fixtures" / "tool-positions-v1.json").read_text(encoding="utf-8"))[
-    "cases"
-]
+_FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "tool-positions-v1.json").read_text(encoding="utf-8"))
+_CASES = _FIXTURE["cases"]
+# The ``events`` of each ``placeholder_body`` trace that is not sound.
+_KEPT_PLACEHOLDERS = _FIXTURE["kept_placeholders"]
+# The keys of each fallback that does not repeat its ``placeholder_body`` replacement.
+_KEPT_FALLBACKS = _FIXTURE["kept_fallbacks"]
 _SENT_CASES = [case for case in _CASES if case["wire"] is not None]
 _SHELL = {"type": "tool_call_completed", "tool_name": "shell"}
 
@@ -38,7 +42,10 @@ def _marked(body: str, events: list[Any]) -> dict[str, Any]:
 
 def _sent(case: dict[str, Any]) -> dict[str, Any]:
     sent = case["sent"]
-    return _content(sent["body"], sent["formatted_body"], 2, sent["events"])
+    content = _content(sent["body"], sent["formatted_body"], 2, sent["events"])
+    if "stream_status" in sent:
+        content[STREAM_STATUS_KEY] = sent["stream_status"]
+    return content
 
 
 def _wire(case: dict[str, Any]) -> dict[str, Any]:
@@ -48,7 +55,12 @@ def _wire(case: dict[str, Any]) -> dict[str, Any]:
         {**event, **({} if line is None else {"body_line": line}), **({} if at is None else {"at": at})}
         for event, line, at in places
     ]
-    return _content(wire["body"], wire["formatted_body"], 3, events)
+    content = _content(wire["body"], wire["formatted_body"], 3, events)
+    if wire.get("placeholder_body") is True:
+        content[_TRACE_KEY]["placeholder_body"] = True
+    if "stream_status" in case["sent"]:
+        content[STREAM_STATUS_KEY] = case["sent"]["stream_status"]
+    return content
 
 
 def reply_with_calls(body: str, calls: int) -> tuple[dict[str, Any], dict[str, Any]]:

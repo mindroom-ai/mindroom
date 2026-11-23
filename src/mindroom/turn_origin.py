@@ -9,6 +9,7 @@ from mindroom.dispatch_source import (
     EXTERNAL_TRIGGER_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
     HOOK_SOURCE_KIND,
+    REACTIVE_TRIGGER_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
     SILENT_SCHEDULE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
@@ -98,6 +99,15 @@ class TurnOrigin:
             TurnIntent.ROUTER_HANDOFF,
             TurnIntent.TRUSTED_INTERNAL_RELAY,
         }
+
+    @property
+    def active_human_requester_id(self) -> str | None:
+        """Return the human requester this reply answers, including job follow-ups on their behalf."""
+        if self.may_answer_interactive_prompt or (
+            self.requester_kind == SenderKind.USER and self.intent is TurnIntent.JOB_FOLLOW_UP
+        ):
+            return self.requester_id
+        return None
 
     @property
     def may_be_superseded_by_newer_requester_turn(self) -> bool:
@@ -204,7 +214,7 @@ def _turn_intent(
         intent = TurnIntent.ROUTER_HANDOFF if routed else TurnIntent.TRUSTED_INTERNAL_RELAY
     elif source_kind in {SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND}:
         intent = TurnIntent.SCHEDULED_FIRE
-    elif source_kind == EXTERNAL_TRIGGER_SOURCE_KIND:
+    elif source_kind in {EXTERNAL_TRIGGER_SOURCE_KIND, REACTIVE_TRIGGER_SOURCE_KIND}:
         intent = TurnIntent.EXTERNAL_TRIGGER
     elif source_kind == HOOK_DISPATCH_SOURCE_KIND:
         intent = TurnIntent.HOOK_DISPATCH

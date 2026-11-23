@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 import time
+from dataclasses import replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,7 +25,9 @@ from tests.delegation_job_fuzz import ChildScript, DelegationFuzzRunner, Step
 from tests.reply_span_helpers import reply_span
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine
+    from collections.abc import Awaitable, Callable, Coroutine, Sequence
+
+    from mindroom.event_journal import ToolJobSnapshotUpdate
 
 
 _SCRIPTS = st.builds(
@@ -193,7 +196,7 @@ async def test_subagent_fuzz_oracle_detects_corruption(
             await runner.step(Step("approve"))
             runner.executed["w0-0"] += 1
         else:
-            save = ToolJobStore.save
+            save, save_many = ToolJobStore.save, ToolJobStore.save_many
 
             async def save_without_denial(
                 store: ToolJobStore,
@@ -206,7 +209,14 @@ async def test_subagent_fuzz_oracle_detects_corruption(
                 del approval_end_reason
                 await save(store, job_id, job_json, result_payload_json, approval_end_reason=None)
 
+            async def save_many_without_denial(
+                store: ToolJobStore,
+                updates: Sequence[ToolJobSnapshotUpdate],
+            ) -> None:
+                await save_many(store, [replace(update, approval_end_reason=None) for update in updates])
+
             monkeypatch.setattr(ToolJobStore, "save", save_without_denial)
+            monkeypatch.setattr(ToolJobStore, "save_many", save_many_without_denial)
             with pytest.raises(AssertionError):
                 await runner.step(Step("cancel"))
             return

@@ -11,7 +11,9 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
-from mindroom.constants import CONVERSATION_CONTENT_KEY
+from mindroom.constants import CONVERSATION_CONTENT_KEY, EXACT_MENTIONS_KEY
+from mindroom.contacts.parties import remote_target
+from mindroom.contacts.turns import contact_room
 from mindroom.custom_tools.job import JobTools
 from mindroom.custom_tools.workflow import continued_workflow_job, stopped_workflow_job
 from mindroom.delegation.background import delegation_child, reconcile_delegation
@@ -31,8 +33,11 @@ from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import turn_rows
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
-from mindroom.matrix.message_builder import build_message_content
+from mindroom.matrix.mentions import format_user_mention
+from mindroom.matrix.message_builder import build_message_content, markdown_to_html
+from mindroom.matrix_identifiers import is_concrete_matrix_user_id
 from mindroom.message_target import MessageTarget
+from mindroom.requester_identity import is_human_requester_id
 from mindroom.tool_jobs.approvals import end_tool_call_approval, prune_job_approvals
 from mindroom.tool_jobs.authorization import locally_allowed, toolkit_offered
 from mindroom.tool_jobs.conversation import ConversationKey, unheld_jobs
@@ -126,14 +131,53 @@ def _follow_up_candidates(jobs: Iterable[BackgroundJob]) -> dict[ConversationKey
     return {key: tuple(groups[key]) for key in sorted(groups, key=_key_order)}
 
 
-async def _post_held_notice(client: nio.AsyncClient, key: ConversationKey, txn: str, text: str) -> bool:
+def _mention_held_notice_requester(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    key: ConversationKey,
+    jobs: Iterable[BackgroundJob],
+) -> bool:
+    """Return whether a held-jobs notice should mention ``key.requester_id`` as a human requester."""
+    if not is_concrete_matrix_user_id(key.requester_id) or not is_human_requester_id(
+        key.requester_id,
+        config,
+        runtime_paths,
+    ):
+        return False
+    agents = {name for name in (key.recipient, *(job.owner.agent_name for job in jobs)) if name in config.agents}
+    return not any(
+        remote_target(config, runtime_paths, agent_name, key.requester_id) is not None
+        or contact_room(config, runtime_paths, key.room_id, agent_name) is not None
+        for agent_name in agents
+    )
+
+
+async def _post_held_notice(
+    client: nio.AsyncClient,
+    key: ConversationKey,
+    txn: str,
+    text: str,
+    *,
+    mention_requester: bool,
+) -> bool:
     """Post the agent's notice that the limit holds jobs; a failed send is retried on a later pass, as the same transaction."""
-    # An m.notice starts no turn; as a conversation a room-level one is listed, and a room-mode reply keeps its key.
+    if mention_requester:
+        plain_mention, mentioned_user_ids, markdown_mention = format_user_mention(key.requester_id)
+        body, formatted_body = f"{plain_mention} {text}", markdown_to_html(f"{markdown_mention} {text}")
+    else:
+        body, formatted_body, mentioned_user_ids = text, None, []
+    # Exact mentions prevent job titles from adding agents to thread history or waking anyone else.
     content = build_message_content(
-        text,
+        body,
+        formatted_body=formatted_body,
         thread_event_id=key.thread_id,
         latest_thread_event_id=key.thread_id,
-        extra_content={"msgtype": "m.notice", CONVERSATION_CONTENT_KEY: True},
+        extra_content={
+            "msgtype": "m.text" if mention_requester else "m.notice",
+            CONVERSATION_CONTENT_KEY: True,
+            EXACT_MENTIONS_KEY: True,
+            "m.mentions": {"user_ids": mentioned_user_ids},
+        },
     )
     delivered = await send_message_result(client, key.room_id, content, operation="send_job_hold", transaction_id=txn)
     return delivered is not None
@@ -549,7 +593,18 @@ class ToolJobRuntimeCoordinator:
                 due.add(follow_up_id)
             elif (held := held_jobs(ended)) and bot.client is not None:
                 notice_id, text = held_notice(key, held)
-                if notice_id in self._sent_notices or await _post_held_notice(bot.client, key, notice_id, text):
+                if notice_id in self._sent_notices or await _post_held_notice(
+                    bot.client,
+                    key,
+                    notice_id,
+                    text,
+                    mention_requester=_mention_held_notice_requester(
+                        self.config_provider(),
+                        self.runtime_paths,
+                        key,
+                        held,
+                    ),
+                ):
                     self._sent_notices[notice_id] = frozenset(job.job_id for job in held)
         # Forget follow-ups whose jobs were reported since, so a long-running process does not keep them all.
         self._admitted_follow_ups &= due

@@ -9,6 +9,7 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, TypeGuard
 
 from mindroom.attachments.storage import mentions_attachments
+from mindroom.constants import MID_TURN_MODE_KEY
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
 from mindroom.judgment.state import (
     MAX_REQUEST_BYTES,
@@ -52,9 +53,6 @@ MID_TURN_QUESTION = JudgmentQuestion(
 )
 
 
-MID_TURN_MODE_KEY = "io.mindroom.mid_turn"
-
-
 class MidTurnMode(StrEnum):
     """What a person asks a message sent while an agent replies to do; a client that sends none gets Auto."""
 
@@ -93,6 +91,15 @@ def mid_turn_mode(content: Mapping[str, object] | None) -> MidTurnMode:
         return MidTurnMode(value)
     except ValueError:
         return MidTurnMode.AUTO
+
+
+def coalesced_mid_turn_mode(modes: Sequence[MidTurnMode]) -> MidTurnMode:
+    """Combine the modes of one coalesced batch: any Steer steers, all Queue queues, else Auto."""
+    if MidTurnMode.STEER in modes:
+        return MidTurnMode.STEER
+    if modes and all(mode is MidTurnMode.QUEUE for mode in modes):
+        return MidTurnMode.QUEUE
+    return MidTurnMode.AUTO
 
 
 def _is_plain_text(text: str | None) -> TypeGuard[str]:

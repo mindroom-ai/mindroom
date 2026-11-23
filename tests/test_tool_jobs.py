@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import gc
 import json
+from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
@@ -12,6 +13,10 @@ from typing import TYPE_CHECKING, Literal
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import BackgroundToolJobsConfig
+from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import ACKNOWLEDGED_BY, job_acknowledgers
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.mid_turn import MidTurnGate, MidTurnMode
@@ -22,8 +27,11 @@ from mindroom.tool_jobs import runtime as runtime_module
 from mindroom.tool_jobs.consumption import ConsumptionOwner
 from mindroom.tool_jobs.control import job_checkpoint, pending_human_messages_context
 from mindroom.tool_jobs.conversation import ConversationKey
+from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, read_result_payload
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, ToolJobRuntime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, ToolJobRuntime, register_background_runtime
+from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     backdate_job,
@@ -44,9 +52,11 @@ from tests.tool_job_helpers import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.judgment.state import JudgmentRequest
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 @pytest.mark.asyncio
@@ -2549,4 +2559,132 @@ async def test_an_adapter_save_keeps_the_jobs_status_and_leaves_an_ended_job_alo
         assert (saved.status, saved.adapter) == ("cancelled", {"step": "started"})
     finally:
         release.set()
+        await runtime.shutdown()
+
+
+async def _start_done(
+    runtime: ToolJobRuntime,
+    job_id: str,
+    owner: ToolExecutionIdentity,
+    value: str = "ok",
+) -> None:
+    async def done() -> BackgroundOutcome:
+        return BackgroundOutcome(
+            "completed",
+            value,
+            result_payload=encode_result_payload(ToolResultPayload(value=value)),
+        )
+
+    await start_job(runtime, job_id, tool_name="tool", depth=0, adapter={}, owner=owner, operation=done)
+    await wait_for_status(runtime, job_id, "completed")
+
+
+@asynccontextmanager
+async def _job_tools_harness(
+    tmp_path: Path,
+) -> AsyncIterator[tuple[ToolJobRuntime, ToolExecutionIdentity, JobTools]]:
+    runtime, paths = await tool_job_runtime(tmp_path), _runtime_paths(tmp_path)
+    config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        agents={"leader": AgentConfig(display_name="Leader")},
+    )
+    context = _delegate_runtime_context(config, paths)
+    assert context.execution_identity is not None
+    instance = pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
+    try:
+        with tool_runtime_context(context):
+            yield runtime, context.execution_identity, JobTools(paths)
+    finally:
+        release_background_tool_jobs(paths, instance)
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_job_wait_and_cancel_accept_unique_owned_hex_prefix(tmp_path: Path) -> None:
+    """Job wait/cancel resolve unique 8+ hex prefixes within this caller's jobs and refuse ambiguity/invalid prefixes."""
+    prefix, running_prefix, release = "c6256cac", "f0e1d2c3", asyncio.Event()
+    own_first, own_second, foreign_id = (f"{prefix}{d * 56}" for d in ("1", "2", "9"))
+    running_id = f"{running_prefix}{'0' * 56}"
+
+    async def slow_op() -> BackgroundOutcome:
+        await release.wait()
+        return BackgroundOutcome("cancelled")
+
+    async with _job_tools_harness(tmp_path) as (runtime, owner, tools):
+        try:
+            await _start_done(runtime, own_first, owner)
+            await _start_done(runtime, foreign_id, replace(owner, requester_id="@other:example.org"))
+            await start_job(runtime, running_id, tool_name="tool", depth=0, adapter={}, owner=owner, operation=slow_op)
+
+            assert await tools.job("wait", job_id=prefix, wait_timeout=0) == "ok"
+            assert running_id in str(await tools.job("cancel", job_id=running_prefix))
+            for invalid in (prefix[:7], prefix.upper(), "zzzzzzzz"):
+                assert "No job with this ID is available" in str(
+                    await tools.job("wait", job_id=invalid, wait_timeout=0),
+                )
+
+            await _start_done(runtime, own_second, owner)
+            ambiguous = str(await tools.job("wait", job_id=prefix, wait_timeout=0))
+            assert f'Job ID prefix "{prefix}" matches several jobs in this conversation:' in ambiguous
+            assert {own_first in ambiguous, own_second in ambiguous, foreign_id not in ambiguous} == {True}
+        finally:
+            release.set()
+
+
+@pytest.mark.asyncio
+async def test_prefix_wait_timeout_releases_claim_for_followup_and_collect(tmp_path: Path) -> None:
+    """A timed-out prefix wait on a running job releases its claim under the full ID so completion still delivers."""
+    prefix, full_id, release = "1234abcd", f"1234abcd{'0' * 56}", asyncio.Event()
+
+    async def running_op() -> BackgroundOutcome:
+        await release.wait()
+        return BackgroundOutcome(
+            "completed",
+            "finished",
+            result_payload=encode_result_payload(ToolResultPayload(value="finished")),
+        )
+
+    async with _job_tools_harness(tmp_path) as (runtime, owner, tools):
+        try:
+            await start_job(runtime, full_id, tool_name="tool", depth=0, adapter={}, owner=owner, operation=running_op)
+            assert full_id in str(await tools.job("wait", job_id=prefix, wait_timeout=0.01))
+            assert runtime.awaited_job_ids() == frozenset()
+
+            release.set()
+            await wait_for_status(runtime, full_id, "completed")
+            key = ConversationKey(
+                owner.recipient,
+                owner.room_id or "",
+                owner.resolved_thread_id,
+                owner.requester_id or "",
+                False,
+            )
+            assert [job.job_id for job in await runtime.ended_jobs(key)] == [full_id]
+            assert await tools.job("wait", job_id=prefix, wait_timeout=0) == "finished"
+        finally:
+            release.set()
+
+
+@pytest.mark.asyncio
+async def test_job_prefix_resolution_ignores_pending_grant_jobs(tmp_path: Path) -> None:
+    """Prefix lookup resolves only allowed-grant jobs; exact-ID wait on pending jobs keeps main's release behavior."""
+    pending_ids: set[str] = set()
+    runtime = await tool_job_runtime(tmp_path, grant=lambda job: "pending" if job.job_id in pending_ids else "allowed")
+    owner, prefix = job_owner(), "feedface"
+    allowed_id, pending_id, only_pending_id = f"{prefix}{'1' * 56}", f"{prefix}{'2' * 56}", f"0badf00d{'3' * 56}"
+    try:
+        for jid in (allowed_id, pending_id, only_pending_id):
+            await _start_done(runtime, jid, owner)
+        pending_ids.update({pending_id, only_pending_id})
+
+        waited = await runtime.wait(prefix, owner=owner, depth=0, timeout=0)
+        assert waited.job.job_id == allowed_id
+        assert waited.claim is not None
+        await runtime.release_wait(waited.job.job_id, waited.claim)
+        with pytest.raises(JobAccessError):
+            await runtime.wait("0badf00d", owner=owner, depth=0, timeout=0)
+        exact_pending = await runtime.wait(only_pending_id, owner=owner, depth=0, timeout=0)
+        assert (exact_pending.job.job_id, exact_pending.claim) == (only_pending_id, None)
+    finally:
         await runtime.shutdown()

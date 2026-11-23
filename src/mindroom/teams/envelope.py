@@ -54,6 +54,7 @@ from mindroom.response_turn import (
     is_empty_reply,
     pause_without_approval_error,
     paused_attempt_from_response,
+    publish_error_run_metadata,
     replays_as_turn,
     stream_response_turn,
     stream_with_llm_request_log_context,
@@ -402,6 +403,8 @@ class _TeamTurn:
         self,
         run: TurnRunState,
         continuation_state: TurnContinuationRunState,
+        *,
+        on_model_resolved: Callable[[str], None] | None = None,
     ) -> tuple[TeamAttempt, AsyncIterator[TeamRunEvent]]:
         """Build the attempt's team and prepared input, and return its state with the run's event stream."""
         members = self.members_for_attempt(continuation_state)
@@ -418,6 +421,9 @@ class _TeamTurn:
             ),
             None,
         )
+        # Heard before the team is built, so a failure from here on names this model.
+        if on_model_resolved is not None:
+            on_model_resolved(runtime_model.model_name)
         built = build_team_spec(
             members=members,
             mode=self.spec.mode,
@@ -522,9 +528,15 @@ class _TeamTurn:
         self,
         run: TurnRunState,
         continuation_state: TurnContinuationRunState,
+        *,
+        on_model_resolved: Callable[[str], None] | None = None,
     ) -> AsyncGenerator[TeamStreamChunk | AttemptResolved]:
         """Stream one team attempt as its document grows, ending with its ``AttemptResolved`` sentinel."""
-        attempt, events = await self.start_attempt(run, continuation_state)
+        attempt, events = await self.start_attempt(
+            run,
+            continuation_state,
+            on_model_resolved=on_model_resolved,
+        )
         prior_usage = tuple(run.prior_usage.values())
         shown: str | None = None
         try:
@@ -766,12 +778,13 @@ async def team_response_stream(
     turn = await asyncio.to_thread(_team_turn, spec, ctx)
     if isinstance(turn, FailedReply):
         # A turn whose members cannot run ran nothing to record; its message and this reply stay in the thread.
+        publish_error_run_metadata(sinks)
         yield turn
         return
 
     adapter = TurnAdapter[TeamStreamChunk](
         load_scope=turn.load_scope,
-        run_attempt=turn.run_attempt,
+        run_attempt=partial(turn.run_attempt, on_model_resolved=sinks.on_model_resolved),
         make_text_chunk=lambda text: text,
         user_message=ctx.prompt,
         unexpected_error_text=turn.error_text,

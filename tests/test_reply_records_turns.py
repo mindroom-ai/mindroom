@@ -1314,6 +1314,7 @@ async def _acknowledge_selection(bot: AgentBot) -> tuple[str | None, str | None]
         target=_target(),
         response_text="Thinking...",
         delivery_turn_id="$event",
+        ai_run_content={},
     )
 
 

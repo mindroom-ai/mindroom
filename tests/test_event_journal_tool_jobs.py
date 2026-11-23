@@ -15,6 +15,7 @@ from mindroom.event_journal import (
     DeliveryStage,
     ToolJobExistsError,
     ToolJobOwnershipLostError,
+    ToolJobSnapshotUpdate,
     tool_job_run_id,
 )
 from tests.approval_card_helpers import pending_card, terminal_edit
@@ -131,3 +132,79 @@ async def test_the_save_of_a_jobs_end_denies_its_pending_cards(journal_store: Ev
     assert await router.approvals.detached_decision(call) == BackgroundApprovalDecision("denied", JOB_ENDED_REASON)
     edit = await terminal_edit(router, delivery_id)
     assert (edit["status"], edit["resolution_reason"]) == ("denied", JOB_ENDED_REASON)
+
+
+@pytest.mark.asyncio
+async def test_save_many_updates_atomically_respects_ownership_and_denies_ended_cards(
+    journal_database: Callable[[], EventJournalStore],
+) -> None:
+    """Batched saves fence stale writers cleanly, update all rows in one transaction, and deny ended jobs' cards."""
+    store = journal_database()
+    router = store.principal("router@shared")
+    for suffix in ("a", "b"):
+        delivery_id = f"script-approval:tool-job:job-{suffix}:call"
+        assert await router.approvals.reserve_detached_card(
+            call=CallKey.detached(tool_job_run_id(f"job-{suffix}"), "call"),
+            owner_kind="job",
+            tool_name="write_report",
+            toolkit_name="reports",
+            invoking_agent="code",
+            room_id="!room:test",
+            thread_id="$thread",
+            expires_at_ns=time.time_ns() + 60_000_000_000,
+            card=ApprovalCardReservation(
+                delivery_id=delivery_id,
+                tool_call_id="call",
+                event_type="io.mindroom.tool_approval",
+                approver_user_id="@human:test",
+                approvable=True,
+                payload={"approval_id": delivery_id, "tool_name": "write_report", "status": "pending"},
+            ),
+        )
+        await router.acknowledge_matrix_delivery(
+            delivery_id=delivery_id,
+            stage=DeliveryStage.INITIAL,
+            event_id=f"$card-{suffix}",
+            delivered_projections=(),
+        )
+
+    older = store.tool_jobs("older")
+    await older.take_ownership()
+    await older.accept("job-a", '{"status": "running"}')
+    await older.accept("job-b", '{"status": "running"}')
+    newer = journal_database().tool_jobs("newer")
+    await newer.take_ownership()
+
+    updates = (
+        ToolJobSnapshotUpdate("job-a", '{"status": "completed", "consumed": true}', '{"value": "a"}', JOB_ENDED_REASON),
+        ToolJobSnapshotUpdate("job-b", '{"status": "awaiting_approval"}', None, None),
+    )
+    with pytest.raises(ToolJobOwnershipLostError):
+        await older.save_many(updates)
+    assert [(job.job_id, job.job_json) for job in await newer.load_all()] == [
+        ("job-a", '{"status": "running"}'),
+        ("job-b", '{"status": "running"}'),
+    ]
+    assert await newer.load_payload("job-a") is None
+    card_a_before = await pending_card(router.approvals, room_id="!room:test", card_event_id="$card-a")
+    assert card_a_before is not None
+    assert not card_a_before.decided
+
+    await newer.save_many(())
+    await newer.save_many(updates)
+    assert [(job.job_id, job.job_json) for job in await newer.load_all()] == [
+        ("job-a", '{"status": "completed", "consumed": true}'),
+        ("job-b", '{"status": "awaiting_approval"}'),
+    ]
+    assert await newer.load_payload("job-a") == '{"value": "a"}'
+    card_a = await pending_card(router.approvals, room_id="!room:test", card_event_id="$card-a")
+    card_b = await pending_card(router.approvals, room_id="!room:test", card_event_id="$card-b")
+    assert card_a is not None
+    assert card_a.decided
+    assert card_b is not None
+    assert not card_b.decided
+    edit = await terminal_edit(router, "script-approval:tool-job:job-a:call")
+    assert (edit["status"], edit["resolution_reason"]) == ("denied", JOB_ENDED_REASON)
+
+    await newer.save_many((ToolJobSnapshotUpdate("job-a", '{"status": "completed", "v": 2}', None, JOB_ENDED_REASON),))
+    assert await newer.load_payload("job-a") == '{"value": "a"}'

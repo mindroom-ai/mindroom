@@ -15,11 +15,12 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+from mindroom.constants import DURABLE_DELIVERY_ID_KEY
 from mindroom.tool_approval_grants import ApprovalGrantScope
 
 from . import approval_calls, approval_continuations, approval_grants, approval_signals, membership_state, outbox
 from .identity import decode_thread_id, encode_thread_id
-from .models import DURABLE_DELIVERY_ID_KEY, DeliveryStage
+from .models import DeliveryStage
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

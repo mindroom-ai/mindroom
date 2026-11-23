@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
+    import httpx
     from fastapi import FastAPI
 
     from mindroom.agent_cli.session import TurnToolRegistry
@@ -16,6 +17,7 @@ if TYPE_CHECKING:
     from mindroom.api.client_sessions import ClientSessionStore
     from mindroom.api.computers import ComputerRuntime
     from mindroom.api.config_lifecycle import ApiState
+    from mindroom.api.dictation import DictationLimiter
     from mindroom.api.mcp_gateway import GatewayRuntime
     from mindroom.api.usage_export import UsageExportRunner
     from mindroom.bot import AgentBot
@@ -76,6 +78,8 @@ class ExternalTriggerRuntime:
     # It posts the trigger it answers, under its own run phase and the runtime's admission gate.
     target_bot: Callable[[str], AgentBot | None]
     config_generation: int
+    # Optional callback to wake the reactive trigger delivery loop after durable event-source enqueue.
+    on_reactive_event: Callable[[], None] | None = None
 
 
 @dataclass
@@ -110,6 +114,8 @@ class _MindroomAppState:
     # The runtime's live bots, among which plugin routes pick a room's steward and poster.
     room_bots: Mapping[str, AgentBot] | None = None
     usage_export_runner: UsageExportRunner | None = None
+    dictation_http_client: httpx.AsyncClient | None = None
+    dictation_limiter: DictationLimiter | None = None
 
     @property
     def runtime(self) -> EmbeddedRuntime:

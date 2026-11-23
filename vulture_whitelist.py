@@ -469,3 +469,5 @@ _._validate_logins  # Pydantic field validator (src/mindroom/config/tailnet_ssh.
 _._validate_authorized_keys  # Pydantic field validator (src/mindroom/config/tailnet_ssh.py)
 post_status  # FastAPI route (src/mindroom/api/tailnet_ssh_gateway.py)
 connect_link  # FastAPI route (src/mindroom/api/tailnet_ssh_gateway.py)
+dictation_status  # FastAPI route (src/mindroom/api/dictation.py)
+transcribe_dictation  # FastAPI route (src/mindroom/api/dictation.py)

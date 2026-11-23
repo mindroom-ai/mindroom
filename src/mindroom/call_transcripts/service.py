@@ -17,8 +17,8 @@ from typing import TYPE_CHECKING, Literal, Protocol
 
 from mindroom.background_tasks import create_background_task, run_coroutine_until_complete
 from mindroom.call_transcripts.store import StoredLine
-from mindroom.call_transcripts.wav import WavError, wav_seconds
 from mindroom.logging_config import get_logger
+from mindroom.voice.wav import WavError, wav_seconds
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Mapping, Sequence

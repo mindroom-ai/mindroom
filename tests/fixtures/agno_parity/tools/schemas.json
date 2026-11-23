@@ -6049,7 +6049,7 @@
           "properties": {
             "subagent_id": {
               "type": "string",
-              "description": "Exact Subagent ID returned by run_subagent or continue_subagent."
+              "description": "Subagent ID (or a unique prefix of at least 8 hex characters) returned by run_subagent or continue_subagent."
             },
             "message": {
               "type": "string",
@@ -9392,257 +9392,6 @@
           },
           "required": [
             "query"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      }
-    ]
-  },
-  "external_trigger_manager": {
-    "instructions": null,
-    "guidance": null,
-    "functions": [
-      {
-        "name": "create_trigger",
-        "description": "Create an external trigger endpoint using caller-supplied public key material.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "trigger_id": {
-              "type": "string",
-              "description": "Route-safe trigger id for `/api/triggers/{trigger_id}`."
-            },
-            "public_key": {
-              "type": "string",
-              "description": "Ed25519 public key for request verification. Accepts raw base64 of the\n32 key bytes, OpenSSH single-line format (`ssh-ed25519 <base64> [comment]`, e.g.\nthe contents of `id_ed25519.pub`), or PEM SubjectPublicKeyInfo\n(`-----BEGIN PUBLIC KEY-----`). All formats are normalized to the raw 32-byte key."
-            },
-            "key_id": {
-              "type": "string",
-              "description": "Expected signing key id header."
-            },
-            "description": {
-              "type": "string",
-              "description": "Human-readable purpose."
-            },
-            "target_agent": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Optional target agent/team; non-admin callers use the current one."
-            },
-            "target_room_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Optional target room; non-admin callers use the current room."
-            },
-            "target_thread_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Optional Matrix thread id for delivery; mutually exclusive with new_thread."
-            },
-            "new_thread": {
-              "type": "boolean",
-              "description": "Start a fresh thread per delivery instead of appending to\ntarget_thread_id; mutually exclusive with target_thread_id. Each\ndelivery posts a room-level root and the responding agent answers\nin a new thread under it with a fresh session."
-            },
-            "allowed_kinds": {
-              "anyOf": [
-                {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Optional list of accepted payload kind values."
-            },
-            "replay_window_seconds": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Optional replay window capped by config policy."
-            },
-            "max_body_bytes": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Optional body cap capped by config policy."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
-            }
-          },
-          "required": [
-            "trigger_id",
-            "public_key"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "list_triggers",
-        "description": "List external triggers owned by the requester, or all triggers for admins.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
-            }
-          },
-          "required": []
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "disable_trigger",
-        "description": "Enable or disable a trigger owned by the requester, unless requester is admin.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "trigger_id": {
-              "type": "string"
-            },
-            "enabled": {
-              "type": "boolean"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
-            }
-          },
-          "required": [
-            "trigger_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "delete_trigger",
-        "description": "Delete a trigger owned by the requester, unless requester is admin.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "trigger_id": {
-              "type": "string"
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
-            }
-          },
-          "required": [
-            "trigger_id"
-          ]
-        },
-        "strict": false,
-        "gate": null,
-        "stop_after_tool_call": false
-      },
-      {
-        "name": "rotate_trigger_key",
-        "description": "Rotate a trigger public key without accepting or returning private key material.",
-        "parameters": {
-          "type": "object",
-          "properties": {
-            "trigger_id": {
-              "type": "string",
-              "description": "The trigger whose signing key should be rotated."
-            },
-            "public_key": {
-              "type": "string",
-              "description": "New Ed25519 public key. Accepts raw base64 of the 32 key bytes, OpenSSH\nsingle-line format (`ssh-ed25519 <base64> [comment]`, e.g. the contents of\n`id_ed25519.pub`), or PEM SubjectPublicKeyInfo (`-----BEGIN PUBLIC KEY-----`).\nAll formats are normalized to the raw 32-byte key."
-            },
-            "key_id": {
-              "type": "string",
-              "description": "Expected signing key id header."
-            },
-            "mindroom_output_path": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
-            }
-          },
-          "required": [
-            "trigger_id",
-            "public_key"
           ]
         },
         "strict": false,
@@ -29066,6 +28815,817 @@
             }
           },
           "required": []
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      }
+    ]
+  },
+  "triggers": {
+    "instructions": null,
+    "guidance": null,
+    "functions": [
+      {
+        "name": "watch_room",
+        "description": "Create a reactive trigger watching new visible messages in a Matrix room.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "prompt": {
+              "type": "string",
+              "description": "Instruction delivered to the woken agent when the trigger fires."
+            },
+            "room_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Room key, alias, or Matrix room ID to watch; defaults to the current room."
+            },
+            "thread_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional Matrix thread root (or reply inside it) to restrict watching."
+            },
+            "senders": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional list of Matrix user IDs to match."
+            },
+            "pattern": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional case-insensitive regular expression pattern to match message text."
+            },
+            "triage_instructions": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional plain-English criteria for tool-less cheap triage."
+            },
+            "triage_model": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Model alias from config.models; required when triage_provider='llm'."
+            },
+            "triage_provider": {
+              "type": "string",
+              "enum": [
+                "llm",
+                "typesafe",
+                "openai_decisions"
+              ],
+              "description": "Triage evaluator backend ('llm', 'typesafe', or 'openai_decisions')."
+            },
+            "triage_threshold": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Confidence threshold for 'typesafe' or 'openai_decisions' triage."
+            },
+            "target_agent": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Agent or team to wake; defaults to the current agent."
+            },
+            "target_room_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Room to wake the target in; defaults to the current room."
+            },
+            "target_thread_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Target thread root, 'origin' (reply in triggering message's thread),\nor None (defaults to 'origin' for same-room watch, or room timeline cross-room)."
+            },
+            "new_thread": {
+              "type": "boolean",
+              "description": "Start a fresh thread per firing; mutually exclusive with target_thread_id."
+            },
+            "thread_key": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional grouping key when new_thread=True."
+            },
+            "once": {
+              "type": "boolean",
+              "description": "Disable automatically after firing once."
+            },
+            "max_fires_per_hour": {
+              "type": "integer",
+              "description": "Per-rule hourly firing cap (bounded by policy)."
+            },
+            "cooldown_seconds": {
+              "type": "integer",
+              "description": "Minimum seconds between consecutive firings."
+            },
+            "expires_in_hours": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional lifetime in hours (positive, up to 8760)."
+            },
+            "trigger_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional route-safe trigger ID; auto-generated if omitted."
+            },
+            "description": {
+              "type": "string",
+              "description": "Human-readable description of the rule."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+            }
+          },
+          "required": [
+            "prompt"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "watch_thread",
+        "description": "Create a reactive trigger watching a thread tag state transition.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "prompt": {
+              "type": "string",
+              "description": "Instruction delivered to the woken agent when the transition occurs."
+            },
+            "tag": {
+              "type": "string",
+              "description": "Thread tag name to watch (default 'resolved')."
+            },
+            "transition": {
+              "type": "string",
+              "enum": [
+                "added",
+                "removed"
+              ],
+              "description": "Whether to fire when the tag is 'added' or 'removed'."
+            },
+            "room_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Room key, alias, or Matrix room ID containing the thread; defaults to current room."
+            },
+            "thread_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Thread root (or reply inside it) to watch; defaults to current thread in current room."
+            },
+            "target_agent": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Agent or team to wake; defaults to the current agent."
+            },
+            "target_room_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Room to wake the target in; defaults to the current room."
+            },
+            "target_thread_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Target thread root; defaults to the current thread when targeting current room."
+            },
+            "new_thread": {
+              "type": "boolean",
+              "description": "Start a fresh thread per firing; mutually exclusive with target_thread_id."
+            },
+            "thread_key": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional grouping key when new_thread=True."
+            },
+            "once": {
+              "type": "boolean",
+              "description": "Disable automatically after firing once (default True)."
+            },
+            "max_fires_per_hour": {
+              "type": "integer",
+              "description": "Per-rule hourly firing cap (bounded by policy)."
+            },
+            "cooldown_seconds": {
+              "type": "integer",
+              "description": "Minimum seconds between consecutive firings."
+            },
+            "expires_in_hours": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional lifetime in hours (positive, up to 8760)."
+            },
+            "trigger_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional route-safe trigger ID; auto-generated if omitted."
+            },
+            "description": {
+              "type": "string",
+              "description": "Human-readable description of the rule."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+            }
+          },
+          "required": [
+            "prompt"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "subscribe_event",
+        "description": "Subscribe a reactive trigger to a configured shared external event source.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "source_id": {
+              "type": "string",
+              "description": "Configured source ID under external_trigger_policy.event_sources."
+            },
+            "kind": {
+              "type": "string",
+              "description": "Event kind to match (e.g. 'pull_request.merged', 'release.published')."
+            },
+            "prompt": {
+              "type": "string",
+              "description": "Instruction delivered to the woken agent when a matching event arrives."
+            },
+            "match": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "integer"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional exact-match key/value filter over structured event data."
+            },
+            "triage_instructions": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional plain-English criteria for tool-less cheap triage."
+            },
+            "triage_model": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Model alias from config.models; required when triage_provider='llm'."
+            },
+            "triage_provider": {
+              "type": "string",
+              "enum": [
+                "llm",
+                "typesafe",
+                "openai_decisions"
+              ],
+              "description": "Triage evaluator backend ('llm', 'typesafe', or 'openai_decisions')."
+            },
+            "triage_threshold": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Confidence threshold for 'typesafe' or 'openai_decisions' triage."
+            },
+            "target_agent": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Agent or team to wake; defaults to the current agent."
+            },
+            "target_room_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Room to wake the target in; defaults to the current room."
+            },
+            "target_thread_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Target thread root; defaults to the current thread when targeting current room."
+            },
+            "new_thread": {
+              "type": "boolean",
+              "description": "Start a fresh thread per firing; mutually exclusive with target_thread_id."
+            },
+            "thread_key": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional grouping key when new_thread=True."
+            },
+            "once": {
+              "type": "boolean",
+              "description": "Disable automatically after firing once (default True)."
+            },
+            "max_fires_per_hour": {
+              "type": "integer",
+              "description": "Per-rule hourly firing cap (bounded by policy)."
+            },
+            "cooldown_seconds": {
+              "type": "integer",
+              "description": "Minimum seconds between consecutive firings."
+            },
+            "expires_in_hours": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional lifetime in hours (positive, up to 8760)."
+            },
+            "trigger_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional route-safe trigger ID; auto-generated if omitted."
+            },
+            "description": {
+              "type": "string",
+              "description": "Human-readable description of the rule."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+            }
+          },
+          "required": [
+            "source_id",
+            "kind",
+            "prompt"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "create_trigger",
+        "description": "Create a direct external trigger endpoint using caller-supplied public key material.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "trigger_id": {
+              "type": "string",
+              "description": "Route-safe trigger id for `/api/triggers/{trigger_id}`."
+            },
+            "public_key": {
+              "type": "string",
+              "description": "Ed25519 public key for request verification. Accepts raw base64 of the\n32 key bytes, OpenSSH single-line format (`ssh-ed25519 <base64> [comment]`, e.g.\nthe contents of `id_ed25519.pub`), or PEM SubjectPublicKeyInfo\n(`-----BEGIN PUBLIC KEY-----`). All formats are normalized to the raw 32-byte key."
+            },
+            "key_id": {
+              "type": "string",
+              "description": "Expected signing key id header."
+            },
+            "description": {
+              "type": "string",
+              "description": "Human-readable purpose."
+            },
+            "target_agent": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional target agent/team; non-admin callers use the current one."
+            },
+            "target_room_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional target room; non-admin callers use the current room."
+            },
+            "target_thread_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional Matrix thread id for delivery; mutually exclusive with new_thread."
+            },
+            "new_thread": {
+              "type": "boolean",
+              "description": "Start a fresh thread per delivery instead of appending to\ntarget_thread_id; mutually exclusive with target_thread_id. Each\ndelivery posts a room-level root and the responding agent answers\nin a new thread under it with a fresh session."
+            },
+            "allowed_kinds": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional list of accepted payload kind values."
+            },
+            "replay_window_seconds": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional replay window capped by config policy."
+            },
+            "max_body_bytes": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Optional body cap capped by config policy."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+            }
+          },
+          "required": [
+            "trigger_id",
+            "public_key"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "list_triggers",
+        "description": "List direct external triggers and reactive triggers owned by the requester, or all for admins.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "include_disabled": {
+              "type": "boolean",
+              "description": "Whether to include disabled triggers (default True)."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+            }
+          },
+          "required": []
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "disable_trigger",
+        "description": "Enable or disable a direct external trigger or reactive trigger owned by the requester.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "trigger_id": {
+              "type": "string",
+              "description": "Identifier of the direct or reactive trigger to update."
+            },
+            "enabled": {
+              "type": "boolean",
+              "description": "Target enabled state (False to disable, True to enable)."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+            }
+          },
+          "required": [
+            "trigger_id"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "delete_trigger",
+        "description": "Delete a direct external trigger or reactive trigger owned by the requester.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "trigger_id": {
+              "type": "string",
+              "description": "Identifier of the direct or reactive trigger to delete."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+            }
+          },
+          "required": [
+            "trigger_id"
+          ]
+        },
+        "strict": false,
+        "gate": null,
+        "stop_after_tool_call": false
+      },
+      {
+        "name": "rotate_trigger_key",
+        "description": "Rotate a direct Ed25519 trigger public key without accepting or returning private key material.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "trigger_id": {
+              "type": "string",
+              "description": "The direct signed external trigger whose signing key should be rotated."
+            },
+            "public_key": {
+              "type": "string",
+              "description": "New Ed25519 public key. Accepts raw base64 of the 32 key bytes, OpenSSH\nsingle-line format (`ssh-ed25519 <base64> [comment]`, e.g. the contents of\n`id_ed25519.pub`), or PEM SubjectPublicKeyInfo (`-----BEGIN PUBLIC KEY-----`).\nAll formats are normalized to the raw 32-byte key."
+            },
+            "key_id": {
+              "type": "string",
+              "description": "Expected signing key id header."
+            },
+            "mindroom_output_path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+            }
+          },
+          "required": [
+            "trigger_id",
+            "public_key"
+          ]
         },
         "strict": false,
         "gate": null,

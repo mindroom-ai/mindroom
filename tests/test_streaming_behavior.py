@@ -37,7 +37,7 @@ from mindroom.history.interrupted_replay import (
 from mindroom.hooks import MessageEnvelope
 from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRequirement, ToolExecution
-from mindroom.matrix.client_delivery import DeliveredMatrixEvent, build_edit_event_content
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent, build_edit_event_content, edit_message_result
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.large_messages import calculate_event_size
 from mindroom.matrix.mentions import format_message_with_mentions
@@ -5009,3 +5009,57 @@ def test_newlines_dropped_after_a_tool_call_do_not_count_as_received_text(tmp_pa
     streaming._append_incremental_text("\nDone")
     assert streaming.accumulated_text == "Checking.\n\n🔧 `read` [1] ⏳\n\nDone"
     assert streaming.chars_since_last_update == len(streaming.accumulated_text)
+
+
+@pytest.mark.asyncio
+async def test_streaming_tool_calls_only_progress_edit_sends_thinking_placeholder_without_markers(
+    tmp_path: Path,
+) -> None:
+    """A real streaming tool-calls-only progress edit sends Thinking... with placeholder_body=True and zero markers."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    paths = runtime_paths_for(config)
+    mock_client = _sending_client_mock()
+    mock_client.user_id = "@mindroom_code:localhost"
+
+    pending_call = ToolExecution(tool_call_id="call-2", tool_name="shell", tool_args={"cmd": "pwd"}).call
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!room:localhost", None, "$src"),
+        config=config,
+        runtime_paths=paths,
+        show_tool_calls=True,
+        **reply_hooks(),
+    )
+    await _consume_streaming_chunks_for_test(
+        mock_client,
+        _aiter(*_tool_pair("call-1", "read_file"), ToolStarted(pending_call)),
+        streaming,
+    )
+    prepared = await streaming._prepare_delivery_async(is_final=False, allow_empty_progress=False)
+    assert prepared is not None
+    assert prepared.content["body"] == "🔧 `read_file` [1]\n\n🔧 `shell` [2] ⏳"
+
+    mock_client.room_send = AsyncMock(return_value=nio.RoomSendResponse("$edit", "!room:localhost"))
+    delivered = await edit_message_result(
+        mock_client,
+        "!room:localhost",
+        "$reply",
+        prepared.content,
+        prepared.display_text,
+    )
+    assert delivered is not None
+    wire = mock_client.room_send.await_args.kwargs["content"]
+    assert wire["body"] == "* Thinking..."
+    assert wire["formatted_body"] == "<p>Thinking...</p>\n"
+    assert wire["m.new_content"]["body"] == "Thinking..."
+    assert wire["m.new_content"]["formatted_body"] == "<p>Thinking...</p>\n"
+    assert wire["m.new_content"]["io.mindroom.tool_trace"]["version"] == 3
+    assert wire["m.new_content"]["io.mindroom.tool_trace"]["placeholder_body"] is True
+    assert "🔧" not in wire["body"]
+    assert "🔧" not in wire["formatted_body"]
+    assert "🔧" not in wire["m.new_content"]["body"]
+    assert "🔧" not in wire["m.new_content"]["formatted_body"]
+    assert tool_markers_in_text(wire) == build_edit_event_content(
+        event_id="$reply",
+        new_content=prepared.content,
+        new_text=prepared.display_text,
+    )

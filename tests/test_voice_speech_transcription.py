@@ -7,10 +7,12 @@ from typing import TYPE_CHECKING
 
 import httpx
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig
 from mindroom.llm.usage import TokenCounts
+from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT, OPENAI_BASE_URL_DEFAULT
 from mindroom.voice import handler as voice_handler
 from tests.conftest import test_runtime_paths
 
@@ -162,3 +164,140 @@ async def test_transcribe_speech_returns_none_without_a_key(
 
     assert await voice_handler.transcribe_speech(b"audio", config, test_runtime_paths(tmp_path)) is None
     assert requests == []
+
+
+def test_resolve_stt_connection_handles_providers_and_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """STT connection resolution handles OpenAI keys, credential services, and keyless compatible hosts."""
+    paths = test_runtime_paths(tmp_path)
+    monkeypatch.setattr(
+        voice_handler,
+        "get_api_key_for_service",
+        lambda service, _paths: "svc-key" if service == "custom" else None,
+    )
+
+    assert voice_handler.resolve_stt_connection(_config(api_key="direct-key"), paths) == (
+        f"{OPENAI_BASE_URL_DEFAULT}/audio/transcriptions",
+        "direct-key",
+    )
+    assert (
+        voice_handler.resolve_stt_connection(
+            Config(voice=VoiceConfig(stt=VoiceSTTConfig(credentials_service="openai"))),
+            paths,
+        )
+        is None
+    )
+    assert voice_handler.resolve_stt_connection(
+        Config(voice=VoiceConfig(stt=VoiceSTTConfig(provider="openai_compatible", host="http://localhost:8080"))),
+        paths,
+    ) == ("http://localhost:8080/v1/audio/transcriptions", LOCAL_OPENAI_API_KEY_DEFAULT)
+    assert voice_handler.resolve_stt_connection(
+        Config(
+            voice=VoiceConfig(
+                stt=VoiceSTTConfig(
+                    provider="openai_compatible",
+                    host="https://stt.test/v1",
+                    credentials_service="custom",
+                ),
+            ),
+        ),
+        paths,
+    ) == ("https://stt.test/v1/audio/transcriptions", "svc-key")
+
+
+@pytest.mark.asyncio
+async def test_transcribe_speech_preserves_operator_prompt_and_skips_diarize(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Operator extra_kwargs.prompt is preserved (up to 400 chars) with dictation tail <= 800; diarize omits prompt."""
+    requests = _patch_stt(monkeypatch, lambda _request: httpx.Response(200, json={"text": "ok"}))
+    paths = test_runtime_paths(tmp_path)
+
+    await voice_handler.transcribe_speech(b"audio", _config(), paths, prompt="  MindRoom dictation  ")
+    await voice_handler.transcribe_speech(b"audio", _config(), paths, prompt="   ")
+    vocab = "Vocabulary: MindRoom, Tuwunel"
+    long_dictation = "recent " * 140 + "TAIL"
+    await voice_handler.transcribe_speech(
+        b"audio",
+        _config(extra_kwargs={"prompt": vocab}),
+        paths,
+        prompt=long_dictation,
+    )
+    huge_base = "OP_START " + "b" * 500
+    await voice_handler.transcribe_speech(
+        b"audio",
+        _config(extra_kwargs={"prompt": huge_base}),
+        paths,
+        prompt=long_dictation,
+    )
+    await voice_handler.transcribe_speech(
+        b"audio",
+        _config(model="gpt-4o-transcribe-diarize", extra_kwargs={"prompt": vocab}),
+        paths,
+        prompt="should be omitted",
+    )
+
+    direct, blank, preserved, capped, diarize = (_form_fields(request) for request in requests)
+    assert direct["prompt"] == "MindRoom dictation"
+    assert "prompt" not in blank
+    assert preserved["prompt"].startswith(f"{vocab} ")
+    assert preserved["prompt"].endswith("TAIL")
+    assert len(preserved["prompt"]) <= 800
+    assert capped["prompt"].startswith(f"{huge_base[:400]} ")
+    assert capped["prompt"].endswith("TAIL")
+    assert len(capped["prompt"]) <= 800
+    assert "prompt" not in diarize
+
+
+@pytest.mark.asyncio
+async def test_transcribe_speech_reuses_http_client_without_closing_it(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A supplied pooled client is reused with the requested timeout and never closed by transcribe_speech."""
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"text": "pooled"})
+
+    def unexpected_client(*_args: object, **_kwargs: object) -> httpx.AsyncClient:
+        msg = "transcribe_speech must reuse the provided http_client"
+        raise AssertionError(msg)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as pooled:
+        monkeypatch.setattr(voice_handler.httpx, "AsyncClient", unexpected_client)
+        transcript = await voice_handler.transcribe_speech(
+            b"audio",
+            _config(),
+            test_runtime_paths(tmp_path),
+            timeout_seconds=25.0,
+            http_client=pooled,
+        )
+        assert not pooled.is_closed
+
+    assert transcript == voice_handler.SpeechTranscript(text="pooled", usage=None)
+    assert len(requests) == 1
+    assert requests[0].extensions["timeout"] == {"connect": 5.0, "read": 25.0, "write": 10.0, "pool": 5.0}
+
+
+@pytest.mark.asyncio
+async def test_transcribe_speech_omits_response_text_from_error_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Non-200 STT errors log only the status code so provider error bodies never leak dictated text."""
+    private_phrase = "super-private-dictated-sentence"
+    _patch_stt(monkeypatch, lambda _request: httpx.Response(422, text=f"Invalid transcript: {private_phrase}"))
+
+    with capture_logs() as logs:
+        transcript = await voice_handler.transcribe_speech(b"audio", _config(), test_runtime_paths(tmp_path))
+
+    assert transcript is None
+    [error_log] = [entry for entry in logs if entry.get("event") == "stt_api_error"]
+    assert error_log["status_code"] == 422
+    assert "error" not in error_log
+    assert private_phrase not in str(logs)

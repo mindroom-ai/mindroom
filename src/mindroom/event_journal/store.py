@@ -41,7 +41,7 @@ from .views import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from mindroom.interactive_models import InteractivePrompt
@@ -57,6 +57,7 @@ if TYPE_CHECKING:
         RoomMembershipPosition,
     )
     from .projection import ProjectedEvent
+    from .tool_jobs import ToolJobSnapshotUpdate
 
 _DEFAULT_APPROVAL_CONTINUATION_OWNER_LIMIT = 100
 
@@ -364,6 +365,14 @@ class ToolJobStore:
                 result_payload_json,
                 approval_end_reason=approval_end_reason,
             ),
+        )
+
+    async def save_many(self, updates: Sequence[ToolJobSnapshotUpdate]) -> None:
+        """Replace multiple jobs' snapshots in one owned transaction."""
+        if not updates:
+            return
+        await self._backend.write(
+            lambda transaction: tool_jobs.save_many(transaction, self._runtime_generation, updates),
         )
 
     async def load_payload(self, job_id: str) -> str | None:

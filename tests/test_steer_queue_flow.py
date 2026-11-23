@@ -23,13 +23,17 @@ from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig
 from mindroom.constants import STREAM_STATUS_KEY
 from mindroom.dispatch_handoff import PreparedIngress
+from mindroom.dispatch_source import SCHEDULED_SOURCE_KIND
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.llm.runs import RunStatus, run_tool_executions
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.mid_turn import MID_TURN_MODE_KEY, MidTurnMode
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.response_payload_preparation import _STEER_CONTINUATION_LINE, _steered_follow_up_prompt
+from mindroom.tool_jobs.conversation import ConversationKey
+from mindroom.tool_jobs.follow_ups import follow_up_envelope
 from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 from mindroom.turn_record import TurnRecord
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
@@ -696,3 +700,98 @@ async def test_hidden_tool_only_steer_of_a_person_approved_resume_ends_with_its_
     assert "error" not in turn.homeserver.statuses
     assert len(turn.agent_runs()) == 2
     await _assert_settled(turn, _STEER)
+
+
+@pytest.mark.parametrize(
+    ("turn_kind", "steer_sender", "steers_directly"),
+    [
+        ("job_follow_up", _REQUESTER, True),
+        ("job_follow_up", "@other:localhost", False),
+        ("scheduled", _REQUESTER, False),
+    ],
+    ids=["job-follow-up-requester", "job-follow-up-other-user", "scheduled-fire"],
+)
+async def test_job_follow_up_turn_steers_for_its_requester_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tools: type[_Tools],
+    turn_kind: str,
+    steer_sender: str,
+    *,
+    steers_directly: bool,
+) -> None:
+    """A running JOB_FOLLOW_UP binds its human requester so their Steer stops cleanly, while other users and scheduled turns fall back to Auto."""
+    turn = await _flow(
+        tmp_path,
+        monkeypatch,
+        scripts={"default": [_FIRST_BATCH, answer("Paused for follow-up.")]},
+    )
+    base = _first_request()
+    if turn_kind == "job_follow_up":
+        envelope = replace(
+            follow_up_envelope(
+                ConversationKey(
+                    recipient="general",
+                    room_id=_ROOM,
+                    thread_id=None,
+                    requester_id=_REQUESTER,
+                    silent=False,
+                ),
+                follow_up_id=_SOURCE,
+                sender_id=_AGENT_ID,
+                prompt="Background job finished.",
+            ),
+            target=base.response_envelope.target,
+        )
+    else:
+        envelope = replace(
+            base.response_envelope,
+            origin=TurnOrigin(
+                transport_sender_id=_AGENT_ID,
+                requester_id=_REQUESTER,
+                sender_entity_name="general",
+                requester_entity_name=None,
+                sender_kind=SenderKind.MANAGED_ENTITY,
+                requester_kind=SenderKind.USER,
+                intent=TurnIntent.SCHEDULED_FIRE,
+                source_kind=SCHEDULED_SOURCE_KIND,
+                trust=TurnTrust.TRUSTED_INTERNAL,
+            ),
+        )
+    request = replace(base, response_envelope=envelope)
+    seen_active_requester: list[str | None] = []
+    notices: list[QueuedHumanNoticeReservation] = []
+
+    def arrive() -> None:
+        if notices:
+            return
+        queue = turn.runner.lifecycle_coordinator._conversation_for(base.response_envelope.target)
+        seen_active_requester.append(queue.active_requester_id)
+        target = _target(reply_to_event_id=_STEER)
+        steer_envelope = replace(
+            _envelope(target, source_event_id=_STEER),
+            body=_STEER_TEXT,
+            origin=message_origin(sender_id=steer_sender, requester_id=steer_sender),
+        )
+        notice = turn.runner.lifecycle_coordinator.reserve_waiting_human_message(
+            target=target,
+            response_envelope=steer_envelope,
+            mode=MidTurnMode.STEER,
+        )
+        assert notice is not None
+        notices.append(notice)
+
+    tools.during = arrive
+    await turn.runner.generate_response(request)
+
+    assert seen_active_requester == [_REQUESTER if turn_kind == "job_follow_up" else None]
+    [notice] = notices
+    assert notice.stopped_reply is steers_directly
+    model = turn.models["default"]
+    if steers_directly:
+        assert len(model.requests) == 1
+        assert not any(QUEUED_MESSAGE_NOTICE_TEXT in str(m.content) for m in model.requests[-1].messages)
+    else:
+        assert len(model.requests) == 2
+        assert any(QUEUED_MESSAGE_NOTICE_TEXT in str(m.content) for m in model.requests[-1].messages)
+    notice.release()

@@ -10,9 +10,15 @@ import pytest
 from structlog.testing import capture_logs
 
 from mindroom.config.main import Config
+from mindroom.event_journal import ToolJobStore
+from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.session_storage.agent_storage import create_agent_state_storage
+from mindroom.session_storage.store import ConversationStore
+from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_jobs.consumption import ConsumptionOwner
 from mindroom.tool_jobs.resources import current_execution_resources
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobRecoveryBlockedError
+from mindroom.tool_jobs.runtime import BackgroundOutcome, JobClaim, JobRecoveryBlockedError
 from tests.bot_helpers import _runtime_bound_config
 from tests.conftest import runtime_paths_for
 from tests.tool_job_helpers import (
@@ -28,9 +34,10 @@ from tests.tool_job_helpers import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Sequence
     from pathlib import Path
 
+    from mindroom.event_journal import ToolJobSnapshotUpdate
     from mindroom.tool_jobs import runtime as runtime_module
 
 
@@ -363,3 +370,171 @@ async def test_blocked_shutdown_cleanup_still_settles_other_jobs(tmp_path: Path)
     assert [type(error) for error in failure.value.exceptions] == [JobRecoveryBlockedError]
     saved = {name: job.status for name, job in (await saved_jobs(tmp_path)).items()}
     assert saved == {"blocked": "running", "later": "interrupted"}
+
+
+async def _start_completed_job(runtime: runtime_module.ToolJobRuntime, job_id: str) -> runtime_module.BackgroundJob:
+    async def operation() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", f"done-{job_id}")
+
+    await start_job(runtime, job_id, tool_name="tool", depth=0, adapter={}, owner=job_owner(), operation=operation)
+    waited = await runtime.wait(job_id, owner=job_owner(), depth=0)
+    await runtime.release_wait(job_id, waited.claim)
+    return waited.job
+
+
+def _save_finished_run(store: ConversationStore, run_id: str, call_id: str) -> None:
+    session = ConversationSession(session_id="session-1", kind="agent", owner_id="leader")
+    store.save_run(
+        session,
+        RunRecord(
+            run_id=run_id,
+            session_id="session-1",
+            status=RunStatus.completed,
+            tools=[ToolExecution(tool_call_id=call_id, tool_name="job", result="ok")],
+        ),
+        record_usage=False,
+    )
+
+
+async def _claim_and_register(
+    runtime: runtime_module.ToolJobRuntime,
+    owner: ConsumptionOwner,
+    job_id: str,
+    *,
+    run_id: str,
+    call_id: str,
+    claim_override: JobClaim | None = None,
+) -> JobClaim:
+    waited = await runtime.wait(job_id, owner=job_owner(), depth=0, timeout=0)
+    assert waited.claim is not None
+    owner.register(
+        runtime,
+        waited.job,
+        waited.claim if claim_override is None else claim_override,
+        run_id=run_id,
+        team=False,
+        call_id=call_id,
+        returned_inline=False,
+    )
+    return waited.claim
+
+
+@pytest.mark.asyncio
+async def test_finalize_consumption_batches_run_reads_and_journal_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Finalizing N claims for one run reads that run once and writes all acknowledgements in one transaction."""
+    runtime = await tool_job_runtime(tmp_path)
+    store = create_agent_state_storage("leader", tmp_path)
+    _save_finished_run(store, "run-1", "collect-call")
+    get_run_calls: list[str] = []
+    original_get_run = ConversationStore.get_run
+
+    def spy_get_run(target: ConversationStore, run_id: str) -> object:
+        get_run_calls.append(run_id)
+        return original_get_run(target, run_id)
+
+    save_many_batches: list[int] = []
+    original_save_many = ToolJobStore.save_many
+
+    async def spy_save_many(job_store: ToolJobStore, updates: Sequence[ToolJobSnapshotUpdate]) -> None:
+        save_many_batches.append(len(updates))
+        await original_save_many(job_store, updates)
+
+    monkeypatch.setattr(ConversationStore, "get_run", spy_get_run)
+    monkeypatch.setattr(ToolJobStore, "save_many", spy_save_many)
+    owner = ConsumptionOwner(storage_factory=lambda: store)
+    try:
+        await owner.finalize()
+        assert get_run_calls == []
+        assert save_many_batches == []
+
+        job_ids = [f"job-{index}" for index in range(5)]
+        for job_id in job_ids:
+            await _start_completed_job(runtime, job_id)
+            await _claim_and_register(runtime, owner, job_id, run_id="run-1", call_id="collect-call")
+        await owner.finalize()
+        assert get_run_calls == ["run-1"]
+        assert save_many_batches == [5]
+        persisted = await saved_jobs(tmp_path)
+        for job_id in job_ids:
+            assert (await lookup(runtime, job_id, owner=job_owner(), depth=0)).consumed
+            assert persisted[job_id].consumed
+            reclaimed = await runtime.wait(job_id, owner=job_owner(), depth=0, timeout=0)
+            assert reclaimed.claim is not None
+            await runtime.release_wait(job_id, reclaimed.claim)
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_finalize_consumption_isolates_invalid_claims_and_storage_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Invalid claims and per-run read errors do not block valid claims; journal failures leave all jobs unconsumed."""
+    runtime = await tool_job_runtime(tmp_path)
+    store = create_agent_state_storage("leader", tmp_path)
+    _save_finished_run(store, "run-1", "call-1")
+    original_get_run = ConversationStore.get_run
+
+    def failing_get_run(target: ConversationStore, run_id: str) -> object:
+        if run_id == "bad-run":
+            msg = "corrupt run row"
+            raise RuntimeError(msg)
+        return original_get_run(target, run_id)
+
+    monkeypatch.setattr(ConversationStore, "get_run", failing_get_run)
+    owner = ConsumptionOwner(storage_factory=lambda: store)
+    try:
+        for job_id in ("valid-a", "valid-b", "stale", "bad-run-job"):
+            await _start_completed_job(runtime, job_id)
+        await _claim_and_register(runtime, owner, "valid-a", run_id="run-1", call_id="call-1")
+        stale_claim = await _claim_and_register(
+            runtime,
+            owner,
+            "stale",
+            run_id="run-1",
+            call_id="call-1",
+            claim_override=JobClaim("wrong"),
+        )
+        await _claim_and_register(runtime, owner, "valid-b", run_id="run-1", call_id="call-1")
+        await _claim_and_register(runtime, owner, "bad-run-job", run_id="bad-run", call_id="call-1")
+        with capture_logs() as logs:
+            await owner.finalize()
+        persisted = await saved_jobs(tmp_path)
+        for job_id in ("valid-a", "valid-b"):
+            assert (await lookup(runtime, job_id, owner=job_owner(), depth=0)).consumed
+            assert persisted[job_id].consumed
+        for job_id in ("stale", "bad-run-job"):
+            assert not (await lookup(runtime, job_id, owner=job_owner(), depth=0)).consumed
+        assert {e["job_id"] for e in logs if e["event"] == "Tool result persistence was not confirmed"} == {
+            "stale",
+            "bad-run-job",
+        }
+        # Release stale's real claim (the registered one was wrong); bad-run-job was already released by finalize.
+        await runtime.release_wait("stale", stale_claim)
+
+        def fail_save(_job: dict[str, object], _payload: object) -> None:
+            msg = "disk full"
+            raise OSError(msg)
+
+        for job_id in ("stale", "bad-run-job"):
+            await _claim_and_register(runtime, owner, job_id, run_id="run-1", call_id="call-1")
+        with monkeypatch.context() as patch, capture_logs() as failure_logs:
+            intercept_job_saves(patch, before=fail_save)
+            await owner.finalize()
+        persisted_after = await saved_jobs(tmp_path)
+        for job_id in ("stale", "bad-run-job"):
+            assert not (await lookup(runtime, job_id, owner=job_owner(), depth=0)).consumed
+            assert not persisted_after[job_id].consumed
+            reclaimed = await runtime.wait(job_id, owner=job_owner(), depth=0, timeout=0)
+            assert reclaimed.claim is not None
+            await runtime.release_wait(job_id, reclaimed.claim)
+        assert {e["job_id"] for e in failure_logs if e["event"] == "Tool result persistence was not confirmed"} == {
+            "stale",
+            "bad-run-job",
+        }
+    finally:
+        await runtime.shutdown()

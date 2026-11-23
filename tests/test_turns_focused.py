@@ -51,7 +51,7 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.config.participation import ParticipationConfig
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.constants import ROUTER_AGENT_NAME, WAKE_MENTIONED_KEY
+from mindroom.constants import DURABLE_DELIVERY_ID_KEY, ROUTER_AGENT_NAME, WAKE_MENTIONED_KEY
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps, MessageContext
 from mindroom.conversation_state_writer import ConversationStateWriter, ConversationStateWriterDeps
 from mindroom.credentials.manager import get_runtime_credentials_manager
@@ -88,7 +88,6 @@ from mindroom.event_journal import (
     turn_rows,
 )
 from mindroom.event_journal.identity import journal_principal_id
-from mindroom.event_journal.models import DURABLE_DELIVERY_ID_KEY
 from mindroom.event_journal.opening import open_event_journal
 from mindroom.execution_preparation import _build_unseen_context_messages, render_prepared_messages_text
 from mindroom.hooks import (
@@ -114,6 +113,7 @@ from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_reads import ConversationReader  # noqa: TC001
 from mindroom.matrix.journal_ingress import _inbound_event
 from mindroom.matrix.large_messages import prepare_large_message
+from mindroom.matrix.media import carried_media_content
 from mindroom.matrix.room_history_reads import UnresolvedOpaqueRoomHistoryError
 from mindroom.matrix.segmented_messages import segment_matrix_content
 from mindroom.matrix.thread_history_result import thread_history_result
@@ -123,7 +123,7 @@ from mindroom.mid_turn import MidTurnGate, MidTurnMode
 from mindroom.reply_scope import ReplyRuntime
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionRefusedError
-from mindroom.response_lifecycle import QueuedHumanNoticeReservation, _Conversation
+from mindroom.response_lifecycle import QueuedHumanNoticeReservation, ResponseLifecycleCoordinator, _Conversation
 from mindroom.response_payload_preparation import (
     _STEER_CONTINUATION_LINE,
     DispatchPayloadInputs,
@@ -325,6 +325,10 @@ class _RecordingResponseRunner:
         """Await every runner-owned response task, surfacing its failures."""
         for task in self.inbox_tasks:
             await task
+
+    def placeholder_ai_run_content(self, target: MessageTarget, *, requester_id: str | None) -> dict[str, Any]:  # noqa: ARG002
+        """Name no model on a selection's acknowledgement; these tests follow its sources, not its content."""
+        return {}
 
     async def generate_response(self, request: ResponseRequest) -> SourceFate:
         self.requests.append(request)
@@ -9442,3 +9446,114 @@ async def test_a_second_route_of_an_answered_message_is_not_answered_again(tmp_p
     await harness.deliver(room, _route_message(config, steward=ROUTER_AGENT_NAME, event_id="$route-again:localhost"))
 
     assert len(harness.runner.requests) == 1
+
+
+def test_carried_media_content_preserves_mid_turn_mode() -> None:
+    """Rebuilt media and voice events keep io.mindroom.mid_turn when present and omit it when absent."""
+    with_mode = _thread_upload_event("m.audio", event_id="$voice-steer:localhost", origin_server_ts=1_000_000)
+    assert isinstance(with_mode, nio.RoomMessageAudio)
+    with_mode.source["content"][constants.MID_TURN_MODE_KEY] = "steer"
+    assert carried_media_content(with_mode)[constants.MID_TURN_MODE_KEY] == "steer"
+
+    without_mode = _thread_upload_event("m.audio", event_id="$voice-auto:localhost", origin_server_ts=1_000_001)
+    assert isinstance(without_mode, nio.RoomMessageAudio)
+    assert constants.MID_TURN_MODE_KEY not in carried_media_content(without_mode)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode_value", "expected_mode", "replayed_checkpoint"),
+    [
+        ("steer", MidTurnMode.STEER, False),
+        ("queue", MidTurnMode.QUEUE, False),
+        ("steer", MidTurnMode.STEER, True),
+    ],
+    ids=["voice-steer", "voice-queue", "voice-steer-checkpoint-replay"],
+)
+async def test_voice_ingress_honors_mid_turn_steer_and_queue(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode_value: str,
+    expected_mode: MidTurnMode,
+    *,
+    replayed_checkpoint: bool,
+) -> None:
+    """VoiceIngress forwards io.mindroom.mid_turn into waiting notices and dispatches with the preserved mode."""
+    harness = _build_harness(config, tmp_path)
+    lifecycle = ResponseLifecycleCoordinator()
+    harness.runner.lifecycle_coordinator = lifecycle  # type: ignore[assignment]
+    room = _room_with_members(config, "general")
+    active_target = MessageTarget.resolve(_ROOM_ID, _THREAD_ROOT, "$active:localhost")
+    queue = lifecycle._conversation_for(active_target)
+    queue.begin_response_turn()
+    queue.bind_active_requester(_SENDER)
+
+    event = _thread_upload_event("m.audio", event_id=f"$voice-{mode_value}:localhost", origin_server_ts=1_000_000)
+    event.source["content"][constants.MID_TURN_MODE_KEY] = mode_value
+    rebuilt_content = {
+        "msgtype": "m.text",
+        "body": "🎤 switch to the short summary",
+        constants.SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+        constants.ORIGINAL_SENDER_KEY: _SENDER,
+        constants.VOICE_TRANSCRIPT_KEY: True,
+        **carried_media_content(event),
+    }
+    if replayed_checkpoint:
+        # Even a checkpoint saved before this fix still honors mode from event.source at voice ingress.
+        checkpoint_content = {k: v for k, v in rebuilt_content.items() if k != constants.MID_TURN_MODE_KEY}
+        await harness.turn_store.record_prepared_voice(
+            _ROOM_ID,
+            event.event_id,
+            PreparedVoiceSource.from_content(
+                rebuilt_content["body"],
+                checkpoint_content,
+                thread_id=_THREAD_ROOT,
+                coalescing_thread_id=_THREAD_ROOT,
+            ),
+        )
+    else:
+        transcript = PreparedIngress(
+            sender=_SENDER,
+            event_id=event.event_id,
+            body=rebuilt_content["body"],
+            source={**event.source, "content": rebuilt_content},
+            payload_trusted=True,
+        )
+        monkeypatch.setattr(
+            InboundTurnNormalizer,
+            "prepare_voice_event",
+            AsyncMock(return_value=_VoiceNormalizationResult(event=transcript)),
+        )
+
+    observed: dict[str, object] = {}
+    original_handle = harness.dispatcher.handle_prepared_turn
+
+    async def capture_then_handle(batch: PreparedTurn) -> None:
+        # Snapshot the waiting notice VoiceIngress reserved before dispatch consumes it.
+        observed["pending"] = queue.pending_message_snapshot()
+        observed["steers"] = queue.requester_steer_snapshot()
+        observed["interrupting"] = queue.interrupting_snapshot()
+        observed["queued"] = queue.queued_snapshot()
+        queue.bind_active_requester(None)
+        queue.finish_response_turn()
+        await original_handle(batch)
+
+    monkeypatch.setattr(harness.dispatcher, "handle_prepared_turn", capture_then_handle)
+    await harness.ingress.handle_media_event(room, event)
+    await harness.gate.drain_all()
+
+    [pending] = observed["pending"]
+    assert pending.event_id == event.event_id
+    assert pending.mode is expected_mode
+    if expected_mode is MidTurnMode.STEER:
+        assert [m.event_id for m in observed["steers"]] == [event.event_id]
+        assert [m.event_id for m in observed["interrupting"]] == [event.event_id]
+        assert observed["queued"] == ()
+    else:
+        assert observed["steers"] == ()
+        assert observed["interrupting"] == ()
+        assert [m.event_id for m in observed["queued"]] == [event.event_id]
+    [request] = harness.runner.requests
+    if not replayed_checkpoint:
+        assert request.mid_turn_mode is expected_mode
