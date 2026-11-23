@@ -257,7 +257,7 @@ async def test_the_operators_ceiling_caps_how_many_calls_of_a_run_work_at_once(
     toolkit = WorkflowTools(stack.context.config, max_concurrent_agents=ceiling_)
     arguments = {"source": SCRIPT, "args": None, "title": None, "max_concurrent": asked, "resource_profile": None}
 
-    run, _ = await toolkit._reserve(stack.engine, stack.context, _job_id(stack, "call-1"), arguments)
+    run = await toolkit._reserve(stack.engine, stack.context, _job_id(stack, "call-1"), arguments)
 
     assert run.max_concurrent == saved
 
@@ -276,7 +276,7 @@ async def test_a_refused_retry_takes_back_an_intent_that_no_job_owns(stack: Work
     with pytest.raises(CallFailed, match="not available"):
         await stack.call("start_workflow", source=SCRIPT, call_id="call-1")
 
-    assert leftover[1]
+    assert leftover.run_id
     assert stack.store.list_runs() == []
 
 

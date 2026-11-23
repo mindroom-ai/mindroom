@@ -347,7 +347,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
             after = partial(hooks, before=False)
             if function_name == _RESUME:
                 return await _resume_job(engine, context, arguments, self.limits, job_id, runtime, after=after)
-            run, _ = await self._reserve(engine, context, job_id, arguments, job_id=job_id)
+            run = await self._reserve(engine, context, job_id, arguments, job_id=job_id)
             refused = partial(asyncio.to_thread, engine.store.delete_intent, run.run_id, job_id, run.epoch)
         except ValueError as exc:
             return str(exc)
@@ -362,7 +362,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         job_id: str | None = None,
         outer: tuple[str, str, int] | None = None,
         source: bytes | None = None,
-    ) -> tuple[WorkflowRun, bool]:
+    ) -> WorkflowRun:
         """Check one start and write its intent, or return the run *origin* reserved before; a refusal raises.
 
         *job_id* names the job the run is reserved for, which no call that waits for its run itself has. *outer* is
@@ -432,10 +432,10 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
             (*outer, made.context.call_id) if outer is not None and made is not None and made.context.call_id else None
         )
         reserve = partial(store.reserve_run, intent, max_active=self.limits.max_concurrent_runs, call=call)
-        reserved = await run_blocking_or_compensate(reserve, take_back)
-        if outer is not None and reserved[1]:
-            await engine.nest(reserved[0])
-        return reserved
+        run, created = await run_blocking_or_compensate(reserve, take_back)
+        if outer is not None and created:
+            await engine.nest(run)
+        return run
 
 
 async def _resume_job(

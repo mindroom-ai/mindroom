@@ -515,11 +515,11 @@ class WorkflowEngine:
         job_id: str | None = None,
         epoch: int | None = None,
         persona: Mapping[str, object] | None = None,
-    ) -> tuple[WorkflowRun, bool]:
+    ) -> WorkflowRun:
         """Make an ended run ready for its next attempt, with the full working time; `launch` then starts it.
 
         The saved calls stay: the next attempt replays the script, with *source* when given, and reuses them, except
-        the calls *rerun* names. The answer has the form of a reservation that found its run.
+        the calls *rerun* names.
 
         Nothing changes before the resume takes the run (`resumable`), and it takes it in one write: the run becomes
         *owner*'s, the invocation that resumes it, with *job_id* when that is a job, names no attempt, and the calls
@@ -532,7 +532,7 @@ class WorkflowEngine:
         limits = limits or WorkflowLimits()
         run = self.store.get_run(run_id)
         if owner is not None and run.owner == owner:
-            return run, False
+            return run
         while job_id is not None and self.admit(run, context, limits) is None:  # noqa: ASYNC110 - access has no event
             await asyncio.sleep(RECHECK_SECONDS)
         text = run.source if source is None else source
@@ -563,7 +563,7 @@ class WorkflowEngine:
                 reopened = await wait_for_future_until_complete(asyncio.ensure_future(asyncio.to_thread(take)))
         except SupersededAttemptError:
             raise WorkflowRunStoreError(_TAKEN.format(run_id)) from None
-        return reopened, False
+        return reopened
 
     async def wait(
         self,
@@ -599,7 +599,7 @@ class WorkflowEngine:
     async def attend(
         self,
         origin: str,
-        reserve: Callable[[], Awaitable[tuple[WorkflowRun, bool]]],
+        reserve: Callable[[], Awaitable[WorkflowRun]],
         context: ToolRuntimeContext,
         limits: WorkflowLimits,
     ) -> WorkflowRun:
@@ -614,12 +614,12 @@ class WorkflowEngine:
         self._attending[origin] += 1
         reserving = asyncio.ensure_future(reserve())
         try:
-            run, _ = await wait_for_future_until_complete(reserving)
+            run = await wait_for_future_until_complete(reserving)
             # The call starts the run's attempt as a job's operation does, again while `admit` cannot answer yet.
             return await self.wait(run.run_id, partial(self.launch, run.run_id, context, limits, owner=origin), origin)
         finally:
             if not reserving.cancelled() and not reserving.exception():
-                self._inline_runs[origin] = reserving.result()[0].run_id
+                self._inline_runs[origin] = reserving.result().run_id
             self._attending -= Counter({origin: 1})
             stopping = self._closed or context.orchestrator is None or not context.orchestrator.running
             if not self._attending[origin] and (run_id := self._inline_runs.pop(origin, None)) and not stopping:
@@ -1091,8 +1091,8 @@ class WorkflowEngine:
             kept = run.claims.get(str(run.origin_job_id))
             return _TAKEN.format(run_id) if kept is None else kept
 
-        async def found() -> tuple[WorkflowRun, bool]:
-            return run, False
+        async def found() -> WorkflowRun:
+            return run
 
         access = self.owner_access(run)
         attended = self.attend(str(run.owner), found, *access) if isinstance(access, tuple) else self.wait(run_id)
