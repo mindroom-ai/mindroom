@@ -490,3 +490,45 @@ async def test_delegation_submitted_after_cost_limit_does_not_request_approval(
             decision.set()
             hold.set()
             await gated.close()
+
+
+@pytest.mark.asyncio
+async def test_edited_resume_replacing_interrupted_nested_launch_does_not_repeat_write(stack: WorkflowStack) -> None:
+    """Replacing an interrupted nested launch at @0 with another tool keeps that tool's completion across resumes."""
+    launch = tool_args("workflow", "start_workflow", source="def main(args):\n    return 'inner'\n")
+    append = tool_args("counter", "append", line="done")
+    await stack.start(max_cost_usd=0.10, max_concurrent=1)
+    parent = stack.run_id
+    stack.child_script(answer("first", _usd(0.20)))
+
+    await stack.submit("@0", "tool", launch)
+    await stack.until(lambda: [run.state for run in stack.store.child_runs(parent)] == [WorkflowRunState.RUNNING])
+    [child] = stack.store.child_runs(parent)
+
+    stack.run_id = child.run_id
+    assert await stack.result("@0", "agent", {"prompt": "First"}) == "first"
+    await stack.until(lambda: stack.store.get_run(child.run_id).state is WorkflowRunState.INTERRUPTED)
+
+    stack.run_id = parent
+    await stack.until(lambda: stack.store.get_run(parent).state is WorkflowRunState.INTERRUPTED)
+
+    edited = "def main(args):\n    return 'edited'\n"
+    await stack.call("resume_workflow", run_id=parent, source=edited, max_cost_usd=1.0, call_id="edit-to-append")
+    await stack.until(lambda: stack.store.get_run(parent).attempt == 2)
+
+    assert await stack.result("@0", "tool", append) == "appended"
+    assert stack.counting_tool.lines == ["done"]
+    saved = stack.store.get_node(parent, "@0")
+    assert saved is not None
+    assert (saved.state, saved.result) == (WorkflowNodeState.COMPLETED, "appended")
+    second_job = stack.store.get_run(parent).job_id
+    assert second_job is not None
+    await stack.finish_attempt(result="done")
+    await stack.jobs.wait(second_job, owner=stack.context.execution_identity, depth=0)
+
+    await stack.call("resume_workflow", run_id=parent, call_id="resume-again")
+    await stack.until(lambda: stack.store.get_run(parent).attempt == 3)
+
+    replayed = await stack.submit("@0", "tool", append)
+    assert (replayed.state, replayed.cached, replayed.result) == ("completed", True, "appended")
+    assert stack.counting_tool.lines == ["done"]

@@ -1874,12 +1874,17 @@ class WorkflowEngine:
             await asyncio.to_thread(settle)
 
     def _nested_interrupted(self, node: WorkflowNode) -> _Outcome | None:
-        """Return a non-completed outcome when *node* ran a nested run that ended interrupted."""
-        children = [child for child in self.store.child_runs(node.run_id) if child.parent_node_key == node.key]
-        if not children or children[0].state is not WorkflowRunState.INTERRUPTED:
+        """Return a non-completed outcome when this generation's nested run ended interrupted."""
+        if (node.request.get("toolkit"), node.request.get("function")) != ("workflow", "start_workflow"):
             return None
-        reason = children[0].error or f"Nested run {children[0].run_id} ended interrupted."
-        return WorkflowNodeState.CANCELLED, None, {"kind": "interrupted", "message": reason}
+        for child in self.store.child_runs(node.run_id):
+            if child.parent_node_key != node.key or child.state is not WorkflowRunState.INTERRUPTED:
+                continue
+            expected = nested_key((node.run_id, node.key, node.generation), child.source.encode(), child.args)
+            if child.owner == expected:
+                reason = child.error or f"Nested run {child.run_id} ended interrupted."
+                return WorkflowNodeState.CANCELLED, None, {"kind": "interrupted", "message": reason}
+        return None
 
 
 def _changed(node: WorkflowNode, outcome: _Outcome) -> bool:
