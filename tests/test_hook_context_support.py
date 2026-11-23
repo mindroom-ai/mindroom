@@ -208,7 +208,10 @@ async def test_state_putter_falls_back_to_steward(config: Config, agent_in_room:
         agent_client.room_get_state_event.return_value = SimpleNamespace(content={"name": "Agent Lobby"})
     else:
         agent_client.rooms = {}
-        agent_client.room_get_state_event.return_value = nio.RoomGetStateEventError(message="forbidden")
+        agent_client.room_get_state_event.return_value = nio.RoomGetStateEventError(
+            message="not found",
+            status_code="M_NOT_FOUND",
+        )
         agent_client.room_put_state.return_value = nio.RoomPutStateError(message="forbidden")
     owner = _peer(config, ROUTER_AGENT_NAME)
 
