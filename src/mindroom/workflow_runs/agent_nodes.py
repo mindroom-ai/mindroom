@@ -360,27 +360,19 @@ async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[Child
     usage: TurnUsage = {}
     records = [run for run in (*cut_short, record) if run is not None]
     prices = model_prices(runtime.config)
-    for run in records[: len(records) - (record is not None)]:
-        # What a run that a restart cut short spent, with what the subagents it had received cost: the child that
-        # went on after it carries neither. Skip only when the record proves no model work happened; any evidenced
-        # work without usage stays unknown (`cost_usd=None`).
+    for is_final, run in (*((False, r) for r in cut_short), (True, record)):
+        if run is None:
+            continue
         used = turn_usage(tuple(prior_usage_by_run(run.metadata).values()), run.metrics)
-        if _did_model_work(run, used):
-            own = run_cost_usd(used, model_provider=run.model_provider, model_id=run.model, prices=prices)
-            usage[f"{EARLIER_TURN}{run.run_id}"] = _spent(run, own)
-        if (theirs := SubagentCost(stored_receipts(run.metadata)).usd) is not None:
-            # An entry of its own, as below: a turn without a price keeps what its subagents are known to have cost.
-            usage[f"{EARLIER_TURN}sub:{run.run_id}"] = {"cost_usd": theirs}
-    if record is not None:
-        # The child's cost is its own and its subagents' together: a cost that is theirs alone prices none of its own.
-        cost, theirs = child.cost_usd, child.subagents_cost_usd
-        own = cost if cost is None or theirs is None else None if cost == theirs else cost - theirs
-        used = turn_usage(tuple(prior_usage_by_run(record.metadata).values()), record.metrics)
-        if job.status == "completed" or own is not None or _did_model_work(record, used):
-            usage[1] = _spent(record, own)
+        own = run_cost_usd(used, model_provider=run.model_provider, model_id=run.model, prices=prices)
+        if (is_final and job.status == "completed") or own is not None or _did_model_work(run, used):
+            usage[1 if is_final else f"{EARLIER_TURN}{run.run_id}"] = _spent(run, used, own)
+        theirs = child.subagents_cost_usd if is_final else SubagentCost(stored_receipts(run.metadata)).usd
         if theirs is not None:
-            usage[f"sub:{child.delegation_id}"] = {"cost_usd": theirs}
-        if child.subagents_cost_unknown:
+            # An entry of its own: a turn without a price keeps what its subagents are known to have cost.
+            sub_key = f"sub:{child.delegation_id}" if is_final else f"{EARLIER_TURN}sub:{run.run_id}"
+            usage[sub_key] = {"cost_usd": theirs}
+        if is_final and child.subagents_cost_unknown:
             # A subagent turn it received whose cost nobody knows makes the sum a lower bound, as an unpriced turn
             # does. A delegation that was refused ran no turn, and changes nothing.
             usage[f"sub:{child.delegation_id}:unpriced"] = {"cost_usd": None}
@@ -410,9 +402,8 @@ def _did_model_work(run: RunRecord, used: RunMetrics | None) -> bool:
     )
 
 
-def _spent(run: RunRecord, cost: float | None) -> dict[str, object]:
+def _spent(run: RunRecord, used: RunMetrics | None, cost: float | None) -> dict[str, object]:
     """Return the ledger entry of one run of an agent's turn: its tokens, its calls, and *cost*."""
-    used = turn_usage(tuple(prior_usage_by_run(run.metadata).values()), run.metrics)
     return {
         "input_tokens": used.tokens.input_tokens if used is not None else 0,
         "output_tokens": used.tokens.output_tokens if used is not None else 0,

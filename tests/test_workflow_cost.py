@@ -14,8 +14,9 @@ from typing import TYPE_CHECKING
 import pytest
 import pytest_asyncio
 
-from mindroom.config.models import ModelPricing
+from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.llm.events import TextDelta
+from mindroom.providers.identity import model_identity
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
@@ -137,6 +138,23 @@ async def test_agent_on_an_unpriced_model_with_a_priced_subagent_is_a_lower_boun
     assert await stack.result("@0", "agent", _PROMPT) == "done"
 
     assert _costs(stack) == (pytest.approx(0.30), pytest.approx(0.30), True)
+
+
+@pytest.mark.asyncio
+async def test_zero_priced_agent_with_a_priced_subagent_is_exact_not_a_lower_bound(stack: WorkflowStack) -> None:
+    """A zero-priced parent model with a priced subagent has an exact total cost, not an unknown lower bound (B13)."""
+    free = ModelConfig(provider="openai", id="free-model", pricing=ModelPricing(input=0, output=0))
+    stack.context.config.models["free"] = free
+    delegated = tool_call("run_subagent", "c1", task="Help.", agent_name="helper")
+    stack.models["watcher"] = ScriptedModel(
+        [calls(delegated, metrics=usage(1_000, 0)), answer("done", usage(500, 0))],
+        identity=model_identity(free),
+    )
+    stack.child_script(answer("helped", _usd(0.30)), agent="helper")
+
+    assert await stack.result("@0", "agent", _PROMPT | {"model": "free"}) == "done"
+
+    assert _costs(stack) == (pytest.approx(0.30), pytest.approx(0.30), False)
 
 
 @pytest.mark.asyncio
