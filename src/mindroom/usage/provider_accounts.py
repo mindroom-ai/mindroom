@@ -16,11 +16,11 @@ from mindroom.credentials.environment import get_secret_from_env
 from mindroom.credentials.sync import get_api_key_for_provider
 from mindroom.model_defaults import ANTHROPIC_BASE_URL_DEFAULT, OPENAI_BASE_URL_DEFAULT, OPENROUTER_BASE_URL_DEFAULT
 from mindroom.providers.credentials import (
+    gemini_uses_vertexai,
     model_api_key,
     model_with_dashboard_key,
     own_api_key,
     resolve_api_key_reference,
-    uses_alternative_auth,
 )
 from mindroom.providers.identity import model_identity
 from mindroom.providers.names import ROUTE_PROVIDERS, provider_route
@@ -67,8 +67,40 @@ def _client_params(model_config: ModelConfig) -> Mapping[str, object]:
     return raw if isinstance(raw, Mapping) else {}
 
 
-def _effective_header_layers(model_config: ModelConfig) -> tuple[object, object]:
-    """Return ``(request_headers, default_headers)`` matching route merge precedence."""
+def _clean_secret(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    if not stripped or ENV_PLACEHOLDER_PATTERN.fullmatch(stripped):
+        return None
+    return stripped
+
+
+def _anthropic_env_headers(runtime_paths: RuntimePaths) -> tuple[bool, list[tuple[str, str]]]:
+    """Parse ``ANTHROPIC_CUSTOM_HEADERS`` (``Name: Value`` lines); return ``(unreadable, pairs)``."""
+    raw_env = get_secret_from_env("ANTHROPIC_CUSTOM_HEADERS", runtime_paths=runtime_paths)
+    if raw_env is None:
+        raw_env = runtime_paths.env_value("ANTHROPIC_CUSTOM_HEADERS")
+    if not isinstance(raw_env, str) or not raw_env.strip():
+        return False, []
+    if ENV_PLACEHOLDER_PATTERN.fullmatch(raw_env.strip()):
+        return True, []
+    pairs: list[tuple[str, str]] = []
+    for line in raw_env.split("\n"):
+        colon = line.find(":")
+        if colon < 0:
+            continue
+        name = line[:colon].strip()
+        if name:
+            pairs.append((name, line[colon + 1 :].strip()))
+    return False, pairs
+
+
+def _effective_header_layers(
+    model_config: ModelConfig,
+    runtime_paths: RuntimePaths,
+) -> tuple[bool, tuple[object, ...]]:
+    """Return ``(unreadable_env, header_layers)`` in route merge precedence order."""
     extra = model_config.extra_kwargs or {}
     request_params = extra.get("request_params")
     req_headers = (
@@ -83,23 +115,28 @@ def _effective_header_layers(model_config: ModelConfig) -> tuple[object, object]
             if extra.get("default_headers") is not None
             else client_params.get("default_headers")
         )
-    else:
-        default_headers = (
-            client_params["default_headers"] if "default_headers" in client_params else extra.get("default_headers")
-        )
-    return req_headers, default_headers
+        unreadable_env, env_headers = _anthropic_env_headers(runtime_paths)
+        return unreadable_env, (req_headers, default_headers, env_headers)
+    default_headers = (
+        client_params["default_headers"] if "default_headers" in client_params else extra.get("default_headers")
+    )
+    return False, (req_headers, default_headers)
 
 
 def _header_override(
-    model_config: ModelConfig,
+    layers: tuple[object, ...],
     header_name: str,
 ) -> tuple[Literal["none", "value", "conflict"], object]:
-    """Return ``(state, value)`` for ``header_name`` across effective request and client header layers."""
+    """Return ``(state, value)`` for ``header_name`` across effective request, client, and env header layers."""
     target = header_name.lower()
-    for raw_headers in _effective_header_layers(model_config):
-        if not isinstance(raw_headers, Mapping):
+    for raw_headers in layers:
+        if isinstance(raw_headers, Mapping):
+            items = list(raw_headers.items())
+        elif isinstance(raw_headers, list):
+            items = raw_headers
+        else:
             continue
-        matches = [value for key, value in raw_headers.items() if isinstance(key, str) and key.lower() == target]
+        matches = [value for key, value in items if isinstance(key, str) and key.lower() == target]
         if not matches:
             continue
         first = matches[0]
@@ -119,32 +156,35 @@ def _parse_bearer_header(raw_value: object) -> str | None:
 
 
 def _parse_x_api_key_header(raw_value: object) -> str | None:
-    if not isinstance(raw_value, str):
-        return None
-    token = raw_value.strip()
-    if token and not ENV_PLACEHOLDER_PATTERN.fullmatch(token):
-        return token
-    return None
+    return _clean_secret(raw_value)
 
 
-def _auth_header_override(model_config: ModelConfig) -> tuple[Literal["none", "token", "opaque"], str | None, str]:
+def _auth_header_override(
+    model_config: ModelConfig,
+    runtime_paths: RuntimePaths,
+) -> tuple[Literal["none", "token", "opaque"], str | None, str]:
     """Resolve ``Authorization`` and ``X-Api-Key`` overrides; reject unreadable or conflicting headers."""
-    auth_state, auth_raw = _header_override(model_config, "authorization")
-    xkey_state, xkey_raw = _header_override(model_config, "x-api-key")
+    unreadable_env, layers = _effective_header_layers(model_config, runtime_paths)
+    if unreadable_env:
+        return "opaque", None, "anthropic-custom-headers:unresolved"
+    auth_state, auth_raw = _header_override(layers, "authorization")
+    xkey_state, xkey_raw = _header_override(layers, "x-api-key")
     if auth_state == "none" and xkey_state == "none":
         return "none", None, ""
-    if auth_state == "conflict" or xkey_state == "conflict":
-        return "opaque", None, f"conflict:{auth_state}:{auth_raw!r}:{xkey_state}:{xkey_raw!r}"
     auth_tok = _parse_bearer_header(auth_raw) if auth_state == "value" else None
     xkey_tok = _parse_x_api_key_header(xkey_raw) if xkey_state == "value" else None
-    if auth_state == "value" and auth_tok is None:
-        return "opaque", None, f"authorization:{auth_raw!r}"
-    if xkey_state == "value" and xkey_tok is None:
-        return "opaque", None, f"x-api-key:{xkey_raw!r}"
-    if auth_tok is not None and xkey_tok is not None and auth_tok != xkey_tok:
-        return "opaque", None, f"both:{auth_raw!r}:{xkey_raw!r}"
-    token = auth_tok if auth_tok is not None else xkey_tok
-    return "token", token, ""
+    opaque_seed: str | None = None
+    if auth_state == "conflict" or xkey_state == "conflict":
+        opaque_seed = f"conflict:{auth_state}:{auth_raw!r}:{xkey_state}:{xkey_raw!r}"
+    elif auth_state == "value" and auth_tok is None:
+        opaque_seed = f"authorization:{auth_raw!r}"
+    elif xkey_state == "value" and xkey_tok is None:
+        opaque_seed = f"x-api-key:{xkey_raw!r}"
+    elif auth_tok is not None and xkey_tok is not None and auth_tok != xkey_tok:
+        opaque_seed = f"both:{auth_raw!r}:{xkey_raw!r}"
+    if opaque_seed is not None:
+        return "opaque", None, opaque_seed
+    return "token", (auth_tok if auth_tok is not None else xkey_tok), ""
 
 
 def _is_official_openrouter_url(url: str | None) -> bool:
@@ -171,23 +211,87 @@ def _effective_base_url(route: str, model_config: ModelConfig, runtime_paths: Ru
     return None
 
 
-def _resolve_model_key(model_key: str, model_config: ModelConfig, runtime_paths: RuntimePaths) -> str | None:
+def _resolve_anthropic_auth_token(candidate: ModelConfig, runtime_paths: RuntimePaths) -> tuple[bool, str | None]:
+    extra = candidate.extra_kwargs or {}
+    client_params = _client_params(candidate)
+    raw = client_params.get("auth_token") if "auth_token" in client_params else extra.get("auth_token")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return False, None
+    if isinstance(raw, str) and (match := ENV_PLACEHOLDER_PATTERN.fullmatch(raw.strip())):
+        return True, _clean_secret(get_secret_from_env(match.group(1), runtime_paths=runtime_paths))
+    return True, _clean_secret(raw)
+
+
+def _resolve_anthropic_credential(
+    candidate: ModelConfig,
+    runtime_paths: RuntimePaths,
+) -> tuple[Literal["none", "token", "opaque"], str | None, str]:
+    client_params = _client_params(candidate)
+    raw_own_key = own_api_key(candidate)
+    has_own_key = raw_own_key is not None and (not isinstance(raw_own_key, str) or bool(raw_own_key.strip()))
+    own_key = _clean_secret(raw_own_key)
+    has_auth_token, auth_token = _resolve_anthropic_auth_token(candidate, runtime_paths)
+    sdk_providers = tuple(name for name in ("credentials", "config", "profile") if client_params.get(name) is not None)
+    if has_auth_token:
+        if auth_token is None or (has_own_key and own_key != auth_token):
+            seed = (
+                "anthropic-auth-token:unresolved"
+                if auth_token is None
+                else f"anthropic-key-and-token:{own_key!r}:{auth_token!r}"
+            )
+            return "opaque", None, seed
+        return "token", auth_token, ""
+    if sdk_providers:
+        return "opaque", None, f"anthropic-sdk-provider:{','.join(sdk_providers)}"
+    if has_own_key:
+        return ("token", own_key, "") if own_key is not None else ("none", None, "")
+    shared_key = _clean_secret(get_api_key_for_provider("anthropic", runtime_paths=runtime_paths))
+    env_auth_token = _clean_secret(get_secret_from_env("ANTHROPIC_AUTH_TOKEN", runtime_paths=runtime_paths))
+    if shared_key and env_auth_token and shared_key != env_auth_token:
+        return "opaque", None, "anthropic-env-key-and-auth-token"
+    token = env_auth_token or shared_key
+    return ("token", token, "") if token is not None else ("none", None, "")
+
+
+def _resolve_model_credential(
+    model_key: str,
+    model_config: ModelConfig,
+    runtime_paths: RuntimePaths,
+) -> tuple[Literal["none", "token", "opaque"], str | None, str]:
+    """Resolve a model's effective token or mark it opaque when headers/SDK auth overrides conflict."""
+    auth_kind, header_token, opaque_seed = _auth_header_override(model_config, runtime_paths)
+    if auth_kind == "opaque":
+        return "opaque", None, opaque_seed
     candidate = model_config
     with suppress(OSError, ValueError):
         candidate = model_with_dashboard_key(model_key, candidate, runtime_paths)
     candidate = resolve_api_key_reference(candidate, runtime_paths)
+    if auth_kind == "token" and header_token is not None:
+        if provider_route(candidate.provider) == "anthropic":
+            has_auth_token, auth_token = _resolve_anthropic_auth_token(candidate, runtime_paths)
+            if has_auth_token and auth_token != header_token:
+                return "opaque", None, f"anthropic-header-and-token:{header_token!r}:{auth_token!r}"
+        return "token", header_token, ""
     if provider_route(candidate.provider) == "anthropic":
-        key = own_api_key(candidate)
-        if not key and isinstance(token := (candidate.extra_kwargs or {}).get("auth_token"), str) and token.strip():
-            match = ENV_PLACEHOLDER_PATTERN.fullmatch(token.strip())
-            key = get_secret_from_env(match.group(1), runtime_paths=runtime_paths) if match else token.strip()
-        if not key and not uses_alternative_auth(candidate, runtime_paths):
-            key = get_api_key_for_provider("anthropic", runtime_paths=runtime_paths)
-    else:
-        key = model_api_key(candidate, runtime_paths)
-    if not isinstance(key, str) or not key.strip() or ENV_PLACEHOLDER_PATTERN.fullmatch(key.strip()):
+        return _resolve_anthropic_credential(candidate, runtime_paths)
+    key = _clean_secret(model_api_key(candidate, runtime_paths))
+    return ("token", key, "") if key is not None else ("none", None, "")
+
+
+def _google_vertex_project_id(model_config: ModelConfig, runtime_paths: RuntimePaths) -> str | None:
+    """Return the effective Vertex AI project ID for a keyless ``google`` model, if any."""
+    if provider_route(model_config.provider) != "google" or not gemini_uses_vertexai(model_config, runtime_paths):
         return None
-    return key.strip()
+    extra = model_config.extra_kwargs or {}
+    client_params = _client_params(model_config)
+    for candidate in (
+        client_params.get("project"),
+        extra.get("project_id"),
+        get_secret_from_env("GOOGLE_CLOUD_PROJECT", runtime_paths=runtime_paths),
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return None
 
 
 def _payg_credential_fingerprint(
@@ -196,13 +300,14 @@ def _payg_credential_fingerprint(
     runtime_paths: RuntimePaths,
 ) -> str:
     """Return an in-memory credential fingerprint for grouping PAYG models by billing account."""
-    auth_kind, header_token, opaque_seed = _auth_header_override(model_config)
-    if auth_kind == "token" and header_token is not None:
-        return _digest(header_token)
-    if auth_kind == "opaque":
+    cred_kind, token, opaque_seed = _resolve_model_credential(model_key, model_config, runtime_paths)
+    if cred_kind == "token" and token is not None:
+        return _digest(token)
+    if cred_kind == "opaque":
         return _digest(f"opaque:{opaque_seed}")
-    key = _resolve_model_key(model_key, model_config, runtime_paths)
-    return _digest(key) if key else "__default__"
+    if vertex_project := _google_vertex_project_id(model_config, runtime_paths):
+        return _digest(f"vertex-project:{vertex_project}")
+    return "__default__"
 
 
 def _resolve_cli_scope(cli_path: str | None) -> tuple[str | None, str]:
@@ -226,7 +331,14 @@ def _payg_specs(
     specs: list[AccountSpec] = []
     for (route, is_custom), by_cred in sorted(payg_groups.items()):
         shared = get_api_key_for_provider(route, runtime_paths=runtime_paths)
-        default_fp = _digest(shared.strip()) if isinstance(shared, str) and shared.strip() else "__default__"
+        if isinstance(shared, str) and shared.strip():
+            default_fp = _digest(shared.strip())
+        elif route == "google" and (
+            env_project := get_secret_from_env("GOOGLE_CLOUD_PROJECT", runtime_paths=runtime_paths)
+        ):
+            default_fp = _digest(f"vertex-project:{env_project.strip()}")
+        else:
+            default_fp = "__default__"
         ordered = sorted(by_cred.items(), key=lambda item: (item[0] != default_fp, item[1][0][0]))
         for idx, (_cred_fp, (keys, ukeys)) in enumerate(ordered):
             if is_custom:
@@ -274,14 +386,11 @@ def discover_accounts(config: Config, runtime_paths: RuntimePaths) -> list[Accou
         elif route in {"openrouter", "openai", "anthropic"} and _is_official_openrouter_url(
             _effective_base_url(route, model_config, runtime_paths),
         ):
-            auth_kind, header_token, _ = _auth_header_override(model_config)
-            if auth_kind == "opaque":
-                cred_fp = _payg_credential_fingerprint(model_key, model_config, runtime_paths)
+            cred_kind, target, opaque_seed = _resolve_model_credential(model_key, model_config, runtime_paths)
+            if cred_kind == "opaque":
+                cred_fp = _digest(f"opaque:{opaque_seed}")
                 keys, ukeys = payg_groups.setdefault(("openrouter", True), {}).setdefault(cred_fp, ([], set()))
             else:
-                target = (
-                    header_token if auth_kind == "token" else _resolve_model_key(model_key, model_config, runtime_paths)
-                )
                 key_fp = _digest(target) if target else "__missing__"
                 _, keys, ukeys = grouped["openrouter"].setdefault(key_fp, (target, [], set()))
         else:

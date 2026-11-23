@@ -1124,3 +1124,249 @@ async def test_snapshot_bounds_usage_scan_since_and_shields_single_flight_from_c
     assert snapshot.accounts[0].plan == "Max 20x"
     assert snapshot.accounts[0].windows[0].used_percent == 20.0
     assert seen_since == [datetime(2026, 11, 16, 0, 0, tzinfo=UTC).timestamp()]
+
+
+@pytest.mark.asyncio
+async def test_openrouter_anthropic_custom_headers_and_env_auth_token_never_leak_api_key(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ANTHROPIC_CUSTOM_HEADERS and ANTHROPIC_AUTH_TOKEN overrides never leak ANTHROPIC_API_KEY to OpenRouter."""
+    seen_auth: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        auth = request.headers.get("authorization", "")
+        seen_auth.append(auth)
+        if auth in {"Bearer gw", "Bearer tok-or-env"}:
+            return httpx.Response(
+                200,
+                json={"data": {"limit": 20.0, "limit_remaining": 15.0, "limit_reset": "monthly"}},
+            )
+        return httpx.Response(500)
+
+    _mock_httpx(monkeypatch, _handler)
+    monkeypatch.setattr(provider_limits, "collect_admin_usage", lambda **_kw: _empty_report())
+    config = Config(
+        models={
+            "or_claude": ModelConfig(
+                provider="anthropic",
+                id="anthropic/claude-sonnet-4-6",
+                extra_kwargs={"base_url": "https://openrouter.ai/api"},
+            ),
+        },
+    )
+
+    # Case 1: ANTHROPIC_CUSTOM_HEADERS="X-Api-Key: gw" overrides ANTHROPIC_API_KEY.
+    paths_custom = resolve_primary_runtime_paths(
+        config_path=tmp_path / "custom" / "config.yaml",
+        storage_path=tmp_path / "custom" / "storage",
+        process_env={
+            "ANTHROPIC_API_KEY": "sk-ant-shared-never-send",
+            "ANTHROPIC_CUSTOM_HEADERS": "X-Api-Key: gw",
+        },
+    )
+    snap_custom = await get_provider_usage_snapshot(config=config, runtime_paths=paths_custom, now=FIXED_NOW)
+    assert seen_auth == ["Bearer gw"]
+    assert all("sk-ant-shared-never-send" not in header for header in seen_auth)
+    assert snap_custom.accounts[0].id == "openrouter:1"
+    assert snap_custom.accounts[0].plan == "Credit cap"
+
+    # Case 2: Conflicting ANTHROPIC_CUSTOM_HEADERS skips probe cleanly without leaking ANTHROPIC_API_KEY.
+    seen_auth.clear()
+    paths_conflict = resolve_primary_runtime_paths(
+        config_path=tmp_path / "conflict" / "config.yaml",
+        storage_path=tmp_path / "conflict" / "storage",
+        process_env={
+            "ANTHROPIC_API_KEY": "sk-ant-shared-never-send",
+            "ANTHROPIC_CUSTOM_HEADERS": "X-Api-Key: gw\nAuthorization: Bearer other",
+        },
+    )
+    snap_conflict = await get_provider_usage_snapshot(config=config, runtime_paths=paths_conflict, now=FIXED_NOW)
+    assert seen_auth == []
+    assert snap_conflict.accounts[0].id == "openrouter:custom"
+    assert snap_conflict.accounts[0].plan == "Pay-as-you-go"
+
+    # Case 3: Both ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN set -> uncertain env override skips probe.
+    paths_both_env = resolve_primary_runtime_paths(
+        config_path=tmp_path / "both" / "config.yaml",
+        storage_path=tmp_path / "both" / "storage",
+        process_env={
+            "ANTHROPIC_API_KEY": "sk-ant-shared-never-send",
+            "ANTHROPIC_AUTH_TOKEN": "tok-or-env",
+        },
+    )
+    snap_both_env = await get_provider_usage_snapshot(config=config, runtime_paths=paths_both_env, now=FIXED_NOW)
+    assert seen_auth == []
+    assert snap_both_env.accounts[0].id == "openrouter:custom"
+
+    # Case 4: Only ANTHROPIC_AUTH_TOKEN set -> unambiguous Bearer token probes OpenRouter.
+    paths_token_only = resolve_primary_runtime_paths(
+        config_path=tmp_path / "tok" / "config.yaml",
+        storage_path=tmp_path / "tok" / "storage",
+        process_env={"ANTHROPIC_AUTH_TOKEN": "tok-or-env"},
+    )
+    snap_token_only = await get_provider_usage_snapshot(config=config, runtime_paths=paths_token_only, now=FIXED_NOW)
+    assert seen_auth == ["Bearer tok-or-env"]
+    assert snap_token_only.accounts[0].id == "openrouter:1"
+
+
+@pytest.mark.asyncio
+async def test_google_vertex_distinct_project_ids_group_separately_with_opaque_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keyless Google Vertex models on different projects get distinct opaque IDs and keep shared usage unattributed."""
+    daily = (
+        UsageDailyBreakdownRow(
+            date="2026-11-23",
+            totals=TokenCounts(input_tokens=3000, output_tokens=1000, total_tokens=4000),
+            run_count=1,
+            model_breakdown=(
+                UsageModelBreakdownRow(
+                    model_provider="Google",
+                    model="gemini-2.5-pro",
+                    totals=TokenCounts(input_tokens=3000, output_tokens=1000, total_tokens=4000),
+                    run_count=1,
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(provider_limits, "collect_admin_usage", lambda **_kw: _empty_report(daily))
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={"GOOGLE_CLOUD_PROJECT": "gcp-proj-alpha"},
+    )
+    config = Config(
+        models={
+            "vertex_alpha_env": ModelConfig(
+                provider="google",
+                id="gemini-2.5-pro",
+                extra_kwargs={"vertexai": True},
+                pricing=ModelPricing(input=1.25, output=10.0),
+            ),
+            "vertex_alpha_explicit": ModelConfig(
+                provider="google",
+                id="gemini-2.5-flash",
+                extra_kwargs={"vertexai": True, "project_id": "gcp-proj-alpha"},
+            ),
+            "vertex_beta": ModelConfig(
+                provider="google",
+                id="gemini-2.5-pro",
+                extra_kwargs={"vertexai": True, "client_params": {"project": "gcp-proj-beta"}},
+            ),
+        },
+    )
+    snapshot = await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW)
+    payload_text = json.dumps(snapshot.to_dict())
+    assert "gcp-proj-alpha" not in payload_text
+    assert "gcp-proj-beta" not in payload_text
+    by_id = {acct.id: acct for acct in snapshot.accounts}
+    assert set(by_id) == {"google:default", "google:2"}
+    assert by_id["google:default"].model_keys == ("vertex_alpha_env", "vertex_alpha_explicit")
+    assert by_id["google:2"].model_keys == ("vertex_beta",)
+    assert by_id["google:default"].tokens_7d == 0
+    assert by_id["google:2"].tokens_7d == 0
+    assert snapshot.unattributed_tokens_7d == 4000
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (CodexAuthError("Codex token refresh failed (HTTP 503)", status_code=503), "probe_failed"),
+        (CodexAuthError("Codex token refresh failed (HTTP 429)", status_code=429), "probe_failed"),
+        (CodexAuthError("Codex token refresh returned an unexpected payload."), "probe_failed"),
+        (CodexAuthError("Codex auth file not found"), "not_signed_in"),
+        (CodexAuthError("Codex token refresh failed (HTTP 400)", status_code=400), "not_signed_in"),
+        (CodexAuthError("Codex token refresh failed (HTTP 401)", status_code=401), "not_signed_in"),
+        (CodexAuthError("Codex token refresh failed (HTTP 403)", status_code=403), "not_signed_in"),
+    ],
+)
+async def test_probe_codex_classifies_transient_vs_permanent_auth_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    error: CodexAuthError,
+    expected: str,
+) -> None:
+    """Transient refresh failures map to probe_failed while missing/refused logins map to not_signed_in."""
+
+    def _borrow(*, codex_home: object = None) -> tuple[str, str | None]:
+        _ = codex_home
+        raise error
+
+    monkeypatch.setattr(provider_probes, "borrow_codex_key", _borrow)
+    assert (await provider_probes.probe_codex(None, FIXED_NOW)).unavailable_reason == expected
+
+
+@pytest.mark.asyncio
+async def test_codex_transient_refresh_error_preserves_last_good_reading_while_auth_refusal_clears(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Transient CodexAuthError (HTTPError / 503) preserves cached windows as stale; 401 clears to not_signed_in."""
+    clock = [100.0]
+    mode = ["ok"]
+
+    def _borrow(*, codex_home: object = None) -> tuple[str, str | None]:
+        _ = codex_home
+        if mode[0] == "ok":
+            return "tok-codex", "acct-1"
+        if mode[0] == "timeout":
+            timeout_msg = "timed out"
+            try:
+                raise httpx.ReadTimeout(timeout_msg)
+            except httpx.HTTPError as cause:
+                msg = "Codex token refresh failed: timed out"
+                raise CodexAuthError(msg) from cause
+        if mode[0] == "transient":
+            msg = "Codex token refresh failed (HTTP 503)"
+            raise CodexAuthError(msg, status_code=503)
+        msg = "Codex token refresh failed (HTTP 401)"
+        raise CodexAuthError(msg, status_code=401)
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        assert request.url == httpx.URL(provider_probes.CODEX_USAGE_URL)
+        return httpx.Response(
+            200,
+            json={
+                "plan_type": "pro",
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 35.0,
+                        "limit_window_seconds": 18000,
+                        "reset_at": 1795475160,
+                    },
+                },
+            },
+        )
+
+    _mock_httpx(monkeypatch, _handler)
+    monkeypatch.setattr(provider_probes, "borrow_codex_key", _borrow)
+    monkeypatch.setattr(provider_limits, "_monotonic", lambda: clock[0])
+    monkeypatch.setattr(provider_limits, "collect_admin_usage", lambda **_kw: _empty_report())
+    config = Config(models={"astra": ModelConfig(provider="codex", id="gpt-5.4")})
+    paths = test_runtime_paths(tmp_path)
+
+    snap_ok = await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW)
+    assert snap_ok.accounts[0].stale is False
+    assert snap_ok.accounts[0].windows[0].used_percent == 35.0
+
+    clock[0] += 120.0
+    mode[0] = "transient"
+    snap_transient = await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW)
+    assert snap_transient.accounts[0].stale is True
+    assert snap_transient.accounts[0].unavailable_reason is None
+    assert snap_transient.accounts[0].windows[0].used_percent == 35.0
+
+    clock[0] += 120.0
+    mode[0] = "timeout"
+    snap_timeout = await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW)
+    assert snap_timeout.accounts[0].stale is True
+    assert snap_timeout.accounts[0].unavailable_reason is None
+    assert snap_timeout.accounts[0].windows[0].used_percent == 35.0
+
+    clock[0] += 120.0
+    mode[0] = "revoked"
+    snap_revoked = await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW)
+    assert snap_revoked.accounts[0].unavailable_reason == "not_signed_in"
+    assert snap_revoked.accounts[0].windows == ()

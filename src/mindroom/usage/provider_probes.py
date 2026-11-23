@@ -162,12 +162,23 @@ def _parse_codex_payload(data: Mapping[str, Any], now: datetime) -> ProbeResult:
     )
 
 
+def _is_transient_codex_auth_error(exc: CodexAuthError) -> bool:
+    """Return whether ``exc`` came from a transient refresh/transport failure rather than missing/revoked login."""
+    if isinstance(exc.__cause__, (httpx.HTTPError, json.JSONDecodeError, TimeoutError, ConnectionError)):
+        return True
+    if exc.status_code is not None:
+        return exc.status_code in {408, 429} or exc.status_code >= 500
+    message = str(exc).lower()
+    return "token refresh returned" in message or "token refresh response" in message
+
+
 async def probe_codex(codex_home: str | None, now: datetime) -> ProbeResult:
     """Probe Codex ChatGPT usage windows via ``borrow_codex_key`` and ``wham/usage``."""
     try:
         token, account_id = await asyncio.to_thread(borrow_codex_key, codex_home=codex_home)
-    except CodexAuthError:
-        return ProbeResult(unavailable_reason="not_signed_in")
+    except CodexAuthError as exc:
+        reason: UnavailableReason = "probe_failed" if _is_transient_codex_auth_error(exc) else "not_signed_in"
+        return ProbeResult(unavailable_reason=reason)
     except Exception:
         return ProbeResult(unavailable_reason="probe_failed")
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
