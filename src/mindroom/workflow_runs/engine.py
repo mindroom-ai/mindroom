@@ -1167,17 +1167,8 @@ class WorkflowEngine:
         the request fails as a transport error does, which the script's SDK repeats, and a *queued* node, which is
         saved already, is tried again.
         """
-        access = self.authorize(run)
-        if access is None:
-            raise ScriptRuntimeUnavailableError(_OWNER_NOT_READY)
         try:
-            if not isinstance(access, tuple) or (runtime := self.agents()) is None:
-                raise AgentNodeError(access if isinstance(access, str) else _NO_AGENTS)  # noqa: TRY301
-            if node.name in access[0].current_config.agents and not node.request.get("agent"):
-                notice = _NAME_LABELS.format(name=node.name)
-                await asyncio.to_thread(self.store.append_log, run.run_id, run.epoch, notice)
-            launch = partial(launch_child, access[0], run, node, run.epoch, store=self.store, jobs=runtime.jobs)
-            node = await launch(timeout=timeout, queued=queued)
+            node = await self._launch_agent(run, node, run.epoch, timeout=timeout, queued=queued)
         except AgentNotReadyError as exc:
             raise ScriptRuntimeUnavailableError(str(exc)) from exc
         except AgentNodeError as exc:
@@ -1200,6 +1191,17 @@ class WorkflowEngine:
         self._wait_for_agent(run, node, run.epoch)
         await self._restate(run.run_id)
         return _receipt(node)
+
+    async def _launch_agent(self, run: WorkflowRun, node: WorkflowNode, epoch: int, **options: Any) -> WorkflowNode:  # noqa: ANN401
+        """Authorize and start one turn of an agent node; turn 1 logs the label-vs-agent notice when applicable."""
+        access, runtime = self.authorize(run), self.agents()
+        if access is None:
+            raise AgentNotReadyError(_OWNER_NOT_READY)
+        if not isinstance(access, tuple) or runtime is None:
+            raise AgentNodeError(access if isinstance(access, str) else _NO_AGENTS)
+        if not options.get("turn") and not node.request.get("agent") and node.name in access[0].current_config.agents:
+            await asyncio.to_thread(self.store.append_log, run.run_id, epoch, _NAME_LABELS.format(name=node.name))
+        return await launch_child(access[0], run, node, epoch, store=self.store, jobs=runtime.jobs, **options)
 
     def _wait_for_agent(self, run: WorkflowRun, node: WorkflowNode, epoch: int) -> None:
         """Start the engine's wait for the job of an agent node, in place of an earlier attempt's wait for it.
@@ -1386,13 +1388,8 @@ class WorkflowEngine:
                 if await self._hold_turn(node, epoch, locked=not block, shown=queued):
                     queued = True
                     raise AgentNotReadyError(_HELD)  # noqa: TRY301
-                access, runtime = self.authorize(run), self.agents()
-                if access is None:
-                    raise AgentNotReadyError(_OWNER_NOT_READY)  # noqa: TRY301
-                if not isinstance(access, tuple) or runtime is None:
-                    raise AgentNodeError(access if isinstance(access, str) else _NO_AGENTS)  # noqa: TRY301
-                launch = partial(launch_child, access[0], run, node, epoch, store=self.store, jobs=runtime.jobs)
-                return await launch(timeout=left, queued=True, turn=turn, correction=correction, made=made)
+                opts = {"timeout": left, "queued": True, "turn": turn, "correction": correction, "made": made}
+                return await self._launch_agent(run, node, epoch, **opts)
             except AgentNotReadyError:
                 if not block:
                     raise
