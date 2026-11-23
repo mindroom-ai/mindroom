@@ -1289,7 +1289,7 @@ visibility = [
     "mindroom.providers.gemini",
     "mindroom.providers.openai",
     "mindroom.providers.registry",
-    "mindroom.usage.provider_limits",
+    "mindroom.usage.provider_accounts",
 ]
 
 [[modules]]
@@ -10006,14 +10006,22 @@ depends_on = [
 visibility = ["mindroom.usage.provider_limits"]
 
 [[modules]]
-path = "mindroom.usage.provider_limits"
+path = "mindroom.usage.provider_accounts"
 depends_on = [
     "mindroom.config.schema_hints",
     "mindroom.providers.credentials",
     "mindroom.providers.identity",
     "mindroom.providers.names",
+    "mindroom.usage.limit_store",
+]
+visibility = ["mindroom.usage.provider_limits"]
+
+[[modules]]
+path = "mindroom.usage.provider_limits"
+depends_on = [
     "mindroom.usage.legacy_usage_storage",
     "mindroom.usage.limit_store",
+    "mindroom.usage.provider_accounts",
     "mindroom.usage.provider_probes",
 ]
 
