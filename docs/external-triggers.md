@@ -112,7 +112,7 @@ By default (`include_bots=False`), bot and agent messages are skipped; pass `inc
 | `thread_id` | none | Restrict matching to messages inside this thread root. |
 | `senders` | any | Optional list of Matrix sender IDs (matched with `authorization.aliases`). |
 | `pattern` | none | Optional case-insensitive regex (max 256 chars), evaluated with a strict search timeout over the first 4,096 characters. |
-| `include_bots` | `false` | When `true`, allow messages from other configured MindRoom agents (once the owner's source-room membership and authorization pass) and authorized external bots; messages from the target agent or target team members and trigger-generated messages are always skipped. |
+| `include_bots` | `false` | When `true`, allow messages from other configured MindRoom agents (once the owner's source-room membership and authorization pass) and authorized external bots; messages from the target agent or target team members and trigger-generated messages are always skipped. Avoid creating mutual `include_bots=true` rules between two agents that reply to each other (`max_fires_per_hour` and `cooldown_seconds` cap runaway loops if both fire). |
 | `triage_instructions` | none | Optional plain-English criteria for [cheap tool-less triage](#cheap-tool-less-triage) (max 1,000 chars). |
 | `triage_model` | none | Configured model alias from `models`; required when `triage_instructions` is set and `triage_provider="llm"`. |
 | `triage_provider` | `"llm"` | Triage backend: `"llm"`, `"typesafe"`, or `"openai_decisions"`. |
@@ -277,7 +277,7 @@ Attacker-controlled free text (such as PR titles and bodies) is isolated in `tit
 
 ### Generic HMAC-SHA256 webhooks (`kind: hmac`)
 
-Configure a generic HMAC-SHA256 source for any webhook provider that signs the raw request body with a shared secret (such as Linear, Stripe-style proxies, custom services, or internal alert relays):
+Configure a generic HMAC-SHA256 source for any webhook provider that signs the raw request body with a shared secret (such as Linear, custom services, or internal alert relays):
 
 ```yaml
 external_trigger_policy:
@@ -311,6 +311,10 @@ external_trigger_policy:
 | `max_body_bytes` | `262144` | 1024 to 1048576 | Maximum accepted webhook body size in bytes. |
 
 Verified HMAC webhooks populate `event.data` with the parsed JSON object and extract optional string `actor`, `title`, `summary`, and `text` fields when present.
+
+!!! note "HMAC headers are unsigned"
+    Generic HMAC-SHA256 verification signs only the raw HTTP request body, not HTTP headers such as `kind_header` or `event_id_header`.
+    For replay-sensitive sources, prefer `kind_field` and a body-level `event_id` (or `id`) field so event classification and deduplication are bound to the signed payload, and keep the endpoint behind TLS with a private shared secret.
 
 ### Shared Ed25519 fan-out (`kind: ed25519`)
 

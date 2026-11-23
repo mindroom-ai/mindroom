@@ -30,6 +30,7 @@ from mindroom.dispatch_source import REACTIVE_TRIGGER_SOURCE_KIND
 from mindroom.event_journal import ConversationCursor, RefreshRequest, RoomPage, VisibleMessage
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot
+from mindroom.matrix.state import MatrixState
 from mindroom.orchestration.external_trigger_runtime import ExternalTriggerRuntimeCoordinator
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.reactive_triggers import (
@@ -57,6 +58,7 @@ from mindroom.reactive_triggers.service import (
 )
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -2596,3 +2598,77 @@ async def test_include_bots_polling_and_dispatch_allow_other_mindroom_bot_and_bl
     ):
         await service.drain_due_firings_once()
     assert send_mock.await_count == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_include_bots_polling_requires_persisted_account_and_rejects_synthetic_id(tmp_path: Path) -> None:
+    """Polling with include_bots=True accepts a bot's renamed persisted account and rejects its unconfigured synthetic ID."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "research": AgentConfig(display_name="Research", rooms=[_ROOM_A], access={"users": [_OWNER]}),
+                "helper": AgentConfig(display_name="Helper", rooms=[_ROOM_A], access={"users": [_OWNER]}),
+            },
+            models={"default": ModelConfig(provider="openai", id="gpt-test")},
+            external_trigger_policy=ExternalTriggerPolicyConfig(enabled=True, reactive_enabled=True),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_account("agent_helper", "renamed_helper", "pw", domain="localhost")
+    save_matrix_state(state, runtime_paths)
+
+    store = ReactiveTriggerStore(runtime_paths)
+    page = RoomPage(
+        messages=(
+            _visible_message(
+                "$m_persisted_helper",
+                sender="@renamed_helper:localhost",
+                body="persisted bot message",
+                created_ts=20_100,
+                content_extra={AGENT_AUTHORED_KEY: True},
+            ),
+            _visible_message(
+                "$m_synthetic_spoof",
+                sender="@mindroom_helper:localhost",
+                body="unconfigured synthetic account",
+                created_ts=20_200,
+            ),
+        ),
+        refresh_pending=(),
+        more=False,
+        last_cursor=ConversationCursor(created_ts=20_200, logical_event_id="$m_synthetic_spoof"),
+        stopped_at=None,
+    )
+    research_bot = _make_fake_bot(
+        agent_name="research",
+        joined_rooms=[_ROOM_A],
+        reader=_FakeConversationReader(pages=[page]),
+    )
+    now = time.time()
+    store.create_trigger(
+        ReactiveTriggerRecord(
+            trigger_id="tr_renamed_poll",
+            owner_user_id=_OWNER,
+            source=RoomMessageSourceSpec(room_id=_ROOM_A, include_bots=True),
+            target=TriggerTargetSpec(agent="research", room_id=_ROOM_A, prompt="Follow up"),
+            created_at=now,
+            updated_at=now,
+        ),
+        initial_cursor=RoomCursor(created_ts=10_000, logical_event_id="$init"),
+    )
+    service = ReactiveTriggerService(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: config,
+        bots=lambda: {"research": research_bot},
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+    snapshot = _room_state_snapshot(_ROOM_A, [_OWNER, "@mindroom_research:localhost", "@renamed_helper:localhost"])
+    with patch("mindroom.reactive_triggers.service.read_room_state", new=AsyncMock(return_value=snapshot)):
+        await service.poll_room_messages_once()
+
+    due = store.list_due_firings()
+    assert [firing.dedupe_key for firing in due] == ["$m_persisted_helper"]

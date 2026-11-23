@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import re
 import time
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -20,7 +21,7 @@ from mindroom.config.external_trigger_policy import (
     GitHubEventSourceConfig,
     HmacEventSourceConfig,
 )
-from mindroom.config.main import Config
+from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.config.models import lazy_loading_prohibited_reason
 from mindroom.config.tool_aliases import TOOL_ALIASES, canonical_tool_name
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
@@ -31,6 +32,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.reactive_triggers.models import RoomCursor, TriggerEvent
 from mindroom.reactive_triggers.store import ReactiveTriggerStore
 from mindroom.reactive_triggers.triage import TriageOutcome
+from mindroom.requester_identity import runtime_matrix_domain
 from mindroom.thread_tags import ThreadTagRecord, ThreadTagsError, ThreadTagsState
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.catalog import builtin_tool_registry, get_tool_by_name
@@ -1556,3 +1558,362 @@ async def test_dry_run_matches_and_runs_triage_without_side_effects(tmp_path: Pa
     assert room_rule is not None
     assert (room_rule.enabled, room_rule.fire_count) == (True, 0)
     assert store.list_firings() == []
+
+
+def _load_trigger_approval_rules(tmp_path: Path, *rules: str | tuple[str, str]) -> Config:
+    runtime_paths = _runtime_paths(tmp_path)
+    pairs = [(rule, "require_approval") if isinstance(rule, str) else rule for rule in rules]
+    data = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "agents": {"a": {"display_name": "A", "tools": ["triggers"]}},
+        "tool_approval": {"rules": [{"match": match, "action": action} for match, action in pairs]},
+    }
+    return Config.validate_with_runtime(data, runtime_paths)
+
+
+@pytest.mark.parametrize(
+    ("match", "retired"),
+    [
+        ("watch_room", "watch_room is now triggers"),
+        ("watch_thread", "watch_thread is now triggers"),
+        ("subscribe_event", "subscribe_event is now triggers"),
+        ("create_trigger", "create_trigger is now triggers"),
+        ("list_triggers", "list_triggers is now triggers"),
+        ("disable_trigger", "disable_trigger is now triggers"),
+        ("delete_trigger", "delete_trigger is now triggers"),
+        ("rotate_trigger_key", "rotate_trigger_key is now triggers"),
+        ("watch_*", "watch_room is now triggers"),
+        ("*_trigger", "create_trigger is now triggers"),
+        ("*_trigger*", "create_trigger is now triggers"),
+    ],
+)
+def test_an_approval_rule_that_stops_deciding_a_retired_trigger_function_fails(
+    tmp_path: Path,
+    match: str,
+    retired: str,
+) -> None:
+    """A rule matching a retired trigger function that does not also decide `triggers` fails config load."""
+    expected = rf"tool_approval\.rules\[1\]\.match {re.escape(repr(match))} .*{re.escape(retired)}"
+    with pytest.raises(ConfigRuntimeValidationError, match=expected):
+        _load_trigger_approval_rules(tmp_path, "run_shell_command", match)
+
+
+def test_an_earlier_approval_rule_that_takes_triggers_from_a_retired_gate_fails(tmp_path: Path) -> None:
+    """An earlier rule matching `triggers` ahead of a retired trigger gate fails config load."""
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match=r"rules\[1\]\.match 'create_trigger' .*create_trigger is now triggers",
+    ):
+        _load_trigger_approval_rules(tmp_path, ("triggers", "auto_approve"), ("create_trigger", "require_approval"))
+    with pytest.raises(ConfigRuntimeValidationError, match=r"rules\[0\]\.match 'create_trigger'"):
+        _load_trigger_approval_rules(tmp_path, "create_trigger", "*")
+    assert _load_trigger_approval_rules(tmp_path, ("*trigger*", "require_approval"), ("triggers", "auto_approve"))
+
+
+@pytest.mark.parametrize("match", ["triggers", "*", "*trigger*", "trigger*"])
+def test_approval_rules_that_decide_triggers_load(tmp_path: Path, match: str) -> None:
+    """Rules deciding `triggers` directly (or deciding both retired and new names at the same index) load."""
+    assert _load_trigger_approval_rules(tmp_path, match).tool_approval.rules[0].match == match
+
+
+@pytest.mark.parametrize("tool_name", ["triggers", "external_trigger_manager"])
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"exclude_tools": ["create_trigger"]},
+        {"include_tools": "watch_room, list_triggers"},
+    ],
+)
+def test_retired_trigger_include_exclude_overrides_fail_config_load(
+    tmp_path: Path,
+    tool_name: str,
+    overrides: dict[str, object],
+) -> None:
+    """include_tools/exclude_tools naming a retired trigger function fails config load with migration guidance."""
+    data = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "agents": {"a": {"display_name": "A", "tools": [{tool_name: overrides}]}},
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match=r"triggers\.(in|ex)clude_tools: .* was removed; .*triggers"):
+        Config.validate_with_runtime(data, _runtime_paths(tmp_path))
+
+
+@pytest.mark.asyncio
+async def test_history_hides_and_refuses_firings_after_owner_loses_source_access(tmp_path: Path) -> None:
+    """History refuses/omits pending or finished firings once a non-admin owner loses source room or event access."""
+    _record_rooms(tmp_path)
+    gh_source = GitHubEventSourceConfig(
+        secret_env="GH_SECRET",  # noqa: S106
+        allowed_repos=["org/app"],
+        allowed_events=["pull_request"],
+        subscribers=["@owner:example.org"],
+    )
+    config = _config(admin_users=["@admin:example.org"], event_sources={"github": gh_source})
+    tool = TriggersTools()
+    store = ReactiveTriggerStore(_runtime_paths(tmp_path))
+
+    live_members: dict[str, list[str]] = {
+        "!lobby:example.org": ["@owner:example.org"],
+        "!other-room:example.org": ["@owner:example.org"],
+    }
+    client = _room_state_client(room_members=live_members)
+    other_bot = SimpleNamespace(agent_name="other", running=True, client=client)
+    orch = _make_orchestrator(bots={"other": other_bot})
+    absent_state = ThreadTagsState(
+        room_id="!other-room:example.org",
+        thread_root_id="$priv_thread:example.org",
+        tags={},
+    )
+
+    # Owner watches private room A (!other-room) targeting room B (!lobby), plus lobby and github
+    with (
+        tool_runtime_context(_context(tmp_path, config=config, client=client, orchestrator=orch)),
+        patch("mindroom.custom_tools.triggers.get_thread_tags", new=AsyncMock(return_value=absent_state)),
+    ):
+        assert (
+            _payload(
+                await tool.triggers(
+                    action="watch_thread",
+                    trigger_id="watch-priv-tag",
+                    room_id="!other-room:example.org",
+                    thread_id="$priv_thread:example.org",
+                    tag="resolved",
+                    prompt="Report resolution",
+                    target_room_id="!lobby:example.org",
+                ),
+            )["status"]
+            == "ok"
+        )
+        assert (
+            _payload(
+                await tool.triggers(
+                    action="watch_room",
+                    trigger_id="watch-priv-msg",
+                    room_id="!other-room:example.org",
+                    prompt="Report msg",
+                    target_room_id="!lobby:example.org",
+                ),
+            )["status"]
+            == "ok"
+        )
+        assert (
+            _payload(await tool.triggers(action="watch_room", trigger_id="watch-lobby", prompt="Lobby"))["status"]
+            == "ok"
+        )
+        assert (
+            _payload(
+                await tool.triggers(
+                    action="subscribe_event",
+                    trigger_id="watch-gh",
+                    source_id="github",
+                    kind="pull_request.merged",
+                    prompt="PR merged",
+                    match={"repo": "org/app"},
+                ),
+            )["status"]
+            == "ok"
+        )
+
+    # Record pending firings across all rules (including pending thread_tag firing in private room A)
+    for trigger_id, event in (
+        (
+            "watch-lobby",
+            TriggerEvent(
+                source_type="room_message",
+                source_id="!lobby:example.org",
+                kind="room.message",
+                event_id="$ev_lobby",
+                timestamp=1_001.0,
+                room_id="!lobby:example.org",
+                actor="@owner:example.org",
+                text="public lobby note",
+            ),
+        ),
+        (
+            "watch-priv-tag",
+            TriggerEvent(
+                source_type="thread_tag",
+                source_id="!other-room:example.org",
+                kind="thread_tag.added",
+                event_id="$ev_priv_tag",
+                timestamp=1_002.0,
+                room_id="!other-room:example.org",
+                thread_id="$priv_thread:example.org",
+                actor="@secret_user:example.org",
+                text="private resolution note",
+            ),
+        ),
+        (
+            "watch-priv-msg",
+            TriggerEvent(
+                source_type="room_message",
+                source_id="!other-room:example.org",
+                kind="room.message",
+                event_id="$ev_priv_msg",
+                timestamp=1_003.0,
+                room_id="!other-room:example.org",
+                actor="@secret_user:example.org",
+                text="private room message",
+            ),
+        ),
+        (
+            "watch-gh",
+            TriggerEvent(
+                source_type="external_event",
+                source_id="github",
+                kind="pull_request.merged",
+                event_id="$ev_gh",
+                timestamp=1_004.0,
+                actor="octocat",
+                text="merged PR",
+                data={"repo": "org/app"},
+            ),
+        ),
+    ):
+        store.enqueue_firing(trigger_id, event.event_id, event)
+
+    # While still joined to room A, unscoped history returns all 4 firings and caches room A's state check once
+    client.room_get_state.reset_mock()
+    with tool_runtime_context(_context(tmp_path, config=config, client=client, orchestrator=orch)):
+        before = _payload(await tool.triggers(action="history"))
+    assert before["status"] == "ok"
+    assert [row["dedupe_key"] for row in before["firings"]] == ["$ev_gh", "$ev_priv_msg", "$ev_priv_tag", "$ev_lobby"]
+    assert client.room_get_state.await_count == 1
+
+    # Owner leaves private room A (stale client.rooms.users intentionally still contains owner!)
+    live_members["!other-room:example.org"] = ["@someone_else:example.org"]
+    with tool_runtime_context(_context(tmp_path, config=config, client=client, orchestrator=orch)):
+        scoped_left = _payload(await tool.triggers(action="history", trigger_id="watch-priv-tag"))
+        unscoped_left = _payload(await tool.triggers(action="history"))
+    assert scoped_left["status"] == "error"
+    assert "no longer have access to the source for trigger watch-priv-tag" in scoped_left["message"].lower()
+    assert unscoped_left["status"] == "ok"
+    assert [row["dedupe_key"] for row in unscoped_left["firings"]] == ["$ev_gh", "$ev_lobby"]
+
+    # Unreadable room state fails closed even if stale cached client.rooms still lists the owner
+    del live_members["!other-room:example.org"]
+    with tool_runtime_context(_context(tmp_path, config=config, client=client, orchestrator=orch)):
+        scoped_unreadable = _payload(await tool.triggers(action="history", trigger_id="watch-priv-tag"))
+        unscoped_unreadable = _payload(await tool.triggers(action="history"))
+    assert scoped_unreadable["status"] == "error"
+    assert [row["dedupe_key"] for row in unscoped_unreadable["firings"]] == ["$ev_gh", "$ev_lobby"]
+
+    # Revoking external event source subscriber access also blocks scoped and unscoped history
+    revoked_config = _config(
+        admin_users=["@admin:example.org"],
+        event_sources={
+            "github": GitHubEventSourceConfig(
+                secret_env="GH_SECRET",  # noqa: S106
+                allowed_repos=["org/app"],
+                allowed_events=["pull_request"],
+                subscribers=["@other-owner:example.org"],
+            ),
+        },
+    )
+    with tool_runtime_context(_context(tmp_path, config=revoked_config, client=client, orchestrator=orch)):
+        scoped_gh = _payload(await tool.triggers(action="history", trigger_id="watch-gh"))
+        unscoped_gh = _payload(await tool.triggers(action="history"))
+    assert scoped_gh["status"] == "error"
+    assert "no longer have access to the source for trigger watch-gh" in scoped_gh["message"].lower()
+    assert [row["dedupe_key"] for row in unscoped_gh["firings"]] == ["$ev_lobby"]
+
+    # Admins still see all firings
+    with tool_runtime_context(
+        _context(tmp_path, requester_id="@admin:example.org", config=revoked_config, client=client, orchestrator=orch),
+    ):
+        admin_hist = _payload(await tool.triggers(action="history"))
+    assert admin_hist["status"] == "ok"
+    assert [row["dedupe_key"] for row in admin_hist["firings"]] == [
+        "$ev_gh",
+        "$ev_priv_msg",
+        "$ev_priv_tag",
+        "$ev_lobby",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_dry_run_skips_target_self_and_non_human_bots_without_invoking_triage(tmp_path: Path) -> None:
+    """Dry-run `test` applies live target-self and include_bots=False exclusions before matching and triage."""
+    _record_rooms(tmp_path)
+    runtime_paths = _runtime_paths(tmp_path)
+    domain = runtime_matrix_domain(runtime_paths)
+    base_data = _config().model_dump(mode="json")
+    base_data["teams"] = {
+        "ops_team": {
+            "display_name": "Ops Team",
+            "role": "Ops",
+            "agents": ["watcher", "other"],
+            "rooms": ["lobby"],
+            "access": {"users": ["@owner:example.org"]},
+        },
+    }
+    config = Config.model_validate(base_data)
+    tool = TriggersTools()
+
+    with tool_runtime_context(_context(tmp_path, config=config)):
+        await tool.triggers(
+            action="watch_room",
+            trigger_id="dr-no-bots",
+            prompt="React",
+            pattern=r"deploy",
+            include_bots=False,
+            triage_instructions="Only prod",
+            triage_model="fast",
+        )
+        await tool.triggers(
+            action="watch_room",
+            trigger_id="dr-with-bots",
+            prompt="React",
+            pattern=r"deploy",
+            include_bots=True,
+            triage_instructions="Only prod",
+            triage_model="fast",
+        )
+        await tool.triggers(
+            action="watch_room",
+            trigger_id="dr-team-bots",
+            prompt="Team react",
+            pattern=r"deploy",
+            include_bots=True,
+            target_agent="ops_team",
+            triage_instructions="Only prod",
+            triage_model="fast",
+        )
+
+    watcher_id = f"@mindroom_watcher:{domain}"
+    other_bot_id = f"@mindroom_other:{domain}"
+    triage_mock = AsyncMock(return_value=TriageOutcome(act=True, reason="llm (gpt-6-mini)"))
+
+    with (
+        tool_runtime_context(_context(tmp_path, config=config)),
+        patch("mindroom.custom_tools.triggers.evaluate_triage", new=triage_mock),
+    ):
+        # Target agent's own ID is skipped for BOTH include_bots=False and include_bots=True without calling triage
+        for tid in ("dr-no-bots", "dr-with-bots"):
+            res = _payload(await tool.triggers(action="test", trigger_id=tid, text="prod deploy", actor=watcher_id))
+            assert (res["matched"], res["would_fire"], res["triage_decision"]) == (False, False, None)
+            assert "target agent or team" in res["note"].lower()
+        assert triage_mock.await_count == 0
+
+        # Target team also skips member agent messages even when include_bots=True
+        team_res = _payload(
+            await tool.triggers(action="test", trigger_id="dr-team-bots", text="prod deploy", actor=other_bot_id),
+        )
+        assert (team_res["matched"], team_res["would_fire"], team_res["triage_decision"]) == (False, False, None)
+        assert "target agent or team" in team_res["note"].lower()
+        assert triage_mock.await_count == 0
+
+        # Other bot is skipped when include_bots=False without invoking triage
+        bot_skip = _payload(
+            await tool.triggers(action="test", trigger_id="dr-no-bots", text="prod deploy", actor=other_bot_id),
+        )
+        assert (bot_skip["matched"], bot_skip["would_fire"], bot_skip["triage_decision"]) == (False, False, None)
+        assert "include_bots=false" in bot_skip["note"].lower()
+        assert triage_mock.await_count == 0
+
+        # Other bot IS allowed when include_bots=True and invokes triage
+        bot_allow = _payload(
+            await tool.triggers(action="test", trigger_id="dr-with-bots", text="prod deploy", actor=other_bot_id),
+        )
+        assert (bot_allow["matched"], bot_allow["would_fire"], bot_allow["triage_decision"]) == (True, True, True)
+        assert triage_mock.await_count == 1

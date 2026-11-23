@@ -6,7 +6,7 @@ from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterable, Mapping, Sequence
+    from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 
 # LEGACY_COMPAT: Scalar knowledge_base agent configuration.
 # Legacy format: Agent config accepted scalar knowledge_base instead of knowledge_bases.
@@ -257,21 +257,58 @@ _RETIRED_FILE_SETTINGS = {
 }
 
 
-# LEGACY_COMPAT: Approval rules written for the file tool's retired function names.
-# Legacy format: a tool_approval.rules[].match glob matching save_file, replace_file_chunk, read_file_chunk,
-#   list_files, search_files, or search_content, the functions of Agno's FileTools.
-# Last legacy release: v2026.11.447; replacement: unreleased; the filesystem toolkit names them write_file,
-#   edit_file, read_file, ls, find_files, and grep.
+# LEGACY_COMPAT: Retired individual functions of the triggers (external_trigger_manager) toolkit.
+# Legacy format: triggers / external_trigger_manager exposed 8 separate functions (watch_room, watch_thread,
+#   subscribe_event, create_trigger, list_triggers, disable_trigger, delete_trigger, rotate_trigger_key), which
+#   could appear in tool_approval.rules[].match globs or include_tools/exclude_tools overrides.
+# Last legacy release: v2026.11.480; replacement: unreleased; all 8 were collapsed into a single `triggers`
+#   function taking an `action` parameter.
+# Handling: Reject tool_approval.rules when the first rule matching a retired name is not the first rule matching
+#   `triggers` (unless another registered toolkit still offers the retired name), and reject include_tools or
+#   exclude_tools naming a retired trigger function on a triggers entry, naming `triggers`.
+# Coverage:
+#   tests/test_triggers_tool.py::test_an_approval_rule_that_stops_deciding_a_retired_trigger_function_fails,
+#   tests/test_triggers_tool.py::test_an_earlier_approval_rule_that_takes_triggers_from_a_retired_gate_fails,
+#   tests/test_triggers_tool.py::test_approval_rules_that_decide_triggers_load,
+#   tests/test_triggers_tool.py::test_retired_trigger_include_exclude_overrides_fail_config_load.
+RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
+    "watch_room": "triggers",
+    "watch_thread": "triggers",
+    "subscribe_event": "triggers",
+    "create_trigger": "triggers",
+    "list_triggers": "triggers",
+    "disable_trigger": "triggers",
+    "delete_trigger": "triggers",
+    "rotate_trigger_key": "triggers",
+}
+RETIRED_TOOL_FUNCTION_RENAMES: tuple[tuple[str, Mapping[str, str]], ...] = (
+    ("filesystem", RETIRED_FILE_FUNCTIONS),
+    ("triggers", RETIRED_TRIGGER_FUNCTIONS),
+)
+
+
+# LEGACY_COMPAT: Approval rules written for retired file or trigger function names.
+# Legacy format: a tool_approval.rules[].match glob matching a retired Agno FileTools function name or one of the
+#   8 retired triggers toolkit function names.
+# Last legacy release: v2026.11.447 (file), v2026.11.480 (triggers); replacement: unreleased; filesystem exposes
+#   write_file, edit_file, read_file, ls, find_files, and grep, and triggers exposes the unified `triggers` function.
 # Handling: Reject the rules when the first one matching a retired name is not the first one matching its
 #   replacement, unless another registered toolkit still offers the retired name, naming that rule and the
 #   replacement, so the rule that decided a call still decides it.
 # Coverage:
 #   tests/test_filesystem_tool_config.py::test_an_approval_rule_that_stops_deciding_a_renamed_function_fails,
 #   tests/test_filesystem_tool_config.py::test_an_earlier_approval_rule_that_takes_the_replacement_from_its_gate_fails,
-#   tests/test_filesystem_tool_config.py::test_approval_rules_that_decide_the_new_names_as_they_did_the_old_load.
-def approval_rule_a_file_rename_escapes(globs: Sequence[str], offered_elsewhere: Collection[str]) -> str | None:
-    """Return the rule that decided a retired file function but not its replacement, as text, or None."""
-    for old, new in RETIRED_FILE_FUNCTIONS.items():
+#   tests/test_filesystem_tool_config.py::test_approval_rules_that_decide_the_new_names_as_they_did_the_old_load,
+#   tests/test_triggers_tool.py::test_an_approval_rule_that_stops_deciding_a_retired_trigger_function_fails,
+#   tests/test_triggers_tool.py::test_an_earlier_approval_rule_that_takes_triggers_from_a_retired_gate_fails,
+#   tests/test_triggers_tool.py::test_approval_rules_that_decide_triggers_load.
+def approval_rule_a_rename_escapes(
+    globs: Sequence[str],
+    renames: Mapping[str, str],
+    offered_elsewhere: Collection[str],
+) -> str | None:
+    """Return the rule that decided a retired function but not its replacement, as text, or None."""
+    for old, new in renames.items():
         first_old, first_new = (
             next((index for index, glob in enumerate(globs) if fnmatchcase(name, glob)), None) for name in (old, new)
         )
@@ -280,20 +317,51 @@ def approval_rule_a_file_rename_escapes(globs: Sequence[str], offered_elsewhere:
     return None
 
 
-def retired_file_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
-    """Return the first Agno FileTools setting or retired function filter in ``settings``, and what replaces it."""
+def _retired_function_filter(
+    settings: Mapping[str, object],
+    renames: Mapping[str, str],
+    *,
+    guidance_for: Callable[[str, str], str],
+) -> tuple[str, str] | None:
     for key in ("include_tools", "exclude_tools"):
         value = settings.get(key)
         names = value.replace("\n", ",").split(",") if isinstance(value, str) else value
         for name in names if isinstance(names, list) else ():
-            if isinstance(name, str) and (new := RETIRED_FILE_FUNCTIONS.get(name.strip())):
-                return f"{key}: {name.strip()}", f"use `filesystem: {{{key}: [{new}]}}`"
+            if isinstance(name, str) and (new := renames.get(name.strip())):
+                return f"{key}: {name.strip()}", guidance_for(key, new)
+    return None
+
+
+def retired_file_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
+    """Return the first Agno FileTools setting or retired function filter in ``settings``, and what replaces it."""
+    if (
+        retired := _retired_function_filter(
+            settings,
+            RETIRED_FILE_FUNCTIONS,
+            guidance_for=lambda key, new: f"use `filesystem: {{{key}: [{new}]}}`",
+        )
+    ) is not None:
+        return retired
     return next(((field, guidance) for field, guidance in _RETIRED_FILE_SETTINGS.items() if field in settings), None)
+
+
+def retired_trigger_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
+    """Return the first retired trigger function filter in ``settings``, and its migration guidance."""
+    return _retired_function_filter(
+        settings,
+        RETIRED_TRIGGER_FUNCTIONS,
+        guidance_for=lambda _key, new: (
+            f"`{new}` is now a single unified function with an `action` parameter; "
+            "remove the per-function filter and use `tool_approval.rules` matching `triggers` if gating is needed"
+        ),
+    )
 
 
 def retired_tool_override(tool_name: str, overrides: Mapping[str, object]) -> tuple[str, str] | None:
     """Return the first rejected retired field an entry of ``tool_name`` authors, and its replacement guidance."""
     if tool_name == "filesystem" and (retired := retired_file_setting(overrides)) is not None:
+        return retired
+    if tool_name == "triggers" and (retired := retired_trigger_setting(overrides)) is not None:
         return retired
     rejected = _REJECTED_TOOL_OVERRIDES | _REJECTED_TOOL_OVERRIDES_BY_TOOL.get(tool_name, {})
     return next(((field, guidance) for field, guidance in rejected.items() if field in overrides), None)

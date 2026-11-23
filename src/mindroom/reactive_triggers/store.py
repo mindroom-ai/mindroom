@@ -300,11 +300,18 @@ class ReactiveTriggerStore:
         record: ReactiveTriggerRecord,
         *,
         expected_rule_uid: str | None = None,
+        update_enabled: bool = False,
     ) -> ReactiveTriggerRecord | None:
-        """Atomically update mutable rule fields while preserving rule_uid, stats, cursors, and checkpoints."""
+        """Atomically update mutable rule fields while preserving rule_uid, stats, cursors, and checkpoints.
+
+        When ``update_enabled`` is False (default), the live row's ``enabled`` and ``disabled_reason`` are
+        preserved inside the SQLite transaction (and synced into ``spec_json``) so concurrent disablement
+        such as a ``once=True`` firing cannot be accidentally overwritten.
+        """
         with self._write_transaction() as conn:
             existing = conn.execute(
-                "SELECT rule_uid, fire_count, last_fired_at FROM reactive_triggers WHERE trigger_id = ?",
+                "SELECT rule_uid, enabled, disabled_reason, fire_count, last_fired_at "
+                "FROM reactive_triggers WHERE trigger_id = ?",
                 (record.trigger_id,),
             ).fetchone()
             if existing is None:
@@ -312,9 +319,17 @@ class ReactiveTriggerStore:
             live_uid = str(existing["rule_uid"])
             if expected_rule_uid is not None and live_uid != expected_rule_uid:
                 return None
+            effective_enabled = record.enabled if update_enabled else bool(existing["enabled"])
+            effective_disabled_reason = (
+                record.disabled_reason
+                if update_enabled
+                else (str(existing["disabled_reason"]) if existing["disabled_reason"] is not None else None)
+            )
             persisted = record.model_copy(
                 update={
                     "rule_uid": live_uid,
+                    "enabled": effective_enabled,
+                    "disabled_reason": effective_disabled_reason,
                     "fire_count": int(existing["fire_count"]),
                     "last_fired_at": (
                         float(existing["last_fired_at"]) if existing["last_fired_at"] is not None else None
@@ -554,10 +569,27 @@ class ReactiveTriggerStore:
             ).fetchone()
         return _firing_from_row(row) if row is not None else None
 
+    def list_triggers_with_firings(self, *, owner_user_ids: Collection[str]) -> list[ReactiveTriggerRecord]:
+        """Return reactive triggers owned by ``owner_user_ids`` that have at least one firing row."""
+        unique_owners = sorted(set(owner_user_ids))
+        if not unique_owners:
+            return []
+        placeholders = ", ".join("?" for _ in unique_owners)
+        query = (
+            "SELECT rt.* FROM reactive_triggers rt "  # noqa: S608
+            f"WHERE rt.owner_user_id IN ({placeholders}) "
+            "AND EXISTS (SELECT 1 FROM trigger_firings f WHERE f.trigger_id = rt.trigger_id) "
+            "ORDER BY rt.created_at ASC, rt.trigger_id ASC"
+        )
+        with self._read_connection() as conn:
+            rows = conn.execute(query, unique_owners).fetchall()
+        return [_record_from_row(row) for row in rows]
+
     def list_firings(
         self,
         *,
         trigger_id: str | None = None,
+        trigger_ids: Collection[str] | None = None,
         owner_user_id: str | None = None,
         owner_user_ids: Collection[str] | None = None,
         limit: int = 20,
@@ -584,6 +616,13 @@ class ReactiveTriggerStore:
         if trigger_id is not None:
             clauses.append("f.trigger_id = ?")
             params.append(trigger_id)
+        elif trigger_ids is not None:
+            unique_trigger_ids = sorted(set(trigger_ids))
+            if not unique_trigger_ids:
+                return []
+            placeholders = ", ".join("?" for _ in unique_trigger_ids)
+            clauses.append(f"f.trigger_id IN ({placeholders})")
+            params.extend(unique_trigger_ids)
 
         where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
         query = f"SELECT f.* FROM trigger_firings f{join_sql}{where_sql} ORDER BY f.id DESC LIMIT ?"  # noqa: S608

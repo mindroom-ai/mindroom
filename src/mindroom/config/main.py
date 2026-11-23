@@ -56,7 +56,8 @@ from mindroom.config.legacy_access import (
 )
 from mindroom.config.legacy_fields import (
     RETIRED_PROMPT_NAMES,
-    approval_rule_a_file_rename_escapes,
+    RETIRED_TOOL_FUNCTION_RENAMES,
+    approval_rule_a_rename_escapes,
     drop_retired_fields,
     rename_legacy_knowledge_reranker,
 )
@@ -1538,16 +1539,17 @@ class Config(BaseModel):
         # why-lazy: catalog pulls runtime tool registry paths and loads agents+tools at config import.
         from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
 
-        elsewhere = {
-            function
-            for name in tools
-            if name != "filesystem" and (metadata := tools.get(name)) is not None
-            for function in metadata.function_names or ()
-        }
         globs = [rule.match for rule in self.tool_approval.rules]
-        if (escaped := approval_rule_a_file_rename_escapes(globs, elsewhere)) is not None:
-            msg = f"{escaped}, which another rule or the default now decides; rewrite the rules for the new names."
-            raise ToolConfigOverrideError(msg)
+        for toolkit_name, renames in RETIRED_TOOL_FUNCTION_RENAMES:
+            elsewhere = {
+                function
+                for name in tools
+                if name != toolkit_name and (metadata := tools.get(name)) is not None
+                for function in metadata.function_names or ()
+            }
+            if (escaped := approval_rule_a_rename_escapes(globs, renames, elsewhere)) is not None:
+                msg = f"{escaped}, which another rule or the default now decides; rewrite the rules for the new names."
+                raise ToolConfigOverrideError(msg)
 
     def _validate_tailnet_ssh_tools(self, tools: ToolRegistry) -> None:
         """Refuse an SSH opt-in when the turn can offer another toolkit's shell instead."""

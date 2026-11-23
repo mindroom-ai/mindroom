@@ -33,6 +33,7 @@ from mindroom.judgment.answers import JudgmentResult
 from mindroom.judgment.state import MAX_REQUEST_BYTES
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot
+from mindroom.matrix.state import MatrixState
 from mindroom.reactive_triggers import (
     REACTIVE_TRIGGER_DEDUPE_KEY,
     REACTIVE_TRIGGER_ID_KEY,
@@ -56,6 +57,7 @@ from mindroom.reactive_triggers import (
     matches_room_message,
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection
@@ -1629,3 +1631,100 @@ async def test_include_bots_source_access_allows_other_internal_bot_and_blocks_t
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_include_bots_uses_persisted_account_not_synthetic_generated_id(tmp_path: Path) -> None:
+    """Positive include_bots exemption matches only persisted accounts; synthetic fallback IDs stay unauthorized."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "research": AgentConfig(display_name="Research", rooms=[_ROOM_A], access={"users": [_OWNER]}),
+                "helper": AgentConfig(display_name="Helper", rooms=[_ROOM_A], access={"users": [_OWNER]}),
+            },
+            models={"default": ModelConfig(provider="openai", id="gpt-test")},
+            external_trigger_policy=ExternalTriggerPolicyConfig(enabled=True, reactive_enabled=True),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_account("agent_helper", "renamed_helper", "pw", domain="localhost")
+    save_matrix_state(state, runtime_paths)
+
+    memberships = AgentReplyMembershipIndex()
+    source_bot = SimpleNamespace(
+        agent_name="research",
+        running=True,
+        client=SimpleNamespace(rooms={_ROOM_A: nio.MatrixRoom(_ROOM_A, "@mindroom_research:localhost")}),
+    )
+    room_state = RoomStateSnapshot(
+        room_id=_ROOM_A,
+        events={("m.room.member", _OWNER): {"membership": "join"}},
+        creators=frozenset(),
+    )
+
+    def _event(actor: str) -> TriggerEvent:
+        return TriggerEvent(
+            source_type="room_message",
+            source_id=_ROOM_A,
+            kind="room.message",
+            event_id="$ev1",
+            timestamp=time.time(),
+            room_id=_ROOM_A,
+            actor=actor,
+            text="update",
+        )
+
+    research_rule = ReactiveTriggerRecord(
+        trigger_id="tr_renamed_check",
+        owner_user_id=_OWNER,
+        source=RoomMessageSourceSpec(room_id=_ROOM_A, include_bots=True),
+        target=TriggerTargetSpec(agent="research", room_id=_ROOM_A, prompt="React"),
+        created_at=1000.0,
+        updated_at=1000.0,
+    )
+    # Persisted renamed account passes include_bots=True under human-only access.users
+    assert (
+        await check_reactive_source_access(
+            rule=research_rule,
+            event=_event("@renamed_helper:localhost"),
+            source_bot=source_bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            memberships=memberships,
+            known_room_states={_ROOM_A: room_state},
+        )
+        is None
+    )
+    # Unconfigured synthetic generated ID MUST NOT receive the managed-bot exemption
+    assert await check_reactive_source_access(
+        rule=research_rule,
+        event=_event("@mindroom_helper:localhost"),
+        source_bot=source_bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        memberships=memberships,
+        known_room_states={_ROOM_A: room_state},
+    ) == DispatchResult(status="skipped", reason="source_sender_not_authorized")
+
+    # Negative self-exclusion conservatively still blocks BOTH the persisted and synthetic IDs of target `helper`
+    helper_rule = ReactiveTriggerRecord(
+        trigger_id="tr_helper_self",
+        owner_user_id=_OWNER,
+        source=RoomMessageSourceSpec(room_id=_ROOM_A, include_bots=True),
+        target=TriggerTargetSpec(agent="helper", room_id=_ROOM_A, prompt="React"),
+        created_at=1000.0,
+        updated_at=1000.0,
+    )
+    for self_actor in ("@renamed_helper:localhost", "@mindroom_helper:localhost"):
+        assert await check_reactive_source_access(
+            rule=helper_rule,
+            event=_event(self_actor),
+            source_bot=source_bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            memberships=memberships,
+            known_room_states={_ROOM_A: room_state},
+        ) == DispatchResult(status="skipped", reason="source_sender_is_target")

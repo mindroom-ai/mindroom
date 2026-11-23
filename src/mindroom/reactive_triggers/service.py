@@ -42,7 +42,7 @@ from mindroom.reactive_triggers.triage import evaluate_triage
 from mindroom.requester_identity import (
     equivalent_requester_ids,
     is_human_requester_id,
-    is_managed_entity_id,
+    is_persisted_managed_entity_id,
     managed_entity_user_ids,
 )
 from mindroom.thread_tags import (
@@ -976,7 +976,7 @@ class ReactiveTriggerService:
         observed_room: nio.MatrixRoom | None,
     ) -> _MessageDecision:
         assert isinstance(rule.source, RoomMessageSourceSpec)
-        if rule.source.include_bots and is_managed_entity_id(msg.sender, config, self.runtime_paths):
+        if rule.source.include_bots and is_persisted_managed_entity_id(msg.sender, config, self.runtime_paths):
             owner_check = check_room_source_owner_authorization(
                 rule=rule,
                 source_room_id=source_room_id,

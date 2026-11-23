@@ -28,7 +28,7 @@ from mindroom.reactive_triggers.store import ReactiveTriggerStore, ReactiveTrigg
 from mindroom.requester_identity import (
     equivalent_requester_ids,
     is_human_requester_id,
-    is_managed_entity_id,
+    is_persisted_managed_entity_id,
     managed_entity_user_ids,
 )
 
@@ -290,7 +290,7 @@ def _check_room_source_sender(
     if actor in managed_entity_user_ids(rule.target.agent, config, runtime_paths):
         return DispatchResult(status="skipped", reason="source_sender_is_target")
     if source.include_bots:
-        if is_managed_entity_id(actor, config, runtime_paths):
+        if is_persisted_managed_entity_id(actor, config, runtime_paths):
             return None
     elif not is_human_requester_id(actor, config, runtime_paths):
         return DispatchResult(status="skipped", reason="source_sender_not_human")

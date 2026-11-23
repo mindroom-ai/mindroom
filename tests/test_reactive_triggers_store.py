@@ -1027,3 +1027,37 @@ def test_list_firings_filters_orders_desc_and_clamps_limit(tmp_path: Path) -> No
     assert [f.dedupe_key for f in store.list_firings(owner_user_id="@bob:example.org")] == ["$b1"]
     assert [f.dedupe_key for f in store.list_firings(trigger_id="r_alice", limit=1)] == ["$a2"]
     assert [f.dedupe_key for f in store.list_firings(limit=0)] == ["$a2"]
+    assert [f.dedupe_key for f in store.list_firings(trigger_ids=["r_alice"])] == ["$a2", "$a1"]
+    assert [r.trigger_id for r in store.list_triggers_with_firings(owner_user_ids=[_OWNER])] == ["r_alice"]
+
+
+def test_update_trigger_preserves_live_enabled_and_disabled_reason_by_default(tmp_path: Path) -> None:
+    """update_trigger(update_enabled=False) keeps live enabled/disabled_reason synced in columns and spec_json."""
+    store = ReactiveTriggerStore(_runtime_paths(tmp_path))
+    rec = _make_record(trigger_id="once_race", once=True)
+    store.create_trigger(rec)
+    store.enqueue_firing("once_race", "$e1", _make_event(event_id="$e1"))
+    # Concurrent claim consumes once=True and disables the row live in SQLite
+    assert store.claim_firing(1, now=2000.0) == "claimed"
+
+    # An unrelated update built from the stale enabled=True snapshot must NOT re-enable the trigger
+    stale_update = rec.model_copy(update={"description": "new desc", "enabled": True, "disabled_reason": None})
+    preserved = store.update_trigger(stale_update, expected_rule_uid=rec.rule_uid)
+    assert preserved is not None
+    assert preserved.description == "new desc"
+    assert preserved.enabled is False
+    assert preserved.disabled_reason == "once_consumed"
+    # Verify spec_json itself was synced with the live enabled/disabled_reason inside the transaction
+    with store._read_connection() as conn:
+        raw_spec = conn.execute(
+            "SELECT spec_json FROM reactive_triggers WHERE trigger_id = ?",
+            ("once_race",),
+        ).fetchone()
+    assert raw_spec is not None
+    spec_record = ReactiveTriggerRecord.model_validate_json(str(raw_spec["spec_json"]))
+    assert (spec_record.enabled, spec_record.disabled_reason) == (False, "once_consumed")
+
+    # Explicitly setting update_enabled=True does re-enable the trigger in both columns and spec_json
+    reenabled = store.update_trigger(stale_update, expected_rule_uid=rec.rule_uid, update_enabled=True)
+    assert reenabled is not None
+    assert (reenabled.enabled, reenabled.disabled_reason) == (True, None)

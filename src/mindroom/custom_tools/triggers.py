@@ -5,9 +5,10 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
+
+import nio
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_agent_reply_in_room
@@ -61,14 +62,16 @@ from mindroom.reactive_triggers.store import (
     trigger_id_creation_lock,
 )
 from mindroom.reactive_triggers.triage import evaluate_triage
-from mindroom.requester_identity import equivalent_requester_ids
+from mindroom.requester_identity import (
+    equivalent_requester_ids,
+    is_human_requester_id,
+    managed_entity_user_ids,
+)
 from mindroom.thread_tags import ThreadTagsError, get_thread_tags, normalize_tag_name
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-
-    import nio
 
     from mindroom.bot import AgentBot
     from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
@@ -127,45 +130,7 @@ _UPDATABLE_FIELDS: tuple[str, ...] = (
 )
 
 
-@dataclass(frozen=True, slots=True)
-class _TriggerArgs:
-    trigger_id: str | None = None
-    prompt: str | None = None
-    description: str | None = None
-    room_id: str | None = None
-    thread_id: str | None = None
-    senders: list[str] | None = None
-    pattern: str | None = None
-    include_bots: bool | None = None
-    tag: str | None = None
-    transition: Literal["added", "removed"] | None = None
-    source_id: str | None = None
-    kind: str | None = None
-    match: dict[str, str | bool | int] | None = None
-    triage_instructions: str | None = None
-    triage_model: str | None = None
-    triage_provider: Literal["llm", "typesafe", "openai_decisions"] | None = None
-    triage_threshold: float | None = None
-    target_agent: str | None = None
-    target_room_id: str | None = None
-    target_thread_id: str | None = None
-    new_thread: bool = False
-    thread_key: str | None = None
-    once: bool | None = None
-    max_fires_per_hour: int | None = None
-    cooldown_seconds: int | None = None
-    expires_in_hours: float | None = None
-    enabled: bool | None = None
-    include_disabled: bool = True
-    public_key: str | None = None
-    key_id: str | None = None
-    allowed_kinds: list[str] | None = None
-    replay_window_seconds: int | None = None
-    max_body_bytes: int | None = None
-    limit: int | None = None
-    text: str | None = None
-    actor: str | None = None
-    sample_data: dict[str, Any] | None = None
+type _TriggerParams = Mapping[str, Any]
 
 
 class TriggersTools(Toolkit):
@@ -214,41 +179,37 @@ class TriggersTools(Toolkit):
     @staticmethod
     def _validate_reactive_common(
         context: ToolRuntimeContext,
+        args: _TriggerParams,
         *,
         policy: ExternalTriggerPolicyConfig,
-        trigger_id: str | None,
-        max_fires_per_hour: int,
-        cooldown_seconds: int,
-        expires_in_hours: float | None,
-        triage_instructions: str | None = None,
-        triage_model: str | None = None,
-        triage_provider: Literal["llm", "typesafe", "openai_decisions"] = "llm",
-        triage_threshold: float | None = None,
         now: float,
-    ) -> tuple[str | None, TriageSpec | None, float | None]:
-        validated_trigger_id = _validate_optional_trigger_id(trigger_id)
-        _validate_max_fires_per_hour(max_fires_per_hour, policy=policy)
-        _validate_cooldown_seconds(cooldown_seconds)
-        expires_at = _validate_expires_in_hours(expires_in_hours, now=now)
-        triage = _build_triage_spec(
-            context,
-            triage_instructions=triage_instructions,
-            triage_model=triage_model,
-            triage_provider=triage_provider,
-            triage_threshold=triage_threshold,
+        allow_triage: bool = True,
+    ) -> tuple[str | None, TriageSpec | None, float | None, int, int]:
+        max_fires = 10 if args["max_fires_per_hour"] is None else args["max_fires_per_hour"]
+        cooldown = 0 if args["cooldown_seconds"] is None else args["cooldown_seconds"]
+        validated_trigger_id = _validate_optional_trigger_id(args["trigger_id"])
+        _validate_max_fires_per_hour(max_fires, policy=policy)
+        _validate_cooldown_seconds(cooldown)
+        expires_at = _validate_expires_in_hours(args["expires_in_hours"], now=now)
+        triage = (
+            _build_triage_spec(
+                context,
+                triage_instructions=args["triage_instructions"],
+                triage_model=args["triage_model"],
+                triage_provider="llm" if args["triage_provider"] is None else args["triage_provider"],
+                triage_threshold=args["triage_threshold"],
+            )
+            if allow_triage
+            else None
         )
-        return validated_trigger_id, triage, expires_at
+        return validated_trigger_id, triage, expires_at, max_fires, cooldown
 
     @classmethod
-    async def _direct_target(
-        cls,
-        context: ToolRuntimeContext,
-        *,
-        target_agent: str | None,
-        target_room_id: str | None,
-        target_thread_id: str | None,
-        new_thread: bool,
-    ) -> ExternalTriggerTarget:
+    async def _direct_target(cls, context: ToolRuntimeContext, args: _TriggerParams) -> ExternalTriggerTarget:
+        target_agent = args["target_agent"]
+        target_room_id = args["target_room_id"]
+        target_thread_id = args["target_thread_id"]
+        new_thread = args["new_thread"]
         is_admin = cls._is_admin(context)
         if not is_admin and target_agent not in (None, context.agent_name):
             msg = "Only external trigger admins can target a different agent or team."
@@ -272,16 +233,17 @@ class TriggersTools(Toolkit):
     async def _resolve_reactive_target(
         cls,
         context: ToolRuntimeContext,
+        args: _TriggerParams,
         *,
-        target_agent: str | None,
-        target_room_id: str | None,
-        target_thread_id: str | None,
-        new_thread: bool,
-        thread_key: str | None,
         prompt: str,
         default_thread_id: Callable[[str], str | None],
         allow_origin: bool,
     ) -> TriggerTargetSpec:
+        target_agent = args["target_agent"]
+        target_room_id = args["target_room_id"]
+        target_thread_id = args["target_thread_id"]
+        new_thread = args["new_thread"]
+        thread_key = args["thread_key"]
         if new_thread and target_thread_id is not None:
             msg = "target_thread_id and new_thread are mutually exclusive"
             raise ValueError(msg)
@@ -360,6 +322,52 @@ class TriggersTools(Toolkit):
         )
 
     @classmethod
+    async def _verify_watched_room_access(
+        cls,
+        context: ToolRuntimeContext,
+        *,
+        raw_room_id: str,
+        resolved_room_id: str,
+        preferred_agent: str | None,
+        require_live_membership: bool = False,
+    ) -> None:
+        if resolved_room_id == resolve_room_id(context.room_id, context.runtime_paths):
+            return
+        await _verify_owner_joined_room(
+            context,
+            room_id=resolved_room_id,
+            preferred_agent=preferred_agent,
+            require_live=require_live_membership,
+        )
+        candidate_entities = _watch_room_candidate_entities(
+            context,
+            raw_room_id=raw_room_id,
+            resolved_room_id=resolved_room_id,
+        )
+        if not candidate_entities:
+            msg = f"No configured or running agent is available to watch room {resolved_room_id}."
+            raise ReactiveTriggerStoreError(msg)
+
+        observed_room = _observed_room_for(context, resolved_room_id, preferred_agent=preferred_agent)
+        memberships = cls._memberships(context)
+        for entity_name in candidate_entities:
+            try:
+                if is_sender_allowed_for_agent_reply_in_room(
+                    context.requester_id,
+                    entity_name,
+                    context.config,
+                    resolved_room_id,
+                    context.runtime_paths,
+                    memberships,
+                    observed_room=observed_room,
+                ):
+                    return
+            except ReplyMembershipPendingError:
+                continue
+        msg = f"You are not authorized to watch room {resolved_room_id}."
+        raise ReactiveTriggerStoreError(msg)
+
+    @classmethod
     async def _resolve_watched_room(
         cls,
         context: ToolRuntimeContext,
@@ -372,46 +380,54 @@ class TriggersTools(Toolkit):
             msg = "Watched room must be a room key MindRoom manages, that room's full alias, or a ! room ID."
             raise ReactiveTriggerStoreError(msg)
         resolved_watch_room_id = resolve_room_id(raw_watch_room, context.runtime_paths)
-        current_room_id = resolve_room_id(context.room_id, context.runtime_paths)
-        if resolved_watch_room_id == current_room_id:
-            return resolved_watch_room_id
-
-        await _verify_owner_joined_room(
-            context,
-            room_id=resolved_watch_room_id,
-            preferred_agent=preferred_agent,
-        )
-        candidate_entities = _watch_room_candidate_entities(
+        await cls._verify_watched_room_access(
             context,
             raw_room_id=raw_watch_room,
             resolved_room_id=resolved_watch_room_id,
+            preferred_agent=preferred_agent,
         )
-        if not candidate_entities:
-            msg = f"No configured or running agent is available to watch room {resolved_watch_room_id}."
-            raise ReactiveTriggerStoreError(msg)
-
-        observed_room = _observed_room_for(context, resolved_watch_room_id, preferred_agent=preferred_agent)
-        memberships = cls._memberships(context)
-        authorized = False
-        for entity_name in candidate_entities:
-            try:
-                if is_sender_allowed_for_agent_reply_in_room(
-                    context.requester_id,
-                    entity_name,
-                    context.config,
-                    resolved_watch_room_id,
-                    context.runtime_paths,
-                    memberships,
-                    observed_room=observed_room,
-                ):
-                    authorized = True
-                    break
-            except ReplyMembershipPendingError:
-                continue
-        if not authorized:
-            msg = f"You are not authorized to watch room {resolved_watch_room_id}."
-            raise ReactiveTriggerStoreError(msg)
         return resolved_watch_room_id
+
+    @classmethod
+    async def _has_source_access_for_history(
+        cls,
+        context: ToolRuntimeContext,
+        rule: ReactiveTriggerRecord,
+        *,
+        room_access_cache: dict[str, bool],
+    ) -> bool:
+        if isinstance(rule.source, (RoomMessageSourceSpec, ThreadTagSourceSpec)):
+            resolved_room_id = resolve_room_id(rule.source.room_id, context.runtime_paths)
+            cached = room_access_cache.get(resolved_room_id)
+            if cached is not None:
+                return cached
+            try:
+                await cls._verify_watched_room_access(
+                    context,
+                    raw_room_id=rule.source.room_id,
+                    resolved_room_id=resolved_room_id,
+                    preferred_agent=rule.target.agent,
+                    require_live_membership=True,
+                )
+            except ReactiveTriggerStoreError:
+                room_access_cache[resolved_room_id] = False
+                return False
+            room_access_cache[resolved_room_id] = True
+            return True
+
+        source_config = context.config.external_trigger_policy.event_sources.get(rule.source.source_id)
+        if source_config is None or not is_source_subscriber_allowed(
+            source_config,
+            context.requester_id,
+            context.config,
+            context.runtime_paths,
+        ):
+            return False
+        try:
+            validate_subscription_against_source(source_config, kind=rule.source.kind, match=rule.source.match)
+        except ValueError:
+            return False
+        return True
 
     @staticmethod
     def _record_payload(record: ExternalTriggerRecord) -> dict[str, object]:
@@ -437,25 +453,7 @@ class TriggersTools(Toolkit):
 
     @staticmethod
     def _reactive_record_payload(record: ReactiveTriggerRecord) -> dict[str, object]:
-        return {
-            "trigger_id": record.trigger_id,
-            "trigger_kind": "reactive",
-            "enabled": record.enabled,
-            "disabled_reason": record.disabled_reason,
-            "description": record.description,
-            "owner_user_id": record.owner_user_id,
-            "source": record.source.model_dump(mode="json"),
-            "triage": record.triage.model_dump(mode="json") if record.triage is not None else None,
-            "target": record.target.model_dump(mode="json"),
-            "once": record.once,
-            "max_fires_per_hour": record.max_fires_per_hour,
-            "cooldown_seconds": record.cooldown_seconds,
-            "expires_at": record.expires_at,
-            "fire_count": record.fire_count,
-            "last_fired_at": record.last_fired_at,
-            "created_at": record.created_at,
-            "updated_at": record.updated_at,
-        }
+        return {"trigger_kind": "reactive", **record.model_dump(mode="json", exclude={"rule_uid"})}
 
     @staticmethod
     def _notify_reactive_service(context: ToolRuntimeContext) -> None:
@@ -478,21 +476,18 @@ class TriggersTools(Toolkit):
     async def _create_reactive_rule(
         self,
         context: ToolRuntimeContext,
+        args: _TriggerParams,
         *,
         policy: ExternalTriggerPolicyConfig,
-        validated_trigger_id: str | None,
-        description: str,
+        common: tuple[str | None, TriageSpec | None, float | None, int, int],
         source: RoomMessageSourceSpec | ThreadTagSourceSpec | ExternalEventSourceSpec,
-        triage: TriageSpec | None,
         target: TriggerTargetSpec,
-        once: bool,
-        max_fires_per_hour: int,
-        cooldown_seconds: int,
-        expires_at: float | None,
+        default_once: bool,
         now: float,
         initial_cursor: RoomCursor | None = None,
         initial_checkpoint: ThreadCheckpoint | None = None,
     ) -> ReactiveTriggerRecord:
+        validated_trigger_id, triage, expires_at, max_fires_per_hour, cooldown_seconds = common
         external_store = ExternalTriggerStore(context.runtime_paths)
         reactive_store = ReactiveTriggerStore(context.runtime_paths)
 
@@ -506,11 +501,11 @@ class TriggersTools(Toolkit):
                 record = ReactiveTriggerRecord(
                     trigger_id=resolved_trigger_id,
                     owner_user_id=context.requester_id,
-                    description=description,
+                    description="" if args["description"] is None else args["description"],
                     source=source,
                     triage=triage,
                     target=target,
-                    once=once,
+                    once=default_once if args["once"] is None else args["once"],
                     max_fires_per_hour=max_fires_per_hour,
                     cooldown_seconds=cooldown_seconds,
                     expires_at=expires_at,
@@ -676,48 +671,10 @@ class TriggersTools(Toolkit):
             sample_data: Sample event.data dict (test).
 
         """
+        args: _TriggerParams = {key: value for key, value in locals().items() if key not in {"self", "action"}}
         try:
             context = require_external_trigger_owner_context(self._CONTEXT_LABEL)
-            args = _TriggerArgs(
-                trigger_id=trigger_id,
-                prompt=prompt,
-                description=description,
-                room_id=room_id,
-                thread_id=thread_id,
-                senders=senders,
-                pattern=pattern,
-                include_bots=include_bots,
-                tag=tag,
-                transition=transition,
-                source_id=source_id,
-                kind=kind,
-                match=match,
-                triage_instructions=triage_instructions,
-                triage_model=triage_model,
-                triage_provider=triage_provider,
-                triage_threshold=triage_threshold,
-                target_agent=target_agent,
-                target_room_id=target_room_id,
-                target_thread_id=target_thread_id,
-                new_thread=new_thread,
-                thread_key=thread_key,
-                once=once,
-                max_fires_per_hour=max_fires_per_hour,
-                cooldown_seconds=cooldown_seconds,
-                expires_in_hours=expires_in_hours,
-                enabled=enabled,
-                include_disabled=include_disabled,
-                public_key=public_key,
-                key_id=key_id,
-                allowed_kinds=allowed_kinds,
-                replay_window_seconds=replay_window_seconds,
-                max_body_bytes=max_body_bytes,
-                limit=limit,
-                text=text,
-                actor=actor,
-                sample_data=sample_data,
-            )
-            handlers: dict[str, Callable[[ToolRuntimeContext, _TriggerArgs], Awaitable[str]]] = {
+            handlers: dict[str, Callable[[ToolRuntimeContext, _TriggerParams], Awaitable[str]]] = {
                 "watch_room": self._watch_room,
                 "watch_thread": self._watch_thread,
                 "subscribe_event": self._subscribe_event,
@@ -737,59 +694,34 @@ class TriggersTools(Toolkit):
         except _TOOL_ERRORS as exc:
             return self._payload("error", message=str(exc))
 
-    async def _watch_room(self, context: ToolRuntimeContext, args: _TriggerArgs) -> str:
-        resolved_prompt = _require_non_empty_arg(args.prompt, "prompt", "watch_room")
+    async def _watch_room(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
+        resolved_prompt = _require_non_empty_arg(args["prompt"], "prompt", "watch_room")
         policy = self._require_reactive_policy(context)
         now = time.time()
-        resolved_max_fires = 10 if args.max_fires_per_hour is None else args.max_fires_per_hour
-        resolved_cooldown = 0 if args.cooldown_seconds is None else args.cooldown_seconds
-        resolved_triage_provider: Literal["llm", "typesafe", "openai_decisions"] = (
-            "llm" if args.triage_provider is None else args.triage_provider
-        )
-
-        validated_trigger_id, triage, expires_at = self._validate_reactive_common(
-            context,
-            policy=policy,
-            trigger_id=args.trigger_id,
-            max_fires_per_hour=resolved_max_fires,
-            cooldown_seconds=resolved_cooldown,
-            expires_in_hours=args.expires_in_hours,
-            triage_instructions=args.triage_instructions,
-            triage_model=args.triage_model,
-            triage_provider=resolved_triage_provider,
-            triage_threshold=args.triage_threshold,
-            now=now,
-        )
-
+        common = self._validate_reactive_common(context, args, policy=policy, now=now)
         resolved_watch_room_id = await self._resolve_watched_room(
             context,
-            room_id=args.room_id,
-            preferred_agent=args.target_agent or context.agent_name,
+            room_id=args["room_id"],
+            preferred_agent=args["target_agent"] or context.agent_name,
         )
         resolved_watch_thread_id = (
-            await explicit_thread_root(context, room_id=resolved_watch_room_id, thread_id=args.thread_id)
-            if args.thread_id is not None
+            await explicit_thread_root(context, room_id=resolved_watch_room_id, thread_id=args["thread_id"])
+            if args["thread_id"] is not None
             else None
         )
-
         target = await self._resolve_reactive_target(
             context,
-            target_agent=args.target_agent,
-            target_room_id=args.target_room_id,
-            target_thread_id=args.target_thread_id,
-            new_thread=args.new_thread,
-            thread_key=args.thread_key,
+            args,
             prompt=resolved_prompt,
             default_thread_id=lambda dest_room: "origin" if dest_room == resolved_watch_room_id else None,
             allow_origin=True,
         )
-
         source = RoomMessageSourceSpec(
             room_id=resolved_watch_room_id,
             thread_id=resolved_watch_thread_id,
-            senders=list(args.senders or ()),
-            pattern=args.pattern,
-            include_bots=False if args.include_bots is None else args.include_bots,
+            senders=list(args["senders"] or ()),
+            pattern=args["pattern"],
+            include_bots=False if args["include_bots"] is None else args["include_bots"],
         )
         initial_cursor = await _read_initial_room_cursor(
             context,
@@ -797,51 +729,33 @@ class TriggersTools(Toolkit):
             preferred_agent=target.agent,
             now=now,
         )
-
         created = await self._create_reactive_rule(
             context,
+            args,
             policy=policy,
-            validated_trigger_id=validated_trigger_id,
-            description="" if args.description is None else args.description,
+            common=common,
             source=source,
-            triage=triage,
             target=target,
-            once=False if args.once is None else args.once,
-            max_fires_per_hour=resolved_max_fires,
-            cooldown_seconds=resolved_cooldown,
-            expires_at=expires_at,
+            default_once=False,
             now=now,
             initial_cursor=initial_cursor,
         )
         return self._payload("ok", action="watch_room", trigger=self._reactive_record_payload(created))
 
-    async def _watch_thread(self, context: ToolRuntimeContext, args: _TriggerArgs) -> str:
-        resolved_prompt = _require_non_empty_arg(args.prompt, "prompt", "watch_thread")
+    async def _watch_thread(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
+        resolved_prompt = _require_non_empty_arg(args["prompt"], "prompt", "watch_thread")
         policy = self._require_reactive_policy(context)
         now = time.time()
-        resolved_max_fires = 10 if args.max_fires_per_hour is None else args.max_fires_per_hour
-        resolved_cooldown = 0 if args.cooldown_seconds is None else args.cooldown_seconds
-        resolved_tag = "resolved" if args.tag is None else args.tag
-        resolved_transition: Literal["added", "removed"] = "added" if args.transition is None else args.transition
-
-        validated_trigger_id, _triage, expires_at = self._validate_reactive_common(
-            context,
-            policy=policy,
-            trigger_id=args.trigger_id,
-            max_fires_per_hour=resolved_max_fires,
-            cooldown_seconds=resolved_cooldown,
-            expires_in_hours=args.expires_in_hours,
-            now=now,
-        )
-        normalized_tag = _normalize_watch_thread_tag(resolved_tag)
-
+        common = self._validate_reactive_common(context, args, policy=policy, now=now, allow_triage=False)
+        normalized_tag = _normalize_watch_thread_tag("resolved" if args["tag"] is None else args["tag"])
+        resolved_transition: Literal["added", "removed"] = "added" if args["transition"] is None else args["transition"]
         resolved_watch_room_id = await self._resolve_watched_room(
             context,
-            room_id=args.room_id,
-            preferred_agent=args.target_agent or context.agent_name,
+            room_id=args["room_id"],
+            preferred_agent=args["target_agent"] or context.agent_name,
         )
         current_room_id = resolve_room_id(context.room_id, context.runtime_paths)
-        raw_watch_thread_id = args.thread_id
+        raw_watch_thread_id = args["thread_id"]
         if raw_watch_thread_id is None and resolved_watch_room_id == current_room_id:
             raw_watch_thread_id = context.resolved_thread_id or context.thread_id
         if raw_watch_thread_id is None or not raw_watch_thread_id.strip():
@@ -852,45 +766,33 @@ class TriggersTools(Toolkit):
             room_id=resolved_watch_room_id,
             thread_id=raw_watch_thread_id,
         )
-
         current_thread_id = context.resolved_thread_id or context.thread_id
         target = await self._resolve_reactive_target(
             context,
-            target_agent=args.target_agent,
-            target_room_id=args.target_room_id,
-            target_thread_id=args.target_thread_id,
-            new_thread=args.new_thread,
-            thread_key=args.thread_key,
+            args,
             prompt=resolved_prompt,
             default_thread_id=lambda dest_room: current_thread_id if dest_room == current_room_id else None,
             allow_origin=False,
         )
-
         source = ThreadTagSourceSpec(
             room_id=resolved_watch_room_id,
             thread_id=resolved_watch_thread_id,
             tag=normalized_tag,
             transition=resolved_transition,
         )
-
         tag_present = await _read_thread_tag_present(context, source, preferred_agent=target.agent)
         initial_checkpoint = ThreadCheckpoint(tag_present=tag_present, state_event_id=None, updated_at=now)
         already_in_state = (source.transition == "added" and tag_present) or (
             source.transition == "removed" and not tag_present
         )
-
         created = await self._create_reactive_rule(
             context,
+            args,
             policy=policy,
-            validated_trigger_id=validated_trigger_id,
-            description="" if args.description is None else args.description,
+            common=common,
             source=source,
-            triage=None,
             target=target,
-            once=True if args.once is None else args.once,
-            max_fires_per_hour=resolved_max_fires,
-            cooldown_seconds=resolved_cooldown,
-            expires_at=expires_at,
+            default_once=True,
             now=now,
             initial_checkpoint=initial_checkpoint,
         )
@@ -904,32 +806,13 @@ class TriggersTools(Toolkit):
             **extra,
         )
 
-    async def _subscribe_event(self, context: ToolRuntimeContext, args: _TriggerArgs) -> str:
-        resolved_source_id = _require_non_empty_arg(args.source_id, "source_id", "subscribe_event")
-        resolved_kind = _require_non_empty_arg(args.kind, "kind", "subscribe_event")
-        resolved_prompt = _require_non_empty_arg(args.prompt, "prompt", "subscribe_event")
+    async def _subscribe_event(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
+        resolved_source_id = _require_non_empty_arg(args["source_id"], "source_id", "subscribe_event")
+        resolved_kind = _require_non_empty_arg(args["kind"], "kind", "subscribe_event")
+        resolved_prompt = _require_non_empty_arg(args["prompt"], "prompt", "subscribe_event")
         policy = self._require_reactive_policy(context)
         now = time.time()
-        resolved_max_fires = 10 if args.max_fires_per_hour is None else args.max_fires_per_hour
-        resolved_cooldown = 0 if args.cooldown_seconds is None else args.cooldown_seconds
-        resolved_triage_provider: Literal["llm", "typesafe", "openai_decisions"] = (
-            "llm" if args.triage_provider is None else args.triage_provider
-        )
-
-        validated_trigger_id, triage, expires_at = self._validate_reactive_common(
-            context,
-            policy=policy,
-            trigger_id=args.trigger_id,
-            max_fires_per_hour=resolved_max_fires,
-            cooldown_seconds=resolved_cooldown,
-            expires_in_hours=args.expires_in_hours,
-            triage_instructions=args.triage_instructions,
-            triage_model=args.triage_model,
-            triage_provider=resolved_triage_provider,
-            triage_threshold=args.triage_threshold,
-            now=now,
-        )
-
+        common = self._validate_reactive_common(context, args, policy=policy, now=now)
         source_config = policy.event_sources.get(resolved_source_id)
         if source_config is None or not is_source_subscriber_allowed(
             source_config,
@@ -954,53 +837,37 @@ class TriggersTools(Toolkit):
         source_spec = ExternalEventSourceSpec(
             source_id=resolved_source_id,
             kind=resolved_kind,
-            match=dict(args.match) if args.match is not None else {},
+            match=dict(args["match"]) if args["match"] is not None else {},
         )
         validate_subscription_against_source(source_config, kind=source_spec.kind, match=source_spec.match)
-
         current_room_id = resolve_room_id(context.room_id, context.runtime_paths)
         current_thread_id = context.resolved_thread_id or context.thread_id
         target = await self._resolve_reactive_target(
             context,
-            target_agent=args.target_agent,
-            target_room_id=args.target_room_id,
-            target_thread_id=args.target_thread_id,
-            new_thread=args.new_thread,
-            thread_key=args.thread_key,
+            args,
             prompt=resolved_prompt,
             default_thread_id=lambda dest_room: current_thread_id if dest_room == current_room_id else None,
             allow_origin=False,
         )
-
         created = await self._create_reactive_rule(
             context,
+            args,
             policy=policy,
-            validated_trigger_id=validated_trigger_id,
-            description="" if args.description is None else args.description,
+            common=common,
             source=source_spec,
-            triage=triage,
             target=target,
-            once=True if args.once is None else args.once,
-            max_fires_per_hour=resolved_max_fires,
-            cooldown_seconds=resolved_cooldown,
-            expires_at=expires_at,
+            default_once=True,
             now=now,
         )
         return self._payload("ok", action="subscribe_event", trigger=self._reactive_record_payload(created))
 
-    async def _create_trigger(self, context: ToolRuntimeContext, args: _TriggerArgs) -> str:
-        resolved_trigger_id = _require_non_empty_arg(args.trigger_id, "trigger_id", "create")
-        resolved_public_key = _require_non_empty_arg(args.public_key, "public_key", "create")
-        resolved_key_id = "default" if args.key_id is None else args.key_id
+    async def _create_trigger(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
+        resolved_trigger_id = _require_non_empty_arg(args["trigger_id"], "trigger_id", "create")
+        resolved_public_key = _require_non_empty_arg(args["public_key"], "public_key", "create")
+        resolved_key_id = "default" if args["key_id"] is None else args["key_id"]
         external_store = ExternalTriggerStore(context.runtime_paths)
         reactive_store = ReactiveTriggerStore(context.runtime_paths)
-        target = await self._direct_target(
-            context,
-            target_agent=args.target_agent,
-            target_room_id=args.target_room_id,
-            target_thread_id=args.target_thread_id,
-            new_thread=args.new_thread,
-        )
+        target = await self._direct_target(context, args)
 
         def _create_direct() -> ExternalTriggerRecord:
             with trigger_id_creation_lock(context.runtime_paths):
@@ -1016,10 +883,10 @@ class TriggersTools(Toolkit):
                     target=target,
                     public_key=resolved_public_key,
                     key_id=resolved_key_id,
-                    description="" if args.description is None else args.description,
-                    allowed_kinds=args.allowed_kinds or (),
-                    replay_window_seconds=args.replay_window_seconds,
-                    max_body_bytes=args.max_body_bytes,
+                    description="" if args["description"] is None else args["description"],
+                    allowed_kinds=args["allowed_kinds"] or (),
+                    replay_window_seconds=args["replay_window_seconds"],
+                    max_body_bytes=args["max_body_bytes"],
                     config=context.config,
                 )
 
@@ -1032,8 +899,8 @@ class TriggersTools(Toolkit):
             public_key_fingerprint=record.public_key_fingerprint,
         )
 
-    async def _list_triggers(self, context: ToolRuntimeContext, args: _TriggerArgs) -> str:
-        include_disabled = args.include_disabled
+    async def _list_triggers(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
+        include_disabled = args["include_disabled"]
 
         def _list_records() -> str:
             external_store = ExternalTriggerStore(context.runtime_paths)
@@ -1066,7 +933,7 @@ class TriggersTools(Toolkit):
 
         return await run_blocking_until_complete(_list_records)
 
-    async def _update_trigger(self, context: ToolRuntimeContext, args: _TriggerArgs) -> str:
+    async def _update_trigger(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
         resolved_trigger_id = _validate_update_args(args)
         external_store = ExternalTriggerStore(context.runtime_paths)
         reactive_store = ReactiveTriggerStore(context.runtime_paths)
@@ -1083,15 +950,8 @@ class TriggersTools(Toolkit):
 
         now = time.time()
         validated = _build_updated_reactive_record(context, existing=existing, args=args, now=now)
-
-        reenabling = args.enabled is True and not existing.enabled
-        refreshed_tag_present: bool | None = None
-        if reenabling and isinstance(existing.source, ThreadTagSourceSpec):
-            refreshed_tag_present = await _read_thread_tag_present(
-                context,
-                existing.source,
-                preferred_agent=existing.target.agent,
-            )
+        reenabling = args["enabled"] is True and not existing.enabled
+        refreshed_tag_present = await _read_reenable_tag_state(context, existing, enabling=reenabling)
 
         def _persist() -> ReactiveTriggerRecord:
             if reenabling:
@@ -1101,7 +961,11 @@ class TriggersTools(Toolkit):
                     now=now,
                     refreshed_tag_present=refreshed_tag_present,
                 )
-            updated = reactive_store.update_trigger(validated, expected_rule_uid=existing.rule_uid)
+            updated = reactive_store.update_trigger(
+                validated,
+                expected_rule_uid=existing.rule_uid,
+                update_enabled=args["enabled"] is not None,
+            )
             if updated is None:
                 msg = f"Reactive trigger not found: {resolved_trigger_id}"
                 raise ReactiveTriggerStoreError(msg)
@@ -1111,30 +975,24 @@ class TriggersTools(Toolkit):
         self._notify_reactive_service(context)
         return self._payload("ok", action="update", trigger=self._reactive_record_payload(updated))
 
-    async def _set_enabled(self, context: ToolRuntimeContext, args: _TriggerArgs) -> str:
-        resolved_trigger_id = _require_non_empty_arg(args.trigger_id, "trigger_id", "set_enabled")
-        target_enabled = False if args.enabled is None else args.enabled
+    async def _set_enabled(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
+        resolved_trigger_id = _require_non_empty_arg(args["trigger_id"], "trigger_id", "set_enabled")
+        target_enabled = False if args["enabled"] is None else args["enabled"]
         external_store = ExternalTriggerStore(context.runtime_paths)
         reactive_store = ReactiveTriggerStore(context.runtime_paths)
 
         refreshed_tag_present: bool | None = None
-        if target_enabled and not await run_blocking_until_complete(
-            partial(_has_external_trigger, external_store, resolved_trigger_id),
-        ):
+        if target_enabled:
             reactive_record = await run_blocking_until_complete(
-                partial(reactive_store.get_trigger, resolved_trigger_id),
+                lambda: (
+                    None
+                    if _has_external_trigger(external_store, resolved_trigger_id)
+                    else reactive_store.get_trigger(resolved_trigger_id)
+                ),
             )
-            if (
-                reactive_record is not None
-                and not reactive_record.enabled
-                and isinstance(reactive_record.source, ThreadTagSourceSpec)
-            ):
+            if reactive_record is not None and not reactive_record.enabled:
                 self._require_reactive_owner_or_admin(context, reactive_record)
-                refreshed_tag_present = await _read_thread_tag_present(
-                    context,
-                    reactive_record.source,
-                    preferred_agent=reactive_record.target.agent,
-                )
+                refreshed_tag_present = await _read_reenable_tag_state(context, reactive_record, enabling=True)
         return await run_blocking_until_complete(
             partial(
                 self._apply_set_enabled_sync,
@@ -1147,8 +1005,8 @@ class TriggersTools(Toolkit):
             ),
         )
 
-    async def _delete_trigger(self, context: ToolRuntimeContext, args: _TriggerArgs) -> str:
-        resolved_trigger_id = _require_non_empty_arg(args.trigger_id, "trigger_id", "delete")
+    async def _delete_trigger(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
+        resolved_trigger_id = _require_non_empty_arg(args["trigger_id"], "trigger_id", "delete")
 
         def _delete() -> str:
             external_store = ExternalTriggerStore(context.runtime_paths)
@@ -1173,10 +1031,10 @@ class TriggersTools(Toolkit):
 
         return await run_blocking_until_complete(_delete)
 
-    async def _rotate_key(self, context: ToolRuntimeContext, args: _TriggerArgs) -> str:
-        resolved_trigger_id = _require_non_empty_arg(args.trigger_id, "trigger_id", "rotate_key")
-        resolved_public_key = _require_non_empty_arg(args.public_key, "public_key", "rotate_key")
-        resolved_key_id = "default" if args.key_id is None else args.key_id
+    async def _rotate_key(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
+        resolved_trigger_id = _require_non_empty_arg(args["trigger_id"], "trigger_id", "rotate_key")
+        resolved_public_key = _require_non_empty_arg(args["public_key"], "public_key", "rotate_key")
+        resolved_key_id = "default" if args["key_id"] is None else args["key_id"]
 
         def _rotate() -> str:
             external_store = ExternalTriggerStore(context.runtime_paths)
@@ -1203,44 +1061,83 @@ class TriggersTools(Toolkit):
 
         return await run_blocking_until_complete(_rotate)
 
-    async def _history(self, context: ToolRuntimeContext, args: _TriggerArgs) -> str:
-        if args.limit is None:
+    async def _history(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
+        raw_limit = args["limit"]
+        if raw_limit is None:
             clamped_limit = _DEFAULT_HISTORY_LIMIT
-        elif isinstance(args.limit, bool):
+        elif isinstance(raw_limit, bool):
             msg = "limit must be an integer."
             raise ValueError(msg)
         else:
-            clamped_limit = max(1, min(args.limit, _MAX_HISTORY_LIMIT))
+            clamped_limit = max(1, min(raw_limit, _MAX_HISTORY_LIMIT))
 
-        def _read_history() -> list[FiringRecord]:
-            external_store = ExternalTriggerStore(context.runtime_paths)
-            reactive_store = ReactiveTriggerStore(context.runtime_paths)
-            if args.trigger_id is not None:
-                stripped_id = args.trigger_id.strip()
-                if not stripped_id:
-                    msg = "trigger_id must be a non-empty string when provided."
-                    raise ValueError(msg)
-                record = _load_reactive_or_error(
+        external_store = ExternalTriggerStore(context.runtime_paths)
+        reactive_store = ReactiveTriggerStore(context.runtime_paths)
+        is_admin = self._is_admin(context)
+        room_access_cache: dict[str, bool] = {}
+
+        if args["trigger_id"] is not None:
+            stripped_id = args["trigger_id"].strip()
+            if not stripped_id:
+                msg = "trigger_id must be a non-empty string when provided."
+                raise ValueError(msg)
+            record = await run_blocking_until_complete(
+                partial(
+                    _load_reactive_or_error,
                     external_store,
                     reactive_store,
                     stripped_id,
                     direct_error="Firing history is only available for reactive triggers.",
-                )
-                self._require_reactive_owner_or_admin(context, record, verb="viewed")
-                return reactive_store.list_firings(trigger_id=stripped_id, limit=clamped_limit)
-
-            if self._is_admin(context):
-                return reactive_store.list_firings(limit=clamped_limit)
+                ),
+            )
+            self._require_reactive_owner_or_admin(context, record, verb="viewed")
+            if not is_admin and not await self._has_source_access_for_history(
+                context,
+                record,
+                room_access_cache=room_access_cache,
+            ):
+                msg = f"You no longer have access to the source for trigger {record.trigger_id}."
+                raise ReactiveTriggerStoreError(msg)
+            firings = await run_blocking_until_complete(
+                partial(reactive_store.list_firings, trigger_id=stripped_id, limit=clamped_limit),
+            )
+            firings = [firing for firing in firings if firing.rule_uid == record.rule_uid]
+        elif is_admin:
+            firings = await run_blocking_until_complete(
+                partial(reactive_store.list_firings, limit=clamped_limit),
+            )
+        else:
             owner_ids = equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths)
-            return reactive_store.list_firings(owner_user_ids=owner_ids, limit=clamped_limit)
+            candidate_rules = await run_blocking_until_complete(
+                partial(reactive_store.list_triggers_with_firings, owner_user_ids=owner_ids),
+            )
+            allowed_uids: dict[str, str] = {}
+            for candidate in candidate_rules:
+                if await self._has_source_access_for_history(
+                    context,
+                    candidate,
+                    room_access_cache=room_access_cache,
+                ):
+                    allowed_uids[candidate.trigger_id] = candidate.rule_uid
+            if not allowed_uids:
+                firings = []
+            else:
+                raw_firings = await run_blocking_until_complete(
+                    partial(
+                        reactive_store.list_firings,
+                        owner_user_ids=owner_ids,
+                        trigger_ids=allowed_uids,
+                        limit=clamped_limit,
+                    ),
+                )
+                firings = [firing for firing in raw_firings if allowed_uids.get(firing.trigger_id) == firing.rule_uid]
 
-        firings = await run_blocking_until_complete(_read_history)
         serialized = [_firing_summary_payload(firing) for firing in firings]
         return self._payload("ok", action="history", firings=serialized, count=len(serialized))
 
-    async def _test_trigger(self, context: ToolRuntimeContext, args: _TriggerArgs) -> str:
-        resolved_trigger_id = _require_non_empty_arg(args.trigger_id, "trigger_id", "test")
-        if args.sample_data is not None and not isinstance(args.sample_data, dict):
+    async def _test_trigger(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
+        resolved_trigger_id = _require_non_empty_arg(args["trigger_id"], "trigger_id", "test")
+        if args["sample_data"] is not None and not isinstance(args["sample_data"], dict):
             msg = "sample_data must be a JSON object."
             raise ValueError(msg)
 
@@ -1256,7 +1153,7 @@ class TriggersTools(Toolkit):
         self._require_reactive_owner_or_admin(context, rule, verb="tested")
 
         now = time.time()
-        event, matched = _build_dry_run_event_and_match(context, rule=rule, args=args, now=now)
+        event, matched, skip_note = _build_dry_run_event_and_match(context, rule=rule, args=args, now=now)
 
         triage_decision: bool | None = None
         triage_reason: str | None = None
@@ -1277,6 +1174,9 @@ class TriggersTools(Toolkit):
         elif expired:
             would_fire = False
             note = "Dry run only (no state changed or message sent); trigger is currently expired."
+        elif skip_note is not None:
+            would_fire = False
+            note = skip_note
         else:
             would_fire = matched and (triage_decision is not False)
             note = "Dry run only: no state changed, no rate-limit/once quota consumed, and no Matrix message sent."
@@ -1331,15 +1231,15 @@ def _load_reactive_or_error(
     raise ReactiveTriggerStoreError(msg)
 
 
-def _validate_update_args(args: _TriggerArgs) -> str:
-    resolved_trigger_id = _require_non_empty_arg(args.trigger_id, "trigger_id", "update")
-    provided_immutable = [name for name in _IMMUTABLE_UPDATE_FIELDS if getattr(args, name) is not None]
-    if args.new_thread:
+def _validate_update_args(args: _TriggerParams) -> str:
+    resolved_trigger_id = _require_non_empty_arg(args["trigger_id"], "trigger_id", "update")
+    provided_immutable = [name for name in _IMMUTABLE_UPDATE_FIELDS if args[name] is not None]
+    if args["new_thread"]:
         provided_immutable.append("new_thread")
     if provided_immutable:
         msg = f"Cannot modify immutable trigger field(s) in place: {', '.join(sorted(provided_immutable))}."
         raise ValueError(msg)
-    if all(getattr(args, name) is None for name in _UPDATABLE_FIELDS):
+    if all(args[name] is None for name in _UPDATABLE_FIELDS):
         msg = "Provide at least one field to update."
         raise ValueError(msg)
     return resolved_trigger_id
@@ -1445,29 +1345,29 @@ def _build_updated_reactive_record(
     context: ToolRuntimeContext,
     *,
     existing: ReactiveTriggerRecord,
-    args: _TriggerArgs,
+    args: _TriggerParams,
     now: float,
 ) -> ReactiveTriggerRecord:
     policy = context.config.external_trigger_policy
     new_source = _resolve_updated_source(context, existing=existing, args=args)
     new_triage = _resolve_updated_triage(context, existing=existing, args=args)
-    if args.max_fires_per_hour is not None:
-        _validate_max_fires_per_hour(args.max_fires_per_hour, policy=policy)
-    if args.cooldown_seconds is not None:
-        _validate_cooldown_seconds(args.cooldown_seconds)
+    if args["max_fires_per_hour"] is not None:
+        _validate_max_fires_per_hour(args["max_fires_per_hour"], policy=policy)
+    if args["cooldown_seconds"] is not None:
+        _validate_cooldown_seconds(args["cooldown_seconds"])
     new_expires_at = (
         existing.expires_at
-        if args.expires_in_hours is None
-        else _validate_expires_in_hours(args.expires_in_hours, now=now)
+        if args["expires_in_hours"] is None
+        else _validate_expires_in_hours(args["expires_in_hours"], now=now)
     )
     new_target = (
         existing.target
-        if args.prompt is None
-        else TriggerTargetSpec.model_validate({**existing.target.model_dump(), "prompt": args.prompt})
+        if args["prompt"] is None
+        else TriggerTargetSpec.model_validate({**existing.target.model_dump(), "prompt": args["prompt"]})
     )
-    if args.enabled is None:
+    if args["enabled"] is None:
         new_enabled, new_disabled_reason = existing.enabled, existing.disabled_reason
-    elif args.enabled:
+    elif args["enabled"]:
         new_enabled, new_disabled_reason = True, None
     else:
         new_enabled = False
@@ -1475,17 +1375,19 @@ def _build_updated_reactive_record(
     return ReactiveTriggerRecord.model_validate(
         {
             **existing.model_dump(),
-            "description": existing.description if args.description is None else args.description,
+            "description": existing.description if args["description"] is None else args["description"],
             "source": new_source.model_dump(),
             "triage": new_triage.model_dump() if new_triage is not None else None,
             "target": new_target.model_dump(),
             "enabled": new_enabled,
             "disabled_reason": new_disabled_reason,
-            "once": existing.once if args.once is None else args.once,
+            "once": existing.once if args["once"] is None else args["once"],
             "max_fires_per_hour": (
-                existing.max_fires_per_hour if args.max_fires_per_hour is None else args.max_fires_per_hour
+                existing.max_fires_per_hour if args["max_fires_per_hour"] is None else args["max_fires_per_hour"]
             ),
-            "cooldown_seconds": (existing.cooldown_seconds if args.cooldown_seconds is None else args.cooldown_seconds),
+            "cooldown_seconds": (
+                existing.cooldown_seconds if args["cooldown_seconds"] is None else args["cooldown_seconds"]
+            ),
             "expires_at": new_expires_at,
             "updated_at": now,
         },
@@ -1496,24 +1398,24 @@ def _resolve_updated_source(
     context: ToolRuntimeContext,
     *,
     existing: ReactiveTriggerRecord,
-    args: _TriggerArgs,
+    args: _TriggerParams,
 ) -> RoomMessageSourceSpec | ThreadTagSourceSpec | ExternalEventSourceSpec:
-    if any(value is not None for value in (args.pattern, args.senders, args.include_bots)) and not isinstance(
+    if any(args[name] is not None for name in ("pattern", "senders", "include_bots")) and not isinstance(
         existing.source,
         RoomMessageSourceSpec,
     ):
         msg = "pattern, senders, and include_bots are only valid for room_message triggers."
         raise ValueError(msg)
-    if args.match is not None and not isinstance(existing.source, ExternalEventSourceSpec):
+    if args["match"] is not None and not isinstance(existing.source, ExternalEventSourceSpec):
         msg = "match is only valid for external_event triggers."
         raise ValueError(msg)
 
     if isinstance(existing.source, RoomMessageSourceSpec):
         new_pattern = (
-            existing.source.pattern if args.pattern is None else (None if args.pattern == "" else args.pattern)
+            existing.source.pattern if args["pattern"] is None else (None if args["pattern"] == "" else args["pattern"])
         )
-        new_senders = list(existing.source.senders) if args.senders is None else list(args.senders)
-        new_include_bots = existing.source.include_bots if args.include_bots is None else args.include_bots
+        new_senders = list(existing.source.senders) if args["senders"] is None else list(args["senders"])
+        new_include_bots = existing.source.include_bots if args["include_bots"] is None else args["include_bots"]
         return RoomMessageSourceSpec(
             room_id=existing.source.room_id,
             thread_id=existing.source.thread_id,
@@ -1522,7 +1424,7 @@ def _resolve_updated_source(
             include_bots=new_include_bots,
         )
 
-    if isinstance(existing.source, ExternalEventSourceSpec) and args.match is not None:
+    if isinstance(existing.source, ExternalEventSourceSpec) and args["match"] is not None:
         source_config = context.config.external_trigger_policy.event_sources.get(existing.source.source_id)
         if source_config is None or not is_source_subscriber_allowed(
             source_config,
@@ -1532,7 +1434,7 @@ def _resolve_updated_source(
         ):
             msg = f"Event source {existing.source.source_id!r} is unavailable."
             raise ValueError(msg)
-        new_match = dict(args.match)
+        new_match = dict(args["match"])
         validate_subscription_against_source(source_config, kind=existing.source.kind, match=new_match)
         return ExternalEventSourceSpec(
             source_id=existing.source.source_id,
@@ -1547,23 +1449,22 @@ def _resolve_updated_triage(
     context: ToolRuntimeContext,
     *,
     existing: ReactiveTriggerRecord,
-    args: _TriggerArgs,
+    args: _TriggerParams,
 ) -> TriageSpec | None:
     if all(
-        value is None
-        for value in (args.triage_instructions, args.triage_model, args.triage_provider, args.triage_threshold)
+        args[name] is None for name in ("triage_instructions", "triage_model", "triage_provider", "triage_threshold")
     ):
         return existing.triage
     if existing.source.source_type == "thread_tag":
         msg = "Triage is not supported for thread_tag triggers."
         raise ValueError(msg)
-    if args.triage_instructions == "":
-        if args.triage_model is not None or args.triage_threshold is not None:
+    if args["triage_instructions"] == "":
+        if args["triage_model"] is not None or args["triage_threshold"] is not None:
             msg = "Cannot set triage_model or triage_threshold while clearing triage_instructions."
             raise ValueError(msg)
         return None
-    if args.triage_instructions is not None:
-        effective_instructions = args.triage_instructions
+    if args["triage_instructions"] is not None:
+        effective_instructions = args["triage_instructions"]
     elif existing.triage is not None:
         effective_instructions = existing.triage.instructions
     else:
@@ -1571,13 +1472,13 @@ def _resolve_updated_triage(
         raise ValueError(msg)
 
     effective_provider: Literal["llm", "typesafe", "openai_decisions"] = (
-        args.triage_provider
-        if args.triage_provider is not None
+        args["triage_provider"]
+        if args["triage_provider"] is not None
         else (existing.triage.provider if existing.triage is not None else "llm")
     )
     effective_model = (
-        args.triage_model
-        if args.triage_model is not None
+        args["triage_model"]
+        if args["triage_model"] is not None
         else (
             existing.triage.model
             if effective_provider == "llm" and existing.triage is not None and existing.triage.provider == "llm"
@@ -1585,8 +1486,8 @@ def _resolve_updated_triage(
         )
     )
     effective_threshold = (
-        args.triage_threshold
-        if args.triage_threshold is not None
+        args["triage_threshold"]
+        if args["triage_threshold"] is not None
         else (
             existing.triage.threshold
             if effective_provider != "llm" and existing.triage is not None and existing.triage.provider != "llm"
@@ -1606,12 +1507,13 @@ def _build_dry_run_event_and_match(
     context: ToolRuntimeContext,
     *,
     rule: ReactiveTriggerRecord,
-    args: _TriggerArgs,
+    args: _TriggerParams,
     now: float,
-) -> tuple[TriggerEvent, bool]:
-    extra_data = dict(args.sample_data) if args.sample_data is not None else {}
+) -> tuple[TriggerEvent, bool, str | None]:
+    extra_data = dict(args["sample_data"]) if args["sample_data"] is not None else {}
+    raw_kind = args["kind"]
     if isinstance(rule.source, RoomMessageSourceSpec):
-        sample_actor = args.actor if args.actor is not None else context.requester_id
+        sample_actor = args["actor"] if args["actor"] is not None else context.requester_id
         raw_thread_id = extra_data.get("thread_id")
         sample_thread_id = (
             raw_thread_id
@@ -1621,36 +1523,52 @@ def _build_dry_run_event_and_match(
         event = TriggerEvent(
             source_type="room_message",
             source_id=rule.source.room_id,
-            kind=args.kind.strip() if args.kind and args.kind.strip() else "room.message",
+            kind=raw_kind.strip() if raw_kind and raw_kind.strip() else "room.message",
             event_id="dry_run",
             timestamp=now,
             room_id=rule.source.room_id,
             thread_id=sample_thread_id,
             actor=sample_actor,
-            text=args.text if args.text is not None else "",
+            text=args["text"] if args["text"] is not None else "",
             data={"room_id": rule.source.room_id, "sender": sample_actor, **extra_data},
         )
+        if sample_actor in managed_entity_user_ids(rule.target.agent, context.config, context.runtime_paths):
+            return (
+                event,
+                False,
+                "Dry run only (no state changed or message sent); messages from the target agent or team are always skipped.",
+            )
+        if not rule.source.include_bots and not is_human_requester_id(
+            sample_actor,
+            context.config,
+            context.runtime_paths,
+        ):
+            return (
+                event,
+                False,
+                "Dry run only (no state changed or message sent); bot/non-human messages are skipped when include_bots=False.",
+            )
         matched = matches_room_message(
             rule.source,
             event,
             config=context.config,
             runtime_paths=context.runtime_paths,
         )
-        return event, matched
+        return event, matched, None
 
     if isinstance(rule.source, ExternalEventSourceSpec):
-        sample_kind = args.kind.strip() if args.kind is not None and args.kind.strip() else rule.source.kind
+        sample_kind = raw_kind.strip() if raw_kind is not None and raw_kind.strip() else rule.source.kind
         event = TriggerEvent(
             source_type="external_event",
             source_id=rule.source.source_id,
             kind=sample_kind,
             event_id="dry_run",
             timestamp=now,
-            actor=args.actor,
-            text=args.text,
+            actor=args["actor"],
+            text=args["text"],
             data=extra_data,
         )
-        return event, matches_external_event(rule.source, event)
+        return event, matches_external_event(rule.source, event), None
 
     raw_tag_val = extra_data.get("tag")
     raw_tag = raw_tag_val if isinstance(raw_tag_val, str) else rule.source.tag
@@ -1658,23 +1576,23 @@ def _build_dry_run_event_and_match(
     raw_transition_val = extra_data.get("transition")
     if isinstance(raw_transition_val, str):
         sample_transition = raw_transition_val.strip()
-    elif args.kind and args.kind.strip().startswith("thread_tag."):
-        sample_transition = args.kind.strip().removeprefix("thread_tag.")
+    elif raw_kind and raw_kind.strip().startswith("thread_tag."):
+        sample_transition = raw_kind.strip().removeprefix("thread_tag.")
     else:
         sample_transition = rule.source.transition
     raw_thread_val = extra_data.get("thread_id")
     sample_thread_id = raw_thread_val if isinstance(raw_thread_val, str) else rule.source.thread_id
-    sample_actor = args.actor if args.actor is not None else context.requester_id
+    sample_actor = args["actor"] if args["actor"] is not None else context.requester_id
     event = TriggerEvent(
         source_type="thread_tag",
         source_id=rule.source.room_id,
-        kind=args.kind.strip() if args.kind and args.kind.strip() else f"thread_tag.{sample_transition}",
+        kind=raw_kind.strip() if raw_kind and raw_kind.strip() else f"thread_tag.{sample_transition}",
         event_id="dry_run",
         timestamp=now,
         room_id=rule.source.room_id,
         thread_id=sample_thread_id,
         actor=sample_actor,
-        text=args.text,
+        text=args["text"],
         data={
             "room_id": rule.source.room_id,
             "thread_id": sample_thread_id,
@@ -1688,7 +1606,7 @@ def _build_dry_run_event_and_match(
         and sample_tag.lower() == rule.source.tag.lower()
         and sample_transition == rule.source.transition
     )
-    return event, matched
+    return event, matched, None
 
 
 async def _read_thread_tag_present(
@@ -1701,6 +1619,17 @@ async def _read_thread_tag_present(
     tag_state = await get_thread_tags(watch_client, source.room_id, source.thread_id)
     current_tags = tag_state.tags if tag_state is not None else {}
     return source.tag.lower() in {existing.lower() for existing in current_tags}
+
+
+async def _read_reenable_tag_state(
+    context: ToolRuntimeContext,
+    record: ReactiveTriggerRecord,
+    *,
+    enabling: bool,
+) -> bool | None:
+    if not enabling or record.enabled or not isinstance(record.source, ThreadTagSourceSpec):
+        return None
+    return await _read_thread_tag_present(context, record.source, preferred_agent=record.target.agent)
 
 
 def _has_external_trigger(external_store: ExternalTriggerStore, trigger_id: str) -> bool:
@@ -1863,7 +1792,7 @@ def _client_for_room(
     rooms = getattr(context.client, "rooms", None)
     if isinstance(rooms, Mapping) and room_id in rooms:
         return context.client
-    if hasattr(context.client, "room_get_state"):
+    if hasattr(context.client, "room_get_state") or hasattr(context.client, "joined_members"):
         return context.client
     return None
 
@@ -1905,33 +1834,51 @@ def _watch_room_candidate_entities(
     return candidates
 
 
+async def _live_room_membership(
+    client: nio.AsyncClient,
+    room_id: str,
+    owner_ids: set[str],
+) -> bool | None:
+    if hasattr(client, "room_get_state"):
+        room_state = await read_room_state(client, room_id)
+        if room_state is None:
+            return None
+        return any(room_state.events.get(("m.room.member", uid), {}).get("membership") == "join" for uid in owner_ids)
+    if hasattr(client, "joined_members"):
+        response = await client.joined_members(room_id)
+        if isinstance(response, nio.JoinedMembersResponse):
+            return any(member.user_id in owner_ids for member in response.members)
+    return None
+
+
 async def _verify_owner_joined_room(
     context: ToolRuntimeContext,
     *,
     room_id: str,
     preferred_agent: str | None = None,
+    require_live: bool = False,
 ) -> None:
     """Verify that the requester is joined to room_id using preferred_agent when joined or another joined reader."""
     current_room_id = resolve_room_id(context.room_id, context.runtime_paths)
     owner_ids = equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths)
     client = _client_for_room(context, room_id, preferred_agent=preferred_agent)
     if client is not None:
-        if hasattr(client, "room_get_state"):
-            room_state = await read_room_state(client, room_id)
-            if room_state is not None:
-                if any(
-                    room_state.events.get(("m.room.member", uid), {}).get("membership") == "join" for uid in owner_ids
-                ):
-                    return
-                msg = f"You must be joined to room {room_id} to create this trigger."
-                raise ReactiveTriggerStoreError(msg)
+        live_joined = await _live_room_membership(client, room_id, owner_ids)
+        if live_joined is True:
+            return
+        if live_joined is False:
+            msg = f"You must be joined to room {room_id} to access this trigger."
+            raise ReactiveTriggerStoreError(msg)
+        if require_live:
+            msg = f"Cannot verify that you are joined to room {room_id}."
+            raise ReactiveTriggerStoreError(msg)
         rooms = getattr(client, "rooms", None)
         room = rooms.get(room_id) if isinstance(rooms, Mapping) else None
         users = getattr(room, "users", None)
         if isinstance(users, Mapping) and users:
             if any(uid in users for uid in owner_ids):
                 return
-            msg = f"You must be joined to room {room_id} to create this trigger."
+            msg = f"You must be joined to room {room_id} to access this trigger."
             raise ReactiveTriggerStoreError(msg)
 
     if room_id == current_room_id:
