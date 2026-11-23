@@ -169,15 +169,17 @@ def _catalog_authority(config: Config, agent_name: str) -> dict[str, Any] | None
     """Return what a prepared catalog's toolkits and permissions were built from, or None once the agent is gone.
 
     Other agents' and teams' entries are left out: a call re-authorizes its requester against the current config, and
-    nothing an edit there changes reaches the toolkits this agent's catalog holds. So are the model entries: they
-    shape model requests and prompt text, like the agent's own ``model`` field, and no toolkit is resolved, configured,
-    routed, or permitted from one.
+    nothing an edit there changes reaches the toolkits this agent's catalog holds. So are ``models`` and
+    ``room_models``: they shape model requests and prompt text, like the agent's own ``model`` field, and no toolkit
+    is resolved, configured, routed, or permitted from one. The agent's own ``rooms`` are also excluded here and
+    checked explicitly in ``check_prepared_catalog_authority`` so appending a room stays valid while removing one
+    refuses the catalog.
     """
     agent = config.agents.get(agent_name)
     if agent is None:
         return None
     private = config.__pydantic_private__ or {}
-    dump = config.model_dump(exclude={"agents", "teams", "models"})
+    dump = config.model_dump(exclude={"agents", "teams", "models", "room_models"})
     # Each onboarding adds the new user's agent to calls.agents; another generated agent's entry never reaches this one.
     dump["calls"]["agents"] = {
         name: profile
@@ -186,7 +188,7 @@ def _catalog_authority(config: Config, agent_name: str) -> dict[str, Any] | None
     }
     return {
         **dump,
-        "agent": agent.model_dump(exclude=set(_PROMPT_ONLY_AGENT_FIELDS)),
+        "agent": agent.model_dump(exclude=set(_PROMPT_ONLY_AGENT_FIELDS) | {"rooms"}),
         "private": {
             name: value.get(agent_name) if name in _PER_AGENT_PRIVATE_FIELDS else value
             for name, value in private.items()
@@ -200,13 +202,20 @@ def check_prepared_catalog_authority(context: ToolRuntimeContext) -> None:
 
     The catalog's toolkits were resolved from ``context.config``, while live reloads hand running turns the current
     config. Edits that leave the agent's own toolkits and permissions alone, such as another agent's instructions,
-    this agent's own prompt, or a model entry, keep the catalog valid; any other edit refuses it.
+    this agent's own prompt, a ``models`` or ``room_models`` entry, or appending a room to this agent, keep the
+    catalog valid; removing one of its rooms or any other edit refuses it.
     """
     current = context.current_config
     if current is context.config:
         return
-    authority = _catalog_authority(current, context.agent_name)
-    if authority is None or authority != _catalog_authority(context.config, context.agent_name):
+    old_agent = context.config.agents.get(context.agent_name)
+    current_agent = current.agents.get(context.agent_name)
+    if (
+        old_agent is None
+        or current_agent is None
+        or not set(old_agent.rooms) <= set(current_agent.rooms)
+        or _catalog_authority(current, context.agent_name) != _catalog_authority(context.config, context.agent_name)
+    ):
         msg = "Current configuration no longer permits this prepared CLI call"
         raise PermissionError(msg)
 
