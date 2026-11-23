@@ -2621,7 +2621,7 @@ expose = [
     "AgentNotReadyError",
     "AgentRuntime",
     "await_child",
-    "check_agent_schema",
+    "schema_failure",
     "delegated_request",
     "launch_child",
 ]

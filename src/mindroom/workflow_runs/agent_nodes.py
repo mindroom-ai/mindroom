@@ -80,11 +80,7 @@ EARLIER_TURN = "cut:"
 
 
 class AgentNodeError(Exception):
-    """An agent turn that did not start: the refusal the script reads, of kind `refused` unless it says another."""
-
-    def __init__(self, message: str, kind: str = "refused") -> None:
-        super().__init__(message)
-        self.kind = kind
+    """An agent turn that did not start: the refusal the script reads."""
 
 
 class AgentNotReadyError(Exception):
@@ -106,27 +102,25 @@ def delegated_request(arguments: dict[str, object]) -> dict[str, object]:
     return {names.get(name, name): value for name, value in arguments.items()}
 
 
-def check_agent_schema(request: dict[str, object]) -> None:
-    """Raise `AgentNodeError` with kind `schema` when *request*'s schema cannot be used."""
+def schema_failure(request: dict[str, object]) -> str | None:
+    """Return why *request*'s schema cannot be used, or None when it is valid or absent."""
     schema = request.get("schema")
     if schema is None:
-        return
+        return None
     if request.get("output_path") is not None:
         # The file would hold each turn's answer before it is checked, and a call that wrote one is not run again.
-        raise AgentNodeError(_SCHEMA_WITH_OUTPUT_PATH, kind="schema")
+        return _SCHEMA_WITH_OUTPUT_PATH
     try:
         check_schema(schema)
     except SchemaError as exc:
-        raise AgentNodeError(str(exc), kind="schema") from exc
+        return str(exc)
+    return None
 
 
 def _first_prompt(node: WorkflowNode) -> str:
     """Return what the agent of *node* is sent first: its prompt, and with a schema the instruction to match it."""
     prompt, schema = str(node.request.get("prompt")), node.request.get("schema")
-    if schema is None:
-        return prompt
-    check_agent_schema(node.request)
-    return schema_prompt(prompt, schema)
+    return prompt if schema is None else schema_prompt(prompt, schema)
 
 
 def turn_job_id(run: WorkflowRun, key: str, generation: int, turn: int) -> str:
