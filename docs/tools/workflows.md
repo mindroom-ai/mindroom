@@ -292,9 +292,10 @@ Nothing caps what a run costs unless its start names a limit: `start_workflow(..
   An amount under a cent is written with up to six decimal places.
 - A nested run is under its ancestors' limits too: before starting new work, it checks every ancestor run that has a `max_cost_usd`.
   Once an ancestor is over its limit, the nested run starts no new call, lets its running calls finish, and ends `interrupted` with that reason, and the parent then stops at its limit.
-- To continue a run stopped at its cost limit, call `resume_workflow(run_id, max_cost_usd=...)` (or send `io.mindroom.workflow_control` with `{"run": "<run id>", "action": "resume", "max_cost_usd": ...}`) with a limit above what the run has spent.
-  Resume replays from stored results as any resume does; saved answers cost nothing, while calls that run again add to `cost_usd`.
-  Resuming a run that has reached its limit without a higher `max_cost_usd` is refused with `Run <id> has already spent $<spent> (limit $<limit>). Pass max_cost_usd above $<spent> to resume it.`
+- To continue a run stopped at its cost limit, call `resume_workflow(run_id, max_cost_usd=...)` with a limit above what the run has spent, or click Resume on the run's card.
+  Resume replays from stored results as any resume does; saved answers cost nothing, while calls that run again add to `cost_usd`, and an interrupted nested child continues under the parent's raised limit.
+  Calling `resume_workflow` on a run that has reached its limit without a higher `max_cost_usd` is refused with `Run <id> has already spent $<spent> (limit $<limit>). Pass max_cost_usd above $<spent> to resume it.`
+  A card Resume control (`io.mindroom.workflow_control`) without `max_cost_usd` on a run stopped at its limit raises `max_cost_usd` to `spent + max_cost_usd` (one more allowance of the same size).
 - A turn on a model without a price adds nothing to `cost_usd`, so a limit cannot stop a run of unpriced models.
 - The limit is checked before starting new work and when a call ends, so the run can pass it by what the calls already running cost.
   A further turn of a [`schema`](#structured-output) call is new spending too: at the limit it does not start, and the run ends `interrupted`.
@@ -333,7 +334,7 @@ Room state lists the run as one job, with its IDs only: no title, label or phase
 
 MindRoom Chat's Resume button sends `io.mindroom.workflow_control` with `{"run": "<run id>", "action": "resume"}` (and optionally `"max_cost_usd"`) in the run's thread.
 It resumes the run as `resume_workflow(run_id, max_cost_usd=...)` does, with a new job, when the run's requester sent it in the run's room and thread.
-For a run stopped at its cost limit, a Resume control without a `max_cost_usd` above what the run spent changes nothing; pass a higher `max_cost_usd` on the control event or call `resume_workflow(run_id, max_cost_usd=...)`.
+For a run stopped at its cost limit, a Resume control without `max_cost_usd` raises the limit to `spent + current max_cost_usd` (one more allowance of the same size); an explicit `max_cost_usd` that is not above what the run spent changes nothing.
 The report of that job is delivered in the thread when the run ends, as the report of any job nobody waits for.
 The bot that posts a run's cards also takes these events and the answers to its questions: for a run that a team's member started in the team, that is the team's bot.
 Anything else, such as another person's event, another action, or a run that has not ended, changes nothing.

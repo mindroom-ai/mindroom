@@ -599,7 +599,12 @@ async def handle_workflow_control(
             # The event took the run before, and its job is no longer kept: delivered again, it starts nothing.
             return False
         async with jobs.admission(job_id):
-            arguments = {"run_id": run.run_id, "max_cost_usd": content.get("max_cost_usd")}
+            max_cost = content.get("max_cost_usd")
+            if max_cost is None and run.max_cost_usd is not None:
+                spent = (await asyncio.to_thread(workflows.run_usage, run.run_id))["cost_usd"]
+                if spent >= run.max_cost_usd or math.isclose(spent, run.max_cost_usd, rel_tol=1e-9, abs_tol=0.0):
+                    max_cost = spent + run.max_cost_usd
+            arguments = {"run_id": run.run_id, "max_cost_usd": max_cost}
             job = await _resume_job(workflows, context, arguments, limits, job_id, jobs)
             # In the owner's context, which the job's task keeps, as the job of a call's resume has it.
             with tool_runtime_context(context):

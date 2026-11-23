@@ -69,9 +69,16 @@ async def _fail(stack: WorkflowStack) -> str:
     return job_id
 
 
-def _event(event_type: str, content: dict[str, object], *, sender: str, thread: str | None) -> nio.UnknownEvent:
+def _event(
+    event_type: str,
+    content: dict[str, object],
+    *,
+    sender: str,
+    thread: str | None,
+    event_id: str = "$control",
+) -> nio.UnknownEvent:
     relation = {} if thread is None else {"m.relates_to": {"rel_type": "m.thread", "event_id": thread}}
-    source = {"type": event_type, "sender": sender, "event_id": "$control", "origin_server_ts": 1, "content": {}}
+    source = {"type": event_type, "sender": sender, "event_id": event_id, "origin_server_ts": 1, "content": {}}
     event = nio.UnknownEvent.from_dict(source)
     assert isinstance(event, nio.UnknownEvent)
     event.source["content"] = content | relation
@@ -87,12 +94,13 @@ async def _control(
     thread: str | None = _THREAD,
     agent_name: str | None = None,
     max_cost_usd: float | None = None,
+    event_id: str = "$control",
 ) -> bool:
     """Hand one control event that names the stack's run to an agent's bot, as its journal callback does."""
     payload: dict[str, object] = {"run": stack.run_id, "action": action}
     if max_cost_usd is not None:
         payload["max_cost_usd"] = max_cost_usd
-    event = _event(WORKFLOW_CONTROL_EVENT_TYPE, payload, sender=sender, thread=thread)
+    event = _event(WORKFLOW_CONTROL_EVENT_TYPE, payload, sender=sender, thread=thread, event_id=event_id)
     room = nio.MatrixRoom(room_id, "@mindroom_watcher:example.test")
     return await handle_workflow_control(
         room,
@@ -383,17 +391,26 @@ async def test_workflow_job_whose_run_ended_while_waiting_to_continue_clears_roo
 
 
 @pytest.mark.asyncio
-async def test_resume_control_at_cost_limit_requires_higher_max_cost_usd(stack: WorkflowStack) -> None:
-    """A Resume control on a cost-stopped run refuses without a higher limit and resumes when given one."""
+async def test_resume_control_at_cost_limit_adds_one_more_allowance_when_omitted(stack: WorkflowStack) -> None:
+    """A bare Resume control on a cost-stopped run raises max_cost_usd to spent + current limit; explicit low fails."""
     await _fail(stack)
     run = stack.store.get_run(stack.run_id)
     stack.store.update_run(run.run_id, run.epoch, when=frozenset({run.state}), max_cost_usd=1.0)
     stack.store.add_usage(run.run_id, "@0", 1, "turn-1", run.attempt, {"cost_usd": 1.2})
 
-    assert await _control(stack) is False
     assert await _control(stack, max_cost_usd=1.2) is False
     assert stack.store.get_run(stack.run_id).attempt == 1
 
-    assert await _control(stack, max_cost_usd=2.0) is True
+    assert await _control(stack) is True
     await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
-    assert stack.store.get_run(stack.run_id).max_cost_usd == 2.0
+    assert stack.store.get_run(stack.run_id).max_cost_usd == pytest.approx(2.2)
+
+    second_job = stack.store.get_run(stack.run_id).job_id
+    assert second_job is not None
+    await stack.end_attempt(ScriptRunState.FAILED)
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        await stack.jobs.wait(second_job, owner=stack.context.execution_identity, depth=0)
+    # Under the new limit (1.2 < 2.2), a bare Resume keeps 2.2 instead of raising it again.
+    assert await _control(stack, event_id="$control-2") is True
+    await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 3)
+    assert stack.store.get_run(stack.run_id).max_cost_usd == pytest.approx(2.2)
