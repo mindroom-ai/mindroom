@@ -2731,6 +2731,8 @@ depends_on = [
     "mindroom.tool_jobs.settings",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.invocation",
+    "mindroom.tool_system.metadata",
+    "mindroom.tool_system.plugins",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_routing",

@@ -109,7 +109,7 @@ class WorkflowRuntimeLifecycle:
                 return "pending"
             if authorized:
                 context = resolver.resolve(owner, correlation_id=f"workflow:{run.run_id}")
-                return context, workflow_limits(context.config, run.agent_name)
+                return context, workflow_limits(context, run.agent_name)
         except ValueError:
             # The saved identity names another owner than the run's: nothing confirms the access.
             logger.warning("workflow_resume_owner_unresolved", run_id=run.run_id, exc_info=True)

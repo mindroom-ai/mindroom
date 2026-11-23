@@ -32,6 +32,8 @@ from mindroom.tool_jobs.runtime import (
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import current_tool_call
+from mindroom.tool_system.metadata import resolve_tool_settings
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.tool_hooks import dispatch_external_tool_hooks
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
@@ -647,7 +649,7 @@ async def continued_workflow_job(job: BackgroundJob) -> JobSpec | BackgroundOutc
     run = engine.store.get_run(str(job.adapter.get("workflow")))
     if run.owner == job.job_id and run.state in TERMINAL_RUN_STATES:
         return await _workflow_job_outcome(engine, run)
-    limits = workflow_limits(context.config, run.agent_name)
+    limits = workflow_limits(context, run.agent_name)
     return _run_job(engine, run, job.job_id, context, limits, resume=job.adapter.get("resume"))
 
 
@@ -691,12 +693,22 @@ def undelivered_workflow_jobs(runtime_paths: RuntimePaths) -> frozenset[str] | N
     )
 
 
-def workflow_limits(config: Config, agent_name: str) -> WorkflowLimits:
+def workflow_limits(context: ToolRuntimeContext, agent_name: str) -> WorkflowLimits:
     """Return the limits the agent's `workflow` entry sets now, for a run that goes on with no call of the toolkit."""
-    entries = authored_tool_entries(config, agent_name)
-    settings = next((entry.tool_config_overrides for entry in entries if entry.name == "workflow"), {})
+    entries = authored_tool_entries(context.config, agent_name)
+    overrides = next((entry.tool_config_overrides for entry in entries if entry.name == "workflow"), None)
+    target = context.resolve_worker_target()
+    allowed = context.config.get_worker_grantable_credentials() if target.worker_scope is not None else None
+    settings = resolve_tool_settings(
+        "workflow",
+        context.runtime_paths,
+        tools=config_plugins(context.config, context.runtime_paths).tools,
+        worker_target=target,
+        allowed_shared_services=allowed,
+        tool_config_overrides=overrides,
+    )
     names = {limit.name for limit in fields(WorkflowLimits)}
-    limits: dict[str, Any] = {name: value for name, value in settings.items() if name in names}
+    limits: dict[str, Any] = {name: value for name, value in settings.values.items() if name in names}
     return WorkflowLimits(**limits)
 
 

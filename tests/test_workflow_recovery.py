@@ -23,6 +23,7 @@ import structlog
 from mindroom import authorization
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools import workflow as workflow_tool_module
 from mindroom.custom_tools.workflow import workflow_job_standing
 from mindroom.delegation.lifecycle import accessed_entities
@@ -1574,6 +1575,30 @@ async def test_lifecycle_waits_for_room_membership_before_it_judges_the_owners_a
         if answer == "ALLOWED"
         else (WorkflowRunState.INTERRUPTED, 1, "The requester no longer has access.")
     )
+
+
+@pytest.mark.asyncio
+async def test_stored_workflow_settings_apply_to_owner_access_and_auto_resume(stack: WorkflowStack) -> None:
+    """Dashboard-stored workflow settings apply to owner access and auto-resumed attempts, not just start_workflow."""
+    get_runtime_credentials_manager(stack.context.runtime_paths).save_credentials(
+        "workflow",
+        {"max_tool_calls_per_minute": 42, "max_runtime_hours": 12},
+    )
+    script_runtime = _script_runtime(stack)
+    lifecycle = WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime)  # type: ignore[arg-type]
+    await stack.start(SCRIPT)
+    await lifecycle.start()
+    await _interrupt(stack, RUNTIME_RESTARTED)
+
+    await script_runtime.after_reconcile()
+
+    run = stack.store.get_run(stack.run_id)
+    access = stack.engine.owner_access(run)
+    assert isinstance(access, tuple)
+    assert (access[1].max_tool_calls_per_minute, access[1].max_runtime_hours) == (42, 12)
+    limits = stack.scripts.limits[-1]
+    assert limits is not None
+    assert limits.max_tool_calls_per_minute == 42
 
 
 @pytest.mark.asyncio
