@@ -336,7 +336,7 @@ async def test_budget_counts_rerun_turns_and_cached_nodes_do_not_move_it(stack: 
 
     await stack.resume(stack.run_id, rerun=["n1"])
     assert await stack.result("@0", "agent", {"prompt": "Look into it."}) == "done"
-    await stack.until(lambda: "$budget:1" in _states(stack))
+    await stack.until(lambda: _questions(stack))
     assert _questions(stack)[-1]["text"] == "This run has spent $1.20 of its $1.00 limit. Continue?"
 
 
