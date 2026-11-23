@@ -1719,5 +1719,12 @@ def test_no_function_name_is_shared_with_dynamic_workflow(stack: WorkflowStack) 
     """An agent can hold both toolkits while it migrates."""
     names = set(toolkit_function_names(WorkflowTools(stack.context.config)))
 
-    assert names == {"start_workflow", "get_workflow", "cancel_workflow", "resume_workflow"}
+    assert names == {
+        "start_workflow",
+        "get_workflow",
+        "cancel_workflow",
+        "resume_workflow",
+        "list_workflow_runs",
+        "save_workflow",
+    }
     assert names.isdisjoint(toolkit_function_names(DynamicWorkflowTools()))
