@@ -3582,6 +3582,7 @@ depends_on = [
     "mindroom.delegation.background",
     "mindroom.delegation.cost",
     "mindroom.delivery_gateway",
+    "mindroom.entity_resolution",
     "mindroom.event_journal",
     "mindroom.history.reply_compactions",
     "mindroom.history.storage",

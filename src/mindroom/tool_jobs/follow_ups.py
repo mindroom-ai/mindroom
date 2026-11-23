@@ -83,7 +83,14 @@ def _follow_up_streak(source_event_id: str | None) -> int:
     return int(source_event_id.rsplit(":", 1)[1])
 
 
-def follow_up_envelope(key: ConversationKey, *, follow_up_id: str, sender_id: str, prompt: str) -> MessageEnvelope:
+def follow_up_envelope(
+    key: ConversationKey,
+    *,
+    follow_up_id: str,
+    sender_id: str,
+    prompt: str,
+    requester_entity_name: str | None = None,
+) -> MessageEnvelope:
     """Address a follow-up to its conversation, as runtime work on behalf of the jobs' requester."""
     return MessageEnvelope(
         source_event_id=follow_up_id,
@@ -97,9 +104,9 @@ def follow_up_envelope(key: ConversationKey, *, follow_up_id: str, sender_id: st
             transport_sender_id=sender_id,
             requester_id=key.requester_id,
             sender_entity_name=key.recipient,
-            requester_entity_name=None,
+            requester_entity_name=requester_entity_name,
             sender_kind=SenderKind.MANAGED_ENTITY,
-            requester_kind=SenderKind.USER,
+            requester_kind=SenderKind.MANAGED_ENTITY if requester_entity_name is not None else SenderKind.USER,
             intent=TurnIntent.JOB_FOLLOW_UP,
             source_kind=MESSAGE_SOURCE_KIND,
             trust=TurnTrust.TRUSTED_INTERNAL,

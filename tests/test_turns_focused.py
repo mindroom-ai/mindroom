@@ -120,7 +120,7 @@ from mindroom.matrix.segmented_messages import segment_matrix_content
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.thread_membership import ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
-from mindroom.mid_turn import MID_TURN_MODE_KEY, MidTurnGate, MidTurnMode
+from mindroom.mid_turn import MidTurnGate, MidTurnMode
 from mindroom.reply_scope import ReplyRuntime
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionRefusedError
@@ -9449,12 +9449,12 @@ def test_carried_media_content_preserves_mid_turn_mode() -> None:
     """Rebuilt media and voice events keep io.mindroom.mid_turn when present and omit it when absent."""
     with_mode = _thread_upload_event("m.audio", event_id="$voice-steer:localhost", origin_server_ts=1_000_000)
     assert isinstance(with_mode, nio.RoomMessageAudio)
-    with_mode.source["content"][MID_TURN_MODE_KEY] = "steer"
-    assert carried_media_content(with_mode)[MID_TURN_MODE_KEY] == "steer"
+    with_mode.source["content"][constants.MID_TURN_MODE_KEY] = "steer"
+    assert carried_media_content(with_mode)[constants.MID_TURN_MODE_KEY] == "steer"
 
     without_mode = _thread_upload_event("m.audio", event_id="$voice-auto:localhost", origin_server_ts=1_000_001)
     assert isinstance(without_mode, nio.RoomMessageAudio)
-    assert MID_TURN_MODE_KEY not in carried_media_content(without_mode)
+    assert constants.MID_TURN_MODE_KEY not in carried_media_content(without_mode)
 
 
 @pytest.mark.asyncio
@@ -9487,9 +9487,8 @@ async def test_voice_ingress_honors_mid_turn_steer_and_queue(
     queue.bind_active_requester(_SENDER)
 
     event = _thread_upload_event("m.audio", event_id=f"$voice-{mode_value}:localhost", origin_server_ts=1_000_000)
-    event.source["content"][MID_TURN_MODE_KEY] = mode_value
+    event.source["content"][constants.MID_TURN_MODE_KEY] = mode_value
     rebuilt_content = {
-        **event.source["content"],
         "msgtype": "m.text",
         "body": "🎤 switch to the short summary",
         constants.SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
@@ -9499,7 +9498,7 @@ async def test_voice_ingress_honors_mid_turn_steer_and_queue(
     }
     if replayed_checkpoint:
         # Even a checkpoint saved before this fix still honors mode from event.source at voice ingress.
-        checkpoint_content = {k: v for k, v in rebuilt_content.items() if k != MID_TURN_MODE_KEY}
+        checkpoint_content = {k: v for k, v in rebuilt_content.items() if k != constants.MID_TURN_MODE_KEY}
         await harness.turn_store.record_prepared_voice(
             _ROOM_ID,
             event.event_id,

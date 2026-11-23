@@ -1976,14 +1976,14 @@ def test_job_follow_up_binds_human_requester_on_gate_without_interactive_prompt_
     assert not human_follow_up.origin.may_answer_interactive_prompt
     assert human_follow_up.origin.active_human_requester_id == _REQUESTER
 
-    managed_follow_up = replace(
-        human_follow_up,
-        origin=replace(
-            human_follow_up.origin,
-            requester_kind=SenderKind.MANAGED_ENTITY,
-            requester_entity_name="helper",
-        ),
+    managed_follow_up = follow_up_envelope(
+        replace(key, requester_id="@mindroom_helper:localhost"),
+        follow_up_id="job-follow-up:2",
+        sender_id="@mindroom_test_agent:localhost",
+        prompt="Background job finished.",
+        requester_entity_name="helper",
     )
+    assert managed_follow_up.origin.requester_kind is SenderKind.MANAGED_ENTITY
     assert managed_follow_up.origin.active_human_requester_id is None
 
     paths = test_runtime_paths(tmp_path)

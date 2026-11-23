@@ -535,15 +535,9 @@ class ResponseLifecycleCoordinator:
     async def reserve_response_lifecycle(
         self,
         response_envelope: MessageEnvelope,
-        *,
-        mid_turn_mode: MidTurnMode = MidTurnMode.AUTO,
     ) -> _ResponseLifecycleReservation:
         """Reserve FIFO admission on one canonical lifecycle before response preparation."""
-        reservation = self._begin_response_turn(
-            response_envelope,
-            signal_queued_message=True,
-            mid_turn_mode=mid_turn_mode,
-        )
+        reservation = self._begin_response_turn(response_envelope, signal_queued_message=True)
         try:
             await reservation._wait_until_reserved()
         except BaseException:
