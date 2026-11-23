@@ -642,52 +642,45 @@ mindroom local-stack-setup --synapse-dir /path/to/mindroom/local/matrix
  Start local Synapse + MindRoom Chat using Docker only.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --synapse-dir                                 PATH                 Directory           │
-│                                                                    containing Synapse  │
-│                                                                    docker-compose.yml  │
-│                                                                    (core MindRoom      │
-│                                                                    repo:               │
-│                                                                    local/matrix).      │
-│                                                                    [default:           │
-│                                                                    local/matrix]       │
-│ --homeserver-url                              TEXT                 Homeserver URL that │
-│                                                                    MindRoom Chat and   │
-│                                                                    MindRoom should     │
-│                                                                    use.                │
-│                                                                    [default:           │
-│                                                                    http://localhost:8… │
-│ --server-name                                 TEXT                 Matrix server name  │
-│                                                                    (default: inferred  │
-│                                                                    from                │
-│                                                                    --homeserver-url    │
-│                                                                    hostname).          │
-│ --cinny-port                                  INTEGER RANGE        Local host port for │
-│                                               [1<=x<=65535]        the MindRoom Chat   │
-│                                                                    container.          │
-│                                                                    [default: 8080]     │
-│ --cinny-image                                 TEXT                 Docker image for    │
-│                                                                    MindRoom Chat.      │
-│                                                                    [default:           │
-│                                                                    ghcr.io/mindroom-a… │
-│ --cinny-container-n…                          TEXT                 Container name for  │
-│                                                                    MindRoom Chat       │
-│                                                                    (legacy default     │
-│                                                                    retained for        │
-│                                                                    compatibility).     │
-│                                                                    [default:           │
-│                                                                    mindroom-cinny-loc… │
-│ --skip-synapse                                                     Skip starting       │
-│                                                                    Synapse (assume it  │
-│                                                                    is already          │
-│                                                                    running).           │
-│ --persist-env             --no-persist-env                         Persist Matrix      │
-│                                                                    local dev settings  │
-│                                                                    to .env next to     │
-│                                                                    config.yaml.        │
-│                                                                    [default:           │
-│                                                                    persist-env]        │
-│ --help                -h                                           Show this message   │
-│                                                                    and exit.           │
+│ --synapse-dir                                 PATH                Directory containing │
+│                                                                   Synapse              │
+│                                                                   docker-compose.yml   │
+│                                                                   (core MindRoom repo: │
+│                                                                   local/matrix).       │
+│                                                                   [default:            │
+│                                                                   local/matrix]        │
+│ --homeserver-url                              TEXT                Homeserver URL that  │
+│                                                                   MindRoom Chat and    │
+│                                                                   MindRoom should use. │
+│                                                                   [default:            │
+│                                                                   http://localhost:80… │
+│ --server-name                                 TEXT                Matrix server name   │
+│                                                                   (default: inferred   │
+│                                                                   from                 │
+│                                                                   --homeserver-url     │
+│                                                                   hostname).           │
+│ --chat-port                                   INTEGER RANGE       Local host port for  │
+│                                               [1<=x<=65535]       the MindRoom Chat    │
+│                                                                   container.           │
+│                                                                   [default: 8080]      │
+│ --chat-image                                  TEXT                Docker image for     │
+│                                                                   MindRoom Chat.       │
+│                                                                   [default:            │
+│                                                                   ghcr.io/mindroom-ai… │
+│ --chat-container-na…                          TEXT                Container name for   │
+│                                                                   MindRoom Chat.       │
+│                                                                   [default:            │
+│                                                                   mindroom-chat-local] │
+│ --skip-synapse                                                    Skip starting        │
+│                                                                   Synapse (assume it   │
+│                                                                   is already running). │
+│ --persist-env             --no-persist-env                        Persist Matrix local │
+│                                                                   dev settings to .env │
+│                                                                   next to config.yaml. │
+│                                                                   [default:            │
+│                                                                   persist-env]         │
+│ --help                -h                                          Show this message    │
+│                                                                   and exit.            │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 

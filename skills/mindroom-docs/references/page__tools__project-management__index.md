@@ -143,7 +143,7 @@ todos:
     priority: high
 ```
 
-Values can use inline Jinja, such as `{{ NAME }}`, `{% if REPO == 'cinny' %}...{% endif %}`, and `{{ BRANCH | default('main') }}`.
+Values can use inline Jinja, such as `{{ NAME }}`, `{% if REPO == 'mindroom-chat' %}...{% endif %}`, and `{{ BRANCH | default('main') }}`.
 Outside Linux, workspace templates may only substitute `{{ NAME }}`.
 YAML aliases, `%TAG` directives, and collections nested more than 64 levels deep are refused.
 
