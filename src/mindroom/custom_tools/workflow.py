@@ -48,6 +48,7 @@ from mindroom.workflow_runs.models import (
     WorkflowRunState,
     new_workflow_run_id,
 )
+from mindroom.workflow_runs.replay import result_digest
 from mindroom.workflow_runs.store import WorkflowRunNotFoundError, WorkflowRunStoreError, owned_run
 
 if TYPE_CHECKING:
@@ -472,11 +473,13 @@ def _resumable_child(
     arguments: Mapping[str, Any],
 ) -> WorkflowRun | None:
     """Return the latest interrupted nested run of *outer*'s node with matching script and args, if any."""
-    digest, args = hashlib.sha256(source).hexdigest(), arguments.get("args")
+    digest, args_digest = hashlib.sha256(source).hexdigest(), result_digest(arguments.get("args"))
     children = [
         child
         for child in engine.store.child_runs(outer[0])
-        if child.parent_node_key == outer[1] and child.source_digest == digest and child.args == args
+        if child.parent_node_key == outer[1]
+        and child.source_digest == digest
+        and result_digest(child.args) == args_digest
     ]
     return children[0] if children and children[0].state is WorkflowRunState.INTERRUPTED else None
 

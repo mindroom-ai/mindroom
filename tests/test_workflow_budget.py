@@ -535,3 +535,46 @@ async def test_edited_resume_replacing_interrupted_nested_launch_does_not_repeat
     replayed = await stack.submit("@0", "tool", append)
     assert (replayed.state, replayed.cached, replayed.result) == ("completed", True, "appended")
     assert stack.counting_tool.lines == ["done"]
+
+
+@pytest.mark.asyncio
+async def test_resuming_nested_launch_with_boolean_instead_of_int_starts_new_child(stack: WorkflowStack) -> None:
+    """Changing nested launch args from `1` to `True` starts a new child instead of reusing the integer-arg child."""
+    inner_source = "def main(args):\n    return 'inner'\n"
+    launch_int = tool_args("workflow", "start_workflow", source=inner_source, args={"enabled": 1})
+    launch_bool = tool_args("workflow", "start_workflow", source=inner_source, args={"enabled": True})
+    await stack.start(max_cost_usd=0.10, max_concurrent=1)
+    parent = stack.run_id
+    stack.child_script(answer("first", _usd(0.20)))
+
+    await stack.submit("@0", "tool", launch_int)
+    await stack.until(lambda: [run.state for run in stack.store.child_runs(parent)] == [WorkflowRunState.RUNNING])
+    [old_child] = stack.store.child_runs(parent)
+
+    stack.run_id = old_child.run_id
+    assert await stack.result("@0", "agent", {"prompt": "First"}) == "first"
+    await stack.until(lambda: stack.store.get_run(old_child.run_id).state is WorkflowRunState.INTERRUPTED)
+
+    stack.run_id = parent
+    await stack.until(lambda: stack.store.get_run(parent).state is WorkflowRunState.INTERRUPTED)
+
+    edited = "def main(args):\n    return 'bool'\n"
+    await stack.call("resume_workflow", run_id=parent, source=edited, max_cost_usd=1.0, call_id="edit-bool-arg")
+    await stack.until(lambda: stack.store.get_run(parent).attempt == 2)
+
+    await stack.submit("@0", "tool", launch_bool)
+    await stack.until(lambda: any(run.state is WorkflowRunState.RUNNING for run in stack.store.child_runs(parent)))
+    [active] = [run for run in stack.store.child_runs(parent) if run.state is WorkflowRunState.RUNNING]
+    assert active.run_id != old_child.run_id
+
+    stack.run_id = active.run_id
+    info = await stack.engine.run_info(stack.attempt)
+    assert info["args"] == {"enabled": True}
+    assert info["args"]["enabled"] is True
+    await stack.finish_attempt(result="checked args")
+
+    stack.run_id = parent
+    await _settled(stack, "@0")
+    parent_node = stack.store.get_node(parent, "@0")
+    assert parent_node is not None
+    assert (parent_node.state, parent_node.result) == (WorkflowNodeState.COMPLETED, "checked args")

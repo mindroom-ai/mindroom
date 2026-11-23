@@ -2738,6 +2738,7 @@ depends_on = [
     "mindroom.workflow_runs.answers",
     "mindroom.workflow_runs.engine",
     "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.replay",
     "mindroom.workflow_runs.store",
 ]
 
