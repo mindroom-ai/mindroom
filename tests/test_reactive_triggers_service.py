@@ -2292,3 +2292,162 @@ async def test_corrupt_spec_json_marks_pending_firing_failed_without_blocking_he
     assert f_healthy is not None
     assert f_healthy.status == "delivered"
     assert store.list_due_firings() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_cross_room_source_responder_auth_revocation_skips_room_message_and_thread_tag(
+    tmp_path: Path,
+) -> None:
+    """Losing responder authorization in a watched source room skips room_message and thread_tag before triage/delivery."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "watcher": AgentConfig(
+                    display_name="Watcher",
+                    rooms=[_ROOM_A],
+                    access={"users": [_OTHER]},
+                ),
+                "research": AgentConfig(
+                    display_name="Research",
+                    rooms=[_ROOM_B],
+                    access={"users": [_OWNER]},
+                ),
+            },
+            models={
+                "default": ModelConfig(provider="openai", id="gpt-test"),
+                "cheap": ModelConfig(provider="openai", id="gpt-mini"),
+            },
+            external_trigger_policy=ExternalTriggerPolicyConfig(enabled=True, reactive_enabled=True),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+    store = ReactiveTriggerStore(runtime_paths)
+
+    source_bot = _make_fake_bot(agent_name="watcher", joined_rooms=[_ROOM_A])
+    target_bot = _make_fake_bot(agent_name="research", joined_rooms=[_ROOM_B])
+    # Owner remains joined to both _ROOM_A and _ROOM_B, and still has full access to target agent in _ROOM_B
+    room_state_mock = AsyncMock(
+        side_effect=lambda room_id: nio.RoomGetStateResponse(
+            [_member_state_source(_OWNER), _member_state_source(_OTHER)],
+            room_id,
+        ),
+    )
+    source_bot.client.room_get_state = room_state_mock
+    target_bot.client.room_get_state = room_state_mock
+
+    msg_rule = _room_message_rule(
+        "tr_cross_msg_revoked",
+        room_id=_ROOM_A,
+        target_room_id=_ROOM_B,
+        triage=TriageSpec(instructions="Only urgent", model="cheap", provider="llm"),
+    )
+    tag_rule = _thread_tag_rule(
+        "tr_cross_tag_revoked",
+        room_id=_ROOM_A,
+        thread_id=_THREAD_A,
+    ).model_copy(update={"triage": TriageSpec(instructions="Only urgent", model="cheap", provider="llm")})
+    store.create_trigger(msg_rule)
+    store.create_trigger(
+        tag_rule,
+        initial_checkpoint=ThreadCheckpoint(tag_present=False, state_event_id=None, updated_at=time.time()),
+    )
+    store.enqueue_firing(
+        "tr_cross_msg_revoked",
+        "$ev-revoked",
+        TriggerEvent(
+            source_type="room_message",
+            source_id=_ROOM_A,
+            kind="m.room.message",
+            event_id="$ev-revoked",
+            timestamp=time.time(),
+            room_id=_ROOM_A,
+            actor=_OTHER,
+            text="prod alert",
+        ),
+    )
+
+    service = ReactiveTriggerService(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: config,
+        bots=lambda: {"watcher": source_bot, "research": target_bot},
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+    service.observe_state_event(_ROOM_A, _tag_state_source(present=True, event_id="$tag-revoked"))
+    assert len(store.list_due_firings()) == 2
+
+    triage_mock = AsyncMock(return_value=TriageOutcome(act=True, reason="urgent"))
+    send_mock = AsyncMock()
+    with (
+        patch("mindroom.reactive_triggers.service.evaluate_triage", new=triage_mock),
+        patch("mindroom.reactive_triggers.dispatch.send_matrix_message", new=send_mock),
+    ):
+        await service.drain_due_firings_once()
+
+    triage_mock.assert_not_awaited()
+    send_mock.assert_not_awaited()
+    f_msg = store.get_firing(1)
+    f_tag = store.get_firing(2)
+    assert f_msg is not None
+    assert f_msg.status == "skipped"
+    assert f_msg.error_message == "source_room_not_authorized"
+    assert f_tag is not None
+    assert f_tag.status == "skipped"
+    assert f_tag.error_message == "source_room_not_authorized"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_cross_room_source_responder_pending_membership_retries_before_triage(
+    tmp_path: Path,
+) -> None:
+    """Unresolved membership on a watched source room responder schedules retry instead of skipping."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "watcher": AgentConfig(
+                    display_name="Watcher",
+                    rooms=[_ROOM_A],
+                    access={"current_room_members": True},
+                ),
+                "research": AgentConfig(
+                    display_name="Research",
+                    rooms=[_ROOM_B],
+                    access={"users": [_OWNER]},
+                ),
+            },
+            models={"default": ModelConfig(provider="openai", id="gpt-test")},
+            external_trigger_policy=ExternalTriggerPolicyConfig(enabled=True, reactive_enabled=True),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+    store = ReactiveTriggerStore(runtime_paths)
+    source_bot = _make_fake_bot(agent_name="watcher", joined_rooms=[_ROOM_A])
+    target_bot = _make_fake_bot(agent_name="research", joined_rooms=[_ROOM_B])
+    store.create_trigger(
+        _thread_tag_rule("tr_cross_tag_pending", room_id=_ROOM_A, thread_id=_THREAD_A),
+        initial_checkpoint=ThreadCheckpoint(tag_present=False, state_event_id=None, updated_at=time.time()),
+    )
+
+    service = ReactiveTriggerService(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: config,
+        bots=lambda: {"watcher": source_bot, "research": target_bot},
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+    service.observe_state_event(_ROOM_A, _tag_state_source(present=True, event_id="$tag-pending"))
+
+    send_mock = AsyncMock()
+    with patch("mindroom.reactive_triggers.dispatch.send_matrix_message", new=send_mock):
+        await service.drain_due_firings_once()
+
+    send_mock.assert_not_awaited()
+    firing = store.get_firing(1)
+    assert firing is not None
+    assert firing.status == "pending"
+    assert firing.error_message == "source_membership_pending"
+    assert firing.next_retry_at is not None

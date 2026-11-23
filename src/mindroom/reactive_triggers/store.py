@@ -399,14 +399,6 @@ class ReactiveTriggerStore:
             updated_at=float(row["updated_at"]),
         )
 
-    def clear_thread_checkpoint(self, trigger_id: str, *, expected_rule_uid: str | None = None) -> bool:
-        """Delete any persisted thread tag checkpoint for a trigger when its rule_uid matches."""
-        with self._write_transaction() as conn:
-            if expected_rule_uid is not None and _live_rule_uid(conn, trigger_id) != expected_rule_uid:
-                return False
-            cursor = conn.execute("DELETE FROM thread_checkpoints WHERE trigger_id = ?", (trigger_id,))
-            return cursor.rowcount > 0
-
     def update_thread_checkpoint_and_enqueue(
         self,
         trigger_id: str,

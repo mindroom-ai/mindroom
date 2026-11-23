@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_agent_reply_in_room
 from mindroom.constants import ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SOURCE_KIND_KEY
 from mindroom.dispatch_source import REACTIVE_TRIGGER_SOURCE_KIND
+from mindroom.entity_resolution import configured_routable_entity_names_for_room
 from mindroom.hooks.sender import send_matrix_message
 from mindroom.logging_config import get_logger
 from mindroom.matrix.mentions import format_entity_mention
@@ -27,6 +28,8 @@ from mindroom.reactive_triggers.store import ReactiveTriggerStore, ReactiveTrigg
 from mindroom.requester_identity import equivalent_requester_ids, is_human_requester_id
 
 if TYPE_CHECKING:
+    import nio
+
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
@@ -195,6 +198,17 @@ async def _check_room_source_access(
     ):
         return DispatchResult(status="skipped", reason="source_room_not_joined")
 
+    owner_rejection = _check_room_source_owner_authorization(
+        rule=rule,
+        source_room_id=source_room_id,
+        source_bot=source_bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        memberships=memberships,
+    )
+    if owner_rejection is not None:
+        return owner_rejection
+
     if not isinstance(source, RoomMessageSourceSpec) or not event.actor:
         return None
     return _check_room_source_sender(
@@ -208,6 +222,53 @@ async def _check_room_source_access(
     )
 
 
+def _observed_room_for_bot(source_bot: AgentBot | None, room_id: str) -> nio.MatrixRoom | None:
+    bot_client = source_bot.client if source_bot is not None else None
+    rooms = getattr(bot_client, "rooms", None) if bot_client is not None else None
+    return rooms.get(room_id) if isinstance(rooms, Mapping) else None
+
+
+def _check_room_source_owner_authorization(
+    *,
+    rule: ReactiveTriggerRecord,
+    source_room_id: str,
+    source_bot: AgentBot | None,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    memberships: AgentReplyMembershipIndex,
+) -> DispatchResult | None:
+    candidates: list[str] = []
+    source_agent_name = getattr(source_bot, "agent_name", None)
+    if isinstance(source_agent_name, str) and source_agent_name:
+        candidates.append(source_agent_name)
+    for entity_name in configured_routable_entity_names_for_room(config, source_room_id, runtime_paths):
+        if entity_name not in candidates:
+            candidates.append(entity_name)
+    if (source_room_id == rule.target.room_id or not candidates) and rule.target.agent not in candidates:
+        candidates.append(rule.target.agent)
+
+    observed_room = _observed_room_for_bot(source_bot, source_room_id)
+    saw_pending = False
+    for entity_name in candidates:
+        try:
+            if is_sender_allowed_for_agent_reply_in_room(
+                rule.owner_user_id,
+                entity_name,
+                config,
+                source_room_id,
+                runtime_paths,
+                memberships,
+                require_resolved_membership=True,
+                observed_room=observed_room,
+            ):
+                return None
+        except ReplyMembershipPendingError:
+            saw_pending = True
+    if saw_pending:
+        return DispatchResult(status="retry", reason="source_membership_pending")
+    return DispatchResult(status="skipped", reason="source_room_not_authorized")
+
+
 def _check_room_source_sender(
     *,
     actor: str,
@@ -219,9 +280,7 @@ def _check_room_source_sender(
     memberships: AgentReplyMembershipIndex,
 ) -> DispatchResult | None:
     source_agent_name = getattr(source_bot, "agent_name", None) or fallback_agent_name
-    bot_client = source_bot.client if source_bot is not None else None
-    rooms = getattr(bot_client, "rooms", None) if bot_client is not None else None
-    observed_room = rooms.get(source_room_id) if isinstance(rooms, Mapping) else None
+    observed_room = _observed_room_for_bot(source_bot, source_room_id)
     try:
         sender_allowed = is_sender_allowed_for_agent_reply_in_room(
             actor,

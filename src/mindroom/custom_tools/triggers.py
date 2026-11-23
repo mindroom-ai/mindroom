@@ -512,10 +512,12 @@ class TriggersTools(Toolkit):
                         expected_rule_uid=reactive_record.rule_uid,
                     )
                 else:
-                    reactive_store.clear_thread_checkpoint(
-                        trigger_id,
-                        expected_rule_uid=reactive_record.rule_uid,
+                    msg = (
+                        "Re-enabling a thread_tag trigger requires async "
+                        "TriggersTools.disable_trigger(trigger_id, enabled=True) "
+                        "so the live tag baseline can be refreshed."
                     )
+                    raise ReactiveTriggerStoreError(msg)
         updated = reactive_store.set_enabled(trigger_id, enabled, expected_rule_uid=reactive_record.rule_uid)
         if updated is None:
             msg = f"external trigger not found: {trigger_id}"

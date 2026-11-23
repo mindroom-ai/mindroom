@@ -10820,6 +10820,7 @@ depends_on = [
 path = "mindroom.reactive_triggers.dispatch"
 depends_on = [
     "mindroom.constants",
+    "mindroom.entity_resolution",
     "mindroom.hooks.sender",
     "mindroom.matrix.room_reconciliation",
     "mindroom.reactive_triggers.external_sources",

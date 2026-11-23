@@ -897,15 +897,25 @@ async def test_legacy_external_trigger_manager_tool_factory_shim_does_not_double
             ]
             == "ok"
         )
-        # Synchronous disable_trigger works without await for both direct and reactive triggers
+        # Synchronous disable_trigger works without await for direct triggers and disabling thread_tag triggers
         assert _payload(legacy_tool.disable_trigger("legacy-direct", enabled=False))["trigger"]["enabled"] is False
         assert _payload(legacy_tool.disable_trigger("legacy-direct", enabled=True))["trigger"]["enabled"] is True
         assert _payload(legacy_tool.disable_trigger("legacy-tag", enabled=False))["trigger"]["enabled"] is False
-        assert _payload(legacy_tool.disable_trigger("legacy-tag", enabled=True))["trigger"]["enabled"] is True
 
-    store = ReactiveTriggerStore(_runtime_paths(tmp_path))
-    # Sync re-enable cleared any stale thread checkpoint so restore_room/live events re-seed cleanly
-    assert store.get_thread_checkpoint("legacy-tag") is None
+        store = ReactiveTriggerStore(_runtime_paths(tmp_path))
+        checkpoint_before = store.get_thread_checkpoint("legacy-tag")
+        assert checkpoint_before is not None
+        assert checkpoint_before.tag_present is False
+
+        # Sync re-enable of a disabled thread_tag rule refuses without touching enabled state or checkpoint
+        reenable = _payload(legacy_tool.disable_trigger("legacy-tag", enabled=True))
+        assert reenable["status"] == "error"
+        assert "async TriggersTools.disable_trigger" in reenable["message"]
+
+    record = store.get_trigger("legacy-tag")
+    assert record is not None
+    assert record.enabled is False
+    assert store.get_thread_checkpoint("legacy-tag") == checkpoint_before
 
 
 @pytest.mark.asyncio
