@@ -921,9 +921,7 @@ class WorkflowEngine:
         A queued call has started nothing and names nothing that could have: it starts when a place is free, in the
         order the calls came. The caller holds the run's lock.
         """
-        places = self._places.setdefault(run.run_id, _Places(max(1, run.max_concurrent)))
-        if not await self._over_budget(run) and len(places.working) < places.limit:
-            places.working.add(node.key)
+        if await self._try_place(run, node.key):
             try:
                 return await dispatch(node)
             except BaseException:
@@ -934,10 +932,24 @@ class WorkflowEngine:
                 raise
         queued = replace(node, state=WorkflowNodeState.QUEUED)
         queued = await asyncio.to_thread(partial(self.store.put_node, queued, run.epoch, dirty_after=dirty_after))
-        places.queued.append((queued.key, partial(dispatch, queued, queued=True)))
-        # A place that became free while the node was saved is taken now.
-        self._leave(run.run_id, None)
+        self._enqueue_place(run, queued.key, partial(dispatch, queued, queued=True))
         return _receipt(queued)
+
+    def _places_for(self, run: WorkflowRun) -> _Places:
+        return self._places.setdefault(run.run_id, _Places(max(1, run.max_concurrent)))
+
+    async def _try_place(self, run: WorkflowRun, key: str) -> bool:
+        """Take one working place for *key* if *run* has room and is within budget. The caller holds the run's lock."""
+        places = self._places_for(run)
+        if await self._over_budget(run) or len(places.working) >= places.limit:
+            return False
+        places.working.add(key)
+        return True
+
+    def _enqueue_place(self, run: WorkflowRun, key: str, start: Callable[[], Awaitable[object]]) -> None:
+        """Queue *start* for *key* and start any queued call a free place now admits. The caller holds the run's lock."""
+        self._places_for(run).queued.append((key, start))
+        self._leave(run.run_id, None)
 
     def _leave(self, run_id: str, key: str | None) -> None:
         """Give up the place of the call at *key*, which ended or waits for a person, and start the calls there is room for."""
@@ -1012,15 +1024,12 @@ class WorkflowEngine:
                 # The run ended while the gate was open: its end settled the call, and nothing of it starts now.
                 return
             if outcome[0] is WorkflowNodeState.COMPLETED:
-                places = self._places.setdefault(run.run_id, _Places(max(1, run.max_concurrent)))
                 start = partial(self._dispatch_agent, run, node, timeout=None, queued=True)
-                places.queued.append((node.key, start))
+                self._enqueue_place(run, node.key, start)
             else:
                 settle = partial(self.store.settle_node, run.run_id, node.key, node.generation, run.epoch)
                 with suppress(SupersededAttemptError):
                     await asyncio.to_thread(partial(settle, state=outcome[0], error=outcome[2]))
-            # A call whose approval came counts as working since then: it has no place yet, or needs none now.
-            self._leave(run.run_id, node.key)
         await self._notify(run.run_id)
 
     async def nest(self, child: WorkflowRun) -> None:
@@ -1217,7 +1226,7 @@ class WorkflowEngine:
             stale.cancel()
         if node.state is not WorkflowNodeState.WAITING:
             # An agent that an earlier attempt started works too: it holds a place, over the limit if it must.
-            self._places.setdefault(run.run_id, _Places(max(1, run.max_concurrent))).working.add(node.key)
+            self._places_for(run).working.add(node.key)
         task = self._spawn(run.run_id, self._run_agent_node(run, node, epoch))
         if node.handle.work_until is not None or node.handle.work_left is not None:
             task.set_name(name)
@@ -1415,24 +1424,75 @@ class WorkflowEngine:
                 await self._restate(node.run_id)
             return held
 
-    async def _node_waits(self, node: WorkflowNode, epoch: int, on: str | None, left: float | None = None) -> None:
+    async def _node_waits(
+        self,
+        node: WorkflowNode,
+        epoch: int,
+        on: str | None,
+        left: float | None = None,
+        *,
+        acquire: bool = True,
+    ) -> None:
         """Show a node as waiting for a person, for what *on* says, or as running again with None; its run follows.
 
         *left* is the working time an agent's turn has left, which its handle keeps for whoever waits for it next.
+        Returning from a wait with *acquire* takes a place through the run's admission queue before resuming.
         """
-        changes: dict[str, object] = {"state": WorkflowNodeState.WAITING if on else WorkflowNodeState.RUNNING}
-        if left is not None and node.handle is not None:
-            until = None if on else time.time() + left
-            changes["handle"] = replace(node.handle, work_left=left if on else None, work_until=until)
         stamp = partial(self.store.update_node, node.run_id, node.key, node.generation, epoch)
-        with suppress(SupersededAttemptError):
-            await asyncio.to_thread(partial(stamp, waiting_on=on, **changes))
+
+        async def mark(state: WorkflowNodeState, *, waiting_on: str | None = None, timed: bool = False) -> None:
+            changes: dict[str, object] = {}
+            if timed and left is not None and node.handle is not None:
+                until = None if waiting_on else time.time() + left
+                changes["handle"] = replace(node.handle, work_left=left if waiting_on else None, work_until=until)
+            with suppress(SupersededAttemptError):
+                await asyncio.to_thread(partial(stamp, state=state, waiting_on=waiting_on, **changes))
+
         if on:
+            await mark(WorkflowNodeState.WAITING, waiting_on=on, timed=True)
             # A call that waits for a person is no working call: the next one starts in its place.
             self._leave(node.run_id, node.key)
-        elif (places := self._places.get(node.run_id)) is not None:
-            places.working.add(node.key)
+            await self._notify(node.run_id)
+            return
+
+        if not acquire:
+            await mark(WorkflowNodeState.QUEUED, timed=True)
+            await self._notify(node.run_id)
+            return
+        await self._reacquire_place(node, epoch, mark)
+
+    async def _reacquire_place(
+        self,
+        node: WorkflowNode,
+        epoch: int,
+        mark: Callable[..., Awaitable[None]],
+    ) -> None:
+        """Take a working place for a node returning from a wait, queuing until one is free."""
+        granted: asyncio.Future[None] | None = None
+        async with self._condition(node.run_id):
+            if self._closed or node.run_id in self._stopping:
+                return
+            run = self.store.get_run(node.run_id)
+            if run.epoch != epoch or run.state not in SERVED_RUN_STATES:
+                return
+            if await self._try_place(run, node.key):
+                await mark(WorkflowNodeState.RUNNING, timed=True)
+            else:
+                await mark(WorkflowNodeState.QUEUED)
+                granted = asyncio.get_running_loop().create_future()
+
+                async def resume(ready: asyncio.Future[None] = granted) -> None:
+                    if ready.cancelled():
+                        self._leave(node.run_id, node.key)
+                        return
+                    await mark(WorkflowNodeState.RUNNING, timed=True)
+                    if not ready.done():
+                        ready.set_result(None)
+
+                self._enqueue_place(run, node.key, resume)
         await self._notify(node.run_id)
+        if granted is not None:
+            await granted
 
     async def _reconcile(  # noqa: C901
         self,
@@ -1657,7 +1717,7 @@ class WorkflowEngine:
     ) -> _Outcome:
         """Run one broker call for *node* within the rate limit and return its node outcome."""
         cid = call_id or uuid5(NAMESPACE_OID, f"{node.run_id}:{node.key}:{node.generation}").hex
-        waits = partial(self._node_waits, node, epoch)
+        waits = partial(self._node_waits, node, epoch, acquire=not gate_only)
         call = partial(
             self.broker.execute_for_workflow,
             attempt,

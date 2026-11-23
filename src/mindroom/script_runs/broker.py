@@ -869,10 +869,10 @@ async def _request_approval(runtime_resolver: ScriptRuntimeResolver, **request: 
     if waits is None:
         return await runtime_resolver.request_approval(**request)
     await waits("approval")
-    try:
-        return await runtime_resolver.request_approval(**request)
-    finally:
+    decision = await runtime_resolver.request_approval(**request)
+    if decision.approved:
         await waits(None)
+    return decision
 
 
 def _build_background_approval_gate(

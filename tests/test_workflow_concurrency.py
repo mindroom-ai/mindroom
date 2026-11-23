@@ -125,6 +125,38 @@ async def test_waiting_node_frees_its_slot_and_takes_one_again(gated: WorkflowSt
 
 
 @pytest.mark.asyncio
+async def test_approved_tool_waits_for_a_free_slot_before_running(gated: WorkflowStack) -> None:
+    """A tool whose approval arrives while another call holds the only slot queues until that slot is free."""
+    stack = gated
+    await stack.start(max_concurrent=1)
+    approver = asyncio.Event()
+    second_started = asyncio.Event()
+    release_second = asyncio.Event()
+    stack.resolver.hold_approvals = approver
+
+    async def hold_second() -> None:
+        second_started.set()
+        await release_second.wait()
+
+    stack.child_script([Await(hold_second), *answer("ok")])
+    first = await stack.submit("@0", "tool", _append("a"))
+    await stack.until(lambda: _states(stack) == [_WAITING])
+    second = await stack.submit("@1", "agent", {"prompt": "other work"})
+    await asyncio.wait_for(second_started.wait(), 8)
+
+    try:
+        approver.set()
+        await stack.until(lambda: _states(stack) == [_QUEUED, _RUNNING])
+        await asyncio.sleep(0.05)
+        assert (stack.counting_tool.lines, _states(stack)) == ([], [_QUEUED, _RUNNING])
+    finally:
+        release_second.set()
+
+    assert ((await _settled(stack, second)).result, (await _settled(stack, first)).result) == ("ok", "appended")
+    assert stack.counting_tool.lines == ["a"]
+
+
+@pytest.mark.asyncio
 async def test_tool_calls_of_an_attempt_work_side_by_side_whenever_they_were_claimed(stack: WorkflowStack) -> None:
     """The broker holds no call of a workflow attempt back: one that was claimed while another ended waits for none.
 
