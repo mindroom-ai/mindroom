@@ -11,12 +11,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom import reply_lifecycle as rl
-from mindroom.config.agent import TeamConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.main import Config
 from mindroom.custom_tools.job import JobTools
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal.models import EventClass, EventKind, InboundEvent
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
+from mindroom.matrix.identity import MatrixID
 from mindroom.reply_presentation import Presentation, encode_presentation
 from mindroom.reply_scope import SpanHandle, SpanSlot, _current_slot
 from mindroom.response_lifecycle import ResponseLifecycleCoordinator, _Conversation
@@ -30,6 +32,7 @@ from mindroom.response_turn import (
     stream_response_turn,
 )
 from mindroom.session_storage.store import ConversationStore
+from mindroom.thread_utils import check_agent_mentioned
 from mindroom.tool_jobs.client_cancel import JobCancelRequest, cancel_jobs_command, cancel_room_jobs
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import (
@@ -50,6 +53,7 @@ from tests.conftest import (
     patch_response_runner_module,
     unwrap_extracted_collaborator,
 )
+from tests.delegation_helpers import _runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _envelope, _noop_typing, _target
 from tests.tool_job_helpers import (
@@ -137,6 +141,9 @@ async def _ended(
     owner: ToolExecutionIdentity | None = None,
     source_event_id: str | None = None,
     reply_id: str | None = None,
+    tool_name: str | None = None,
+    kind: str = "tool",
+    adapter: dict[str, object] | None = None,
 ) -> None:
     """Start a job that ends with ``outcome`` at once, as the turn ``source_event_id`` started it."""
 
@@ -146,9 +153,10 @@ async def _ended(
     await start_job(
         runtime,
         job_id,
-        tool_name=f"tool_{job_id}",
+        tool_name=tool_name or f"tool_{job_id}",
         depth=0,
-        adapter={},
+        kind=kind,
+        adapter={} if adapter is None else adapter,
         owner=owner or job_owner(),
         operation=operation,
         source_event_id=source_event_id,
@@ -380,10 +388,18 @@ async def test_jobs_the_limit_holds_get_one_notice_of_the_agent(tmp_path: Path) 
             client, room_id, content = send.await_args.args
             assert (client, room_id) == (bot.client, key.room_id)
             assert send.await_args.kwargs["operation"] == "send_job_hold"
-            assert content["msgtype"] == "m.notice"
+            assert send.await_args.kwargs["transaction_id"] == _follow_up_event_id(
+                key,
+                [job for job in runtime.retained_jobs() if job.job_id == "capped"],
+                0,
+            )
+            assert content["msgtype"] == "m.text"
+            assert content["m.mentions"] == {"user_ids": [key.requester_id]}
+            assert f'href="https://matrix.to/#/{key.requester_id}"' in content["formatted_body"]
             assert content["m.relates_to"]["event_id"] == key.thread_id
             assert content["body"] == (
-                "⏸️ 1 background job finished while I was paused after 20 automatic follow-ups. "
+                f"{key.requester_id} ⏸️ 1 background job finished while I was paused after "
+                "20 automatic follow-ups in a row without a message from you: tool_capped (`capped`). "
                 "Reply here to let me continue."
             )
     finally:
@@ -404,8 +420,12 @@ async def test_a_room_level_hold_is_a_conversation_notice(tmp_path: Path) -> Non
             await coordinator._admit_follow_ups(runtime)
             content = send.await_args.args[2]
             assert "m.relates_to" not in content
+            assert content["msgtype"] == "m.text"
+            assert content["m.mentions"] == {"user_ids": [owner.requester_id]}
             assert content["io.mindroom.conversation"] is True
-            assert content["body"].startswith("⏸️ 2 background jobs finished")
+            assert content["body"].startswith(f"{owner.requester_id} ⏸️ 2 background jobs finished")
+            assert "- tool_capped_a (`capped_a`)" in content["body"]
+            assert "- tool_capped_b (`capped_b`)" in content["body"]
     finally:
         await runtime.shutdown()
 
@@ -1167,5 +1187,72 @@ async def test_a_ready_result_at_the_boundary_does_not_continue_the_turn(tmp_pat
         assert (text, attempts) == ("answer", 1)
         await coordinator._admit_follow_ups(runtime)
         bot.admit_job_follow_up.assert_awaited_once()
+    finally:
+        await runtime.shutdown()
+
+
+async def test_held_notice_names_subagent_title_caps_list_and_mentions_only_requester(tmp_path: Path) -> None:
+    """Held notices show subagent titles (or tool names) + 8-char IDs, cap at 5, and mention only the requester."""
+    runtime = await tool_job_runtime(tmp_path)
+    bot = _admitting_bot()
+    coordinator = job_coordinator(tmp_path, runtime, bot)
+    key = _key(job_owner())
+    last = _follow_up_event_id(key, [], _FOLLOW_UP_LIMIT)
+    try:
+        with patch(_SEND, AsyncMock()) as send:
+            first_id = "c6256cac" + "1" * 56
+            second_id = "d4e5f607" + "2" * 56
+            await _ended(
+                runtime,
+                first_id,
+                BackgroundOutcome("completed", "done"),
+                source_event_id=last,
+                tool_name="research",
+                kind="delegation",
+                adapter={"child": {"title": "Review @general design"}},
+            )
+            await _ended(
+                runtime,
+                second_id,
+                BackgroundOutcome("completed", "done"),
+                source_event_id=last,
+                tool_name="research",
+                kind="delegation",
+                adapter={"child": {"title": ""}},
+            )
+            for idx in range(5):
+                await _ended(
+                    runtime,
+                    f"{idx:08x}" + "a" * 56,
+                    BackgroundOutcome("completed", "done"),
+                    source_event_id=last,
+                    tool_name=f"run_tool_{idx}",
+                )
+            await coordinator._admit_follow_ups(runtime)
+            send.assert_awaited_once()
+            content = send.await_args.args[2]
+            assert content["msgtype"] == "m.text"
+            assert content["m.mentions"] == {"user_ids": [key.requester_id]}
+            assert f'href="https://matrix.to/#/{key.requester_id}"' in content["formatted_body"]
+            assert "- Review @general design (`c6256cac`)" in content["body"]
+            assert "- research (`d4e5f607`)" in content["body"]
+            assert "- and 2 more" in content["body"]
+            assert "20 automatic follow-ups in a row without a message from you" in content["body"]
+
+            # Mentioning only the human requester dispatches no agent even when a title contains @general.
+            config = Config(agents={"general": AgentConfig(display_name="General")})
+            paths = _runtime_paths(tmp_path)
+            persist_entity_accounts(config, paths)
+            room = MagicMock(users={key.requester_id: object()})
+            mentioned_agents, am_i_mentioned, has_non_agent_mentions = check_agent_mentioned(
+                {"sender": "@mindroom_general:example.org", "content": content},
+                MatrixID.parse("@mindroom_general:example.org"),
+                config,
+                paths,
+                room=room,
+            )
+            assert mentioned_agents == []
+            assert am_i_mentioned is False
+            assert has_non_agent_mentions is True
     finally:
         await runtime.shutdown()

@@ -128,7 +128,7 @@ run_subagent(
     task="Compare SQLite and PostgreSQL for a single-host task queue with 20 concurrent writers. Return three risks and cite sources.",
 )
 
-# Copy the Subagent ID from the result.
+# Copy the Subagent ID (or a unique prefix of at least 8 lowercase hex characters) from the result.
 continue_subagent(
     subagent_id="<returned-subagent-id>",
     message="Now assess how your recommendation changes with multiple hosts.",
@@ -141,6 +141,7 @@ Common errors:
 - `Cannot delegate to '<name>': that agent is not allowed to reply to you.` - the requester is not allowed to use the target agent under its [access settings](../authorization.md).
 - `Cannot delegate: Unknown model '<model>'. Available models: ...` - `model` is not an alias in `models:`.
 - `Cannot delegate: the maximum delegation depth was reached.` - the chain of subagents is already 3 deep.
+- `Subagent ID prefix "<prefix>" matches several subagents in this conversation: <id1>, <id2>. Pass the full ID.` - the prefix matched more than one of this caller's subagents in the conversation.
 - `Subagent is busy or awaiting approval. Finish its current turn before sending a follow-up.` - the child's previous turn has not finished.
 - `Subagent belongs to a Dynamic Workflow run and cannot be continued outside it; start a new subagent.` - `continue_subagent` named a workflow participant, whose tools work only inside its run.
 - `Cannot delegate an empty task. Please provide a task description.` - `task` or `message` is empty.
@@ -342,7 +343,7 @@ Ended jobs that no reply collected get one follow-up: a new message in the conve
 A follow-up waits until the conversation is free and never interrupts a running reply, and a reply that collected the jobs first leaves it nothing to do.
 Cancelled jobs and a silent schedule's jobs get no follow-up, so a cancel never makes the agent speak; the next standard reply (not a minimal-mode one) collects cancelled jobs like any other, and a silent schedule's next run hears of its own.
 Work that follow-ups start can chain at most 20 follow-ups without a human message; after that, its results wait for the next human message, whose reply hears of them.
-The agent then posts one notice in the conversation that results wait for a reply, which starts no turn of its own.
+The agent then posts one message in the conversation mentioning the requester, naming each waiting job (its subagent title or tool name and 8-character job ID, up to 5) and explaining that it paused after 20 automatic follow-ups in a row without a human message; mentioning only the requester notifies them without starting a new turn.
 Another requester's reply in a shared room never hears of these results.
 A tool's job a restart interrupted is reported as interrupted, with a warning that it may have partly run, and is never run again on its own; a subagent's job [continues instead](#running-subagents).
 
@@ -355,8 +356,8 @@ Enabling background jobs reserves the function name `job`; custom and plugin too
 | Action | Behavior |
 | --- | --- |
 | `list` | Discover accessible jobs, active first, with their status, saved summaries, the latest progress of running jobs, bounded pagination, and retained terminal outcomes, including collected ones. A call that returned its result before its wait ended never became a job and is not listed, unless its reply could not be saved. |
-| `wait` | Retrieve one job's original result, including supported structured data and media, using the same optional waiting budget; a wait that times out returns the job's latest progress. |
-| `cancel` | Ask one job to stop and return at once; the next notice reports how it ended. |
+| `wait` | Retrieve one job's original result, including supported structured data and media, using the same optional waiting budget; accepts a full job ID or a unique prefix of at least 8 lowercase hex characters. A wait that times out returns the job's latest progress. |
+| `cancel` | Ask one job to stop and return at once; accepts a full job ID or a unique prefix of at least 8 lowercase hex characters. The next notice reports how it ended. |
 | `collect` | Return and acknowledge every ended job of the conversation that the caller may see. |
 
 Each summary contains at most 500 characters; `summary_truncated` reports whether text was clipped, while `wait` retrieves the complete stored result.

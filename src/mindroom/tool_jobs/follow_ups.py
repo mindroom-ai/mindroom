@@ -125,8 +125,29 @@ def held_jobs(jobs: Sequence[BackgroundJob]) -> tuple[BackgroundJob, ...]:
     )
 
 
+_MAX_HELD_NOTICE_JOBS = 5
+_SHORT_JOB_ID_LENGTH = 8
+
+
+def _held_job_label(job: BackgroundJob) -> str:
+    child = job.adapter.get("child") if job.kind == "delegation" and isinstance(job.adapter, dict) else None
+    title = child.get("title") if isinstance(child, dict) else None
+    name = title.strip() if isinstance(title, str) and title.strip() else job.tool_name
+    return f"{name} (`{job.job_id[:_SHORT_JOB_ID_LENGTH]}`)"
+
+
 def held_notice(key: ConversationKey, jobs: Sequence[BackgroundJob]) -> tuple[str, str]:
     """Return the transaction ID and text of the notice that the limit holds ``jobs``; follow-ups start at streak 1."""
     noun = "job" if len(jobs) == 1 else "jobs"
-    text = f"⏸️ {len(jobs)} background {noun} finished while I was paused after {_FOLLOW_UP_LIMIT} automatic follow-ups."
-    return _follow_up_event_id(key, jobs, 0), f"{text} Reply here to let me continue."
+    header = (
+        f"⏸️ {len(jobs)} background {noun} finished while I was paused after "
+        f"{_FOLLOW_UP_LIMIT} automatic follow-ups in a row without a message from you"
+    )
+    if len(jobs) == 1:
+        body = f"{header}: {_held_job_label(jobs[0])}. Reply here to let me continue."
+    else:
+        lines = [f"- {_held_job_label(job)}" for job in jobs[:_MAX_HELD_NOTICE_JOBS]]
+        if (remaining := len(jobs) - _MAX_HELD_NOTICE_JOBS) > 0:
+            lines.append(f"- and {remaining} more")
+        body = f"{header}:\n" + "\n".join(lines) + "\n\nReply here to let me continue."
+    return _follow_up_event_id(key, jobs, 0), body

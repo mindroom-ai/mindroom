@@ -139,6 +139,12 @@ def format_entity_mention(
     return resolution.plain_text, [resolution.user_id], resolution.markdown_text
 
 
+def format_user_mention(user_id: str) -> tuple[str, list[str], str]:
+    """Return one literal Matrix user mention without resolving unrelated mentions."""
+    resolution = _literal_user_resolution(user_id)
+    return resolution.plain_text, [resolution.user_id], resolution.markdown_text
+
+
 def _mentioned_user_ids_from_replacements(replacements: list[_MentionReplacement]) -> list[str]:
     """Return replacement user IDs without duplicates while preserving mention order."""
     return list(dict.fromkeys(replacement.user_id for replacement in replacements))
