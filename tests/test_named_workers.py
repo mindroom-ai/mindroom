@@ -8,6 +8,7 @@ import threading
 import time
 from contextvars import copy_context
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import httpx
@@ -40,13 +41,14 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers import named as named_module
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends import kubernetes as kubernetes_backend_module
-from mindroom.workers.models import WorkerHandle, WorkerSpec
+from mindroom.workers.models import WorkerHandle, WorkerSandboxConfig, WorkerSpec
 from mindroom.workers.named import (
     NamedWorkerCall,
     NamedWorkerError,
     ensure_named_worker,
     named_worker_call,
     named_workers_refusal,
+    sandbox_mount_relative_path,
 )
 from mindroom.workers.runtime import idle_worker_cleanup_owner
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -59,7 +61,6 @@ from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Iterator
-    from pathlib import Path
 
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -203,6 +204,9 @@ def _call(
     name: object,
     resource_profile: object = None,
     *,
+    sandbox: object = None,
+    mount_dir: object = None,
+    mount_read_only: object = None,
     turn_id: str | None = _TURN,
     agent_name: str | None = "code",
     config: Config | None = _CONFIG,
@@ -210,6 +214,9 @@ def _call(
     call = named_worker_call(
         name,
         resource_profile,
+        sandbox=sandbox,
+        mount_dir=mount_dir,
+        mount_read_only=mount_read_only,
         agent_name=agent_name,
         config=config,
         runtime_paths=runtime_paths,
@@ -222,7 +229,8 @@ def _call(
 def _run(backend: object, call: NamedWorkerCall, normal_key: str = _ALICE) -> WorkerHandle:
     """Reach the worker ``call`` names beside ``normal_key``, as one routed shell call does."""
     spec = call.worker_spec(WorkerSpec(normal_key, private_agent_names=frozenset()))
-    return ensure_named_worker(cast("WorkerBackend", backend), spec, call)
+    handle, _admitted_spec = ensure_named_worker(cast("WorkerBackend", backend), spec, call)
+    return handle
 
 
 async def _retired(backend: _FakeBackend) -> list[str]:
@@ -282,7 +290,8 @@ async def _name_at_the_same_time(
         call = _call(runtime_paths, "e2e-0", profile)
         spec = call.worker_spec(WorkerSpec(_ALICE, private_agent_names=frozenset()))
         named.wait(SETTLE_TIMEOUT_SECONDS)
-        return ensure_named_worker(cast("WorkerBackend", backend), spec, call)
+        handle, _admitted_spec = ensure_named_worker(cast("WorkerBackend", backend), spec, call)
+        return handle
 
     async with execution_resources(response=True):
         return await asyncio.gather(*(asyncio.to_thread(run, profile) for profile in profiles), return_exceptions=True)
@@ -657,10 +666,179 @@ def test_a_call_names_a_worker_only_with_usable_arguments_inside_a_reply(
 
 
 def test_a_call_that_names_no_worker_asks_for_none(runtime_paths: RuntimePaths) -> None:
-    """Without the two arguments a call runs in its normal worker, whatever its agent may do."""
+    """Without a named-worker request, including default false booleans, a call runs in its normal worker."""
     assert (
         named_worker_call(None, None, agent_name="code", config=None, runtime_paths=runtime_paths, turn_id=None) is None
     )
+    assert (
+        named_worker_call(
+            None,
+            None,
+            sandbox=False,
+            mount_read_only=False,
+            agent_name="code",
+            config=None,
+            runtime_paths=runtime_paths,
+            turn_id=None,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "kwargs", "message"),
+    [
+        (None, {"sandbox": True}, "set worker too"),
+        (None, {"mount_dir": "scratch"}, "set worker too"),
+        (None, {"mount_read_only": True}, "set worker too"),
+        (None, {"sandbox": "true"}, "sandbox must be a boolean"),
+        (None, {"mount_dir": 123}, "mount_dir must be a workspace-relative directory path string"),
+        (None, {"mount_read_only": "yes"}, "mount_read_only must be a boolean"),
+        ("s1", {"sandbox": False, "mount_dir": "scratch"}, "mount_dir always runs in sandbox mode"),
+        ("s1", {"mount_read_only": True}, "mount_read_only requires mount_dir"),
+        ("s1", {"sandbox": True, "mount_read_only": True}, "mount_read_only requires mount_dir"),
+        ("s1", {"mount_dir": ""}, "Invalid mount_dir"),
+        ("s1", {"mount_dir": "   "}, "Invalid mount_dir"),
+        ("s1", {"mount_dir": "/etc"}, "Invalid mount_dir"),
+        ("s1", {"mount_dir": "../escape"}, "Invalid mount_dir"),
+        ("s1", {"mount_dir": "a/../b"}, "Invalid mount_dir"),
+        ("s1", {"mount_dir": "$HOME/sub"}, "Invalid mount_dir"),
+        ("s1", {"mount_dir": "~/sub"}, "Invalid mount_dir"),
+        ("s1", {"mount_dir": "a\x00b"}, "NUL bytes"),
+    ],
+)
+async def test_sandbox_argument_validation(
+    runtime_paths: RuntimePaths,
+    name: object,
+    kwargs: dict[str, object],
+    message: str,
+) -> None:
+    """Invalid sandbox, mount_dir, and mount_read_only combinations raise NamedWorkerError."""
+    async with execution_resources(response=True):
+        with pytest.raises(NamedWorkerError, match=message):
+            named_worker_call(
+                name,
+                None,
+                agent_name="code",
+                config=_CONFIG,
+                runtime_paths=runtime_paths,
+                turn_id=_TURN,
+                **kwargs,
+            )
+
+
+@pytest.mark.asyncio
+async def test_sandbox_options_lock_on_first_call_and_reuse_without_repeating(
+    runtime_paths: RuntimePaths,
+    backend: _FakeBackend,
+) -> None:
+    """First admission locks sandbox settings; follow-up calls reuse them and reject mismatches."""
+    async with execution_resources(response=True):
+        first_call = _call(runtime_paths, "sbx", mount_dir="./scratch/job1/", mount_read_only=True)
+        assert first_call.sandbox == WorkerSandboxConfig(mount_dir="scratch/job1", mount_read_only=True)
+        assert first_call.sandbox_specified is True
+
+        first_spec_in = first_call.worker_spec(WorkerSpec(_ALICE, private_agent_names=frozenset()))
+        assert first_spec_in.mirror_grantable_credentials is False
+        first_handle, first_admitted = ensure_named_worker(cast("WorkerBackend", backend), first_spec_in, first_call)
+        assert first_admitted.sandbox == WorkerSandboxConfig(mount_dir="scratch/job1", mount_read_only=True)
+        assert first_admitted.mirror_grantable_credentials is False
+
+        # Follow-up omitting sandbox flags inherits the locked sandbox and still strips credential mirroring.
+        followup_call = _call(runtime_paths, "sbx")
+        assert followup_call.sandbox is None
+        assert followup_call.sandbox_specified is False
+        followup_spec_in = followup_call.worker_spec(WorkerSpec(_ALICE, private_agent_names=frozenset()))
+        followup_handle, followup_admitted = ensure_named_worker(
+            cast("WorkerBackend", backend),
+            followup_spec_in,
+            followup_call,
+        )
+        assert followup_handle.worker_key == first_handle.worker_key
+        assert followup_admitted.sandbox == WorkerSandboxConfig(mount_dir="scratch/job1", mount_read_only=True)
+        assert followup_admitted.mirror_grantable_credentials is False
+        assert followup_call.admitted_sandbox(followup_handle.worker_key) == first_admitted.sandbox
+
+        # Repeating the exact same sandbox options is allowed.
+        same_call = _call(runtime_paths, "sbx", sandbox=True, mount_dir="scratch/job1", mount_read_only=True)
+        _run(backend, same_call)
+
+        # Any conflicting sandbox option is refused, including sandbox=False or different mount_dir/RO.
+        for bad_kwargs in (
+            {"sandbox": False},
+            {"sandbox": True},
+            {"mount_dir": "scratch/job1"},
+            {"mount_dir": "scratch/job2", "mount_read_only": True},
+        ):
+            with pytest.raises(NamedWorkerError, match="was started in sandbox mode"):
+                _run(backend, _call(runtime_paths, "sbx", **bad_kwargs))
+
+        # Unsandboxed worker refuses later sandbox=True.
+        _run(backend, _call(runtime_paths, "plain"))
+        with pytest.raises(NamedWorkerError, match="was started without sandbox mode"):
+            _run(backend, _call(runtime_paths, "plain", sandbox=True))
+
+
+def test_sandbox_mount_relative_path_validates_directory_without_symlinks(tmp_path: Path) -> None:
+    """Pre-validation accepts real directories (including '.') and rejects missing paths, files, and symlinks."""
+    workspace = tmp_path / "agents" / "code" / "workspace"
+    sub = workspace / "scratch" / "job1"
+    sub.mkdir(parents=True)
+    (workspace / "file.txt").write_text("hi", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (workspace / "link").symlink_to(outside)
+
+    assert (
+        sandbox_mount_relative_path(
+            storage_root=tmp_path,
+            worker_key=_ALICE,
+            private_agent_names=frozenset(),
+            config=_CONFIG,
+            sandbox=WorkerSandboxConfig(mount_dir=None),
+        )
+        is None
+    )
+    assert sandbox_mount_relative_path(
+        storage_root=tmp_path,
+        worker_key=_ALICE,
+        private_agent_names=frozenset(),
+        config=_CONFIG,
+        sandbox=WorkerSandboxConfig(mount_dir="."),
+    ) == Path("agents/code/workspace")
+    assert sandbox_mount_relative_path(
+        storage_root=tmp_path,
+        worker_key=_ALICE,
+        private_agent_names=frozenset(),
+        config=_CONFIG,
+        sandbox=WorkerSandboxConfig(mount_dir="scratch/job1"),
+    ) == Path("agents/code/workspace/scratch/job1")
+
+    with pytest.raises(NamedWorkerError, match="does not exist"):
+        sandbox_mount_relative_path(
+            storage_root=tmp_path,
+            worker_key=_ALICE,
+            private_agent_names=frozenset(),
+            config=_CONFIG,
+            sandbox=WorkerSandboxConfig(mount_dir="missing"),
+        )
+    with pytest.raises(NamedWorkerError, match="real directory without symlinks"):
+        sandbox_mount_relative_path(
+            storage_root=tmp_path,
+            worker_key=_ALICE,
+            private_agent_names=frozenset(),
+            config=_CONFIG,
+            sandbox=WorkerSandboxConfig(mount_dir="file.txt"),
+        )
+    with pytest.raises(NamedWorkerError, match="without symlinks"):
+        sandbox_mount_relative_path(
+            storage_root=tmp_path,
+            worker_key=_ALICE,
+            private_agent_names=frozenset(),
+            config=_CONFIG,
+            sandbox=WorkerSandboxConfig(mount_dir="link"),
+        )
 
 
 @pytest.mark.parametrize(

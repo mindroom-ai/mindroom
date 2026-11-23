@@ -372,7 +372,7 @@ def worker_route(
         streamed = tool_name == "shell" and get_call_output_stream() is not None
         spec = replace(_placed_worker_spec(spec, worker_target, named), wait_for_setup=not streamed)
         if named is not None:
-            worker_handle = ensure_named_worker(worker_manager, spec, named, progress_sink=progress_sink)
+            worker_handle, spec = ensure_named_worker(worker_manager, spec, named, progress_sink=progress_sink)
         elif start or not worker_backend_kind(runtime_paths).dedicated:
             worker_handle = worker_manager.ensure_worker(spec, progress_sink=progress_sink)
         else:

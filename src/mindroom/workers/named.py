@@ -22,20 +22,26 @@ from typing import TYPE_CHECKING, cast
 from mindroom.background_tasks import create_background_task
 from mindroom.config.resolution import agent_policy
 from mindroom.logging_config import get_logger
+from mindroom.path_confinement import open_directory_within_root
 from mindroom.tool_jobs.resources import current_response_resources
 from mindroom.tool_system.worker_routing import (
+    agent_workspace_relative_path,
     named_worker_key,
     pinned_worker_state_scope_key,
     resolved_worker_key_scope,
+    shared_storage_root,
+    visible_workspace_roots,
     worker_log_id,
 )
 from mindroom.workers.backend import RetiringWorkerBackend, WorkerBackendError
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.backends.kubernetes_config import NAMED_WORKERS_MAX_ENV, configured_named_workers_max
-from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES
+from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES, WorkerSandboxConfig
 from mindroom.workers.runtime import idle_worker_cleanup_runs, lease_configured_primary_worker_manager
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.workers.backend import WorkerBackend
@@ -47,6 +53,7 @@ __all__ = [
     "ensure_named_worker",
     "named_worker_call",
     "named_workers_refusal",
+    "sandbox_mount_relative_path",
 ]
 
 logger = get_logger(__name__)
@@ -74,11 +81,21 @@ class NamedWorkerError(RuntimeError):
     """Why a call cannot run in the worker it names, in words for the agent that made the call."""
 
 
+def _describe_sandbox(sandbox: WorkerSandboxConfig | None) -> str:
+    if sandbox is None:
+        return "without sandbox mode"
+    if sandbox.mount_dir is None:
+        return "in sandbox mode (empty scratch)"
+    mode = ", read-only" if sandbox.mount_read_only else ""
+    return f"in sandbox mode (mount_dir={sandbox.mount_dir!r}{mode})"
+
+
 @dataclass(slots=True)
 class _NamedWorker:
-    """One worker a fleet started: the size it was started with and the start its last call ran in."""
+    """One worker a fleet started: its locked size and sandbox config, and the start its last call ran in."""
 
     resource_profile: ScriptResourceProfileName | None
+    sandbox: WorkerSandboxConfig | None = None
     # What the backend ran the worker as when the last call ran in it, and how often that had started.
     start: tuple[str | None, int] | None = None
 
@@ -101,27 +118,46 @@ class _NamedWorkerFleet:
         pin_id = hashlib.sha256(f"{self.nonce}:{name}".encode()).hexdigest()[:32]
         return named_worker_key(normal_worker_key, pin_id)
 
-    def admit(self, call: NamedWorkerCall, worker_key: str) -> ScriptResourceProfileName | None:
-        """Record that ``call`` starts or reaches ``worker_key`` and return the size the worker has; ``_lock`` is held.
+    def admit(
+        self,
+        call: NamedWorkerCall,
+        worker_key: str,
+    ) -> tuple[ScriptResourceProfileName | None, WorkerSandboxConfig | None]:
+        """Record that ``call`` starts or reaches ``worker_key`` and return its locked size and sandbox; ``_lock`` is held.
 
-        The first call admitted for a worker sizes it. A later call takes that size, and one that asks for another
-        is refused, because resizing a worker restarts it under the commands that run in it.
+        The first call admitted for a worker locks its size and sandbox settings. A later call omitting them reuses
+        those locked settings; one asking for different settings is refused.
         """
         if self.holders < 1:
             msg = f"Cannot run in worker '{call.name}': its reply and that reply's background jobs have ended."
             raise NamedWorkerError(msg)
         worker = self.workers.get(worker_key)
         if worker is None:
-            worker = self.workers[worker_key] = _NamedWorker(call.resource_profile)
-        elif call.resource_profile not in (None, worker.resource_profile):
-            size = f"resource_profile {worker.resource_profile}" if worker.resource_profile else "no resource_profile"
-            msg = (
-                f"Worker '{call.name}' was started with {size} in this reply; "
-                "omit resource_profile, or name another worker."
-            )
-            raise NamedWorkerError(msg)
+            worker = self.workers[worker_key] = _NamedWorker(call.resource_profile, call.sandbox)
+        else:
+            if call.resource_profile not in (None, worker.resource_profile):
+                size = (
+                    f"resource_profile {worker.resource_profile}" if worker.resource_profile else "no resource_profile"
+                )
+                msg = (
+                    f"Worker '{call.name}' was started with {size} in this reply; "
+                    "omit resource_profile, or name another worker."
+                )
+                raise NamedWorkerError(msg)
+            if call.sandbox_specified and call.sandbox != worker.sandbox:
+                msg = (
+                    f"Worker '{call.name}' was started {_describe_sandbox(worker.sandbox)} in this reply; "
+                    "omit sandbox options to reuse it, or name another worker."
+                )
+                raise NamedWorkerError(msg)
         self.runtime_paths = call.runtime_paths
-        return worker.resource_profile
+        return worker.resource_profile, worker.sandbox
+
+    def admitted_sandbox(self, worker_key: str) -> WorkerSandboxConfig | None:
+        """Return the locked sandbox config of an admitted worker in this fleet."""
+        with _lock:
+            worker = self.workers.get(worker_key)
+            return None if worker is None else worker.sandbox
 
     def header(self, name: str, handle: WorkerHandle) -> str:
         """Return the line a call's result starts with: its worker, and whether this call ran in a new start of it."""
@@ -159,18 +195,26 @@ class NamedWorkerCall:
     agent_limit: int
     runtime_paths: RuntimePaths
     _fleet: _NamedWorkerFleet
+    sandbox: WorkerSandboxConfig | None = None
+    sandbox_specified: bool = False
 
     def worker_spec(self, normal_spec: WorkerSpec) -> WorkerSpec:
         """Return the spec of the named worker beside the normal worker ``normal_spec`` describes, as the call asks.
 
-        ``ensure_named_worker`` gives the worker the size its first admitted call asked for.
+        ``ensure_named_worker`` gives the worker the size and sandbox config its first admitted call asked for.
         """
         return replace(
             normal_spec,
             worker_key=self._fleet.worker_key(normal_spec.worker_key, self.name),
             state_scope_worker_key=normal_spec.worker_key,
             resource_profile=self.resource_profile,
+            sandbox=self.sandbox,
+            mirror_grantable_credentials=normal_spec.mirror_grantable_credentials and self.sandbox is None,
         )
+
+    def admitted_sandbox(self, worker_key: str) -> WorkerSandboxConfig | None:
+        """Return the locked sandbox config of an admitted worker in this call's fleet."""
+        return self._fleet.admitted_sandbox(worker_key)
 
     def header(self, handle: WorkerHandle) -> str:
         """Return the line the call's result starts with, which names its worker and says when it is a new start."""
@@ -217,24 +261,109 @@ def named_workers_refusal(agent_name: str | None, config: Config | None, runtime
     return None
 
 
+def _parse_sandbox_config(
+    sandbox: object,
+    mount_dir: object,
+    mount_read_only: object,
+) -> tuple[WorkerSandboxConfig | None, bool]:
+    if sandbox is False and mount_dir is not None:
+        msg = "mount_dir always runs in sandbox mode; omit sandbox or set sandbox=true."
+        raise NamedWorkerError(msg)
+    if mount_read_only is True and mount_dir is None:
+        msg = "mount_read_only requires mount_dir."
+        raise NamedWorkerError(msg)
+    normalized_mount_dir: str | None = None
+    if isinstance(mount_dir, str):
+        if "\x00" in mount_dir:
+            msg = "mount_dir must not contain NUL bytes."
+            raise NamedWorkerError(msg)
+        try:
+            normalized_mount_dir = agent_workspace_relative_path(mount_dir).as_posix()
+        except ValueError as exc:
+            msg = f"Invalid mount_dir: {exc}"
+            raise NamedWorkerError(msg) from exc
+    sandbox_specified = sandbox is not None or mount_dir is not None or mount_read_only is not None
+    sandbox_config = (
+        WorkerSandboxConfig(mount_dir=normalized_mount_dir, mount_read_only=bool(mount_read_only))
+        if sandbox is True or normalized_mount_dir is not None
+        else None
+    )
+    return sandbox_config, sandbox_specified
+
+
+def sandbox_mount_relative_path(
+    *,
+    storage_root: Path,
+    worker_key: str,
+    private_agent_names: frozenset[str] | None,
+    config: Config | None,
+    sandbox: WorkerSandboxConfig,
+    validate: bool = True,
+) -> Path | None:
+    """Return the storage-relative mount path for ``sandbox`` (None for empty scratch), validating on disk."""
+    if sandbox.mount_dir is None:
+        return None
+    root = shared_storage_root(storage_root)
+    policies = config.get_agent_policies() if config is not None else {}
+    workspaces = visible_workspace_roots(
+        root,
+        worker_key,
+        policies,
+        private_agent_names=private_agent_names or frozenset(),
+    )
+    if len(workspaces) != 1:
+        msg = "Sandbox mount_dir requires a single agent workspace."
+        raise NamedWorkerError(msg)
+    workspace_rel = workspaces[0].relative_to(root)
+    target_rel = workspace_rel if sandbox.mount_dir == "." else workspace_rel / sandbox.mount_dir
+    if validate:
+        try:
+            with open_directory_within_root(root, target_rel, create=False):
+                pass
+        except FileNotFoundError as exc:
+            msg = f"Sandbox mount_dir '{sandbox.mount_dir}' does not exist in the agent workspace."
+            raise NamedWorkerError(msg) from exc
+        except (OSError, ValueError) as exc:
+            msg = f"Sandbox mount_dir '{sandbox.mount_dir}' must be a real directory without symlinks."
+            raise NamedWorkerError(msg) from exc
+    return target_rel
+
+
 def named_worker_call(
     name: object,
     resource_profile: object,
     *,
+    sandbox: object = None,
+    mount_dir: object = None,
+    mount_read_only: object = None,
     agent_name: str | None,
     config: Config | None,
     runtime_paths: RuntimePaths,
     turn_id: str | None,
 ) -> NamedWorkerCall | None:
-    """Return the named worker a call's ``worker`` and ``resource_profile`` arguments ask for, None for neither.
+    """Return the named worker a call's arguments ask for, or None for an ordinary shell call.
 
     The arguments are as the model sent them, so their types are checked here. ``turn_id`` is the reply the call
     belongs to, whose fleet owns the worker.
     """
-    if name is None and resource_profile is None:
+    if sandbox is not None and not isinstance(sandbox, bool):
+        msg = "sandbox must be a boolean."
+        raise NamedWorkerError(msg)
+    if mount_dir is not None and not isinstance(mount_dir, str):
+        msg = "mount_dir must be a workspace-relative directory path string."
+        raise NamedWorkerError(msg)
+    if mount_read_only is not None and not isinstance(mount_read_only, bool):
+        msg = "mount_read_only must be a boolean."
+        raise NamedWorkerError(msg)
+    sandbox_requested = sandbox is True or mount_dir is not None or mount_read_only is True
+    if name is None and resource_profile is None and not sandbox_requested:
         return None
     if name is None:
-        msg = "resource_profile sizes a named worker; set worker too."
+        msg = (
+            "resource_profile sizes a named worker; set worker too."
+            if resource_profile is not None and not sandbox_requested
+            else "sandbox, mount_dir, and mount_read_only configure a named worker; set worker too."
+        )
         raise NamedWorkerError(msg)
     refusal = named_workers_refusal(agent_name, config, runtime_paths)
     if refusal is not None:
@@ -245,6 +374,7 @@ def named_worker_call(
     if resource_profile is not None and resource_profile not in SCRIPT_RESOURCE_PROFILE_NAMES:
         msg = "resource_profile must be small, standard, or large."
         raise NamedWorkerError(msg)
+    sandbox_config, sandbox_specified = _parse_sandbox_config(sandbox, mount_dir, mount_read_only)
     fleet = _owned_fleet(turn_id)
     if fleet is None:
         msg = (
@@ -258,6 +388,8 @@ def named_worker_call(
         agent_limit=_agent_limit(agent_name, config),
         runtime_paths=runtime_paths,
         _fleet=fleet,
+        sandbox=sandbox_config,
+        sandbox_specified=sandbox_specified,
     )
 
 
@@ -267,7 +399,7 @@ def ensure_named_worker(
     call: NamedWorkerCall,
     *,
     progress_sink: ProgressSink | None = None,
-) -> WorkerHandle:
+) -> tuple[WorkerHandle, WorkerSpec]:
     """Start or reach the named worker ``spec``, from ``call.worker_spec``, describes, refusing one past the limits.
 
     A worker that exists, or that another call is starting, is reached without counting. Otherwise every named
@@ -310,10 +442,16 @@ def ensure_named_worker(
                 )
                 raise NamedWorkerError(msg)
         with _lock:
-            spec = replace(spec, resource_profile=call._fleet.admit(call, worker_key))
+            resource_profile, sandbox = call._fleet.admit(call, worker_key)
+            spec = replace(
+                spec,
+                resource_profile=resource_profile,
+                sandbox=sandbox,
+                mirror_grantable_credentials=spec.mirror_grantable_credentials and sandbox is None,
+            )
             _starting[worker_key] += 1
     try:
-        return backend.ensure_worker(spec, progress_sink=progress_sink)
+        return backend.ensure_worker(spec, progress_sink=progress_sink), spec
     finally:
         with _lock:
             _starting[worker_key] -= 1
