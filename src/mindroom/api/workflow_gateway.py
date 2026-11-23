@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Annotated
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
@@ -148,7 +148,11 @@ async def submit_node(request: Request, authenticated: _Attempt) -> Response:
 
 
 @router.get("/nodes/{node_id}")
-async def node_receipt(node_id: str, authenticated: _Attempt, wait: float = 0) -> dict[str, object]:
+async def node_receipt(
+    node_id: str,
+    authenticated: _Attempt,
+    wait: Annotated[float, Query(allow_inf_nan=False)] = 0,
+) -> dict[str, object]:
     """Return a node's receipt, held up to `wait` seconds until the node ends."""
     engine, attempt = authenticated
     with _refusals():

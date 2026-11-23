@@ -184,6 +184,17 @@ async def test_malformed_requests_are_422_and_save_nothing(stack: WorkflowStack,
 
 
 @pytest.mark.asyncio
+async def test_non_finite_wait_query_is_422(stack: WorkflowStack, client: httpx.AsyncClient) -> None:
+    """Non-finite poll durations are rejected before they can reach the asyncio timer heap."""
+    node_id = (await client.post("nodes", json=_NODE)).json()["id"]
+    await stack.until(lambda: stack.status(stack.run_id)[1][0].state is WorkflowNodeState.COMPLETED)
+
+    answers = [await client.get(f"nodes/{node_id}", params={"wait": value}) for value in ("nan", "inf", "-inf")]
+
+    assert [answer.status_code for answer in answers] == [422, 422, 422]
+
+
+@pytest.mark.asyncio
 async def test_poll_returns_when_the_node_changes_and_after_wait_otherwise(
     stack: WorkflowStack,
     client: httpx.AsyncClient,
