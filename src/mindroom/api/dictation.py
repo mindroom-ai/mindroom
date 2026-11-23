@@ -20,6 +20,7 @@ from mindroom.api.app_state import app_state, ensure_app_state
 from mindroom.api.auth import is_administrator
 from mindroom.api.bounded_form import InvalidMultipartFormError, RequestBodyTooLargeError, parse_multipart_form
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import prepared_entity_names_by_user_id
 from mindroom.helper_usage import record_system_usage
 from mindroom.logging_config import get_logger
@@ -308,7 +309,10 @@ async def _authorized_in_room(
     present_responders = tuple(name for member_id in members if (name := entity_by_user_id.get(member_id)) is not None)
     if not present_responders:
         return False
-    allowed, pending = _allowed_any_responder(user_id, present_responders, room_id, config, runtime_paths, memberships)
+    room_responders = (
+        present_responders if ROUTER_AGENT_NAME in present_responders else (*present_responders, ROUTER_AGENT_NAME)
+    )
+    allowed, pending = _allowed_any_responder(user_id, room_responders, room_id, config, runtime_paths, memberships)
     if allowed:
         return True
     embedded = state.embedded
@@ -325,7 +329,7 @@ async def _authorized_in_room(
         )
         allowed, pending = _allowed_any_responder(
             user_id,
-            present_responders,
+            room_responders,
             room_id,
             config,
             runtime_paths,
@@ -360,10 +364,13 @@ async def _authorize_user(
         return
     if (pending or memberships.needs_refresh(config)) and embedded is not None:
         await _refresh_memberships(embedded.refresh_agent_reply_memberships_when_needed)
-        if _allowed_any_responder(user_id, responders, None, config, runtime_paths, memberships)[0]:
+        allowed, pending = _allowed_any_responder(user_id, responders, None, config, runtime_paths, memberships)
+        if allowed:
             return
     if room_id and await _authorized_in_room(request, user_id, room_id, config, runtime_paths, memberships):
         return
+    if pending:
+        raise _DictationRefusedError(code="unavailable", message=_MEMBERSHIP_UNAVAILABLE)
     raise _DictationRefusedError(code="forbidden", message=_FORBIDDEN)
 
 

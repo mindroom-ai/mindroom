@@ -405,9 +405,18 @@ async def test_authorization_covers_admins_agents_teams_room_grants_bots_and_gue
     assert (await api.status(ADMIN)).status_code == 200
     assert (await api.status(ALICE)).status_code == 200
     assert (await api.status(TEAM_USER)).status_code == 200
-    _refusal(await api.status(OUTSIDER), 403, "forbidden")
 
-    # Unauthorized humans and MindRoom bot accounts are rejected before acquiring a slot or reading a byte.
+    # Room-backed grant user succeeds after one membership refresh on pending state.
+    grant_user = "@grantmember:localhost"
+    cfg = _base_config()
+    api.publish(cfg)
+    api.refresh_calls = 0
+    api.on_refresh = lambda: _seed_memberships(api.memberships, cfg, [(GRANT_ROOM_KEY, GRANT_ROOM_ID, {grant_user})])
+    assert (await api.status(grant_user)).status_code == 200
+    assert api.refresh_calls == 1
+
+    # With grant rooms resolved, unauthorized humans and MindRoom bots get 403 unread and touch no slots.
+    _refusal(await api.status(OUTSIDER), 403, "forbidden")
     bot_id = MatrixID.from_username(
         agent_username_localpart("assistant", api.runtime_paths),
         runtime_matrix_domain(api.runtime_paths),
@@ -421,15 +430,6 @@ async def test_authorization_covers_admins_agents_teams_room_grants_bots_and_gue
         )
         assert (status_code, body["code"], chunks_read) == (403, "forbidden", 0)
     assert api.limiter._in_flight_total == 0
-
-    # Room-backed grant user succeeds after one membership refresh on pending state.
-    grant_user = "@grantmember:localhost"
-    cfg = _base_config()
-    api.publish(cfg)
-    api.refresh_calls = 0
-    api.on_refresh = lambda: _seed_memberships(api.memberships, cfg, [(GRANT_ROOM_KEY, GRANT_ROOM_ID, {grant_user})])
-    assert (await api.status(grant_user)).status_code == 200
-    assert api.refresh_calls == 1
 
     # Guest in a router room passes only when joined in room_members and allowed by a responder in that room.
     api.on_refresh = None
@@ -491,6 +491,39 @@ async def test_two_room_guest_only_evaluates_responders_present_in_target_room(a
     assert (await api.status(GUEST, room_id=room_b)).status_code == 200
     assert (await api.transcribe(GUEST, audio=_wav(), room_id=room_b)).status_code == 200
 
+    # In an agent-steward room without the router joined, router.access still authorizes joined guests.
+    steward_cfg = Config(
+        administrators=[ADMIN],
+        agents={
+            "agent_a": AgentConfig(
+                display_name="Agent A",
+                access=ResponderAccessConfig(users=[ALICE], current_room_members=False),
+            ),
+        },
+        router=RouterConfig(access=ResponderAccessConfig(current_room_members=True)),
+        voice=VoiceConfig(enabled=True, stt=VoiceSTTConfig(api_key="test-stt-key", model="gpt-transcribe")),
+    )
+    api.publish(steward_cfg)
+    api.room_roster[room_a] = {GUEST: "Guest", agent_a_id: "Agent A"}
+    api.room_roster["!no_bot:localhost"] = {GUEST: "Guest", ALICE: "Alice"}
+    _seed_memberships(api.memberships, steward_cfg, [(None, room_a, {GUEST}), (None, "!no_bot:localhost", {GUEST})])
+    assert (await api.status(GUEST, room_id=room_a)).status_code == 200
+    assert (await api.transcribe(GUEST, audio=_wav(), room_id=room_a)).status_code == 200
+    _refusal(await api.status(GUEST, room_id="!no_bot:localhost"), 403, "forbidden")
+
+
+@pytest.mark.asyncio
+async def test_roomless_unresolved_members_of_rooms_grant_returns_503(api: DictationHarness) -> None:
+    """An unresolved members_of_rooms grant after refresh returns 503 unavailable instead of 403 forbidden."""
+    api.refresh_calls = 0
+    api.on_refresh = None
+    _refusal(await api.status(OUTSIDER), 503, "unavailable")
+    assert api.refresh_calls == 1
+
+    # Once the grant room resolves without OUTSIDER, roomless /status returns a proven 403 forbidden.
+    _seed_memberships(api.memberships, _base_config(), [(GRANT_ROOM_KEY, GRANT_ROOM_ID, set())])
+    _refusal(await api.status(OUTSIDER), 403, "forbidden")
+
 
 @pytest.mark.asyncio
 async def test_room_membership_lookup_failures_return_503_unavailable(api: DictationHarness) -> None:
@@ -513,12 +546,14 @@ async def test_room_membership_lookup_failures_return_503_unavailable(api: Dicta
     state.room_members = None
     _refusal(await api.status(GUEST, room_id=ROOM), 503, "unavailable")
 
-    # 4. Successful lookup proving the user is not joined returns 403 forbidden.
+    # 4. Successful lookup proving the user is not joined returns 403 forbidden (with grant rooms resolved).
     state.room_members = original_room_members
+    _seed_memberships(api.memberships, _base_config(), [(GRANT_ROOM_KEY, GRANT_ROOM_ID, set())])
     api.room_roster[ROOM] = {ALICE: "Alice"}
     _refusal(await api.status(GUEST, room_id=ROOM), 403, "forbidden")
 
     # 5. Successful lookup with user + router joined, but unresolved reply memberships -> 503 unavailable.
+    api.memberships.invalidate(_base_config(), reason="unresolved")
     router_id = current_entity_id(ROUTER_AGENT_NAME, api.runtime_paths).full_id
     api.room_roster[ROOM] = {GUEST: "Guest", router_id: "Router"}
     _refusal(await api.status(GUEST, room_id=ROOM), 503, "unavailable")
