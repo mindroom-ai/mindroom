@@ -565,3 +565,16 @@ async def test_run_inside_a_run_gets_no_card_and_shows_as_a_group(
     assert [args[2] for args in published] == [outer]
     (group,) = published[0][4].groups
     assert (group["kind"], group["parent"], group["total"]) == ("workflow", "n1", 0)
+
+
+@pytest.mark.asyncio
+async def test_unsendable_final_card_backoff_never_overflows(stack: WorkflowStack) -> None:
+    """Long-running retries of an unsendable final card stay capped instead of overflowing float conversion."""
+    await stack.finish_attempt("done")
+    stack.access = "denied"
+    stack.views._unsent[stack.run_id] = 1025
+
+    await stack.views.show(stack.run_id)
+
+    assert stack.views._unsent[stack.run_id] == 1026
+    assert stack.views._due[stack.run_id] > 0

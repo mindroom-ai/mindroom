@@ -217,7 +217,7 @@ class RunViews:
         else:
             # Nothing writes to an ended run again, so its card is sent again from here until it says the end.
             tries = self._unsent[run_id] = self._unsent.get(run_id, 0) + 1
-            self._due[run_id] = time.monotonic() + min(_REFRESH_SECONDS * 2**tries, _CARD_SECONDS)
+            self._due[run_id] = time.monotonic() + min(_REFRESH_SECONDS * 2 ** min(tries, 10), _CARD_SECONDS)
 
     async def _ask_pending(self, run_id: str) -> bool:
         """Retry unposted question cards for *run_id* and its descendants; return whether any remain unposted."""
