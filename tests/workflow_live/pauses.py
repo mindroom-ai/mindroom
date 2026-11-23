@@ -11,18 +11,19 @@ Usage, from the checkout, after `just live up --backend <checkout>` in `~/repos/
    Its script calls `ask_user` first. While the card is open this script stops the backend with SIGTERM and starts
    it again, waits until the call waits again, and answers `Yes` with an `io.mindroom.workflow_answer` event of the
    test account.
-3. Then one agent of that run answers, and the next one would start over the limit, so it waits as queued while the
-   run's cost question is open. This script answers that question `Stop`, which cancels the run.
+3. Then one agent of that run answers and spends past the limit, so the next agent never starts and the run ends
+   `interrupted` with `Stopped at the cost limit (...)`.
 
-A further turn of a `schema` call is new spending and waits at the limit too, which is why the correction has a run
-of its own: with a limit this small no `Continue` would ever release it.
+A further turn of a `schema` call is new spending and stops at the limit too, which is why the correction has a run
+of its own.
 When both runs have ended the script prints
 
     schema_turns=<turns of the schema call> schema_kind=<how it ended> questions=<cards of the script's question>
-    answered=<the answer the call returned> held=<agent calls that waited at the limit and never started>
-    budget_cards=<cards of the cost question> attempt=<attempts of the second run> run=<how the second run ended>
+    answered=<the answer the call returned> held=<1 when the second agent never started a job>
+    limit_reason=<True when the run's error reports the cost limit> attempt=<attempts of the second run>
+    run=<how the second run ended>
 
-Expected: `schema_turns=5 schema_kind=schema questions=1 answered=Yes held=1 budget_cards=1 attempt=2 run=cancelled`.
+Expected: `schema_turns=5 schema_kind=schema questions=1 answered=Yes held=1 limit_reason=True attempt=2 run=interrupted`.
 The lobby must not be encrypted, since the script reads the cards from the room: run it before `graph_frames.py`,
 which encrypts the lobby, or on another slot.
 The agents' model needs a price, or the limit is never reached: the script then says so and exits 1.
@@ -144,29 +145,25 @@ def main() -> int:
     run = deployment.run(token)
     assert run is not None
     _answer(deployment, run[0], asked, "Yes")
-    held_states = ("queued", "running")
-    until("the held agent", lambda: (_node(deployment, token, "@2") or {}).get("state") in held_states, 600, 1)
-    if _node(deployment, token, "$budget:1") is None:
+    ended, nodes = deployment.ended_run(token, 600)
+    if ended["state"] == "completed":
         msg = "the run's first agent cost nothing: give the slot's model a `pricing` entry and run this again"
         raise LiveError(msg)
-    budget = until("the cost question", lambda: _waits(deployment, token, "$budget:1", 2), 300, 1)
-    say(f"the run waits at its limit: {json.loads(budget['request_json'])['question']}")
-    _answer(deployment, run[0], budget, "Stop")
-    ended, nodes = deployment.ended_run(token, 300)
+    say(f"the run ended {ended['state']}: {ended['error']}")
 
     by_key = {node["key"]: node for node in nodes}
-    choice, spender = by_key["@0"], by_key["@2"]
-    held = spender["state"] == "cancelled" and "job_id" not in json.loads(spender["links_json"])
+    choice, spender = by_key["@0"], by_key.get("@2")
+    held = spender is None or (spender["state"] == "cancelled" and "job_id" not in json.loads(spender["links_json"]))
+    limit_reason = (ended["error"] or "").startswith("Stopped at the cost limit (")
     line = (
         f"schema_turns={json.loads(checker['links_json']).get('turn', 1)} schema_kind={kind} "
         f"questions={_cards(deployment, ended['run_id'], f'n{choice["seq"]}')} "
         f"answered={json.loads(choice['result_json'])} held={int(held)} "
-        f"budget_cards={_cards(deployment, ended['run_id'], f'n{budget["seq"]}')} "
-        f"attempt={ended['attempt']} run={ended['state']}"
+        f"limit_reason={limit_reason} attempt={ended['attempt']} run={ended['state']}"
     )
     print(line, flush=True)
     expected = (
-        "schema_turns=5 schema_kind=schema questions=1 answered=Yes held=1 budget_cards=1 attempt=2 run=cancelled"
+        "schema_turns=5 schema_kind=schema questions=1 answered=Yes held=1 limit_reason=True attempt=2 run=interrupted"
     )
     return 0 if line == expected else 1
 
