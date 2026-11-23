@@ -924,3 +924,203 @@ async def test_claude_get_usage_low_percent_display_name_null_limits_and_unrelat
     claude_acct = {a.id: a for a in snap2.accounts}["claude_code:default"]
     assert claude_acct.stale is True
     assert claude_acct.windows[0].used_percent == 0.5
+
+
+@pytest.mark.asyncio
+async def test_openrouter_request_params_authorization_and_x_api_key_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """request_params.extra_headers.Authorization and default_headers.X-Api-Key override shared keys; conflicts skip."""
+    seen_auth: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        auth = request.headers.get("authorization", "")
+        seen_auth.append(auth)
+        if auth in {"Bearer sk-or-req-wins", "Bearer sk-or-xkey-tok"}:
+            return httpx.Response(200, json={"data": {"limit": 10.0, "limit_remaining": 7.5, "limit_reset": "monthly"}})
+        return httpx.Response(500)
+
+    _mock_httpx(monkeypatch, _handler)
+    monkeypatch.setattr(provider_limits, "collect_admin_usage", lambda **_kw: _empty_report())
+    paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={
+            "OPENAI_API_KEY": "sk-openai-shared-never-send",
+            "ANTHROPIC_API_KEY": "sk-anthropic-shared-never-send",
+        },
+    )
+    config = Config(
+        models={
+            "or_req_auth": ModelConfig(
+                provider="openai",
+                id="openai/gpt-5.4",
+                extra_kwargs={
+                    "base_url": "https://openrouter.ai/api/v1",
+                    "extra_headers": {"Authorization": "Bearer sk-or-shadowed"},
+                    "request_params": {"extra_headers": {"Authorization": "Bearer sk-or-req-wins"}},
+                },
+            ),
+            "or_ant_xkey": ModelConfig(
+                provider="anthropic",
+                id="anthropic/claude-sonnet-4-6",
+                extra_kwargs={
+                    "base_url": "https://openrouter.ai/api",
+                    "default_headers": {"X-Api-Key": "sk-or-xkey-tok"},
+                },
+            ),
+            "or_conflict": ModelConfig(
+                provider="anthropic",
+                id="anthropic/claude-haiku-4-5",
+                extra_kwargs={
+                    "base_url": "https://openrouter.ai/api",
+                    "default_headers": {"Authorization": "Bearer sk-or-a", "X-Api-Key": "sk-or-b"},
+                },
+            ),
+            "or_unreadable_xkey": ModelConfig(
+                provider="anthropic",
+                id="anthropic/claude-opus-4-6",
+                extra_kwargs={
+                    "base_url": "https://openrouter.ai/api",
+                    "default_headers": {"X-Api-Key": "${UNRESOLVED_KEY}"},
+                },
+            ),
+        },
+    )
+    snapshot = await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW)
+    assert sorted(seen_auth) == ["Bearer sk-or-req-wins", "Bearer sk-or-xkey-tok"]
+    for leaked in (
+        "sk-openai-shared-never-send",
+        "sk-anthropic-shared-never-send",
+        "sk-or-shadowed",
+        "sk-or-a",
+        "sk-or-b",
+    ):
+        assert all(leaked not in header for header in seen_auth)
+    by_id = {acct.id: acct for acct in snapshot.accounts}
+    assert by_id["openrouter:1"].plan == "Credit cap"
+    assert by_id["openrouter:2"].plan == "Credit cap"
+    assert by_id["openrouter:custom"].plan == "Pay-as-you-go"
+    assert by_id["openrouter:custom:2"].plan == "Pay-as-you-go"
+
+
+@pytest.mark.asyncio
+async def test_payg_same_credential_across_api_key_and_headers_groups_into_one_account(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Models sharing the exact same secret via api_key, X-Api-Key, and Authorization Bearer group into one account."""
+    daily = (
+        UsageDailyBreakdownRow(
+            date="2026-11-23",
+            totals=TokenCounts(input_tokens=2000, output_tokens=500, total_tokens=2500),
+            run_count=1,
+            model_breakdown=(
+                UsageModelBreakdownRow(
+                    model_provider="Anthropic",
+                    model="claude-haiku-4-5",
+                    totals=TokenCounts(input_tokens=2000, output_tokens=500, total_tokens=2500),
+                    run_count=1,
+                ),
+            ),
+        ),
+    )
+    monkeypatch.setattr(provider_limits, "collect_admin_usage", lambda **_kw: _empty_report(daily))
+    shared_key = "sk-ant-same-billing-account"
+    config = Config(
+        models={
+            "haiku_key": ModelConfig(
+                provider="anthropic",
+                id="claude-haiku-4-5",
+                api_key=shared_key,
+                pricing=ModelPricing(input=1.0, output=5.0),
+            ),
+            "haiku_xkey": ModelConfig(
+                provider="anthropic",
+                id="claude-haiku-4-5",
+                extra_kwargs={"default_headers": {"X-Api-Key": shared_key}},
+            ),
+            "haiku_bearer": ModelConfig(
+                provider="anthropic",
+                id="claude-haiku-4-5",
+                extra_kwargs={"request_params": {"extra_headers": {"Authorization": f"Bearer {shared_key}"}}},
+            ),
+        },
+    )
+    snapshot = await get_provider_usage_snapshot(
+        config=config,
+        runtime_paths=test_runtime_paths(tmp_path),
+        now=FIXED_NOW,
+    )
+    assert [acct.id for acct in snapshot.accounts] == ["anthropic:default"]
+    assert snapshot.accounts[0].model_keys == ("haiku_bearer", "haiku_key", "haiku_xkey")
+    assert snapshot.accounts[0].tokens_7d == 2500
+    assert snapshot.accounts[0].cost_usd_7d == pytest.approx(0.0045)
+    assert snapshot.unattributed_tokens_7d == 0
+
+
+@pytest.mark.asyncio
+async def test_snapshot_bounds_usage_scan_since_and_shields_single_flight_from_caller_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """collect_admin_usage is bounded with since=7d UTC ago, and a caller timeout does not cancel the shared scan."""
+    seen_since: list[float | None] = []
+    probe_started = asyncio.Event()
+    release_probe = asyncio.Event()
+    probe_calls = 0
+
+    def _fake_collect(**kwargs: object) -> UsageReport:
+        since = kwargs.get("since")
+        seen_since.append(since if isinstance(since, float) else None)
+        return _empty_report()
+
+    async def _slow_probe(_cli: str | None, now: datetime) -> provider_probes.ProbeResult:
+        nonlocal probe_calls
+        probe_calls += 1
+        probe_started.set()
+        await release_probe.wait()
+        return provider_probes.ProbeResult(
+            windows=(
+                limit_store.build_window(
+                    window_id="five_hour",
+                    kind="session",
+                    label="5-hour window",
+                    used_percent=20.0,
+                    window_duration_mins=300,
+                ),
+            ),
+            plan="Max 20x",
+            account_label="Max 20x",
+            observed_at=now,
+            succeeded=True,
+        )
+
+    monkeypatch.setattr(provider_limits, "collect_admin_usage", _fake_collect)
+    monkeypatch.setattr(provider_limits, "probe_claude_code", _slow_probe)
+    config = Config(models={"opus": ModelConfig(provider="claude_code", id="claude-opus-4-6")})
+    paths = test_runtime_paths(tmp_path)
+
+    caller = asyncio.create_task(get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW))
+    await probe_started.wait()
+    # Timeout on a second waiter and cancellation on the first caller must not cancel the shielded scan.
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0):
+            await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW)
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+
+    inflight_tasks = list(provider_limits._IN_FLIGHT.get(asyncio.get_running_loop(), {}).values())
+    assert len(inflight_tasks) == 1
+    assert not inflight_tasks[0].cancelled()
+    release_probe.set()
+    await inflight_tasks[0]
+
+    # After all callers left, the shielded task still populated _CACHE so the next call is an immediate cache hit.
+    snapshot = await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW)
+    assert probe_calls == 1
+    assert snapshot.accounts[0].plan == "Max 20x"
+    assert snapshot.accounts[0].windows[0].used_percent == 20.0
+    assert seen_since == [datetime(2026, 11, 16, 0, 0, tzinfo=UTC).timestamp()]

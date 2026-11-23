@@ -67,34 +67,84 @@ def _client_params(model_config: ModelConfig) -> Mapping[str, object]:
     return raw if isinstance(raw, Mapping) else {}
 
 
-def _header_override(model_config: ModelConfig, header_name: str) -> tuple[bool, object]:
-    """Return ``(found, value)`` for ``header_name`` across extra/default headers in precedence order."""
+def _effective_header_layers(model_config: ModelConfig) -> tuple[object, object]:
+    """Return ``(request_headers, default_headers)`` matching route merge precedence."""
     extra = model_config.extra_kwargs or {}
+    request_params = extra.get("request_params")
+    req_headers = (
+        request_params["extra_headers"]
+        if isinstance(request_params, Mapping) and "extra_headers" in request_params
+        else extra.get("extra_headers")
+    )
     client_params = _client_params(model_config)
+    if provider_route(model_config.provider) == "anthropic":
+        default_headers = (
+            extra.get("default_headers")
+            if extra.get("default_headers") is not None
+            else client_params.get("default_headers")
+        )
+    else:
+        default_headers = (
+            client_params["default_headers"] if "default_headers" in client_params else extra.get("default_headers")
+        )
+    return req_headers, default_headers
+
+
+def _header_override(
+    model_config: ModelConfig,
+    header_name: str,
+) -> tuple[Literal["none", "value", "conflict"], object]:
+    """Return ``(state, value)`` for ``header_name`` across effective request and client header layers."""
     target = header_name.lower()
-    for raw_headers in (
-        extra.get("extra_headers"),
-        client_params.get("default_headers"),
-        extra.get("default_headers"),
-    ):
+    for raw_headers in _effective_header_layers(model_config):
         if not isinstance(raw_headers, Mapping):
             continue
-        for key, value in raw_headers.items():
-            if isinstance(key, str) and key.lower() == target:
-                return True, value
-    return False, None
+        matches = [value for key, value in raw_headers.items() if isinstance(key, str) and key.lower() == target]
+        if not matches:
+            continue
+        first = matches[0]
+        if all(value == first for value in matches[1:]):
+            return "value", first
+        return "conflict", tuple(matches)
+    return "none", None
 
 
-def _authorization_override(model_config: ModelConfig) -> tuple[Literal["none", "bearer", "opaque"], str | None]:
-    found, raw_value = _header_override(model_config, "authorization")
-    if not found:
-        return "none", None
+def _parse_bearer_header(raw_value: object) -> str | None:
     if not isinstance(raw_value, str):
-        return "opaque", None
+        return None
     parts = raw_value.strip().split()
     if len(parts) == 2 and parts[0].lower() == "bearer" and not ENV_PLACEHOLDER_PATTERN.fullmatch(parts[1]):
-        return "bearer", parts[1]
-    return "opaque", None
+        return parts[1]
+    return None
+
+
+def _parse_x_api_key_header(raw_value: object) -> str | None:
+    if not isinstance(raw_value, str):
+        return None
+    token = raw_value.strip()
+    if token and not ENV_PLACEHOLDER_PATTERN.fullmatch(token):
+        return token
+    return None
+
+
+def _auth_header_override(model_config: ModelConfig) -> tuple[Literal["none", "token", "opaque"], str | None, str]:
+    """Resolve ``Authorization`` and ``X-Api-Key`` overrides; reject unreadable or conflicting headers."""
+    auth_state, auth_raw = _header_override(model_config, "authorization")
+    xkey_state, xkey_raw = _header_override(model_config, "x-api-key")
+    if auth_state == "none" and xkey_state == "none":
+        return "none", None, ""
+    if auth_state == "conflict" or xkey_state == "conflict":
+        return "opaque", None, f"conflict:{auth_state}:{auth_raw!r}:{xkey_state}:{xkey_raw!r}"
+    auth_tok = _parse_bearer_header(auth_raw) if auth_state == "value" else None
+    xkey_tok = _parse_x_api_key_header(xkey_raw) if xkey_state == "value" else None
+    if auth_state == "value" and auth_tok is None:
+        return "opaque", None, f"authorization:{auth_raw!r}"
+    if xkey_state == "value" and xkey_tok is None:
+        return "opaque", None, f"x-api-key:{xkey_raw!r}"
+    if auth_tok is not None and xkey_tok is not None and auth_tok != xkey_tok:
+        return "opaque", None, f"both:{auth_raw!r}:{xkey_raw!r}"
+    token = auth_tok if auth_tok is not None else xkey_tok
+    return "token", token, ""
 
 
 def _is_official_openrouter_url(url: str | None) -> bool:
@@ -146,15 +196,11 @@ def _payg_credential_fingerprint(
     runtime_paths: RuntimePaths,
 ) -> str:
     """Return an in-memory credential fingerprint for grouping PAYG models by billing account."""
-    auth_kind, bearer = _authorization_override(model_config)
-    if auth_kind == "bearer" and bearer is not None:
-        return _digest(f"auth:{bearer}")
+    auth_kind, header_token, opaque_seed = _auth_header_override(model_config)
+    if auth_kind == "token" and header_token is not None:
+        return _digest(header_token)
     if auth_kind == "opaque":
-        _, raw = _header_override(model_config, "authorization")
-        return _digest(f"auth-opaque:{raw!r}")
-    found_xkey, raw_xkey = _header_override(model_config, "x-api-key")
-    if found_xkey:
-        return _digest(f"x-api-key:{raw_xkey!r}")
+        return _digest(f"opaque:{opaque_seed}")
     key = _resolve_model_key(model_key, model_config, runtime_paths)
     return _digest(key) if key else "__default__"
 
@@ -228,12 +274,14 @@ def discover_accounts(config: Config, runtime_paths: RuntimePaths) -> list[Accou
         elif route in {"openrouter", "openai", "anthropic"} and _is_official_openrouter_url(
             _effective_base_url(route, model_config, runtime_paths),
         ):
-            auth_kind, bearer = _authorization_override(model_config)
+            auth_kind, header_token, _ = _auth_header_override(model_config)
             if auth_kind == "opaque":
                 cred_fp = _payg_credential_fingerprint(model_key, model_config, runtime_paths)
                 keys, ukeys = payg_groups.setdefault(("openrouter", True), {}).setdefault(cred_fp, ([], set()))
             else:
-                target = bearer if auth_kind == "bearer" else _resolve_model_key(model_key, model_config, runtime_paths)
+                target = (
+                    header_token if auth_kind == "token" else _resolve_model_key(model_key, model_config, runtime_paths)
+                )
                 key_fp = _digest(target) if target else "__missing__"
                 _, keys, ukeys = grouped["openrouter"].setdefault(key_fp, (target, [], set()))
         else:

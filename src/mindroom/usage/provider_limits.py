@@ -10,6 +10,7 @@ import time
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from datetime import time as dt_time
 from typing import TYPE_CHECKING
 from weakref import WeakKeyDictionary
 
@@ -144,7 +145,11 @@ class _CacheEntry:
 
 _CACHE: OrderedDict[tuple[Path, Path, str], _CacheEntry] = OrderedDict()
 _LAST_GOOD: OrderedDict[tuple[tuple[Path, Path], str, str], ProbeResult] = OrderedDict()
-_LOOP_LOCKS: WeakKeyDictionary[asyncio.AbstractEventLoop, dict[tuple[Path, Path], asyncio.Lock]] = WeakKeyDictionary()
+_IN_FLIGHT: WeakKeyDictionary[
+    asyncio.AbstractEventLoop,
+    dict[tuple[Path, Path, str], asyncio.Task[ProviderUsageSnapshot]],
+] = WeakKeyDictionary()
+_CACHE_EPOCH = [0]
 
 
 def _put_bounded[K, V](store: OrderedDict[K, V], key: K, value: V, *, max_entries: int) -> None:
@@ -160,8 +165,10 @@ def _monotonic() -> float:
 
 def clear_cache() -> None:
     """Clear cached snapshots and last-good probe readings (intended for tests)."""
+    _CACHE_EPOCH[0] += 1
     _CACHE.clear()
     _LAST_GOOD.clear()
+    _IN_FLIGHT.clear()
 
 
 def _build_account(
@@ -172,11 +179,13 @@ def _build_account(
     now: datetime,
     tokens_7d: int,
     cost_usd_7d: float | None,
+    record_last_good: bool = True,
 ) -> ProviderLimitAccount:
     windows, plan, label, reason, checked, stale = (), None, None, probe.unavailable_reason, format_utc_iso(now), False
     last_good_key = (runtime_key, spec.id, spec.scope_key)
     if probe.succeeded:
-        _put_bounded(_LAST_GOOD, last_good_key, probe, max_entries=_MAX_LAST_GOOD_ENTRIES)
+        if record_last_good:
+            _put_bounded(_LAST_GOOD, last_good_key, probe, max_entries=_MAX_LAST_GOOD_ENTRIES)
         windows, plan, label, reason, checked = (
             probe.windows,
             probe.plan,
@@ -326,6 +335,78 @@ async def _probe_account(account: AccountSpec, now: datetime) -> ProbeResult:
     return ProbeResult(plan="Pay-as-you-go", account_label="Pay-as-you-go", observed_at=now, succeeded=True)
 
 
+async def _compute_snapshot(
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    runtime_key: tuple[Path, Path],
+    cache_key: tuple[Path, Path, str],
+    now: datetime | None,
+    epoch: int,
+) -> ProviderUsageSnapshot:
+    current_utc = (datetime.now(UTC) if now is None else now).astimezone(UTC)
+    # Include one extra UTC day before the 7-day window so sessions started the prior day with runs in range are read.
+    since = datetime.combine(current_utc.date() - timedelta(days=7), dt_time(), UTC).timestamp()
+    specs = await asyncio.to_thread(discover_accounts, config, runtime_paths)
+    probe_results, report = await asyncio.gather(
+        asyncio.gather(*(_probe_account(spec, current_utc) for spec in specs)),
+        asyncio.to_thread(
+            collect_admin_usage,
+            config=config,
+            runtime_paths=runtime_paths,
+            include_daily=True,
+            since=since,
+        ),
+    )
+    tokens_7d, costs_7d, daily_7d, unattr_tokens, unattr_cost = _attribute_7d_usage(
+        specs,
+        report,
+        config,
+        current_utc,
+    )
+    record_cache = epoch == _CACHE_EPOCH[0]
+    accounts = tuple(
+        _build_account(
+            spec,
+            probe,
+            runtime_key=runtime_key,
+            now=current_utc,
+            tokens_7d=tokens_7d.get(spec.id, 0),
+            cost_usd_7d=costs_7d.get(spec.id),
+            record_last_good=record_cache,
+        )
+        for spec, probe in zip(specs, probe_results, strict=True)
+    )
+    snapshot = ProviderUsageSnapshot(
+        checked_at=format_utc_iso(current_utc),
+        partial=False,
+        accounts=accounts,
+        daily_7d=daily_7d,
+        unattributed_tokens_7d=unattr_tokens,
+        unattributed_cost_usd_7d=unattr_cost,
+    )
+    if record_cache:
+        _put_bounded(
+            _CACHE,
+            cache_key,
+            _CacheEntry(snapshot=snapshot, fetched_monotonic=_monotonic()),
+            max_entries=_MAX_CACHE_ENTRIES,
+        )
+    return snapshot
+
+
+def _on_inflight_done(
+    inflight: dict[tuple[Path, Path, str], asyncio.Task[ProviderUsageSnapshot]],
+    cache_key: tuple[Path, Path, str],
+    task: asyncio.Task[ProviderUsageSnapshot],
+) -> None:
+    if inflight.get(cache_key) is task:
+        inflight.pop(cache_key, None)
+    if not task.cancelled():
+        # Retrieve any exception so timed-out callers do not leave an unretrieved background task exception.
+        task.exception()
+
+
 async def get_provider_usage_snapshot(
     *,
     config: Config,
@@ -340,49 +421,23 @@ async def get_provider_usage_snapshot(
     if (cached := _CACHE.get(cache_key)) is not None and (_monotonic() - cached.fetched_monotonic) < min_age:
         _CACHE.move_to_end(cache_key)
         return cached.snapshot
-    lock = _LOOP_LOCKS.setdefault(asyncio.get_running_loop(), {}).setdefault(runtime_key, asyncio.Lock())
-    async with lock:
-        if (cached := _CACHE.get(cache_key)) is not None and (_monotonic() - cached.fetched_monotonic) < min_age:
-            _CACHE.move_to_end(cache_key)
-            return cached.snapshot
-        current_utc = (datetime.now(UTC) if now is None else now).astimezone(UTC)
-        specs = await asyncio.to_thread(discover_accounts, config, runtime_paths)
-        probe_results, report = await asyncio.gather(
-            asyncio.gather(*(_probe_account(spec, current_utc) for spec in specs)),
-            asyncio.to_thread(collect_admin_usage, config=config, runtime_paths=runtime_paths, include_daily=True),
-        )
-        tokens_7d, costs_7d, daily_7d, unattr_tokens, unattr_cost = _attribute_7d_usage(
-            specs,
-            report,
-            config,
-            current_utc,
-        )
-        accounts = tuple(
-            _build_account(
-                spec,
-                probe,
+    loop = asyncio.get_running_loop()
+    inflight = _IN_FLIGHT.setdefault(loop, {})
+    task = inflight.get(cache_key)
+    if task is None or task.done():
+        task = loop.create_task(
+            _compute_snapshot(
+                config=config,
+                runtime_paths=runtime_paths,
                 runtime_key=runtime_key,
-                now=current_utc,
-                tokens_7d=tokens_7d.get(spec.id, 0),
-                cost_usd_7d=costs_7d.get(spec.id),
-            )
-            for spec, probe in zip(specs, probe_results, strict=True)
+                cache_key=cache_key,
+                now=now,
+                epoch=_CACHE_EPOCH[0],
+            ),
         )
-        snapshot = ProviderUsageSnapshot(
-            checked_at=format_utc_iso(current_utc),
-            partial=False,
-            accounts=accounts,
-            daily_7d=daily_7d,
-            unattributed_tokens_7d=unattr_tokens,
-            unattributed_cost_usd_7d=unattr_cost,
-        )
-        _put_bounded(
-            _CACHE,
-            cache_key,
-            _CacheEntry(snapshot=snapshot, fetched_monotonic=_monotonic()),
-            max_entries=_MAX_CACHE_ENTRIES,
-        )
-        return snapshot
+        inflight[cache_key] = task
+        task.add_done_callback(lambda done: _on_inflight_done(inflight, cache_key, done))
+    return await asyncio.shield(task)
 
 
 def _encoded_size(payload: Mapping[str, object]) -> int:

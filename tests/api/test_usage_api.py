@@ -256,3 +256,23 @@ def test_provider_limits_endpoint_enforces_admin_auth_and_returns_contract_shape
     assert body["accounts"][0]["id"] == "anthropic:default"
     mock_snapshot.assert_awaited_once()
     assert mock_snapshot.await_args.kwargs["force_refresh"] is True
+
+
+def test_provider_limits_sanitizes_failed_committed_configuration(
+    temp_config_file: Path,
+    tmp_path: Path,
+) -> None:
+    """GET /api/usage/provider-limits returns 503 with Cache-Control: no-store on committed config load errors."""
+    client = _dashboard_client(temp_config_file, tmp_path, {"MINDROOM_API_KEY": "test-usage-key"})
+    sensitive_detail = "/secret/include/path/broken.yaml"
+    _publish_failed_config_load(client, sensitive_detail)
+
+    response = client.get(
+        "/api/usage/provider-limits",
+        headers={"Authorization": "Bearer test-usage-key"},
+    )
+
+    assert response.status_code == 503
+    assert response.content == b""
+    assert response.headers["cache-control"] == "no-store"
+    assert sensitive_detail not in response.text

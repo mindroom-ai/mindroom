@@ -203,14 +203,36 @@ describe("ProviderLimits", () => {
     );
   });
 
-  it("hides previous account cards when refresh returns 403 and allows retry", async () => {
+  it("clears cached cards on 403 refresh, refetches on Try again, and stays hidden until retry succeeds", async () => {
+    const recovered: ProviderUsageSnapshot = {
+      ...(contractFixture as ProviderUsageSnapshot),
+      accounts: [
+        {
+          ...(contractFixture.accounts[0] as ProviderUsageSnapshot["accounts"][number]),
+          windows: [
+            {
+              id: "five_hour",
+              kind: "session",
+              label: "5-hour window",
+              used_percent: 20,
+              remaining_percent: 80,
+              window_duration_mins: 300,
+              resets_at: "2026-11-23T24:00:00Z",
+            },
+          ],
+        },
+      ],
+    };
     vi.mocked(fetch)
       .mockResolvedValueOnce(respond(contractFixture))
       .mockResolvedValueOnce(respond({}, 403))
-      .mockResolvedValueOnce(respond(contractFixture));
+      .mockResolvedValueOnce(respond({}, 403))
+      .mockResolvedValueOnce(respond(recovered));
 
     renderProviderLimits();
     expect(await screen.findByText("Claude Code")).toBeInTheDocument();
+    expect(screen.getByText("62% left")).toBeInTheDocument();
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
 
     await userEvent.click(
       screen.getByRole("button", { name: "Refresh limits" }),
@@ -218,8 +240,19 @@ describe("ProviderLimits", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent(/permission/i);
     expect(screen.queryByText("Claude Code")).not.toBeInTheDocument();
     expect(screen.queryByText("OpenRouter")).not.toBeInTheDocument();
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
 
+    // First retry also returns 403: must make a real new request and keep old cards hidden.
     await userEvent.click(screen.getByRole("button", { name: "Try again" }));
-    expect(await screen.findByText("Claude Code")).toBeInTheDocument();
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(3));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/permission/i);
+    expect(screen.queryByText("Claude Code")).not.toBeInTheDocument();
+    expect(screen.queryByText("62% left")).not.toBeInTheDocument();
+
+    // Second retry succeeds: cards render with fresh data.
+    await userEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(4));
+    expect(await screen.findByText("80% left")).toBeInTheDocument();
+    expect(screen.queryByText("62% left")).not.toBeInTheDocument();
   });
 });

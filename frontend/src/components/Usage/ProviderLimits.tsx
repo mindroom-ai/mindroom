@@ -197,18 +197,27 @@ function AccountCard({
   );
 }
 
+const PROVIDER_LIMITS_QUERY_KEY = ["provider-limits"] as const;
+
+function isAuthError(error: unknown): error is ProviderLimitsHttpError {
+  return (
+    error instanceof ProviderLimitsHttpError &&
+    (error.status === 401 || error.status === 403)
+  );
+}
+
 export function ProviderLimits() {
   const queryClient = useQueryClient();
   const [refreshing, setRefreshing] = useState(false);
-  const [refreshError, setRefreshError] = useState<string | null>(null);
-  const [authError, setAuthError] = useState<string | null>(null);
+  const [refreshError, setRefreshError] = useState<Error | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 60_000);
     return () => window.clearInterval(timer);
   }, []);
+  const authError = isAuthError(refreshError) ? refreshError : null;
   const query = useQuery({
-    queryKey: ["provider-limits"],
+    queryKey: PROVIDER_LIMITS_QUERY_KEY,
     queryFn: ({ signal }) => fetchProviderLimits(false, signal),
     enabled: authError === null,
     retry: false,
@@ -220,41 +229,34 @@ export function ProviderLimits() {
   const handleRefresh = async () => {
     setRefreshing(true);
     setRefreshError(null);
-    setAuthError(null);
     try {
       const fresh = await fetchProviderLimits(true);
-      queryClient.setQueryData(["provider-limits"], fresh);
+      queryClient.setQueryData(PROVIDER_LIMITS_QUERY_KEY, fresh);
       setNowMs(Date.now());
     } catch (error) {
-      const message =
+      const err =
         error instanceof Error
-          ? error.message
-          : "Could not refresh provider limits.";
-      if (
-        error instanceof ProviderLimitsHttpError &&
-        (error.status === 401 || error.status === 403)
-      ) {
-        queryClient.setQueryData(["provider-limits"], undefined);
-        setAuthError(message);
-      } else {
-        setRefreshError(message);
+          ? error
+          : new Error("Could not refresh provider limits.");
+      if (isAuthError(err)) {
+        queryClient.removeQueries({ queryKey: PROVIDER_LIMITS_QUERY_KEY });
       }
+      setRefreshError(err);
     } finally {
       setRefreshing(false);
     }
   };
 
   const handleRetry = () => {
-    const hadAuthError = authError !== null;
-    setAuthError(null);
     setRefreshError(null);
-    if (!hadAuthError) {
-      void query.refetch();
-    }
+    void query.refetch();
   };
 
   const snapshot = authError ? undefined : query.data;
-  const blockingError = authError ?? (query.isError ? query.error.message : null);
+  const blockingError =
+    authError?.message ?? (query.isError ? query.error.message : null);
+  const nonBlockingError =
+    snapshot && !authError && refreshError ? refreshError.message : null;
   const busy = query.isFetching || refreshing;
 
   return (
@@ -277,7 +279,7 @@ export function ProviderLimits() {
           variant="outline"
           size="sm"
           onClick={() => void handleRefresh()}
-          disabled={busy}
+          disabled={busy || blockingError !== null}
         >
           <RefreshCw
             className={`mr-2 h-3.5 w-3.5 ${busy ? "animate-spin" : ""}`}
@@ -287,12 +289,12 @@ export function ProviderLimits() {
         </Button>
       </div>
 
-      {refreshError && (
+      {nonBlockingError && (
         <p
           role="alert"
           className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs"
         >
-          {refreshError}
+          {nonBlockingError}
         </p>
       )}
 

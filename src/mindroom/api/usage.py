@@ -110,14 +110,17 @@ def get_private_usage(
     return _report_payload(report)
 
 
-@router.get("/provider-limits", dependencies=[Depends(verify_user)])
+@router.get("/provider-limits", dependencies=[Depends(verify_user)], response_model=None)
 async def get_provider_limits(
     request: Request,
     response: Response,
     refresh: bool = False,
-) -> dict[str, object]:
+) -> dict[str, object] | Response:
     """Return per-account provider usage limits and 7-day token/cost aggregates."""
-    config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    try:
+        config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    except HTTPException:
+        return Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, headers={"Cache-Control": "no-store"})
     snapshot = await get_provider_usage_snapshot(
         config=config,
         runtime_paths=runtime_paths,
