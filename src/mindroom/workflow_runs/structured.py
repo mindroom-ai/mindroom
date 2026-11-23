@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 # How many turns an agent gets to answer with a value that matches: its first, and four corrections.
 SCHEMA_TURNS = 5
 _INSTRUCTION = "End your answer with one fenced json block that matches this JSON Schema:"
-_FENCED = re.compile(r"```json\s*\n(.*?)```", re.DOTALL)
+_FENCED = re.compile(r"^[ \t]*```json[ \t]*\r?\n(.*?)\r?\n[ \t]*```[ \t]*\r?$", re.DOTALL | re.MULTILINE)
 # What a schema may reach beside itself: nothing, so no reference is ever fetched.
 _NOTHING_ELSE: Registry = Registry()
 _REFERENCES = ("$ref", "$dynamicRef")

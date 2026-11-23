@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from contextlib import closing
 from typing import TYPE_CHECKING
@@ -472,3 +473,16 @@ async def test_genuine_json_null_stays_accepted_when_schema_allows_it(stack: Wor
     result = await stack.result("@0", "agent", {"prompt": "Estimate.", "schema": {"type": ["number", "null"]}})
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_fenced_json_with_embedded_code_fences_in_string(stack: WorkflowStack) -> None:
+    """A closing Markdown fence is recognized only on its own line, so embedded fences inside JSON strings work."""
+    obj = {"example": "```python\nprint(17)\n```"}
+    message = "```json\n" + json.dumps(obj) + "\n```"
+    model = stack.child_script(answer(message))
+
+    result = await stack.result("@0", "agent", {"prompt": "Return a Markdown sample.", "schema": {"type": "object"}})
+
+    assert result == obj
+    assert len(model.requests) == 1
