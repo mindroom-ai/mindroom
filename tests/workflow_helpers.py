@@ -740,7 +740,6 @@ class WorkflowStack:
         self.resolver.context = self.context
         self.views = RunViews(
             self.engine,
-            bot=lambda _run: (self.context.agent_name, room.client),
             client=lambda _account: room.client,
             homeserver_url="http://homeserver.test",
             live_frames=lambda: False,

@@ -181,7 +181,7 @@ async def test_frames_of_a_run_go_out_through_its_accounts_client_whatever_becom
     [lookup] = lookups
     client = lookup()
 
-    stack.views.bot = lambda _run: None
+    stack.engine.served_by = lambda _run: None
 
     assert client is _room(stack).client
     assert lookup() is client

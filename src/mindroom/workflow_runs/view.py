@@ -120,7 +120,6 @@ class RunViews:
     """
 
     engine: WorkflowEngine
-    bot: Callable[[WorkflowRun], tuple[str, nio.AsyncClient] | None]
     client: Callable[[str], nio.AsyncClient | None]
     homeserver_url: str
     live_frames: Callable[[], bool] = lambda: True
@@ -187,10 +186,7 @@ class RunViews:
         """
         built = await asyncio.to_thread(self._build, run_id)
         if built is None:
-            if await self._ask_pending(run_id):
-                self._due[run_id] = time.monotonic() + _REFRESH_SECONDS
-            else:
-                self._forget(run_id)
+            self._forget(run_id)
             return
         run, nodes, usage, graph = built
         agents = sum(node.kind in _AGENT_KINDS for node in nodes)
@@ -202,9 +198,10 @@ class RunViews:
             await asyncio.to_thread(self._mark_large, run, text)
         meta = graph_meta(run, nodes, usage, large=large)
         shown = False
-        if isinstance(access, tuple) and (bot := self.bot(run)) is not None:
+        account = self.engine.served_by(run) if isinstance(access, tuple) else None
+        client = self.client(account) if account is not None else None
+        if account is not None and client is not None:
             # Else the run may not act now, or nobody can post for it: its next view tries again.
-            account, client = bot
             self._publish_frame(run, account, meta, graph)
             shown = await self._card(run, meta, graph, client)
             await self._ask_pending(run_id)
@@ -219,14 +216,10 @@ class RunViews:
             tries = self._unsent[run_id] = self._unsent.get(run_id, 0) + 1
             self._due[run_id] = time.monotonic() + min(_REFRESH_SECONDS * 2 ** min(tries, 10), _CARD_SECONDS)
 
-    async def _ask_pending(self, run_id: str) -> bool:
-        """Retry unposted question cards for *run_id* and its descendants; return whether any remain unposted."""
-        pending = await asyncio.to_thread(self._unasked_runs, run_id)
-        if not pending:
-            return False
-        for waiting_id in pending:
+    async def _ask_pending(self, run_id: str) -> None:
+        """Retry unposted question cards for *run_id* and its descendants."""
+        for waiting_id in await asyncio.to_thread(self._unasked_runs, run_id):
             await self.engine.ask_again(waiting_id)
-        return bool(await asyncio.to_thread(self._unasked_runs, run_id))
 
     def _unasked_runs(self, run_id: str) -> list[str]:
         """Return every live run in *run_id*'s tree that has a waiting question with no card yet."""
