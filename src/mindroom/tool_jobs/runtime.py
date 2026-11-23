@@ -189,12 +189,18 @@ def _encoded(job: BackgroundJob, payload: EncodedResultPayload | None) -> tuple[
     return json.dumps(asdict(job)), None if payload is None else json.dumps(payload)
 
 
-def _encode_updates(
-    items: Sequence[tuple[BackgroundJob, EncodedResultPayload | None, str | None]],
-) -> tuple[ToolJobSnapshotUpdate, ...]:
+@dataclass(frozen=True, slots=True)
+class _PendingUpdate:
+    entry: _Entry
+    job: BackgroundJob
+    payload: EncodedResultPayload | None
+    approval_end_reason: str | None
+
+
+def _encode_updates(items: Sequence[_PendingUpdate]) -> tuple[ToolJobSnapshotUpdate, ...]:
     return tuple(
-        ToolJobSnapshotUpdate(job.job_id, *_encoded(job, payload), approval_end_reason)
-        for job, payload, approval_end_reason in items
+        ToolJobSnapshotUpdate(item.job.job_id, *_encoded(item.job, item.payload), item.approval_end_reason)
+        for item in items
     )
 
 
@@ -1048,8 +1054,7 @@ class ToolJobRuntime:
         async with self._lock:
             self._ensure_open()
             errors: list[tuple[str, Exception]] = []
-            pending: list[tuple[_Entry, BackgroundJob]] = []
-            to_encode: list[tuple[BackgroundJob, EncodedResultPayload | None, str | None]] = []
+            batch: list[_PendingUpdate] = []
             seen: set[str] = set()
             for wait in waits:
                 entry = self._entries.get(wait.job_id)
@@ -1062,16 +1067,15 @@ class ToolJobRuntime:
                 seen.add(wait.job_id)
                 job = _acknowledged_job(entry.job, returned_inline=wait.returned_inline, adapter=wait.adapter)
                 payload = entry.unsaved_payload if job.has_result_payload else None
-                pending.append((entry, job))
-                to_encode.append((job, payload, _approval_end_reason(entry, job)))
-            if pending:
+                batch.append(_PendingUpdate(entry, job, payload, _approval_end_reason(entry, job)))
+            if batch:
 
                 async def publish_batch() -> None:
-                    updates = await asyncio.to_thread(_encode_updates, to_encode)
+                    updates = await asyncio.to_thread(_encode_updates, batch)
                     await self._store.save_many(updates)
-                    for entry, job in pending:
-                        _apply_published(entry, job)
-                        entry.claim = None
+                    for item in batch:
+                        _apply_published(item.entry, item.job)
+                        item.entry.claim = None
                     self.changed.set()
 
                 # A cancelled caller cannot separate a landed write from its in-memory publication.

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from ast import literal_eval
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
@@ -16,6 +18,7 @@ from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig
+from mindroom.custom_tools import job as job_module
 from mindroom.delegation.background import delegation_outcome
 from mindroom.delegation.cost import SubagentCost, received_subagent_cost_usd, receiving_subagent_cost
 from mindroom.delegation.lifecycle import prepare_child_turn
@@ -28,15 +31,17 @@ from mindroom.run_storage import RunStorage
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_jobs import consumption as consumption_module
 from mindroom.tool_jobs.consumption import session_state_delta, set_consumption_storage
 from mindroom.tool_jobs.execution_scope import owned_tool_execution
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, read_result_payload
-from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, ToolJobRuntime, register_background_runtime
+from mindroom.tool_system.agno_toolkits import Toolkit, adapt_toolkit
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
-from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.tool_function import AdaptedToolkit, ToolValue
 from tests.conftest import bind_runtime_paths
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
@@ -58,6 +63,7 @@ if TYPE_CHECKING:
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.constants import RuntimePaths
     from mindroom.llm.runs import RunRecord
+    from mindroom.tool_system.output_files import ToolOutputFileRequest
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from tests.fakes.scripted_model import ScriptStep
 
@@ -127,6 +133,7 @@ class _OutputAgent:
         *steps: Sequence[ScriptStep],
         session_state: dict[str, object] | None = None,
         run_id: str = "owned-run",
+        extra_toolkits: tuple[AdaptedToolkit, ...] = (),
     ) -> tuple[RunRecord, dict[str, object], float | None]:
         store = create_agent_state_storage("leader", self.paths.storage_root)
         session = ConversationSession(
@@ -155,7 +162,11 @@ class _OutputAgent:
             finished = [
                 event.record
                 async for event in run_agent(
-                    replace(self.build.spec, system_messages=prompt_for_turn(self.build)),
+                    replace(
+                        self.build.spec,
+                        system_messages=prompt_for_turn(self.build),
+                        toolkits=(*self.build.spec.toolkits, *extra_toolkits),
+                    ),
                     [Message(role="user", content="retrieve output")],
                     ctx=RunContext(run_id=run_id, session=session),
                     hooks=hooks,
@@ -478,3 +489,158 @@ async def test_collect_auto_save_error_releases_claims_immediately_and_keeps_job
     reclaimed = await case.runtime.wait(large_id, owner=case.owner, depth=0, timeout=0)
     assert reclaimed.claim is not None
     await case.runtime.release_wait(large_id, reclaimed.claim)
+
+
+@pytest.mark.parametrize("has_delta", [False, True])
+async def test_wait_output_redirect_preserves_concurrent_sync_sibling_session_state(
+    output_agent: _OutputAgent,
+    monkeypatch: pytest.MonkeyPatch,
+    has_delta: bool,
+) -> None:
+    """Committing a redirected wait never clears or clobbers session_state keys written by a concurrent sync sibling."""
+    case = output_agent
+    state_delta = (
+        session_state_delta(
+            {"updated": 1, "removed": "bye", "raced": "before"},
+            {"updated": 2, "added": "new", "raced": "from-job"},
+        )
+        if has_delta
+        else {}
+    )
+    job_id = await case.save_payload_job(
+        "2" * 64,
+        ToolResultPayload(value="redirected-report", state_delta=state_delta),
+        summary="redirected-report",
+    )
+    sibling_started = threading.Event()
+    finalize_entered = threading.Event()
+    sibling_wrote = threading.Event()
+    original_read = consumption_module.read_result_payload
+    original_finalize = job_module.finalize_tool_output_file
+
+    def sync_sibling(run_context: RunContext) -> str:
+        sibling_started.set()
+        assert finalize_entered.wait(timeout=5)
+        run_context.session_state["sibling_only"] = "from-sync-thread"
+        if has_delta:
+            run_context.session_state["raced"] = "from-sync-thread"
+        sibling_wrote.set()
+        return "sibling-ok"
+
+    async def wait_for_sibling_read(runtime: ToolJobRuntime, job: BackgroundJob) -> ToolResultPayload:
+        assert await asyncio.to_thread(sibling_started.wait, 5)
+        return await original_read(runtime, job)
+
+    def gated_finalize(request: ToolOutputFileRequest, result: object) -> object:
+        finalize_entered.set()
+        assert sibling_wrote.wait(timeout=5)
+        return original_finalize(request, result)
+
+    monkeypatch.setattr(consumption_module, "read_result_payload", wait_for_sibling_read)
+    monkeypatch.setattr(job_module, "finalize_tool_output_file", gated_finalize)
+
+    initial_state: dict[str, object] = (
+        {"existing": "keep", "updated": 1, "removed": "bye", "raced": "before"} if has_delta else {"existing": "keep"}
+    )
+    turn, state_after, _ = await case.owned_turn(
+        calls(
+            tool_call("job", "wait-redirect", action="wait", job_id=job_id, mindroom_output_path="results/wait.txt"),
+            tool_call("sync_sibling", "sibling-call"),
+        ),
+        answer("saved"),
+        session_state=initial_state,
+        run_id=f"wait-sync-sibling-{has_delta}",
+        extra_toolkits=(adapt_toolkit(Toolkit(name="sync_sibling", tools=[sync_sibling])),),
+    )
+    wait_tool = next(tool for tool in turn.tools or () if tool.tool_call_id == "wait-redirect")
+    receipt = literal_eval(str(wait_tool.result))["mindroom_tool_output"]
+    assert receipt["status"] == "saved_to_file"
+    assert (case.workspace / receipt["path"]).read_text(encoding="utf-8") == "redirected-report"
+    expected_state: dict[str, object] = (
+        {
+            "existing": "keep",
+            "updated": 2,
+            "added": "new",
+            "raced": "from-sync-thread",
+            "sibling_only": "from-sync-thread",
+        }
+        if has_delta
+        else {"existing": "keep", "sibling_only": "from-sync-thread"}
+    )
+    assert state_after == expected_state
+    assert (await lookup(case.runtime, job_id, owner=case.owner, depth=0)).consumed
+
+
+async def test_collect_output_redirect_coalesces_chained_deltas_and_preserves_sync_sibling(
+    output_agent: _OutputAgent,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A redirected collect coalesces chained job deltas against live baselines without clobbering sync sibling writes."""
+    case = output_agent
+    first_id = await case.save_payload_job(
+        "1" * 64,
+        ToolResultPayload(
+            value="first-report",
+            state_delta=session_state_delta({"chain": 1, "raced_chain": 1}, {"chain": 2, "raced_chain": 2}),
+        ),
+        summary="first",
+    )
+    second_id = await case.save_payload_job(
+        "2" * 64,
+        ToolResultPayload(
+            value="second-report",
+            state_delta=session_state_delta({"chain": 2, "raced_chain": 2}, {"chain": 3, "raced_chain": 3}),
+        ),
+        summary="second",
+    )
+    sibling_started = threading.Event()
+    finalize_entered = threading.Event()
+    sibling_wrote = threading.Event()
+    original_read = consumption_module.read_result_payload
+    original_finalize = job_module.finalize_tool_output_file
+
+    def sync_sibling(run_context: RunContext) -> str:
+        sibling_started.set()
+        assert finalize_entered.wait(timeout=5)
+        run_context.session_state["sibling_only"] = "from-sync-thread"
+        # Writing the intermediate value must not match the second job's delta against the original baseline.
+        run_context.session_state["raced_chain"] = 2
+        sibling_wrote.set()
+        return "sibling-ok"
+
+    async def wait_for_sibling_read(runtime: ToolJobRuntime, job: BackgroundJob) -> ToolResultPayload:
+        assert await asyncio.to_thread(sibling_started.wait, 5)
+        return await original_read(runtime, job)
+
+    def gated_finalize(request: ToolOutputFileRequest, result: object) -> object:
+        finalize_entered.set()
+        assert sibling_wrote.wait(timeout=5)
+        return original_finalize(request, result)
+
+    monkeypatch.setattr(consumption_module, "read_result_payload", wait_for_sibling_read)
+    monkeypatch.setattr(job_module, "finalize_tool_output_file", gated_finalize)
+
+    turn, state_after, _ = await case.owned_turn(
+        calls(
+            tool_call("job", "collect-redirect", action="collect", mindroom_output_path="results/collect.txt"),
+            tool_call("sync_sibling", "sibling-call"),
+        ),
+        answer("saved"),
+        session_state={"existing": "keep", "chain": 1, "raced_chain": 1},
+        run_id="collect-sync-sibling",
+        extra_toolkits=(adapt_toolkit(Toolkit(name="sync_sibling", tools=[sync_sibling])),),
+    )
+    collect_tool = next(tool for tool in turn.tools or () if tool.tool_call_id == "collect-redirect")
+    receipt = literal_eval(str(collect_tool.result))["mindroom_tool_output"]
+    assert receipt["status"] == "saved_to_file"
+    saved_text = (case.workspace / receipt["path"]).read_text(encoding="utf-8")
+    assert "first-report" in saved_text
+    assert "second-report" in saved_text
+    assert state_after == {
+        "existing": "keep",
+        "chain": 3,
+        "raced_chain": 2,
+        "sibling_only": "from-sync-thread",
+    }
+    assert (await lookup(case.runtime, first_id, owner=case.owner, depth=0)).consumed
+    assert (await lookup(case.runtime, second_id, owner=case.owner, depth=0)).consumed

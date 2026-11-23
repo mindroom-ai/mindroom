@@ -257,23 +257,43 @@ def session_state_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[s
     }
 
 
+def _apply_state_change(state: dict[str, Any], key: str, change: dict[str, Any]) -> bool:
+    """Apply one baseline-checked key change to ``state``; return False when the live value no longer matches."""
+    if (key in state) != change["before_present"] or state.get(key) != change["before"]:
+        return False
+    if change["present"]:
+        state[key] = change["value"]
+    else:
+        state.pop(key, None)
+    return True
+
+
+def _apply_prepared_changes(state: dict[str, Any], changes: dict[str, dict[str, Any]]) -> None:
+    """Apply accepted per-key changes against live ``state``, skipping any key whose baseline moved."""
+    for key, change in changes.items():
+        _apply_state_change(state, key, change)
+
+
 def _merge_session_state(
     state: dict[str, Any],
     value: Any,  # noqa: ANN401
     job: BackgroundJob,
     payload: ToolResultPayload,
+    accepted: dict[str, dict[str, Any]],
 ) -> Any:  # noqa: ANN401
     """Apply unconflicted state changes to ``state``, reporting conflicts in a new value that leaves the payload intact."""
     if job.consumed or job.status != "completed":
         return value
     conflicts: list[str] = []
     for key, change in payload.state_delta.items():
-        if (key in state) != change["before_present"] or state.get(key) != change["before"]:
-            conflicts.append(key)
-        elif change["present"]:
-            state[key] = change["value"]
+        if _apply_state_change(state, key, change):
+            if key in accepted:
+                # Preserve the original live baseline and advance only the final target across chained jobs.
+                accepted[key] = {**accepted[key], "present": change["present"], "value": change["value"]}
+            else:
+                accepted[key] = change
         else:
-            state.pop(key, None)
+            conflicts.append(key)
     if conflicts:
         warning = "Session state conflicts: " + ", ".join(sorted(conflicts))
         if isinstance(value, ToolValue):
@@ -315,7 +335,7 @@ class StagedConsumptions:
 
     job_call: JobCall | None = None
     _items: list[_StagedPayload] = field(default_factory=list, init=False)
-    _prepared_state: dict[str, Any] | None = field(default=None, init=False)
+    _prepared_changes: dict[str, dict[str, Any]] | None = field(default=None, init=False)
 
     def __post_init__(self) -> None:
         """Capture the active management call when none was supplied explicitly."""
@@ -344,6 +364,7 @@ class StagedConsumptions:
         except BaseException:
             await runtime.release_wait(job.job_id, claim)
             raise
+        self._prepared_changes = None
         self._items.append(_StagedPayload(runtime, job, claim, payload, returned_inline, subagent_cost))
         return len(self._items) - 1
 
@@ -351,13 +372,21 @@ class StagedConsumptions:
         """Merge all staged payloads synchronously against a fresh copy of live session state."""
         owner = _OWNER.get()
         staged_state = (
-            dict(self.job_call.context.session_state) if self.job_call is not None and owner is not None else None
+            dict(self.job_call.context.session_state)
+            if self.job_call is not None
+            and owner is not None
+            and any(
+                not item.job.consumed and item.job.status == "completed" and item.payload.state_delta
+                for item in self._items
+            )
+            else None
         )
+        accepted: dict[str, dict[str, Any]] = {}
         prepared = [
             PreparedConsumption(
                 job=item.job,
                 value=(
-                    _merge_session_state(staged_state, item.payload.value, item.job, item.payload)
+                    _merge_session_state(staged_state, item.payload.value, item.job, item.payload, accepted)
                     if staged_state is not None
                     else item.payload.value
                 ),
@@ -365,7 +394,7 @@ class StagedConsumptions:
             )
             for item in self._items
         ]
-        self._prepared_state = staged_state
+        self._prepared_changes = accepted
         return prepared
 
     async def commit(self) -> None:
@@ -375,7 +404,7 @@ class StagedConsumptions:
         owner, call = _OWNER.get(), self.job_call
         if owner is None or call is None:
             await _release_by_runtime([(item.runtime, item.job.job_id, item.claim) for item in self._items])
-            items, self._items, self._prepared_state = self._items, [], None
+            items, self._items, self._prepared_changes = self._items, [], None
             for item in items:
                 if item.subagent_cost is not None:
                     receive_subagent_cost(*item.subagent_cost)
@@ -385,13 +414,12 @@ class StagedConsumptions:
         except ValueError:
             await self.release()
             raise
-        if self._prepared_state is None:
+        if self._prepared_changes is None:
             self.prepare_values()
-        items, prepared_state = self._items, self._prepared_state
-        self._items, self._prepared_state = [], None
-        if prepared_state is not None:
-            call.context.session_state.clear()
-            call.context.session_state.update(prepared_state)
+        items, prepared_changes = self._items, self._prepared_changes
+        self._items, self._prepared_changes = [], None
+        if prepared_changes:
+            _apply_prepared_changes(call.context.session_state, prepared_changes)
         for item in items:
             if item.subagent_cost is not None:
                 # The turn that reads a subagent job's result first receives what its child cost.
@@ -408,7 +436,7 @@ class StagedConsumptions:
 
     async def release(self) -> None:
         """Release every still-staged claim in one lock acquisition per runtime."""
-        items, self._items, self._prepared_state = self._items, [], None
+        items, self._items, self._prepared_changes = self._items, [], None
         if items:
             await _release_by_runtime([(item.runtime, item.job.job_id, item.claim) for item in items])
 
