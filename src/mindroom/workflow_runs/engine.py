@@ -239,11 +239,9 @@ class _Places:
     held: bool = False
 
 
-# What an attempt starts with: the live context and limits of its run's owner.
-type _Admission = tuple[ToolRuntimeContext, WorkflowLimits]
-# What the saved owner of a run has now in the run's conversation: that, once the owner's access is confirmed;
+# What the saved owner of a run has now in the run's conversation: its live context once access is confirmed,
 # "pending" while it cannot be checked yet, "revoked" when it is gone.
-type ResumeAccess = _Admission | Literal["pending", "revoked"]
+type ResumeAccess = ToolRuntimeContext | Literal["pending", "revoked"]
 
 
 class WorkflowEngine:
@@ -262,6 +260,10 @@ class WorkflowEngine:
         self._clock = clock
         # What the saved owner of a run may start an attempt with now; set by the runtime that knows the live bots.
         self.owner_access: Callable[[WorkflowRun], ResumeAccess] = lambda _run: "pending"
+        # Live workflow limits for an authorized owner context; read only where limits are used.
+        self.owner_limits: Callable[[ToolRuntimeContext, str], WorkflowLimits] = lambda _context, _agent: (
+            WorkflowLimits()
+        )
         # What agent turns run on, None while there is no job runtime; set by the runtime that knows it.
         self.agents: Callable[[], AgentRuntime | None] = lambda: None
         # The bot that serves a run, which posts its cards and acts on the events people send to them: its agent's,
@@ -286,7 +288,7 @@ class WorkflowEngine:
         self._inline_runs: dict[str, str] = {}
         self._closed = False
 
-    def authorize(self, run: WorkflowRun, grant: ScriptToolGrant | None = None) -> _Admission | str | None:
+    def authorize(self, run: WorkflowRun, grant: ScriptToolGrant | None = None) -> ToolRuntimeContext | str | None:
         """Say whether *run* may act now: its owner's live context, why not, or None while that cannot be said yet.
 
         The one check before an attempt starts and before any call of the run is made, a tool's, an agent's or
@@ -300,14 +302,16 @@ class WorkflowEngine:
         if tool is not None and not persona_allows(tuple(kept or ()), *tool):
             return f"{tool[0]}.{tool[1]} is not a tool of the agent that started this run."
         access = self.owner_access(run)
-        return access if isinstance(access, tuple) else NO_ACCESS if access == "revoked" else None
+        if access is None or access == "pending":
+            return None
+        return NO_ACCESS if access == "revoked" else access
 
     def admit(
         self,
         run: WorkflowRun,
         caller: ToolRuntimeContext | None = None,
         limits: WorkflowLimits | None = None,
-    ) -> _Admission | str | None:
+    ) -> tuple[ToolRuntimeContext, WorkflowLimits] | str | None:
         """Say what the next attempt of *run* starts with now, why it gets none, or None while that cannot be said yet.
 
         The one check of a start, a person's resume and a replay after an interruption: asked before a resume
@@ -319,14 +323,19 @@ class WorkflowEngine:
         """
         replay = run.state is WorkflowRunState.STARTING and run.script_run_id is not None
         place = (run.room_id, run.thread_root_event_id)
-        access = self.authorize(run)
-        if not isinstance(access, tuple):
-            return access
+        context = self.authorize(run)
+        if context is None or isinstance(context, str):
+            return context
         if caller is not None and not replay and place == (caller.room_id, caller.resolved_thread_id):
-            access = (caller, limits or WorkflowLimits())
+            context = caller
+            resolved_limits = limits or self.owner_limits(context, run.agent_name)
+        else:
+            resolved_limits = self.owner_limits(context, run.agent_name)
         if run.state is WorkflowRunState.STARTING and run.runtime_seconds_left == 0:
-            return _OUT_OF_TIME.format(hours=access[1].max_runtime_hours)
-        return _IDLE.format(attempts=_MAX_IDLE_RESUMES) if replay and run.idle_resumes >= _MAX_IDLE_RESUMES else access
+            return _OUT_OF_TIME.format(hours=resolved_limits.max_runtime_hours)
+        if replay and run.idle_resumes >= _MAX_IDLE_RESUMES:
+            return _IDLE.format(attempts=_MAX_IDLE_RESUMES)
+        return context, resolved_limits
 
     async def launch(
         self,
@@ -529,10 +538,10 @@ class WorkflowEngine:
         live runs. A job was accepted with its request, so it waits here while `admit` cannot answer yet. *persona*
         is that of the turn the resume was accepted from: the run keeps what it, *context* and the run all keep.
         """
-        limits = limits or WorkflowLimits()
         run = self.store.get_run(run_id)
         if owner is not None and run.owner == owner:
             return run
+        limits = limits or self.owner_limits(context, run.agent_name)
         while job_id is not None and self.admit(run, context, limits) is None:  # noqa: ASYNC110 - access has no event
             await asyncio.sleep(RECHECK_SECONDS)
         text = run.source if source is None else source
@@ -601,7 +610,7 @@ class WorkflowEngine:
         origin: str,
         reserve: Callable[[], Awaitable[WorkflowRun]],
         context: ToolRuntimeContext,
-        limits: WorkflowLimits,
+        limits: WorkflowLimits | None = None,
     ) -> WorkflowRun:
         """Reserve, launch and wait for a run that is no job, as one of the calls of *origin* that wait for it.
 
@@ -788,9 +797,12 @@ class WorkflowEngine:
             started_at=utc_timestamp(),
         )
         # Before a tool call is saved or sent anywhere, whether it is a tool's or an agent's behind a gate.
-        access = self.authorize(run, grant) if grant is not None else ()
-        if access is None:
-            raise ScriptRuntimeUnavailableError(_OWNER_NOT_READY)
+        if grant is not None:
+            access = self.authorize(run, grant)
+            if access is None:
+                raise ScriptRuntimeUnavailableError(_OWNER_NOT_READY)
+        else:
+            access = None
         if isinstance(access, str):
             # Refused: nothing ran, and the node ends as it is submitted, below.
             node = replace(node, state=WorkflowNodeState.FAILED, error={"kind": "failed", "message": access})
@@ -837,8 +849,8 @@ class WorkflowEngine:
 
     def poster(self, run: WorkflowRun) -> nio.AsyncClient | None:
         """Return the client of the bot that serves *run*, which posts for it, or None while the run may not act."""
-        access = self.authorize(run)
-        return access[0].client if isinstance(access, tuple) else None
+        context = self.authorize(run)
+        return None if context is None or isinstance(context, str) else context.client
 
     async def _asked(self, run: WorkflowRun, node: WorkflowNode, epoch: int) -> WorkflowNode:
         """Send the card of a question that waits and has none yet, and return the node with it.
@@ -891,7 +903,8 @@ class WorkflowEngine:
             run, node = self.store.get_run(run_id), self.store.get_node(run_id, key)
             waits = node is not None and (node.state, node.waiting_on) == (WorkflowNodeState.WAITING, "user")
             # An answer is an act of the run, to a card somebody was shown: both are checked as they are now.
-            asked = waits and "event_id" in node.links and isinstance(self.authorize(run), tuple)
+            context = self.authorize(run)
+            asked = waits and "event_id" in node.links and context is not None and not isinstance(context, str)
             if run.state in TERMINAL_RUN_STATES or node is None or node.generation != generation or not asked:
                 return False
             settle = partial(self.store.settle_node, run_id, key, generation, run.epoch)
@@ -1104,7 +1117,11 @@ class WorkflowEngine:
             return run
 
         access = self.owner_access(run)
-        attended = self.attend(str(run.owner), found, *access) if isinstance(access, tuple) else self.wait(run_id)
+        attended = (
+            self.attend(str(run.owner), found, access)
+            if access is not None and not isinstance(access, str)
+            else self.wait(run_id)
+        )
         return await self.delivery(await attended)
 
     async def delivery(self, run: WorkflowRun) -> str:
@@ -1202,14 +1219,14 @@ class WorkflowEngine:
 
     async def _launch_agent(self, run: WorkflowRun, node: WorkflowNode, epoch: int, **options: Any) -> WorkflowNode:  # noqa: ANN401
         """Authorize and start one turn of an agent node; turn 1 logs the label-vs-agent notice when applicable."""
-        access, runtime = self.authorize(run), self.agents()
-        if access is None:
+        context, runtime = self.authorize(run), self.agents()
+        if context is None:
             raise AgentNotReadyError(_OWNER_NOT_READY)
-        if not isinstance(access, tuple) or runtime is None:
-            raise AgentNodeError(access if isinstance(access, str) else _NO_AGENTS)
-        if not options.get("turn") and not node.request.get("agent") and node.name in access[0].current_config.agents:
+        if isinstance(context, str) or runtime is None:
+            raise AgentNodeError(context if isinstance(context, str) else _NO_AGENTS)
+        if not options.get("turn") and not node.request.get("agent") and node.name in context.current_config.agents:
             await asyncio.to_thread(self.store.append_log, run.run_id, epoch, _NAME_LABELS.format(name=node.name))
-        return await launch_child(access[0], run, node, epoch, store=self.store, jobs=runtime.jobs, **options)
+        return await launch_child(context, run, node, epoch, store=self.store, jobs=runtime.jobs, **options)
 
     def _wait_for_agent(self, run: WorkflowRun, node: WorkflowNode, epoch: int) -> None:
         """Start the engine's wait for the job of an agent node, in place of an earlier attempt's wait for it.

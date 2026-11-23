@@ -758,6 +758,7 @@ class WorkflowStack:
         self.scripts.tokens = self.tokens
         self.engine = WorkflowEngine(self.store, self.scripts, self.broker, clock=lambda: self.now)  # type: ignore[arg-type]
         self.engine.owner_access = self._owner_access
+        self.engine.owner_limits = self._owner_limits
         self.engine.agents = self._agents
         # What a turn of the owner sees: the context with the orchestrator that holds the engine. Each agent's bot is
         # in the rooms `bot_rooms` lists for it.
@@ -821,7 +822,10 @@ class WorkflowStack:
 
     def _owner_access(self, _run: WorkflowRun) -> ResumeAccess:
         """Answer for the run's saved owner as the live runtime does: the stack's own context, or what `access` says."""
-        return self.access or (self.context, self.limits or WorkflowLimits())
+        return self.access or self.context
+
+    def _owner_limits(self, _context: ToolRuntimeContext, _agent_name: str) -> WorkflowLimits:
+        return self.limits or WorkflowLimits()
 
     @property
     def attempt(self) -> ScriptRunRecord:

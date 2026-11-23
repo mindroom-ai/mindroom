@@ -522,10 +522,14 @@ async def handle_workflow_control(
         run = workflows.store.get_run(str(content.get("run")))
         if (workflows.served_by(run), run.owner_user_id, run.room_id, run.thread_root_event_id) != where:
             return False
-        access = workflows.authorize(run)
-        if not isinstance(access, tuple) or (jobs := get_background_runtime(access[0].runtime_paths)) is None:
+        context = workflows.authorize(run)
+        if (
+            context is None
+            or isinstance(context, str)
+            or (jobs := get_background_runtime(context.runtime_paths)) is None
+        ):
             return False
-        context, limits = access
+        limits = await asyncio.to_thread(workflow_limits, context, run.agent_name)
         job_id = hashlib.sha256(f"workflow_control:{event.event_id}".encode()).hexdigest()
         if job_id in (run.owner, *run.claims):
             # The event took the run before, and its job is no longer kept: delivered again, it starts nothing.

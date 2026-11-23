@@ -20,7 +20,6 @@ from mindroom.live_frames.workflow import publish_run, stop_run
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_types import WORKFLOW_RUN_CONTENT_KEY
 from mindroom.redaction import redact_sensitive_text
-from mindroom.workflow_runs.engine import WorkflowLimits
 from mindroom.workflow_runs.faults import capture
 from mindroom.workflow_runs.graph import (
     AGENT_KINDS,
@@ -197,15 +196,18 @@ class RunViews:
             return
         run, nodes, usage, graph = built
         agents = sum(node.kind in AGENT_KINDS for node in nodes)
-        access = self.engine.authorize(run)
-        notice = (access[1] if isinstance(access, tuple) else WorkflowLimits()).large_run_notice_usd
-        large = run.large or agents > _LARGE_RUN_AGENTS or 0 < notice < usage["projected_cost_usd"]
+        context = self.engine.authorize(run)
+        authorized = context is not None and not isinstance(context, str)
+        large = run.large or agents > _LARGE_RUN_AGENTS
+        if not large and authorized and usage["projected_cost_usd"] > 0:
+            notice = (await asyncio.to_thread(self.engine.owner_limits, context, run.agent_name)).large_run_notice_usd
+            large = 0 < notice < usage["projected_cost_usd"]
         if large and not run.large:
             text = _LARGE.format(agents=agents, projected=usage["projected_cost_usd"])
             await asyncio.to_thread(self._mark_large, run, text)
         meta = graph_meta(run, nodes, usage, large=large)
         shown = False
-        account = self.engine.served_by(run) if isinstance(access, tuple) else None
+        account = self.engine.served_by(run) if authorized else None
         client = self.client(account) if account is not None else None
         if account is not None and client is not None:
             # Else the run may not act now, or nobody can post for it: its next view tries again.
@@ -261,7 +263,7 @@ class RunViews:
             graph,
             client=live,
             homeserver_url=url,
-            allowed=lambda: isinstance(self.engine.authorize(run), tuple),
+            allowed=lambda: (access := self.engine.authorize(run)) is not None and not isinstance(access, str),
         )
         self._streams[run.run_id] = place
 

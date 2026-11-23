@@ -47,6 +47,7 @@ class WorkflowRuntimeLifecycle:
     async def start(self) -> None:
         """Follow each pass of the script runtime, which records the attempts that ended, and show the runs."""
         self.engine.owner_access = self._access
+        self.engine.owner_limits = workflow_limits
         self.engine.agents = self._agents
         self.engine.served_by = self._served_by
         self.script_runtime.after_reconcile = self._maintain
@@ -107,8 +108,7 @@ class WorkflowRuntimeLifecycle:
             if authorized is None:
                 return "pending"
             if authorized:
-                context = resolver.resolve(run, correlation_id=f"workflow:{run.run_id}")
-                return context, workflow_limits(context, run.agent_name)
+                return resolver.resolve(run, correlation_id=f"workflow:{run.run_id}")
         except ValueError:
             # The saved identity names another owner than the run's: nothing confirms the access.
             logger.warning("workflow_resume_owner_unresolved", run_id=run.run_id, exc_info=True)

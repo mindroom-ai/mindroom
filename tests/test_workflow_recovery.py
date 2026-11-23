@@ -28,6 +28,7 @@ from mindroom.custom_tools import workflow as workflow_tool_module
 from mindroom.custom_tools.workflow import workflow_job_standing
 from mindroom.delegation.lifecycle import accessed_entities
 from mindroom.orchestration import tool_job_runtime as coordinator_module
+from mindroom.orchestration import workflow_runtime
 from mindroom.orchestration.script_runtime import _LiveScriptRuntimeResolver
 from mindroom.orchestration.workflow_runtime import WorkflowRuntimeLifecycle
 from mindroom.script_runs import manager as manager_module
@@ -46,7 +47,7 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
 )
 from mindroom.workflow_runs import engine as engine_module
-from mindroom.workflow_runs.engine import SupersededAttemptError
+from mindroom.workflow_runs.engine import SupersededAttemptError, WorkflowLimits
 from mindroom.workflow_runs.models import NodeRequest, WorkflowNodeState, WorkflowRunState
 from mindroom.workflow_runs.recovery import AUTO_RESUME_REASONS
 from mindroom.workflow_runs.store import WorkflowRunNotFoundError, WorkflowRunStoreError
@@ -1399,8 +1400,7 @@ async def test_run_that_a_teams_member_started_is_answered_for_by_the_team(stack
 
     access = lifecycle._access(run)
 
-    assert isinstance(access, tuple)
-    assert access[0] is context
+    assert access is context
     # The team's bot posts the run's cards, so the answers and the Resume a person sends to them are its to act on.
     own = stack.store.get_run(stack.run_id)
     assert (lifecycle._served_by(run), lifecycle._served_by(own)) == ("crew", context.agent_name)
@@ -1484,7 +1484,7 @@ async def test_run_of_a_named_child_answers_to_the_childs_access_and_to_the_room
         lifecycle = WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime)  # type: ignore[arg-type]
         run = await stack.start()
         try:
-            assert (isinstance(lifecycle._access(run), tuple), resolver.is_authorized(stack.attempt)) == (True, True)
+            assert (lifecycle._access(run) is stack.context, resolver.is_authorized(stack.attempt)) == (True, True)
 
             if lost == "the serving bot's place in the room":
                 rooms.clear()
@@ -1603,12 +1603,24 @@ async def test_lifecycle_waits_for_room_membership_before_it_judges_the_owners_a
 
 
 @pytest.mark.asyncio
-async def test_stored_workflow_settings_apply_to_owner_access_and_auto_resume(stack: WorkflowStack) -> None:
-    """Dashboard-stored workflow settings apply to owner access and auto-resumed attempts, not just start_workflow."""
+async def test_stored_workflow_settings_apply_to_admit_without_reading_on_authorize(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dashboard-stored workflow settings apply at admit and auto-resume, while authorize returns the context alone."""
     get_runtime_credentials_manager(stack.context.runtime_paths).save_credentials(
         "workflow",
         {"max_tool_calls_per_minute": 42, "max_runtime_hours": 12},
     )
+    reads = 0
+    real_limits = workflow_runtime.workflow_limits
+
+    def counted_limits(context: ToolRuntimeContext, agent_name: str) -> WorkflowLimits:
+        nonlocal reads
+        reads += 1
+        return real_limits(context, agent_name)
+
+    monkeypatch.setattr(workflow_runtime, "workflow_limits", counted_limits)
     script_runtime = _script_runtime(stack)
     lifecycle = WorkflowRuntimeLifecycle(engine=stack.engine, script_runtime=script_runtime)  # type: ignore[arg-type]
     await stack.start(SCRIPT)
@@ -1618,9 +1630,15 @@ async def test_stored_workflow_settings_apply_to_owner_access_and_auto_resume(st
     await script_runtime.after_reconcile()
 
     run = stack.store.get_run(stack.run_id)
-    access = stack.engine.owner_access(run)
-    assert isinstance(access, tuple)
-    assert (access[1].max_tool_calls_per_minute, access[1].max_runtime_hours) == (42, 12)
+    reads_before_authorize = reads
+    authorized = stack.engine.authorize(run)
+    assert not isinstance(authorized, (tuple, str))
+    assert authorized is not None
+    assert reads == reads_before_authorize
+    admitted = stack.engine.admit(run)
+    assert isinstance(admitted, tuple)
+    assert (admitted[1].max_tool_calls_per_minute, admitted[1].max_runtime_hours) == (42, 12)
+    assert reads == reads_before_authorize + 1
     limits = stack.scripts.limits[-1]
     assert limits is not None
     assert limits.max_tool_calls_per_minute == 42

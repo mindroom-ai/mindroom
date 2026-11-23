@@ -92,6 +92,7 @@ class LocalWorkflowStack(WorkflowStack):
         )
         self.engine = WorkflowEngine(self.store, self.scripts, self.broker)
         self.engine.owner_access = self._owner_access
+        self.engine.owner_limits = self._owner_limits
         self.context.orchestrator.workflow_engine = self.engine  # type: ignore[union-attr]
         if self.served is not None:
             bind_workflow_engine(self.served, self.engine)

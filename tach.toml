@@ -2691,7 +2691,6 @@ expose = ["answer_command", "answer_question", "handle_workflow_answer"]
 path = "mindroom.workflow_runs.view"
 depends_on = [
     "mindroom.live_frames.workflow",
-    "mindroom.workflow_runs.engine",
     "mindroom.workflow_runs.faults",
     "mindroom.workflow_runs.graph",
     "mindroom.workflow_runs.models",
