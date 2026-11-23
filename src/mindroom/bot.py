@@ -348,7 +348,6 @@ class AgentBot:
         self._call_rooms_reconcile_pending = set()
         self._local_membership_lock = asyncio.Lock()
         self._ingestion_admission_progress = asyncio.Event()
-        self._active_runs = ActiveRunPublisher(get_client=lambda: self.client, user_id=self.matrix_id.full_id)
 
         async def send_room_lifecycle_response(
             *,
@@ -424,6 +423,7 @@ class AgentBot:
             msg = f"Missing Matrix ID for {self.agent_name!r} during runtime initialization"
             raise PermanentMatrixStartupError(msg)
         runtime_matrix_id = self.matrix_id
+        self._active_runs = ActiveRunPublisher(get_client=lambda: self.client, user_id=runtime_matrix_id.full_id)
         self._journal_principal_id = journal_principal_id(self.agent_name, runtime_matrix_id.full_id)
         # One database holds every principal, so the runtime's one store serves this bot's view. The runtime closes it.
         self._journal_store = self.orchestrator.event_journal_store()

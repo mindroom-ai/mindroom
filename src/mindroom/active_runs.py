@@ -30,7 +30,7 @@ _SWEEP_READ_TIMEOUT_SECONDS = 10.0
 
 
 @dataclass(eq=False)
-class ActiveRunLease:
+class _ActiveRunLease:
     """In-memory handle for one tracked reply run."""
 
     publisher: ActiveRunPublisher
@@ -40,7 +40,7 @@ class ActiveRunLease:
     registered: bool = False
 
 
-_CURRENT_LEASE: ContextVar[ActiveRunLease | None] = ContextVar("mindroom_active_run_lease", default=None)
+_CURRENT_LEASE: ContextVar[_ActiveRunLease | None] = ContextVar("mindroom_active_run_lease", default=None)
 
 
 @contextmanager
@@ -69,7 +69,7 @@ class ActiveRunPublisher:
     user_id: str
     heartbeat_seconds: float = _HEARTBEAT_SECONDS
     retry_backoffs: tuple[float, ...] = _RETRY_BACKOFFS
-    _leases: dict[str, list[ActiveRunLease]] = field(default_factory=dict, init=False)
+    _leases: dict[str, list[_ActiveRunLease]] = field(default_factory=dict, init=False)
     _published: dict[str, list[str | None] | None] = field(default_factory=dict, init=False)
     _dirty: dict[str, asyncio.Event] = field(default_factory=dict, init=False)
     _workers: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False)
@@ -83,9 +83,15 @@ class ActiveRunPublisher:
     _closing: bool = field(default=False, init=False)
 
     @asynccontextmanager
-    async def track(self, room_id: str, thread_id: str | None, *, active: bool = True) -> AsyncIterator[ActiveRunLease]:
+    async def track(
+        self,
+        room_id: str,
+        thread_id: str | None,
+        *,
+        active: bool = True,
+    ) -> AsyncIterator[_ActiveRunLease]:
         """Track a live reply run in ``room_id`` and bind its lease for foreground human-wait pauses."""
-        lease = ActiveRunLease(publisher=self, room_id=room_id, thread_id=thread_id)
+        lease = _ActiveRunLease(publisher=self, room_id=room_id, thread_id=thread_id)
         token = _CURRENT_LEASE.set(lease)
         if active:
             self._register(lease)
@@ -96,7 +102,7 @@ class ActiveRunPublisher:
             self._unregister(lease)
 
     @asynccontextmanager
-    async def activate(self, lease: ActiveRunLease) -> AsyncIterator[None]:
+    async def activate(self, lease: _ActiveRunLease) -> AsyncIterator[None]:
         """Register a deferred lease once progress becomes visible and unregister it on exit."""
         self._register(lease)
         try:
@@ -164,13 +170,13 @@ class ActiveRunPublisher:
     def _dirty_rooms_to_clear(self) -> list[str]:
         return [room_id for room_id, state in self._published.items() if state != [] and room_id not in self._refused]
 
-    def _register(self, lease: ActiveRunLease) -> None:
+    def _register(self, lease: _ActiveRunLease) -> None:
         if not lease.registered:
             lease.registered = True
             self._leases.setdefault(lease.room_id, []).append(lease)
             self._wake(lease.room_id)
 
-    def _unregister(self, lease: ActiveRunLease) -> None:
+    def _unregister(self, lease: _ActiveRunLease) -> None:
         if not lease.registered:
             return
         lease.registered = False
