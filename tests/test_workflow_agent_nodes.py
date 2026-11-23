@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import time
 from contextlib import suppress
 from dataclasses import replace
 from datetime import timedelta
@@ -762,19 +763,46 @@ async def test_timeout_counts_the_work_before_and_after_an_approval_and_not_the_
 
 
 @pytest.mark.asyncio
-async def test_approval_wait_does_not_exhaust_schema_correction_working_time(gated: WorkflowStack) -> None:
+async def test_approval_wait_does_not_exhaust_schema_correction_working_time(
+    gated: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Approval wait time on turn 1 is not deducted from the schema correction turn's working time (B2)."""
     cards: JobApprovalCards = gated.cards  # type: ignore[attr-defined]
+    clock = [1_000_000.0]
+    monkeypatch.setattr(engine_module, "time", SimpleNamespace(time=lambda: clock[0], monotonic=time.monotonic))
+    monkeypatch.setattr(agent_nodes, "time", SimpleNamespace(time=lambda: clock[0]))
+    correction_started, release_correction = asyncio.Event(), asyncio.Event()
+
+    async def hold_correction() -> None:
+        correction_started.set()
+        await release_correction.wait()
+
     schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}
     gated.child_script(
         calls(tool_call("append", "c1", line="a")),
         answer("not json"),
-        [Await(partial(asyncio.sleep, 0.2)), *answer('```json\n{"ok": true}\n```')],
+        [Await(hold_correction), *answer('```json\n{"ok": true}\n```')],
     )
-    receipt = await gated.submit("@0", "agent", _PROMPT | {"schema": schema}, {"timeout": 2.0})
+    receipt = await gated.submit("@0", "agent", _PROMPT | {"schema": schema}, {"timeout": 5.0})
     await asyncio.wait_for(cards.posted.wait(), 10)
-    await asyncio.sleep(2.3)
+    await gated.until(
+        lambda: (
+            (node := _node(gated)).state is WorkflowNodeState.WAITING
+            and node.handle is not None
+            and node.handle.work_left is not None
+        ),
+    )
+    # Advance the wall clock past turn 1's original deadline while waiting for approval.
+    clock[0] += 10.0
     cards.decision.set_result(BackgroundApprovalDecision("approved", None))
+
+    await asyncio.wait_for(correction_started.wait(), 10)
+    handle = _node(gated).handle
+    assert handle is not None
+    assert handle.work_until is not None
+    assert handle.work_until > clock[0] + 1.0
+    release_correction.set()
 
     while receipt.state in ("running", "waiting"):
         receipt = await gated.engine.node_receipt(gated.attempt, receipt.id, wait=10)
