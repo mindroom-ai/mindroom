@@ -20,7 +20,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.knowledge import RerankerConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig, ModelPricing
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.direct import run_direct_child_turn
@@ -30,6 +30,7 @@ from mindroom.delegation.lifecycle import prepare_child_turn, reload_stopped_chi
 from mindroom.delegation.recovery import settled_subagent
 from mindroom.delegation.state import SubagentPersona
 from mindroom.llm.events import ReportedCall
+from mindroom.llm.provider import ModelIdentity
 from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.response_turn import ResponseTurnContext
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
@@ -38,8 +39,9 @@ from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 from mindroom.tool_system.agno_toolkits import toolkit_function
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context
-from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
 from tests.identity_helpers import entity_ids
 from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
     agent_cli_api,
@@ -482,7 +484,26 @@ def _exclude_memory_archive(config: Config) -> None:
     config.memory.search.exclude.append(f"archive-{len(config.memory.search.exclude)}/**")
 
 
+def _remove_shell(config: Config) -> None:
+    config.agents["helper"].tools = ["calculator"]
+
+
+def _withdraw_delegation(config: Config) -> None:
+    config.agents["leader"].delegate_to = ["plain"]
+    config.agents["helper"].tools = ["shell"]
+
+
+def _move_helper_storage(config: Config) -> None:
+    config.agents["helper"].worker_scope = "user"
+
+
+def _append_room_and_room_model(config: Config) -> None:
+    config.agents["helper"].rooms.append("new-room")
+    config.room_models["new-room"] = "default"
+
+
 _RELOAD_STOPPED = "MindRoom's configuration was reloaded while this turn ran, so the turn stopped"
+_RELOAD_FOLLOW_UP = "MindRoom's configuration was reloaded during your previous turn"
 _CALL_REFUSED = "This MindRoom call did not run: the configuration was reloaded"
 # The control call a completed `switch_thread_model` call for the current response reports.
 _SWITCHED = {"tool": "thread_model", "action": "switch", "status": "ok", "when": "after-toolcall", "model": "default"}
@@ -499,13 +520,18 @@ class _ReloadedRun:
     reloaded: list[Config]
     child: ScriptedModel
     paths: RuntimePaths
-    # What a `continue_subagent` call after the turn answered, when one was made.
-    resumed: str | None = None
 
     def receipt(self) -> dict[str, object]:
         """Return the child as its delegation settled it."""
         (handle,) = (self.paths.storage_root / "subagent_sessions").glob("*.json")
         return json.loads(handle.read_text())["child"]
+
+    def prompts(self) -> list[str]:
+        """Return what each of the child's requests was last sent by its caller."""
+        return [
+            next(str(message.content) for message in reversed(request.messages) if message.role == "user")
+            for request in self.child.requests
+        ]
 
 
 async def _run_minimal_turn_through_a_reload(
@@ -515,19 +541,23 @@ async def _run_minimal_turn_through_a_reload(
     *,
     via: str = "direct",
     reload_at: str = "between_bash_calls",
-    resume: bool = False,
+    bash_calls: int = 3,
+    reload_every_command: bool = False,
     after_cli_call: Callable[[LiveTurnTools], Awaitable[object]] | None = None,
 ) -> _ReloadedRun:
-    """Run a minimal `helper` turn of three Bash calls whose config reloads once while it runs.
+    """Run a minimal `helper` turn of Bash calls whose config reloads while it runs.
 
     Each command calls the calculator through the CLI. The reload lands after the first command (``between_bash_calls``),
     while the first command runs before its CLI call (``before_cli_call``), or while that call's toolkit is bound
     (``during_bind``). ``via`` is how the turn runs: `leader`'s ``direct`` subagent call, a call in its own ``reply``,
-    a subagent ``job``, or ``top_level`` as `helper`'s own turn. With ``resume``, `leader` then continues the subagent.
-    Each command awaits ``after_cli_call`` with the turn's CLI owner once its CLI call settled.
-    Alice administers the deployment, so real authorization admits her.
+    a subagent ``job``, a ``workflow`` participant, a direct call under an ``approval_overlay``, or ``top_level`` as
+    `helper`'s own turn. With ``reload_every_command``, each command triggers another reload. Each command awaits
+    ``after_cli_call`` with the turn's CLI owner once its CLI call settled. Alice administers the deployment, so real
+    authorization admits her.
     """
-    config = _config(helper_tools=["shell", "calculator"])
+    helper_tools = ["shell", "calculator", *(["dynamic_workflow"] if via == "workflow" else [])]
+    config = _config(helper_tools=helper_tools)
+    config.models["default"].pricing = ModelPricing(input=1, output=1)
     config.administrators = ["@alice:example.org"]
     paths = _paths(tmp_path, _CLI_DEPLOYMENT_ENV)
     entity_ids(config, paths)
@@ -536,18 +566,18 @@ async def _run_minimal_turn_through_a_reload(
     live = replace(_live_context(config, paths), config_provider=lambda: current[0])
     ran_under: list[Config] = []
 
-    def reload_once(at: str) -> None:
-        if at == reload_at and not reloaded:
+    def trigger_reload(at: str) -> None:
+        if at == reload_at and (reload_every_command or not reloaded):
             reloaded.append(current[0].model_copy(deep=True))
-            reload(reloaded[0])
-            current[0] = reloaded[0]
+            reload(reloaded[-1])
+            current[0] = reloaded[-1]
 
     bind = PreparedAgentToolCatalog.bind
 
     async def bind_through_a_reload(catalog: PreparedAgentToolCatalog, key: ToolKey, **kwargs: object) -> object:
         binding = await bind(catalog, key, **kwargs)
         if key.toolkit == "calculator":
-            reload_once("during_bind")
+            trigger_reload("during_bind")
         return binding
 
     monkeypatch.setattr(PreparedAgentToolCatalog, "bind", bind_through_a_reload)
@@ -555,7 +585,7 @@ async def _run_minimal_turn_through_a_reload(
     async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ARG001, ASYNC109
         owner = shell_cli_owner(live.orchestrator.agent_cli_registry)
         ran_under.append(owner.catalog.runtime_context.config)
-        reload_once("before_cli_call")
+        trigger_reload("before_cli_call")
         call_id = uuid4()
         await owner.operation(
             window=cli_window(),
@@ -570,27 +600,27 @@ async def _run_minimal_turn_through_a_reload(
         receipt = await settled_receipt(owner, str(call_id))
         if after_cli_call is not None:
             await after_cli_call(owner)
-        reload_once("between_bash_calls")
+        trigger_reload("between_bash_calls")
         return f"{receipt['status']}: {receipt['outcome']}"
 
     command = "mindroom-agent calculator is_prime 7"
+    per_request = usage(1_000_000, 0)
     child = ScriptedModel(
-        [*(calls(tool_call("bash", f"bash-{turn}", command=command)) for turn in range(3)), answer("Child answer")],
+        [
+            *(
+                calls(tool_call("bash", f"bash-{turn}", command=command), metrics=per_request)
+                for turn in range(bash_calls)
+            ),
+            answer("Child answer", metrics=per_request),
+        ],
+        identity=ModelIdentity(id="gpt-6-astra", provider="OpenAI"),
     )
     leader = ScriptedModel([])
     install_scripted_shell(monkeypatch, run_shell_command)
     ScriptedAgents({"leader": leader, "helper": child}).install(monkeypatch)
     run = _ReloadedRun("", ran_under, reloaded, child, paths)
-    if via == "top_level":
-        identity = replace(_identity(), agent_name="helper")
-        turn = replace(
-            _leader_turn(identity, agent_mode="minimal"),
-            entity_label="helper",
-            prompt="Report",
-            execution_identity=identity,
-        )
-        with tool_runtime_context(replace(live, agent_name="helper")):
-            run.result = (await ai.ai_response(turn, paths, config)).text
+    if via in ("top_level", "workflow", "approval_overlay"):
+        run.result = await _run_direct_reload_child(via, config, paths, live)
         return run
     toolkit = DelegateTools("leader", paths, config, _workspace(tmp_path, "leader"), execution_identity=_identity())
     with tool_runtime_context(live):
@@ -607,18 +637,58 @@ async def _run_minimal_turn_through_a_reload(
                 agent_name="helper",
                 minimal=True,
             )
-        if resume:
-            child.turns[:] = [calls(tool_call("bash", "bash-resumed", command=command)), answer("Resumed answer")]
-            run.resumed = await _delegate(
-                toolkit,
-                current[0],
-                paths,
-                "continue_subagent",
-                leader=None,
-                subagent_id=str(run.receipt()["subagent_id"]),
-                message="continue",
-            )
     return run
+
+
+async def _run_direct_reload_child(
+    via: str,
+    config: Config,
+    paths: RuntimePaths,
+    live: ToolRuntimeContext,
+) -> str:
+    """Run a minimal `helper` turn directly: top-level, workflow participant, or under a pre-approval overlay."""
+    if via == "top_level":
+        identity = replace(_identity(), agent_name="helper")
+        turn = replace(
+            _leader_turn(identity, agent_mode="minimal"),
+            entity_label="helper",
+            prompt="Report",
+            execution_identity=identity,
+        )
+        with tool_runtime_context(replace(live, agent_name="helper")):
+            return (await ai.ai_response(turn, paths, config)).text
+    caller = "helper" if via == "workflow" else "leader"
+    owner = replace(_identity(), agent_name=caller, transport_agent_name=caller)
+    persona = (
+        SubagentPersona(source_kind="workflow", source_name="step", system_prompt="Report.")
+        if via == "workflow"
+        else None
+    )
+    child_turn = prepare_child_turn(
+        caller,
+        "helper",
+        "Report",
+        owner=owner,
+        config=config,
+        runtime_paths=paths,
+        depth=0,
+        budget_monitor=None,
+        model=None,
+        agent_mode="minimal",
+        previous=None,
+        persona=persona,
+    )
+    with tool_runtime_context(replace(live, agent_name=caller)):
+        direct = await run_direct_child_turn(
+            child_turn,
+            owner=owner,
+            parent_run_id=None,
+            config=config,
+            runtime_paths=paths,
+            refresh_scheduler=None,
+            approval_config=config.model_copy(deep=True) if via == "approval_overlay" else None,
+        )
+    return direct.text
 
 
 async def _run_subagent_job(tmp_path: Path, config: Config, paths: RuntimePaths, owner: ToolExecutionIdentity) -> str:
@@ -666,74 +736,175 @@ async def _run_subagent_job(tmp_path: Path, config: Config, paths: RuntimePaths,
 @pytest.mark.usefixtures("agent_cli_api", "enforce_turn_authorization")
 @pytest.mark.parametrize("reload", [_add_reranker, _exclude_memory_archive], ids=["reranker", "memory_search_exclude"])
 @pytest.mark.parametrize("via", ["direct", "reply", "job"])
-async def test_a_reload_stops_a_minimal_subagent_at_its_refused_call_and_a_follow_up_resumes_it(
+async def test_a_reload_ends_a_minimal_subagents_turn_and_its_follow_up_turn_finishes_the_task(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     reload: Callable[[Config], object],
     via: str,
 ) -> None:
-    """A reload between two Bash calls ends the child's turn as failed, and `continue_subagent` runs it on."""
-    run = await _run_minimal_turn_through_a_reload(tmp_path, monkeypatch, reload, via=via, resume=True)
+    """A reload between two Bash calls stops the child's turn and its delegation finishes in a follow-up turn."""
+    run = await _run_minimal_turn_through_a_reload(tmp_path, monkeypatch, reload, via=via)
 
-    # The refused call never ran, and the model was asked nothing after the batch that held it.
+    assert "Child answer" in run.result, run.result
+    # The refused call never ran; the follow-up turn's command ran under the reloaded config.
+    assert len(run.ran_under) == 2
     assert run.ran_under[0] is not run.reloaded[0]
-    assert "Child answer" not in run.result, run.result
-    assert _RELOAD_STOPPED in run.result, run.result
-    receipt = run.receipt()
-    subagent_id = receipt["subagent_id"]
-    assert (
-        f'Resume this subagent with continue_subagent(subagent_id="{subagent_id}", message="continue").' in run.result
-    )
-    # The follow-up is a new turn under the reloaded config: its Bash runs, after the stopped turn's history.
-    assert run.resumed is not None
-    assert "Resumed answer" in run.resumed, run.resumed
-    assert run.ran_under[1:] == [run.reloaded[0]]
-    assert len(run.child.requests) == 4
-    resumed = str(run.child.requests[2].messages)
-    assert "Report" in resumed
-    assert _CALL_REFUSED in resumed
-    assert "turn stopped" not in resumed
+    assert run.ran_under[1] is run.reloaded[0]
+    # The stopped attempt asked the model nothing more: its next request is the follow-up turn's.
+    prompts = run.prompts()
+    assert len(prompts) == 4
+    assert [_RELOAD_FOLLOW_UP in prompt for prompt in prompts] == [False, False, True, True]
+    # The follow-up turn replays the child's session: its task, and the refused call with why it did not run.
+    follow_up = str(run.child.requests[2].messages)
+    assert "Report" in follow_up
+    assert _CALL_REFUSED in follow_up
+    assert "turn stopped" not in follow_up
     assert "completed: " in str(run.child.requests[3].messages[-1])
+    receipt = run.receipt()
     assert receipt["status"] == "completed", receipt
+    assert "Child answer" in str(receipt["result"]), receipt
+    # Both the stopped run's two requests and the follow-up run's two requests count toward the child's cost.
+    assert receipt["cost_usd"] == pytest.approx(4.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api", "enforce_turn_authorization")
+@pytest.mark.parametrize("reload_at", ["before_cli_call", "during_bind"])
+async def test_a_cli_call_a_reload_refuses_inside_a_running_bash_ends_the_turn_for_its_follow_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reload_at: str,
+) -> None:
+    """A CLI call refused at dispatch, before or after its toolkit is bound, stops the run for a follow-up turn."""
+    run = await _run_minimal_turn_through_a_reload(
+        tmp_path,
+        monkeypatch,
+        _add_reranker,
+        reload_at=reload_at,
+        bash_calls=2,
+    )
+
+    assert "Child answer" in run.result, run.result
+    assert run.ran_under[0] is not run.reloaded[0]
+    assert run.ran_under[1] is run.reloaded[0]
+    prompts = run.prompts()
+    assert [_RELOAD_FOLLOW_UP in prompt for prompt in prompts] == [False, True, True]
+    assert f"failed: {_CALL_REFUSED}" in str(run.child.requests[1].messages)
+    assert "completed: " in str(run.child.requests[2].messages[-1])
+    receipt = run.receipt()
+    assert receipt["status"] == "completed", receipt
+    assert receipt["cost_usd"] == pytest.approx(3.0)
 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("agent_cli_api", "enforce_turn_authorization")
 @pytest.mark.parametrize("via", ["direct", "job"])
-async def test_a_minimal_subagent_a_reload_stopped_settles_failed_with_how_to_resume_it(
+async def test_repeated_reloads_exhaust_follow_ups_and_settle_failed_with_resume_hint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     via: str,
 ) -> None:
-    """The stopped child's receipt is failed, never completed, and says how its caller resumes it."""
-    run = await _run_minimal_turn_through_a_reload(tmp_path, monkeypatch, _add_reranker, via=via)
+    """Repeated reloads stop after the continuation limit and settle failed with the existing resume hint."""
+    run = await _run_minimal_turn_through_a_reload(
+        tmp_path,
+        monkeypatch,
+        _exclude_memory_archive,
+        via=via,
+        bash_calls=2 * (TURN_CONTINUATION_LIMIT + 2),
+        reload_every_command=True,
+    )
 
-    assert len(run.ran_under) == 1
-    assert len(run.child.requests) == 2
+    assert "Child answer" not in run.result, run.result
+    assert _RELOAD_STOPPED in run.result, run.result
+    # Each turn ran one command under the config it started on, and its next call was refused.
+    assert run.ran_under[1:] == run.reloaded[:TURN_CONTINUATION_LIMIT]
+    assert len(run.child.requests) == 2 * (TURN_CONTINUATION_LIMIT + 1)
     receipt = run.receipt()
     assert receipt["status"] == "failed", receipt
     assert _RELOAD_STOPPED in str(receipt["result"]), receipt
-    assert f'continue_subagent(subagent_id="{receipt["subagent_id"]}"' in str(receipt["result"]), receipt
+    resume = f'Resume this subagent with continue_subagent(subagent_id="{receipt["subagent_id"]}", message="continue").'
+    assert resume in str(receipt["result"]), receipt
+    assert resume in run.result, run.result
+    assert receipt["cost_usd"] == pytest.approx(2 * (TURN_CONTINUATION_LIMIT + 1))
     if via == "job":
         assert run.result.startswith("failed: "), run.result
 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("agent_cli_api", "enforce_turn_authorization")
-@pytest.mark.parametrize("reload_at", ["before_cli_call", "during_bind"])
-async def test_a_cli_call_a_reload_refuses_inside_a_running_bash_stops_the_minimal_subagent(
+@pytest.mark.parametrize(
+    ("reload", "error"),
+    [
+        (_remove_shell, "Minimal mode requires the agent's `run_shell_command` shell permission"),
+        (_withdraw_delegation, "Cannot delegate to 'helper'. Allowed subagents: plain."),
+        (_move_helper_storage, "Subagent storage scope changed; start a new subagent."),
+        (lambda config: config.agents.pop("helper"), "Subagent target or caller is no longer configured."),
+        (lambda config: setattr(config, "administrators", []), "Cannot delegate to 'helper'"),
+    ],
+    ids=["shell_removed", "delegation_withdrawn", "storage_moved", "agent_removed", "requester_revoked"],
+)
+@pytest.mark.parametrize("via", ["direct", "job"])
+async def test_a_reload_whose_config_refuses_the_follow_up_turn_fails_the_minimal_subagent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    reload_at: str,
+    reload: Callable[[Config], object],
+    error: str,
+    via: str,
 ) -> None:
-    """A CLI call refused at dispatch, before or after its toolkit is bound, stops the run after its Bash call."""
-    run = await _run_minimal_turn_through_a_reload(tmp_path, monkeypatch, _add_reranker, reload_at=reload_at)
+    """A follow-up turn the reloaded config no longer allows fails the child with the reason a new turn would get."""
+    run = await _run_minimal_turn_through_a_reload(tmp_path, monkeypatch, reload, via=via)
 
+    assert "Child answer" not in run.result, run.result
+    assert error in run.result, run.result
     assert len(run.ran_under) == 1
-    assert len(run.child.requests) == 1
+    assert len(run.child.requests) == 2
+    receipt = run.receipt()
+    assert receipt["status"] == "failed", receipt
+    assert error in str(receipt["result"]), receipt
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api", "enforce_turn_authorization")
+@pytest.mark.parametrize("via", ["workflow", "approval_overlay"])
+async def test_workflow_participant_and_approval_overlay_settle_failed_without_a_follow_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    via: str,
+) -> None:
+    """Workflow participants and pre-approval overlays do not run an automatic follow-up on reload."""
+    run = await _run_minimal_turn_through_a_reload(tmp_path, monkeypatch, _add_reranker, via=via)
+
+    assert "Child answer" not in run.result, run.result
+    assert len(run.ran_under) == 1
+    assert len(run.child.requests) == 2
     receipt = run.receipt()
     assert receipt["status"] == "failed", receipt
     assert _RELOAD_STOPPED in str(receipt["result"]), receipt
+    if via == "workflow":
+        assert "continue_subagent" not in str(receipt["result"]), receipt
+    else:
+        assert f'continue_subagent(subagent_id="{receipt["subagent_id"]}"' in str(receipt["result"]), receipt
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api", "enforce_turn_authorization")
+@pytest.mark.parametrize("via", ["direct", "job"])
+async def test_appending_own_room_and_room_model_does_not_stop_a_minimal_subagent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    via: str,
+) -> None:
+    """Appending a room to the child's own config and adding a room_models entry keeps the turn running."""
+    run = await _run_minimal_turn_through_a_reload(tmp_path, monkeypatch, _append_room_and_room_model, via=via)
+
+    assert "Child answer" in run.result, run.result
+    assert len(run.ran_under) == 3
+    assert all(cfg is not run.reloaded[0] for cfg in run.ran_under)
+    assert len(run.child.requests) == 4
+    assert all(_RELOAD_FOLLOW_UP not in prompt for prompt in run.prompts())
+    assert all(_CALL_REFUSED not in str(request.messages) for request in run.child.requests)
+    receipt = run.receipt()
+    assert receipt["status"] == "completed", receipt
 
 
 @pytest.mark.asyncio
@@ -751,15 +922,14 @@ async def test_a_reload_stop_wins_over_a_model_switch_in_the_same_batch(
         tmp_path,
         monkeypatch,
         _add_reranker,
+        via="top_level",
         reload_at="before_cli_call",
         after_cli_call=complete_a_model_switch,
     )
 
     assert len(run.ran_under) == 1
     assert len(run.child.requests) == 1
-    receipt = run.receipt()
-    assert receipt["status"] == "failed", receipt
-    assert _RELOAD_STOPPED in str(receipt["result"]), receipt
+    assert _RELOAD_STOPPED in run.result, run.result
 
 
 @pytest.mark.asyncio
@@ -802,7 +972,12 @@ async def test_a_reload_stopped_minimal_subagent_recovers_as_failed_after_a_rest
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A restart between the stopped run's save and the child's settlement settles the child from the stored run."""
-    run = await _run_minimal_turn_through_a_reload(tmp_path, monkeypatch, _add_reranker)
+    run = await _run_minimal_turn_through_a_reload(
+        tmp_path,
+        monkeypatch,
+        _add_reranker,
+        via="approval_overlay",
+    )
     settled = run.receipt()
     (handle,) = (run.paths.storage_root / "subagent_sessions").glob("*.json")
     saved = json.loads(handle.read_text())

@@ -77,13 +77,18 @@ async def load_subagent(
     child = await asyncio.to_thread(_read, _path(subagent_id, runtime_paths), owner)
     if child.subagent_id != subagent_id or child.caller_agent_name != owner.agent_name or child.depth != depth + 1:
         raise SubagentSessionError(_UNAVAILABLE)
+    check_subagent_storage(child, config)
+    return child
+
+
+def check_subagent_storage(child: DelegationChild, config: Config) -> None:
+    """Refuse another turn of ``child`` under a config that no longer holds its agents or moved their storage."""
     if any(name not in config.agents for name in child.storage_bindings):
         msg = "Subagent target or caller is no longer configured."
         raise SubagentSessionError(msg)
     if child.storage_bindings != freeze_delegation_storage(config, child.storage_bindings):
         msg = "Subagent storage scope changed; start a new subagent."
         raise SubagentSessionError(msg)
-    return child
 
 
 async def load_retained_subagent_turn(child: DelegationChild, runtime_paths: RuntimePaths) -> DelegationChild | None:

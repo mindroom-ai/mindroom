@@ -4,15 +4,23 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.ai import run_delegated_child_response
-from mindroom.delegation.lifecycle import child_run_context, finish_child_turn, reserve_child_turn, start_child_turn
+from mindroom.delegation.lifecycle import (
+    child_run_context,
+    finish_child_turn,
+    reserve_child_turn,
+    run_child_across_reloads,
+    start_child_turn,
+)
 from mindroom.delegation.sessions import subagent_liveness
 from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 from mindroom.response_turn import ResponsePausedForApproval
+from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -63,14 +71,19 @@ async def run_direct_child_turn(
                 caller_execution_identity=owner,
             )
             async with child_run_context(child, config=config, runtime_paths=runtime_paths):
-                response = await run_delegated_child_response(
+                response = await run_child_across_reloads(
+                    partial(
+                        run_delegated_child_response,
+                        supports_native_tool_approval=False,
+                        approval_config=approval_config,
+                    ),
                     child,
                     prompt=child.task,
                     config=config,
                     runtime_paths=runtime_paths,
                     refresh_scheduler=refresh_scheduler,
-                    supports_native_tool_approval=False,
-                    approval_config=approval_config,
+                    # A pre-approval overlay is of the config its caller built it from, so a reload stops its child.
+                    follow_ups=0 if approval_config is not None else TURN_CONTINUATION_LIMIT,
                 )
         except asyncio.CancelledError:
             await _settle_cancelled(child, config=config, runtime_paths=runtime_paths)

@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from mindroom.agent_cli.session import CONFIG_RELOAD_CALL
 from mindroom.agent_loop.model_loop import SendRequest
-from mindroom.ai_run_metadata import model_payload, prior_usage_by_run, prompt_input_tokens, turn_usage
+from mindroom.ai_run_metadata import merge_usage, model_payload, prior_usage_by_run, prompt_input_tokens, turn_usage
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.budgets.pricing import model_prices, run_cost_usd
@@ -32,7 +32,12 @@ from mindroom.delegation.audit import (
 from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost, stored_receipts
 from mindroom.delegation.personas import caller_toolkit_names, self_only_refusal
 from mindroom.delegation.records import DelegationRecordLimitError
-from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn, update_subagent_turn_sync
+from mindroom.delegation.sessions import (
+    check_subagent_storage,
+    reserve_subagent_turn,
+    update_subagent_turn,
+    update_subagent_turn_sync,
+)
 from mindroom.delegation.state import (
     RESTART_INTERRUPTION_REASON,
     TERMINAL_CHILD_STATUSES,
@@ -69,10 +74,11 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.activity import SubagentSink
-    from mindroom.delegation.state import DelegationTerminalStatus, SubagentPersona
+    from mindroom.delegation.state import ChildResponseRunner, DelegationTerminalStatus, SubagentPersona
     from mindroom.event_journal import ApprovalCall
+    from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent
-    from mindroom.llm.runs import AnyRunRecord
+    from mindroom.llm.runs import AnyRunRecord, RunMetrics
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.workers.models import ScriptResourceProfileName
@@ -124,6 +130,11 @@ class ChildRunObservation:
 
 
 _CHILD_RUN: ContextVar[ChildRunObservation | None] = ContextVar("delegation_child_run", default=None)
+# What a child is sent to start the follow-up turn of a turn a config reload stopped.
+_RELOAD_FOLLOW_UP_PROMPT = (
+    "MindRoom's configuration was reloaded during your previous turn, which ended there: your last call did not run. "
+    "Continue the task from where you stopped, repeating that call if it is still needed."
+)
 
 
 def running_child_run() -> ChildRunObservation | None:
@@ -618,6 +629,62 @@ def live_delegation_config(config: Config) -> Config:
     detached = get_detached_requester_context()
     live = detached.config_provider() if detached is not None else None
     return live if live is not None else config
+
+
+async def run_child_across_reloads(
+    run_child: ChildResponseRunner,
+    child: DelegationChild,
+    *,
+    prompt: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    refresh_scheduler: KnowledgeRefreshScheduler | None,
+    prior_usage: Mapping[str, RunMetrics] | None = None,
+    follow_ups: int,
+) -> str:
+    """Run the child's response; when a config reload stops its turn, run a follow-up turn under the live config.
+
+    A follow-up is a new response turn of the child's session, sent a continuation note: it is authorized, built, and
+    granted as any turn is, so a config that no longer allows the child fails it there. The stopped run stays in the
+    session's history and is never the child's outcome while follow-ups remain. Reloads may add ``follow_ups`` such
+    turns before the child settles as reload-stopped. Dynamic Workflow participants never run a follow-up.
+    """
+    observation = _CHILD_RUN.get()
+    text = await run_child(
+        child,
+        prompt=prompt,
+        config=config,
+        runtime_paths=runtime_paths,
+        refresh_scheduler=refresh_scheduler,
+        prior_usage=prior_usage,
+    )
+    stopped = None if observation is None else observation.current_record()
+    if (
+        not follow_ups
+        or delegation_grant(child) == "dynamic_workflow"
+        or stopped is None
+        or reload_stopped_child_result(child, stopped) is None
+    ):
+        return text
+    # The child settles on its follow-up's run or as failed, not on the run the reload stopped.
+    note_child_run_id(child, uuid4().hex, runtime_paths, model_name=child.model_name)
+    config = live_delegation_config(config)
+    check_subagent_storage(child, config)
+    spent = {} if stopped.metrics is None else {stopped.run_id: stopped.metrics}
+    text = await run_child_across_reloads(
+        run_child,
+        child,
+        prompt=_RELOAD_FOLLOW_UP_PROMPT,
+        config=config,
+        runtime_paths=runtime_paths,
+        refresh_scheduler=refresh_scheduler,
+        prior_usage=merge_usage(prior_usage or {}, prior_usage_by_run(stopped.metadata), spent),
+        follow_ups=follow_ups - 1,
+    )
+    if observation is not None and observation.current_record() is None:
+        # A follow-up turn refused before its run fails the child with the refusal.
+        raise RuntimeError(text)
+    return text
 
 
 def authorize_delegation(  # noqa: PLR0911
