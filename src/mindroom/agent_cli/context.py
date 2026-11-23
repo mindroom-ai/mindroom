@@ -31,20 +31,27 @@ def minimal_system_message(
     """Identify the same agent's workspace, memory, and discoverable CLI tools.
 
     An authored subagent's ``identity`` replaces the agent's own identity line. ``toolkit_functions`` maps toolkit
-    names to their known function names, shown inline when within the roster budget. ``named_workers`` says the
-    agent's shell commands may run in workers it names, which Bash reaches only through the CLI.
+    names to their known function names, shown inline within the roster budget by collapsing the largest toolkits
+    first. ``named_workers`` says the agent's shell commands may run in workers it names, which Bash reaches only
+    through the CLI.
     """
     names = sorted(set(toolkit_names))
-    functions_by_toolkit = toolkit_functions or {}
-    detailed = "Tools callable through mindroom-agent, by toolkit: " + ", ".join(
-        f"{name} ({', '.join(functions)})" if (functions := functions_by_toolkit.get(name)) else name for name in names
-    )
-    if len(detailed) <= 2000:
-        roster = detailed
-    else:
-        roster = "Toolkits callable through mindroom-agent: " + ", ".join(names)
-        if len(roster) > 2000:
-            roster = f"{len(names)} toolkits available; use mindroom-agent tools list."
+    shown = {name: ", ".join(functions) for name in names if (functions := (toolkit_functions or {}).get(name))}
+
+    def _render() -> str:
+        prefix = (
+            "Tools callable through mindroom-agent, by toolkit: "
+            if shown
+            else "Toolkits callable through mindroom-agent: "
+        )
+        return prefix + ", ".join(f"{name} ({shown[name]})" if name in shown else name for name in names)
+
+    roster = _render()
+    while len(roster) > 2000 and shown:
+        del shown[min(shown, key=lambda name: (-len(shown[name]), name))]
+        roster = _render()
+    if len(roster) > 2000:
+        roster = f"{len(names)} toolkits available; use mindroom-agent tools list."
     guidance = []
     if context_files:
         files = "Context files: " + ", ".join(f"`{path}`" for path in context_files)

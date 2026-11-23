@@ -365,17 +365,26 @@ def test_minimal_roster_names_toolkit_functions_and_call_syntax() -> None:
 
 
 def test_minimal_context_roster_is_bounded() -> None:
-    toolkit_names = [f"toolkit_{number}" for number in range(20)]
-    names_only = minimal_system_message(
+    big_functions = [f"long_action_name_{i:02d}" for i in range(55)]
+    partial = minimal_system_message(
         agent_name="helper",
         display_name="Helper",
-        toolkit_names=toolkit_names,
-        toolkit_functions={name: [f"very_long_function_name_{i}" for i in range(10)] for name in toolkit_names},
+        toolkit_names=["filesystem", "giant_a", "giant_b", "shell"],
+        toolkit_functions={
+            "filesystem": ["read_file", "edit_file"],
+            "giant_a": big_functions,
+            "giant_b": big_functions,
+            "shell": ["run_shell_command"],
+        },
         instructions=[],
     )
-    assert f"Toolkits callable through mindroom-agent: {', '.join(sorted(toolkit_names))}" in names_only.splitlines()
-    assert "mindroom-agent tools call TOOLKIT.FUNCTION '<json arguments>'" in names_only
-    assert len(names_only) < 2600
+    roster_line = next(
+        line for line in partial.splitlines() if line.startswith("Tools callable through mindroom-agent, by toolkit: ")
+    )
+    assert len(roster_line) <= 2000
+    assert "filesystem (read_file, edit_file), giant_a, giant_b (" in roster_line
+    assert "shell (run_shell_command)" in roster_line
+    assert "mindroom-agent tools call TOOLKIT.FUNCTION '<json arguments>'" in partial
 
     message = minimal_system_message(
         agent_name="helper",
