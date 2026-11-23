@@ -2,14 +2,26 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import re
 from typing import Annotated, Literal
 
+from cryptography.exceptions import UnsupportedAlgorithm
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+from cryptography.hazmat.primitives.serialization import (
+    Encoding,
+    PublicFormat,
+    load_pem_public_key,
+    load_ssh_public_key,
+)
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _ENV_VAR_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _GITHUB_REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _EVENT_SOURCE_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_MATRIX_USER_ID_PATTERN = re.compile(r"^@[^:\s]+:[^:\s]+$")
+_ED25519_PUBLIC_KEY_BYTES = 32
 
 
 def _strip_non_empty(value: str, *, field_name: str) -> str:
@@ -22,6 +34,75 @@ def _strip_non_empty(value: str, *, field_name: str) -> str:
 
 def _validate_non_empty_list_items(values: list[str], *, field_name: str) -> list[str]:
     return [_strip_non_empty(item, field_name=field_name) for item in values]
+
+
+def _validate_matrix_user_ids(values: list[str], *, field_name: str) -> list[str]:
+    normalized: list[str] = []
+    for raw in values:
+        user_id = _strip_non_empty(raw, field_name=field_name)
+        if _MATRIX_USER_ID_PATTERN.fullmatch(user_id) is None:
+            msg = f"Invalid Matrix user ID in {field_name}: {raw!r}"
+            raise ValueError(msg)
+        normalized.append(user_id)
+    return normalized
+
+
+def _decode_strict_base64(value: str) -> bytes | None:
+    try:
+        return base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+
+
+def _raw_ed25519_public_key_bytes(key: object) -> bytes | None:
+    if not isinstance(key, Ed25519PublicKey):
+        return None
+    return key.public_bytes(Encoding.Raw, PublicFormat.Raw)
+
+
+def _public_key_bytes_from_base64(value: str) -> bytes | None:
+    decoded = _decode_strict_base64(value)
+    return decoded if decoded is not None and len(decoded) == _ED25519_PUBLIC_KEY_BYTES else None
+
+
+def _public_key_bytes_from_openssh(value: str) -> bytes | None:
+    parts = value.split()
+    if len(parts) >= 2 and parts[0] == "ssh-ed25519":
+        encoded_key = value.encode("utf-8")
+    elif len(parts) == 1 and _decode_strict_base64(value) is not None:
+        encoded_key = f"ssh-ed25519 {value}".encode()
+    else:
+        return None
+    try:
+        key = load_ssh_public_key(encoded_key)
+    except (ValueError, UnsupportedAlgorithm):
+        return None
+    return _raw_ed25519_public_key_bytes(key)
+
+
+def _public_key_bytes_from_pem(value: str) -> bytes | None:
+    try:
+        key = load_pem_public_key(value.encode("utf-8"))
+    except (ValueError, UnsupportedAlgorithm):
+        return None
+    return _raw_ed25519_public_key_bytes(key)
+
+
+def _normalize_ed25519_public_key(value: str) -> str:
+    """Normalize raw base64, OpenSSH, or PEM Ed25519 public keys to raw 32-byte base64."""
+    normalized_input = _strip_non_empty(value, field_name="public_key")
+    public_key_bytes = (
+        _public_key_bytes_from_pem(normalized_input)
+        or _public_key_bytes_from_openssh(normalized_input)
+        or _public_key_bytes_from_base64(normalized_input)
+    )
+    if public_key_bytes is None:
+        msg = (
+            "public_key must be an Ed25519 public key as raw base64 (32 key bytes), "
+            "OpenSSH single-line format ('ssh-ed25519 <base64> [comment]'), or PEM SubjectPublicKeyInfo"
+        )
+        raise ValueError(msg)
+    return base64.b64encode(public_key_bytes).decode("ascii")
 
 
 class GitHubEventSourceConfig(BaseModel):
@@ -93,8 +174,8 @@ class GitHubEventSourceConfig(BaseModel):
     @field_validator("subscribers")
     @classmethod
     def validate_subscribers(cls, values: list[str]) -> list[str]:
-        """Reject empty subscriber user IDs."""
-        return _validate_non_empty_list_items(values, field_name="subscribers entry")
+        """Require valid Matrix user IDs for subscribers."""
+        return _validate_matrix_user_ids(values, field_name="subscribers entry")
 
 
 class Ed25519EventSourceConfig(BaseModel):
@@ -134,8 +215,8 @@ class Ed25519EventSourceConfig(BaseModel):
     @field_validator("public_key")
     @classmethod
     def validate_public_key(cls, value: str) -> str:
-        """Require a non-empty public key."""
-        return _strip_non_empty(value, field_name="public_key")
+        """Validate and normalize an Ed25519 public key (raw base64, OpenSSH, or PEM) to raw base64."""
+        return _normalize_ed25519_public_key(value)
 
     @field_validator("key_id")
     @classmethod
@@ -152,8 +233,8 @@ class Ed25519EventSourceConfig(BaseModel):
     @field_validator("subscribers")
     @classmethod
     def validate_subscribers(cls, values: list[str]) -> list[str]:
-        """Reject empty subscriber user IDs."""
-        return _validate_non_empty_list_items(values, field_name="subscribers entry")
+        """Require valid Matrix user IDs for subscribers."""
+        return _validate_matrix_user_ids(values, field_name="subscribers entry")
 
 
 ExternalEventSourceConfig = Annotated[

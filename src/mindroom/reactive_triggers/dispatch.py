@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -14,8 +15,14 @@ from mindroom.hooks.sender import send_matrix_message
 from mindroom.logging_config import get_logger
 from mindroom.matrix.mentions import format_entity_mention
 from mindroom.matrix.message_builder import build_message_content, markdown_to_html
-from mindroom.matrix.room_reconciliation import read_room_state
+from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_room_state
+from mindroom.reactive_triggers.external_sources import check_external_event_source_access
 from mindroom.reactive_triggers.matching import REACTIVE_TRIGGER_DEDUPE_KEY, REACTIVE_TRIGGER_ID_KEY
+from mindroom.reactive_triggers.models import (
+    ExternalEventSourceSpec,
+    RoomMessageSourceSpec,
+    ThreadTagSourceSpec,
+)
 from mindroom.reactive_triggers.store import ReactiveTriggerStore, ReactiveTriggerStoreError
 from mindroom.requester_identity import equivalent_requester_ids, is_human_requester_id
 
@@ -50,6 +57,12 @@ class _ResolvedTargetThread:
     thread_event_id: str | None
     per_fire_root: bool
     save_thread_key: bool
+
+
+def build_reactive_trigger_transaction_id(firing: FiringRecord) -> str:
+    """Build a deterministic Matrix transaction ID for crash-safe firing delivery deduplication."""
+    digest = hashlib.sha256(f"{firing.id}:{firing.rule_uid}:{firing.dedupe_key}".encode()).hexdigest()[:32]
+    return f"rt_{digest}"
 
 
 def build_reactive_trigger_body(
@@ -100,6 +113,133 @@ def build_reactive_trigger_body(
     return "\n\n".join(sections)
 
 
+async def check_reactive_source_access(
+    *,
+    rule: ReactiveTriggerRecord,
+    event: TriggerEvent,
+    source_bot: AgentBot | None,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    memberships: AgentReplyMembershipIndex,
+    known_room_states: Mapping[str, RoomStateSnapshot] | None = None,
+) -> DispatchResult | None:
+    """Recheck source-side authorization and membership before triage and before every delivery."""
+    if not is_human_requester_id(rule.owner_user_id, config, runtime_paths):
+        return DispatchResult(status="skipped", reason="owner_not_human")
+
+    source = rule.source
+    if isinstance(source, ExternalEventSourceSpec):
+        reason = check_external_event_source_access(
+            owner_user_id=rule.owner_user_id,
+            source_spec=source,
+            event=event,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+        return DispatchResult(status="skipped", reason=reason) if reason is not None else None
+
+    if isinstance(source, (RoomMessageSourceSpec, ThreadTagSourceSpec)):
+        return await _check_room_source_access(
+            rule=rule,
+            source=source,
+            event=event,
+            source_bot=source_bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            memberships=memberships,
+            known_room_states=known_room_states,
+        )
+    return None
+
+
+async def _resolve_source_room_state(
+    source_room_id: str,
+    *,
+    source_bot: AgentBot | None,
+    known_room_states: Mapping[str, RoomStateSnapshot] | None,
+) -> RoomStateSnapshot | None:
+    if known_room_states is not None and source_room_id in known_room_states:
+        return known_room_states[source_room_id]
+    if source_bot is None or not source_bot.running or source_bot.client is None:
+        return None
+    rooms = getattr(source_bot.client, "rooms", None)
+    if not isinstance(rooms, Mapping) or source_room_id not in rooms:
+        return None
+    return await read_room_state(source_bot.client, source_room_id)
+
+
+async def _check_room_source_access(
+    *,
+    rule: ReactiveTriggerRecord,
+    source: RoomMessageSourceSpec | ThreadTagSourceSpec,
+    event: TriggerEvent,
+    source_bot: AgentBot | None,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    memberships: AgentReplyMembershipIndex,
+    known_room_states: Mapping[str, RoomStateSnapshot] | None,
+) -> DispatchResult | None:
+    """Verify owner source-room membership (live) and room_message sender authorization."""
+    source_room_id = source.room_id
+    room_state = await _resolve_source_room_state(
+        source_room_id,
+        source_bot=source_bot,
+        known_room_states=known_room_states,
+    )
+    if room_state is None:
+        return DispatchResult(status="retry", reason="source_room_state_unreadable")
+
+    if not _is_owner_joined_in_state(
+        room_state,
+        owner_user_id=rule.owner_user_id,
+        config=config,
+        runtime_paths=runtime_paths,
+    ):
+        return DispatchResult(status="skipped", reason="source_room_not_joined")
+
+    if not isinstance(source, RoomMessageSourceSpec) or not event.actor:
+        return None
+    return _check_room_source_sender(
+        actor=event.actor,
+        source_room_id=source_room_id,
+        source_bot=source_bot,
+        fallback_agent_name=rule.target.agent,
+        config=config,
+        runtime_paths=runtime_paths,
+        memberships=memberships,
+    )
+
+
+def _check_room_source_sender(
+    *,
+    actor: str,
+    source_room_id: str,
+    source_bot: AgentBot | None,
+    fallback_agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    memberships: AgentReplyMembershipIndex,
+) -> DispatchResult | None:
+    source_agent_name = getattr(source_bot, "agent_name", None) or fallback_agent_name
+    bot_client = source_bot.client if source_bot is not None else None
+    rooms = getattr(bot_client, "rooms", None) if bot_client is not None else None
+    observed_room = rooms.get(source_room_id) if isinstance(rooms, Mapping) else None
+    try:
+        sender_allowed = is_sender_allowed_for_agent_reply_in_room(
+            actor,
+            source_agent_name,
+            config,
+            source_room_id,
+            runtime_paths,
+            memberships,
+            require_resolved_membership=True,
+            observed_room=observed_room,
+        )
+    except ReplyMembershipPendingError:
+        return DispatchResult(status="retry", reason="source_membership_pending")
+    return None if sender_allowed else DispatchResult(status="skipped", reason="source_sender_not_authorized")
+
+
 async def dispatch_reactive_trigger(
     *,
     rule: ReactiveTriggerRecord,
@@ -107,14 +247,17 @@ async def dispatch_reactive_trigger(
     triage_reason: str | None,
     store: ReactiveTriggerStore,
     target_bot: AgentBot | None,
+    source_bot: AgentBot | None = None,
     config: Config,
     runtime_paths: RuntimePaths,
     memberships: AgentReplyMembershipIndex,
 ) -> DispatchResult:
-    """Verify owner-scoped policy/auth/membership and post one Matrix wake-agent message."""
+    """Verify owner-scoped policy/auth/membership/source access and post one Matrix wake-agent message."""
     rejection = await _check_dispatch_preconditions(
         rule=rule,
+        firing=firing,
         target_bot=target_bot,
+        source_bot=source_bot,
         config=config,
         runtime_paths=runtime_paths,
         memberships=memberships,
@@ -152,7 +295,13 @@ async def dispatch_reactive_trigger(
         config=config,
         runtime_paths=runtime_paths,
     )
-    delivered = await send_matrix_message(target_bot.client, rule.target.room_id, content)
+    transaction_id = build_reactive_trigger_transaction_id(firing)
+    delivered = await send_matrix_message(
+        target_bot.client,
+        rule.target.room_id,
+        content,
+        transaction_id=transaction_id,
+    )
     if delivered is None:
         return DispatchResult(status="retry", reason="matrix_send_failed")
 
@@ -160,6 +309,7 @@ async def dispatch_reactive_trigger(
         _persist_thread_key_binding(
             store=store,
             trigger_id=rule.trigger_id,
+            rule_uid=rule.rule_uid,
             thread_key=rule.target.thread_key,
             matrix_event_id=delivered.event_id,
         )
@@ -167,7 +317,7 @@ async def dispatch_reactive_trigger(
     return DispatchResult(status="delivered", matrix_event_id=delivered.event_id)
 
 
-async def _check_dispatch_preconditions(
+def _check_target_bot_and_owner_auth(
     *,
     rule: ReactiveTriggerRecord,
     target_bot: AgentBot | None,
@@ -175,13 +325,10 @@ async def _check_dispatch_preconditions(
     runtime_paths: RuntimePaths,
     memberships: AgentReplyMembershipIndex,
 ) -> DispatchResult | None:
-    """Return a skip/retry DispatchResult when preconditions are not met, or None to proceed."""
     if not config.external_trigger_policy.enabled or not config.external_trigger_policy.reactive_enabled:
         return DispatchResult(status="skipped", reason="reactive_triggers_disabled")
-
     if target_bot is None or not target_bot.running or target_bot.client is None:
         return DispatchResult(status="retry", reason="target_bot_unavailable")
-
     auth_rejection = _check_owner_reply_authorization(
         rule=rule,
         config=config,
@@ -190,21 +337,56 @@ async def _check_dispatch_preconditions(
     )
     if auth_rejection is not None:
         return auth_rejection
-
     rooms = getattr(target_bot.client, "rooms", None)
     if not isinstance(rooms, Mapping) or rule.target.room_id not in rooms:
         return DispatchResult(status="retry", reason="target_bot_not_joined")
+    return None
 
-    owner_joined = await _is_owner_joined_target_room(
-        target_bot.client,
-        owner_user_id=rule.owner_user_id,
-        room_id=rule.target.room_id,
+
+async def _check_dispatch_preconditions(
+    *,
+    rule: ReactiveTriggerRecord,
+    firing: FiringRecord,
+    target_bot: AgentBot | None,
+    source_bot: AgentBot | None,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    memberships: AgentReplyMembershipIndex,
+) -> DispatchResult | None:
+    """Return a skip/retry DispatchResult when preconditions are not met, or None to proceed."""
+    rejection = _check_target_bot_and_owner_auth(
+        rule=rule,
+        target_bot=target_bot,
         config=config,
         runtime_paths=runtime_paths,
+        memberships=memberships,
     )
-    if owner_joined is None:
+    if rejection is not None:
+        return rejection
+    assert target_bot is not None
+    assert target_bot.client is not None
+
+    target_room_state = await _read_owner_room_state(target_bot.client, rule.target.room_id)
+    if target_room_state is None:
         return DispatchResult(status="retry", reason="room_state_unreadable")
-    return None if owner_joined else DispatchResult(status="skipped", reason="owner_not_joined")
+    if not _is_owner_joined_in_state(
+        target_room_state,
+        owner_user_id=rule.owner_user_id,
+        config=config,
+        runtime_paths=runtime_paths,
+    ):
+        return DispatchResult(status="skipped", reason="owner_not_joined")
+
+    effective_source_bot = source_bot if source_bot is not None else target_bot
+    return await check_reactive_source_access(
+        rule=rule,
+        event=firing.event,
+        source_bot=effective_source_bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        memberships=memberships,
+        known_room_states={rule.target.room_id: target_room_state},
+    )
 
 
 def _check_owner_reply_authorization(
@@ -284,12 +466,18 @@ def _persist_thread_key_binding(
     *,
     store: ReactiveTriggerStore,
     trigger_id: str,
+    rule_uid: str,
     thread_key: str,
     matrix_event_id: str,
 ) -> None:
     """Best-effort save of a newly opened per-fire thread root for thread_key grouping."""
     try:
-        store.save_thread_key_binding(trigger_id, thread_key, matrix_event_id)
+        store.save_thread_key_binding(
+            trigger_id,
+            thread_key,
+            matrix_event_id,
+            expected_rule_uid=rule_uid,
+        )
     except ReactiveTriggerStoreError:
         logger.warning(
             "Failed to persist reactive trigger thread_key binding after delivery",
@@ -300,18 +488,17 @@ def _persist_thread_key_binding(
         )
 
 
-async def _is_owner_joined_target_room(
-    client: nio.AsyncClient,
+async def _read_owner_room_state(client: nio.AsyncClient, room_id: str) -> RoomStateSnapshot | None:
+    return await read_room_state(client, room_id)
+
+
+def _is_owner_joined_in_state(
+    room_state: RoomStateSnapshot,
     *,
     owner_user_id: str,
-    room_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
-) -> bool | None:
-    """Return whether the trigger owner (or an equivalent alias) is currently joined to room_id."""
-    room_state = await read_room_state(client, room_id)
-    if room_state is None:
-        return None
+) -> bool:
     return any(
         room_state.events.get(("m.room.member", user_id), {}).get("membership") == "join"
         for user_id in equivalent_requester_ids(owner_user_id, config, runtime_paths)

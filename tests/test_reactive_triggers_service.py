@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from types import SimpleNamespace
@@ -16,7 +17,7 @@ import pytest
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.authorization import ReplyMembershipPendingError
 from mindroom.config.agent import AgentConfig
-from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
+from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig, GitHubEventSourceConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
@@ -79,7 +80,21 @@ def _make_config(
     reactive_enabled: bool = True,
     agent_users: list[str] | None = None,
     bot_accounts: list[str] | None = None,
+    max_fires_per_hour: int = 60,
+    event_sources: dict[str, Any] | None = None,
 ) -> tuple[Config, RuntimePaths]:
+    resolved_sources = (
+        event_sources
+        if event_sources is not None
+        else {
+            "github": GitHubEventSourceConfig(
+                kind="github",
+                secret_env="GH_SECRET",  # noqa: S106
+                allowed_repos=["mindroom-ai/mindroom"],
+                subscribers=[_OWNER],
+            ),
+        }
+    )
     config = bind_runtime_paths(
         Config(
             agents={
@@ -96,6 +111,8 @@ def _make_config(
             external_trigger_policy=ExternalTriggerPolicyConfig(
                 enabled=enabled,
                 reactive_enabled=reactive_enabled,
+                max_fires_per_hour=max_fires_per_hour,
+                event_sources=resolved_sources,
             ),
         ),
         test_runtime_paths(tmp_path),
@@ -126,6 +143,14 @@ def _visible_message(
         revision_ts=created_ts,
         content=content,
     )
+
+
+def _member_state_source(user_id: str = _OWNER, membership: str = "join") -> dict[str, Any]:
+    return {
+        "type": "m.room.member",
+        "state_key": user_id,
+        "content": {"membership": membership},
+    }
 
 
 def _tag_state_source(
@@ -211,7 +236,7 @@ def _make_fake_bot(
     }
     client = SimpleNamespace(
         rooms=rooms,
-        room_get_state=AsyncMock(return_value=nio.RoomGetStateResponse([], _ROOM_A)),
+        room_get_state=AsyncMock(return_value=nio.RoomGetStateResponse([_member_state_source(_OWNER)], _ROOM_A)),
     )
     return SimpleNamespace(
         agent_name=agent_name,
@@ -557,6 +582,7 @@ async def test_restore_room_reconciles_offline_transition_once_and_skips_already
     bot.client.room_get_state = AsyncMock(
         return_value=nio.RoomGetStateResponse(
             [
+                _member_state_source(_OWNER),
                 _tag_state_source(thread_root_id=_THREAD_A, tag="resolved", present=True, event_id="$offline_1"),
                 _tag_state_source(
                     thread_root_id="$thread_already",
@@ -625,7 +651,7 @@ async def test_restore_room_live_event_during_restore_wins_over_stale_snapshot(t
         await release_state_read.wait()
         # Stale snapshot showing tag present with an older event_id
         return nio.RoomGetStateResponse(
-            [_tag_state_source(present=True, event_id="$stale_snapshot")],
+            [_member_state_source(_OWNER), _tag_state_source(present=True, event_id="$stale_snapshot")],
             room_id,
         )
 
@@ -1238,7 +1264,9 @@ async def test_restore_room_reconciles_offline_removal_and_retries_unreadable_st
     assert service._restore_retries == {}
 
     # Next call succeeds with empty state (tag removed offline) -> fires once
-    bot.client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse([], _ROOM_A))
+    bot.client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse([_member_state_source(_OWNER)], _ROOM_A),
+    )
     await service.restore_room(bot, _ROOM_A)
     due = store.list_due_firings()
     assert len(due) == 1
@@ -1478,7 +1506,9 @@ async def test_policy_disable_and_reenable_reconciles_unrestored_thread_tag_room
 
     store = ReactiveTriggerStore(runtime_paths)
     bot = _make_fake_bot()
-    bot.client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse([], _ROOM_A))
+    bot.client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse([_member_state_source(_OWNER)], _ROOM_A),
+    )
 
     service = ReactiveTriggerService(
         runtime_paths=runtime_paths,
@@ -1495,8 +1525,10 @@ async def test_policy_disable_and_reenable_reconciles_unrestored_thread_tag_room
     )
 
     try:
-        # Initial enable reconciles _ROOM_A (tag absent -> no firing)
+        # Initial enable schedules background reconciliation of _ROOM_A (tag absent -> no firing)
         await service.sync(enabled_config)
+        if service._reconcile_task is not None:
+            await service._reconcile_task
         assert _ROOM_A in service._restored_rooms
         assert store.list_due_firings() == []
 
@@ -1515,7 +1547,15 @@ async def test_policy_disable_and_reenable_reconciles_unrestored_thread_tag_room
         # While disabled, thread becomes resolved in Matrix room state
         bot.client.room_get_state = AsyncMock(
             return_value=nio.RoomGetStateResponse(
-                [_tag_state_source(thread_root_id=_THREAD_A, tag="resolved", present=True, event_id="$while_disabled")],
+                [
+                    _member_state_source(_OWNER),
+                    _tag_state_source(
+                        thread_root_id=_THREAD_A,
+                        tag="resolved",
+                        present=True,
+                        event_id="$while_disabled",
+                    ),
+                ],
                 _ROOM_A,
             ),
         )
@@ -1527,6 +1567,8 @@ async def test_policy_disable_and_reenable_reconciles_unrestored_thread_tag_room
             new=AsyncMock(return_value=DispatchResult(status="retry", reason="hold_for_check")),
         ):
             await service.sync(enabled_config)
+            if service._reconcile_task is not None:
+                await service._reconcile_task
             assert _ROOM_A in service._restored_rooms
             firing = store.get_firing(1)
             assert firing is not None
@@ -1604,3 +1646,446 @@ async def test_room_member_cache_avoids_repeated_state_reads_and_fails_closed_on
         assert read_state_mock.await_count == 3
         assert store.get_room_cursor("tr_cache") == RoomCursor(created_ts=20_200, logical_event_id="$m_2")
         assert [f.dedupe_key for f in store.list_due_firings()] == ["$m_0", "$m_1"]
+
+
+@pytest.mark.asyncio
+async def test_source_access_rechecked_before_triage_and_delivery_for_room_message(tmp_path: Path) -> None:
+    """When Alice leaves the watched room after queueing, drainer skips BEFORE triage and BEFORE delivery."""
+    config, runtime_paths = _make_config(tmp_path)
+    store = ReactiveTriggerStore(runtime_paths)
+    bot = _make_fake_bot()
+
+    rule = _room_message_rule(
+        "tr_leave_room",
+        room_id=_ROOM_A,
+        target_room_id=_ROOM_B,
+        triage=TriageSpec(instructions="Is this urgent?", provider="llm", model="cheap"),
+    )
+    store.create_trigger(rule)
+    store.enqueue_firing(
+        "tr_leave_room",
+        "$msg-1",
+        TriggerEvent(
+            source_type="room_message",
+            source_id=_ROOM_A,
+            kind="room.message",
+            event_id="$msg-1",
+            timestamp=time.time(),
+            room_id=_ROOM_A,
+            actor=_OTHER,
+            text="prod alert",
+        ),
+    )
+
+    # Alice left _ROOM_A (only _OTHER remains joined in _ROOM_A, while Alice is still in _ROOM_B)
+    async def _room_get_state(room_id: str) -> nio.RoomGetStateResponse:
+        if room_id == _ROOM_A:
+            return nio.RoomGetStateResponse([_member_state_source(_OTHER)], _ROOM_A)
+        return nio.RoomGetStateResponse([_member_state_source(_OWNER)], room_id)
+
+    bot.client.room_get_state = AsyncMock(side_effect=_room_get_state)
+
+    service = ReactiveTriggerService(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: config,
+        bots=lambda: {"research": bot},
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+
+    triage_mock = AsyncMock(return_value=TriageOutcome(act=True, reason="urgent"))
+    send_mock = AsyncMock()
+    with (
+        patch("mindroom.reactive_triggers.service.evaluate_triage", new=triage_mock),
+        patch("mindroom.reactive_triggers.dispatch.send_matrix_message", new=send_mock),
+    ):
+        await service.drain_due_firings_once()
+
+    triage_mock.assert_not_awaited()
+    send_mock.assert_not_awaited()
+    firing = store.get_firing(1)
+    assert firing is not None
+    assert firing.status == "skipped"
+    assert firing.error_message == "source_room_not_joined"
+
+
+@pytest.mark.asyncio
+async def test_cross_room_thread_tag_skipped_when_owner_leaves_watched_room(tmp_path: Path) -> None:
+    """When Alice leaves the watched room on a cross-room thread_tag rule, resolution is NOT delivered."""
+    config, runtime_paths = _make_config(tmp_path)
+    store = ReactiveTriggerStore(runtime_paths)
+    bot = _make_fake_bot()
+
+    rule = _thread_tag_rule("tr_cross_tag", room_id=_ROOM_A, thread_id=_THREAD_A)
+    store.create_trigger(
+        rule,
+        initial_checkpoint=ThreadCheckpoint(tag_present=False, state_event_id=None, updated_at=time.time()),
+    )
+
+    # Simulate tag event enqueued, then Alice leaves _ROOM_A before drain
+    service = ReactiveTriggerService(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: config,
+        bots=lambda: {"research": bot},
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+    service.observe_state_event(_ROOM_A, _tag_state_source(present=True, event_id="$res-1"))
+    assert len(store.list_due_firings()) == 1
+
+    async def _room_get_state(room_id: str) -> nio.RoomGetStateResponse:
+        if room_id == _ROOM_A:
+            return nio.RoomGetStateResponse([_member_state_source(_OTHER)], _ROOM_A)
+        return nio.RoomGetStateResponse([_member_state_source(_OWNER)], room_id)
+
+    bot.client.room_get_state = AsyncMock(side_effect=_room_get_state)
+    send_mock = AsyncMock()
+    with patch("mindroom.reactive_triggers.dispatch.send_matrix_message", new=send_mock):
+        await service.drain_due_firings_once()
+
+    send_mock.assert_not_awaited()
+    firing = store.get_firing(1)
+    assert firing is not None
+    assert firing.status == "skipped"
+    assert firing.error_message == "source_room_not_joined"
+
+    # And on restore_room when Alice is not joined to _ROOM_A, offline transition is NOT enqueued
+    store.create_trigger(
+        _thread_tag_rule("tr_cross_tag_restore", room_id=_ROOM_A, thread_id="$threadX"),
+        initial_checkpoint=ThreadCheckpoint(tag_present=False, state_event_id=None, updated_at=time.time()),
+    )
+    bot.client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse(
+            [
+                _member_state_source(_OTHER),
+                _tag_state_source(thread_root_id="$threadX", present=True, event_id="$res-2"),
+            ],
+            _ROOM_A,
+        ),
+    )
+    await service.restore_room(bot, _ROOM_A)
+    assert store.list_due_firings() == []
+
+
+@pytest.mark.asyncio
+async def test_external_event_subscriber_revoked_during_retry_backoff_skips_retry(tmp_path: Path) -> None:
+    """Removing Alice from source.subscribers while a claimed external_event is in retry backoff skips delivery."""
+    config_allowed, runtime_paths = _make_config(tmp_path)
+    config_revoked, _ = _make_config(
+        tmp_path,
+        event_sources={
+            "github": GitHubEventSourceConfig(
+                kind="github",
+                secret_env="GH_SECRET",  # noqa: S106
+                allowed_repos=["mindroom-ai/mindroom"],
+                subscribers=[_OTHER],  # Alice removed!
+            ),
+        },
+    )
+    active_config = [config_allowed]
+
+    store = ReactiveTriggerStore(runtime_paths)
+    bot = _make_fake_bot()
+    bot.client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse([_member_state_source(_OWNER)], _ROOM_B),
+    )
+    store.create_trigger(_external_event_rule("tr_ext_revoke"))
+    store.enqueue_firing("tr_ext_revoke", "deliv-rev-1", _external_event("deliv-rev-1"))
+
+    service = ReactiveTriggerService(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: active_config[0],
+        bots=lambda: {"research": bot},
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+
+    # First attempt claims the firing, then transient Matrix send failure puts it into retry backoff
+    with patch("mindroom.reactive_triggers.dispatch.send_matrix_message", new=AsyncMock(return_value=None)):
+        await service.drain_due_firings_once()
+
+    mid = store.get_firing(1)
+    assert mid is not None
+    assert mid.status == "claimed"
+    assert mid.attempt_count == 1
+
+    # Revoke Alice from subscribers and make retry due
+    active_config[0] = config_revoked
+    with store._write_transaction() as conn:
+        conn.execute("UPDATE trigger_firings SET next_retry_at = ? WHERE id = 1", (time.time() - 1.0,))
+
+    send_mock = AsyncMock()
+    with patch("mindroom.reactive_triggers.dispatch.send_matrix_message", new=send_mock):
+        await service.drain_due_firings_once()
+
+    send_mock.assert_not_awaited()
+    after = store.get_firing(1)
+    assert after is not None
+    assert after.status == "skipped"
+    assert after.error_message == "source_subscriber_revoked"
+
+
+@pytest.mark.asyncio
+async def test_disabled_thread_tag_rule_tracks_checkpoints_so_reenable_fires_next_transition(tmp_path: Path) -> None:
+    """watch_thread(once=True) fires on resolved -> reopened while disabled -> re-enabled -> resolved again MUST fire."""
+    config, runtime_paths = _make_config(tmp_path)
+    store = ReactiveTriggerStore(runtime_paths)
+    bot = _make_fake_bot()
+    store.create_trigger(
+        _thread_tag_rule("tr_once_rearm", thread_id=_THREAD_A, transition="added", once=True),
+        initial_checkpoint=ThreadCheckpoint(tag_present=False, state_event_id=None, updated_at=time.time()),
+    )
+
+    service = ReactiveTriggerService(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: config,
+        bots=lambda: {"research": bot},
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+
+    # 1. Thread resolved -> enqueued & claimed (once=True auto-disables rule with tag_present=True)
+    service.observe_state_event(_ROOM_A, _tag_state_source(present=True, event_id="$res-first"))
+    assert store.claim_firing(1, now=time.time()) == "claimed"
+    assert store.mark_delivered(1, "$sent-first") is True
+    disabled = store.get_trigger("tr_once_rearm")
+    assert disabled is not None
+    assert disabled.enabled is False
+    assert disabled.disabled_reason == "once_consumed"
+
+    # 2. Thread reopened while rule is disabled -> checkpoint updates to tag_present=False WITHOUT enqueueing
+    service.observe_state_event(_ROOM_A, _tag_state_source(present=False, event_id="$reopen-while-disabled"))
+    cp = store.get_thread_checkpoint("tr_once_rearm")
+    assert cp is not None
+    assert cp.tag_present is False
+    assert cp.state_event_id == "$reopen-while-disabled"
+    assert store.list_due_firings() == []
+
+    # 3. User re-enables rule, then thread is resolved again -> MUST fire!
+    assert store.set_enabled("tr_once_rearm", True) is not None
+    service.observe_state_event(_ROOM_A, _tag_state_source(present=True, event_id="$res-second"))
+    due = store.list_due_firings()
+    assert len(due) == 1
+    assert due[0].dedupe_key == "$res-second"
+
+
+@pytest.mark.asyncio
+async def test_drainer_skips_firing_whose_rule_uid_was_replaced(tmp_path: Path) -> None:
+    """If a firing row references an old rule_uid after trigger_id reuse, drain_due_firings_once skips it."""
+    config, runtime_paths = _make_config(tmp_path)
+    store = ReactiveTriggerStore(runtime_paths)
+    bot = _make_fake_bot()
+
+    bob_rule = _external_event_rule("tr_reused")
+    store.create_trigger(bob_rule)
+    store.enqueue_firing("tr_reused", "deliv-old-uid", _external_event("deliv-old-uid"))
+
+    # Simulate stale firing carrying a previous rule_uid
+    with store._write_transaction() as conn:
+        conn.execute("UPDATE trigger_firings SET rule_uid = 'stale-alice-uid' WHERE id = 1")
+
+    service = ReactiveTriggerService(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: config,
+        bots=lambda: {"research": bot},
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+    dispatch_mock = AsyncMock()
+    with patch("mindroom.reactive_triggers.service.dispatch_reactive_trigger", new=dispatch_mock):
+        await service.drain_due_firings_once()
+
+    dispatch_mock.assert_not_awaited()
+    f = store.get_firing(1)
+    assert f is not None
+    assert f.status == "skipped"
+    assert f.error_message == "rule_replaced"
+
+
+@pytest.mark.asyncio
+async def test_claimed_retry_stops_when_manually_disabled_but_continues_when_once_consumed(tmp_path: Path) -> None:
+    """Manually disabled repeating rule stops retrying; auto-consumed once=True rule keeps retrying until delivered."""
+    config, runtime_paths = _make_config(tmp_path)
+    store = ReactiveTriggerStore(runtime_paths)
+    bot = _make_fake_bot()
+
+    # Case 1: Repeating rule claimed, enters retry backoff, then manually disabled -> MUST skip retry
+    store.create_trigger(_external_event_rule("tr_manual_stop", once=False))
+    store.enqueue_firing("tr_manual_stop", "deliv-man-1", _external_event("deliv-man-1"))
+    assert store.claim_firing(1, now=time.time()) == "claimed"
+    assert store.mark_delivery_retry(1, "transient", now=time.time() - 60.0) == "retrying"
+    assert store.set_enabled("tr_manual_stop", False) is not None
+
+    # Case 2: once=True rule claimed (auto-disabled with disabled_reason='once_consumed'), enters retry -> MUST retry!
+    store.create_trigger(_external_event_rule("tr_once_retry", once=True))
+    store.enqueue_firing("tr_once_retry", "deliv-once-1", _external_event("deliv-once-1"))
+    assert store.claim_firing(2, now=time.time()) == "claimed"
+    assert store.mark_delivery_retry(2, "transient", now=time.time() - 60.0) == "retrying"
+
+    service = ReactiveTriggerService(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: config,
+        bots=lambda: {"research": bot},
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+
+    dispatched_ids: list[str] = []
+
+    async def _fake_dispatch(*, rule: ReactiveTriggerRecord, **_kwargs: object) -> DispatchResult:
+        dispatched_ids.append(rule.trigger_id)
+        return DispatchResult(status="delivered", matrix_event_id=f"$sent_{rule.trigger_id}")
+
+    with patch("mindroom.reactive_triggers.service.dispatch_reactive_trigger", side_effect=_fake_dispatch):
+        await service.drain_due_firings_once()
+
+    assert dispatched_ids == ["tr_once_retry"]
+    f_manual = store.get_firing(1)
+    f_once = store.get_firing(2)
+    assert f_manual is not None
+    assert f_manual.status == "skipped"
+    assert f_manual.error_message == "disabled_or_expired"
+    assert f_once is not None
+    assert f_once.status == "delivered"
+    assert f_once.matrix_event_id == "$sent_tr_once_retry"
+
+
+@pytest.mark.asyncio
+async def test_pre_triage_target_bot_check_and_policy_rate_limit_avoid_wasting_triage_and_once(tmp_path: Path) -> None:
+    """Unavailable target bot defers pending without triage/once consumption; live policy cap skips before triage."""
+    config, runtime_paths = _make_config(tmp_path, max_fires_per_hour=1)
+    store = ReactiveTriggerStore(runtime_paths)
+
+    # 1. Target bot stopped -> pending once=True triaged rule is deferred without calling triage or consuming once
+    stopped_bot = _make_fake_bot(running=False)
+    active_bots: dict[str, Any] = {"research": stopped_bot}
+
+    store.create_trigger(
+        _external_event_rule(
+            "tr_once_wait",
+            once=True,
+            triage=TriageSpec(instructions="Important?", provider="llm", model="cheap"),
+        ),
+    )
+    store.enqueue_firing("tr_once_wait", "deliv-w1", _external_event("deliv-w1"))
+
+    service = ReactiveTriggerService(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: config,
+        bots=lambda: active_bots,
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+
+    triage_mock = AsyncMock(return_value=TriageOutcome(act=True, reason="yes"))
+    dispatch_mock = AsyncMock(return_value=DispatchResult(status="delivered", matrix_event_id="$delivered-w1"))
+    with (
+        patch("mindroom.reactive_triggers.service.evaluate_triage", new=triage_mock),
+        patch("mindroom.reactive_triggers.service.dispatch_reactive_trigger", new=dispatch_mock),
+    ):
+        await service.drain_due_firings_once()
+
+    triage_mock.assert_not_awaited()
+    dispatch_mock.assert_not_awaited()
+    f_wait = store.get_firing(1)
+    r_wait = store.get_trigger("tr_once_wait")
+    assert f_wait is not None
+    assert f_wait.status == "pending"
+    assert f_wait.next_retry_at is not None
+    assert f_wait.error_message == "target_bot_unavailable"
+    assert r_wait is not None
+    assert r_wait.enabled is True  # once=True was NOT burned!
+
+    # Now target bot comes online and backoff expires -> triage + claim + delivery succeed!
+    active_bots["research"] = _make_fake_bot(running=True)
+    with store._write_transaction() as conn:
+        conn.execute("UPDATE trigger_firings SET next_retry_at = ? WHERE id = 1", (time.time() - 1.0,))
+    with (
+        patch("mindroom.reactive_triggers.service.evaluate_triage", new=triage_mock),
+        patch("mindroom.reactive_triggers.service.dispatch_reactive_trigger", new=dispatch_mock),
+    ):
+        await service.drain_due_firings_once()
+    triage_mock.assert_awaited_once()
+    assert store.get_firing(1).status == "delivered"  # type: ignore[union-attr]
+
+    # 2. Policy max_fires_per_hour=1 rate-limits a rule created with max_fires_per_hour=60 BEFORE triage
+    rule_hi = _external_event_rule(
+        "tr_policy_cap",
+        once=False,
+        triage=TriageSpec(instructions="Check", provider="llm", model="cheap"),
+    ).model_copy(update={"max_fires_per_hour": 60})
+    store.create_trigger(rule_hi)
+    store.enqueue_firing("tr_policy_cap", "deliv-p1", _external_event("deliv-p1"))
+    store.enqueue_firing("tr_policy_cap", "deliv-p2", _external_event("deliv-p2"))
+
+    triage_mock.reset_mock()
+    with (
+        patch("mindroom.reactive_triggers.service.evaluate_triage", new=triage_mock),
+        patch("mindroom.reactive_triggers.service.dispatch_reactive_trigger", new=dispatch_mock),
+    ):
+        await service.drain_due_firings_once()
+
+    # Triage ran ONLY for deliv-p1; deliv-p2 was skipped pre-triage due to policy.max_fires_per_hour=1
+    assert triage_mock.await_count == 1
+    assert store.get_firing(2).status == "delivered"  # type: ignore[union-attr]
+    f_rl = store.get_firing(3)
+    assert f_rl is not None
+    assert f_rl.status == "skipped"
+    assert f_rl.error_message == "rate_limited"
+
+
+@pytest.mark.asyncio
+async def test_sync_is_non_blocking_and_drain_survives_sqlite_errors(tmp_path: Path) -> None:
+    """sync() schedules thread_tag reconciliation in the background; SQLite errors in status writes don't crash drain."""
+    config, runtime_paths = _make_config(tmp_path)
+    store = ReactiveTriggerStore(runtime_paths)
+    bot = _make_fake_bot()
+
+    store.create_trigger(
+        _thread_tag_rule("tr_bg_sync", thread_id=_THREAD_A, transition="added"),
+        initial_checkpoint=ThreadCheckpoint(tag_present=False, state_event_id=None, updated_at=time.time()),
+    )
+
+    gate = asyncio.Event()
+    started = asyncio.Event()
+
+    async def _slow_state(room_id: str) -> nio.RoomGetStateResponse:
+        started.set()
+        await gate.wait()
+        return nio.RoomGetStateResponse([_member_state_source(_OWNER)], room_id)
+
+    bot.client.room_get_state = AsyncMock(side_effect=_slow_state)
+
+    service = ReactiveTriggerService(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: config,
+        bots=lambda: {"research": bot},
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+    service._poll_interval_seconds = 60.0
+
+    try:
+        # sync() MUST return immediately even while room_get_state is blocked on gate
+        async with asyncio.timeout(0.5):
+            await service.sync(config)
+        assert service._reconcile_task is not None
+        assert not service._reconcile_task.done()
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        gate.set()
+        await asyncio.wait_for(service._reconcile_task, timeout=1.0)
+        assert _ROOM_A in service._restored_rooms
+    finally:
+        await service.stop()
+
+    # Transient sqlite3.OperationalError during mark_delivered must not crash drain_due_firings_once
+    store.create_trigger(_external_event_rule("tr_sqlite_err"))
+    store.enqueue_firing("tr_sqlite_err", "deliv-sq-1", _external_event("deliv-sq-1"))
+    with (
+        patch(
+            "mindroom.reactive_triggers.service.dispatch_reactive_trigger",
+            new=AsyncMock(return_value=DispatchResult(status="delivered", matrix_event_id="$sent-sq")),
+        ),
+        patch.object(store, "mark_delivered", side_effect=sqlite3.OperationalError("database is locked")),
+    ):
+        await service.drain_due_firings_once()

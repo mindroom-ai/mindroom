@@ -65,6 +65,15 @@ class ExternalSourceUnavailableError(RuntimeError):
     """Raised when an external event source dependency or secret is unavailable (HTTP 503)."""
 
 
+def event_source_replay_store(runtime_paths: RuntimePaths) -> DeliveryReplayStore:
+    """Return the dedicated replay store for shared Ed25519 event sources."""
+    control_root = runtime_paths.control_state_root
+    if control_root is None:
+        msg = "Event source replay store requires primary control state"
+        raise ExternalSourceUnavailableError(msg)
+    return DeliveryReplayStore(root=control_root / "event_source_replay")
+
+
 def is_source_subscriber_allowed(
     source: ExternalEventSourceConfig,
     owner_user_id: str,
@@ -118,6 +127,40 @@ def validate_subscription_against_source(
         raise ValueError(msg)
 
 
+def check_external_event_source_access(
+    *,
+    owner_user_id: str,
+    source_spec: ExternalEventSourceSpec,
+    event: TriggerEvent,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    """Recheck shared external event source existence, subscriber allowlist, and event/repo grants."""
+    source = config.external_trigger_policy.event_sources.get(source_spec.source_id)
+    if source is None:
+        return "source_removed"
+    if not is_source_subscriber_allowed(source, owner_user_id, config, runtime_paths):
+        return "source_subscriber_revoked"
+    try:
+        validate_subscription_against_source(source, kind=source_spec.kind, match=source_spec.match)
+    except ValueError:
+        return "source_grant_revoked"
+    if isinstance(source, GitHubEventSourceConfig):
+        repo = event.data.get("repo")
+        base_event = event.kind.split(".", 1)[0]
+        if (
+            not isinstance(repo, str)
+            or not any(allowed.lower() == repo.lower() for allowed in source.allowed_repos)
+            or base_event not in source.allowed_events
+        ):
+            return "source_grant_revoked"
+    elif (
+        isinstance(source, Ed25519EventSourceConfig) and source.allowed_kinds and event.kind not in source.allowed_kinds
+    ):
+        return "source_grant_revoked"
+    return None
+
+
 def verify_and_normalize_github_webhook(
     *,
     source_id: str,
@@ -152,14 +195,25 @@ def verify_and_normalize_github_webhook(
 
     payload = _parse_json_object(body)
     repo = _extract_allowed_github_repo(payload, source)
+    current_time = time.time() if now is None else now
+    actor = _optional_str(_mapping(payload.get("sender")).get("login"))
+
+    if gh_event == "ping":
+        return TriggerEvent(
+            source_type="external_event",
+            source_id=source_id,
+            kind="ping",
+            event_id=delivery_id,
+            timestamp=current_time,
+            actor=actor,
+            data={"repo": repo},
+        )
 
     if gh_event not in source.allowed_events:
         msg = "GitHub event type is not allowed for this event source"
         raise ExternalSourceBadRequestError(msg)
 
-    current_time = time.time() if now is None else now
     kind, data, title, summary = _normalize_github_payload(gh_event, repo, payload)
-    actor = _optional_str(_mapping(payload.get("sender")).get("login"))
 
     return TriggerEvent(
         source_type="external_event",
@@ -252,6 +306,8 @@ def fan_out_external_event(
     now: float | None = None,
 ) -> int:
     """Enqueue deduplicated firings for all matching, authorized, unexpired rules subscribed to source_id."""
+    if isinstance(source, GitHubEventSourceConfig) and event.kind == "ping" and "ping" not in source.allowed_events:
+        return 0
     current_time = time.time() if now is None else now
     rules = store.list_triggers(
         include_disabled=False,
@@ -269,7 +325,7 @@ def fan_out_external_event(
             continue
         if not matches_external_event(rule.source, event):
             continue
-        if store.enqueue_firing(rule.trigger_id, event.event_id, event):
+        if store.enqueue_firing(rule.trigger_id, event.event_id, event, expected_rule_uid=rule.rule_uid):
             matched_count += 1
     return matched_count
 
@@ -315,11 +371,24 @@ def _extract_allowed_github_repo(payload: Mapping[str, Any], source: GitHubEvent
     return canonical_repo
 
 
+_REQUIRED_GITHUB_OBJECT_KEYS: dict[str, str] = {
+    "pull_request": "pull_request",
+    "pull_request_review": "review",
+    "issues": "issue",
+    "release": "release",
+    "check_suite": "check_suite",
+}
+
+
 def _normalize_github_payload(
     gh_event: str,
     repo: str,
     payload: Mapping[str, Any],
 ) -> tuple[str, dict[str, str | int | bool], str | None, str | None]:
+    required_key = _REQUIRED_GITHUB_OBJECT_KEYS.get(gh_event)
+    if required_key is not None and not isinstance(payload.get(required_key), dict):
+        msg = f"Missing or invalid {required_key!r} object for GitHub {gh_event!r} webhook"
+        raise ExternalSourceBadRequestError(msg)
     action = _optional_str(payload.get("action"))
     normalizer = _GITHUB_EVENT_NORMALIZERS.get(gh_event)
     if normalizer is not None:

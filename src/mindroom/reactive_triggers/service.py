@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import sqlite3
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Literal
@@ -18,7 +19,11 @@ from mindroom.matrix.agent_authored import carries_agent_authored_marker
 from mindroom.matrix.conversation_reads import projected_visible_messages
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_room_state
 from mindroom.matrix.transport_progress import is_unfinished_reply
-from mindroom.reactive_triggers.dispatch import DispatchResult, dispatch_reactive_trigger
+from mindroom.reactive_triggers.dispatch import (
+    DispatchResult,
+    check_reactive_source_access,
+    dispatch_reactive_trigger,
+)
 from mindroom.reactive_triggers.matching import is_reactive_trigger_event_content, matches_room_message
 from mindroom.reactive_triggers.models import (
     FiringRecord,
@@ -55,6 +60,7 @@ _REFETCH_WAIT_SECONDS = 600.0
 _ROOM_MEMBER_CACHE_TTL_SECONDS = 30.0
 _MAX_MESSAGES_PER_POLL = 50
 _MAX_FIRINGS_PER_DRAIN = 50
+_STORE_PERSIST_ERRORS = (ReactiveTriggerStoreError, sqlite3.Error)
 
 _MessageDecision = Literal["allow", "skip", "hold"]
 
@@ -76,6 +82,21 @@ def _joined_members_from_snapshot(room_state: RoomStateSnapshot) -> frozenset[st
         for (event_type, state_key), content in room_state.events.items()
         if event_type == "m.room.member" and content.get("membership") == "join"
     )
+
+
+def _joined_members_from_raw_events(events: Sequence[object]) -> frozenset[str]:
+    """Extract currently joined Matrix user IDs from raw RoomGetStateResponse state events."""
+    joined: set[str] = set()
+    for raw_event in events:
+        if not isinstance(raw_event, Mapping):
+            continue
+        if raw_event.get("type") != "m.room.member":
+            continue
+        state_key = raw_event.get("state_key")
+        content = raw_event.get("content")
+        if isinstance(state_key, str) and isinstance(content, Mapping) and content.get("membership") == "join":
+            joined.add(state_key)
+    return frozenset(joined)
 
 
 def _owner_joined_in_members(
@@ -156,6 +177,7 @@ class ReactiveTriggerService:
         self._restored_rooms: set[str] = set()
         self._restore_locks: dict[str, asyncio.Lock] = {}
         self._restore_retries: dict[str, asyncio.Task[None]] = {}
+        self._reconcile_task: asyncio.Task[None] | None = None
         self._live_during_restore: dict[str, set[tuple[str, str]]] = {}
 
         self._unfinished_waits: dict[str, tuple[str, float]] = {}
@@ -174,7 +196,7 @@ class ReactiveTriggerService:
         """Start or stop the background loop to match the active reactive trigger policy."""
         if self._store is not None and _reactive_enabled(config):
             self.start()
-            await self._reconcile_unrestored_thread_tag_rooms()
+            self._schedule_thread_tag_reconcile()
             self.notify_work()
         else:
             await self.stop()
@@ -186,12 +208,18 @@ class ReactiveTriggerService:
         self._loop.start()
 
     async def stop(self) -> None:
-        """Stop the background loop, cancel restore retries, and reset transient wait/restore caches."""
+        """Stop the background loop, cancel reconcile/restore tasks, and reset transient wait/restore caches."""
+        reconcile_task = self._reconcile_task
+        self._reconcile_task = None
+        if reconcile_task is not None:
+            reconcile_task.cancel()
         retries = list(self._restore_retries.values())
         self._restore_retries.clear()
         for retry in retries:
             retry.cancel()
-        await asyncio.gather(*retries, return_exceptions=True)
+        tasks_to_await = [*retries, *([reconcile_task] if reconcile_task is not None else [])]
+        if tasks_to_await:
+            await asyncio.gather(*tasks_to_await, return_exceptions=True)
         await self._loop.stop()
         self._restored_rooms.clear()
         self._refetch_waits.clear()
@@ -212,6 +240,19 @@ class ReactiveTriggerService:
                 running_loop.call_soon_threadsafe(self._wake_event.set)
             return
         self._wake_event.set()
+
+    def _schedule_thread_tag_reconcile(self) -> None:
+        """Schedule background thread_tag reconciliation without blocking config hot-reload."""
+        if self._reconcile_task is not None and not self._reconcile_task.done():
+            return
+        task = asyncio.create_task(self._reconcile_unrestored_thread_tag_rooms())
+        self._reconcile_task = task
+
+        def _clear_task(done_task: asyncio.Task[None]) -> None:
+            if self._reconcile_task is done_task:
+                self._reconcile_task = None
+
+        task.add_done_callback(_clear_task)
 
     async def _reconcile_unrestored_thread_tag_rooms(self) -> None:
         """Reconcile joined rooms with enabled thread_tag rules that are not yet marked restored."""
@@ -291,7 +332,10 @@ class ReactiveTriggerService:
         return await asyncio.to_thread(self._store.prune_old_firings)
 
     def observe_state_event(self, room_id: str, source: Mapping[str, object]) -> None:
-        """Observe one live raw Matrix state event and enqueue matching thread_tag transitions."""
+        """Observe one live raw Matrix state event, invalidating member cache or updating thread_tag rules."""
+        if source.get("type") == "m.room.member":
+            self._room_member_cache.pop(room_id, None)
+            return
         if self._store is None:
             return
         config = self.config_provider()
@@ -311,7 +355,21 @@ class ReactiveTriggerService:
             tag_present=tag_present,
             state_event_id=state_event_id,
             actor=actor,
+            config=config,
         )
+
+    def _known_room_members_sync(self, room_id: str) -> frozenset[str] | None:
+        """Return currently known joined members for room_id from fresh cache or populated room sync state."""
+        now_mono = time.monotonic()
+        cached = self._room_member_cache.get(room_id)
+        if cached is not None and now_mono - cached[1] < _ROOM_MEMBER_CACHE_TTL_SECONDS:
+            return cached[0]
+        for _bot, client in self._joined_bots(room_id):
+            room = client.rooms.get(room_id)
+            users = getattr(room, "users", None)
+            if isinstance(users, Mapping) and users:
+                return frozenset(str(uid) for uid in users)
+        return None
 
     def _handle_thread_tag_observation(
         self,
@@ -322,13 +380,15 @@ class ReactiveTriggerService:
         tag_present: bool,
         state_event_id: str | None,
         actor: str | None,
+        config: Config,
     ) -> None:
-        """Reconcile one thread tag state observation against all matching enabled thread_tag rules."""
+        """Reconcile one thread tag state observation against all matching thread_tag rules (enabled & disabled)."""
         if self._store is None:
             return
         now = time.time()
+        known_members = self._known_room_members_sync(room_id)
         rules = self._store.list_triggers(
-            include_disabled=False,
+            include_disabled=True,
             source_type="thread_tag",
             source_room_id=room_id,
         )
@@ -337,8 +397,15 @@ class ReactiveTriggerService:
                 continue
             if rule.source.thread_id != thread_root_id or rule.source.tag.lower() != tag:
                 continue
-            if _is_rule_expired(rule, now):
-                continue
+            allow_enqueue = rule.enabled and not _is_rule_expired(rule, now)
+            if allow_enqueue and not is_human_requester_id(rule.owner_user_id, config, self.runtime_paths):
+                allow_enqueue = False
+            if (
+                allow_enqueue
+                and known_members is not None
+                and not _owner_joined_in_members(known_members, rule.owner_user_id, config, self.runtime_paths)
+            ):
+                allow_enqueue = False
             self._handle_thread_tag_observation_for_rule(
                 rule=rule,
                 room_id=room_id,
@@ -348,6 +415,7 @@ class ReactiveTriggerService:
                 state_event_id=state_event_id,
                 actor=actor,
                 now=now,
+                allow_enqueue=allow_enqueue,
             )
 
     def _handle_thread_tag_observation_for_rule(
@@ -361,19 +429,21 @@ class ReactiveTriggerService:
         state_event_id: str | None,
         actor: str | None,
         now: float,
+        allow_enqueue: bool = True,
     ) -> None:
-        """Apply transition logic for one thread_tag rule and atomically update checkpoint + firing."""
+        """Apply transition logic for one thread_tag rule and atomically update checkpoint + optional firing."""
         assert self._store is not None
         assert isinstance(rule.source, ThreadTagSourceSpec)
 
         checkpoint = self._store.get_thread_checkpoint(rule.trigger_id)
-        if checkpoint is None:
+        if not allow_enqueue or checkpoint is None:
             self._store.update_thread_checkpoint_and_enqueue(
                 rule.trigger_id,
                 tag_present=tag_present,
                 state_event_id=state_event_id,
                 firing_dedupe_key=None,
                 event=None,
+                expected_rule_uid=rule.rule_uid,
             )
             return
 
@@ -385,6 +455,7 @@ class ReactiveTriggerService:
                     state_event_id=state_event_id,
                     firing_dedupe_key=None,
                     event=None,
+                    expected_rule_uid=rule.rule_uid,
                 )
             return
 
@@ -400,6 +471,7 @@ class ReactiveTriggerService:
                 state_event_id=state_event_id,
                 firing_dedupe_key=None,
                 event=None,
+                expected_rule_uid=rule.rule_uid,
             )
             return
 
@@ -429,6 +501,7 @@ class ReactiveTriggerService:
             state_event_id=state_event_id,
             firing_dedupe_key=dedupe_key,
             event=event,
+            expected_rule_uid=rule.rule_uid,
         )
         if enqueued:
             self.notify_work()
@@ -485,7 +558,10 @@ class ReactiveTriggerService:
         live_keys: set[tuple[str, str]],
     ) -> None:
         """Apply a room state snapshot to every enabled thread_tag rule not superseded by live events."""
+        config = self.config_provider()
         snapshot_tags = _snapshot_thread_tags(events)
+        joined_members = _joined_members_from_raw_events(events)
+        self._room_member_cache[room_id] = (joined_members, time.monotonic())
         reconcile_now = time.time()
         for rule in rules:
             if not isinstance(rule.source, ThreadTagSourceSpec):
@@ -494,6 +570,16 @@ class ReactiveTriggerService:
             if key in live_keys:
                 continue
             tag_present, state_event_id, actor = snapshot_tags.get(key, (False, None, None))
+            allow_enqueue = is_human_requester_id(
+                rule.owner_user_id,
+                config,
+                self.runtime_paths,
+            ) and _owner_joined_in_members(
+                joined_members,
+                rule.owner_user_id,
+                config,
+                self.runtime_paths,
+            )
             self._handle_thread_tag_observation_for_rule(
                 rule=rule,
                 room_id=room_id,
@@ -503,6 +589,7 @@ class ReactiveTriggerService:
                 state_event_id=state_event_id,
                 actor=actor,
                 now=reconcile_now,
+                allow_enqueue=allow_enqueue,
             )
 
     async def _enabled_thread_tag_rules_for_room(self, room_id: str, *, now: float) -> list[ReactiveTriggerRecord]:
@@ -566,6 +653,13 @@ class ReactiveTriggerService:
                 return preferred
         joined = next(self._joined_bots(room_id), None)
         return joined[0] if joined is not None else None
+
+    def _pick_bot_for_source(self, rule: ReactiveTriggerRecord) -> AgentBot | None:
+        """Pick a running bot joined to the rule's watched source room, when the rule watches a Matrix room."""
+        source = rule.source
+        if isinstance(source, (RoomMessageSourceSpec, ThreadTagSourceSpec)):
+            return self._pick_bot_for_room(source.room_id, preferred_agent=rule.target.agent)
+        return None
 
     async def _get_room_joined_members(
         self,
@@ -665,7 +759,13 @@ class ReactiveTriggerService:
         cursor = await asyncio.to_thread(self._store.get_room_cursor, rule.trigger_id)
         if cursor is None:
             cursor = RoomCursor(created_ts=int(rule.created_at * 1000), logical_event_id="")
-            await asyncio.to_thread(self._store.advance_room_cursor, rule.trigger_id, cursor)
+            if not await asyncio.to_thread(
+                self._store.advance_room_cursor,
+                rule.trigger_id,
+                cursor,
+                expected_rule_uid=rule.rule_uid,
+            ):
+                return
 
         repair_key = (bot.agent_name, source_room_id)
         if repair_key not in repaired_pairs:
@@ -754,6 +854,7 @@ class ReactiveTriggerService:
                 self._store.advance_room_cursor,
                 rule.trigger_id,
                 RoomCursor(created_ts=stopped_at.created_ts, logical_event_id=stopped_at.logical_event_id),
+                expected_rule_uid=rule.rule_uid,
             )
         return True
 
@@ -803,8 +904,12 @@ class ReactiveTriggerService:
             return False
         if decision == "skip":
             self._unfinished_waits.pop(rule.trigger_id, None)
-            await asyncio.to_thread(self._store.advance_room_cursor, rule.trigger_id, msg_cursor)
-            return True
+            return await asyncio.to_thread(
+                self._store.advance_room_cursor,
+                rule.trigger_id,
+                msg_cursor,
+                expected_rule_uid=rule.rule_uid,
+            )
 
         self._unfinished_waits.pop(rule.trigger_id, None)
         event = TriggerEvent(
@@ -831,11 +936,17 @@ class ReactiveTriggerService:
                 msg.event_id,
                 event,
                 advance_cursor=msg_cursor,
+                expected_rule_uid=rule.rule_uid,
             )
             if enqueued:
                 self.notify_work()
         else:
-            await asyncio.to_thread(self._store.advance_room_cursor, rule.trigger_id, msg_cursor)
+            return await asyncio.to_thread(
+                self._store.advance_room_cursor,
+                rule.trigger_id,
+                msg_cursor,
+                expected_rule_uid=rule.rule_uid,
+            )
         return True
 
     async def _check_room_message_eligibility(
@@ -921,14 +1032,17 @@ class ReactiveTriggerService:
                 self._in_flight_trigger_ids.discard(firing.trigger_id)
 
     async def _process_firing(self, firing: FiringRecord, config: Config) -> None:
-        """Run triage, atomic claim, and Matrix dispatch for one due firing."""
+        """Run pre-checks, triage, atomic claim, and Matrix dispatch for one due firing."""
         assert self._store is not None
         store = self._store
         claimed_now = firing.status == "claimed"
         try:
             rule = await asyncio.to_thread(store.get_trigger, firing.trigger_id)
             if rule is None:
-                await asyncio.to_thread(store.mark_skipped, firing.id, "rule_missing")
+                await self._mark_skipped_safe(firing.id, "rule_missing")
+                return
+            if rule.rule_uid != firing.rule_uid:
+                await self._mark_skipped_safe(firing.id, "rule_replaced")
                 return
 
             triage_reason = firing.triage_reason
@@ -941,6 +1055,9 @@ class ReactiveTriggerService:
                 if not claimed_ok:
                     return
                 claimed_now = True
+            elif (not rule.enabled and rule.disabled_reason != "once_consumed") or _is_rule_expired(rule, time.time()):
+                await self._mark_skipped_safe(firing.id, "disabled_or_expired")
+                return
 
             result = await dispatch_reactive_trigger(
                 rule=rule,
@@ -948,6 +1065,7 @@ class ReactiveTriggerService:
                 triage_reason=triage_reason,
                 store=store,
                 target_bot=self.bots().get(rule.target.agent),
+                source_bot=self._pick_bot_for_source(rule),
                 config=config,
                 runtime_paths=self.runtime_paths,
                 memberships=self.memberships,
@@ -962,12 +1080,71 @@ class ReactiveTriggerService:
                 trigger_id=firing.trigger_id,
             )
             if claimed_now:
-                with contextlib.suppress(ReactiveTriggerStoreError):
-                    await asyncio.to_thread(
-                        store.mark_delivery_retry,
-                        firing.id,
-                        f"unexpected_error:{type(exc).__name__}",
-                    )
+                await self._mark_delivery_retry_safe(
+                    firing.id,
+                    f"unexpected_error:{type(exc).__name__}",
+                )
+
+    async def _check_pending_target_and_policy(
+        self,
+        *,
+        firing: FiringRecord,
+        rule: ReactiveTriggerRecord,
+        config: Config,
+    ) -> bool:
+        """Return True when policy, rule state, and target bot are ready for pre-triage checks."""
+        if not _reactive_enabled(config):
+            await self._mark_skipped_safe(firing.id, "reactive_triggers_disabled")
+            return False
+        if not rule.enabled or _is_rule_expired(rule, time.time()):
+            await self._mark_skipped_safe(firing.id, "disabled_or_expired")
+            return False
+
+        target_bot = self.bots().get(rule.target.agent)
+        if target_bot is None or not target_bot.running or target_bot.client is None:
+            await self._defer_pending_safe(firing.id, "target_bot_unavailable")
+            return False
+        target_rooms = getattr(target_bot.client, "rooms", None)
+        if not isinstance(target_rooms, Mapping) or rule.target.room_id not in target_rooms:
+            await self._defer_pending_safe(firing.id, "target_bot_not_joined")
+            return False
+        return True
+
+    async def _check_pending_guards_and_source(
+        self,
+        *,
+        firing: FiringRecord,
+        rule: ReactiveTriggerRecord,
+        config: Config,
+    ) -> bool:
+        """Return True when claim guards and source access allow proceeding to triage and claim."""
+        assert self._store is not None
+        policy_cap = config.external_trigger_policy.max_fires_per_hour
+        guard_status = await asyncio.to_thread(
+            self._store.can_claim_now,
+            firing.id,
+            policy_max_fires_per_hour=policy_cap,
+        )
+        if guard_status != "ok":
+            if guard_status != "missing":
+                await self._mark_skipped_safe(firing.id, guard_status)
+            return False
+
+        source_rejection = await check_reactive_source_access(
+            rule=rule,
+            event=firing.event,
+            source_bot=self._pick_bot_for_source(rule),
+            config=config,
+            runtime_paths=self.runtime_paths,
+            memberships=self.memberships,
+        )
+        if source_rejection is not None:
+            if source_rejection.status == "skipped":
+                await self._mark_skipped_safe(firing.id, source_rejection.reason or "source_not_authorized")
+            else:
+                await self._defer_pending_safe(firing.id, source_rejection.reason or "source_retry")
+            return False
+        return True
 
     async def _triage_and_claim_pending_firing(
         self,
@@ -976,14 +1153,11 @@ class ReactiveTriggerService:
         rule: ReactiveTriggerRecord,
         config: Config,
     ) -> tuple[bool, str | None]:
-        """Validate policy/rule state, run optional triage, and atomically claim a pending firing."""
+        """Validate policy/target/guards/source access, run optional triage, and atomically claim a pending firing."""
         assert self._store is not None
-        store = self._store
-        if not _reactive_enabled(config):
-            await asyncio.to_thread(store.mark_skipped, firing.id, "reactive_triggers_disabled")
+        if not await self._check_pending_target_and_policy(firing=firing, rule=rule, config=config):
             return False, None
-        if not rule.enabled or _is_rule_expired(rule, time.time()):
-            await asyncio.to_thread(store.mark_skipped, firing.id, "disabled_or_expired")
+        if not await self._check_pending_guards_and_source(firing=firing, rule=rule, config=config):
             return False, None
 
         triage_reason: str | None = None
@@ -995,24 +1169,87 @@ class ReactiveTriggerService:
                 runtime_paths=self.runtime_paths,
             )
             if not outcome.act:
-                await asyncio.to_thread(store.mark_triaged_no, firing.id, outcome.failure or outcome.reason)
+                await self._mark_triaged_no_safe(firing.id, outcome.failure or outcome.reason)
                 return False, None
             triage_reason = outcome.reason
 
-        claim_status = await asyncio.to_thread(store.claim_firing, firing.id, triage_reason=triage_reason)
+        claim_status = await asyncio.to_thread(
+            self._store.claim_firing,
+            firing.id,
+            triage_reason=triage_reason,
+            policy_max_fires_per_hour=config.external_trigger_policy.max_fires_per_hour,
+        )
         return claim_status == "claimed", triage_reason
 
     async def _record_dispatch_result(self, firing_id: int, result: DispatchResult) -> None:
-        """Persist the outcome of one Matrix dispatch attempt."""
-        assert self._store is not None
-        store = self._store
+        """Persist the outcome of one Matrix dispatch attempt without letting SQLite errors crash the drain loop."""
         if result.status == "delivered":
             if result.matrix_event_id is not None:
-                await asyncio.shield(asyncio.to_thread(store.mark_delivered, firing_id, result.matrix_event_id))
+                await self._mark_delivered_safe(firing_id, result.matrix_event_id)
             else:
-                await asyncio.to_thread(store.mark_delivery_retry, firing_id, "missing_matrix_event_id")
+                await self._mark_delivery_retry_safe(firing_id, "missing_matrix_event_id")
             return
         if result.status == "skipped":
-            await asyncio.to_thread(store.mark_skipped, firing_id, result.reason or "skipped")
+            await self._mark_skipped_safe(firing_id, result.reason or "skipped")
             return
-        await asyncio.to_thread(store.mark_delivery_retry, firing_id, result.reason or "retry")
+        await self._mark_delivery_retry_safe(firing_id, result.reason or "retry")
+
+    async def _mark_delivered_safe(self, firing_id: int, matrix_event_id: str) -> None:
+        assert self._store is not None
+        try:
+            await asyncio.shield(asyncio.to_thread(self._store.mark_delivered, firing_id, matrix_event_id))
+        except _STORE_PERSIST_ERRORS:
+            logger.warning(
+                "Failed to persist delivered status for reactive trigger firing",
+                firing_id=firing_id,
+                matrix_event_id=matrix_event_id,
+                exc_info=True,
+            )
+
+    async def _mark_delivery_retry_safe(self, firing_id: int, reason: str) -> None:
+        assert self._store is not None
+        try:
+            await asyncio.to_thread(self._store.mark_delivery_retry, firing_id, reason)
+        except _STORE_PERSIST_ERRORS:
+            logger.warning(
+                "Failed to persist retry status for reactive trigger firing",
+                firing_id=firing_id,
+                reason=reason,
+                exc_info=True,
+            )
+
+    async def _defer_pending_safe(self, firing_id: int, reason: str) -> None:
+        assert self._store is not None
+        try:
+            await asyncio.to_thread(self._store.defer_pending_firing, firing_id, reason)
+        except _STORE_PERSIST_ERRORS:
+            logger.warning(
+                "Failed to defer pending reactive trigger firing",
+                firing_id=firing_id,
+                reason=reason,
+                exc_info=True,
+            )
+
+    async def _mark_skipped_safe(self, firing_id: int, reason: str) -> None:
+        assert self._store is not None
+        try:
+            await asyncio.to_thread(self._store.mark_skipped, firing_id, reason)
+        except _STORE_PERSIST_ERRORS:
+            logger.warning(
+                "Failed to persist skipped status for reactive trigger firing",
+                firing_id=firing_id,
+                reason=reason,
+                exc_info=True,
+            )
+
+    async def _mark_triaged_no_safe(self, firing_id: int, reason: str | None) -> None:
+        assert self._store is not None
+        try:
+            await asyncio.to_thread(self._store.mark_triaged_no, firing_id, reason)
+        except _STORE_PERSIST_ERRORS:
+            logger.warning(
+                "Failed to persist triaged_no status for reactive trigger firing",
+                firing_id=firing_id,
+                reason=reason,
+                exc_info=True,
+            )

@@ -53,6 +53,7 @@ from mindroom.reactive_triggers.external_sources import (
     ExternalSourceForbiddenError,
     ExternalSourceReplayError,
     ExternalSourceUnavailableError,
+    event_source_replay_store,
     fan_out_external_event,
     verify_and_normalize_ed25519_event,
     verify_and_normalize_github_webhook,
@@ -648,7 +649,7 @@ async def _verify_and_normalize_event_source(
                 runtime_paths=runtime_paths,
             )
         if isinstance(source, Ed25519EventSourceConfig):
-            replay_store = _replay_store(runtime_paths)
+            replay_store = event_source_replay_store(runtime_paths)
             return await _run_replay_store_call(
                 verify_and_normalize_ed25519_event,
                 source_id=source_id,

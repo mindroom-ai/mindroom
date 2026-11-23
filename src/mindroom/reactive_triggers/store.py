@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 from contextlib import closing, contextmanager
 from typing import TYPE_CHECKING, Literal
 
+from pydantic import ValidationError
+
+from mindroom.file_locks import advisory_file_lock
+from mindroom.logging_config import get_logger
 from mindroom.reactive_triggers.models import (
     ExternalEventSourceSpec,
     FiringRecord,
@@ -25,15 +30,22 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
 
+logger = get_logger(__name__)
+
 _SCHEMA_VERSION = 1
 _DB_FILENAME = "reactive_triggers.db"
+_TRIGGER_ID_LOCK_FILENAME = ".trigger_id_creation.lock"
 _FINISHED_FIRING_STATUSES = ("triaged_no", "delivered", "failed", "skipped")
 _ONE_HOUR_SECONDS = 3600.0
 _MAX_BACKOFF_SECONDS = 300.0
 _BASE_BACKOFF_SECONDS = 5.0
 
-ClaimResult = Literal["claimed", "disabled", "expired", "cooldown", "rate_limited", "missing"]
+ClaimResult = Literal["claimed", "disabled", "expired", "cooldown", "rate_limited", "missing", "rule_replaced"]
+ClaimCheckResult = Literal["ok", "disabled", "expired", "cooldown", "rate_limited", "missing", "rule_replaced"]
 RetryResult = Literal["retrying", "failed"]
+
+_CREATION_THREAD_LOCKS_GUARD = threading.Lock()
+_CREATION_THREAD_LOCKS: dict[Path, threading.Lock] = {}
 
 
 class ReactiveTriggerStoreError(RuntimeError):
@@ -48,6 +60,20 @@ class ReactiveTriggerLimitError(ReactiveTriggerStoreError):
     """Raised when creating a trigger would exceed the owner's configured quota."""
 
 
+@contextmanager
+def trigger_id_creation_lock(runtime_paths: RuntimePaths) -> Iterator[None]:
+    """Serialize cross-store trigger_id reservation across direct and reactive trigger stores."""
+    control_root = runtime_paths.control_state_root
+    if control_root is None:
+        msg = "Trigger ID creation lock requires primary control state"
+        raise ReactiveTriggerStoreError(msg)
+    lock_path = (control_root / _TRIGGER_ID_LOCK_FILENAME).resolve()
+    with _CREATION_THREAD_LOCKS_GUARD:
+        thread_lock = _CREATION_THREAD_LOCKS.setdefault(lock_path, threading.Lock())
+    with thread_lock, advisory_file_lock(lock_path, exclusive=True):
+        yield
+
+
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS schema_version (
@@ -57,11 +83,13 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     """
     CREATE TABLE IF NOT EXISTS reactive_triggers (
         trigger_id TEXT PRIMARY KEY,
+        rule_uid TEXT NOT NULL,
         owner_user_id TEXT NOT NULL,
         source_type TEXT NOT NULL,
         source_room_id TEXT,
         source_id TEXT,
         enabled INTEGER NOT NULL DEFAULT 1,
+        disabled_reason TEXT,
         once INTEGER NOT NULL DEFAULT 0,
         expires_at REAL,
         max_fires_per_hour INTEGER NOT NULL,
@@ -93,6 +121,7 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     CREATE TABLE IF NOT EXISTS trigger_firings (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         trigger_id TEXT NOT NULL REFERENCES reactive_triggers(trigger_id) ON DELETE CASCADE,
+        rule_uid TEXT NOT NULL,
         dedupe_key TEXT NOT NULL,
         status TEXT NOT NULL,
         event_json TEXT NOT NULL,
@@ -182,18 +211,20 @@ class ReactiveTriggerStore:
             conn.execute(
                 """
                 INSERT INTO reactive_triggers (
-                    trigger_id, owner_user_id, source_type, source_room_id, source_id,
-                    enabled, once, expires_at, max_fires_per_hour, cooldown_seconds,
+                    trigger_id, rule_uid, owner_user_id, source_type, source_room_id, source_id,
+                    enabled, disabled_reason, once, expires_at, max_fires_per_hour, cooldown_seconds,
                     fire_count, last_fired_at, spec_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.trigger_id,
+                    record.rule_uid,
                     record.owner_user_id,
                     record.source.source_type,
                     source_room_id,
                     source_id,
                     1 if record.enabled else 0,
+                    record.disabled_reason,
                     1 if record.once else 0,
                     record.expires_at,
                     record.max_fires_per_hour,
@@ -264,14 +295,35 @@ class ReactiveTriggerStore:
             rows = conn.execute(query, params).fetchall()
         return [_record_from_row(row) for row in rows]
 
-    def set_enabled(self, trigger_id: str, enabled: bool) -> ReactiveTriggerRecord | None:
-        """Enable or disable a reactive trigger and return the updated record, or None if missing."""
+    def set_enabled(
+        self,
+        trigger_id: str,
+        enabled: bool,
+        *,
+        expected_rule_uid: str | None = None,
+    ) -> ReactiveTriggerRecord | None:
+        """Enable or disable a reactive trigger and return the updated record, or None if missing/replaced."""
         now = time.time()
+        disabled_reason = None if enabled else "manual"
         with self._write_transaction() as conn:
-            cursor = conn.execute(
-                "UPDATE reactive_triggers SET enabled = ?, updated_at = ? WHERE trigger_id = ?",
-                (1 if enabled else 0, now, trigger_id),
-            )
+            if expected_rule_uid is not None:
+                cursor = conn.execute(
+                    """
+                    UPDATE reactive_triggers
+                    SET enabled = ?, disabled_reason = ?, updated_at = ?
+                    WHERE trigger_id = ? AND rule_uid = ?
+                    """,
+                    (1 if enabled else 0, disabled_reason, now, trigger_id, expected_rule_uid),
+                )
+            else:
+                cursor = conn.execute(
+                    """
+                    UPDATE reactive_triggers
+                    SET enabled = ?, disabled_reason = ?, updated_at = ?
+                    WHERE trigger_id = ?
+                    """,
+                    (1 if enabled else 0, disabled_reason, now, trigger_id),
+                )
             if cursor.rowcount == 0:
                 return None
             row = conn.execute(
@@ -280,13 +332,24 @@ class ReactiveTriggerStore:
             ).fetchone()
         return _record_from_row(row) if row is not None else None
 
-    def delete_trigger(self, trigger_id: str) -> bool:
+    def delete_trigger(
+        self,
+        trigger_id: str,
+        *,
+        expected_rule_uid: str | None = None,
+    ) -> bool:
         """Delete a reactive trigger and cascade-delete its cursors, checkpoints, firings, and thread keys."""
         with self._write_transaction() as conn:
-            cursor = conn.execute(
-                "DELETE FROM reactive_triggers WHERE trigger_id = ?",
-                (trigger_id,),
-            )
+            if expected_rule_uid is not None:
+                cursor = conn.execute(
+                    "DELETE FROM reactive_triggers WHERE trigger_id = ? AND rule_uid = ?",
+                    (trigger_id, expected_rule_uid),
+                )
+            else:
+                cursor = conn.execute(
+                    "DELETE FROM reactive_triggers WHERE trigger_id = ?",
+                    (trigger_id,),
+                )
             return cursor.rowcount > 0
 
     def get_room_cursor(self, trigger_id: str) -> RoomCursor | None:
@@ -300,15 +363,26 @@ class ReactiveTriggerStore:
             return None
         return RoomCursor(created_ts=int(row["created_ts"]), logical_event_id=str(row["logical_event_id"]))
 
-    def advance_room_cursor(self, trigger_id: str, cursor: RoomCursor) -> None:
-        """Upsert the room journal cursor for an existing trigger."""
+    def advance_room_cursor(
+        self,
+        trigger_id: str,
+        cursor: RoomCursor,
+        *,
+        expected_rule_uid: str | None = None,
+    ) -> bool:
+        """Upsert the room journal cursor for an existing trigger; return False if expected_rule_uid mismatches."""
         now = time.time()
         with self._write_transaction() as conn:
+            if expected_rule_uid is not None:
+                live_uid = _live_rule_uid(conn, trigger_id)
+                if live_uid != expected_rule_uid:
+                    return False
             try:
                 _upsert_room_cursor(conn, trigger_id, cursor, updated_at=now)
             except sqlite3.IntegrityError as exc:
                 msg = f"Cannot advance cursor for unknown trigger: {trigger_id}"
                 raise ReactiveTriggerStoreError(msg) from exc
+            return True
 
     def get_thread_checkpoint(self, trigger_id: str) -> ThreadCheckpoint | None:
         """Return the persisted thread tag checkpoint for a trigger, or None."""
@@ -333,6 +407,7 @@ class ReactiveTriggerStore:
         state_event_id: str | None,
         firing_dedupe_key: str | None = None,
         event: TriggerEvent | None = None,
+        expected_rule_uid: str | None = None,
     ) -> bool:
         """Atomically update a thread checkpoint and optionally enqueue a deduplicated firing."""
         if (firing_dedupe_key is None) != (event is None):
@@ -341,6 +416,15 @@ class ReactiveTriggerStore:
 
         now = time.time()
         with self._write_transaction() as conn:
+            live_uid = _live_rule_uid(conn, trigger_id)
+            if expected_rule_uid is not None:
+                if live_uid != expected_rule_uid:
+                    return False
+            elif live_uid is None:
+                msg = f"Cannot update checkpoint for unknown trigger: {trigger_id}"
+                raise ReactiveTriggerStoreError(msg)
+            assert live_uid is not None
+
             try:
                 _upsert_thread_checkpoint(
                     conn,
@@ -354,6 +438,7 @@ class ReactiveTriggerStore:
                 return _insert_pending_firing(
                     conn,
                     trigger_id=trigger_id,
+                    rule_uid=live_uid,
                     dedupe_key=firing_dedupe_key,
                     event=event,
                     now=now,
@@ -369,14 +454,25 @@ class ReactiveTriggerStore:
         event: TriggerEvent,
         *,
         advance_cursor: RoomCursor | None = None,
+        expected_rule_uid: str | None = None,
     ) -> bool:
         """Enqueue a pending firing with idempotent (trigger_id, dedupe_key) deduplication."""
         now = time.time()
         with self._write_transaction() as conn:
+            live_uid = _live_rule_uid(conn, trigger_id)
+            if expected_rule_uid is not None:
+                if live_uid != expected_rule_uid:
+                    return False
+            elif live_uid is None:
+                msg = f"Cannot enqueue firing for unknown trigger: {trigger_id}"
+                raise ReactiveTriggerStoreError(msg)
+            assert live_uid is not None
+
             try:
                 inserted = _insert_pending_firing(
                     conn,
                     trigger_id=trigger_id,
+                    rule_uid=live_uid,
                     dedupe_key=dedupe_key,
                     event=event,
                     now=now,
@@ -415,18 +511,18 @@ class ReactiveTriggerStore:
             )
             return cursor.rowcount > 0
 
-    def claim_firing(
+    def can_claim_now(
         self,
         firing_id: int,
         *,
         now: float | None = None,
-        triage_reason: str | None = None,
-    ) -> ClaimResult:
-        """Atomically verify trigger guards and claim a pending firing for delivery."""
+        policy_max_fires_per_hour: int | None = None,
+    ) -> ClaimCheckResult:
+        """Read-only check of whether a pending firing currently passes claim guards."""
         current_time = time.time() if now is None else now
-        with self._write_transaction() as conn:
+        with self._read_connection() as conn:
             firing = conn.execute(
-                "SELECT id, trigger_id, status FROM trigger_firings WHERE id = ?",
+                "SELECT id, trigger_id, rule_uid, status FROM trigger_firings WHERE id = ?",
                 (firing_id,),
             ).fetchone()
             if firing is None or str(firing["status"]) != "pending":
@@ -435,7 +531,49 @@ class ReactiveTriggerStore:
             trigger_id = str(firing["trigger_id"])
             trigger = conn.execute(
                 """
-                SELECT enabled, once, expires_at, max_fires_per_hour, cooldown_seconds, last_fired_at
+                SELECT rule_uid, enabled, once, expires_at, max_fires_per_hour, cooldown_seconds, last_fired_at
+                FROM reactive_triggers
+                WHERE trigger_id = ?
+                """,
+                (trigger_id,),
+            ).fetchone()
+            if trigger is None:
+                return "missing"
+            if str(trigger["rule_uid"]) != str(firing["rule_uid"]):
+                return "rule_replaced"
+
+            blocked_reason = _evaluate_claim_guards(
+                conn,
+                trigger_id,
+                trigger,
+                current_time=current_time,
+                policy_max_fires_per_hour=policy_max_fires_per_hour,
+            )
+            return blocked_reason if blocked_reason is not None else "ok"
+
+    def claim_firing(
+        self,
+        firing_id: int,
+        *,
+        now: float | None = None,
+        triage_reason: str | None = None,
+        policy_max_fires_per_hour: int | None = None,
+    ) -> ClaimResult:
+        """Atomically verify trigger guards and claim a pending firing for delivery."""
+        current_time = time.time() if now is None else now
+        with self._write_transaction() as conn:
+            firing = conn.execute(
+                "SELECT id, trigger_id, rule_uid, status FROM trigger_firings WHERE id = ?",
+                (firing_id,),
+            ).fetchone()
+            if firing is None or str(firing["status"]) != "pending":
+                return "missing"
+
+            trigger_id = str(firing["trigger_id"])
+            trigger = conn.execute(
+                """
+                SELECT rule_uid, enabled, disabled_reason, once, expires_at,
+                       max_fires_per_hour, cooldown_seconds, last_fired_at
                 FROM reactive_triggers
                 WHERE trigger_id = ?
                 """,
@@ -444,7 +582,28 @@ class ReactiveTriggerStore:
             if trigger is None:
                 return "missing"
 
-            blocked_reason = _evaluate_claim_guards(conn, trigger_id, trigger, current_time=current_time)
+            if str(trigger["rule_uid"]) != str(firing["rule_uid"]):
+                conn.execute(
+                    """
+                    UPDATE trigger_firings
+                    SET status = 'skipped',
+                        triage_reason = COALESCE(?, triage_reason),
+                        error_message = 'rule_replaced',
+                        next_retry_at = NULL,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (triage_reason, current_time, firing_id),
+                )
+                return "rule_replaced"
+
+            blocked_reason = _evaluate_claim_guards(
+                conn,
+                trigger_id,
+                trigger,
+                current_time=current_time,
+                policy_max_fires_per_hour=policy_max_fires_per_hour,
+            )
             if blocked_reason is not None:
                 conn.execute(
                     """
@@ -466,6 +625,7 @@ class ReactiveTriggerStore:
                 SET status = 'claimed',
                     triage_reason = COALESCE(?, triage_reason),
                     claimed_at = ?,
+                    attempt_count = 0,
                     next_retry_at = NULL,
                     error_message = NULL,
                     updated_at = ?
@@ -473,19 +633,80 @@ class ReactiveTriggerStore:
                 """,
                 (triage_reason, current_time, current_time, firing_id),
             )
-            new_enabled = 0 if bool(trigger["once"]) else int(trigger["enabled"])
+            if bool(trigger["once"]):
+                new_enabled = 0
+                new_disabled_reason: str | None = "once_consumed"
+            else:
+                new_enabled = int(trigger["enabled"])
+                new_disabled_reason = trigger["disabled_reason"]
             conn.execute(
                 """
                 UPDATE reactive_triggers
                 SET fire_count = fire_count + 1,
                     last_fired_at = ?,
                     enabled = ?,
+                    disabled_reason = ?,
                     updated_at = ?
                 WHERE trigger_id = ?
                 """,
-                (current_time, new_enabled, current_time, trigger_id),
+                (current_time, new_enabled, new_disabled_reason, current_time, trigger_id),
             )
             return "claimed"
+
+    def defer_pending_firing(
+        self,
+        firing_id: int,
+        error: str,
+        *,
+        now: float | None = None,
+        max_attempts: int = 5,
+    ) -> RetryResult:
+        """Back off a pending firing on transient pre-triage unavailability without consuming once=True."""
+        current_time = time.time() if now is None else now
+        with self._write_transaction() as conn:
+            row = conn.execute(
+                "SELECT status, attempt_count FROM trigger_firings WHERE id = ?",
+                (firing_id,),
+            ).fetchone()
+            if row is None:
+                msg = f"Reactive trigger firing not found: {firing_id}"
+                raise ReactiveTriggerStoreError(msg)
+            status = str(row["status"])
+            if status != "pending":
+                msg = f"Cannot defer firing {firing_id} in status {status!r}; expected 'pending'"
+                raise ReactiveTriggerStoreError(msg)
+
+            attempt = int(row["attempt_count"]) + 1
+            if attempt >= max_attempts:
+                conn.execute(
+                    """
+                    UPDATE trigger_firings
+                    SET status = 'failed',
+                        attempt_count = ?,
+                        next_retry_at = NULL,
+                        error_message = ?,
+                        updated_at = ?
+                    WHERE id = ? AND status = 'pending'
+                    """,
+                    (attempt, error, current_time, firing_id),
+                )
+                return "failed"
+
+            backoff_seconds = min(_MAX_BACKOFF_SECONDS, _BASE_BACKOFF_SECONDS * (2 ** (attempt - 1)))
+            next_retry_at = current_time + backoff_seconds
+            conn.execute(
+                """
+                UPDATE trigger_firings
+                SET status = 'pending',
+                    attempt_count = ?,
+                    next_retry_at = ?,
+                    error_message = ?,
+                    updated_at = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (attempt, next_retry_at, error, current_time, firing_id),
+            )
+            return "retrying"
 
     def mark_delivered(
         self,
@@ -584,20 +805,49 @@ class ReactiveTriggerStore:
             return cursor.rowcount > 0
 
     def list_due_firings(self, *, now: float | None = None, limit: int = 50) -> list[FiringRecord]:
-        """Return pending firings and claimed firings whose retry backoff is due, ordered by id ASC."""
+        """Return due pending and claimed firings ordered by id ASC, isolating corrupt rows."""
         current_time = time.time() if now is None else now
         with self._read_connection() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM trigger_firings
-                WHERE status = 'pending'
-                   OR (status = 'claimed' AND (next_retry_at IS NULL OR next_retry_at <= ?))
+                WHERE status IN ('pending', 'claimed')
+                  AND (next_retry_at IS NULL OR next_retry_at <= ?)
                 ORDER BY id ASC
                 LIMIT ?
                 """,
                 (current_time, limit),
             ).fetchall()
-        return [_firing_from_row(row) for row in rows]
+
+        firings: list[FiringRecord] = []
+        corrupt_ids: list[int] = []
+        for row in rows:
+            try:
+                firings.append(_firing_from_row(row))
+            except (ValidationError, ValueError, KeyError, TypeError):
+                firing_id = int(row["id"])
+                logger.exception(
+                    "Corrupt reactive trigger firing row; marking failed",
+                    firing_id=firing_id,
+                    trigger_id=row["trigger_id"],
+                )
+                corrupt_ids.append(firing_id)
+
+        if corrupt_ids:
+            with self._write_transaction() as conn:
+                for firing_id in corrupt_ids:
+                    conn.execute(
+                        """
+                        UPDATE trigger_firings
+                        SET status = 'failed',
+                            error_message = 'corrupt_event_json',
+                            next_retry_at = NULL,
+                            updated_at = ?
+                        WHERE id = ? AND status IN ('pending', 'claimed')
+                        """,
+                        (current_time, firing_id),
+                    )
+        return firings
 
     def get_thread_key_binding(
         self,
@@ -631,10 +881,15 @@ class ReactiveTriggerStore:
         thread_root_id: str,
         *,
         now: float | None = None,
-    ) -> None:
+        expected_rule_uid: str | None = None,
+    ) -> bool:
         """Persist or refresh the Matrix thread root ID bound to (trigger_id, thread_key)."""
         current_time = time.time() if now is None else now
         with self._write_transaction() as conn:
+            if expected_rule_uid is not None:
+                live_uid = _live_rule_uid(conn, trigger_id)
+                if live_uid != expected_rule_uid:
+                    return False
             try:
                 conn.execute(
                     """
@@ -649,6 +904,7 @@ class ReactiveTriggerStore:
             except sqlite3.IntegrityError as exc:
                 msg = f"Cannot save thread key binding for unknown trigger: {trigger_id}"
                 raise ReactiveTriggerStoreError(msg) from exc
+            return True
 
     def prune_old_firings(
         self,
@@ -706,6 +962,14 @@ def _connect(db_path: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def _live_rule_uid(conn: sqlite3.Connection, trigger_id: str) -> str | None:
+    row = conn.execute(
+        "SELECT rule_uid FROM reactive_triggers WHERE trigger_id = ?",
+        (trigger_id,),
+    ).fetchone()
+    return str(row["rule_uid"]) if row is not None else None
 
 
 def _source_index_fields(record: ReactiveTriggerRecord) -> tuple[str | None, str | None]:
@@ -767,6 +1031,7 @@ def _insert_pending_firing(
     conn: sqlite3.Connection,
     *,
     trigger_id: str,
+    rule_uid: str,
     dedupe_key: str,
     event: TriggerEvent,
     now: float,
@@ -774,11 +1039,11 @@ def _insert_pending_firing(
     cursor = conn.execute(
         """
         INSERT INTO trigger_firings (
-            trigger_id, dedupe_key, status, event_json, attempt_count, created_at, updated_at
-        ) VALUES (?, ?, 'pending', ?, 0, ?, ?)
+            trigger_id, rule_uid, dedupe_key, status, event_json, attempt_count, created_at, updated_at
+        ) VALUES (?, ?, ?, 'pending', ?, 0, ?, ?)
         ON CONFLICT(trigger_id, dedupe_key) DO NOTHING
         """,
-        (trigger_id, dedupe_key, event.model_dump_json(), now, now),
+        (trigger_id, rule_uid, dedupe_key, event.model_dump_json(), now, now),
     )
     return cursor.rowcount > 0
 
@@ -789,6 +1054,7 @@ def _evaluate_claim_guards(
     trigger: sqlite3.Row,
     *,
     current_time: float,
+    policy_max_fires_per_hour: int | None = None,
 ) -> Literal["disabled", "expired", "cooldown", "rate_limited"] | None:
     if not bool(trigger["enabled"]):
         return "disabled"
@@ -814,7 +1080,10 @@ def _evaluate_claim_guards(
             (trigger_id, window_start),
         ).fetchone()[0],
     )
-    if hourly_count >= int(trigger["max_fires_per_hour"]):
+    effective_cap = int(trigger["max_fires_per_hour"])
+    if policy_max_fires_per_hour is not None:
+        effective_cap = min(effective_cap, policy_max_fires_per_hour)
+    if hourly_count >= effective_cap:
         return "rate_limited"
 
     return None
@@ -824,7 +1093,9 @@ def _record_from_row(row: sqlite3.Row) -> ReactiveTriggerRecord:
     record = ReactiveTriggerRecord.model_validate_json(str(row["spec_json"]))
     return record.model_copy(
         update={
+            "rule_uid": str(row["rule_uid"]),
             "enabled": bool(row["enabled"]),
+            "disabled_reason": row["disabled_reason"],
             "fire_count": int(row["fire_count"]),
             "last_fired_at": float(row["last_fired_at"]) if row["last_fired_at"] is not None else None,
             "updated_at": float(row["updated_at"]),
@@ -836,6 +1107,7 @@ def _firing_from_row(row: sqlite3.Row) -> FiringRecord:
     return FiringRecord(
         id=int(row["id"]),
         trigger_id=str(row["trigger_id"]),
+        rule_uid=str(row["rule_uid"]),
         dedupe_key=str(row["dedupe_key"]),
         status=row["status"],
         event=TriggerEvent.model_validate_json(str(row["event_json"])),

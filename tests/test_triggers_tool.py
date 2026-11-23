@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 import time
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -27,10 +28,13 @@ from mindroom.custom_tools.triggers import TriggersTools
 from mindroom.event_journal import ConversationCursor
 from mindroom.matrix.state import MatrixState
 from mindroom.message_target import MessageTarget
+from mindroom.reactive_triggers.models import TriggerEvent
 from mindroom.reactive_triggers.store import ReactiveTriggerStore
 from mindroom.thread_tags import ThreadTagRecord, ThreadTagsError, ThreadTagsState
 from mindroom.tool_system.catalog import builtin_tool_registry, get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tools.external_trigger_manager import external_trigger_manager_tools
+from mindroom.tools.triggers import triggers_tools
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     make_conversation_reader_mock,
@@ -555,11 +559,11 @@ async def test_unified_list_disable_delete_and_rotate(tmp_path: Path) -> None:
         assert rotate_reactive["status"] == "error"
         assert rotate_reactive["message"] == "Key rotation applies only to direct signed external triggers."
 
-        disabled_reactive = _payload(tool.disable_trigger("reactive-1", enabled=False))
+        disabled_reactive = _payload(await tool.disable_trigger("reactive-1", enabled=False))
         assert disabled_reactive["status"] == "ok"
         assert disabled_reactive["trigger"]["enabled"] is False
 
-        disabled_direct = _payload(tool.disable_trigger("direct-1", enabled=False))
+        disabled_direct = _payload(await tool.disable_trigger("direct-1", enabled=False))
         assert disabled_direct["status"] == "ok"
         assert disabled_direct["trigger"]["enabled"] is False
 
@@ -568,7 +572,7 @@ async def test_unified_list_disable_delete_and_rotate(tmp_path: Path) -> None:
         assert active_only["triggers"] == []
 
         orchestrator.reactive_triggers.notify_work.reset_mock()
-        reenabled = _payload(tool.disable_trigger("reactive-1", enabled=True))
+        reenabled = _payload(await tool.disable_trigger("reactive-1", enabled=True))
         assert reenabled["status"] == "ok"
         assert reenabled["trigger"]["enabled"] is True
         orchestrator.reactive_triggers.notify_work.assert_called_once()
@@ -577,7 +581,7 @@ async def test_unified_list_disable_delete_and_rotate(tmp_path: Path) -> None:
     with tool_runtime_context(_context(tmp_path, requester_id="@other-owner:example.org", config=config)):
         other_list = _payload(tool.list_triggers())
         assert other_list["triggers"] == []
-        assert _payload(tool.disable_trigger("reactive-1", enabled=False))["status"] == "error"
+        assert _payload(await tool.disable_trigger("reactive-1", enabled=False))["status"] == "error"
         assert _payload(tool.delete_trigger("reactive-1"))["status"] == "error"
 
     # Admin can inspect and delete both direct and reactive triggers
@@ -828,7 +832,7 @@ async def test_reenabling_disabled_room_message_trigger_advances_cursor_forward(
     with tool_runtime_context(_context(tmp_path)):
         created = _payload(await tool.watch_room(prompt="Pause test", trigger_id="paused-watch"))
         assert created["status"] == "ok", created
-        assert _payload(tool.disable_trigger("paused-watch", enabled=False))["status"] == "ok"
+        assert _payload(await tool.disable_trigger("paused-watch", enabled=False))["status"] == "ok"
 
     # Simulate an old cursor from days ago by rewriting the cursor row in SQLite directly
     with store._write_transaction() as conn:
@@ -842,7 +846,7 @@ async def test_reenabling_disabled_room_message_trigger_advances_cursor_forward(
 
     before_reenable_ms = int(time.time() * 1000)
     with tool_runtime_context(_context(tmp_path)):
-        reenabled = _payload(tool.disable_trigger("paused-watch", enabled=True))
+        reenabled = _payload(await tool.disable_trigger("paused-watch", enabled=True))
     assert reenabled["status"] == "ok", reenabled
     assert reenabled["trigger"]["enabled"] is True
 
@@ -854,15 +858,150 @@ async def test_reenabling_disabled_room_message_trigger_advances_cursor_forward(
     # If the cursor is already ahead of now_ms, re-enabling preserves the newer cursor
     ahead_ts = int(time.time() * 1000) + 60_000
     with tool_runtime_context(_context(tmp_path)):
-        assert _payload(tool.disable_trigger("paused-watch", enabled=False))["status"] == "ok"
+        assert _payload(await tool.disable_trigger("paused-watch", enabled=False))["status"] == "ok"
     with store._write_transaction() as conn:
         conn.execute(
             "UPDATE room_cursors SET created_ts = ?, logical_event_id = ? WHERE trigger_id = ?",
             (ahead_ts, "$future:example.org", "paused-watch"),
         )
     with tool_runtime_context(_context(tmp_path)):
-        assert _payload(tool.disable_trigger("paused-watch", enabled=True))["status"] == "ok"
+        assert _payload(await tool.disable_trigger("paused-watch", enabled=True))["status"] == "ok"
     kept_cursor = store.get_room_cursor("paused-watch")
     assert kept_cursor is not None
     assert kept_cursor.created_ts == ahead_ts
     assert kept_cursor.logical_event_id == "$future:example.org"
+
+
+def test_legacy_external_trigger_manager_tool_factory_shim_does_not_double_register() -> None:
+    """Legacy Python import shim exports external_trigger_manager_tools without creating duplicate metadata."""
+    registry = builtin_tool_registry()
+    assert external_trigger_manager_tools is triggers_tools
+    assert external_trigger_manager_tools() is TriggersTools
+    assert "triggers" in registry.entries
+    assert "external_trigger_manager" not in registry.entries
+
+
+@pytest.mark.asyncio
+async def test_watch_thread_normalizes_tag_names_and_rejects_invalid_tags(tmp_path: Path) -> None:
+    """watch_thread normalizes tag='needs_review' to 'needs-review' and rejects invalid tag names cleanly."""
+    _record_rooms(tmp_path)
+    config = _config()
+    tool = TriggersTools()
+    existing_state = ThreadTagsState(
+        room_id="!lobby:example.org",
+        thread_root_id="$thread1",
+        tags={"needs-review": ThreadTagRecord(set_by="@owner:example.org", set_at=datetime.now(UTC))},
+    )
+
+    with (
+        tool_runtime_context(_context(tmp_path, config=config)),
+        patch("mindroom.custom_tools.triggers.get_thread_tags", new=AsyncMock(return_value=existing_state)),
+    ):
+        created = _payload(
+            await tool.watch_thread(
+                prompt="Follow up on review",
+                tag="needs_review",
+                transition="added",
+                trigger_id="norm-tag-watch",
+            ),
+        )
+        assert created["status"] == "ok", created
+        assert created["trigger"]["source"]["tag"] == "needs-review"
+        assert created["already_in_state"] is True
+
+        for bad_tag in ("", "   ", "bad!tag", "!!!"):
+            bad = _payload(await tool.watch_thread(prompt="Bad", tag=bad_tag))
+            assert bad["status"] == "error", (bad_tag, bad)
+
+
+@pytest.mark.asyncio
+async def test_reenabling_thread_tag_trigger_refreshes_checkpoint_from_live_room_state(tmp_path: Path) -> None:
+    """Re-enabling a disabled thread_tag rule refreshes thread_checkpoints from live room state without firing."""
+    _record_rooms(tmp_path)
+    config = _config()
+    tool = TriggersTools()
+    store = ReactiveTriggerStore(_runtime_paths(tmp_path))
+
+    # Create watch_thread(once=True) with resolved initially absent
+    absent_state = ThreadTagsState(room_id="!lobby:example.org", thread_root_id="$thread1", tags={})
+    present_state = ThreadTagsState(
+        room_id="!lobby:example.org",
+        thread_root_id="$thread1",
+        tags={"resolved": ThreadTagRecord(set_by="@owner:example.org", set_at=datetime.now(UTC))},
+    )
+
+    with (
+        tool_runtime_context(_context(tmp_path, config=config)),
+        patch("mindroom.custom_tools.triggers.get_thread_tags", new=AsyncMock(return_value=absent_state)),
+    ):
+        res = _payload(await tool.watch_thread(prompt="On resolve", tag="resolved", once=True, trigger_id="rearm-tag"))
+        assert res["status"] == "ok", res
+
+    # Simulate first firing consumed once=True with checkpoint tag_present=True
+    rule = store.get_trigger("rearm-tag")
+    assert rule is not None
+    store.update_thread_checkpoint_and_enqueue(
+        "rearm-tag",
+        tag_present=True,
+        state_event_id="$res1",
+        firing_dedupe_key="$res1",
+        event=TriggerEvent(
+            source_type="thread_tag",
+            source_id="!lobby:example.org",
+            kind="thread_tag.added",
+            event_id="$res1",
+            timestamp=time.time(),
+            room_id="!lobby:example.org",
+            thread_id="$thread1",
+        ),
+        expected_rule_uid=rule.rule_uid,
+    )
+    assert store.claim_firing(1) == "claimed"
+    assert store.mark_delivered(1, "$sent1") is True
+
+    # Scenario A: thread reopened offline while disabled -> disable_trigger(enabled=True) refreshes checkpoint to False
+    with (
+        tool_runtime_context(_context(tmp_path, config=config)),
+        patch("mindroom.custom_tools.triggers.get_thread_tags", new=AsyncMock(return_value=absent_state)),
+    ):
+        reenabled = _payload(await tool.disable_trigger("rearm-tag", enabled=True))
+    assert reenabled["status"] == "ok", reenabled
+    cp = store.get_thread_checkpoint("rearm-tag")
+    assert cp is not None
+    assert cp.tag_present is False
+    assert store.list_due_firings() == []
+
+    # Scenario B: disabled again -> tag added while disabled -> re-enable refreshes checkpoint to True WITHOUT firing
+    with tool_runtime_context(_context(tmp_path, config=config)):
+        assert _payload(await tool.disable_trigger("rearm-tag", enabled=False))["status"] == "ok"
+    with (
+        tool_runtime_context(_context(tmp_path, config=config)),
+        patch("mindroom.custom_tools.triggers.get_thread_tags", new=AsyncMock(return_value=present_state)),
+    ):
+        reenabled2 = _payload(await tool.disable_trigger("rearm-tag", enabled=True))
+    assert reenabled2["status"] == "ok", reenabled2
+    cp2 = store.get_thread_checkpoint("rearm-tag")
+    assert cp2 is not None
+    assert cp2.tag_present is True
+    assert store.list_due_firings() == []
+
+
+@pytest.mark.asyncio
+async def test_concurrent_cross_store_trigger_id_creation_is_serialized(tmp_path: Path) -> None:
+    """Concurrent direct + reactive trigger creation with the same trigger_id allows at most one winner."""
+    _record_rooms(tmp_path)
+    config = _config()
+    tool = TriggersTools()
+    ctx = _context(tmp_path, config=config)
+
+    async def _create_direct() -> dict[str, Any]:
+        with tool_runtime_context(ctx):
+            return _payload(await tool.create_trigger("race-id", public_key=_PUBLIC_KEY))
+
+    async def _create_reactive() -> dict[str, Any]:
+        with tool_runtime_context(ctx):
+            return _payload(await tool.watch_room(prompt="Watch", trigger_id="race-id"))
+
+    res_direct, res_reactive = await asyncio.gather(_create_direct(), _create_reactive())
+    statuses = sorted([res_direct["status"], res_reactive["status"]])
+    assert statuses == ["error", "ok"], (res_direct, res_reactive)

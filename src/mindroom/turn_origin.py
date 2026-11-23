@@ -9,6 +9,7 @@ from mindroom.dispatch_source import (
     EXTERNAL_TRIGGER_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
     HOOK_SOURCE_KIND,
+    REACTIVE_TRIGGER_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
     SILENT_SCHEDULE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
@@ -204,7 +205,7 @@ def _turn_intent(
         intent = TurnIntent.ROUTER_HANDOFF if routed else TurnIntent.TRUSTED_INTERNAL_RELAY
     elif source_kind in {SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND}:
         intent = TurnIntent.SCHEDULED_FIRE
-    elif source_kind == EXTERNAL_TRIGGER_SOURCE_KIND:
+    elif source_kind in {EXTERNAL_TRIGGER_SOURCE_KIND, REACTIVE_TRIGGER_SOURCE_KIND}:
         intent = TurnIntent.EXTERNAL_TRIGGER
     elif source_kind == HOOK_DISPATCH_SOURCE_KIND:
         intent = TurnIntent.HOOK_DISPATCH

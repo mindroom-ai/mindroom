@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
@@ -9,6 +10,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 import yaml
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from pydantic import ValidationError
 
 from mindroom.config.external_trigger_policy import (
@@ -157,7 +160,7 @@ def test_github_and_ed25519_event_source_configs_and_yaml_roundtrip() -> None:
                     },
                     "ci_signed": {
                         "kind": "ed25519",
-                        "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKey",
+                        "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAOhB7/zzhC+HXDdGOdLwJln5NYwm6UNXx3chmQSVTG4",
                         "allowed_kinds": ["deploy.finished"],
                         "subscribers": [_OWNER],
                     },
@@ -833,3 +836,134 @@ def test_advance_room_cursor_is_monotonic(tmp_path: Path) -> None:
     # Greater timestamp advances even with smaller logical_event_id
     store.advance_room_cursor("monotonic_cursor", RoomCursor(created_ts=2001, logical_event_id="$e0"))
     assert store.get_room_cursor("monotonic_cursor") == RoomCursor(created_ts=2001, logical_event_id="$e0")
+
+
+def test_ed25519_event_source_normalizes_key_formats_and_validates_subscribers() -> None:
+    """Ed25519EventSourceConfig accepts raw base64, OpenSSH, and PEM keys and rejects invalid keys/subscribers."""
+    pub = Ed25519PrivateKey.generate().public_key()
+    raw_b64 = base64.b64encode(pub.public_bytes(Encoding.Raw, PublicFormat.Raw)).decode("ascii")
+    openssh = pub.public_bytes(Encoding.OpenSSH, PublicFormat.OpenSSH).decode("ascii") + " ci@example"
+    pem = pub.public_bytes(Encoding.PEM, PublicFormat.SubjectPublicKeyInfo).decode("ascii")
+
+    for fmt in (raw_b64, openssh, pem):
+        cfg = Ed25519EventSourceConfig(public_key=fmt, subscribers=["@alice:example.org"])
+        assert cfg.public_key == raw_b64
+
+    for bad_key in ("not-a-key", "AAAA", "ssh-ed25519 AAAA_bad", "-----BEGIN PUBLIC KEY-----\nbad"):
+        with pytest.raises(ValidationError):
+            Ed25519EventSourceConfig(public_key=bad_key)
+
+    for bad_sub in ("alice", "alice:example.org", "@alice", "@a b:example.org"):
+        with pytest.raises(ValidationError):
+            Ed25519EventSourceConfig(public_key=raw_b64, subscribers=[bad_sub])
+        with pytest.raises(ValidationError):
+            GitHubEventSourceConfig(secret_env="GH_SEC", allowed_repos=["org/repo"], subscribers=[bad_sub])  # noqa: S106
+
+
+def test_expected_rule_uid_prevents_stale_writes_after_rule_replacement(tmp_path: Path) -> None:
+    """Deleting rule 'x' (Alice) and recreating 'x' (Bob) blocks stale enqueue/cursor/checkpoint/toggle/delete."""
+    store = ReactiveTriggerStore(_runtime_paths(tmp_path))
+    alice_rule = _make_record(trigger_id="shared_x", owner_user_id="@alice:example.org")
+    store.create_trigger(alice_rule)
+
+    assert store.delete_trigger("shared_x", expected_rule_uid=alice_rule.rule_uid) is True
+
+    bob_rule = _make_record(trigger_id="shared_x", owner_user_id="@bob:example.org")
+    assert bob_rule.rule_uid != alice_rule.rule_uid
+    store.create_trigger(bob_rule)
+
+    # Stale expected_rule_uid from Alice's deleted rule must cleanly no-op (False / None)
+    assert (
+        store.enqueue_firing(
+            "shared_x",
+            "$alice-ev",
+            _make_event(event_id="$alice-ev"),
+            expected_rule_uid=alice_rule.rule_uid,
+        )
+        is False
+    )
+    assert (
+        store.update_thread_checkpoint_and_enqueue(
+            "shared_x",
+            tag_present=True,
+            state_event_id="$st1",
+            firing_dedupe_key="$alice-tag",
+            event=_make_event(event_id="$alice-tag"),
+            expected_rule_uid=alice_rule.rule_uid,
+        )
+        is False
+    )
+    assert (
+        store.advance_room_cursor(
+            "shared_x",
+            RoomCursor(created_ts=9999, logical_event_id="$ev"),
+            expected_rule_uid=alice_rule.rule_uid,
+        )
+        is False
+    )
+    assert store.set_enabled("shared_x", False, expected_rule_uid=alice_rule.rule_uid) is None
+    assert store.delete_trigger("shared_x", expected_rule_uid=alice_rule.rule_uid) is False
+
+    # Bob's rule is untouched and has zero firings
+    live_bob = store.get_trigger("shared_x")
+    assert live_bob is not None
+    assert live_bob.owner_user_id == "@bob:example.org"
+    assert live_bob.rule_uid == bob_rule.rule_uid
+    assert live_bob.enabled is True
+    assert store.list_due_firings() == []
+
+
+def test_disabled_reason_distinguishes_manual_from_once_consumed(tmp_path: Path) -> None:
+    """claim_firing on once=True sets disabled_reason='once_consumed'; set_enabled sets 'manual' or None."""
+    store = ReactiveTriggerStore(_runtime_paths(tmp_path))
+    store.create_trigger(_make_record(trigger_id="once_r", once=True))
+    store.enqueue_firing("once_r", "$e1", _make_event(event_id="$e1"))
+    firing = store.list_due_firings()[0]
+
+    assert store.claim_firing(firing.id, now=1000.0) == "claimed"
+    consumed = store.get_trigger("once_r")
+    assert consumed is not None
+    assert consumed.enabled is False
+    assert consumed.disabled_reason == "once_consumed"
+
+    reenabled = store.set_enabled("once_r", True)
+    assert reenabled is not None
+    assert reenabled.enabled is True
+    assert reenabled.disabled_reason is None
+
+    manual = store.set_enabled("once_r", False)
+    assert manual is not None
+    assert manual.enabled is False
+    assert manual.disabled_reason == "manual"
+
+
+def test_claim_firing_enforces_live_policy_max_fires_per_hour(tmp_path: Path) -> None:
+    """Lowering policy_max_fires_per_hour immediately rate-limits an existing rule with a higher per-rule cap."""
+    store = ReactiveTriggerStore(_runtime_paths(tmp_path))
+    store.create_trigger(_make_record(trigger_id="high_cap", max_fires_per_hour=60))
+    store.enqueue_firing("high_cap", "$e1", _make_event(event_id="$e1"))
+    store.enqueue_firing("high_cap", "$e2", _make_event(event_id="$e2"))
+    f1, f2 = store.list_due_firings(now=1000.0)
+
+    assert store.claim_firing(f1.id, now=1000.0, policy_max_fires_per_hour=1) == "claimed"
+    assert store.can_claim_now(f2.id, now=1010.0, policy_max_fires_per_hour=1) == "rate_limited"
+    assert store.claim_firing(f2.id, now=1010.0, policy_max_fires_per_hour=1) == "rate_limited"
+
+
+def test_list_due_firings_isolates_corrupt_event_json_row(tmp_path: Path) -> None:
+    """A single corrupt event_json row is marked failed without aborting the remaining valid due firings."""
+    store = ReactiveTriggerStore(_runtime_paths(tmp_path))
+    store.create_trigger(_make_record(trigger_id="corrupt_test"))
+    store.enqueue_firing("corrupt_test", "$bad", _make_event(event_id="$bad"))
+    store.enqueue_firing("corrupt_test", "$good", _make_event(event_id="$good"))
+
+    with closing(sqlite3.connect(store.db_path)) as conn:
+        conn.execute("UPDATE trigger_firings SET event_json = '{not valid json' WHERE dedupe_key = '$bad'")
+        conn.commit()
+
+    due = store.list_due_firings(now=1000.0)
+    assert [f.dedupe_key for f in due] == ["$good"]
+
+    with closing(sqlite3.connect(store.db_path)) as conn:
+        row = conn.execute("SELECT status, error_message FROM trigger_firings WHERE dedupe_key = '$bad'").fetchone()
+    assert row == ("failed", "corrupt_event_json")

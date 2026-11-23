@@ -4615,7 +4615,7 @@ requires-dist = [
     { name = "questionary", specifier = ">=2.1.1" },
     { name = "redshift-connector", marker = "extra == 'redshift'" },
     { name = "referencing", specifier = ">=0.37" },
-    { name = "regex" },
+    { name = "regex", specifier = ">=2024.11.6" },
     { name = "replicate", marker = "extra == 'replicate'", specifier = ">=1.0.7" },
     { name = "reportlab", marker = "extra == 'file-generation'" },
     { name = "requests", marker = "extra == 'bitbucket'" },

@@ -10822,7 +10822,9 @@ depends_on = [
     "mindroom.constants",
     "mindroom.hooks.sender",
     "mindroom.matrix.room_reconciliation",
+    "mindroom.reactive_triggers.external_sources",
     "mindroom.reactive_triggers.matching",
+    "mindroom.reactive_triggers.models",
     "mindroom.reactive_triggers.store",
 ]
 
@@ -10876,4 +10878,10 @@ depends_on = [
     "mindroom.custom_tools.triggers",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.tools.external_trigger_manager"
+depends_on = [
+    "mindroom.tools.triggers",
 ]

@@ -25,7 +25,7 @@ from mindroom.config.external_trigger_policy import (
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.external_triggers.auth import sign_trigger_request
-from mindroom.external_triggers.store import external_trigger_replay_store
+from mindroom.external_triggers.store import ExternalTriggerStore, ExternalTriggerTarget, external_trigger_replay_store
 from mindroom.reactive_triggers import (
     ExternalEventSourceSpec,
     ExternalSourceAuthError,
@@ -1363,3 +1363,167 @@ def test_github_webhook_canonicalizes_repo_casing_for_rule_matching(tmp_path: Pa
     pending = store.list_due_firings(now=1700000000.0)
     assert [row.trigger_id for row in pending] == ["gh-pr-canonical-repo"]
     assert pending[0].event.data["repo"] == "mindroom-ai/mindroom"
+
+
+def test_ed25519_event_source_replay_store_isolated_from_direct_trigger_writes(tmp_path: Path) -> None:
+    """Direct trigger store writes must NOT prune shared Ed25519 event source replay nonces."""
+    private_key = Ed25519PrivateKey.generate()
+    runtime_paths, _config = _setup_event_source_api(
+        tmp_path,
+        event_sources={
+            "ci": {
+                "kind": "ed25519",
+                "public_key": _public_key_b64(private_key),
+                "key_id": "ci-main",
+                "allowed_kinds": ["build.failed"],
+                "subscribers": [_ALICE],
+            },
+        },
+    )
+    direct_config = Config.model_validate(
+        {
+            "models": {"default": {"provider": "openai", "id": "gpt-6-astra"}},
+            "agents": {"research": {"display_name": "Research", "model": "default", "rooms": [_ROOM]}},
+            "rooms": {"main": {"display_name": "Main"}},
+            "external_trigger_policy": {"enabled": True, "reactive_enabled": True},
+        },
+    )
+
+    body = json.dumps({"kind": "build.failed", "message": "CI failed", "event_id": "evt-isolated-1"}).encode("utf-8")
+    headers = sign_trigger_request(
+        method="POST",
+        path="/api/event-sources/ci",
+        body=body,
+        key_id="ci-main",
+        timestamp=str(int(time.time())),
+        nonce="nonce-isolated-replay-1",
+        private_key=private_key,
+    )
+
+    with TestClient(api_main.app) as client:
+        first = client.post("/api/event-sources/ci", content=body, headers=headers)
+        assert first.status_code == 202
+
+        # Creating a direct trigger calls ExternalTriggerStore._write_records -> retain_scopes on direct replay store
+        direct_key = Ed25519PrivateKey.generate()
+        direct_store = ExternalTriggerStore(runtime_paths)
+        direct_store.create_record(
+            trigger_id="direct_other",
+            owner_user_id=_ALICE,
+            created_by_agent_name="research",
+            created_in_room_id=_ROOM,
+            created_in_thread_id=None,
+            target=ExternalTriggerTarget(room_id=_ROOM, agent="research"),
+            public_key=_public_key_b64(direct_key),
+            config=direct_config,
+        )
+
+        # Replaying the exact same signed Ed25519 event MUST still return 409
+        replayed = client.post("/api/event-sources/ci", content=body, headers=headers)
+        assert replayed.status_code == 409
+
+
+def test_github_webhook_ping_returns_202_after_signature_and_repo_checks(tmp_path: Path) -> None:
+    """X-GitHub-Event: ping passes cleanly with 202 and matched_rules=0 after HMAC + allowed_repos verification."""
+    secret = _GH_SECRET
+    _setup_event_source_api(
+        tmp_path,
+        event_sources={
+            "gh": {
+                "kind": "github",
+                "secret_env": "GH_PING_SECRET",
+                "allowed_repos": ["mindroom-ai/mindroom"],
+                "allowed_events": ["pull_request"],
+                "subscribers": [_ALICE],
+            },
+        },
+        env={"GH_PING_SECRET": secret},
+    )
+
+    payload = json.dumps({"zen": "Design for failure.", "repository": {"full_name": "mindroom-ai/mindroom"}}).encode()
+    headers = {
+        "X-GitHub-Event": "ping",
+        "X-GitHub-Delivery": "deliv-ping-1",
+        "X-Hub-Signature-256": _github_signature(payload, secret),
+        "Content-Type": "application/json",
+    }
+    with TestClient(api_main.app) as client:
+        resp = client.post("/api/event-sources/gh", content=payload, headers=headers)
+        assert resp.status_code == 202
+        assert resp.json() == {
+            "accepted": True,
+            "source_id": "gh",
+            "event_id": "deliv-ping-1",
+            "matched_rules": 0,
+        }
+
+        # Ping with bad signature still returns 401
+        bad_sig_resp = client.post(
+            "/api/event-sources/gh",
+            content=payload,
+            headers={**headers, "X-Hub-Signature-256": "sha256=deadbeef"},
+        )
+        assert bad_sig_resp.status_code == 401
+
+        # Ping with disallowed repo still returns 403
+        bad_repo_payload = json.dumps({"zen": "nope", "repository": {"full_name": "evil/repo"}}).encode()
+        bad_repo_resp = client.post(
+            "/api/event-sources/gh",
+            content=bad_repo_payload,
+            headers={
+                "X-GitHub-Event": "ping",
+                "X-GitHub-Delivery": "deliv-ping-2",
+                "X-Hub-Signature-256": _github_signature(bad_repo_payload, secret),
+                "Content-Type": "application/json",
+            },
+        )
+        assert bad_repo_resp.status_code == 403
+
+
+@pytest.mark.parametrize(
+    ("gh_event", "missing_key", "bad_value"),
+    [
+        ("pull_request", "pull_request", None),
+        ("pull_request", "pull_request", "not-a-dict"),
+        ("pull_request_review", "review", None),
+        ("issues", "issue", ["list"]),
+        ("release", "release", None),
+        ("check_suite", "check_suite", 123),
+    ],
+)
+def test_github_typed_events_reject_missing_or_non_dict_object_key(
+    tmp_path: Path,
+    gh_event: str,
+    missing_key: str,
+    bad_value: object,
+) -> None:
+    """Typed GitHub webhook events reject mismatched/spoofed payloads missing their expected dict key."""
+    secret = _GH_SECRET
+    _setup_event_source_api(
+        tmp_path,
+        event_sources={
+            "gh": {
+                "kind": "github",
+                "secret_env": "GH_TYPED_SECRET",
+                "allowed_repos": ["mindroom-ai/mindroom"],
+                "subscribers": [_ALICE],
+            },
+        },
+        env={"GH_TYPED_SECRET": secret},
+    )
+    body_obj: dict[str, object] = {"repository": {"full_name": "mindroom-ai/mindroom"}, "action": "opened"}
+    if bad_value is not None:
+        body_obj[missing_key] = bad_value
+    payload = json.dumps(body_obj).encode("utf-8")
+    with TestClient(api_main.app) as client:
+        resp = client.post(
+            "/api/event-sources/gh",
+            content=payload,
+            headers={
+                "X-GitHub-Event": gh_event,
+                "X-GitHub-Delivery": f"deliv-bad-{gh_event}",
+                "X-Hub-Signature-256": _github_signature(payload, secret),
+                "Content-Type": "application/json",
+            },
+        )
+    assert resp.status_code == 400

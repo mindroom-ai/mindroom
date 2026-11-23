@@ -3,6 +3,8 @@
 from mindroom.reactive_triggers.dispatch import (
     DispatchResult,
     build_reactive_trigger_body,
+    build_reactive_trigger_transaction_id,
+    check_reactive_source_access,
     dispatch_reactive_trigger,
 )
 from mindroom.reactive_triggers.external_sources import (
@@ -11,6 +13,8 @@ from mindroom.reactive_triggers.external_sources import (
     ExternalSourceForbiddenError,
     ExternalSourceReplayError,
     ExternalSourceUnavailableError,
+    check_external_event_source_access,
+    event_source_replay_store,
     fan_out_external_event,
     is_source_subscriber_allowed,
     validate_subscription_against_source,
@@ -26,6 +30,7 @@ from mindroom.reactive_triggers.matching import (
 )
 from mindroom.reactive_triggers.models import (
     TRIGGER_ID_PATTERN,
+    DisabledReason,
     ExternalEventSourceSpec,
     FiringRecord,
     FiringStatus,
@@ -43,12 +48,14 @@ from mindroom.reactive_triggers.models import (
 )
 from mindroom.reactive_triggers.service import ReactiveTriggerService
 from mindroom.reactive_triggers.store import (
+    ClaimCheckResult,
     ClaimResult,
     ReactiveTriggerDuplicateError,
     ReactiveTriggerLimitError,
     ReactiveTriggerStore,
     ReactiveTriggerStoreError,
     RetryResult,
+    trigger_id_creation_lock,
 )
 from mindroom.reactive_triggers.triage import TriageOutcome, evaluate_triage
 
@@ -56,7 +63,9 @@ __all__ = (
     "REACTIVE_TRIGGER_DEDUPE_KEY",
     "REACTIVE_TRIGGER_ID_KEY",
     "TRIGGER_ID_PATTERN",
+    "ClaimCheckResult",
     "ClaimResult",
+    "DisabledReason",
     "DispatchResult",
     "ExternalEventSourceSpec",
     "ExternalSourceAuthError",
@@ -84,14 +93,19 @@ __all__ = (
     "TriggerSourceSpec",
     "TriggerTargetSpec",
     "build_reactive_trigger_body",
+    "build_reactive_trigger_transaction_id",
+    "check_external_event_source_access",
+    "check_reactive_source_access",
     "dispatch_reactive_trigger",
     "evaluate_triage",
+    "event_source_replay_store",
     "fan_out_external_event",
     "generate_trigger_id",
     "is_reactive_trigger_event_content",
     "is_source_subscriber_allowed",
     "matches_external_event",
     "matches_room_message",
+    "trigger_id_creation_lock",
     "validate_subscription_against_source",
     "verify_and_normalize_ed25519_event",
     "verify_and_normalize_github_webhook",

@@ -13,6 +13,7 @@ TRIGGER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 SourceType = Literal["room_message", "thread_tag", "external_event"]
 FiringStatus = Literal["pending", "triaged_no", "claimed", "delivered", "failed", "skipped"]
+DisabledReason = Literal["manual", "once_consumed"]
 
 
 def generate_trigger_id() -> str:
@@ -206,12 +207,14 @@ class ReactiveTriggerRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     trigger_id: str
+    rule_uid: str = Field(default_factory=lambda: uuid4().hex)
     owner_user_id: str
     description: str = ""
     source: TriggerSourceSpec
     triage: TriageSpec | None = None
     target: TriggerTargetSpec
     enabled: bool = True
+    disabled_reason: DisabledReason | None = None
     once: bool = False
     max_fires_per_hour: int = Field(default=10, ge=1, le=600)
     cooldown_seconds: int = Field(default=0, ge=0, le=86400)
@@ -230,6 +233,12 @@ class ReactiveTriggerRecord(BaseModel):
             msg = "trigger_id must match ^[A-Za-z0-9_-]{1,64}$"
             raise ValueError(msg)
         return stripped
+
+    @field_validator("rule_uid")
+    @classmethod
+    def validate_rule_uid(cls, value: str) -> str:
+        """Require a non-empty immutable rule UID."""
+        return _strip_non_empty(value, field_name="rule_uid")
 
     @field_validator("owner_user_id")
     @classmethod
@@ -295,6 +304,7 @@ class FiringRecord(BaseModel):
 
     id: int
     trigger_id: str
+    rule_uid: str
     dedupe_key: str
     status: FiringStatus
     event: TriggerEvent

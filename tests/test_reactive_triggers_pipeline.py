@@ -27,6 +27,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SOURCE_KIND_KEY
 from mindroom.dispatch_source import EXTERNAL_TRIGGER_SOURCE_KIND, REACTIVE_TRIGGER_SOURCE_KIND
 from mindroom.entity_resolution import current_entity_id
+from mindroom.hooks.sender import send_matrix_message
 from mindroom.judgment.answers import JudgmentResult
 from mindroom.judgment.state import MAX_REQUEST_BYTES
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
@@ -172,12 +173,14 @@ def _rule(
 def _firing(
     *,
     trigger_id: str = "trig_1",
+    rule_uid: str = "rule-uid-1",
     dedupe_key: str = "dedupe-1",
     event: TriggerEvent | None = None,
 ) -> FiringRecord:
     return FiringRecord(
         id=1,
         trigger_id=trigger_id,
+        rule_uid=rule_uid,
         dedupe_key=dedupe_key,
         status="claimed",
         event=event or _room_event(),
@@ -1393,3 +1396,94 @@ async def test_dispatch_rejects_non_human_owner_unjoined_bot_origin_mismatch_and
     )
     assert res_store_err == DispatchResult(status="retry", reason="store_error")
     send_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_dispatch_passes_exact_same_deterministic_transaction_id_on_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retrying a claimed firing after a lost response passes the exact same transaction_id to Matrix."""
+    config = _config(tmp_path, agent_users=[_OWNER])
+    runtime_paths = runtime_paths_for(config)
+    store = ReactiveTriggerStore(runtime_paths)
+    memberships = AgentReplyMembershipIndex()
+
+    rule = _rule(trigger_id="txn_rule", owner_user_id=_OWNER)
+    firing = _firing(trigger_id="txn_rule", rule_uid=rule.rule_uid, dedupe_key="dk-crash-retry")
+
+    room_state = RoomStateSnapshot(
+        room_id=_ROOM_B,
+        events={("m.room.member", _OWNER): {"membership": "join"}},
+        creators=frozenset(),
+    )
+    monkeypatch.setattr("mindroom.reactive_triggers.dispatch.read_room_state", AsyncMock(return_value=room_state))
+
+    seen_txns: list[str | None] = []
+
+    async def _flaky_send(
+        _client: object,
+        _room_id: str,
+        _content: dict[str, Any],
+        *,
+        transaction_id: str | None = None,
+    ) -> DeliveredMatrixEvent | None:
+        seen_txns.append(transaction_id)
+        if len(seen_txns) == 1:
+            return None  # Simulate lost response / crash
+        return DeliveredMatrixEvent(event_id="$delivered-after-retry", content_sent={})
+
+    monkeypatch.setattr("mindroom.reactive_triggers.dispatch.send_matrix_message", _flaky_send)
+
+    first = await dispatch_reactive_trigger(
+        rule=rule,
+        firing=firing,
+        triage_reason=None,
+        store=store,
+        target_bot=_bot(),
+        config=config,
+        runtime_paths=runtime_paths,
+        memberships=memberships,
+    )
+    assert first == DispatchResult(status="retry", reason="matrix_send_failed")
+
+    second = await dispatch_reactive_trigger(
+        rule=rule,
+        firing=firing,
+        triage_reason=None,
+        store=store,
+        target_bot=_bot(),
+        config=config,
+        runtime_paths=runtime_paths,
+        memberships=memberships,
+    )
+    assert second == DispatchResult(status="delivered", matrix_event_id="$delivered-after-retry")
+    assert len(seen_txns) == 2
+    assert seen_txns[0] is not None
+    assert seen_txns[0].startswith("rt_")
+    assert seen_txns[0] == seen_txns[1]
+
+
+@pytest.mark.asyncio
+async def test_hook_send_matrix_message_forwards_transaction_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """mindroom.hooks.sender.send_matrix_message forwards keyword-only transaction_id to send_message_result."""
+    mock_send_result = AsyncMock(return_value=DeliveredMatrixEvent(event_id="$ok", content_sent={}))
+    monkeypatch.setattr("mindroom.matrix.client_delivery.send_message_result", mock_send_result)
+
+    client = AsyncMock()
+    delivered = await send_matrix_message(
+        client,
+        _ROOM_B,
+        {"msgtype": "m.text", "body": "hi"},
+        transaction_id="rt_deadbeef",
+    )
+    assert delivered is not None
+    assert delivered.event_id == "$ok"
+    mock_send_result.assert_awaited_once_with(
+        client,
+        _ROOM_B,
+        {"msgtype": "m.text", "body": "hi"},
+        message_type="m.room.message",
+        transaction_id="rt_deadbeef",
+    )
