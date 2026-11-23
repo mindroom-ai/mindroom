@@ -39,6 +39,7 @@ from mindroom.matrix.visible_body import (
     visible_body_from_event_source,
     visible_content_from_content,
 )
+from mindroom.model_selection import THREAD_MODEL_CONTENT_KEY
 from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
 from tests.conftest import (
     FakeMediaResponse,
@@ -462,6 +463,57 @@ class TestResolvedMessageExtraction:
         assert event_info.is_edit is True
         assert event_info.original_event_id == "$original"
         assert event_info.thread_id is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("event_owned", [{}, {THREAD_MODEL_CONTENT_KEY: {"model": "event"}, ROUTE_REVISION_KEY: 2}])
+    async def test_an_edit_whose_sidecar_holds_its_replacement_alone_keeps_what_its_event_owns(
+        self,
+        event_owned: dict[str, object],
+    ) -> None:
+        """The file becomes the edit's replacement layer, which says what that layer of the event says and no more.
+
+        A payload that named a thread model or a route revision would otherwise reach history through
+        ``m.new_content``, where an edit's content is read.
+        """
+        client = _make_client()
+        filed = {
+            "msgtype": "m.text",
+            "body": "Full text",
+            "m.relates_to": {"rel_type": "m.thread", "event_id": "$claimed"},
+            THREAD_MODEL_CONTENT_KEY: {"model": "filed"},
+            ROUTE_REVISION_KEY: 9,
+        }
+        client.download = AsyncMock(
+            return_value=MagicMock(spec=nio.DownloadResponse, body=json.dumps(filed).encode("utf-8")),
+        )
+        event_source = {
+            "type": "m.room.message",
+            "sender": "@person:localhost",
+            "content": {
+                "msgtype": "m.text",
+                "body": "* Preview edit",
+                "m.new_content": {
+                    "msgtype": "m.file",
+                    "body": "Preview edit",
+                    "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+                    "url": "mxc://server/replacement-alone",
+                    **event_owned,
+                },
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+            },
+        }
+
+        resolved = await resolve_event_source_content(event_source, client)
+        edited = await extract_edit_body(event_source, client)
+
+        replacement = {"msgtype": "m.text", "body": "Full text", **event_owned}
+        assert resolved["content"] == {
+            "msgtype": "m.text",
+            "body": "* Full text",
+            "m.new_content": replacement,
+            "m.relates_to": {"rel_type": "m.replace", "event_id": "$original"},
+        }
+        assert edited == ("Full text", replacement)
 
     @pytest.mark.parametrize(
         "preview",

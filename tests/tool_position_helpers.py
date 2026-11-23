@@ -15,6 +15,8 @@ _FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "tool-positions-v1.j
 _CASES = _FIXTURE["cases"]
 # The ``events`` of each ``placeholder_body`` trace that is not sound.
 _KEPT_PLACEHOLDERS = _FIXTURE["kept_placeholders"]
+# The keys of each fallback that does not repeat its ``placeholder_body`` replacement.
+_KEPT_FALLBACKS = _FIXTURE["kept_fallbacks"]
 _SENT_CASES = [case for case in _CASES if case["wire"] is not None]
 _SHELL = {"type": "tool_call_completed", "tool_name": "shell"}
 

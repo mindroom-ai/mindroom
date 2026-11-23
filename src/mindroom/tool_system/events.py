@@ -835,8 +835,9 @@ def _layer_without_markers(layer: Mapping[str, Any], fallback: str | None) -> tu
     # A reply of calls alone keeps its lines, or a reader that puts no markers back would see no message. Only a
     # progress write of a stream, sent outside the outbox, says it is thinking in their place: an outbox row is found
     # again by its exact content, which the release before this one does not restore from ``placeholder_body``.
-    streams = layer.get(STREAM_STATUS_KEY) in NONTERMINAL_STREAM_STATUSES and DURABLE_DELIVERY_ID_KEY not in layer
-    if not streams or kept or other or rest:
+    status = layer.get(STREAM_STATUS_KEY)
+    streams = isinstance(status, str) and status in NONTERMINAL_STREAM_STATUSES
+    if not streams or DURABLE_DELIVERY_ID_KEY in layer or kept or other or rest:
         return None
     return {
         **layer,
@@ -859,8 +860,17 @@ def _each_layer[C: Mapping[str, Any]](
     keys = ("formatted_body", _TOOL_TRACE_KEY) if _TOOL_TRACE_KEY in content else ("formatted_body",)
     # A fallback repeats its replacement after "* ": the same HTML and calls, converted once for both, and its own
     # text. One that shows other HTML or other calls, or whose calls stand elsewhere, is someone's own and stays.
-    shared = all(content.get(key) == replacement.get(key) for key in keys)
-    converted = convert(replacement, body[2:]) if isinstance(body, str) and body.startswith("* ") and shared else None
+    repeats = (
+        isinstance(body, str)
+        and body.startswith("* ")
+        and all(content.get(key) == replacement.get(key) for key in keys)
+    )
+    if has_placeholder_body(replacement) and not (repeats and body == f"* {replacement.get('body')}"):
+        # A placeholder stands in for the text of its own layer. A fallback that is not that text again says
+        # something else, so the replacement is converted alone and the fallback stays, as MindRoom Chat reads it.
+        converted = convert(replacement, None)
+        return {**content, "m.new_content": converted[0]} if converted else content
+    converted = convert(replacement, body[2:]) if repeats else None
     if converted is None:
         return content
     layer, fallback = converted

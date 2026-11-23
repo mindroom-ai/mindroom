@@ -938,7 +938,7 @@ async def prepare_large_message(
         sidecar_required: Raise ``MatrixEventTooLargeError`` instead of falling back to a truncated text without
             the content's sidecar-only keys, for a message that must arrive whole or not at all
         edit_wrapper_budget: Budget a non-edit replacement payload for the late-bound ``m.replace`` wrapper
-            that ``_reply_row_wire_content`` adds when the row is claimed
+            that ``_reply_row_wire_content`` adds when the row is claimed, and upload it as that edit's sidecar
 
     Returns:
         The original content object when no preparation is needed, otherwise
@@ -1034,10 +1034,14 @@ async def prepare_large_message(
         is_edit=is_edit,
     )
 
+    # A replacement that gets its edit envelope when its row is claimed is uploaded as the content it is and as the
+    # replacement of an edit. The release before this one reads an edit's sidecar for its ``m.new_content`` alone,
+    # and every reader takes the same content from the event that creates the reply when no earlier row did.
+    sidecar_content = {**content, "m.new_content": content} if edit_wrapper_budget and not is_edit else content
     mxc_uri, file_info, modified_content = await _build_file_content(
         client,
         room_id,
-        content,
+        sidecar_content,
         preview_text,
         size_limit,
         room_encrypted=encrypted_delivery_safe,

@@ -60,6 +60,7 @@ from mindroom.matrix.large_messages import (
     calculate_event_size,
     should_send_oversized_nonterminal_streaming_edit,
 )
+from mindroom.matrix.media import decrypt_media_bytes
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.matrix.message_content import (
@@ -71,6 +72,7 @@ from mindroom.matrix.room_history_reads import (
     find_outbox_delivery_event_id_via_room_messages,
     missing_outbox_delivery_copy_indices_via_room_messages,
 )
+from mindroom.matrix.visible_body import visible_body_from_event_source
 from mindroom.message_target import MessageTarget
 from mindroom.mid_turn import MidTurnGate, MidTurnOutcome, QueuedMessage
 from mindroom.reply_presentation import Presentation
@@ -92,6 +94,7 @@ from tests.test_mentions import _default_runtime_paths, _make_config, _runtime_p
 from tests.test_response_delivery_gateway import _delivered_event_response, _gateway
 from tests.tool_position_helpers import (
     _CASES,
+    _KEPT_FALLBACKS,
     _KEPT_PLACEHOLDERS,
     _SENT_CASES,
     _SHELL,
@@ -306,8 +309,9 @@ async def test_an_edit_bound_when_claimed_that_is_too_large_for_an_event_is_sent
 ) -> None:
     """A terminal row written while the reply's create is still owed gets its edit envelope only when claimed.
 
-    Its replacement is sized with that envelope, so the event fits. The sidecar holds the replacement alone, as
-    no event existed to edit when it was uploaded, and a read still takes it for the edit the event is.
+    Its replacement is sized with that envelope, so the event fits. No event existed to edit when its sidecar was
+    uploaded, so the file holds the replacement as the content it is and as an edit's ``m.new_content``: the
+    release before this one finds an edit's text nowhere else, and the row creates the reply when no earlier row did.
     """
     outbox = journal_store.principal("agent@alice")
     room_send = AsyncMock(
@@ -357,16 +361,18 @@ async def test_an_edit_bound_when_claimed_that_is_too_large_for_an_event_is_sent
         assert await extract_edit_body(_event(wire, "$edit"), client) == (row.payload["body"], row.payload)
         return
     frozen = {**replacement, DURABLE_DELIVERY_ID_KEY: row.payload[DURABLE_DELIVERY_ID_KEY]}
+    file = row.payload["file"]
+    uploaded = decrypt_media_bytes(sidecars[0], key=file["key"]["k"], sha256=file["hashes"]["sha256"], iv=file["iv"])
+    assert json.loads(uploaded) == {**frozen, "m.new_content": frozen}
     with patch("mindroom.matrix.message_content.download_mxc_bytes", new=AsyncMock(return_value=sidecars[0])):
         edited = await extract_edit_body(_event(wire, "$edit"), client)
         resolved = await resolve_event_source_content(_event(wire, "$edit"), client)
+        # As the row is sent when the reply's create failed for good: it is then the message itself.
+        created = await resolve_event_source_content(_event(row.payload, "$reply"), client)
     assert edited == (replacement["body"], frozen)
-    # As the edit reads that had room for its replacement in its event.
-    assert resolved["content"] == build_edit_event_content(
-        event_id="$reply",
-        new_content=frozen,
-        new_text=replacement["body"],
-    )
+    assert resolved["content"] == {**frozen, "m.new_content": frozen, "m.relates_to": wire["m.relates_to"]}
+    assert created["content"] == {**frozen, "m.new_content": frozen}
+    assert visible_body_from_event_source(created, "") == replacement["body"]
 
 
 @pytest.mark.asyncio
@@ -591,6 +597,19 @@ async def test_a_terminal_reply_of_calls_alone_is_sent_with_its_markers_in_its_t
     wire = _on_the_wire(client)
     assert wire is content
     assert message_judgment_text(_message(wire.get("m.new_content", wire))) is not None
+
+
+@pytest.mark.parametrize("edit", [False, True])
+@pytest.mark.parametrize("stream_status", [{"state": "streaming"}, ["streaming"], 1, True])
+def test_a_reply_of_calls_alone_whose_stream_status_is_no_text_is_sent_with_its_markers(
+    stream_status: object,
+    edit: bool,
+) -> None:
+    """A status that is no string names no stream, whether or not a set of statuses could hold it."""
+    built = {**_marked("🔧 `shell` [1]", [_SHELL]), STREAM_STATUS_KEY: stream_status}
+    content = build_edit_event_content(event_id="$reply", new_content=built, new_text=built["body"]) if edit else built
+
+    assert tool_markers_out_of_text(content) is content
 
 
 @pytest.mark.asyncio
@@ -1425,6 +1444,27 @@ def test_a_placeholder_trace_that_is_not_sound_is_read_as_it_is(kept: dict[str, 
     content = build_edit_event_content(event_id="$reply", new_content=held, new_text=held["body"]) if edit else held
 
     assert tool_markers_in_text(content) is content
+
+
+@pytest.mark.parametrize("fallback_trace", [True, False])
+@pytest.mark.parametrize("kept", _KEPT_FALLBACKS, ids=[kept["name"] for kept in _KEPT_FALLBACKS])
+def test_a_fallback_that_is_not_its_placeholder_replacement_again_is_read_as_it_is(
+    kept: dict[str, Any],
+    fallback_trace: bool,
+) -> None:
+    """The shared fixture pins the fallbacks this reader and MindRoom Chat both keep beside the restored replacement."""
+    case = _case("a streaming reply of calls alone")
+    held = _wire(case)
+    fallback = {key: value for key, value in held.items() if fallback_trace or key != _TRACE_KEY}
+    edit = {
+        **fallback,
+        "body": f"* {held['body']}",
+        **kept["fallback"],
+        "m.new_content": held,
+        "m.relates_to": {"rel_type": "m.replace", "event_id": "$reply"},
+    }
+
+    assert tool_markers_in_text(edit) == {**edit, "m.new_content": _sent(case)}
 
 
 def test_a_placeholder_position_of_zero_is_read_as_chat_reads_it_whether_json_wrote_it_as_a_float_or_not() -> None:
