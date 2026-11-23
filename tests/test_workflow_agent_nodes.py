@@ -1371,3 +1371,28 @@ async def test_denied_card_denies_the_call_and_the_child_goes_on(gated: Workflow
     assert await gated.result("@0", "agent", _PROMPT) == "not sent"
 
     assert (gated.counting_tool.lines, _node(gated).state) == ([], WorkflowNodeState.COMPLETED)
+
+
+@pytest.mark.asyncio
+async def test_failed_agent_turn_does_not_write_output_path(stack: WorkflowStack) -> None:
+    """A failed workflow agent turn does not write its output_path redirect; only a completed turn does."""
+
+    async def fail() -> None:
+        msg = "synthetic model error"
+        raise RuntimeError(msg)
+
+    stack.child_script([Await(fail)], answer("final report"))
+    req: dict[str, object] = {"prompt": "Report.", "output_path": "trial-review.txt"}
+
+    with pytest.raises(NodeFailed) as failed:
+        await stack.result("@0", "agent", req)
+
+    assert failed.value.kind == "failed"
+    assert list(stack.tmp_path.rglob("trial-review.txt")) == []
+    await stack.end_attempt(ScriptRunState.FAILED)
+    await stack.resume(stack.run_id)
+
+    assert await stack.result("@0", "agent", req) == "final report"
+    written = list(stack.tmp_path.rglob("trial-review.txt"))
+    assert len(written) == 1
+    assert "final report" in written[0].read_text()

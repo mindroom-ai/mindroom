@@ -820,7 +820,11 @@ def delegation_call_job(
                 error=error,
             )
             raise
-        result = _finalize_delegation_output(text, output_request)
+        result = (
+            text
+            if child.workflow_run_id is not None and status != "completed"
+            else _finalize_delegation_output(text, output_request)
+        )
         await after_delegation(hook_state, config=config, runtime_paths=runtime_paths, result=result)
         return delegation_outcome(status, result)
 
