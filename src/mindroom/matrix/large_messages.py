@@ -750,7 +750,7 @@ async def upload_json_sidecar(
         # Check if upload was successful
         if not isinstance(upload_result, nio.UploadResponse):
             http_status = response_http_status(upload_result)
-            # Durable uploads wait out 502/503/504 in upload_media_bytes; non-durable progress edits fall back inline.
+            # Durable uploads wait out 502/503/504 in upload_media_bytes; non-durable sends fall back to an inline or truncated preview.
             log = logger.warning if not durable and is_transient_homeserver_status(http_status) else logger.error
             log(
                 "large_message_sidecar_upload_failed",
