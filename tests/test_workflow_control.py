@@ -19,6 +19,7 @@ from mindroom.journal_dispatch import _BINDINGS
 from mindroom.matrix.event_types import WORKFLOW_ANSWER_EVENT_TYPE, WORKFLOW_CONTROL_EVENT_TYPE
 from mindroom.script_runs import manager as manager_module
 from mindroom.script_runs.models import ScriptRunState
+from mindroom.tool_jobs import runtime as tool_job_runtime
 from mindroom.tool_jobs.client_cancel import handle_job_cancel_event
 from mindroom.tool_jobs.publication import _jobs_state_content
 from mindroom.workflow_runs import agent_nodes
@@ -194,6 +195,26 @@ async def test_resume_control_delivered_again_after_its_job_is_gone_starts_nothi
 
     assert await _control(stack) is False
     assert stack.store.get_run(stack.run_id).attempt == 2
+
+
+@pytest.mark.asyncio
+async def test_resume_control_job_expires_through_coordinator(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ended job started by a Resume control event has no chat turn and expires after its retention period."""
+    monkeypatch.setattr(tool_job_runtime, "_ENDED_JOB_RETENTION", timedelta(0))
+    await _fail(stack)
+    assert await _control(stack) is True
+    await stack.until(lambda: stack.store.get_run(stack.run_id).attempt == 2)
+    job_id = stack.store.get_run(stack.run_id).job_id
+    await stack.finish_attempt(result="the resumed report")
+    kept = lambda: [job for job in stack.jobs.retained_jobs() if job.job_id == job_id]  # noqa: E731
+    await stack.until(lambda: [job.status for job in kept()] == ["completed"])
+
+    await stack.coordinator._expire_ended_jobs()
+    assert kept() == []
+    assert await _control(stack) is False
 
 
 @pytest.mark.asyncio

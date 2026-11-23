@@ -574,8 +574,11 @@ class ToolJobRuntimeCoordinator:
                 call = (job.adapter["workflow"], job.adapter.get("node"), job.adapter.get("generation"))
                 return self.workflow_engine().node_prompt(*call) is None
             entity, source = job.owner.recipient, job.source_event_id
-            if source is None or (entity, job.owner.session_id) in protected_sessions:
+            if (entity, job.owner.session_id) in protected_sessions:
                 return False
+            if source is None:
+                # A control-resumed workflow job has no chat turn that could replay it; the run records its job_id.
+                return job.kind == "workflow"
             # The turn that started the job may still need its outcome to recover.
             key = (entity, source)
             if key not in finished:
