@@ -87,10 +87,10 @@ async def resolve_subagent_id(
             raise SubagentSessionError(msg)
         matches: list[str] = []
         for path in sorted(root.glob(f"{subagent_id}*.json")) if root.exists() else ():
-            if not _SUBAGENT_ID_PATTERN.fullmatch(candidate := path.stem) or path.is_symlink():
+            if not _SUBAGENT_ID_PATTERN.fullmatch(candidate := path.stem):
                 continue
             with suppress(SubagentSessionError, OSError, KeyError, TypeError, ValueError):
-                child = _read(path, owner)
+                child = _read(_path(candidate, runtime_paths), owner)
                 if (
                     child.subagent_id == candidate
                     and child.caller_agent_name == owner.agent_name

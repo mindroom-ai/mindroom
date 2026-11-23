@@ -24,6 +24,7 @@ from mindroom import agents
 from mindroom.ai import run_delegated_child_response
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.response import require_ordered_pause_presentation
+from mindroom.approval.tool_approval import evaluate_tool_approval
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
@@ -1222,6 +1223,116 @@ async def test_delegate_policy_denial_never_starts_child(tmp_path: Path, monkeyp
     assert DelegationState.from_metadata(resumed.metadata).children == []
     assert "child was not executed" in str(
         next(message.content for message in resumed.messages if message.tool_call_id == "policy-gated"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_continue_subagent_prefix_projects_resolved_id_for_approval_policy_and_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prefix continue_subagent call exposes the resolved full subagent_id to approval policy and binds it on resume."""
+    paths = _runtime_paths(tmp_path)
+    identity = _leader_identity()
+
+    # Start one child cleanly so we have a real saved 32-hex subagent handle.
+    start_config = _config(paths, child_tools=())
+    start_leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "start-call", agent_name="code", task="Initial task")),
+            answer("Started"),
+        ],
+    )
+    ScriptedAgents({"leader": start_leader, "code": ScriptedModel([answer("First turn done")])}).install(monkeypatch)
+    await respond(
+        "leader",
+        "start child",
+        config=start_config,
+        runtime_paths=paths,
+        identity=identity,
+        run_id="start-run",
+    )
+    start_state = DelegationState.from_metadata(_parent_record(start_config, paths, identity, "start-run").metadata)
+    full_id = start_state.children[0].subagent_id
+    prefix = full_id[:8]
+
+    # Configure a policy script on continue_subagent that requires approval ONLY for the exact full subagent_id.
+    policy_script = paths.config_path.parent / "check_subagent_id.py"
+    policy_script.write_text(
+        f"def check(tool_name, arguments, agent_name):\n"
+        f"    return tool_name == 'continue_subagent' and arguments.get('subagent_id') == {full_id!r}\n",
+        encoding="utf-8",
+    )
+    gated_config = start_config.model_copy(
+        update={
+            "tool_approval": type(start_config.tool_approval).model_validate(
+                {
+                    "rules": [
+                        {
+                            "match": "continue_subagent",
+                            "script": str(policy_script),
+                        },
+                    ],
+                },
+            ),
+        },
+    )
+
+    continue_leader = ScriptedModel(
+        [
+            calls(tool_call("continue_subagent", "continue-gated", subagent_id=prefix, message="Follow up")),
+            answer("Continued safely"),
+        ],
+    )
+    ScriptedAgents({"leader": continue_leader, "code": ScriptedModel([answer("Follow-up done")])}).install(monkeypatch)
+
+    paused = await respond(
+        "leader",
+        "continue child",
+        config=gated_config,
+        runtime_paths=paths,
+        identity=identity,
+        run_id="continue-run",
+    )
+
+    assert isinstance(paused, PausedAttempt)
+    stored = _parent_record(gated_config, paths, identity, "continue-run")
+    state = DelegationState.from_metadata(stored.metadata)
+    assert state.children == []
+    assert state.pending_tools[0]["tool_call_id"] == "continue-gated"
+    assert state.pending_tools[0]["tool_args"]["subagent_id"] == full_id
+    assert paused.tools[0].call.tool_args is not None
+    assert paused.tools[0].call.tool_args["subagent_id"] == full_id
+
+    # Policy evaluation against the projected call sees the resolved full ID and triggers approval.
+    requires_approval, _timeout = await evaluate_tool_approval(
+        gated_config,
+        paths,
+        "continue_subagent",
+        dict(paused.tools[0].call.tool_args),
+        "leader",
+        None,
+    )
+    assert requires_approval is True
+
+    # Resuming with the approved card bound to the projected full-ID arguments succeeds and runs the child.
+    result = await resume(
+        approval_executor(gated_config, paths),
+        paused,
+        _saved_approval_calls(state),
+        agent_name="leader",
+        identity=identity,
+        config=gated_config,
+        runtime_paths=paths,
+        decisions={"continue-gated": True},
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    resumed = _parent_record(gated_config, paths, identity, "continue-run")
+    assert resumed.status is RunStatus.completed
+    assert DelegationState.from_metadata(resumed.metadata).children[0].subagent_id == full_id
+    assert "Follow-up done" in str(
+        next(message.content for message in resumed.messages if message.tool_call_id == "continue-gated"),
     )
 
 

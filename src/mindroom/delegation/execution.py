@@ -932,6 +932,11 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     )
     if isinstance(target, str):
         return resolve_result(target, failed=True)
+    approval_args = (
+        {**(tool.tool_args or {}), "subagent_id": target.previous_child.subagent_id}
+        if target.previous_child is not None
+        else tool.tool_args
+    )
     if target.previous_child is not None:
         args = {**args, "subagent_id": target.previous_child.subagent_id}
 
@@ -988,6 +993,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         state.gates.pop(requirement_key, None)
     if gated and requirement_key not in state.gates:
         projected = deepcopy(tool)
+        projected.tool_args = deepcopy(approval_args)
         projected.external_execution_required = False
         projected.requires_confirmation = True
         projected.approval_type = POLICY_CONFIRMATION_APPROVAL_TYPE
@@ -998,7 +1004,7 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
         return None
     if state.gates.get(requirement_key) is False:
         return resolve_result("Delegation denied by requester; child was not executed.", failed=True)
-    if card is not None and not card.binds_arguments(tool.tool_args):
+    if card is not None and not card.binds_arguments(approval_args):
         # The approved gate card shows the projected call; the child starts from this separate requirement.
         msg = "Saved delegation approval no longer matches its pending arguments; retry the request"
         raise RuntimeError(msg)

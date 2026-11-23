@@ -273,25 +273,65 @@ async def test_subagent_prefix_resolves_only_unique_owned_handle(tmp_path: Path)
     assert foreign_id not in message
     assert deeper_id not in message
 
-    # Corrupt, missing-key, and symlinked sibling files sharing a prefix are skipped silently without aborting lookup.
+
+@pytest.mark.asyncio
+async def test_subagent_prefix_skips_corrupt_and_symlinked_siblings(tmp_path: Path) -> None:
+    """Corrupt, missing-key, symlinked-json, and symlinked-lock sibling handles are skipped cleanly."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])})
+    owner = _identity()
+
+    async def save_child(subagent_id: str) -> None:
+        child = replace(
+            _self_child(config, owner),
+            delegation_id=subagent_id,
+            subagent_id=subagent_id,
+            session_id=f"delegate:leader:leader:{subagent_id}",
+            depth=1,
+            status="completed",
+            result="Done",
+        )
+        await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
+
     clean_prefix = "deadbeef"
     clean_own = f"{clean_prefix}{'1' * 24}"
-    await save_child(clean_own, owner)
+    await save_child(clean_own)
     sessions_root = subagent_sessions_dir(paths)
     (sessions_root / f"{clean_prefix}{'2' * 24}.json").write_text("{not valid json")
     (sessions_root / f"{clean_prefix}{'3' * 24}.json").write_text("{}")
-    (sessions_root / f"{clean_prefix}{'4' * 24}.json").symlink_to(sessions_root / f"{own_first}.json")
+
+    # Symlink target carries the symlink's own stem as its stored subagent_id, so only the symlink guard rejects it.
+    symlink_sibling_id = f"{clean_prefix}{'4' * 24}"
+    await save_child(symlink_sibling_id)
+    external_sibling = tmp_path / f"{symlink_sibling_id}.external.json"
+    (sessions_root / f"{symlink_sibling_id}.json").replace(external_sibling)
+    (sessions_root / f"{symlink_sibling_id}.json").symlink_to(external_sibling)
+
+    # Sibling whose .lock or .active.lock is a symlink is skipped instead of creating false ambiguity.
+    lock_symlink_id = f"{clean_prefix}{'5' * 24}"
+    await save_child(lock_symlink_id)
+    sibling_lock = sessions_root / f"{lock_symlink_id}.lock"
+    sibling_lock.unlink(missing_ok=True)
+    sibling_lock.symlink_to(external_sibling)
+    active_lock_symlink_id = f"{clean_prefix}{'6' * 24}"
+    await save_child(active_lock_symlink_id)
+    (sessions_root / f"{active_lock_symlink_id}.active.lock").symlink_to(external_sibling)
+
     assert await resolve_subagent_id(clean_prefix, owner=owner, runtime_paths=paths, depth=0) == clean_own
 
-    # A symlinked handle alone is never resolved or followed.
+    # A symlinked handle alone (with matching stored subagent_id) is never resolved or followed.
     only_symlink_prefix = "cafebabe"
-    (sessions_root / f"{only_symlink_prefix}{'0' * 24}.json").symlink_to(sessions_root / f"{own_first}.json")
+    only_symlink_id = f"{only_symlink_prefix}{'0' * 24}"
+    await save_child(only_symlink_id)
+    external_only = tmp_path / f"{only_symlink_id}.external.json"
+    (sessions_root / f"{only_symlink_id}.json").replace(external_only)
+    (sessions_root / f"{only_symlink_id}.json").symlink_to(external_only)
     with pytest.raises(SubagentSessionError, match="not available"):
         await resolve_subagent_id(only_symlink_prefix, owner=owner, runtime_paths=paths, depth=0)
 
     # A symlink on the resolved handle's lock file is still refused when loading it.
     lock_path = sessions_root / f"{clean_own}.lock"
     lock_path.unlink(missing_ok=True)
-    lock_path.symlink_to(sessions_root / f"{own_first}.json")
+    lock_path.symlink_to(external_only)
     with pytest.raises(SubagentSessionError, match="symlinks"):
         await load_subagent(clean_own, owner=owner, config=config, runtime_paths=paths, depth=0)
