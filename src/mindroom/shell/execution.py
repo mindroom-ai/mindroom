@@ -1388,7 +1388,11 @@ async def _monitor_process(
         )
         try:
             await _await_process_exit(process, timeout_seconds=timeout_seconds)
-            natural_exit = tracked is None or tracked._stop_reason is None
+            natural_exit = (
+                (tracked is None or tracked._stop_reason is None)
+                and process.returncode is not None
+                and process.returncode >= 0
+            )
         except TimeoutError:
             if tracked is not None and tracked._stop_reason is None:
                 tracked._stop_reason = "timeout"

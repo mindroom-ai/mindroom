@@ -60,7 +60,11 @@ from mindroom.response_turn import (
     stream_with_llm_request_log_context,
 )
 from mindroom.run_storage import bind_turn_session, scope_run_storage
-from mindroom.shell.background_scope import shell_background_scope
+from mindroom.shell.background_scope import (
+    ShellBackgroundScope,
+    bind_shell_background_scope,
+    close_shell_background_scope_shielded,
+)
 from mindroom.teams.attempt import TeamAttempt
 from mindroom.teams.leader import LeaderRun
 from mindroom.teams.members import (
@@ -78,7 +82,7 @@ from mindroom.teams.resume import TeamResume, continued_team_pause, drive_team_d
 from mindroom.teams.runtime import leader_tool_specs, team_usage
 from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
-from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import FailedReply, StructuredStreamChunk
 from mindroom.turn_model import ModelScope, TurnModel, resolve_turn_model
 
@@ -271,7 +275,7 @@ def _leader_run(
     )
 
 
-async def run_prepared_team(
+def run_prepared_team(
     built: BuiltTeam,
     prepared: PreparedTeamExecution,
     *,
@@ -294,17 +298,27 @@ async def run_prepared_team(
         compaction_lifecycle=None,
         turn_recorder=None,
     )
-    async with shell_background_scope():
-        events = leader.start(
-            prepared.run_input(MediaInputs()),
-            run_id=str(uuid4()),
-            user_id=user_id,
-            metadata=prepared.run_metadata,
-            records=None,
-        )
-        async with closing_async_stream(events):
-            async for event in events:
-                yield event
+    scope = ShellBackgroundScope()
+
+    async def events() -> AsyncIterator[TeamRunEvent]:
+        try:
+            stream = context_bound_async_stream(
+                context_factory=lambda: bind_shell_background_scope(scope),
+                stream_factory=lambda: leader.start(
+                    prepared.run_input(MediaInputs()),
+                    run_id=str(uuid4()),
+                    user_id=user_id,
+                    metadata=prepared.run_metadata,
+                    records=None,
+                ),
+            )
+            async with closing_async_stream(stream):
+                async for event in stream:
+                    yield event
+        finally:
+            await close_shell_background_scope_shielded(scope)
+
+    return events()
 
 
 # ---------------------------------------------------------------------------

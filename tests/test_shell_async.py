@@ -1424,3 +1424,57 @@ async def test_auto_backgrounded_natural_exit_preserves_detached_nohup_child(tmp
         if detached_pid is not None:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(detached_pid, signal.SIGKILL)
+
+
+@pytest.mark.asyncio
+async def test_sigterm_to_backgrounded_leader_still_kills_sigterm_ignoring_child(tmp_path: Path) -> None:
+    """Stopping a backgrounded leader via kill -- -PID still SIGKILLs children that ignore SIGTERM."""
+    workspace, fn = _workspace_shell_entrypoint(tmp_path)
+    child_pid_file = workspace / "child.pid"
+    child_script = (
+        "import os, pathlib, signal, sys, time; "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "tmp = pathlib.Path(sys.argv[1] + '.tmp'); "
+        "tmp.write_text(str(os.getpid()), encoding='utf-8'); "
+        "os.replace(tmp, sys.argv[1]); "
+        "time.sleep(30)"
+    )
+    parent_script = (
+        "import subprocess, sys, time; "
+        "subprocess.Popen([sys.executable, '-c', sys.argv[1], sys.argv[2]]); "
+        "time.sleep(30)"
+    )
+    child_pid: int | None = None
+    try:
+        with patch("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2):
+            async with shell_background_scope() as scope:
+                result = await fn.entrypoint([sys.executable, "-c", parent_script, child_script, str(child_pid_file)])
+                assert isinstance(result, str)
+                assert "Still running after 0.2s" in result
+                record = next(iter(scope.records.values()))
+                deadline = time.monotonic() + 3.0
+                while time.monotonic() < deadline:
+                    if child_pid_file.exists():
+                        break
+                    await asyncio.sleep(0.02)
+                assert child_pid_file.exists()
+                child_pid = int(child_pid_file.read_text(encoding="utf-8").strip())
+                os.kill(child_pid, 0)
+                # Simulate model running `kill -- -PID` (SIGTERM to process group).
+                os.killpg(record.pid, signal.SIGTERM)
+                assert record._monitor_task is not None
+                await asyncio.wait_for(record._monitor_task, timeout=5.0)
+                assert record.return_code == -signal.SIGTERM
+                kill_deadline = time.monotonic() + 2.0
+                while time.monotonic() < kill_deadline:
+                    try:
+                        os.kill(child_pid, 0)
+                    except ProcessLookupError:
+                        break
+                    await asyncio.sleep(0.02)
+                else:
+                    pytest.fail(f"SIGTERM-ignoring child {child_pid} stayed alive after leader SIGTERM")
+    finally:
+        if child_pid is not None:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.kill(child_pid, signal.SIGKILL)
