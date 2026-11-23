@@ -171,6 +171,28 @@ def test_redact_sensitive_text_still_hides_credentials_spelled_like_words(text: 
 
 
 @pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Invalid API key provided:\npassword: hunter2", f"Invalid API key provided:\npassword: {REDACTED}"),
+        ("Invalid API key provided: api_key: hunter2", f"Invalid API key provided: api_key: {REDACTED}"),
+        ("Invalid API key client_secret = hunter2", f"Invalid API key client_secret = {REDACTED}"),
+        ("Authorization header Bearer api_key: hunter2", f"Authorization header Bearer api_key: {REDACTED}"),
+        # A value that is not a secret's key is still the credential, whatever follows it.
+        ("Invalid API key provided: hunter2: rejected", f"Invalid API key provided: {REDACTED}: rejected"),
+        ("Invalid API key provided: aGVsbG9Key=", f"Invalid API key provided: {REDACTED}"),
+        ("Invalid API key provided: password=hunter2", f"Invalid API key provided: {REDACTED}"),
+    ],
+)
+def test_redact_sensitive_text_hides_a_secret_assigned_right_after_a_credential_phrase(
+    text: str,
+    expected: str,
+) -> None:
+    """A secret's key after "API key provided:" labels the value after it, which is hidden instead of the key."""
+    assert redact_sensitive_text(text) == expected
+    assert redact_config_text(text) == expected
+
+
+@pytest.mark.parametrize(
     "dsn",
     [
         "postgresql://journal_user:hunter2@db.example:5432/journal",

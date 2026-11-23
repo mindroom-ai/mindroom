@@ -29,6 +29,7 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import ThinkTagSplitter
+from mindroom.providers.names import is_openrouter_gemini_model
 from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.tool_ids import chat_call_id, reformat_tool_call_ids
@@ -70,9 +71,6 @@ _CEREBRAS_SERIAL_TOOL_MODEL = "llama-4-scout-17b-16e-instruct"
 _UNASKED_STREAM_USAGE_ROUTES = frozenset({"groq", "cerebras"})
 # Routes whose thinking models need each assistant message's ``reasoning_content`` sent back, as their APIs document.
 _REASONING_CONTENT_ROUTES = frozenset({"deepseek", "kimi"})
-# OpenRouter model id prefixes routed through its Gemini request translator, whose ``role: "tool"`` parser
-# extracts ``{...}`` substrings out of non-JSON text into ``functionResponse.response`` and drops surrounding text.
-_OPENROUTER_GEMINI_MODEL_PREFIXES = ("google/gemini-", "~google/gemini-")
 # The ``create`` arguments that are request options, not body fields; ``extra_body`` merges into the body.
 SDK_OPTION_KEYS = ("extra_headers", "extra_query", "extra_body", "timeout")
 _CHAT_STOP_REASONS: dict[str, StopReason] = {
@@ -134,9 +132,11 @@ def _wrap_gemini_tool_result(result: ToolResultView) -> str | list[Any]:
 
     OpenRouter's Gemini translator extracts ``{...}`` substrings from plain-text tool content when ``JSON.parse``
     fails, discarding all surrounding text. Sending a valid JSON object matches the native Gemini wire
-    (``providers/gemini/wire.py``) and keeps every character intact. When the content is a list of content parts,
-    OpenRouter concatenates text parts before parsing, so text parts are joined into one wrapped text part while
-    non-text parts and extra part metadata (such as authored ``cache_control``) stay intact.
+    (``providers/gemini/wire.py``) and keeps every character intact. A tool output that is already valid JSON is
+    wrapped too, as on that wire, so OpenRouter's JavaScript ``JSON.parse`` never rounds its integers beyond 53 bits
+    or drops its formatting and duplicate keys. When the content is a list of content parts, OpenRouter concatenates
+    text parts before parsing, so text parts are joined into one wrapped text part while non-text parts and extra
+    part metadata (such as authored ``cache_control``) stay intact.
     """
     content = result.content
     if isinstance(content, str):
@@ -162,18 +162,18 @@ def _wrap_gemini_tool_result(result: ToolResultView) -> str | list[Any]:
 def wraps_openrouter_gemini_tool_results(wire: ChatWire, params: Mapping[str, Any], model_id: str) -> bool:
     """Return whether OpenRouter routes this request's requested ``model`` through its Gemini converter.
 
-    Inspects the requested model (including authored ``request_params`` and ``extra_body`` overrides), not
-    server-selected fallback entries in OpenRouter's ``models`` list.
+    The requested model is the one the SDK sends (``sdk_request_body``): an authored ``extra_body`` ``model``, even
+    a null or empty one, then a ``request_params`` one, then ``model_id``. Server-selected fallback entries in
+    OpenRouter's ``models`` list are not inspected.
     """
     if wire.route != "openrouter":
         return False
     extra_body = params.get("extra_body")
-    effective_model = model_id
-    for source in (extra_body, params):
-        if isinstance(source, Mapping) and isinstance(candidate := source.get("model"), str) and candidate:
-            effective_model = candidate
-            break
-    return effective_model.casefold().startswith(_OPENROUTER_GEMINI_MODEL_PREFIXES)
+    if isinstance(extra_body, Mapping) and "model" in extra_body:
+        effective_model = extra_body["model"]
+    else:
+        effective_model = params.get("model", model_id)
+    return isinstance(effective_model, str) and is_openrouter_gemini_model(effective_model)
 
 
 def _message_content(message: Message, *, wrap_gemini_tool_results: bool = False) -> str | list[Any] | None:

@@ -21,6 +21,7 @@ from mindroom.llm.provider import ReportedUsage, TurnCompleted
 from mindroom.llm.request_context import REQUEST_ATTRIBUTION_FIELDS, current_llm_request_log_context, json_safe
 from mindroom.logging_config import get_logger
 from mindroom.model_usage import metrics_context_tokens
+from mindroom.providers.names import ROUTE_PROVIDERS, is_openrouter_gemini_model
 from mindroom.redaction import redact_sensitive_data
 from mindroom.tool_system.context_bound_streams import closing_async_stream
 
@@ -55,17 +56,17 @@ def _attribution(context: Mapping[str, Any]) -> dict[str, Any]:
     return {name: context[name] for name in REQUEST_ATTRIBUTION_FIELDS if name in context}
 
 
-_OPENROUTER_PROVIDER = "OpenRouter"
-_OPENROUTER_GEMINI_MODEL_PREFIXES = ("google/gemini-", "~google/gemini-")
 _WRAPPED_TOOL_RESULT_KEYS = frozenset({"result", "error"})
 
 
 def _is_openrouter_gemini_request(provider: str, body: Mapping[str, Any], model_id: str) -> bool:
-    if provider != _OPENROUTER_PROVIDER:
-        return False
-    candidate = body.get("model")
-    effective_model = candidate if isinstance(candidate, str) and candidate else model_id
-    return effective_model.casefold().startswith(_OPENROUTER_GEMINI_MODEL_PREFIXES)
+    """Return whether the adapter wrapped this body's tool results, by the ``model`` the body sends, even null or empty."""
+    effective_model = body.get("model", model_id)
+    return (
+        provider == ROUTE_PROVIDERS["openrouter"]
+        and isinstance(effective_model, str)
+        and is_openrouter_gemini_model(effective_model)
+    )
 
 
 def _decode_wrapped_tool_text(text: str) -> dict[str, str] | None:
@@ -144,7 +145,10 @@ def _rewrap_redacted_tool_results(payload: Any, wrapped_positions: Sequence[tupl
 
 
 class _LoggedRequestRecord(dict[str, Any]):
-    """Request-log dict carrying positions of decoded tool envelopes to re-encode after redaction."""
+    """Request-log dict carrying positions of decoded tool envelopes to re-encode after redaction.
+
+    Carrying them on the record keeps ``_write_line(path, payload)`` at the two arguments test monkeypatches replace.
+    """
 
     def __init__(
         self,

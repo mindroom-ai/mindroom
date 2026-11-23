@@ -67,7 +67,7 @@ from mindroom.providers.openai.responses_wire import ResponsesStream
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.media import FALLBACK_MARKER
 from mindroom.token_counting.counts import count
-from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS
+from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, RequestParts
 from tests.history_helpers import stamp_request_identity
 from tests.providers.golden_support import PacedBytes, encoded_response, httpx2_transport, pipeline_provider
 from tests.providers.openai_family_support import (
@@ -3651,6 +3651,57 @@ async def test_openrouter_gemini_tool_wrapping_follows_authored_model_override(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("extra_body_model", [None, ""], ids=["null", "empty"])
+@pytest.mark.parametrize(
+    ("model_id", "request_params"),
+    [("openrouter/auto", {"model": "google/gemini-4-neon"}), ("google/gemini-4-neon", {})],
+    ids=["request_params-gemini", "configured-gemini"],
+)
+async def test_openrouter_gemini_null_or_empty_extra_body_model_is_the_effective_model(
+    tmp_path: Path,
+    model_id: str,
+    request_params: dict[str, Any],
+    extra_body_model: str | None,
+) -> None:
+    """The SDK sends an authored ``extra_body`` ``model`` over every other, even a null or empty one.
+
+    The wire, the context key, and the request log all read that one model, so none of them takes the request for
+    a Gemini one because the configured ID or ``request_params`` names a Gemini model.
+    """
+    log_dir = tmp_path / "request-logs"
+    extra_kwargs = {"request_params": request_params, "extra_body": {"model": extra_body_model}}
+    built = _Built(
+        tmp_path,
+        {"provider": "openrouter", "id": model_id, "api_key": "k", "extra_kwargs": extra_kwargs},
+        _chat_reply(),
+    )
+    assert isinstance(built.adapter, ChatAdapter)
+    provider = pipeline_provider(built.adapter, log_dir=log_dir)
+    quoted_text = 'password="synthetic-quoted-value" followed by public text'
+    compact_json = '{"result":"ok"}'
+    assistant = Message(role="assistant", content="", tool_calls=_calls("call_1", "call_2"))
+    quoted_tool = Message(role="tool", content=quoted_text, tool_call_id="call_1", tool_name="get_weather")
+    compact_tool = Message(role="tool", content=compact_json, tool_call_id="call_2", tool_name="get_weather")
+    request = ModelRequest(messages=[_user(), assistant, quoted_tool, compact_tool])
+
+    await complete(provider, request)
+
+    body = built.body()
+    assert body["model"] == extra_body_model
+    assert [message["content"] for message in body["messages"][2:]] == [quoted_text, compact_json]
+    parts = RequestParts(built.adapter.token_counter)
+    built.adapter._parts(replace(request, messages=()), 0, parts)
+    assert "openrouter_gemini_tool_results" not in parts.flags
+    (log_file,) = log_dir.glob("llm-requests-*.jsonl")
+    logged_text = log_file.read_text(encoding="utf-8")
+    assert "synthetic-quoted-value" not in logged_text
+    logged_messages = json.loads(logged_text.splitlines()[0])["body"]["messages"]
+    # Redacted as plain text, and a result that only looks like a wrapped one is neither decoded nor re-encoded.
+    assert logged_messages[2]["content"] == 'password="***redacted***" followed by public text'
+    assert logged_messages[3]["content"] == compact_json
+
+
+@pytest.mark.asyncio
 async def test_openrouter_gemini_wraps_multimodal_and_multipart_tool_results(tmp_path: Path) -> None:
     """Attached media stays beside one JSON-wrapped text part, and multi-text parts coalesce before wrapping."""
     built = _Built(tmp_path, {"provider": "openrouter", "id": "google/gemini-4-neon", "api_key": "k"}, _chat_reply())
@@ -3774,6 +3825,35 @@ async def test_openrouter_gemini_request_log_redacts_secrets_inside_wrapped_tool
 
 
 @pytest.mark.asyncio
+async def test_openrouter_gemini_request_log_redacts_a_secret_joined_after_an_api_key_message(tmp_path: Path) -> None:
+    """Joining text parts puts a secret assignment right after an API-key message, and the log still hides its value."""
+    log_dir = tmp_path / "request-logs"
+    built = _Built(tmp_path, {"provider": "openrouter", "id": "google/gemini-4-neon", "api_key": "k"}, _chat_reply())
+    provider = pipeline_provider(built.adapter, log_dir=log_dir)
+    assistant = Message(role="assistant", content="", tool_calls=[_CALL])
+    result = Message(
+        role="tool",
+        content=[
+            {"type": "text", "text": "Invalid API key provided:"},
+            {"type": "text", "text": "password: synthetic-canary-value"},
+        ],
+        tool_call_id="call_1",
+        tool_name="get_weather",
+    )
+
+    await complete(provider, ModelRequest(messages=[_user(), assistant, result]))
+
+    assert json.loads(built.body()["messages"][2]["content"]) == {
+        "result": "Invalid API key provided:\npassword: synthetic-canary-value",
+    }
+    (log_file,) = log_dir.glob("llm-requests-*.jsonl")
+    logged_text = log_file.read_text(encoding="utf-8")
+    assert "synthetic-canary-value" not in logged_text
+    logged_content = json.loads(logged_text.splitlines()[0])["body"]["messages"][2]["content"]
+    assert json.loads(logged_content) == {"result": "Invalid API key provided:\npassword: ***redacted***"}
+
+
+@pytest.mark.asyncio
 async def test_request_log_does_not_parse_or_rewrite_non_gemini_tool_results(tmp_path: Path) -> None:
     """Unrelated routes skip wrapped-tool decoding so formatting stays byte-exact and deep JSON never recurses."""
     log_dir = tmp_path / "request-logs"
@@ -3797,8 +3877,6 @@ async def test_request_log_does_not_parse_or_rewrite_non_gemini_tool_results(tmp
 
 def test_openrouter_gemini_context_key_records_wrapper_flag(tmp_path: Path) -> None:
     """The OpenRouter Gemini route records its wrapper flag in ``RequestParts`` so pre-upgrade anchors miss."""
-    from mindroom.token_counting.requests import RequestParts  # noqa: PLC0415
-
     runtime = _runtime(tmp_path)
     gemini = build_provider(
         ModelConfig(provider="openrouter", id="google/gemini-4-neon", api_key="k"),
