@@ -29,7 +29,7 @@ agents:
     tools: [shell]
     access: {users: ["@alice:example.org"]}
 models:
-  default: {provider: openai, id: gpt-6-astra}
+  default: {provider: openai, id: gpt-6.2-astra}
 router: {model: default}
 tailnet_ssh:
   logins: {"@alice:example.org": alice}
