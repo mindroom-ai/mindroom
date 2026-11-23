@@ -1,4 +1,4 @@
-"""Reactive triggers core models, SQLite store, matching, triage, dispatch, and external sources."""
+"""Reactive triggers core models, SQLite store, matching, triage, dispatch, external sources, and service."""
 
 from mindroom.reactive_triggers.dispatch import (
     DispatchResult,
@@ -41,6 +41,7 @@ from mindroom.reactive_triggers.models import (
     TriggerTargetSpec,
     generate_trigger_id,
 )
+from mindroom.reactive_triggers.service import ReactiveTriggerService
 from mindroom.reactive_triggers.store import (
     ClaimResult,
     ReactiveTriggerDuplicateError,
@@ -68,6 +69,7 @@ __all__ = (
     "ReactiveTriggerDuplicateError",
     "ReactiveTriggerLimitError",
     "ReactiveTriggerRecord",
+    "ReactiveTriggerService",
     "ReactiveTriggerStore",
     "ReactiveTriggerStoreError",
     "RetryResult",

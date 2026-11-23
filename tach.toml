@@ -576,6 +576,7 @@ visibility = [
     "mindroom.matrix.transport_progress",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.reaction_dispatch",
+    "mindroom.reactive_triggers.service",
     "mindroom.reply_scope",
     "mindroom.response_runner",
     "mindroom.thread_export.projected_history",
@@ -652,6 +653,7 @@ depends_on = ["mindroom.constants"]
 visibility = [
     "mindroom.listening.service",
     "mindroom.matrix.journal_ingress",
+    "mindroom.reactive_triggers.service",
 ]
 
 [[modules]]
@@ -664,6 +666,7 @@ visibility = [
     "mindroom.listening.service",
     "mindroom.matrix.conversation_hydration",
     "mindroom.matrix.journal_ingress",
+    "mindroom.reactive_triggers.service",
     "mindroom.turns.ingress",
 ]
 
@@ -739,6 +742,7 @@ visibility = [
     "mindroom.matrix.projected_thread_membership",
     "mindroom.matrix_rtc.call_origin",
     "mindroom.post_response_effects",
+    "mindroom.reactive_triggers.service",
     "mindroom.room_activity.note",
     "mindroom.scheduling.tasks",
     "mindroom.thread_export.projected_history",
@@ -3471,6 +3475,7 @@ depends_on = [
     "mindroom.knowledge_graph.runtime",
     "mindroom.egress_broker",
     "mindroom.listening.service",
+    "mindroom.reactive_triggers.service",
 ]
 
 [[modules]]
@@ -4332,6 +4337,7 @@ visibility = [
     "mindroom.orchestration.plugin_http_runtime",
     "mindroom.orchestration.rooms",
     "mindroom.reactive_triggers.dispatch",
+    "mindroom.reactive_triggers.service",
     "mindroom.thread_tags",
     "mindroom.topic_generator",
 ]
@@ -10762,6 +10768,7 @@ depends_on = [
     "mindroom.reactive_triggers.external_sources",
     "mindroom.reactive_triggers.matching",
     "mindroom.reactive_triggers.models",
+    "mindroom.reactive_triggers.service",
     "mindroom.reactive_triggers.store",
     "mindroom.reactive_triggers.triage",
 ]
@@ -10806,4 +10813,20 @@ depends_on = [
     "mindroom.delivery_replay",
     "mindroom.reactive_triggers.matching",
     "mindroom.reactive_triggers.models",
+]
+
+[[modules]]
+path = "mindroom.reactive_triggers.service"
+depends_on = [
+    "mindroom.event_journal",
+    "mindroom.matrix.agent_authored",
+    "mindroom.matrix.conversation_reads",
+    "mindroom.matrix.room_reconciliation",
+    "mindroom.matrix.transport_progress",
+    "mindroom.reactive_triggers.dispatch",
+    "mindroom.reactive_triggers.matching",
+    "mindroom.reactive_triggers.models",
+    "mindroom.reactive_triggers.store",
+    "mindroom.reactive_triggers.triage",
+    "mindroom.thread_tags",
 ]
