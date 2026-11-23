@@ -9451,6 +9451,8 @@ visibility = [
 [[modules]]
 path = "mindroom.orchestration.tool_job_runtime"
 depends_on = [
+    "mindroom.contacts.parties",
+    "mindroom.contacts.turns",
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.publication",
     "mindroom.custom_tools.job",
@@ -9469,6 +9471,7 @@ depends_on = [
     "mindroom.delegation.continuation",
     "mindroom.tool_system.runtime_context",
     "mindroom.matrix.client_delivery",
+    "mindroom.matrix_identifiers",
     "mindroom.constants",
 ]
 visibility = [
