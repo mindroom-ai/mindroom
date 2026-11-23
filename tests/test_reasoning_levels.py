@@ -172,10 +172,10 @@ def test_runtime_validation_distinguishes_an_unsupported_level_from_an_unknown_m
 
     with pytest.raises(
         ConfigRuntimeValidationError,
-        match=r"^Invalid model for agents\.code\.model: unsupported level 'high' for plain; supported: none\. Configured models:",
+        match=r"^agents\.code\.model: unsupported level 'high' for plain; supported: none$",
     ):
         Config.validate_with_runtime(data("plain@high"), runtime_paths)
-    with pytest.raises(ConfigRuntimeValidationError, match=r"^Invalid model for agents\.code\.model: 'nope@high'\."):
+    with pytest.raises(ConfigRuntimeValidationError, match=r"^Unknown model for agents\.code\.model: 'nope@high'\."):
         Config.validate_with_runtime(data("nope@high"), runtime_paths)
 
 
@@ -185,8 +185,39 @@ def test_runtime_validation_distinguishes_an_unsupported_level_from_an_unknown_m
         ({"budgets": {"fallback_model": "sol@xhigh", "monthly_limit_usd": 1}}, "budgets fallback_model"),
         ({"defaults": {"cheap_model": "sol@xhigh"}}, r"defaults\.cheap_model"),
         ({"memory": {"auto_flush": {"extractor": {"model": "sol@xhigh"}}}}, r"memory\.auto_flush\.extractor\.model"),
+        (
+            {
+                "calls": {
+                    "profiles": {
+                        "p": {
+                            "backend": "cascaded",
+                            "model": "sol@xhigh",
+                            "stt": {"model": "s", "credentials_service": "svc"},
+                            "tts": {"model": "t", "credentials_service": "svc"},
+                        },
+                    },
+                },
+            },
+            r"calls\.profiles\.p\.model",
+        ),
+        (
+            {
+                "calls": {
+                    "profiles": {
+                        "p": {
+                            "backend": "live",
+                            "model": "rt",
+                            "credentials_service": "svc",
+                            "voice": "alloy",
+                            "agent_model": "sol@xhigh",
+                        },
+                    },
+                },
+            },
+            r"calls\.profiles\.p\.agent_model",
+        ),
     ],
-    ids=["budgets-fallback", "defaults-cheap", "memory-extractor"],
+    ids=["budgets-fallback", "defaults-cheap", "memory-extractor", "calls-cascaded", "calls-live"],
 )
 def test_config_field_validators_name_supported_levels(extra: dict[str, Any], field: str) -> None:
     with pytest.raises(

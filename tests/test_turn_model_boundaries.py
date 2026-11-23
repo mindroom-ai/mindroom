@@ -181,7 +181,7 @@ def test_a_model_choice_naming_no_configured_model_fails_the_config_load(
 ) -> None:
     """An entity or room model that names no configured model is rejected at load, not at the reply that runs it."""
     paths = test_runtime_paths(tmp_path)
-    with pytest.raises(ConfigRuntimeValidationError, match=re.escape(f"Invalid model for {reference}")):
+    with pytest.raises(ConfigRuntimeValidationError, match=re.escape(f"Unknown model for {reference}")):
         Config.validate_with_runtime({"models": {"default": {"provider": "openai", "id": "d"}}, **raw}, paths)
 
 

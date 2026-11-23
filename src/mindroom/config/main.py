@@ -696,6 +696,18 @@ class Config(BaseModel):
             msg = f"calls.agents references unknown agent(s): {', '.join(unknown_agents)}"
             raise ValueError(msg)
 
+        for profile_name, profile in sorted(self.calls.profiles.items()):
+            field, model = (
+                ("model", profile.model)
+                if isinstance(profile, CascadedCallProfile)
+                else ("agent_model", profile.agent_model)
+                if isinstance(profile, LiveCallProfile)
+                else (None, None)
+            )
+            if field is not None and (reason := unsupported_level_message(self.models, model)):
+                msg = f"calls.profiles.{profile_name}.{field}: {reason}"
+                raise ValueError(msg)
+
         invalid_models = sorted(
             f"{profile_name} -> {profile.model}"
             for profile_name, profile in self.calls.profiles.items()
@@ -805,11 +817,11 @@ class Config(BaseModel):
     def validate_compaction_model_references(self) -> Config:
         """Ensure explicit compaction model and fallback_model references are statically valid."""
         references = self._explicit_compaction_model_references()
-        invalid_references = sorted(
-            f"{label} -> {unsupported_level_message(self.models, model) or model}"
-            for label, model in references
-            if model not in self.models
-        )
+        for label, model in references:
+            if reason := unsupported_level_message(self.models, model):
+                msg = f"{label}: {reason}"
+                raise ValueError(msg)
+        invalid_references = sorted(f"{label} -> {model}" for label, model in references if model not in self.models)
         if invalid_references:
             msg = "Compaction model references unknown models: " + ", ".join(invalid_references)
             raise ValueError(msg)
@@ -1458,14 +1470,14 @@ class Config(BaseModel):
             references.append(("defaults.thread_summary_model", self.defaults.thread_summary_model))
         if self.voice.enabled:
             references.append(("voice.intelligence.model", self.voice.intelligence.model))
-        unknown = [
-            f"{path}: {unsupported_level_message(self.models, model) or repr(model)}"
-            for path, model in references
-            if model not in self.models
-        ]
+        for path, model in references:
+            if reason := unsupported_level_message(self.models, model):
+                msg = f"{path}: {reason}"
+                raise ConfigRuntimeValidationError(msg)
+        unknown = [f"{path}: {model!r}" for path, model in references if model not in self.models]
         if unknown:
             available = ", ".join(sorted(self.models)) or "none"
-            msg = f"Invalid model for {'; '.join(unknown)}. Configured models: {available}"
+            msg = f"Unknown model for {'; '.join(unknown)}. Configured models: {available}"
             raise ConfigRuntimeValidationError(msg)
 
     def _validate_model_extra_kwargs(self, runtime_paths: RuntimePaths) -> None:
