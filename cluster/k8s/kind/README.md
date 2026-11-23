@@ -1,6 +1,9 @@
 # MindRoom Local Development with Kind
 
-Run MindRoom locally with Kubernetes using [kind](https://kind.sigs.k8s.io/).
+> **Looking to deploy MindRoom locally on kind?** Follow the [Kubernetes Quick Start](../../../docs/deployment/kubernetes.md#quick-start-local-kind-cluster) for a Docker-only setup using the runtime and Tuwunel charts.
+> This page is for developing the SaaS platform and instance charts.
+
+Run the MindRoom SaaS platform locally with Kubernetes using [kind](https://kind.sigs.k8s.io/).
 
 Run all commands below from the repository root.
 The bootstrap and diagnostic scripts use your exported `KUBECONFIG`, or the default `~/.kube/config` when unset.
@@ -25,9 +28,9 @@ just cluster-kind-down
 
 - Docker 28 or newer running
 - `just` and Nix (`nix-shell`) for the `just cluster-kind-*` recipes
-- kind (`brew install kind` or [install guide](https://kind.sigs.k8s.io/docs/user/quick-start/#installation))
-- kubectl (`brew install kubectl`)
-- helm (`brew install helm`)
+- kind (`brew install kind`, Linux binary from the [install guide](https://kind.sigs.k8s.io/docs/user/quick-start/#installation), or Step 1 of the [Kubernetes Quick Start](../../../docs/deployment/kubernetes.md#quick-start-local-kind-cluster))
+- kubectl (`brew install kubectl` or [install guide](https://kubernetes.io/docs/tasks/tools/))
+- helm (`brew install helm` or [install guide](https://helm.sh/docs/intro/install/))
 
 ## First Time Setup
 
