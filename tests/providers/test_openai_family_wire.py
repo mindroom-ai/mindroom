@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import importlib
 import json
+import os
 import re
 import threading
 import time
+import urllib.request
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -4018,3 +4021,29 @@ async def test_non_openrouter_gemini_routes_keep_plain_text_tool_results(
         assert sent_content[0]["text"] == text
     else:
         assert sent_content == text
+
+
+def test_openrouter_gemini_upstream_issue_still_open() -> None:
+    """Fail once OpenRouterTeam/docs#815 closes so we re-probe and revert the Gemini tool-result wrapper."""
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "mindroom-tests",
+    }
+    if token := os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN"):
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(
+        "https://api.github.com/repos/OpenRouterTeam/docs/issues/815",
+        headers=headers,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:  # noqa: S310
+            payload = json.load(response)
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        pytest.skip(f"Could not check OpenRouterTeam/docs#815: {exc}")
+    if not isinstance(payload, dict) or not isinstance(state := payload.get("state"), str):
+        pytest.skip(f"Unexpected GitHub API payload for OpenRouterTeam/docs#815: {payload!r}")
+    assert state == "open", (
+        "OpenRouterTeam/docs#815 is no longer open "
+        f"(state={state!r}, state_reason={payload.get('state_reason')!r}). "
+        "Re-probe OpenRouter Gemini tool-result wrapping and revert the workaround if fixed upstream."
+    )
