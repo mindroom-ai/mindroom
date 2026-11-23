@@ -18,7 +18,10 @@ from mindroom.config.models import ModelPricing
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
+from mindroom.workflow_runs.models import WorkflowNodeState
+from mindroom.workflow_runs.store import SupersededAttemptError
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
+from tests.tool_job_helpers import wait_for_status
 from tests.workflow_helpers import WorkflowStack, workflow_stack
 
 if TYPE_CHECKING:
@@ -242,3 +245,61 @@ async def test_get_workflow_shows_the_runs_cost_and_the_attempts(stack: Workflow
     assert (shown["cost_usd"], shown["attempt_cost_usd"]) == (pytest.approx(0.50), pytest.approx(0.10))
     # Each call shows what it used itself.
     assert [node["usage"]["cost_usd"] for node in status["nodes"]] == [pytest.approx(0.40), pytest.approx(0.10)]
+
+
+@pytest.mark.asyncio
+async def test_failed_turn_without_a_model_request_writes_no_phantom_usage_row(stack: WorkflowStack) -> None:
+    """An attempt-1 turn that ended before any model request ran leaves no null-cost ledger row when attempt 2 runs it."""
+    stack.continues = lambda job: job.kind == "delegation"
+
+    async def boom() -> None:
+        msg = "connection closed during shutdown"
+        raise RuntimeError(msg)
+
+    stack.child_script([Await(boom), *answer("never")])
+    await stack.submit("@0", "agent", _PROMPT)
+    await wait_for_status(stack.jobs, stack.node_job("@0").job_id, "failed")
+
+    await stack.restart()
+    stack.child_script(answer("second try", _usd(0.20)))
+    assert await stack.recover() == [stack.run_id]
+    assert await stack.result("@0", "agent", _PROMPT) == "second try"
+
+    assert _ledger(stack) == [("@0", 2, "1")]
+    assert _costs(stack) == (pytest.approx(0.20), pytest.approx(0.20), False)
+
+
+@pytest.mark.asyncio
+async def test_completed_turn_around_restart_stays_generation_one_with_one_ledger_row(stack: WorkflowStack) -> None:
+    """A job that completed in attempt 1 before settlement keeps generation 1 and one attempt-1 ledger row on replay."""
+    stack.continues = lambda job: job.kind == "delegation"
+    gate = asyncio.Event()
+    stack.child_script([Await(gate.wait), *answer("done", _usd(0.20))])
+    await stack.submit("@0", "agent", _PROMPT)
+    await stack.engine.close()
+    gate.set()
+    job_id = stack.node_job("@0").job_id
+    await wait_for_status(stack.jobs, job_id, "completed")
+    # Even if attempt 1 wrote usage before crashing ahead of settle_node, attempt 2 stays idempotent.
+    stack.store.add_usage(
+        stack.run_id,
+        "@0",
+        1,
+        1,
+        1,
+        {"input_tokens": 200_000, "output_tokens": 0, "tool_calls": 0, "cost_usd": 0.20},
+    )
+
+    await stack.restart()
+    assert await stack.recover() == [stack.run_id]
+    assert await stack.result("@0", "agent", _PROMPT) == "done"
+
+    node = stack.store.get_node(stack.run_id, "@0")
+    assert node is not None
+    assert (node.state, node.generation) == (WorkflowNodeState.COMPLETED, 1)
+    assert _ledger(stack) == [("@0", 1, "1")]
+    assert _costs(stack) == (pytest.approx(0.20), 0.0, False)
+    # A superseded epoch cannot append stale usage for a run that has moved on.
+    with pytest.raises(SupersededAttemptError):
+        stack.store.add_usage(stack.run_id, "@0", 2, 1, 1, {"cost_usd": 0.10}, epoch=0)
+    assert _ledger(stack) == [("@0", 1, "1")]

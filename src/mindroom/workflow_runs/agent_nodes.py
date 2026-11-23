@@ -367,15 +367,23 @@ async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[Child
         # What a run that a restart cut short spent, with what the subagents it had received cost: the child that
         # went on after it carries neither. A run without usage made no request, which costs nothing.
         used = turn_usage(prior_usage_of(run), run.metrics)
+        has_tokens = used is not None and bool(used.tokens.input_tokens or used.tokens.output_tokens or used.details)
         own = run_cost_usd(used, model_provider=run.model_provider, model_id=run.model, prices=prices)
-        usage[f"{EARLIER_TURN}{run.run_id}"] = _spent(run, 0 if used is None else own)
+        usage[f"{EARLIER_TURN}{run.run_id}"] = _spent(run, own if has_tokens else 0)
         if (theirs := resumed_subagent_cost(run.metadata).usd) is not None:
             # An entry of its own, as below: a turn without a price keeps what its subagents are known to have cost.
             usage[f"{EARLIER_TURN}sub:{run.run_id}"] = {"cost_usd": theirs}
     if record is not None:
         # The child's cost is its own and its subagents' together: a cost that is theirs alone prices none of its own.
         cost, theirs = child.cost_usd, child.subagents_cost_usd
-        usage[1] = _spent(record, cost if cost is None or theirs is None else None if cost == theirs else cost - theirs)
+        entry = _spent(record, cost if cost is None or theirs is None else None if cost == theirs else cost - theirs)
+        if (
+            job.status == "completed"
+            or entry["input_tokens"]
+            or entry["output_tokens"]
+            or entry["cost_usd"] is not None
+        ):
+            usage[1] = entry
         if theirs is not None:
             usage[f"sub:{child.delegation_id}"] = {"cost_usd": theirs}
         if child.subagents_cost_unknown:

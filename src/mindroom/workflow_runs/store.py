@@ -392,13 +392,17 @@ class WorkflowRunStore:
         turn: int | str,
         attempt: int,
         usage: dict[str, object],
+        *,
+        epoch: int | None = None,
     ) -> bool:
         """Append one model turn's usage; a repeat of the same turn changes nothing and returns false.
 
         *turn* is a number for a turn of the node's own agent, and `sub:<delegation id>` for what the subagents of
-        that agent's turn cost.
+        that agent's turn cost. With *epoch*, a write from a superseded attempt is refused.
         """
         with self._write_transaction(run_id) as connection:
+            if epoch is not None:
+                _fenced(connection, run_id, epoch)
             inserted = connection.execute(
                 "INSERT OR IGNORE INTO workflow_usage (run_id, key, generation, turn, attempt, usage_json) "
                 "VALUES (?, ?, ?, ?, ?, ?)",

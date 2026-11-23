@@ -1355,12 +1355,21 @@ class WorkflowEngine:
             # A turn that no restart cut short worked in the attempt that started it, whichever attempt reads it. What
             # a restart cut short is of the attempt before the one that reads the turn's end.
             cut = [entry for entry in usage if str(entry).startswith(EARLIER_TURN)]
-            for entry, used in usage.items():
-                attempt = run.attempt - (entry in cut) if cut else node.attempt
-                add = partial(self.store.add_usage, node.run_id, node.key, node.generation, entry, attempt, used)
-                await asyncio.to_thread(add)
-            outcome = _turn_outcome(node, kind, text, last=turn >= SCHEMA_TURNS, made=made, stopping=stopping)
             with suppress(SupersededAttemptError):
+                for entry, used in usage.items():
+                    attempt = run.attempt - (entry in cut) if cut else node.attempt
+                    add = partial(
+                        self.store.add_usage,
+                        node.run_id,
+                        node.key,
+                        node.generation,
+                        entry,
+                        attempt,
+                        used,
+                        epoch=epoch,
+                    )
+                    await asyncio.to_thread(add)
+                outcome = _turn_outcome(node, kind, text, last=turn >= SCHEMA_TURNS, made=made, stopping=stopping)
                 if isinstance(outcome, str):
                     correct = partial(self._correct, run, node, epoch, outcome, turn=turn + 1, made=made)
                     outcome = await correct(block=block)
