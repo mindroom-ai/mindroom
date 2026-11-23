@@ -826,11 +826,22 @@ def delegation_call_job(
                 error=error,
             )
             raise
-        result = (
-            text
-            if child.workflow_run_id is not None and status != "completed"
-            else _finalize_delegation_output(text, output_request)
-        )
+        if child.workflow_run_id is None:
+            result = _finalize_delegation_output(text, output_request)
+        elif (
+            status == "completed"
+            and output_request is not None
+            and (record := await read_child_run(child, config, runtime_paths)) is not None
+        ):
+            formatted = finalize_tool_output_file(output_request, record.handover_content or "")
+            receipt = formatted.get("mindroom_tool_output") if isinstance(formatted, dict) else None
+            if isinstance(receipt, dict) and receipt.get("status") == "error":
+                status = "failed"
+                result = str(receipt.get("error") or json.dumps(formatted))
+            else:
+                result = formatted if isinstance(formatted, str) else json.dumps(formatted)
+        else:
+            result = text
         await after_delegation(hook_state, config=config, runtime_paths=runtime_paths, result=result)
         return delegation_outcome(status, result)
 

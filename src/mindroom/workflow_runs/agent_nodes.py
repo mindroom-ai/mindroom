@@ -31,6 +31,7 @@ from mindroom.delegation.state import (
 )
 from mindroom.delegation.targets import resolve_fresh_target
 from mindroom.llm.messages import CUT_OFF_TEXT_KEY, is_own_model_message
+from mindroom.llm.runs import RunStatus
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, JobAccessError
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
@@ -355,7 +356,11 @@ async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[Child
     spent = [replace(child, run_id=run_id) for run_id in job.adapter.get(SPENT_RUNS_KEY, ())]
     continued = bool(spent)
     *cut_short, record = [await read_child_run(turn, runtime.config, runtime.paths) for turn in (*spent, child)]
-    text = (record.handover_content if record is not None else None) or job.result or _NO_ANSWER
+    text = (
+        job.result
+        if job.status != "completed" and record is not None and record.status == RunStatus.completed and job.result
+        else (record.handover_content if record is not None else None) or job.result or _NO_ANSWER
+    )
     usage: TurnUsage = {}
     records = [run for run in (*cut_short, record) if run is not None]
     prices = model_prices(runtime.config)

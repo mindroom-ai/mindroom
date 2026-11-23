@@ -1395,7 +1395,7 @@ async def test_failed_agent_turn_does_not_write_output_path(stack: WorkflowStack
     assert await stack.result("@0", "agent", req) == "final report"
     written = list(stack.tmp_path.rglob("trial-review.txt"))
     assert len(written) == 1
-    assert "final report" in written[0].read_text()
+    assert written[0].read_text() == "final report"
 
 
 @pytest.mark.asyncio
@@ -1410,3 +1410,56 @@ async def test_large_workflow_agent_answer_is_not_auto_saved_to_workspace(
 
     assert await stack.result("@0", "agent", {"prompt": "Generate a dummy report.", **extra}) == text
     assert list(stack.tmp_path.rglob("mindroom_tool_outputs")) == []
+
+
+@pytest.mark.asyncio
+async def test_agent_output_path_writes_exact_raw_answer(stack: WorkflowStack) -> None:
+    """Workflow agent output_path holds only the raw answer the script receives, with no receipt or subagent ID."""
+    text = '{"value": 17}'
+    stack.child_script(answer(text))
+
+    result = await stack.result("@0", "agent", {"prompt": "Give JSON.", "output_path": "object.json"})
+
+    (output,) = list(stack.tmp_path.rglob("object.json"))
+    assert output.read_text() == result == text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("with_tool", "expected_kind"), [(False, "failed"), (True, "indeterminate")])
+async def test_agent_output_path_redirect_failure_fails_node(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    with_tool: bool,
+    expected_kind: str,
+) -> None:
+    """A workflow agent whose output_path redirect fails does not report success and follows the replay rule."""
+    env = {"MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES": "100"}
+    with workflow_stack(tmp_path, extra_tools=("workflow",), require_approval=(), process_env=env) as stack:
+        await stack.open_jobs()
+        stack.script_agents(monkeypatch)
+        await stack.start()
+        try:
+            turns = (
+                [calls(tool_call("append", "c1", line="a")), answer("value " * 100)]
+                if with_tool
+                else [answer("value " * 100)]
+            )
+            stack.child_script(*turns)
+            req: dict[str, object] = {"prompt": "Give data.", "output_path": "data.txt"}
+            with pytest.raises(NodeFailed) as failed:
+                await stack.result("@0", "agent", req)
+            assert failed.value.kind == expected_kind
+            assert "100 byte limit" in (stack.node_job("@0").result or "")
+            if not with_tool:
+                assert "100 byte limit" in str(failed.value)
+            assert list(tmp_path.rglob("data.txt")) == []
+            if with_tool:
+                await stack.end_attempt(ScriptRunState.FAILED)
+                await stack.resume(stack.run_id)
+                with pytest.raises(NodeFailed) as repeated:
+                    await stack.result("@0", "agent", req)
+                assert repeated.value.kind == "indeterminate"
+                assert stack.counting_tool.lines == ["a"]
+        finally:
+            await stack.close()
