@@ -6470,6 +6470,19 @@ async def test_response_lifecycle_reservation_rejects_wrong_target_and_coordinat
     other_target = MessageTarget.resolve("!room:localhost", "$other-thread", "$other")
     reservation = await coordinator.reserve_response_lifecycle(envelope)
 
+    conversation = coordinator._conversation_for(envelope.target)
+    conversation.begin_response_turn()
+    rejected_notice = coordinator.reserve_waiting_human_message(
+        target=envelope.target,
+        response_envelope=_queued_envelope("$waiting-on-rejected"),
+    )
+    assert rejected_notice is not None
+    conversation.finish_response_turn()
+
+    async def _assert_lock_held() -> str:
+        assert conversation.lock.locked()
+        return "owned"
+
     try:
         with response_lifecycle_reservation_context(reservation):
             with pytest.raises(ValueError, match="different coordinator"):
@@ -6478,7 +6491,10 @@ async def test_response_lifecycle_reservation_rejects_wrong_target_and_coordinat
                     response_envelope=envelope,
                     pipeline_timing=None,
                     locked_operation=lambda: asyncio.sleep(0),
+                    notices=(rejected_notice,),
                 )
+            assert not conversation.has_pending_human_messages()
+            assert conversation.lock.locked()
             with pytest.raises(ValueError, match="target does not match"):
                 await coordinator.run_locked_response(
                     target=other_target,
@@ -6486,15 +6502,17 @@ async def test_response_lifecycle_reservation_rejects_wrong_target_and_coordinat
                     pipeline_timing=None,
                     locked_operation=lambda: asyncio.sleep(0),
                 )
+            assert conversation.lock.locked()
             assert (
                 await coordinator.run_locked_response(
                     target=envelope.target,
                     response_envelope=envelope,
                     pipeline_timing=None,
-                    locked_operation=lambda: asyncio.sleep(0, result="owned"),
+                    locked_operation=_assert_lock_held,
                 )
                 == "owned"
             )
+            assert not conversation.lock.locked()
         with response_lifecycle_reservation_context(reservation), pytest.raises(RuntimeError, match="already consumed"):
             await coordinator.run_locked_response(
                 target=envelope.target,
@@ -6503,6 +6521,7 @@ async def test_response_lifecycle_reservation_rejects_wrong_target_and_coordinat
                 locked_operation=lambda: asyncio.sleep(0),
             )
     finally:
+        rejected_notice.release()
         await reservation.release()
 
 

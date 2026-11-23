@@ -334,12 +334,12 @@ class TurnDispatcher:
             _release_notices(turn.notices)
             return
         _release_notices(turn.queued_follow_up_notices)
-        notices_to_release = turn.notices
+        detached = False
 
         def detach_notices() -> None:
-            nonlocal notices_to_release
+            nonlocal detached
             turn.detach_notices()
-            notices_to_release = ()
+            detached = True
 
         try:
             timing_scope = event_timing_scope(turn.event.event_id)
@@ -359,7 +359,8 @@ class TurnDispatcher:
                     timing_scope=timing_scope,
                 )
         finally:
-            _release_notices(notices_to_release)
+            if not detached:
+                _release_notices(turn.notices)
 
     async def dispatch_turn(self, turn: PreparedTurn) -> bool:
         """Run the normal text or command dispatch pipeline for a prepared turn.
@@ -374,19 +375,12 @@ class TurnDispatcher:
         owner shares an event or a completed turn answered an alias; the caller
         still owns the sources then.
         """
-        return await self._dispatch_turn(turn, turn.notices)
-
-    async def _dispatch_turn(
-        self,
-        turn: PreparedTurn,
-        held_notices: tuple[QueuedHumanNoticeReservation, ...],
-    ) -> bool:
-        notices_to_release = held_notices
+        detached = False
 
         def detach_notices() -> None:
-            nonlocal notices_to_release
+            nonlocal detached
             turn.detach_notices()
-            notices_to_release = ()
+            detached = True
 
         try:
             claim = await self.deps.turn_store.merge_claims(turn.claims, turn.handled_turn)
@@ -395,10 +389,9 @@ class TurnDispatcher:
             await self._dispatch_claimed_text_turn(turn, claim, detach_notices=detach_notices)
             return True
         finally:
-            if notices_to_release:
-                held = notices_to_release
+            if not detached:
                 detach_notices()
-                _release_notices(held)
+                _release_notices(turn.notices)
 
     async def _dispatch_claimed_text_turn(
         self,

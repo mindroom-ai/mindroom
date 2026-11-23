@@ -713,14 +713,15 @@ class ResponseLifecycleCoordinator:
         reservation: _ResponseLifecycleReservation | None = None
         try:
             self._assert_target_matches_envelope(target, response_envelope)
-            reservation = _current_response_lifecycle_reservation.get()
-            if reservation is None:
+            inherited = _current_response_lifecycle_reservation.get()
+            if inherited is None:
                 reservation = self._begin_response_turn(response_envelope, signal_queued_message=signal_queued_message)
             else:
-                reservation._consume(self, target)
+                inherited._consume(self, target)
                 # This response now owns the reservation locally. Descendant tasks
                 # must acquire their own lifecycle instead of inheriting this one-shot claim.
                 _current_response_lifecycle_reservation.set(None)
+                reservation = inherited
             conversation = reservation._conversation
             if pipeline_timing is not None:
                 pipeline_timing.mark("lock_wait_start")
