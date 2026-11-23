@@ -23639,16 +23639,17 @@ helm upgrade --install matrix ./cluster/k8s/tuwunel \
   --set tuwunel.serverName=mindroom.local \
   --set tuwunel.registrationToken.existingSecret=matrix-registration \
   --set tuwunel.registrationToken.key=MATRIX_REGISTRATION_TOKEN \
-  --wait --timeout 5m
+  --wait --timeout 10m
 kubectl -n mindroom get pods -l app.kubernetes.io/instance=matrix
 ```
 
 Expected output: Helm prints `STATUS: deployed` and the `matrix-mindroom-tuwunel-*` pod shows `1/1` `Running`.
+Both Helm installs in steps 4–5 print generic `NOTES` hints such as `For production use, provide Matrix settings and runtime secrets.`; those are expected here.
 
 ### 5. Deploy the MindRoom runtime
 
 Write a minimal values file with one model (`default`), one agent (`helper`), and one managed room (`lobby`).
-Setting `join_policy: public` lets any registered account on `mindroom.local` join `#lobby:mindroom.local`; no `access` block is needed because agents admit joined members of their managed rooms and the router admits current room members by default (see [Authorization](https://docs.mindroom.chat/authorization/#responder-access)).
+Setting `join_policy: public` lets any registered account on `mindroom.local` join `#lobby:mindroom.local`; no `access` block is needed because agents admit joined members of their managed rooms and an unset `router.access` restricts nothing (see [Authorization](https://docs.mindroom.chat/authorization/#responder-access)).
 Custom `config.data` must also set `event_journal.backend: postgres` so MindRoom uses the chart's bundled PostgreSQL journal (`database_url_env` defaults to the chart-injected `MINDROOM_EVENT_CACHE_DATABASE_URL`):
 
 ```bash
@@ -23683,62 +23684,68 @@ config:
         rooms: [lobby]
     event_journal:
       backend: postgres
-      database_url_env: MINDROOM_EVENT_CACHE_DATABASE_URL
 EOF
 helm upgrade --install mindroom-runtime ./cluster/k8s/runtime \
   --namespace mindroom \
   -f runtime-values.yaml \
-  --wait --timeout 5m
+  --wait --timeout 10m
 kubectl -n mindroom get pods
-kubectl -n mindroom logs deploy/mindroom-runtime -c mindroom | grep -E "All agents have joined|starting_sync_loop"
+for _ in $(seq 1 60); do
+  kubectl -n mindroom logs deploy/mindroom-runtime -c mindroom | grep -q "All agents have joined their configured rooms" && break
+  sleep 2
+done
+kubectl -n mindroom logs deploy/mindroom-runtime -c mindroom | grep "All agents have joined their configured rooms"
 ```
 
-Expected output: `mindroom-runtime-*` (`2/2` `Running`) and `mindroom-runtime-event-cache-postgres-0` (`1/1` `Running`), plus log lines confirming `All agents have joined their configured rooms` and `starting_sync_loop`.
+Expected output: `mindroom-runtime-*` (`2/2` `Running`), `mindroom-runtime-event-cache-postgres-0` (`1/1` `Running`), and a log line containing `All agents have joined their configured rooms`.
 
 ### 6. Register a test user and get a live reply
 
 Start a background port-forward to Tuwunel and run [`cluster/k8s/kind/chat_check.py`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/kind/chat_check.py).
-The helper uses only the Python standard library, registers `@tester:mindroom.local` with the registration token, caches its access token in `~/.mindroom-kind-auth.json` (`0600`) so reruns avoid Tuwunel's login rate limit, joins `#lobby:mindroom.local`, sends a prompt, and waits for `@mindroom_helper:mindroom.local`'s completed reply:
+The helper uses only the Python standard library, registers `@tester:mindroom.local` once with the registration token, caches its access token in `~/.mindroom-kind-auth.json` (`0600`) so reruns reuse the registered account (deleting the file while Tuwunel keeps its data makes a rerun fail with `M_USER_IN_USE`), joins `#lobby:mindroom.local`, sends a prompt, and waits for `@mindroom_helper:mindroom.local`'s completed reply:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 cd "$HOME/mindroom"
-nohup kubectl -n mindroom port-forward svc/matrix-mindroom-tuwunel 8008:8008 </dev/null >"$HOME/.mindroom-kind-pf.log" 2>&1 &
-echo $! > "$HOME/.mindroom-kind-pf.pid"
-for _ in $(seq 1 60); do
-  curl -fsS http://127.0.0.1:8008/_matrix/client/versions >/dev/null 2>&1 && break
-  sleep 1
-done
-curl -fsS http://127.0.0.1:8008/_matrix/client/versions >/dev/null || { cat "$HOME/.mindroom-kind-pf.log"; exit 1; }
-MATRIX_REGISTRATION_TOKEN=$(kubectl -n mindroom get secret matrix-registration -o go-template='{{.data.MATRIX_REGISTRATION_TOKEN | base64decode}}') \
-  python3 cluster/k8s/kind/chat_check.py
-```
-
-Expected output: `Reply from @mindroom_helper: pong` with exit status `0`.
-
-### 7. Verify restart persistence
-
-Restart the runtime Deployment, ensure the Tuwunel port-forward is up, and run a second prompt using the cached access token:
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-cd "$HOME/mindroom"
-kubectl -n mindroom rollout restart deploy/mindroom-runtime
-kubectl -n mindroom rollout status deploy/mindroom-runtime --timeout=5m
-if ! curl -fsS http://127.0.0.1:8008/_matrix/client/versions >/dev/null 2>&1; then
-  kill "$(cat "$HOME/.mindroom-kind-pf.pid" 2>/dev/null)" 2>/dev/null || true
+{
+  kill "$(cat "$HOME/.mindroom-kind-pf.pid" 2>/dev/null)" 2>/dev/null && sleep 1 || true
   nohup kubectl -n mindroom port-forward svc/matrix-mindroom-tuwunel 8008:8008 </dev/null >"$HOME/.mindroom-kind-pf.log" 2>&1 &
   echo $! > "$HOME/.mindroom-kind-pf.pid"
   for _ in $(seq 1 60); do
     curl -fsS http://127.0.0.1:8008/_matrix/client/versions >/dev/null 2>&1 && break
     sleep 1
   done
-  curl -fsS http://127.0.0.1:8008/_matrix/client/versions >/dev/null || { cat "$HOME/.mindroom-kind-pf.log"; exit 1; }
-fi
+  curl -fsS http://127.0.0.1:8008/_matrix/client/versions >/dev/null || { cat "$HOME/.mindroom-kind-pf.log"; false; }
+} && \
+MATRIX_REGISTRATION_TOKEN=$(kubectl -n mindroom get secret matrix-registration -o go-template='{{.data.MATRIX_REGISTRATION_TOKEN | base64decode}}') \
+  python3 cluster/k8s/kind/chat_check.py
+```
+
+Expected output: `Reply from @mindroom_helper: pong` (the wording may vary; exit status `0` is the check).
+
+### 7. Verify restart persistence
+
+Restart the runtime Deployment, refresh the Tuwunel port-forward, and run a second prompt using the cached access token:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+cd "$HOME/mindroom"
+kubectl -n mindroom rollout restart deploy/mindroom-runtime && \
+kubectl -n mindroom rollout status deploy/mindroom-runtime --timeout=5m && \
+{
+  kill "$(cat "$HOME/.mindroom-kind-pf.pid" 2>/dev/null)" 2>/dev/null && sleep 1 || true
+  nohup kubectl -n mindroom port-forward svc/matrix-mindroom-tuwunel 8008:8008 </dev/null >"$HOME/.mindroom-kind-pf.log" 2>&1 &
+  echo $! > "$HOME/.mindroom-kind-pf.pid"
+  for _ in $(seq 1 60); do
+    curl -fsS http://127.0.0.1:8008/_matrix/client/versions >/dev/null 2>&1 && break
+    sleep 1
+  done
+  curl -fsS http://127.0.0.1:8008/_matrix/client/versions >/dev/null || { cat "$HOME/.mindroom-kind-pf.log"; false; }
+} && \
 python3 cluster/k8s/kind/chat_check.py --prompt "Reply with the single word: still-here"
 ```
 
-Expected output: `deployment "mindroom-runtime" successfully rolled out` followed by `Reply from @mindroom_helper: still-here`.
+Expected output: `deployment "mindroom-runtime" successfully rolled out` followed by `Reply from @mindroom_helper: still-here` (the wording may vary; exit status `0` is the check).
 MindRoom is running.
 
 ### Uninstall
