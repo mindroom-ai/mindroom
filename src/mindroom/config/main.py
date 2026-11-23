@@ -78,6 +78,7 @@ from mindroom.config.models import (
     RouterConfig,
     ToolConfigEntry,
     reject_unmergeable_spellings,
+    unsupported_level_message,
 )
 from mindroom.config.personal_agents import (
     PersonalAgentInstance,
@@ -434,8 +435,10 @@ class Config(BaseModel):
         default_factory=ExternalTriggerPolicyConfig,
         description="Global policy for tool-managed signed external triggers",
     )
-    models: ModelTable = Field(
-        default_factory=ModelTable,
+    # Validating the default turns it into a ``ModelTable`` too, so an omitted ``models`` still reads references.
+    models: dict[str, ModelConfig] = Field(
+        default_factory=dict,
+        validate_default=True,
         description="Model configurations",
     )
     tool_approval: ToolApprovalConfig = Field(
@@ -1442,21 +1445,15 @@ class Config(BaseModel):
             references.append(("defaults.thread_summary_model", self.defaults.thread_summary_model))
         if self.voice.enabled:
             references.append(("voice.intelligence.model", self.voice.intelligence.model))
-        unsupported: list[str] = []
-        unknown: list[str] = []
-        for path, model in references:
-            if model in self.models:
-                continue
-            if reason := self.models.unsupported_level_message(model):
-                unsupported.append(f"{path}: {reason}")
-            else:
-                unknown.append(f"{path}: {model!r}")
-        if unsupported or unknown:
-            parts = list(unsupported)
-            if unknown:
-                available = ", ".join(sorted(self.models)) or "none"
-                parts.append(f"Unknown model for {'; '.join(unknown)}. Configured models: {available}")
-            raise ConfigRuntimeValidationError("; ".join(parts))
+        unknown = [
+            f"{path}: {unsupported_level_message(self.models, model) or repr(model)}"
+            for path, model in references
+            if model not in self.models
+        ]
+        if unknown:
+            available = ", ".join(sorted(self.models)) or "none"
+            msg = f"Unknown model for {'; '.join(unknown)}. Configured models: {available}"
+            raise ConfigRuntimeValidationError(msg)
 
     def _validate_model_extra_kwargs(self, runtime_paths: RuntimePaths) -> None:
         """Reject an ``extra_kwargs`` key the route serving its model does not accept, naming the model."""

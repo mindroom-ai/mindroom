@@ -5,11 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import PurePath, PureWindowsPath
-from typing import TYPE_CHECKING, Any, Literal, Self, cast
+from typing import Any, Literal, Self, cast
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_serializer, model_validator
-from pydantic_core import core_schema
 
 from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
 from mindroom.config.automations import AutomationList  # noqa: TC001
@@ -39,9 +38,6 @@ from mindroom.matrix.identity import valid_matrix_server_name
 from mindroom.model_defaults import OPENAI_EMBEDDING_SMALL
 from mindroom.providers.names import PROVIDER_ROUTES, provider_route
 from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
-
-if TYPE_CHECKING:
-    from pydantic import GetCoreSchemaHandler
 
 
 @dataclass(frozen=True)
@@ -1043,21 +1039,25 @@ def split_model_reference(reference: str) -> tuple[str, str | None]:
     return name, level if separator else None
 
 
+def unsupported_level_message(models: Mapping[str, ModelConfig], reference: object) -> str | None:
+    """Describe why ``name@level`` is rejected when ``name`` exists but ``level`` is not one of its levels."""
+    if not isinstance(reference, str):
+        return None
+    name, level = split_model_reference(reference)
+    if level is None or (model := models.get(name)) is None:
+        return None
+    if model.reasoning is not None and level in model.reasoning.levels:
+        return None
+    supported = ", ".join(model.reasoning.levels) if model.reasoning else "none"
+    return f"unsupported level {level!r} for {name}; supported: {supported}"
+
+
 class ModelTable(dict[str, ModelConfig]):
     """The configured models by name; a reference ``name@level`` also finds the model at one of its levels.
 
     Iteration, ``len``, and serialization see only the configured names, so listings and saved config never show
     a level.
     """
-
-    @classmethod
-    def __get_pydantic_core_schema__(
-        cls,
-        _source_type: object,
-        handler: GetCoreSchemaHandler,
-    ) -> core_schema.CoreSchema:
-        """Validate like ``dict[str, ModelConfig]`` and wrap the result in a ``ModelTable``."""
-        return core_schema.no_info_after_validator_function(cls, handler.generate_schema(dict[str, ModelConfig]))
 
     def _at_level(self, reference: object) -> ModelConfig | None:
         """Return the model a ``name@level`` reference names, or None for any other key."""
@@ -1082,18 +1082,6 @@ class ModelTable(dict[str, ModelConfig]):
         """Return the model ``reference`` names, at its level for ``name@level``, or ``default``."""
         model = self._at_level(reference)
         return super().get(reference, default) if model is None else model
-
-    def unsupported_level_message(self, reference: object) -> str | None:
-        """Describe why ``name@level`` is rejected when ``name`` exists but ``level`` is not one of its levels."""
-        if not isinstance(reference, str):
-            return None
-        name, level = split_model_reference(reference)
-        if level is None or (model := super().get(name)) is None:
-            return None
-        if model.reasoning is not None and level in model.reasoning.levels:
-            return None
-        supported = ", ".join(model.reasoning.levels) if model.reasoning else "none"
-        return f"unsupported level {level!r} for {name}; supported: {supported}"
 
 
 class RouterConfig(BaseModel):

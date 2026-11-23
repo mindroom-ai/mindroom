@@ -32,6 +32,7 @@ from mindroom.approval.tool_approval import (
     scheduled_call_offers_any_arguments,
     toolkit_approval_alias,
 )
+from mindroom.config.models import unsupported_level_message
 from mindroom.config.resolution import entity_timezone
 from mindroom.constants import SCHEDULED_TASK_EVENT_TYPE
 from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
@@ -1066,8 +1067,8 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     if model is not None:
         selected_model = model.strip() or None
     if selected_model is not None and selected_model not in runtime.config.models:
-        msg = runtime.config.models.unsupported_level_message(selected_model)
-        if not isinstance(msg, str):
+        msg = unsupported_level_message(runtime.config.models, selected_model)
+        if msg is None:
             available = ", ".join(sorted(runtime.config.models))
             msg = f"Unknown model: {selected_model}. Available models: {available}"
         raise SchedulingError(msg)

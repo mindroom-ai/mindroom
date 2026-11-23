@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.authorization import addressable_responder_names
+from mindroom.config.models import unsupported_level_message
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.thread_models import (
     THREAD_MODEL_STORAGE_ERROR,
@@ -127,12 +128,7 @@ class ThreadModelTools(Toolkit):
         current = context.current_config
         switchable = context.config.models.keys() & current.models.keys()
         if model_name not in switchable:
-            reason = (
-                current.models.unsupported_level_message(model_name)
-                or context.config.models.unsupported_level_message(model_name)
-                if model_name.partition("@")[0] in switchable
-                else None
-            )
+            reason = unsupported_level_message(current.models, model_name)
             return self._payload(
                 "error",
                 action="switch",

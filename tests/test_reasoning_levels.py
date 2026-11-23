@@ -10,7 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom.config.main import Config, ConfigRuntimeValidationError
-from mindroom.config.models import ModelConfig, ModelTable, ReasoningConfig
+from mindroom.config.models import ModelConfig, ModelTable, ReasoningConfig, unsupported_level_message
 from mindroom.constants import resolve_runtime_paths
 from mindroom.providers.reasoning import apply_reasoning_level
 from mindroom.thread_summary.generation import _summary_provider
@@ -153,12 +153,12 @@ def test_unsupported_level_message_names_the_supported_levels() -> None:
     models = _config(sol=_sol(), plain={"provider": "openai", "id": "gpt-6"}).models
 
     assert (
-        models.unsupported_level_message("sol@xhigh")
+        unsupported_level_message(models, "sol@xhigh")
         == "unsupported level 'xhigh' for sol; supported: low, medium, high"
     )
-    assert models.unsupported_level_message("plain@high") == "unsupported level 'high' for plain; supported: none"
+    assert unsupported_level_message(models, "plain@high") == "unsupported level 'high' for plain; supported: none"
     for ok_or_unknown in ("sol@high", "sol", "nope@high", "missing", "@high", None):
-        assert models.unsupported_level_message(ok_or_unknown) is None
+        assert unsupported_level_message(models, ok_or_unknown) is None
 
 
 def test_runtime_validation_distinguishes_an_unsupported_level_from_an_unknown_model(
@@ -172,7 +172,7 @@ def test_runtime_validation_distinguishes_an_unsupported_level_from_an_unknown_m
 
     with pytest.raises(
         ConfigRuntimeValidationError,
-        match=r"^agents\.code\.model: unsupported level 'high' for plain; supported: none$",
+        match=r"^Unknown model for agents\.code\.model: unsupported level 'high' for plain; supported: none\. Configured models:",
     ):
         Config.validate_with_runtime(data("plain@high"), runtime_paths)
     with pytest.raises(ConfigRuntimeValidationError, match=r"^Unknown model for agents\.code\.model: 'nope@high'\."):
