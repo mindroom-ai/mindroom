@@ -48,6 +48,7 @@ from mindroom.workers.backends.kubernetes_pod_names import (
 from mindroom.workers.models import (
     LABEL_TAILNET_SSH,
     LABEL_TAILNET_SSH_RELEASE,
+    LABEL_WORKER_SANDBOX,
     SCRIPT_RESOURCE_PROFILE_NAMES,
     WORKER_SSH_PORT,
 )
@@ -518,7 +519,7 @@ class KubernetesWorkerBackendConfig:
         if self.worker_port == WORKER_SSH_PORT:
             msg = f"{_PORT_ENV} cannot be {WORKER_SSH_PORT}; that port is reserved for SSH."
             raise WorkerBackendError(msg)
-        for label in (LABEL_TAILNET_SSH, LABEL_TAILNET_SSH_RELEASE):
+        for label in (LABEL_TAILNET_SSH, LABEL_TAILNET_SSH_RELEASE, LABEL_WORKER_SANDBOX):
             if label in self.extra_labels:
                 msg = f"{_EXTRA_LABELS_JSON_ENV} must not set {label}; MindRoom sets it on eligible workers."
                 raise WorkerBackendError(msg)

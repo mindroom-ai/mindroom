@@ -18,6 +18,7 @@ from mindroom.shared_directories.store import (
     shared_directory_relative_path,
 )
 from mindroom.tool_system.worker_routing import (
+    agent_workspace_relative_path,
     normalize_worker_key_part,
     pinned_worker_kind,
     private_instance_scope_root_path,
@@ -36,7 +37,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.constants import RuntimePaths
-    from mindroom.workers.models import WorkerHandle, WorkerLaunchConfig
+    from mindroom.workers.models import WorkerHandle, WorkerLaunchConfig, WorkerSandboxConfig
 
 __all__ = [
     "ScopedWorkspaceMount",
@@ -77,10 +78,11 @@ _DEDICATED_WORKER_RESERVED_ENV_NAMES = frozenset(
 
 @dataclass(frozen=True, slots=True)
 class ScopedWorkspaceMount:
-    """One existing workspace a dedicated worker mounts writable at its canonical path."""
+    """One existing workspace (or sandboxed subpath) a dedicated worker mounts at its canonical path."""
 
     local_path: Path
     worker_visible_path: Path
+    read_only: bool = False
 
 
 def resolve_state_scope_worker_key(worker_key: str, state_scope_worker_key: str | None) -> str:
@@ -209,6 +211,44 @@ def _scoped_workspaces(
     return workspaces
 
 
+def _plan_sandbox_workspace_mounts(
+    *,
+    worker_key: str,
+    storage_root: Path,
+    worker_visible_shared_storage_root: Path,
+    workspaces: tuple[Path, ...],
+    sandbox: WorkerSandboxConfig,
+) -> tuple[ScopedWorkspaceMount, ...]:
+    if sandbox.mount_dir is None:
+        return ()
+    if len(workspaces) != 1:
+        msg = f"Sandboxed mount_dir requires a single agent workspace: {worker_log_id(worker_key)}"
+        raise WorkerBackendError(msg)
+    if "\x00" in sandbox.mount_dir:
+        msg = "Sandbox mount_dir must not contain NUL bytes."
+        raise WorkerBackendError(msg)
+    try:
+        normalized = agent_workspace_relative_path(sandbox.mount_dir).as_posix()
+    except ValueError as exc:
+        msg = f"Invalid sandbox mount_dir: {exc}"
+        raise WorkerBackendError(msg) from exc
+    workspace_rel = workspaces[0].relative_to(storage_root)
+    target_rel = workspace_rel if normalized == "." else workspace_rel / normalized
+    try:
+        with open_directory_within_root(storage_root, target_rel, create=False):
+            pass
+    except (OSError, ValueError) as exc:
+        msg = f"Sandbox mount_dir '{sandbox.mount_dir}' must exist as a real directory without symlinks."
+        raise WorkerBackendError(msg) from exc
+    return (
+        ScopedWorkspaceMount(
+            storage_root / target_rel,
+            worker_visible_shared_storage_root / target_rel,
+            read_only=sandbox.mount_read_only,
+        ),
+    )
+
+
 def plan_scoped_workspace_mounts(
     *,
     worker_key: str,
@@ -217,25 +257,36 @@ def plan_scoped_workspace_mounts(
     private_agent_names: frozenset[str] | None,
     resolved_agent_policies: Mapping[str, ResolvedAgentPolicy],
     create_shared: bool = False,
+    sandbox: WorkerSandboxConfig | None = None,
 ) -> tuple[ScopedWorkspaceMount, ...]:
-    """Return the workspaces one dedicated worker mounts writable, at their canonical paths.
+    """Return the workspaces one dedicated worker mounts, at their canonical paths.
 
     A workspace is mounted only when it is a real directory reached without links
     from the storage root, because container runtimes create missing sources as
     root. ``create_shared`` first creates missing shared workspaces that way; private
     workspaces appear only after the primary writes their scope's identity record.
     Private mounts repeat at the verified legacy spellings of their scope.
+    When ``sandbox`` is set, either no workspace or only one validated directory is mounted.
     """
     storage_root = shared_storage_root(local_shared_storage_root)
-    private_root = private_instances_root_path(storage_root)
-    canonical_scope = private_instance_scope_root_path(storage_root, worker_key)
-    mounts: list[ScopedWorkspaceMount] = []
-    for workspace in _scoped_workspaces(
+    workspaces = _scoped_workspaces(
         worker_key=worker_key,
         storage_root=storage_root,
         private_agent_names=private_agent_names,
         resolved_agent_policies=resolved_agent_policies,
-    ):
+    )
+    if sandbox is not None:
+        return _plan_sandbox_workspace_mounts(
+            worker_key=worker_key,
+            storage_root=storage_root,
+            worker_visible_shared_storage_root=worker_visible_shared_storage_root,
+            workspaces=workspaces,
+            sandbox=sandbox,
+        )
+    private_root = private_instances_root_path(storage_root)
+    canonical_scope = private_instance_scope_root_path(storage_root, worker_key)
+    mounts: list[ScopedWorkspaceMount] = []
+    for workspace in workspaces:
         relative_path = workspace.relative_to(storage_root)
         # A private scope's directory is named after its requester, so logs show the path below it.
         logged_workspace = str(

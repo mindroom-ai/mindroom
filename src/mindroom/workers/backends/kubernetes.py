@@ -403,6 +403,7 @@ class KubernetesWorkerBackend:
                     private_agent_names=spec.private_agent_names,
                     state_scope_worker_key=spec.state_scope_worker_key,
                     resource_profile=spec.resource_profile,
+                    sandbox=spec.sandbox,
                     recreate=replacing_stale_worker,
                 )
                 startup_triggered = should_restart or recreated
@@ -912,6 +913,7 @@ class KubernetesWorkerBackend:
             )
             return False
         try:
+            sandbox = resources.parse_sandbox_annotation(annotations)
             return self._resources.deployment_template_drifted(
                 deployment,
                 worker_key=handle.worker_key,
@@ -921,6 +923,7 @@ class KubernetesWorkerBackend:
                 private_agent_names=private_agent_names,
                 state_scope_worker_key=state_scope_worker_key,
                 resource_profile=resource_profile,
+                sandbox=sandbox,
             )
         except WorkerBackendError:
             logger.warning(
@@ -957,6 +960,7 @@ class KubernetesWorkerBackend:
                 private_agent_names=resources.parse_private_agent_names_annotation(annotations),
                 state_scope_worker_key=resources.parse_state_scope_worker_key_annotation(annotations),
                 resource_profile=resources.parse_resource_profile_annotation(annotations),
+                sandbox=resources.parse_sandbox_annotation(annotations),
             )
         except WorkerBackendError:
             logger.warning(
@@ -1048,6 +1052,7 @@ class KubernetesWorkerBackend:
             private_agent_names=spec.private_agent_names,
             resolved_agent_policies=launch.agent_policies,
             create_shared=create_shared,
+            sandbox=spec.sandbox,
         )
 
     def _plan_shared_directory_mounts(
@@ -1055,6 +1060,8 @@ class KubernetesWorkerBackend:
         spec: WorkerSpec,
         launch: WorkerLaunchConfig,
     ) -> tuple[SharedDirectoryMount, ...]:
+        if spec.sandbox is not None:
+            return ()
         return self._resources.plan_shared_directory_mounts(
             spec.worker_key,
             state_scope_worker_key=spec.state_scope_worker_key,
