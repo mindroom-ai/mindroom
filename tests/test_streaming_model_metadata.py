@@ -47,6 +47,7 @@ from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.matrix.visible_body import visible_content_from_content
 from mindroom.message_target import MessageTarget
+from mindroom.providers.identity import model_identity
 from mindroom.reply_presentation import AGENT_PLACEHOLDER, TEAM_PLACEHOLDER, NoteKind, Presentation
 from mindroom.reply_scope import SpanHandle
 from mindroom.response_sources import Owned, ResponseSources
@@ -1395,6 +1396,46 @@ async def test_handled_failed_reply_without_metadata_builder_reports_error_ai_ru
     if streaming:
         # The failure text reaches the room in a progress edit, after the turn settled its error metadata.
         assert any("prep boom" in str(_visible_content(write).get("body", "")) for write in writes[1:-1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "collected"])
+async def test_cleanup_failure_after_a_completed_run_keeps_its_published_run_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    streaming: bool,
+) -> None:
+    """A turn whose cleanup fails after its run published its metadata keeps the run's id, usage, and cost."""
+    turn = await _setup_turn(
+        tmp_path,
+        monkeypatch,
+        streaming=streaming,
+        scripts={"default": [answer("All done.", usage(10, 5))]},
+    )
+    default = turn.bot.config.models["default"]
+    default.pricing = ModelPricing(input=5, output=30)
+    # The run records its usage under the identity its config prices.
+    turn.models["default"].identity = model_identity(default)
+
+    with patch("mindroom.response_turn.CliTurnLifetime.retire_attempt", side_effect=RuntimeError("cleanup boom")):
+        assert await turn.runner.generate_response(_plain_request(_target())) == Owned()
+
+    writes = turn.homeserver.writes
+    for write in writes[:-1]:
+        assert _stream_status(write) in {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING}
+        assert "status" not in (_ai_run(write) or {})
+    assert "cleanup boom" in str(_visible_content(writes[-1]).get("body", ""))
+    assert _stream_status(writes[-1]) == STREAM_STATUS_COMPLETED
+    final_ai_run = _ai_run(writes[-1])
+    assert final_ai_run is not None
+    assert final_ai_run["version"] == 1
+    assert final_ai_run["status"] == "error"
+    assert final_ai_run["model"]["config"] == "default"
+    assert final_ai_run["run_id"]
+    assert final_ai_run["session_id"]
+    assert final_ai_run["usage"]["total_tokens"] == 15
+    assert float(final_ai_run["cost"]["usd"]) > 0
 
 
 @pytest.mark.asyncio

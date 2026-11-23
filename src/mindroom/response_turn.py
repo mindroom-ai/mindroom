@@ -38,6 +38,7 @@ from mindroom.ai_run_metadata import (
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.cancellation import current_task_is_process_shutdown
 from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
     MATRIX_EVENT_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
@@ -909,11 +910,17 @@ def _persist_interrupted(
 
 
 def publish_error_run_metadata(sinks: TurnSinks) -> None:
-    """Publish terminal error ``io.mindroom.ai_run`` metadata when a handled failure has no run record."""
-    if sinks.run_metadata_collector is None:
+    """Publish terminal error ``io.mindroom.ai_run`` metadata when a handled failure has no run record.
+
+    A run the turn already published, such as one whose cleanup then failed, keeps what it published under the error
+    status.
+    """
+    collector = sinks.run_metadata_collector
+    if collector is None:
         return
     model = sinks.active_model() if sinks.active_model is not None else None
-    sinks.run_metadata_collector.update(build_terminal_note_ai_run_metadata_content("error", model=model))
+    error = build_terminal_note_ai_run_metadata_content("error", model=model)[AI_RUN_METADATA_KEY]
+    collector[AI_RUN_METADATA_KEY] = {**error, **collector.get(AI_RUN_METADATA_KEY, {}), "status": "error"}
 
 
 async def _settle_failure(
