@@ -360,6 +360,19 @@ def test_workflow_refuses_plain_script_toolkit(tmp_path: Path) -> None:
     assert resolve_current_script_tool(context, ScriptToolGrant("calculator", "add"), workflow=True) is not None
 
 
+def test_workflow_refuses_dynamic_workflow_toolkit(tmp_path: Path) -> None:
+    """A workflow run cannot invoke the legacy dynamic_workflow launcher outside its saved persona ceiling."""
+    context = _owner_context(tmp_path, ["calculator", "dynamic_workflow"])
+
+    entries = policy_module._visible_script_tool_entries(context, context.config, workflow=True)
+
+    assert "dynamic_workflow" not in {entry.name for entry in entries}
+    assert (
+        resolve_current_script_tool(context, ScriptToolGrant("dynamic_workflow", "run_workflow"), workflow=True) is None
+    )
+    assert resolve_current_script_tool(context, ScriptToolGrant("calculator", "add"), workflow=True) is not None
+
+
 def test_tool_removed_after_launch_is_refused_at_the_call(tmp_path: Path) -> None:
     """A workflow's call is resolved from the owner's live tools at every call, in both directions."""
 
