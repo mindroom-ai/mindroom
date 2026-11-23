@@ -2714,7 +2714,6 @@ expose = [
     "SavedWorkflowExistsError",
     "WORKFLOWS_DIR",
     "list_saved",
-    "read_saved_source",
     "save_source",
     "validate_workflow_name",
 ]

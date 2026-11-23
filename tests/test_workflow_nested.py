@@ -591,6 +591,43 @@ async def test_agent_whose_cut_short_calls_are_not_all_proven_starts_of_runs_is_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("edited", [False, True], ids=["unchanged", "edited"])
+async def test_restart_during_a_named_nested_run_continues_unless_saved_file_changed(
+    stack: WorkflowStack,
+    edited: bool,
+) -> None:
+    """A nested run started by `name=` continues after restart if unchanged, and is indeterminate if edited."""
+    workspace = stack.context.agent_workspace_root(create=True)
+    workflows = workspace / "workflows"
+    workflows.mkdir(exist_ok=True)
+    saved_file = workflows / "nested-child.py"
+    saved_file.write_text(_SOURCE, encoding="utf-8")
+
+    start = tool_call("start_workflow", "c1", name="nested-child")
+    parent, child = await _cut_short(stack, start)
+    if edited:
+        saved_file.write_text(_SOURCE + "# edited\n", encoding="utf-8")
+    model = stack.child_script(answer("done"))
+
+    await stack.continue_agents()
+    assert parent in await stack.recover()
+    stack.run_id = parent
+    if edited:
+        with pytest.raises(NodeFailed) as cut_short:
+            await stack.result("@0", "agent", _PROMPT)
+        assert (cut_short.value.kind, model.requests) == ("indeterminate", [])
+    else:
+        await stack.until(
+            lambda: (
+                [(run.state, run.attempt) for run in stack.store.child_runs(parent)] == [(WorkflowRunState.RUNNING, 2)]
+            ),
+        )
+        await _report(stack, child.run_id, "named report")
+        assert await stack.result("@0", "agent", _PROMPT) == "done"
+        assert "<start_workflow_result>\nnamed report\n</start_workflow_result>" in _sent(model)
+
+
+@pytest.mark.asyncio
 async def test_agent_cut_short_inside_a_call_that_starts_no_run_goes_on_as_before(stack: WorkflowStack) -> None:
     """The rule above is for calls that start runs: an agent inside any other call is continued and told to check."""
     await stack.start()

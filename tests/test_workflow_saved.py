@@ -33,8 +33,8 @@ from mindroom.workflow_runs.saved import (
     SavedWorkflow,
     SavedWorkflowExistsError,
     list_saved,
-    read_saved_source,
     save_source,
+    validate_workflow_name,
 )
 from tests.identity_helpers import entity_ids
 from tests.workflow_helpers import (
@@ -136,7 +136,7 @@ def test_save_refuses_to_replace_a_different_file_and_accepts_an_identical_one(t
 
     written = save_source(tmp_path, "review-branch", source, description="Review a branch.")
     assert written == tmp_path / "workflows" / "review-branch.py"
-    saved_bytes = read_saved_source(tmp_path, "review-branch")
+    saved_bytes = written.read_bytes()
     assert saved_bytes == b"""\"\"\"Review a branch.\"\"\"\n\ndef main(args):\n    return 1\n"""
 
     # Identical effective content is accepted idempotently.
@@ -145,7 +145,7 @@ def test_save_refuses_to_replace_a_different_file_and_accepts_an_identical_one(t
     # Existing docstring is preserved rather than duplicated.
     with_doc = """\"\"\"Keep me.\"\"\"\n\ndef main(args):\n    return 2\n"""
     kept = save_source(tmp_path, "has-doc", with_doc, description="Ignored description.")
-    assert read_saved_source(tmp_path, "has-doc") == with_doc.encode("utf-8")
+    assert kept.read_bytes() == with_doc.encode("utf-8")
     assert kept == tmp_path / "workflows" / "has-doc.py"
 
     # Different content raises the exact plan error message and leaves the file untouched.
@@ -154,7 +154,7 @@ def test_save_refuses_to_replace_a_different_file_and_accepts_an_identical_one(t
         match=r"^workflows/review-branch\.py already exists with different content\. Pick another name or edit the file\.$",
     ):
         save_source(tmp_path, "review-branch", "def main(args):\n    return 99\n", description="Review a branch.")
-    assert read_saved_source(tmp_path, "review-branch") == saved_bytes
+    assert written.read_bytes() == saved_bytes
 
 
 def test_two_simultaneous_saves_leave_one_winner(tmp_path: Path) -> None:
@@ -184,19 +184,20 @@ def test_two_simultaneous_saves_leave_one_winner(tmp_path: Path) -> None:
     errors = [item for item in results if isinstance(item, SavedWorkflowExistsError)]
     assert len(paths) == 1
     assert len(errors) == 1
-    assert read_saved_source(tmp_path, "race").decode("utf-8") in {first, second}
+    assert (tmp_path / "workflows" / "race.py").read_text(encoding="utf-8") in {first, second}
 
 
 @pytest.mark.parametrize("bad_name", ["../x", "Has Space", "", "-lead", "_lead", "a" * 65, "sub/dir", "ok\n"])
 def test_bad_names_and_symlinks_are_refused(tmp_path: Path, bad_name: str) -> None:
-    """Invalid names are refused by both read and save."""
+    """Invalid names are refused by validation and save."""
     with pytest.raises(ValueError, match="workflow name"):
-        read_saved_source(tmp_path, bad_name)
+        validate_workflow_name(bad_name)
     with pytest.raises(ValueError, match="workflow name"):
         save_source(tmp_path, bad_name, "def main(args):\n    return 1\n", description=None)
 
 
-def test_symlinks_are_refused(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_symlinks_are_refused(tmp_path: Path, stack: WorkflowStack) -> None:
     """A symlinked workflows directory or symlinked workflow file is refused without following the link."""
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -209,21 +210,19 @@ def test_symlinks_are_refused(tmp_path: Path) -> None:
     (ws_dir_link / "workflows").symlink_to(outside)
     symlink_error = r"Too many levels of symbolic links|Not a directory"
     with pytest.raises(OSError, match=symlink_error):
-        read_saved_source(ws_dir_link, "secret")
-    with pytest.raises(OSError, match=symlink_error):
         save_source(ws_dir_link, "other", "def main(args):\n    return 2\n", description=None)
     with pytest.raises(OSError, match=symlink_error):
         list_saved(ws_dir_link)
 
-    # Symlinked file inside a real workflows directory.
-    ws_file_link = tmp_path / "ws_file"
-    (ws_file_link / "workflows").mkdir(parents=True)
-    (ws_file_link / "workflows" / "secret.py").symlink_to(secret)
+    # Symlinked file inside a real workflows directory (and refused by confined engine source read).
+    workspace = stack.context.agent_workspace_root(create=True)
+    (workspace / "workflows").mkdir(parents=True)
+    (workspace / "workflows" / "secret.py").symlink_to(secret)
     with pytest.raises(OSError, match=symlink_error):
-        read_saved_source(ws_file_link, "secret")
-    with pytest.raises(OSError, match=symlink_error):
-        save_source(ws_file_link, "secret", "def main(args):\n    return 2\n", description=None)
-    assert list_saved(ws_file_link) == []
+        save_source(workspace, "secret", "def main(args):\n    return 2\n", description=None)
+    assert list_saved(workspace) == []
+    with pytest.raises(ValueError, match=symlink_error):
+        await stack.engine.resolve_source(stack.context, {"name": "secret"})
 
 
 @pytest.mark.usefixtures("in_main")

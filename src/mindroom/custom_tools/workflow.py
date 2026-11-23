@@ -49,7 +49,7 @@ from mindroom.workflow_runs.models import (
     new_workflow_run_id,
 )
 from mindroom.workflow_runs.replay import result_digest
-from mindroom.workflow_runs.saved import SavedWorkflowExistsError, list_saved, read_saved_source, save_source
+from mindroom.workflow_runs.saved import SavedWorkflowExistsError, list_saved, save_source
 from mindroom.workflow_runs.store import WorkflowRunNotFoundError, WorkflowRunStoreError, owned_run
 
 if TYPE_CHECKING:
@@ -132,7 +132,6 @@ running ones finish, and the run ends interrupted; resume it with a higher max_c
 An agent that needs an approval waits for the user; it does not fail.
 """
 _OWN_RUN = "A call of a run cannot cancel that run or one it is inside. Return from main() or raise to end the script."
-_ONE_SOURCE = "Give exactly one of source, path, or name."
 _AT_MOST_ONE_SOURCE = "Give at most one of source or path."
 _NEEDS_JOBS = "Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow."
 
@@ -228,7 +227,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         engine, context = _waiting_runtime()
         outer = _outer_call()
         # A run inside a run is found by its script, which is read once, here, for its key and for the run.
-        text = None if outer is None else await _source(engine, context, arguments)
+        text = None if outer is None else await engine.resolve_source(context, arguments)
         origin = _inline_origin(context) if text is None else nested_key(outer, text, arguments.get("args"))
         stopped = (
             _resumable_child(engine, outer, text, arguments)
@@ -454,7 +453,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         placement = workflow_placement(context.config, context.runtime_paths)
         if placement not in ("worker", "local"):
             raise WorkflowRunStoreError(placement)
-        text = (source or await _source(engine, context, arguments)).decode()
+        text = (source or await engine.resolve_source(context, arguments)).decode()
         hours = self.limits.max_runtime_hours
         intent = WorkflowRun(
             run_id=new_workflow_run_id(),
@@ -897,20 +896,6 @@ def _outer_call() -> tuple[str, str, int] | None:
     if child is None or child.child.workflow_run_id is None:
         return calling_node()
     return child.child.workflow_run_id, str(child.child.workflow_node_key), child.child.workflow_generation or 1
-
-
-async def _source(engine: WorkflowEngine, context: ToolRuntimeContext, arguments: Mapping[str, Any]) -> bytes:
-    """Return the script a start names, read once: inline source, workspace file, or saved workflow."""
-    source, path, name = arguments.get("source"), arguments.get("path"), arguments.get("name")
-    if sum(value is not None for value in (source, path, name)) != 1:
-        raise WorkflowRunStoreError(_ONE_SOURCE)
-    if name is not None:
-        try:
-            workspace = await asyncio.to_thread(context.agent_workspace_root, create=False)
-            return await asyncio.to_thread(read_saved_source, workspace, str(name))
-        except (OSError, ValueError) as exc:
-            raise WorkflowRunStoreError(str(exc)) from exc
-    return await engine.scripts.resolve_source(context, source=source, path=path)
 
 
 def _inline_origin(context: ToolRuntimeContext) -> str:

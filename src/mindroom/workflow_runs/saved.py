@@ -46,30 +46,6 @@ def validate_workflow_name(name: str) -> str:
     return name
 
 
-def read_saved_source(workspace: Path, name: str) -> bytes:
-    """Read `<workspace>/workflows/<name>.py` through no-follow directory descriptors."""
-    validate_workflow_name(name)
-    filename = f"{name}.py"
-    try:
-        with open_directory_within_root(workspace, WORKFLOWS_DIR) as directory_fd:
-            payload = read_regular_file_within_root(
-                directory_fd,
-                filename,
-                max_bytes=MAX_SOURCE_BYTES + 1,
-                truncate=True,
-            )
-    except FileNotFoundError as exc:
-        msg = f"Saved workflow {name!r} not found."
-        raise FileNotFoundError(msg) from exc
-    if not payload:
-        msg = "Background script source must not be empty."
-        raise ValueError(msg)
-    if len(payload) > MAX_SOURCE_BYTES:
-        msg = f"Background script source exceeds the {MAX_SOURCE_BYTES}-byte limit."
-        raise ValueError(msg)
-    return payload
-
-
 def list_saved(workspace: Path) -> list[SavedWorkflow]:
     """List valid saved workflow files in `<workspace>/workflows`, parsed with AST only."""
     try:

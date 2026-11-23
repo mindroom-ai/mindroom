@@ -75,7 +75,7 @@ from mindroom.workflow_runs.replay import (
     result_digest,
     split_key,
 )
-from mindroom.workflow_runs.saved import read_saved_source, validate_workflow_name
+from mindroom.workflow_runs.saved import WORKFLOWS_DIR, validate_workflow_name
 from mindroom.workflow_runs.store import SupersededAttemptError, WorkflowRunNotFoundError, WorkflowRunStoreError
 from mindroom.workflow_runs.structured import (
     SCHEMA_TURNS,
@@ -703,6 +703,20 @@ class WorkflowEngine:
         run = await self._current_run(attempt)
         return {"run_id": run.run_id, "attempt": run.attempt, "args": run.args}
 
+    async def resolve_source(self, context: ToolRuntimeContext, arguments: Mapping[str, Any]) -> bytes:
+        """Return the script a start names: inline source, workspace file, or saved workflow."""
+        source, path, name = arguments.get("source"), arguments.get("path"), arguments.get("name")
+        if sum(value is not None for value in (source, path, name)) != 1:
+            msg = "Give exactly one of source, path, or name."
+            raise WorkflowRunStoreError(msg)
+        if name is not None:
+            try:
+                validate_workflow_name(str(name))
+            except ValueError as exc:
+                raise WorkflowRunStoreError(str(exc)) from exc
+            path = f"{WORKFLOWS_DIR}/{name}.py"
+        return await self.scripts.resolve_source(context, source=source, path=path)
+
     async def saved_source(self, attempt: ScriptRunRecord, name: str) -> tuple[bytes, str]:
         """Return the saved workflow bytes and SHA-256 for *name*, snapshotted once per attempt."""
         run = await self._current_run(attempt)
@@ -718,11 +732,12 @@ class WorkflowEngine:
         if isinstance(context, str):
             raise WorkflowRunStoreError(context)
         try:
-            workspace = await asyncio.to_thread(context.agent_workspace_root, create=False)
-            raw = await asyncio.to_thread(read_saved_source, workspace, name)
-        except FileNotFoundError as exc:
-            raise LookupError(str(exc)) from exc
-        except (OSError, ValueError) as exc:
+            raw = await self.scripts.resolve_source(context, source=None, path=f"{WORKFLOWS_DIR}/{name}.py")
+        except ValueError as exc:
+            missing = isinstance(exc.__cause__, FileNotFoundError)
+            if missing:
+                msg = f"Saved workflow {name!r} not found."
+                raise LookupError(msg) from exc
             raise WorkflowRunStoreError(str(exc)) from exc
         sha256 = hashlib.sha256(raw).hexdigest()
         return await asyncio.to_thread(self.store.put_source, run.run_id, run.attempt, run.epoch, name, raw, sha256)
@@ -1123,11 +1138,7 @@ class WorkflowEngine:
         since. Without it the answer is None, and nobody can say what the call did.
         """
         try:
-            text = await self.scripts.resolve_source(
-                context,
-                source=arguments.get("source"),
-                path=arguments.get("path"),
-            )
+            text = await self.resolve_source(context, arguments)
         except ValueError:
             return None
         key = nested_key(outer, text, arguments.get("args"))
