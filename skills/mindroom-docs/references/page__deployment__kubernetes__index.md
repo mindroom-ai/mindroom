@@ -1,7 +1,201 @@
 # Kubernetes Deployment
 
-This page covers running MindRoom on Kubernetes with Helm: the available charts, a runtime-only install, worker backends for isolated tool execution, and backup and restore.
+This page covers running MindRoom on Kubernetes with Helm: a local `kind` quick start, the available charts, a production runtime-only install, worker backends for isolated tool execution, and backup and restore.
 For the hosted multi-tenant platform (platform and instance charts), see [SaaS Platform](https://docs.mindroom.chat/deployment/saas-platform/).
+
+## Quick Start: Local kind Cluster
+
+Deploy MindRoom and a standalone Tuwunel Matrix homeserver on a single-node local [`kind`](https://kind.sigs.k8s.io/) cluster and verify a live agent reply.
+
+Preconditions:
+
+- Linux or macOS with Docker running (no `sudo` required), plus `git`, `curl`, `python3`, and `openssl`.
+- `OPENAI_API_KEY` exported in your shell. This quick start uses OpenAI; see [Provider API Keys from Kubernetes Secrets](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#provider-api-keys-from-kubernetes-secrets) and [Models](https://docs.mindroom.chat/configuration/models/) to configure another provider.
+
+Each step's block is self-contained.
+
+### 1. Install `kind`, `kubectl`, and `helm`
+
+Install pinned binaries into `~/.local/bin` for your OS and architecture:
+
+```bash
+mkdir -p "$HOME/.local/bin"
+export PATH="$HOME/.local/bin:$PATH"
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m | sed -e 's/x86_64/amd64/' -e 's/aarch64/arm64/')
+curl -fsSLo "$HOME/.local/bin/kind" "https://kind.sigs.k8s.io/dl/v0.33.0/kind-${OS}-${ARCH}"
+curl -fsSLo "$HOME/.local/bin/kubectl" "https://dl.k8s.io/release/v1.37.2/bin/${OS}/${ARCH}/kubectl"
+curl -fsSLo "$HOME/.local/bin/helm.tgz" "https://get.helm.sh/helm-v3.22.1-${OS}-${ARCH}.tar.gz"
+tar -xzOf "$HOME/.local/bin/helm.tgz" "${OS}-${ARCH}/helm" > "$HOME/.local/bin/helm"
+rm -f "$HOME/.local/bin/helm.tgz"
+chmod +x "$HOME/.local/bin/kind" "$HOME/.local/bin/kubectl" "$HOME/.local/bin/helm"
+kind version && kubectl version --client && helm version --short
+```
+
+Expected output: versions for `kind v0.33.0`, `Client Version: v1.37.2`, and `v3.22.1+...`.
+
+### 2. Clone the repository and create the cluster
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+git clone https://github.com/mindroom-ai/mindroom.git "$HOME/mindroom"
+cd "$HOME/mindroom"
+kind create cluster --name mindroom
+kubectl wait --for=condition=Ready node/mindroom-control-plane --timeout=120s
+```
+
+Expected output: `node/mindroom-control-plane condition met`.
+
+### 3. Create the namespace and Secrets
+
+Generate a shared Matrix registration token and store your OpenAI key in Kubernetes Secrets via stdin so secrets do not appear in process arguments:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+cd "$HOME/mindroom"
+: "${OPENAI_API_KEY:?export OPENAI_API_KEY first}"
+kubectl create namespace mindroom
+openssl rand -hex 32 | tr -d '\n' | kubectl -n mindroom create secret generic matrix-registration \
+  --from-file=MATRIX_REGISTRATION_TOKEN=/dev/stdin
+printf %s "$OPENAI_API_KEY" | kubectl -n mindroom create secret generic llm-credentials \
+  --from-file=OPENAI_API_KEY=/dev/stdin
+kubectl -n mindroom get secrets matrix-registration llm-credentials
+```
+
+Expected output: both `matrix-registration` and `llm-credentials` listed in namespace `mindroom`.
+
+### 4. Install the Tuwunel Matrix homeserver
+
+Install Tuwunel first so MindRoom can register its agent accounts on startup.
+Use `mindroom.local` as the local server name (Tuwunel cannot change `serverName` after first start without wiping its database):
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+cd "$HOME/mindroom"
+helm upgrade --install matrix ./cluster/k8s/tuwunel \
+  --namespace mindroom \
+  --set tuwunel.serverName=mindroom.local \
+  --set tuwunel.registrationToken.existingSecret=matrix-registration \
+  --set tuwunel.registrationToken.key=MATRIX_REGISTRATION_TOKEN \
+  --wait --timeout 5m
+kubectl -n mindroom get pods -l app.kubernetes.io/instance=matrix
+```
+
+Expected output: Helm prints `STATUS: deployed` and the `matrix-mindroom-tuwunel-*` pod shows `1/1` `Running`.
+
+### 5. Deploy the MindRoom runtime
+
+Write a minimal values file with one model (`default`), one agent (`helper`), and one managed room (`lobby`).
+Setting `join_policy: public` lets any registered account on `mindroom.local` join `#lobby:mindroom.local`; no `access` block is needed because agents admit joined members of their managed rooms and the router admits current room members by default (see [Authorization](https://docs.mindroom.chat/authorization/#responder-access)).
+Custom `config.data` must also set `event_journal.backend: postgres` so MindRoom uses the chart's bundled PostgreSQL journal (`database_url_env` defaults to the chart-injected `MINDROOM_EVENT_CACHE_DATABASE_URL`):
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+cd "$HOME/mindroom"
+cat <<'EOF' > runtime-values.yaml
+matrix:
+  homeserverUrl: http://matrix-mindroom-tuwunel.mindroom.svc.cluster.local:8008
+  serverName: mindroom.local
+  registrationToken:
+    existingSecret: matrix-registration
+    key: MATRIX_REGISTRATION_TOKEN
+providerCredentials:
+  - provider: openai
+    existingSecret: llm-credentials
+    key: OPENAI_API_KEY
+config:
+  data: |
+    models:
+      default:
+        provider: openai
+        id: gpt-6-luna
+    rooms:
+      lobby:
+        display_name: Lobby
+        description: Quick-start chat room
+        join_policy: public
+    agents:
+      helper:
+        display_name: Helper
+        role: A concise, helpful assistant.
+        rooms: [lobby]
+    event_journal:
+      backend: postgres
+      database_url_env: MINDROOM_EVENT_CACHE_DATABASE_URL
+EOF
+helm upgrade --install mindroom-runtime ./cluster/k8s/runtime \
+  --namespace mindroom \
+  -f runtime-values.yaml \
+  --wait --timeout 5m
+kubectl -n mindroom get pods
+kubectl -n mindroom logs deploy/mindroom-runtime -c mindroom | grep -E "All agents have joined|starting_sync_loop"
+```
+
+Expected output: `mindroom-runtime-*` (`2/2` `Running`) and `mindroom-runtime-event-cache-postgres-0` (`1/1` `Running`), plus log lines confirming `All agents have joined their configured rooms` and `starting_sync_loop`.
+
+### 6. Register a test user and get a live reply
+
+Start a background port-forward to Tuwunel and run [`cluster/k8s/kind/chat_check.py`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/kind/chat_check.py).
+The helper uses only the Python standard library, registers `@tester:mindroom.local` with the registration token, caches its access token in `~/.mindroom-kind-auth.json` (`0600`) so reruns avoid Tuwunel's login rate limit, joins `#lobby:mindroom.local`, sends a prompt, and waits for `@mindroom_helper:mindroom.local`'s completed reply:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+cd "$HOME/mindroom"
+nohup kubectl -n mindroom port-forward svc/matrix-mindroom-tuwunel 8008:8008 </dev/null >"$HOME/.mindroom-kind-pf.log" 2>&1 &
+echo $! > "$HOME/.mindroom-kind-pf.pid"
+for _ in $(seq 1 60); do
+  curl -fsS http://127.0.0.1:8008/_matrix/client/versions >/dev/null 2>&1 && break
+  sleep 1
+done
+curl -fsS http://127.0.0.1:8008/_matrix/client/versions >/dev/null || { cat "$HOME/.mindroom-kind-pf.log"; exit 1; }
+MATRIX_REGISTRATION_TOKEN=$(kubectl -n mindroom get secret matrix-registration -o go-template='{{.data.MATRIX_REGISTRATION_TOKEN | base64decode}}') \
+  python3 cluster/k8s/kind/chat_check.py
+```
+
+Expected output: `Reply from @mindroom_helper: pong` with exit status `0`.
+
+### 7. Verify restart persistence
+
+Restart the runtime Deployment, ensure the Tuwunel port-forward is up, and run a second prompt using the cached access token:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+cd "$HOME/mindroom"
+kubectl -n mindroom rollout restart deploy/mindroom-runtime
+kubectl -n mindroom rollout status deploy/mindroom-runtime --timeout=5m
+if ! curl -fsS http://127.0.0.1:8008/_matrix/client/versions >/dev/null 2>&1; then
+  kill "$(cat "$HOME/.mindroom-kind-pf.pid" 2>/dev/null)" 2>/dev/null || true
+  nohup kubectl -n mindroom port-forward svc/matrix-mindroom-tuwunel 8008:8008 </dev/null >"$HOME/.mindroom-kind-pf.log" 2>&1 &
+  echo $! > "$HOME/.mindroom-kind-pf.pid"
+  for _ in $(seq 1 60); do
+    curl -fsS http://127.0.0.1:8008/_matrix/client/versions >/dev/null 2>&1 && break
+    sleep 1
+  done
+  curl -fsS http://127.0.0.1:8008/_matrix/client/versions >/dev/null || { cat "$HOME/.mindroom-kind-pf.log"; exit 1; }
+fi
+python3 cluster/k8s/kind/chat_check.py --prompt "Reply with the single word: still-here"
+```
+
+Expected output: `deployment "mindroom-runtime" successfully rolled out` followed by `Reply from @mindroom_helper: still-here`.
+MindRoom is running.
+
+### Uninstall
+
+When you want to remove the local cluster, stop the port-forward, delete the cluster, and remove the cached credentials and values file:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+kill "$(cat "$HOME/.mindroom-kind-pf.pid" 2>/dev/null)" 2>/dev/null || true
+rm -f "$HOME/.mindroom-kind-pf.pid" "$HOME/.mindroom-kind-pf.log" "$HOME/.mindroom-kind-auth.json" "$HOME/mindroom/runtime-values.yaml"
+kind delete cluster --name mindroom
+```
+
+Expected output: `Deleted nodes: ["mindroom-control-plane"]`.
+
+### Next steps
+
+For production clusters, continue with [Runtime-Only Deployment](#runtime-only-deployment) (external ConfigMaps, PVCs, and Secrets), [Worker Backends](#worker-backends) (dedicated Kubernetes workers), and [Backup and Restore](#backup-and-restore).
+To provision the hosted multi-tenant platform on Hetzner Cloud, see [SaaS Platform](https://docs.mindroom.chat/deployment/saas-platform/) and [`cluster/terraform/terraform-k8s/`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/terraform/terraform-k8s/README.md).
 
 ## Charts
 
@@ -15,6 +209,8 @@ For the hosted multi-tenant platform (platform and instance charts), see [SaaS P
 | Platform | `cluster/k8s/platform/` | SaaS control plane (API, frontend, provisioner) |
 
 ## Prerequisites
+
+These prerequisites apply to production clusters; the [local `kind` quick start](#quick-start-local-kind-cluster) requires Docker plus `git`, `curl`, `python3`, and `openssl` (no `sudo` and no existing cluster).
 
 - A Kubernetes cluster (tested with k3s via kube-hetzner)
 - `kubectl` and `helm`

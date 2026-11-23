@@ -134,14 +134,14 @@ eventCache:
 ```
 
 When `config.create` is enabled and `config.data` is empty, the chart renders a minimal config whose `event_journal` section follows `eventCache`.
-When using `config.existingConfigMap` or custom `config.data`, keep that config's `event_journal` settings aligned with the chart values: for PostgreSQL, set `event_journal.backend: postgres` and `event_journal.database_url_env: MINDROOM_EVENT_CACHE_DATABASE_URL` (the default `eventCache.databaseUrlEnv` injected by the chart).
+When using `config.existingConfigMap` or custom `config.data`, keep that config's `event_journal` settings aligned with the chart values: for PostgreSQL, set `event_journal.backend: postgres` (`event_journal.database_url_env` already defaults to the chart-injected `MINDROOM_EVENT_CACHE_DATABASE_URL`).
 The runtime config rejects unknown top-level keys, so a `cache` section makes MindRoom refuse to start.
 
 ## Config Sources
 
 By default the chart keeps the existing ConfigMap behavior.
 Omit `config.source` or set `config.source: configMap` to mount a chart-created or existing ConfigMap at `config.mountPath`.
-Because the chart mounts the ConfigMap with `subPath` and sets no config-checksum pod annotation, changing `config.data` or `config.existingConfigMap` does not roll the pod or hot-reload automatically; run `kubectl rollout restart deployment/<fullname>` after `helm upgrade`.
+Changing `config.existingConfigMap` to a different ConfigMap name updates the pod template and rolls the Deployment, whereas editing `config.data` or the contents of the same `config.existingConfigMap` does not roll the pod or hot-reload automatically because the ConfigMap is mounted with `subPath` and has no config-checksum pod annotation; run `kubectl rollout restart deployment/<fullname>` after `helm upgrade`.
 Set `config.source: file` when another init container or content bundle places `agent-config.yaml` on the runtime filesystem before MindRoom starts.
 In file mode, `config.path` must be an absolute container path.
 In file mode, the chart does not render or mount the runtime config ConfigMap.

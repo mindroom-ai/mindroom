@@ -1,6 +1,6 @@
 # MindRoom Local Development with Kind
 
-> **Looking to deploy MindRoom locally on kind?** Follow the [Kubernetes Quick Start](../../../docs/deployment/kubernetes.md#quick-start-local-kind-cluster) for a Docker-only setup using the runtime and Tuwunel charts.
+> **Looking to deploy MindRoom locally on kind?** Follow the [Kubernetes Quick Start](../../../docs/deployment/kubernetes.md#quick-start-local-kind-cluster) for a self-contained local setup (Docker, `git`, `curl`, `python3`, and `openssl`; no `sudo` or existing cluster) using the runtime and Tuwunel charts.
 > This page is for developing the SaaS platform and instance charts.
 
 Run the MindRoom SaaS platform locally with Kubernetes using [kind](https://kind.sigs.k8s.io/).
