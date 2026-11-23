@@ -287,8 +287,8 @@ async def await_child(  # noqa: C901
     runtime: AgentRuntime,
     *,
     on_waiting: Callable[[str | None, float | None], Awaitable[object]] | None,
-) -> tuple[ChildOutcome, TurnUsage, JobClaim | None]:
-    """Wait for the job of *node* to end; return how the turn ended, what it used, and the claim on the job's outcome.
+) -> tuple[ChildOutcome, TurnUsage, JobClaim | None, bool]:
+    """Wait for the job of *node* to end; return its outcome, usage, claim, and whether a restart continued it.
 
     The wait is on the saved job ID and starts nothing. *on_waiting* is told when the job starts to wait for a
     person's approval, and with None when it works again; that time is not the turn's. After *timeout* seconds of
@@ -303,7 +303,7 @@ async def await_child(  # noqa: C901
         # The one place where a handle without the mark proves something, since here the runtime can be read: a
         # job it never admitted did nothing. One it has since deleted may have done anything.
         kind = "indeterminate" if may_have_written(None if node.handle.dispatched else False) else "interrupted"
-        return (kind, _INTERRUPTED), {}, None
+        return (kind, _INTERRUPTED), {}, None, False
     # What the turn has left of its working time, as the node's handle says: an earlier wait may have used some.
     handle, loop, timed_out, claim = node.handle, asyncio.get_running_loop(), False, None
     # Whether the node shows the wait for a person that an earlier wait saw begin, which this one must see end.
@@ -317,7 +317,7 @@ async def await_child(  # noqa: C901
         except JobAccessError as exc:
             # A read that is denied says nothing of what the turn did, so its call is not one to run again: the
             # runtime holds the job, which may have started before its handle got the mark that it was handed over.
-            return ("indeterminate", str(exc)), {}, None
+            return ("indeterminate", str(exc)), {}, None, False
         job, claim = waited.job, waited.claim
         if left is not None and not waiting:
             left -= loop.time() - since
@@ -338,7 +338,7 @@ async def await_child(  # noqa: C901
             # The job cannot be read while its requester's access resolves.
             await asyncio.sleep(RECHECK_SECONDS)
     try:
-        outcome, usage = await _job_outcome(job, runtime)
+        outcome, usage, continued = await _job_outcome(job, runtime)
     except BaseException:
         # Nothing was read, so nothing is this wait's to save: the outcome is the next reader's.
         await jobs.release_wait(job_id, claim)
@@ -346,11 +346,11 @@ async def await_child(  # noqa: C901
     if timed_out and outcome[0] == "cancelled":
         # Only a turn that had started no tool call: one that had is not run again because its time ran out.
         outcome = ("timeout", "The agent did not finish in time and was stopped.")
-    return outcome, usage, claim
+    return outcome, usage, claim, continued
 
 
-async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[ChildOutcome, TurnUsage]:
-    """Return how the turn of an ended *job* ended and what it used, read from the child's own runs.
+async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[ChildOutcome, TurnUsage, bool]:
+    """Return how an ended *job* ended, what it used, and whether a restart continued it.
 
     The answer is the run's, whole and as the child wrote it: not the job's text, which adds a receipt. The usage is
     that of every run of the job: the ones restarts cut short, and the one it ended with. What the subagents the
@@ -360,6 +360,7 @@ async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[Child
     """
     child = delegation_child(job)
     spent = [replace(child, run_id=run_id) for run_id in job.adapter.get(SPENT_RUNS_KEY, ())]
+    continued = bool(spent)
     *cut_short, record = [await read_child_run(turn, runtime.config, runtime.paths) for turn in (*spent, child)]
     text = (record.handover_content if record is not None else None) or job.result or _NO_ANSWER
     usage: TurnUsage = {}
@@ -392,7 +393,8 @@ async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[Child
     stopped = record is not None and reload_stopped_child_result(child, record) is not None
     if job.status == "completed" and not stopped:
         # A turn that completed without a record to read its answer from did what nobody can say.
-        return ("indeterminate", _NO_ANSWER) if record is None else ("completed", record.handover_content or ""), usage
+        outcome = ("indeterminate", _NO_ANSWER) if record is None else ("completed", record.handover_content or "")
+        return outcome, usage, continued
     # A run is saved before its first tool call starts, so a turn none of whose runs holds a call made none. A call
     # that waited for a person's decision when the restart came had not started, and its run says so. A run that
     # cannot be found may have made some. Only the last run of a turn whose process lived on is none: a run it
@@ -400,8 +402,9 @@ async def _job_outcome(job: BackgroundJob, runtime: AgentRuntime) -> tuple[Child
     made = [tool for run in records for tool in run.tools or () if tool.confirmed or not _never_started(tool)]
     unread = None in cut_short or (record is None and job.status == "interrupted")
     if may_have_written(None if unread else bool(made)):
-        return ("indeterminate", text), usage
-    return ((job.status, text) if job.status in ("cancelled", "failed") else ("interrupted", _INTERRUPTED)), usage
+        return ("indeterminate", text), usage, continued
+    outcome = (job.status, text) if job.status in ("cancelled", "failed") else ("interrupted", _INTERRUPTED)
+    return outcome, usage, continued
 
 
 def _did_model_work(run: RunRecord, used: RunMetrics | None) -> bool:

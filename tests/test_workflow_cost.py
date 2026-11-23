@@ -349,3 +349,32 @@ async def test_cut_short_stream_with_output_and_no_usage_report_keeps_cost_unkno
 
     assert _costs(stack) == (pytest.approx(0.20), pytest.approx(0.20), True)
     assert stack.store.turn_costs(stack.run_id) == [pytest.approx(0.20)]
+
+
+@pytest.mark.asyncio
+async def test_continuation_with_no_cut_usage_keeps_current_attempt_cost(stack: WorkflowStack) -> None:
+    """A turn interrupted before any output or usage still bills its priced continuation to the current attempt."""
+    stack.continues = lambda job: job.kind == "delegation"
+    started = asyncio.Event()
+
+    async def hold() -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    stack.child_script([Await(hold), *answer("never")])
+    await stack.submit("@0", "agent", _PROMPT)
+    await asyncio.wait_for(started.wait(), 5)
+
+    await stack.restart()
+    assert await stack.recover() == [stack.run_id]
+    assert stack.store.get_run(stack.run_id).attempt == 2
+    stack.child_script(answer("continued", _usd(0.20)))
+    await stack.continue_agents()
+    await stack.until(lambda: stack.node_job("@0").status == "completed")
+    assert await stack.result("@0", "agent", _PROMPT) == "continued"
+
+    node = stack.store.get_node(stack.run_id, "@0")
+    assert node is not None
+    assert node.generation == 1
+    assert _ledger(stack) == [("@0", 1, "1")]
+    assert _costs(stack) == (pytest.approx(0.20), pytest.approx(0.20), False)

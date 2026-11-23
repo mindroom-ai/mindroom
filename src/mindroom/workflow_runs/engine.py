@@ -1336,13 +1336,13 @@ class WorkflowEngine:
             raise AgentNotReadyError(_NO_AGENTS)
         try:
             waits = partial(self._node_waits, node, epoch) if block else None
-            (kind, text), usage, claim = await await_child(run, node, runtime, on_waiting=waits)
+            (kind, text), usage, claim, continued = await await_child(run, node, runtime, on_waiting=waits)
         except AgentNotReadyError:
             raise
         except Exception as exc:
             logger.exception("workflow_agent_outcome_unreadable", run_id=node.run_id, key=node.key)
             # What the turn did is unknown, so its call is not one to run again without being asked to.
-            (kind, text), usage, claim = ("indeterminate", str(exc)), {}, None
+            (kind, text), usage, claim, continued = ("indeterminate", str(exc)), {}, None, False
         # A further turn of the node is an entry of its own, and the node keeps whether any turn started a tool call.
         turn = int(node.links.get("turn", 1))
         usage = {turn if key == 1 else key: used for key, used in usage.items()}
@@ -1352,12 +1352,12 @@ class WorkflowEngine:
         settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
         further = None
         try:
-            # A turn that no restart cut short worked in the attempt that started it, whichever attempt reads it. What
-            # a restart cut short is of the attempt before the one that reads the turn's end.
-            cut = [entry for entry in usage if str(entry).startswith(EARLIER_TURN)]
+            # A turn that no restart continued worked in the attempt that started it, whichever attempt reads it. What
+            # a restart cut short is of the attempt before the one that reads the turn's end, even if it left no row.
             with suppress(SupersededAttemptError):
                 for entry, used in usage.items():
-                    attempt = run.attempt - (entry in cut) if cut else node.attempt
+                    earlier = str(entry).startswith(EARLIER_TURN)
+                    attempt = run.attempt - earlier if continued else node.attempt
                     add = partial(
                         self.store.add_usage,
                         node.run_id,
