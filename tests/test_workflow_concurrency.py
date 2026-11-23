@@ -379,3 +379,59 @@ async def test_tool_rate_limit_delays_and_does_not_fail(stack: WorkflowStack, mo
 
     assert (await _settled(stack, third)).result == 3
     await stack.end_attempt(ScriptRunState.EXITED)
+
+
+@pytest.mark.asyncio
+async def test_queued_call_retrying_owner_readiness_does_not_start_on_stopping_run(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A queued agent retrying while its owner bot is not ready must not launch once cancel starts stopping the run."""
+    monkeypatch.setattr(engine_module, "RECHECK_SECONDS", 0.01)
+    await stack.start(max_concurrent=2)
+    holder_gate = asyncio.Event()
+    finisher_gate = asyncio.Event()
+    stack.child_script(
+        [Await(holder_gate.wait), *answer("holder")],
+        [Await(finisher_gate.wait), *answer("finisher")],
+        answer("should never run"),
+    )
+    # Start two agents to fill max_concurrent=2, and queue the third.
+    await stack.submit("@0", "agent", {"prompt": "hold"})
+    await stack.submit("@1", "agent", {"prompt": "finish"})
+    await stack.until(lambda: len(stack.models["watcher"].requests) == 2)
+    queued = await stack.submit("@2", "agent", {"prompt": "queued"})
+    assert queued.state == "queued"
+
+    # Owner bot becomes temporarily unready just as @1 finishes so @2 enters _start_queued's retry loop.
+    ready = False
+    retries = 0
+    default_access = stack.engine.owner_access
+
+    def owner_access(run: object) -> object:
+        nonlocal retries
+        if not ready:
+            retries += 1
+            return None
+        return default_access(run)  # type: ignore[arg-type]
+
+    stack.engine.owner_access = owner_access  # type: ignore[assignment]
+    finisher_gate.set()
+    await stack.until(lambda: retries >= 2)
+
+    # Hold cancel briefly after _stop_agents pops _places and marks _stopping, then restore owner readiness.
+    original_cancel = stack.jobs.request_cancel
+
+    async def slow_cancel(job_id: str) -> object:
+        nonlocal ready
+        ready = True
+        await asyncio.sleep(0.08)
+        holder_gate.set()
+        return await original_cancel(job_id)
+
+    monkeypatch.setattr(stack.jobs, "request_cancel", slow_cancel)
+    await stack.engine.cancel(stack.run_id, reason="Stopped.")
+
+    node = stack.store.get_node(stack.run_id, "@2")
+    assert node is not None
+    assert (node.state, node.handle, len(stack.models["watcher"].requests)) == (_CANCELLED, None, 2)

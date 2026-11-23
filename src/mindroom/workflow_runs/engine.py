@@ -964,8 +964,10 @@ class WorkflowEngine:
                 try:
                     async with self._condition(run_id):
                         places = self._places.get(run_id)
+                        if places is None or run_id in self._stopping:
+                            return
                         # Read from what the run spent: a resume starts without what an earlier primary remembered.
-                        if places is not None and await self._over_budget(self.store.get_run(run_id)):
+                        if await self._over_budget(self.store.get_run(run_id)):
                             # The run reached its cost limit since this call got its place: it waits again, first.
                             places.working.discard(key)
                             places.queued.appendleft((key, start))
