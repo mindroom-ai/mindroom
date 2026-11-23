@@ -13,7 +13,10 @@ from mindroom.path_confinement import open_directory_within_root, read_regular_f
 from mindroom.script_runs.launch_contract import MAX_SOURCE_BYTES
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
+
+    from mindroom.workflow_runs.models import WorkflowRun
 
 WORKFLOWS_DIR = "workflows"
 SAVED_WORKFLOW_NAME_RE = re.compile(r"\A[a-z0-9][a-z0-9_-]{0,63}\Z")
@@ -187,6 +190,34 @@ def _with_docstring(source: str, description: str) -> str:
     prefix = "".join(lines[:insert_at])
     rest = "".join(lines[insert_at:]).lstrip("\n")
     return f"{prefix}{literal}\n\n{rest}" if rest else f"{prefix}{literal}\n"
+
+
+def format_workflows_listing(
+    runs: Sequence[WorkflowRun],
+    saved: Sequence[SavedWorkflow],
+) -> str:
+    """Format recent workflow runs and saved workflows for chat output (`!workflows`)."""
+    if not runs and not saved:
+        return "No workflow runs or saved workflows here."
+    sections: list[str] = []
+    if runs:
+        run_lines = [
+            f"- `{run.run_id}` ({run.state.value}, attempt {run.attempt})" + (f": {run.title}" if run.title else "")
+            for run in runs
+        ]
+        sections.append("Workflow runs:\n" + "\n".join(run_lines))
+    if saved:
+        saved_lines: list[str] = []
+        for item in saved:
+            line = f"- `{item.name}`"
+            if item.description:
+                line += f": {item.description}"
+            if item.args:
+                arg_names = ", ".join(f"`{arg}`" for arg in item.args)
+                line += f" (args: {arg_names})"
+            saved_lines.append(line)
+        sections.append("Saved workflows:\n" + "\n".join(saved_lines))
+    return "\n\n".join(sections)
 
 
 def _docstring_literal(description: str) -> str:

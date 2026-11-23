@@ -4,23 +4,42 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import threading
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
 import pytest_asyncio
 
 import mindroom.workflow as workflow_sdk
+from mindroom.commands.handler import _workflows_command
+from mindroom.commands.parsing import (
+    _COMMAND_DOCS,
+    COMMAND_TYPES_WITH_SIDE_EFFECTS,
+    CommandType,
+    command_parser,
+    get_command_help,
+)
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.script_runs import manager as manager_module
 from mindroom.script_runs.models import ScriptRunState
+from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.workflow_runs.models import WorkflowRunState
 from mindroom.workflow_runs.saved import (
     SavedWorkflow,
     SavedWorkflowExistsError,
+    format_workflows_listing,
     list_saved,
     read_saved_source,
     save_source,
 )
+from tests.identity_helpers import entity_ids
 from tests.workflow_helpers import (
+    CallFailed,
     FakeWorkflowGateway,
     WorkflowStack,
     completed,
@@ -40,6 +59,16 @@ async def stack(tmp_path: Path) -> AsyncIterator[WorkflowStack]:
     with workflow_stack(tmp_path) as harness:
         yield harness
         await harness.engine.close()
+
+
+@pytest_asyncio.fixture
+async def tool_stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[WorkflowStack]:
+    """Engine harness with the workflow toolkit and background job runtime."""
+    monkeypatch.setattr(manager_module, "background_script_supervision_supported", lambda: True)
+    with workflow_stack(tmp_path, extra_tools=("workflow",)) as harness:
+        await harness.open_jobs()
+        yield harness
+        await harness.close()
 
 
 @pytest.fixture
@@ -325,3 +354,203 @@ async def test_edited_saved_file_reruns_its_group_on_resume(stack: WorkflowStack
     assert group_node.generation == 2
     assert after_node is not None
     assert after_node.generation == 2
+
+
+@pytest.mark.asyncio
+async def test_start_by_name_snapshots_the_file(tool_stack: WorkflowStack) -> None:
+    """`start_workflow(name=...)` snapshots the saved file at start so later edits do not change `run.source`."""
+    workspace = tool_stack.context.agent_workspace_root(create=True)
+    original = "def main(args):\n    return 'original'\n"
+    save_source(workspace, "daily-brief", original, description="Daily brief.")
+
+    handle = json.loads(await tool_stack.call("start_workflow", name="daily-brief", args={"day": "mon"}))
+    run_id = handle["run_id"]
+    await tool_stack.until(lambda: tool_stack.store.get_run(run_id).state is WorkflowRunState.RUNNING)
+
+    (workspace / "workflows" / "daily-brief.py").write_text("def main(args):\n    return 'edited'\n", encoding="utf-8")
+
+    stored = tool_stack.store.get_run(run_id)
+    assert "original" in stored.source
+    assert "edited" not in stored.source
+
+    with pytest.raises(CallFailed, match=r"Give exactly one of source, path, or name\."):
+        await tool_stack.call("start_workflow", source=original, name="daily-brief")
+
+
+@pytest.mark.asyncio
+async def test_save_workflow_refuses_another_owners_run(tool_stack: WorkflowStack) -> None:
+    """Another requester cannot save a run they do not own, while the owner can save it once."""
+    source = "def main(args):\n    return 'ok'\n"
+    handle = json.loads(await tool_stack.call("start_workflow", source=source))
+    run_id = handle["run_id"]
+    await tool_stack.until(lambda: tool_stack.store.get_run(run_id).state is WorkflowRunState.RUNNING)
+
+    other = replace(tool_stack.context, requester_id="@bob:example.test")
+    with pytest.raises(CallFailed, match=rf"No workflow run {run_id} in your runs\."):
+        await tool_stack.call("save_workflow", context=other, run_id=run_id, name="stolen")
+
+    saved = json.loads(await tool_stack.call("save_workflow", run_id=run_id, name="my-flow", description="My flow."))
+    assert saved == {"name": "my-flow", "path": "workflows/my-flow.py"}
+    workspace = tool_stack.context.agent_workspace_root(create=False)
+    listed = list_saved(workspace)
+    assert [(item.name, item.description) for item in listed] == [("my-flow", "My flow.")]
+
+
+@pytest.mark.asyncio
+async def test_a_finished_run_writes_nothing_into_a_shared_workspace(tool_stack: WorkflowStack) -> None:
+    """Two requesters sharing a workspace leave no run result files in that workspace."""
+    workspace = tool_stack.context.agent_workspace_root(create=True)
+    before = {path.relative_to(workspace) for path in workspace.rglob("*")}
+
+    handle = json.loads(await tool_stack.call("start_workflow", source="def main(args):\n    return 'secret'\n"))
+    tool_stack.run_id = handle["run_id"]
+    await tool_stack.until(lambda: tool_stack.store.get_run(tool_stack.run_id).state is WorkflowRunState.RUNNING)
+    await tool_stack.finish_attempt(result={"secret": "only-in-store"})
+    await tool_stack.end_attempt(ScriptRunState.EXITED)
+    await tool_stack.until(lambda: tool_stack.store.get_run(tool_stack.run_id).state is WorkflowRunState.COMPLETED)
+
+    after = {path.relative_to(workspace) for path in workspace.rglob("*")}
+    assert after == before
+
+
+@pytest.mark.asyncio
+async def test_list_workflow_runs_has_this_conversations_runs_and_the_saved_files(tool_stack: WorkflowStack) -> None:
+    """`list_workflow_runs` returns only the owner's runs in this conversation plus saved workflow metadata."""
+    workspace = tool_stack.context.agent_workspace_root(create=True)
+    save_source(
+        workspace,
+        "audit",
+        """\"\"\"Audit a repository.\"\"\"
+ARGS = {"branch": "Branch name"}
+def main(args):
+    return args
+""",
+    )
+    own = json.loads(await tool_stack.call("start_workflow", source="def main(args):\n    return 1\n", title="Mine"))
+    await tool_stack.until(lambda: tool_stack.store.get_run(own["run_id"]).state is WorkflowRunState.RUNNING)
+
+    other_thread = replace(
+        tool_stack.context,
+        target=replace(
+            tool_stack.context.target,
+            source_thread_id="$other-thread:example.test",
+            resolved_thread_id="$other-thread:example.test",
+        ),
+    )
+    other_thread_run = json.loads(
+        await tool_stack.call("start_workflow", context=other_thread, source="def main(args):\n    return 2\n"),
+    )
+    await tool_stack.until(
+        lambda: tool_stack.store.get_run(other_thread_run["run_id"]).state is WorkflowRunState.RUNNING,
+    )
+
+    other_user = replace(tool_stack.context, requester_id="@bob:example.test")
+    other_user_run = json.loads(
+        await tool_stack.call("start_workflow", context=other_user, source="def main(args):\n    return 3\n"),
+    )
+    await tool_stack.until(lambda: tool_stack.store.get_run(other_user_run["run_id"]).state is WorkflowRunState.RUNNING)
+
+    listing = json.loads(await tool_stack.call("list_workflow_runs"))
+    assert [run["run_id"] for run in listing["runs"]] == [own["run_id"]]
+    assert listing["runs"][0]["title"] == "Mine"
+    assert listing["saved"] == [
+        {"name": "audit", "description": "Audit a repository.", "args": {"branch": "Branch name"}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_workflows_command_is_parsed_and_listed_in_help() -> None:
+    """`!workflows` and `/workflows` parse as CommandType.WORKFLOWS and appear in `!help`."""
+    bang = command_parser.parse("!workflows")
+    slash = command_parser.parse("/workflows")
+    assert bang is not None
+    assert slash is not None
+    assert bang.type == CommandType.WORKFLOWS
+    assert slash.type == CommandType.WORKFLOWS
+    assert CommandType.WORKFLOWS not in COMMAND_TYPES_WITH_SIDE_EFFECTS
+    assert CommandType.WORKFLOWS in _COMMAND_DOCS
+    assert "/workflows" in get_command_help()
+    assert format_workflows_listing([], []) == "No workflow runs or saved workflows here."
+    rendered = format_workflows_listing(
+        [],
+        [
+            SavedWorkflow(
+                name="audit",
+                description="Audit a repo.",
+                args={"base": "Branch"},
+                path=Path("workflows/audit.py"),
+            ),
+        ],
+    )
+    assert "Saved workflows:" in rendered
+    assert "`audit`: Audit a repo. (args: `base`)" in rendered
+
+
+@pytest.mark.asyncio
+async def test_workflows_command_lists_owner_runs_and_room_saved_workflows(tool_stack: WorkflowStack) -> None:
+    """`!workflows` prints the requester's runs here and saved workflows of workflow-enabled room agents."""
+    workspace = tool_stack.context.agent_workspace_root(create=True)
+    save_source(
+        workspace,
+        "triage",
+        """\"\"\"Triage incoming issues.\"\"\"
+ARGS = {"repo": "Repository slug"}
+def main(args):
+    return args
+""",
+    )
+    own = json.loads(await tool_stack.call("start_workflow", source="def main(args):\n    return 1\n", title="My run"))
+    await tool_stack.until(lambda: tool_stack.store.get_run(own["run_id"]).state is WorkflowRunState.RUNNING)
+    other_user = replace(tool_stack.context, requester_id="@bob:example.test")
+    other = json.loads(
+        await tool_stack.call(
+            "start_workflow",
+            context=other_user,
+            source="def main(args):\n    return 2\n",
+            title="Bob run",
+        ),
+    )
+    await tool_stack.until(lambda: tool_stack.store.get_run(other["run_id"]).state is WorkflowRunState.RUNNING)
+
+    agent_mid = entity_ids(tool_stack.context.config, tool_stack.context.runtime_paths)["watcher"]
+
+    async def candidates(_room: object, _requester: str) -> list[object]:
+        return [agent_mid]
+
+    ctx = SimpleNamespace(
+        workflow_engine=tool_stack.engine,
+        config=tool_stack.context.config,
+        runtime_paths=tool_stack.context.runtime_paths,
+        responder_candidates_for_room=candidates,
+    )
+    room = SimpleNamespace(room_id=tool_stack.context.room_id)
+
+    reply = await _workflows_command(
+        ctx,  # type: ignore[arg-type]
+        room,  # type: ignore[arg-type]
+        tool_stack.context.requester_id,
+        tool_stack.context.resolved_thread_id,
+    )
+    assert own["run_id"] in reply
+    assert "My run" in reply
+    assert other["run_id"] not in reply
+    assert "`triage`: Triage incoming issues. (args: `repo`)" in reply
+
+
+def test_an_agent_may_have_both_toolkits() -> None:
+    """Config validation accepts an agent with both `workflow` and `dynamic_workflow`, and their functions are disjoint."""
+    config = Config(
+        agents={
+            "planner": AgentConfig(
+                display_name="Planner",
+                tools=["workflow", "dynamic_workflow"],
+            ),
+        },
+    )
+    assert config.agents["planner"].tool_names == ["workflow", "dynamic_workflow"]
+    entries = builtin_tool_registry().entries
+    workflow_fns = set(entries["workflow"].function_names)
+    dynamic_fns = set(entries["dynamic_workflow"].function_names)
+    assert workflow_fns
+    assert dynamic_fns
+    assert workflow_fns.isdisjoint(dynamic_fns)

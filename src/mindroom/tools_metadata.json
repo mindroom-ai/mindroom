@@ -7021,7 +7021,9 @@
         "start_workflow",
         "get_workflow",
         "cancel_workflow",
-        "resume_workflow"
+        "resume_workflow",
+        "list_workflow_runs",
+        "save_workflow"
       ],
       "helper_text": null,
       "icon": "Workflow",

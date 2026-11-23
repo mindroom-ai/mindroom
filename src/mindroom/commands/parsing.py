@@ -25,6 +25,7 @@ class CommandType(Enum):
     JOBS = "jobs"  # List the conversation's background jobs
     CANCEL_JOB = "cancel_job"  # Cancel background jobs
     ANSWER = "answer"  # Answer a workflow run's question
+    WORKFLOWS = "workflows"  # List workflow runs and saved workflows
     CONFIG = "config"  # Configuration command
     DESKTOP = "desktop"  # Requester-scoped Desktop pairing
     MODE = "mode"
@@ -57,6 +58,7 @@ _COMMAND_DOCS = {
     CommandType.JOBS: ("/jobs", "List the background jobs running here"),
     CommandType.CANCEL_JOB: ("/cancel_job <id|all>", "Cancel a background job, or all of them here"),
     CommandType.ANSWER: ("/answer [id] <answer>", "Answer a question a workflow run asked you"),
+    CommandType.WORKFLOWS: ("/workflows", "List this conversation's workflow runs and saved workflows"),
     CommandType.HELP: ("/help [topic]", "Get help"),
     CommandType.RELOAD_PLUGINS: ("/reload-plugins", "Reload configured plugins (admin only)"),
     CommandType.CONFIG: ("/config <operation>", "Manage configuration"),
@@ -186,6 +188,7 @@ class _CommandParser:
     JOBS_PATTERN = re.compile(r"^!jobs$", re.IGNORECASE)
     CANCEL_JOB_PATTERN = re.compile(r"^!cancel[_-]?job\s+(\S+)$", re.IGNORECASE)
     ANSWER_PATTERN = re.compile(r"^!answer\s+(.+)$", re.IGNORECASE | re.DOTALL)
+    WORKFLOWS_PATTERN = re.compile(r"^!workflows$", re.IGNORECASE)
     CONFIG_PATTERN = re.compile(r"^!config(?:\s+(.+))?$", re.IGNORECASE)
     DESKTOP_PATTERN = re.compile(r"^!desktop(?:\s+(.+))?$", re.IGNORECASE)
     MODE_PATTERN = re.compile(r"^!mode(?:\s+(.+))?$", re.IGNORECASE)
@@ -290,6 +293,9 @@ class _CommandParser:
         match = self.ANSWER_PATTERN.match(message)
         if match:
             return Command(type=CommandType.ANSWER, args={"text": match.group(1).strip()}, raw_text=raw_text)
+
+        if self.WORKFLOWS_PATTERN.match(message):
+            return Command(type=CommandType.WORKFLOWS, args={}, raw_text=raw_text)
 
         match = self.EDIT_SCHEDULE_PATTERN.match(message)
         if match:

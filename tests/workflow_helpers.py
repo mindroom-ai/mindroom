@@ -988,6 +988,7 @@ class WorkflowStack:
     async def call(
         self,
         name: str,
+        /,
         *,
         context: ToolRuntimeContext | None = None,
         depth: int = 0,

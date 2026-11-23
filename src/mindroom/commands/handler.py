@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -41,6 +42,7 @@ from mindroom.matrix.room_membership import room_membership_is_complete
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import MODEL_SELECTION_CONTENT_KEY
 from mindroom.requester_identity import is_platform_administrator, resolve_human_requester_alias
+from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.scheduling.errors import SchedulingError, refused_for_power
 from mindroom.scheduling.tasks import (
     SchedulingRuntime,
@@ -61,10 +63,13 @@ from mindroom.tool_jobs.client_cancel import (
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.worker_routing import build_requester_execution_identity
 from mindroom.workflow_runs.answers import answer_command
+from mindroom.workflow_runs.saved import SavedWorkflow, format_workflows_listing, list_saved
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
+    from pathlib import Path
 
     import nio
     import structlog
@@ -130,6 +135,54 @@ async def _background_jobs_command(
         request=JobCancelRequest(job_id=command.args["job_id"], thread_id=thread_id),
         may_cancel=may_cancel,
     )
+
+
+async def _workflows_command(
+    context: CommandHandlerContext,
+    room: nio.MatrixRoom,
+    requester_user_id: str,
+    thread_id: str | None,
+) -> str:
+    """List the requester's workflow runs here and the saved workflows of workflow-enabled agents in the room."""
+    if context.workflow_engine is None:
+        return "Workflows are not running here."
+    runs = context.workflow_engine.store.list_runs(
+        owner_user_id=requester_user_id,
+        room_id=room.room_id,
+        thread_root_event_id=thread_id,
+        top_level_only=True,
+    )[:20]
+    candidate_entities = await context.responder_candidates_for_room(room, requester_user_id)
+    saved: list[SavedWorkflow] = []
+    if candidate_entities:
+        registry = entity_identity_registry(context.config, context.runtime_paths)
+        tools = config_plugins(context.config, context.runtime_paths).tools
+        seen_workspaces: set[Path] = set()
+        for entity_id in candidate_entities:
+            entity_name = registry.current_entity_name_for_user_id(entity_id.full_id, include_router=False)
+            if entity_name is None or entity_name not in context.config.agents:
+                continue
+            if "workflow" not in resolve_agent_tools(context.config, entity_name, tools).tool_names:
+                continue
+            identity = build_requester_execution_identity(
+                agent_name=entity_name,
+                runtime_paths=context.runtime_paths,
+                requester_id=requester_user_id,
+            )
+            workspace = resolve_agent_runtime(
+                entity_name,
+                context.config,
+                context.runtime_paths,
+                execution_identity=identity,
+                create=False,
+            ).workspace.root
+            if workspace in seen_workspaces:
+                continue
+            seen_workspaces.add(workspace)
+            with suppress(OSError, ValueError):
+                saved.extend(list_saved(workspace))
+        saved.sort(key=lambda item: item.name)
+    return format_workflows_listing(runs, saved)
 
 
 def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) -> SchedulingRuntime:
@@ -482,6 +535,10 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
                 sender=requester_user_id,
                 text=command.args["text"],
             )
+
+    elif command.type == CommandType.WORKFLOWS:
+        thread_id = context.stable_target.source_thread_id
+        response_text = await _workflows_command(context, room, requester_user_id, thread_id)
 
     elif command.type == CommandType.CONFIG:
         authorization = context.config.authorization

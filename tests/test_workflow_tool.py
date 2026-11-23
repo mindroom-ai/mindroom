@@ -814,7 +814,7 @@ def test_jobs_state_names_the_run_and_carries_no_title(stack: WorkflowStack) -> 
 @pytest.mark.asyncio
 async def test_start_needs_exactly_one_source(stack: WorkflowStack) -> None:
     """Neither or both of `source` and `path` start nothing."""
-    one = "Give exactly one of source or path."
+    one = "Give exactly one of source, path, or name."
 
     assert await _refused(stack, "start_workflow") == one
     assert await _refused(stack, "start_workflow", source=SCRIPT, path="count.py") == one
@@ -1573,10 +1573,10 @@ _OFFERED_DESCRIPTION = """\
 Run a workflow: a Python script that puts many agents to work in the background.
 
 Use it when a task needs many agents, the same step over many items, an independent check, or a loop with a hard stop.
-Give exactly one of `source` (inline Python) or `path` (a file in your workspace).
+Give exactly one of `source` (inline Python), `path` (a file in your workspace), or `name` (a saved workflow, `workflows/<name>.py`).
 The script defines `def main(args):` and returns the final report, a string or a JSON value. MindRoom calls `main`; do not call it yourself.
 
-    from mindroom.workflow import agent, foreach, parallel, ask_user, shell, tool, phase, log, now, random, PartialFailure
+    from mindroom.workflow import agent, foreach, parallel, ask_user, shell, tool, phase, log, now, random, run, PartialFailure
 
     def main(args):
         phase("Research")                        # the same step over many items, in parallel
@@ -1615,7 +1615,7 @@ The script defines `def main(args):` and returns the final report, a string or a
   or free text without options. Only that branch waits, for as long as it takes; parallel branches keep running.
 - shell(command) runs a command with your shell tool and returns .ok, .exit_code and .output. tool(toolkit, function, **arguments) calls any other tool of yours.
   shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.
-- phase(title) groups the calls that follow; log(text) shows a progress line.
+- phase(title) groups the calls that follow; log(text) shows a progress line. run(name, args) calls a saved workflow inside this one.
 
 Every agent, tool and shell call is saved with its result. The Python between the calls runs again on every resume,
 so do writes (files, git, HTTP) through shell(), tool() or an agent, never with plain Python.
@@ -1640,7 +1640,7 @@ Agents you can run with agent=: helper, roommate."""
 def test_description_teaches_what_this_release_runs_and_lists_the_configured_models(stack: WorkflowStack) -> None:
     """The offered description names the calls a script has now, how the report arrives, the models and the agents.
 
-    It promises nothing a later release adds: no sessions, no peers, no saved workflows. The agents are those the owner may
+    It promises nothing a later release adds: no sessions, no peers. The agents are those the owner may
     delegate to and those configured for the room, without the owner itself.
     """
     config, room_id = stack.context.config, stack.context.room_id
@@ -1664,12 +1664,20 @@ def test_description_teaches_what_this_release_runs_and_lists_the_configured_mod
     assert set(functions["start_workflow"].parameters["properties"]) == {
         "source",
         "path",
+        "name",
         "args",
         "title",
         "max_concurrent",
         "resource_profile",
         "max_cost_usd",
     }
+    assert (functions["list_workflow_runs"].description or "").startswith(
+        "List this conversation's recent runs and your saved workflows (name, description, args).",
+    )
+    assert (functions["save_workflow"].description or "").startswith(
+        "Save a run's script as workflows/<name>.py so start_workflow(name=...) can run it again.",
+    )
+    assert set(functions["save_workflow"].parameters["properties"]) == {"run_id", "name", "description"}
     assert (functions["cancel_workflow"].description or "").startswith(
         "Stop a run and its agents. Finished calls stay saved, so resume_workflow can continue it.",
     )

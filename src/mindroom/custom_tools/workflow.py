@@ -49,6 +49,7 @@ from mindroom.workflow_runs.models import (
     new_workflow_run_id,
 )
 from mindroom.workflow_runs.replay import result_digest
+from mindroom.workflow_runs.saved import SavedWorkflowExistsError, list_saved, read_saved_source, save_source
 from mindroom.workflow_runs.store import WorkflowRunNotFoundError, WorkflowRunStoreError, owned_run
 
 if TYPE_CHECKING:
@@ -70,10 +71,10 @@ _START_DESCRIPTION = """\
 Run a workflow: a Python script that puts many agents to work in the background.
 
 Use it when a task needs many agents, the same step over many items, an independent check, or a loop with a hard stop.
-Give exactly one of `source` (inline Python) or `path` (a file in your workspace).
+Give exactly one of `source` (inline Python), `path` (a file in your workspace), or `name` (a saved workflow, `workflows/<name>.py`).
 The script defines `def main(args):` and returns the final report, a string or a JSON value. MindRoom calls `main`; do not call it yourself.
 
-    from mindroom.workflow import agent, foreach, parallel, ask_user, shell, tool, phase, log, now, random, PartialFailure
+    from mindroom.workflow import agent, foreach, parallel, ask_user, shell, tool, phase, log, now, random, run, PartialFailure
 
     def main(args):
         phase("Research")                        # the same step over many items, in parallel
@@ -112,7 +113,7 @@ The script defines `def main(args):` and returns the final report, a string or a
   or free text without options. Only that branch waits, for as long as it takes; parallel branches keep running.
 - shell(command) runs a command with your shell tool and returns .ok, .exit_code and .output. tool(toolkit, function, **arguments) calls any other tool of yours.
   shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.
-- phase(title) groups the calls that follow; log(text) shows a progress line.
+- phase(title) groups the calls that follow; log(text) shows a progress line. run(name, args) calls a saved workflow inside this one.
 
 Every agent, tool and shell call is saved with its result. The Python between the calls runs again on every resume,
 so do writes (files, git, HTTP) through shell(), tool() or an agent, never with plain Python.
@@ -131,7 +132,7 @@ running ones finish, and the run ends interrupted; resume it with a higher max_c
 An agent that needs an approval waits for the user; it does not fail.
 """
 _OWN_RUN = "A call of a run cannot cancel that run or one it is inside. Return from main() or raise to end the script."
-_ONE_SOURCE = "Give exactly one of source or path."
+_ONE_SOURCE = "Give exactly one of source, path, or name."
 _AT_MOST_ONE_SOURCE = "Give at most one of source or path."
 _NEEDS_JOBS = "Workflows need background tool jobs. Set background_tool_jobs.enabled: true and do not exclude workflow."
 
@@ -174,7 +175,14 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
             others += [name for name in rooms if name not in (agent_name, *others) and current_room_id in rooms[name]]
         if others:
             self._start_description += f"\nAgents you can run with agent=: {', '.join(others)}."
-        tools = [self.start_workflow, self.get_workflow, self.cancel_workflow, self.resume_workflow]
+        tools = [
+            self.start_workflow,
+            self.get_workflow,
+            self.cancel_workflow,
+            self.resume_workflow,
+            self.list_workflow_runs,
+            self.save_workflow,
+        ]
         super().__init__(name="workflow", tools=tools)
 
     def offered_function(self, function: ToolFunction) -> ToolFunction:
@@ -185,6 +193,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         self,
         source: str | None = None,
         path: str | None = None,
+        name: str | None = None,
         args: dict[str, Any] | None = None,
         title: str | None = None,
         max_concurrent: int = 16,
@@ -198,6 +207,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         Args:
             source: Inline Python source.
             path: Workspace-relative path of a Python file.
+            name: Name of a saved workflow.
             args: JSON object passed to main(args).
             title: Three to six words shown on the run's card.
             max_concurrent: How many agents run at once. Raise it for large fan-outs.
@@ -208,6 +218,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         arguments = {
             "source": source,
             "path": path,
+            "name": name,
             "args": args,
             "title": title,
             "max_concurrent": max_concurrent,
@@ -324,6 +335,58 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         # The call owns the run it takes, as an inline start owns the run it reserves: its leaving stops that run.
         reopen = partial(engine.reopen, run.run_id, context, limits=self.limits, owner=origin, **request)
         return await engine.delivery(await engine.attend(origin, reopen, context, self.limits))
+
+    async def list_workflow_runs(self) -> str:
+        """List this conversation's recent runs and your saved workflows (name, description, args)."""
+        engine, context = _runtime()
+        runs = await asyncio.to_thread(
+            engine.store.list_runs,
+            agent_name=context.agent_name,
+            owner_user_id=context.requester_id,
+            room_id=context.room_id,
+            thread_root_event_id=context.resolved_thread_id,
+            top_level_only=True,
+        )
+        try:
+            workspace = await asyncio.to_thread(context.agent_workspace_root, create=False)
+            saved = await asyncio.to_thread(list_saved, workspace)
+        except (OSError, ValueError) as exc:
+            raise WorkflowRunStoreError(str(exc)) from exc
+        payload = {
+            "runs": [
+                {
+                    "run_id": run.run_id,
+                    "title": run.title,
+                    "status": run.state.value,
+                    "attempt": run.attempt,
+                    "created_at": run.created_at,
+                    "finished_at": run.finished_at,
+                }
+                for run in runs[:20]
+            ],
+            "saved": [{"name": item.name, "description": item.description, "args": item.args} for item in saved],
+        }
+        return json.dumps(payload, indent=2)
+
+    async def save_workflow(self, run_id: str, name: str, description: str | None = None) -> str:
+        """Save a run's script as workflows/<name>.py so start_workflow(name=...) can run it again.
+
+        Args:
+            run_id: The run's ID, as start_workflow returned it.
+            name: Name of the saved workflow (lowercase letters, digits, hyphens, underscores).
+            description: Optional one-line description added as the file's docstring when it has none.
+
+        """
+        engine, context = _runtime()
+        run = _owned(engine, context, run_id)
+        try:
+            workspace = await asyncio.to_thread(context.agent_workspace_root, create=True)
+            await asyncio.to_thread(save_source, workspace, name, run.source, description)
+        except SavedWorkflowExistsError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise WorkflowRunStoreError(str(exc)) from exc
+        return json.dumps({"name": name, "path": f"workflows/{name}.py"})
 
     async def managed_job(
         self,
@@ -837,10 +900,16 @@ def _outer_call() -> tuple[str, str, int] | None:
 
 
 async def _source(engine: WorkflowEngine, context: ToolRuntimeContext, arguments: Mapping[str, Any]) -> bytes:
-    """Return the script a start names, read once: its inline source, or its file in the agent's workspace."""
-    source, path = arguments.get("source"), arguments.get("path")
-    if (source is None) == (path is None):
+    """Return the script a start names, read once: inline source, workspace file, or saved workflow."""
+    source, path, name = arguments.get("source"), arguments.get("path"), arguments.get("name")
+    if sum(value is not None for value in (source, path, name)) != 1:
         raise WorkflowRunStoreError(_ONE_SOURCE)
+    if name is not None:
+        try:
+            workspace = await asyncio.to_thread(context.agent_workspace_root, create=False)
+            return await asyncio.to_thread(read_saved_source, workspace, str(name))
+        except (OSError, ValueError) as exc:
+            raise WorkflowRunStoreError(str(exc)) from exc
     return await engine.scripts.resolve_source(context, source=source, path=path)
 
 
