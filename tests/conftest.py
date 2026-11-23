@@ -82,6 +82,7 @@ import mindroom.tool_system.sandbox_proxy as sandbox_proxy_module
 import mindroom.tools.shell as shell_tool_module
 from mindroom import ai as mindroom_ai
 from mindroom import logging_config
+from mindroom.active_runs import ActiveRunPublisher
 from mindroom.agent_cli.turn import LiveTurnTools
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.approval.manager import (
@@ -3629,6 +3630,7 @@ def install_personal_room_shutdown_mock(bot: AgentBot) -> None:
     """Install lifecycle cancellation for partial shutdown fixtures through one seam, with idle steward duties."""
     bot._personal_room_lifecycle = MagicMock(spec=PersonalRoomLifecycle)
     bot.steward_duties = MagicMock(spec=StewardDuties)
+    bot._active_runs = ActiveRunPublisher(get_client=lambda: bot.client, user_id="@bot:localhost")
 
 
 def install_shutdown_drain_mocks(

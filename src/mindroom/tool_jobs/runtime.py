@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from contextlib import ExitStack, asynccontextmanager, suppress
+from contextlib import asynccontextmanager, suppress
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -362,20 +362,20 @@ class _HumanWaitPause:
 
     def __init__(self, factory: Callable[[], AbstractContextManager[None]] | None) -> None:
         self._factory = factory
-        self._stack = ExitStack()
-        self._paused = False
+        self._active: AbstractContextManager[None] | None = None
 
     def update(self, *, awaiting: bool) -> None:
-        if awaiting and not self._paused and self._factory is not None:
-            self._stack.enter_context(self._factory())
-            self._paused = True
-        elif not awaiting and self._paused:
-            self._stack.close()
-            self._paused = False
+        if awaiting and self._active is None and self._factory is not None:
+            cm = self._factory()
+            cm.__enter__()
+            self._active = cm
+        elif not awaiting and self._active is not None:
+            self.close()
 
     def close(self) -> None:
-        self._stack.close()
-        self._paused = False
+        if self._active is not None:
+            active, self._active = self._active, None
+            active.__exit__(None, None, None)
 
 
 async def _changed_or_released(

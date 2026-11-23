@@ -2040,12 +2040,14 @@ class AgentBot:
         self._delivery_recovery_wake.set()
         if shutdown_intent.stop_reason == "shutdown":
             self.begin_process_shutdown()
-        await self._active_runs.shutdown()
-        if shutdown_intent.stop_reason == "shutdown" and self.client is not None:
-            cast(
-                _ProcessShutdownMatrixClient,  # noqa: TC006 - runtime reference proves the private protocol is live
-                self.client,
-            ).begin_process_shutdown_transport_fence()
+            self._active_runs.cancel()
+            if self.client is not None:
+                cast(
+                    _ProcessShutdownMatrixClient,  # noqa: TC006 - runtime reference proves the private protocol is live
+                    self.client,
+                ).begin_process_shutdown_transport_fence()
+        else:
+            await self._active_runs.shutdown()
         shutdown_budget = self._sync_shutdown_budget
         if shutdown_budget is None:
             shutdown_budget = ShutdownBudget.start(SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS)

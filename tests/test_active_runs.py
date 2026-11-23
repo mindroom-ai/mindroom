@@ -21,7 +21,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.participation import ParticipationGate
 from mindroom.reply_turn.request import response_typing_indicator
 from mindroom.response_turn import ResponsePausedForApproval
-from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
+from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, SYNC_RESTART_SHUTDOWN
 from mindroom.secret_request_cards import _job_awaits_requester
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_jobs.runtime import BackgroundOutcome, ToolJobRuntime
@@ -221,38 +221,52 @@ async def test_coalescing_bursts_and_heartbeat_and_idle_exit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_forbidden_refused_stops_writes_and_transient_error_retries() -> None:
-    """M_FORBIDDEN refuses further writes for a room while transient failures retry with backoff."""
+async def test_forbidden_refused_recovers_on_later_change_and_transient_error_retries() -> None:
+    """M_FORBIDDEN stops retrying the refused snapshot but recovers when permission is later granted."""
     client = _FakeClient()
+    allow_forbidden_room = False
     attempts = 0
 
     async def handler(room_id: str, _et: str, _content: dict[str, Any], _sk: str) -> object:
         nonlocal attempts
-        if room_id == "!forbidden:localhost":
+        if room_id == "!forbidden:localhost" and not allow_forbidden_room:
             return nio.RoomPutStateError("Forbidden", status_code="M_FORBIDDEN")
-        attempts += 1
-        if attempts == 1:
-            raise OSError
+        if room_id == "!retry:localhost":
+            attempts += 1
+            if attempts == 1:
+                raise OSError
         return nio.RoomPutStateResponse(event_id="$ok", room_id=room_id)
 
     client.put_handler = handler
     publisher = ActiveRunPublisher(
         get_client=lambda: client,
         user_id="@bot:localhost",
+        heartbeat_seconds=0.03,
         retry_backoffs=(0.01, 0.02),
     )
 
-    # M_FORBIDDEN marks room refused and skips subsequent writes.
+    # M_FORBIDDEN records desired snapshot without retrying or heartbeating while unchanged.
     async with publisher.track("!forbidden:localhost", "$t1"):
-        await _wait_workers_done(publisher)
+        await _wait_for_puts(client, 1)
+        await asyncio.sleep(0.06)
+        assert len([p for p in client.puts if p[0] == "!forbidden:localhost"]) == 1
+        assert "!forbidden:localhost" in publisher._refused
+    await _wait_workers_done(publisher)
+    assert len([p for p in client.puts if p[0] == "!forbidden:localhost"]) == 2
+
+    # Once an admin grants permission, a new reply succeeds and clears _refused.
+    allow_forbidden_room = True
     async with publisher.track("!forbidden:localhost", "$t2"):
-        await asyncio.sleep(0.02)
-    assert len([p for p in client.puts if p[0] == "!forbidden:localhost"]) == 1
-    assert "!forbidden:localhost" in publisher._refused
+        await _wait_for_puts(client, 3)
+        assert "!forbidden:localhost" not in publisher._refused
+        assert publisher._published["!forbidden:localhost"] == ["$t2"]
+    await _wait_workers_done(publisher)
+    assert _threads_of(client.puts[-1]) == []
 
     # Transient failure retries and succeeds.
+    before = len(client.puts)
     async with publisher.track("!retry:localhost", "$t1"):
-        await _wait_for_puts(client, 3)
+        await _wait_for_puts(client, before + 2)
         assert publisher._published["!retry:localhost"] == ["$t1"]
     await _wait_workers_done(publisher)
     assert _threads_of(client.puts[-1]) == []
@@ -275,8 +289,11 @@ async def test_shutdown_idle_noop_active_clear_and_reopen() -> None:
         cleared = {put[0]: _threads_of(put) for put in client.puts[2:]}
         assert cleared == {"!r1:localhost": [], "!r2:localhost": []}
 
-    # Reopen lets new runs publish after an in-process restart.
+    # Reopen clears published/swept caches so an in-process restart reconciles stale state.
+    publisher._swept.add("!r1:localhost")
     publisher.reopen()
+    assert not publisher._published
+    assert not publisher._swept
     async with publisher.track("!r1:localhost", "$t3"):
         await _wait_for_puts(client, 5)
         assert _threads_of(client.puts[-1]) == ["$t3"]
@@ -579,25 +596,33 @@ async def test_tool_job_runtime_wait_pauses_while_job_awaits_approval(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_bot_prepare_for_sync_shutdown_clears_active_runs_before_transport_fence(tmp_path: Path) -> None:
-    """Bot shutdown clears active runs before beginning the process shutdown transport fence."""
-    bot = _bot(tmp_path)
+async def test_bot_prepare_for_sync_shutdown_fence_and_restart_clear(tmp_path: Path) -> None:
+    """Process shutdown fences transport before yielding; non-fenced shutdown clears active runs."""
+    bot = _bot(tmp_path / "process")
     assert bot._response_runner.active_runs is bot._active_runs
     assert bot._approval_runner.active_runs is bot._active_runs
 
-    order: list[str] = []
+    events: list[str] = []
     client = _FakeClient()
-
-    async def record_put(room_id: str, _et: str, content: dict[str, Any], _sk: str) -> object:
-        order.append("clear" if not content["threads"] else "active")
-        return nio.RoomPutStateResponse(event_id="$s", room_id=room_id)
-
-    client.put_handler = record_put
-    client.begin_process_shutdown_transport_fence = lambda: order.append("fence")  # type: ignore[attr-defined]
+    client.begin_process_shutdown_transport_fence = lambda: events.append("fence")  # type: ignore[attr-defined]
     bot.client = cast("nio.AsyncClient", client)
 
+    bot._personal_room_lifecycle.cancel_reconciliation = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda **_kw: events.append("first_await"),
+    )
     async with bot._active_runs.track("!r:localhost", "$t1"):
         await _wait_for_puts(client, 1)
         await bot.prepare_for_sync_shutdown(shutdown_intent=ORDERLY_SHUTDOWN)
+    assert events == ["fence", "first_await"]
+    assert len(client.puts) == 1
+    assert not bot._active_runs._published
+    assert not bot._active_runs._swept
 
-    assert order == ["active", "clear", "fence"]
+    # Non-process shutdown (sync restart) best-effort clears active runs to [].
+    restart_bot = _bot(tmp_path / "restart")
+    restart_client = _FakeClient()
+    restart_bot.client = cast("nio.AsyncClient", restart_client)
+    async with restart_bot._active_runs.track("!r:localhost", "$t2"):
+        await _wait_for_puts(restart_client, 1)
+        await restart_bot.prepare_for_sync_shutdown(shutdown_intent=SYNC_RESTART_SHUTDOWN)
+    assert [_threads_of(put) for put in restart_client.puts] == [["$t2"], []]

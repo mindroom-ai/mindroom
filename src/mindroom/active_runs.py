@@ -25,7 +25,6 @@ _TTL_MS = 180_000
 _HEARTBEAT_SECONDS = 60.0
 _RETRY_BACKOFFS = (2.0, 5.0)
 _MAX_LISTED_BYTES = 27_000
-_MAX_REFUSED_ROOMS = 4096
 _SWEEP_CONCURRENCY = 4
 _SWEEP_READ_TIMEOUT_SECONDS = 10.0
 
@@ -105,9 +104,21 @@ class ActiveRunPublisher:
         finally:
             self._unregister(lease)
 
+    def cancel(self) -> None:
+        """Synchronously stop background workers and sweeps without yielding."""
+        self._closing = True
+        for task in (*self._workers.values(), *self._sweep_tasks):
+            task.cancel()
+        self._workers.clear()
+        self._dirty.clear()
+        self._published.clear()
+        self._swept.clear()
+
     def reopen(self) -> None:
-        """Resume publishing after an in-process restart."""
+        """Resume publishing after an in-process restart and require fresh room reconciliation."""
         self._closing = False
+        self._published.clear()
+        self._swept.clear()
         for room_id in list(self._leases):
             self._wake(room_id)
 
@@ -146,6 +157,9 @@ class ActiveRunPublisher:
                 rooms_to_clear = self._dirty_rooms_to_clear()
                 if rooms_to_clear and self.get_client() is not None:
                     await asyncio.gather(*(self._put_state(room_id, []) for room_id in rooms_to_clear))
+        for room_id in self._dirty_rooms_to_clear():
+            self._published.pop(room_id, None)
+        self._swept.clear()
 
     def _dirty_rooms_to_clear(self) -> list[str]:
         return [room_id for room_id, state in self._published.items() if state != [] and room_id not in self._refused]
@@ -169,7 +183,7 @@ class ActiveRunPublisher:
         self._wake(lease.room_id)
 
     def _wake(self, room_id: str) -> None:
-        if self._closing or room_id in self._refused:
+        if self._closing:
             return
         self._dirty.setdefault(room_id, asyncio.Event()).set()
         worker = self._workers.get(room_id)
@@ -200,13 +214,13 @@ class ActiveRunPublisher:
             room_id not in self._published or self._published.get(room_id) == []
         )
 
-    async def _flush_room(self, room_id: str, *, force: bool, retries: int) -> tuple[float, int] | None:
+    async def _flush_room(self, room_id: str, *, force: bool, retries: int) -> tuple[float | None, int] | None:
         desired = self._desired_threads(room_id)
         if not force and room_id in self._published and self._published.get(room_id) == desired:
-            return (self.heartbeat_seconds, retries)
+            return (None if room_id in self._refused else self.heartbeat_seconds, retries)
         if await self._put_state(room_id, desired):
-            return (self.heartbeat_seconds, 0)
-        if self._closing or room_id in self._refused:
+            return (None if room_id in self._refused else self.heartbeat_seconds, 0)
+        if self._closing:
             return None
         if retries < len(self.retry_backoffs):
             return (self.retry_backoffs[retries], retries + 1)
@@ -217,7 +231,7 @@ class ActiveRunPublisher:
         heartbeat_due = False
         retries = 0
         try:
-            while not self._closing and room_id not in self._refused and not self._is_settled_idle(room_id):
+            while not self._closing and not self._is_settled_idle(room_id):
                 event.clear()
                 outcome = await self._flush_room(room_id, force=heartbeat_due, retries=retries)
                 heartbeat_due = False
@@ -264,18 +278,18 @@ class ActiveRunPublisher:
             return False
         if isinstance(response, nio.RoomPutStateResponse):
             self._published[room_id] = desired
+            self._refused.discard(room_id)
             return True
         if isinstance(response, nio.RoomPutStateError) and state_failure(response) is StateFailure.REFUSED:
             if room_id not in self._refused:
-                if len(self._refused) < _MAX_REFUSED_ROOMS:
-                    self._refused.add(room_id)
+                self._refused.add(room_id)
                 logger.warning(
                     "Active runs state was refused in this room",
                     room_id=room_id,
                     status_code=response.status_code or f"HTTP {response.http_status}",
                 )
-            self._published.pop(room_id, None)
-            return False
+            self._published[room_id] = desired
+            return True
         logger.warning("Active runs state write returned an error", room_id=room_id, response=str(response))
         return False
 
