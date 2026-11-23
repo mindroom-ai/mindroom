@@ -2548,7 +2548,7 @@ expose = [
 
 [[modules]]
 path = "mindroom.workflow_runs.structured"
-depends_on = []
+depends_on = ["mindroom.json_utils"]
 visibility = ["mindroom.workflow_runs.agent_nodes", "mindroom.workflow_runs.engine"]
 
 [[interfaces]]
@@ -8838,7 +8838,7 @@ visibility = ["mindroom.loop_hooks"]
 [[modules]]
 path = "mindroom.json_utils"
 depends_on = []
-visibility = ["mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.participation_hook", "mindroom.private_storage.private_instance_identity_store", "mindroom.api.mcp_scim", "mindroom.api.script_gateway", "mindroom.api.workflow_gateway", "mindroom.agent_cli.json_io"]
+visibility = ["mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.participation_hook", "mindroom.private_storage.private_instance_identity_store", "mindroom.api.mcp_scim", "mindroom.api.script_gateway", "mindroom.api.workflow_gateway", "mindroom.agent_cli.json_io", "mindroom.workflow_runs.structured"]
 
 [[modules]]
 path = "mindroom.providers.tool_policy"

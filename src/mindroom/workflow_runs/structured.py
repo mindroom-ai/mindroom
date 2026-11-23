@@ -13,6 +13,8 @@ from referencing import Registry
 from referencing.exceptions import Unresolvable
 from referencing.jsonschema import DRAFT202012
 
+from mindroom.json_utils import has_only_finite_numbers
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
@@ -76,10 +78,14 @@ def extract_json(text: str) -> object:
     """Return the value of an agent's answer: its last fenced json block, else the whole answer."""
     blocks = _FENCED.findall(text)
     try:
-        return json.loads(blocks[-1] if blocks else text)
+        value = json.loads(blocks[-1] if blocks else text)
     except ValueError:
         msg = "no JSON value found"
         raise SchemaError(msg) from None
+    if not has_only_finite_numbers(value):
+        msg = "JSON value contains non-finite numbers"
+        raise SchemaError(msg)
+    return value
 
 
 def validation_error(value: object, schema: object) -> str | None:

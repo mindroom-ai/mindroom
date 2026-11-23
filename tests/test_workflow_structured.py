@@ -432,3 +432,43 @@ async def test_invalid_local_reference_fails_at_submit_without_queueing(
     gate.set()
     assert await stack.result("@0", "agent", _ASK) == {"ok": True}
     assert len(model.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("bad", "good", "schema", "expected"),
+    [
+        ("NaN", "0", {"type": "number"}, 0),
+        ("Infinity", "1.5", {"type": "number"}, 1.5),
+        ("-Infinity", "-2", {"type": "number"}, -2),
+        ('{"n": NaN}', '{"n": 3}', {"type": "object", "properties": {"n": {"type": "number"}}}, {"n": 3}),
+    ],
+)
+async def test_non_finite_structured_answers_trigger_correction(
+    stack: WorkflowStack,
+    bad: str,
+    good: str,
+    schema: dict[str, object],
+    expected: object,
+) -> None:
+    """Non-finite numbers (NaN, Infinity) are rejected before validation and trigger a schema correction."""
+    model = stack.child_script(answer(bad), answer(good))
+
+    result = await stack.result("@0", "agent", {"prompt": "Estimate.", "schema": schema})
+
+    assert result == expected
+    assert len(model.requests) == 2
+    async with stack.http() as client:
+        response = await client.get("nodes/n1")
+    assert response.status_code == 200
+    assert response.json()["result"] == expected
+
+
+@pytest.mark.asyncio
+async def test_genuine_json_null_stays_accepted_when_schema_allows_it(stack: WorkflowStack) -> None:
+    """Rejecting non-finite numbers does not break genuine JSON null where the schema allows null."""
+    stack.child_script(answer("null"))
+
+    result = await stack.result("@0", "agent", {"prompt": "Estimate.", "schema": {"type": ["number", "null"]}})
+
+    assert result is None
