@@ -50,8 +50,8 @@ _SCRIPT_RESTRICTED_TOOLKITS = frozenset(
 
 
 # A workflow's calls may use the owner's other tools; these act on the calling turn (its context, its loaded tools, its
-# hook source), and a script has none.
-_WORKFLOW_RESTRICTED_TOOLKITS = frozenset({"compact_context", "dynamic_tools", "slack"})
+# hook source, or its tool ceiling when launching a plain script), and a script has none.
+_WORKFLOW_RESTRICTED_TOOLKITS = frozenset({"compact_context", "dynamic_tools", "script", "slack"})
 
 
 def resolve_script_launch_grants(context: ToolRuntimeContext) -> tuple[ScriptToolGrant, ...]:

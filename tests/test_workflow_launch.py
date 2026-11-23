@@ -345,8 +345,19 @@ def test_grants_include_memory_and_delegate_but_not_compact_context(tmp_path: Pa
     script_toolkits = {grant.toolkit_name for grant in resolve_script_launch_grants(context)}
 
     assert {"calculator", "memory", "delegate"} <= workflow_toolkits
-    assert not {"compact_context", "dynamic_tools", "slack"} & workflow_toolkits
+    assert not {"compact_context", "dynamic_tools", "script", "slack"} & workflow_toolkits
     assert script_toolkits == {"calculator"}
+
+
+def test_workflow_refuses_plain_script_toolkit(tmp_path: Path) -> None:
+    """A workflow run cannot invoke the plain-script launcher, which would snapshot owner grants outside its ceiling."""
+    context = _owner_context(tmp_path, ["calculator", "script"])
+
+    entries = policy_module._visible_script_tool_entries(context, context.config, workflow=True)
+
+    assert "script" not in {entry.name for entry in entries}
+    assert resolve_current_script_tool(context, ScriptToolGrant("script", "start_script"), workflow=True) is None
+    assert resolve_current_script_tool(context, ScriptToolGrant("calculator", "add"), workflow=True) is not None
 
 
 def test_tool_removed_after_launch_is_refused_at_the_call(tmp_path: Path) -> None:
