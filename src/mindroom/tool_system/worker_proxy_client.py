@@ -9,7 +9,7 @@ import secrets
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
@@ -23,7 +23,7 @@ from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_jobs.control import job_owns_execution
 from mindroom.tool_system.progress import report_tool_progress
-from mindroom.workers.in_flight import worker_call_in_flight
+from mindroom.workers.in_flight import acquire_worker_in_flight
 from mindroom.workers.models import WorkerHandle, normalize_sandbox_runner_api_root, worker_api_endpoint
 from mindroom.workers.protocol import (
     WORKER_PROTOCOL_VERSION,
@@ -539,6 +539,53 @@ def _track_shell_scope_remote(
     return kill_url
 
 
+def _finish_shell_scope_remote(
+    shell_scope: ShellBackgroundScope | None,
+    tracked_kill_url: str | None,
+    *,
+    maybe_backgrounded: bool,
+    worker_handle: WorkerHandle | None,
+    worker_manager: WorkerBackend,
+) -> None:
+    if shell_scope is None or tracked_kill_url is None:
+        return
+    acquire_lease = (
+        functools.partial(acquire_worker_in_flight, worker_manager, worker_handle.worker_key)
+        if worker_handle is not None
+        else None
+    )
+    shell_scope.track_remote_end(
+        tracked_kill_url,
+        backgrounded=maybe_backgrounded,
+        acquire_lease=acquire_lease,
+    )
+
+
+def _stream_execute_response(
+    client: _WorkerProxyClient,
+    *,
+    execute_url: str,
+    payload: dict[str, object],
+    headers: dict[str, str],
+    timeout: httpx.Timeout,
+    deadline: float | None,
+    cancellation: WorkerCallCancellation | None,
+    on_frame: Callable[[dict[str, object]], None] | None,
+) -> dict[str, object] | None:
+    with client.stream("POST", execute_url, json=payload, headers=headers, timeout=timeout) as response:
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            response.read()
+            raise _WorkerHttpError(exc.response) from exc
+        return _read_execute_stream(
+            response,
+            deadline=deadline,
+            cancellation=cancellation,
+            on_frame=on_frame,
+        )
+
+
 def execute_worker_proxy_request(
     *,
     config: WorkerProxyClientConfig,
@@ -568,8 +615,10 @@ def execute_worker_proxy_request(
         raise RuntimeError(msg)
 
     shell_scope_id = shell_scope.scope_id if shell_scope is not None else request.shell_scope_id
+    in_flight_release: Callable[[], None] | None = None
     tracked_kill_url: str | None = None
-    shell_backgrounded = False
+    # Treat any failed or cancelled /execute as possibly backgrounded; only a decoded shell_backgrounded=False skips kill.
+    maybe_backgrounded = True
     try:
         try:
             headers = worker_request_headers(worker_handle, config=config)
@@ -624,11 +673,8 @@ def execute_worker_proxy_request(
                     config.proxy_timeout_seconds,
                     read=max(config.proxy_timeout_seconds, 3 * EXECUTE_KEEPALIVE_SECONDS),
                 )
-                in_flight = (
-                    worker_call_in_flight(worker_manager, worker_handle.worker_key)
-                    if worker_handle is not None
-                    else nullcontext()
-                )
+                if worker_handle is not None:
+                    in_flight_release = acquire_worker_in_flight(worker_manager, worker_handle.worker_key)
                 tracked_kill_url = _track_shell_scope_remote(
                     shell_scope,
                     client_factory=client_factory,
@@ -636,21 +682,16 @@ def execute_worker_proxy_request(
                     runner_api_root=runner_api_root,
                     headers=headers,
                 )
-                with (
-                    in_flight,
-                    client.stream("POST", execute_url, json=payload, headers=headers, timeout=timeout) as response,
-                ):
-                    try:
-                        response.raise_for_status()
-                    except httpx.HTTPStatusError as exc:
-                        response.read()
-                        raise _WorkerHttpError(exc.response) from exc
-                    data = _read_execute_stream(
-                        response,
-                        deadline=deadline,
-                        cancellation=cancellation,
-                        on_frame=on_frame,
-                    )
+                data = _stream_execute_response(
+                    client,
+                    execute_url=execute_url,
+                    payload=payload,
+                    headers=headers,
+                    timeout=timeout,
+                    deadline=deadline,
+                    cancellation=cancellation,
+                    on_frame=on_frame,
+                )
         except Exception as exc:
             _record_proxy_exception_for_worker(
                 exc,
@@ -671,10 +712,19 @@ def execute_worker_proxy_request(
             operation="execute",
             failure="Sandbox execution failed.",
         )
-        shell_backgrounded = answer.shell_backgrounded
+        maybe_backgrounded = answer.shell_backgrounded
     finally:
-        if shell_scope is not None and tracked_kill_url is not None:
-            shell_scope.track_remote_end(tracked_kill_url, backgrounded=shell_backgrounded)
+        try:
+            _finish_shell_scope_remote(
+                shell_scope,
+                tracked_kill_url,
+                maybe_backgrounded=maybe_backgrounded,
+                worker_handle=worker_handle,
+                worker_manager=worker_manager,
+            )
+        finally:
+            if in_flight_release is not None:
+                in_flight_release()
     if worker_handle is not None:
         worker_manager.touch_worker(worker_handle.worker_key)
     return answer.result

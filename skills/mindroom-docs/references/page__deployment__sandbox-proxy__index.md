@@ -438,7 +438,7 @@ Do not put upstream API tokens in `extra_env_passthrough` or `.mindroom/worker-e
 Stopping a response also stops its in-flight worker calls, such as `run_shell_command` and `run_python_code`.
 With [background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) enabled, a call that continues as a job stops when its job is cancelled instead.
 Tools that run inside the runner process itself, such as `file` under the runner's `inprocess` execution mode, and persistent browser actions finish before the stop takes effect.
-Every shell call waits at most 120 seconds in the foreground: calls with `timeout` <= 120 stop inline; a top-level background job runs on until completion, its `timeout`, or job cancellation; and any other turn-scoped call (including subagents and minimal-mode turns) moves to the background on the worker with a live `.mindroom/shell/` log and stops automatically when `timeout` expires or when the turn ends.
+By default a shell call waits at most 120 seconds in the foreground: calls with `timeout` <= 120 stop inline; a top-level background job runs on until completion, its `timeout`, or job cancellation; and any other turn-scoped call (including subagents and minimal-mode turns) moves to the background on the worker with a live `.mindroom/shell/` log and stops automatically when `timeout` expires or when the turn ends.
 A runner or worker restart stops running commands; see the [shell tool](https://docs.mindroom.chat/tools/execution-and-coding/#shell).
 
 ## Browsers in workers

@@ -551,7 +551,9 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
         def _background_log_policy(self) -> BackgroundLogPolicy:
             log_root = self._workspace_dir or self.base_dir
             if log_root is None:
-                return BackgroundLogPolicy(log_dir=str(Path(tempfile.gettempdir()) / "mindroom-shell-logs"))
+                return BackgroundLogPolicy(
+                    log_dir=str(Path(tempfile.gettempdir()) / f"mindroom-shell-logs-{os.getuid()}"),
+                )
             display_root = (
                 str(self.base_dir.resolve())
                 if self.base_dir is not None and not self._beside_workdir and log_root == self.base_dir
@@ -573,26 +575,27 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             """Runs a shell command and returns the output or error.
 
             The last ``tail`` lines of stdout, then of stderr, are returned; on
-            non-zero exit, all of stderr is kept. Every call waits at most 120
-            seconds in the foreground. A call with ``timeout`` <= 120 stops the
-            command and the processes it started after ``timeout`` seconds and
-            returns its output so far. When a command is still running after 120
-            seconds: a call that accepts ``background_after`` (with it unset)
-            returns a job handle while the command runs on until completion, its
-            ``timeout``, or job cancellation; any other call (including subagent
-            calls) moves the command to the background, returns its PID, live log
-            path, and wait/stop commands, and stops it automatically when
-            ``timeout`` (if set) expires or when the turn ends. Set ``timeout`` on
-            a command that might not end on its own, such as a watcher or a test
-            run that can hang. Start a server or anything else meant to outlive
-            the turn detached with ``nohup cmd > out.log 2>&1 &``. Wait for
-            something inside one command, such as
+            non-zero exit, all of stderr is kept. By default the call waits at
+            most 120 seconds in the foreground. A call with ``timeout`` <= 120
+            stops the command and the processes it started after ``timeout``
+            seconds and returns its output so far. When a command is still running
+            after 120 seconds: a call that accepts ``background_after`` (with it
+            unset) returns a job handle while the command runs on until
+            completion, its ``timeout``, or job cancellation; any other call
+            (including subagent calls) moves the command to the background,
+            returns its PID, live log path, and wait/stop commands, and stops it
+            automatically when ``timeout`` (if set) expires or when the turn ends.
+            Set ``timeout`` on a command that might not end on its own, such as a
+            watcher or a test run that can hang. Start a server or anything else
+            meant to outlive the turn detached with ``nohup cmd > out.log 2>&1 &``.
+            Wait for something inside one command, such as
             ``until <check>; do sleep 10; done`` with a ``timeout``, not with
             repeated ``sleep`` calls: every call is a model turn.
 
             With ``mindroom_output_path``, capture the complete supported output
-            within the redirect byte limit instead of applying ``tail``; a stopped
-            or backgrounded command saves no file.
+            within the redirect byte limit instead of applying ``tail``; a managed
+            top-level job still saves it on completion, whereas a command stopped
+            or backgrounded in the current turn saves no file.
 
             Command strings use non-login Bash with the prepared execution environment.
             Use explicit ``["bash", "-lc", command]`` only when login startup is needed.

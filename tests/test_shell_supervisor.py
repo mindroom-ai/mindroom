@@ -112,16 +112,12 @@ def test_invalid_result_metadata_cannot_claim_output_ownership(payload: dict[str
 
 
 @contextlib.asynccontextmanager
-async def _running_server(
-    registry: dict[str, ProcessRecord],
-    deadline_tasks: set[asyncio.Task[None]] | None = None,
-) -> AsyncIterator[str]:
+async def _running_server(registry: dict[str, ProcessRecord]) -> AsyncIterator[str]:
     runtime_dir = Path(tempfile.mkdtemp(prefix="mindroom-shell-test-"))
     socket_path = str(runtime_dir / "s.sock")
     handle_reservations: set[str] = set()
-    tracked_deadline_tasks = deadline_tasks if deadline_tasks is not None else set()
     server = await asyncio.start_unix_server(
-        partial(_handle_connection, registry, handle_reservations, tracked_deadline_tasks),
+        partial(_handle_connection, registry, handle_reservations),
         path=socket_path,
     )
     try:
@@ -129,9 +125,6 @@ async def _running_server(
     finally:
         server.close()
         await server.wait_closed()
-        for task in tracked_deadline_tasks:
-            task.cancel()
-        await asyncio.gather(*tracked_deadline_tasks, return_exceptions=True)
         shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
@@ -365,7 +358,6 @@ async def test_invalid_process_deadline_returns_structured_error(runtime_seconds
 async def test_process_deadlines_are_independent_and_leave_ordinary_background_calls_running(tmp_path: Path) -> None:
     """Each maximum runtime kills only its original process group and drains its timer."""
     registry: dict[str, ProcessRecord] = {}
-    deadline_tasks: set[asyncio.Task[None]] = set()
     resistant_handle = f"shell:{'a' * 32}"
     completed_handle = f"shell:{'b' * 32}"
     cancelled_handle = f"shell:{'c' * 32}"
@@ -377,7 +369,7 @@ async def test_process_deadlines_are_independent_and_leave_ordinary_background_c
         "time.sleep(300)"
     )
 
-    async with _running_server(registry, deadline_tasks) as socket_path:
+    async with _running_server(registry) as socket_path:
         resistant = await _run(
             socket_path,
             [sys.executable, "-c", resistant_script, str(ready_path)],
@@ -421,11 +413,9 @@ async def test_process_deadlines_are_independent_and_leave_ordinary_background_c
             assert "FINISHED" in await _wait_for_finished(socket_path, resistant_handle)
             assert "exit code -9" in await _check(socket_path, resistant_handle)
             assert "RUNNING" in await _check(socket_path, ordinary_handle)
-            for _ in range(20):
-                if not deadline_tasks:
-                    break
-                await asyncio.sleep(0.05)
-            assert deadline_tasks == set()
+            for handle in (resistant_handle, completed_handle, cancelled_handle):
+                monitor = registry[handle]._monitor_task
+                assert monitor is None or monitor.done()
         finally:
             await _kill(socket_path, resistant_handle, force=True)
             await _kill(socket_path, cancelled_handle, force=True)

@@ -9790,10 +9790,10 @@ Run such a script as a [background job](https://docs.mindroom.chat/tools/agent-o
 
 CLI calls follow the agent's existing approval rules and interactive questions, and an approval applies to the exact tool and arguments shown.
 Each Bash command starts a fresh shell: workspace files persist, but shell variables and directory changes do not carry over.
-A minimal-mode Bash command stops after its `timeout`, 120 seconds by default, with its output so far, while one inside a background job, such as a minimal subagent that a standard agent's own `delegate` call started with background jobs enabled, has no default limit.
-In a reply, start longer work detached (`nohup cmd > out.log 2>&1 &`) and read its log in later commands.
+By default a minimal-mode Bash command (including in a minimal subagent) waits at most 120 seconds in the foreground: values of `timeout` <= 120 stop the command inline with its output so far, while an omitted `timeout` or value > 120 moves the command to the background after 120 seconds with a live `.mindroom/shell/` log and stops it automatically when `timeout` expires or when the turn ends.
+To keep work running past the end of the turn, start it detached (`nohup cmd > out.log 2>&1 &`) and read its log in later commands.
 Shell commands can run in parallel, and each keeps its own calls and media.
-A command can submit new calls only while it is running or its earlier calls are finishing; later calls, including those from background commands whose Bash call has returned, are rejected rather than queued.
+A command can submit new `mindroom-agent` calls only while its Bash call is running or its earlier calls are finishing; once a Bash command is backgrounded and its call returns, it cannot make new `mindroom-agent` CLI calls after handoff (later submissions are rejected rather than queued).
 A command's `timeout` stops the command, not the calls it started: its Bash call returns once they finish, including a call that waits for an approval.
 `calls wait` on earlier receipts works until the response and its background jobs end.
 
@@ -11058,10 +11058,10 @@ The command runs in the agent's workspace, or in its workdir, and the result hol
 With `mindroom_output_path`, the complete output is saved to that file instead, and the receipt includes `exit_code` whenever the command exits non-zero or is killed, such as by the OOM killer, even when no file is saved; a command stopped at its `timeout` reports the stop instead.
 A successful command saves its stdout alone, and when it also printed to stderr, the receipt gives its size as `stderr_bytes`; add `2>&1` to the command to save that text too.
 
-Every shell call waits at most 120 seconds in the foreground.
+By default a shell call waits at most 120 seconds in the foreground.
 A command with `timeout` <= 120 that is still running after `timeout` seconds is stopped together with the processes it started, and the tool returns its output so far after `Stopped after <timeout>s.`.
-When `timeout` is omitted or > 120 and the command is still running after 120 seconds, a call that runs as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) returns a job handle while the command continues until completion, its `timeout`, or job cancellation; any other turn-scoped call (including subagent calls, minimal-mode turns, and turns with background jobs off) moves the command to the background, streams ongoing stdout and stderr into a bounded live log file under `.mindroom/shell/` ending with the exit status, returns its PID, log path, and wait/stop commands, and stops the process group automatically when `timeout` (if set) expires or when the turn ends.
-Neither a stopped nor a backgrounded command saves a `mindroom_output_path` file.
+When `timeout` is omitted or > 120 and the command is still running after 120 seconds, a call that runs as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) (with `background_after` unset) returns a job handle while the command continues until completion, its `timeout`, or job cancellation; any other turn-scoped call (including subagent calls, minimal-mode turns, and turns with background jobs off) moves the command to the background, streams ongoing stdout and stderr into a bounded live log file under `.mindroom/shell/` ending with the exit status, returns its PID, log path, and wait/stop commands, and stops the process group automatically when `timeout` (if set) expires or when the turn ends.
+A managed top-level job still saves `mindroom_output_path` when it completes; a command stopped at its timeout or backgrounded in the current turn saves no file.
 While a job's command runs, `job(action="list")` shows the last lines of its output, and cancelling the job stops the command.
 A command that exits non-zero still returned its result, so its job ends `completed`; its summary in `job(action="list")`, the first 500 characters of that result, includes the `Exit code <code>` line, or, with `mindroom_output_path`, is the receipt with its `exit_code`.
 A process started with `nohup cmd > out.log 2>&1 &` keeps running after its command ends on its own, but not after a stop; only a process started in its own session, such as with `setsid`, survives a stop.
@@ -24371,7 +24371,7 @@ Do not put upstream API tokens in `extra_env_passthrough` or `.mindroom/worker-e
 Stopping a response also stops its in-flight worker calls, such as `run_shell_command` and `run_python_code`.
 With [background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) enabled, a call that continues as a job stops when its job is cancelled instead.
 Tools that run inside the runner process itself, such as `file` under the runner's `inprocess` execution mode, and persistent browser actions finish before the stop takes effect.
-Every shell call waits at most 120 seconds in the foreground: calls with `timeout` <= 120 stop inline; a top-level background job runs on until completion, its `timeout`, or job cancellation; and any other turn-scoped call (including subagents and minimal-mode turns) moves to the background on the worker with a live `.mindroom/shell/` log and stops automatically when `timeout` expires or when the turn ends.
+By default a shell call waits at most 120 seconds in the foreground: calls with `timeout` <= 120 stop inline; a top-level background job runs on until completion, its `timeout`, or job cancellation; and any other turn-scoped call (including subagents and minimal-mode turns) moves to the background on the worker with a live `.mindroom/shell/` log and stops automatically when `timeout` expires or when the turn ends.
 A runner or worker restart stops running commands; see the [shell tool](https://docs.mindroom.chat/tools/execution-and-coding/#shell).
 
 ## Browsers in workers

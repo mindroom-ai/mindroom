@@ -126,6 +126,7 @@ from mindroom.workers.backends import static_runner as static_runner_module
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.compatibility import worker_health_payload
+from mindroom.workers.in_flight import touch_workers_in_flight
 from mindroom.workers.models import ConfiguredWorkerBackend, WorkerHandle, WorkerReadyProgress, WorkerSpec
 from mindroom.workers.placements import DedicatedWorkerPlacement, dedicated_worker_placement
 from mindroom.workers.protocol import (
@@ -8329,3 +8330,142 @@ def test_proxy_shell_scope_keeps_bounded_deadline_under_job_control(monkeypatch:
 
     assert deadlines[0] is None
     assert deadlines[1] is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("current_static_runner")
+async def test_proxy_shell_scope_kills_remote_scope_after_execute_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed or aborted scoped /execute still triggers /execute/shell-scope/kill on scope close."""
+    captured_calls: list[tuple[str, dict[str, Any]]] = []
+    paths = _configure_proxy_runtime(
+        monkeypatch,
+        proxy_url="http://sandbox-runner:8765",
+        proxy_token=_TEST_AUTH_TOKEN,
+        execution_mode="selective",
+        proxy_tools={"shell"},
+        credential_policy={},
+    )
+
+    def failing_responder(url: str, _payload: dict[str, Any]) -> object:
+        if url.endswith("/execute/shell-scope/kill"):
+            return {"killed": 1}
+        msg = "connection dropped mid-stream"
+        raise httpx.ReadError(msg)
+
+    monkeypatch.setattr(
+        "mindroom.tool_system.sandbox_proxy.httpx.Client",
+        _recording_client_class(captured_calls=captured_calls, responder=failing_responder),
+    )
+
+    async with shell_background_scope() as scope:
+        with pytest.raises(httpx.ReadError, match="connection dropped"):
+            await asyncio.to_thread(
+                call_proxy_sync_for_test,
+                runtime_paths=paths,
+                tool_name="shell",
+                function_name="run_shell_command",
+                args=("sleep 200",),
+                kwargs={},
+                credentials_manager=None,
+            )
+
+    kill_calls = [(url, body) for url, body in captured_calls if url.endswith("/execute/shell-scope/kill")]
+    assert kill_calls == [
+        (
+            "http://sandbox-runner:8765/api/sandbox-runner/execute/shell-scope/kill",
+            {"protocol": WORKER_PROTOCOL_VERSION, "shell_scope_id": scope.scope_id},
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_proxy_shell_scope_holds_worker_in_flight_lease_until_scope_closes() -> None:
+    """A backgrounded scoped call keeps touch_workers_in_flight active until scope.close() finishes."""
+    manager = _TrackingWorkerManager()
+    handle = WorkerHandle(
+        worker_id="worker-bg",
+        worker_key="v1:shared:scope-lease-test",
+        endpoint="http://worker-bg/api/sandbox-runner/execute",
+        auth_token=_TEST_AUTH_TOKEN,
+        status="ready",
+        backend_name="kubernetes",
+        last_used_at=0.0,
+        created_at=0.0,
+    )
+    config = WorkerProxyClientConfig(
+        proxy_url=None,
+        proxy_token=_TEST_AUTH_TOKEN,
+        proxy_timeout_seconds=150.0,
+        credential_lease_ttl_seconds=60,
+        credential_policy={},
+        lease_tool_credentials=False,
+    )
+    request = ExecuteRequest(
+        protocol=WORKER_PROTOCOL_VERSION,
+        tool_name="shell",
+        function_name="run_shell_command",
+        args=["sleep 200"],
+        kwargs={},
+    )
+    kill_urls: list[str] = []
+    touch_during_kill: list[str] = []
+
+    def responder(url: str, _payload: dict[str, Any]) -> object:
+        if url.endswith("/execute/shell-scope/kill"):
+            kill_urls.append(url)
+            manager.touched.clear()
+            touch_workers_in_flight(manager)
+            touch_during_kill.extend(manager.touched)
+            return {"killed": 1}
+        return {"ok": True, "result": "Still running", "shell_backgrounded": True}
+
+    async with shell_background_scope() as scope:
+        await asyncio.to_thread(
+            execute_worker_proxy_request,
+            config=config,
+            request=request,
+            credentials_manager=None,
+            worker_target=None,
+            worker_handle=handle,
+            worker_manager=manager,
+            client_factory=_recording_client_class(responder=responder),
+            shell_scope=scope,
+        )
+        # Even after /execute returns, the worker stays protected from idle cleanup while backgrounded.
+        manager.touched.clear()
+        touch_workers_in_flight(manager)
+        assert manager.touched == [handle.worker_key]
+
+    # During /execute/shell-scope/kill the lease was still held; after close() it is released.
+    assert kill_urls == ["http://worker-bg/api/sandbox-runner/execute/shell-scope/kill"]
+    assert touch_during_kill == [handle.worker_key]
+    manager.touched.clear()
+    touch_workers_in_flight(manager)
+    assert manager.touched == []
+
+    # Even when /execute fails AND /execute/shell-scope/kill fails, the lease is acquired and still released.
+    def failing_all(url: str, _payload: dict[str, Any]) -> object:
+        msg = f"boom on {url}"
+        raise httpx.ReadError(msg)
+
+    async with shell_background_scope() as failing_scope:
+        with pytest.raises(httpx.ReadError, match="boom on"):
+            await asyncio.to_thread(
+                execute_worker_proxy_request,
+                config=config,
+                request=request,
+                credentials_manager=None,
+                worker_target=None,
+                worker_handle=handle,
+                worker_manager=manager,
+                client_factory=_recording_client_class(responder=failing_all),
+                shell_scope=failing_scope,
+            )
+        manager.touched.clear()
+        touch_workers_in_flight(manager)
+        assert manager.touched == [handle.worker_key]
+    manager.touched.clear()
+    touch_workers_in_flight(manager)
+    assert manager.touched == []

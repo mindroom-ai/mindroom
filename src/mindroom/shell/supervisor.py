@@ -128,7 +128,6 @@ async def _handle_run(
     handle_reservations: set[str],
     payload: dict[str, object],
     reader: asyncio.StreamReader,
-    deadline_tasks: set[asyncio.Task[None]] | None = None,
     *,
     write_progress: Callable[[str], None] | None = None,
 ) -> ShellRunResult | None:
@@ -145,7 +144,6 @@ async def _handle_run(
     if handle_payload is not None and not isinstance(handle_payload, str):
         msg = "run request 'handle' must be a string"
         raise TypeError(msg)
-    _ = deadline_tasks
     response_timeout, max_runtime_seconds = _run_timings(payload)
     output_destination = ShellOutputDestination.from_payload(payload.get("output_destination"))
     background_log = BackgroundLogPolicy.from_payload(payload.get("background_log"))
@@ -241,7 +239,6 @@ def _run_timings(payload: dict[str, object]) -> tuple[float | None, float | None
 async def _handle_connection(
     registry: dict[str, ProcessRecord],
     handle_reservations: set[str],
-    deadline_tasks: set[asyncio.Task[None]],
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
 ) -> None:
@@ -257,7 +254,6 @@ async def _handle_connection(
                 handle_reservations,
                 payload,
                 reader,
-                deadline_tasks,
                 write_progress=partial(_write_progress, writer),
             )
             if result is None:
@@ -300,13 +296,12 @@ async def _handle_connection(
 async def _serve(socket_path: str) -> int:
     registry: dict[str, ProcessRecord] = {}
     handle_reservations: set[str] = set()
-    deadline_tasks: set[asyncio.Task[None]] = set()
     parent_pid = os.getppid()
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGTERM, stop_event.set)
     server = await asyncio.start_unix_server(
-        partial(_handle_connection, registry, handle_reservations, deadline_tasks),
+        partial(_handle_connection, registry, handle_reservations),
         path=socket_path,
         limit=_REQUEST_LIMIT_BYTES,
     )
@@ -321,9 +316,6 @@ async def _serve(socket_path: str) -> int:
     # Handles cannot outlive the supervisor; kill their process groups so a
     # runner or worker restart invalidates handles without leaking processes.
     kill_all_records(registry)
-    for task in deadline_tasks:
-        task.cancel()
-    await asyncio.gather(*deadline_tasks, return_exceptions=True)
     if orphaned:
         # The runner died without running its cleanup (e.g. SIGKILL), so
         # remove our runtime dir ourselves.
