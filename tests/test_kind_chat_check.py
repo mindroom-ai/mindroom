@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from cluster.k8s.kind.chat_check import extract_latest_reply, is_terminal_reply
+import subprocess
+import sys
+
+import pytest
+
+from cluster.k8s.kind.chat_check import extract_latest_reply, is_terminal_reply, port_forward
 
 AGENT = "@mindroom_helper:mindroom.local"
 
@@ -94,3 +99,16 @@ def test_extract_latest_reply_ignores_unrelated_messages_and_orphan_edits() -> N
     assert not is_terminal_reply("", "completed")
     assert not is_terminal_reply("waiting", "approval_pending")
     assert is_terminal_reply("boom", "error")
+
+
+def test_port_forward_reports_stderr_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Port-forward surfaces kubectl stderr if the subprocess exits before becoming ready."""
+    real_popen = subprocess.Popen
+
+    def fake_popen(_cmd: list[str], **_kwargs: object) -> subprocess.Popen[str]:
+        cmd = [sys.executable, "-c", "import sys; sys.stderr.write('svc not found\\n'); sys.exit(1)"]
+        return real_popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    with pytest.raises(RuntimeError, match="svc not found"), port_forward():
+        pass
