@@ -2648,6 +2648,7 @@ depends_on = [
     "mindroom.workflow_runs.notices",
     "mindroom.workflow_runs.questions",
     "mindroom.workflow_runs.recovery",
+    "mindroom.workflow_runs.saved",
     "mindroom.workflow_runs.structured",
     "mindroom.workflow_runs.replay",
     "mindroom.workflow_runs.store",

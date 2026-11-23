@@ -6,6 +6,7 @@ MindRoom calls `main(args)`; every SDK call inside it is one saved node of the r
 
 from __future__ import annotations
 
+import base64
 import difflib
 import functools
 import hashlib
@@ -44,6 +45,7 @@ __all__ = [
     "parallel",
     "phase",
     "random",
+    "run",
     "run_workflow",
     "shell",
     "tool",
@@ -138,6 +140,7 @@ class _Local(threading.local):
     lane: _Lane | None = None
     # The place the thread's lane holds among the active lanes of its fan-out, given up while its call waits.
     place: threading.Semaphore | None = None
+    loading: bool = False
 
 
 _local = _Local()
@@ -146,7 +149,7 @@ _local = _Local()
 def _current_lane() -> _Lane:
     lane = _local.lane
     if lane is None:
-        on_main_thread = threading.current_thread() is threading.main_thread()
+        on_main_thread = _local.loading or threading.current_thread() is threading.main_thread()
         raise WorkflowError(_MODULE_LEVEL_CALL if on_main_thread else _RAW_THREAD_CALL)
     return lane
 
@@ -191,6 +194,15 @@ class _Gateway:
 
     def run_info(self) -> dict[str, object]:
         return cast("dict[str, object]", self._request("GET", "run"))
+
+    def source(self, name: str) -> tuple[bytes, str]:
+        payload = cast("dict[str, object]", self._request("GET", f"sources/{urllib.parse.quote(name, safe='')}"))
+        raw = base64.b64decode(str(payload["source_b64"]))
+        sha256 = str(payload["sha256"])
+        if hashlib.sha256(raw).hexdigest() != sha256:
+            msg = f"Saved workflow '{name}' failed digest check."
+            raise WorkflowError(msg)
+        return raw, sha256
 
     def submit(self, key: str, kind: str, args: dict[str, object], meta: dict[str, object]) -> dict[str, object]:
         body: dict[str, object] = {"key": key, "kind": kind, "args": args, "meta": meta}
@@ -529,6 +541,40 @@ def now() -> datetime:
 def random() -> float:
     """Return a random float in [0, 1), remembered across resume."""
     return float(cast("float", _call("value", {"op": "random"})))
+
+
+def run(name: str, args: object = None) -> object:
+    """Run the saved workflow `workflows/<name>.py` inside this run and return what its main(args) returns."""
+    lane = _current_lane()
+    raw, sha256 = _gateway().source(name)
+    key = _next_key()
+    child_path = f"{lane.path}/{key.rpartition('@')[2]}:run"
+    meta: dict[str, object] = {"cached": True, "phase": lane.phase, "members": [child_path]}
+    group = _gateway().submit(
+        key,
+        "group",
+        {"op": "run", "name": name, "source_sha256": sha256},
+        {field_name: value for field_name, value in meta.items() if value is not None},
+    )
+    if group["state"] != "completed":
+        raise _failure(group, ToolError)
+    module = types.ModuleType(f"__workflow_run_{name}__")
+    module.__file__ = f"workflows/{name}.py"
+    saved_lane = _local.lane
+    try:
+        _local.lane = None
+        _local.loading = True
+        try:
+            exec(compile(raw, module.__file__, "exec"), module.__dict__)  # noqa: S102
+        finally:
+            _local.loading = False
+        main = module.__dict__.get("main")
+        if not callable(main):
+            raise WorkflowError(_NO_MAIN)
+        _local.lane = _Lane(child_path, phase=lane.phase)
+        return main({} if args is None else args)
+    finally:
+        _local.lane = saved_lane
 
 
 def run_workflow(source_path: str) -> None:

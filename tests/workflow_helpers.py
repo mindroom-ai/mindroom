@@ -9,6 +9,7 @@ runs are real delegation jobs whose models answer what the test scripted.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import shutil
@@ -148,6 +149,7 @@ class FakeWorkflowGateway:
         self.logs: list[str] = []
         self.finished: dict[str, object] | None = None
         self.results: dict[str, object] = {}
+        self.sources: dict[str, bytes] = {}
         self.polls_before_settled = 0
         """How many `GET nodes/{id}` answers say `running` before the receipt of `respond` is returned."""
         self.drop_connections = 0
@@ -179,6 +181,14 @@ class FakeWorkflowGateway:
     def _answer(self, method: str, route: str, body: dict[str, object]) -> object:  # noqa: PLR0911
         if (method, route) == ("GET", "run"):
             return {"run_id": "wf-" + "b" * 32, "attempt": 1, "args": self.args}
+        if method == "GET" and route.startswith("sources/"):
+            name = route.removeprefix("sources/")
+            raw = self.sources[name]
+            return {
+                "name": name,
+                "source_b64": base64.b64encode(raw).decode("ascii"),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            }
         if (method, route) == ("POST", "nodes"):
             with self._lock:
                 self.nodes.append(body)

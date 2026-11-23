@@ -75,6 +75,7 @@ from mindroom.workflow_runs.replay import (
     result_digest,
     split_key,
 )
+from mindroom.workflow_runs.saved import read_saved_source, validate_workflow_name
 from mindroom.workflow_runs.store import SupersededAttemptError, WorkflowRunNotFoundError, WorkflowRunStoreError
 from mindroom.workflow_runs.structured import (
     SCHEMA_TURNS,
@@ -701,6 +702,30 @@ class WorkflowEngine:
         """Return what the attempt's script starts from."""
         run = await self._current_run(attempt)
         return {"run_id": run.run_id, "attempt": run.attempt, "args": run.args}
+
+    async def saved_source(self, attempt: ScriptRunRecord, name: str) -> tuple[bytes, str]:
+        """Return the saved workflow bytes and SHA-256 for *name*, snapshotted once per attempt."""
+        run = await self._current_run(attempt)
+        try:
+            validate_workflow_name(name)
+        except ValueError as exc:
+            raise WorkflowRunStoreError(str(exc)) from exc
+        if (existing := await asyncio.to_thread(self.store.get_source, run.run_id, run.attempt, name)) is not None:
+            return existing
+        context = self.authorize(run)
+        if context is None:
+            raise ScriptRuntimeUnavailableError(_OWNER_NOT_READY)
+        if isinstance(context, str):
+            raise WorkflowRunStoreError(context)
+        try:
+            workspace = await asyncio.to_thread(context.agent_workspace_root, create=False)
+            raw = await asyncio.to_thread(read_saved_source, workspace, name)
+        except FileNotFoundError as exc:
+            raise LookupError(str(exc)) from exc
+        except (OSError, ValueError) as exc:
+            raise WorkflowRunStoreError(str(exc)) from exc
+        sha256 = hashlib.sha256(raw).hexdigest()
+        return await asyncio.to_thread(self.store.put_source, run.run_id, run.attempt, run.epoch, name, raw, sha256)
 
     async def submit_node(self, attempt: ScriptRunRecord, request: NodeRequest) -> NodeReceipt:
         """Save and dispatch one call of the attempt's script, or return the receipt of the node its key has."""

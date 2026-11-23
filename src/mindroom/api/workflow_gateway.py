@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from contextlib import contextmanager
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Annotated
@@ -33,6 +34,7 @@ __all__ = [
     "node_result",
     "router",
     "run_info",
+    "saved_source",
     "submit_node",
 ]
 
@@ -133,6 +135,15 @@ async def run_info(authenticated: _Attempt) -> dict[str, object]:
     engine, attempt = authenticated
     with _refusals():
         return await engine.run_info(attempt)
+
+
+@router.get("/sources/{name}")
+async def saved_source(name: str, authenticated: _Attempt) -> dict[str, str]:
+    """Return a saved workflow's snapshotted bytes and SHA-256 for this attempt."""
+    engine, attempt = authenticated
+    with _refusals():
+        raw, sha256 = await engine.saved_source(attempt, name)
+    return {"name": name, "source_b64": base64.b64encode(raw).decode("ascii"), "sha256": sha256}
 
 
 @router.post("/nodes")

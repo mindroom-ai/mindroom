@@ -448,6 +448,37 @@ class WorkflowRunStore:
             ).fetchall()
         return [row["text"] for row in reversed(rows)]
 
+    def get_source(self, run_id: str, attempt: int, name: str) -> tuple[bytes, str] | None:
+        """Return the saved workflow bytes and SHA-256 snapshotted for *name* in *attempt*, if any."""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT source, sha256 FROM workflow_sources WHERE run_id = ? AND attempt = ? AND name = ?",
+                (run_id, attempt, name),
+            ).fetchone()
+        return None if row is None else (bytes(row["source"]), str(row["sha256"]))
+
+    def put_source(
+        self,
+        run_id: str,
+        attempt: int,
+        epoch: int,
+        name: str,
+        source: bytes,
+        sha256: str,
+    ) -> tuple[bytes, str]:
+        """Snapshot *source* for *name* in *attempt* once, returning the winning bytes and SHA-256."""
+        with self._write_transaction() as connection:
+            _fenced(connection, run_id, epoch)
+            connection.execute(
+                "INSERT OR IGNORE INTO workflow_sources (run_id, attempt, name, source, sha256) VALUES (?, ?, ?, ?, ?)",
+                (run_id, attempt, name, source, sha256),
+            )
+            row = connection.execute(
+                "SELECT source, sha256 FROM workflow_sources WHERE run_id = ? AND attempt = ? AND name = ?",
+                (run_id, attempt, name),
+            ).fetchone()
+        return bytes(row["source"]), str(row["sha256"])
+
     def prune(self, finished_before: str, held: Collection[str] | None = ()) -> int:
         """Delete finished runs that ended before *finished_before*, with all they own; return how many.
 
@@ -775,6 +806,17 @@ _SCHEMA_STATEMENTS = (
         run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
         key TEXT NOT NULL, generation INTEGER NOT NULL, call_id TEXT NOT NULL, child_run_id TEXT NOT NULL,
         PRIMARY KEY (run_id, key, generation, call_id, child_run_id)
+    )
+    """,
+    # Saved workflow files snapshotted once per attempt for SDK run(name).
+    """
+    CREATE TABLE workflow_sources (
+        run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+        attempt INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        source BLOB NOT NULL,
+        sha256 TEXT NOT NULL,
+        PRIMARY KEY (run_id, attempt, name)
     )
     """,
 )

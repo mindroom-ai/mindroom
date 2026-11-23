@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+import pytest_asyncio
 
+import mindroom.workflow as workflow_sdk
+from mindroom.script_runs.models import ScriptRunState
 from mindroom.workflow_runs.saved import (
     SavedWorkflow,
     SavedWorkflowExistsError,
@@ -14,6 +20,48 @@ from mindroom.workflow_runs.saved import (
     read_saved_source,
     save_source,
 )
+from tests.workflow_helpers import (
+    FakeWorkflowGateway,
+    WorkflowStack,
+    completed,
+    sdk_env,
+    tool_args,
+    workflow_stack,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator
+    from types import ModuleType
+
+
+@pytest_asyncio.fixture
+async def stack(tmp_path: Path) -> AsyncIterator[WorkflowStack]:
+    """Engine harness with a workspace ready for saved workflows."""
+    with workflow_stack(tmp_path) as harness:
+        yield harness
+        await harness.engine.close()
+
+
+@pytest.fixture
+def gateway(tmp_path: Path) -> Iterator[FakeWorkflowGateway]:
+    """Fake workflow gateway for pure SDK tests."""
+    with FakeWorkflowGateway(tmp_path / "capability") as fake:
+        yield fake
+
+
+@pytest.fixture
+def sdk(monkeypatch: pytest.MonkeyPatch, gateway: FakeWorkflowGateway) -> ModuleType:
+    """SDK module wired to the fake gateway."""
+    sdk_env(monkeypatch, gateway)
+    return workflow_sdk
+
+
+@pytest.fixture
+def in_main(sdk: ModuleType) -> Iterator[None]:
+    """Run the test as if inside `main(args)`."""
+    sdk._local.lane = sdk._Lane("")
+    yield
+    sdk._local.lane = None
 
 
 def test_list_saved_parses_without_running_the_file(tmp_path: Path) -> None:
@@ -148,3 +196,132 @@ def test_symlinks_are_refused(tmp_path: Path) -> None:
     with pytest.raises(OSError, match=symlink_error):
         save_source(ws_file_link, "secret", "def main(args):\n    return 2\n", description=None)
     assert list_saved(ws_file_link) == []
+
+
+@pytest.mark.usefixtures("in_main")
+def test_sdk_run_calls_main_in_a_child_lane(gateway: FakeWorkflowGateway, sdk: ModuleType) -> None:
+    """`run(name, args)` submits a group node and executes the saved workflow in lane `/0:run`."""
+    helper_source = (
+        b"from mindroom.workflow import tool\n"
+        b"def main(args):\n"
+        b"    first = tool('files', 'read', path=args['p'])\n"
+        b"    second = tool('files', 'stat', path=args['p'])\n"
+        b"    return f'{first}:{second}'\n"
+    )
+    gateway.sources["helper"] = helper_source
+    gateway.respond = lambda req: completed(
+        f"{req['args']['function']}({req['args']['arguments']['path']})" if req["kind"] == "tool" else None,
+    )
+
+    result = sdk.run("helper", {"p": "a.txt"})
+    after = sdk.tool("files", "read", path="b.txt")
+
+    assert result == "read(a.txt):stat(a.txt)"
+    assert after == "read(b.txt)"
+    assert [(node["key"], node["kind"]) for node in gateway.nodes] == [
+        ("@0", "group"),
+        ("/0:run@0", "tool"),
+        ("/0:run@1", "tool"),
+        ("@1", "tool"),
+    ]
+    assert gateway.nodes[0]["args"] == {
+        "op": "run",
+        "name": "helper",
+        "source_sha256": hashlib.sha256(helper_source).hexdigest(),
+    }
+    assert gateway.nodes[0]["meta"]["members"] == ["/0:run"]
+
+
+@pytest.mark.asyncio
+async def test_run_executes_the_bytes_snapshotted_for_the_attempt(stack: WorkflowStack) -> None:
+    """Changing the saved file on disk mid-attempt still returns the attempt's first snapshotted bytes."""
+    workspace = stack.context.agent_workspace_root(create=True)
+    v1 = b"def main(args):\n    return 'v1'\n"
+    v2 = b"def main(args):\n    return 'v2'\n"
+    save_source(workspace, "sub", v1)
+    await stack.start(source="def main(args):\n    return 1\n")
+
+    async with stack.http() as client:
+        first = await client.get("sources/sub")
+        assert first.status_code == 200
+        # Overwrite on disk between two run("sub") calls of the same attempt.
+        (workspace / "workflows" / "sub.py").write_bytes(v2)
+        second = await client.get("sources/sub")
+        missing = await client.get("sources/missing")
+
+    assert second.status_code == 200
+    assert missing.status_code == 404
+    expected_sha = hashlib.sha256(v1).hexdigest()
+    assert first.json()["sha256"] == expected_sha
+    assert second.json()["sha256"] == expected_sha
+    assert base64.b64decode(first.json()["source_b64"]) == v1
+    assert base64.b64decode(second.json()["source_b64"]) == v1
+
+    group_args = {"op": "run", "name": "sub", "source_sha256": expected_sha}
+    receipt = await stack.submit("@0", "group", group_args, {"members": ["/0:run"]})
+    assert receipt.cached is False
+    stored = stack.store.get_node(stack.run_id, "@0")
+    assert stored is not None
+    assert stored.request["source_sha256"] == expected_sha
+
+
+@pytest.mark.asyncio
+async def test_edited_saved_file_reruns_its_group_on_resume(stack: WorkflowStack) -> None:
+    """Editing a saved workflow file changes its snapshot hash on resume and reruns the group and what follows."""
+    workspace = stack.context.agent_workspace_root(create=True)
+    v1 = b"def main(args):\n    return 'v1'\n"
+    v2 = b"def main(args):\n    return 'v2'\n"
+    save_source(workspace, "sub", v1)
+    await stack.start(source="def main(args):\n    return 1\n")
+
+    async with stack.http() as client:
+        snap1 = (await client.get("sources/sub")).json()
+    await stack.submit(
+        "@0",
+        "group",
+        {"op": "run", "name": "sub", "source_sha256": snap1["sha256"]},
+        {"members": ["/0:run"]},
+    )
+    await stack.result("/0:run@0", "tool", tool_args("counter", "append", line="inside"))
+    await stack.result("@1", "tool", tool_args("counter", "append", line="after"))
+    await stack.finish_attempt(result="done")
+    await stack.end_attempt(ScriptRunState.EXITED)
+
+    # Resume without editing: group, inner call, and after call all hit cache.
+    await stack.resume(stack.run_id)
+    async with stack.http() as client:
+        snap_same = (await client.get("sources/sub")).json()
+    same_group = await stack.submit(
+        "@0",
+        "group",
+        {"op": "run", "name": "sub", "source_sha256": snap_same["sha256"]},
+        {"members": ["/0:run"]},
+    )
+    same_inner = await stack.submit("/0:run@0", "tool", tool_args("counter", "append", line="inside"))
+    same_after = await stack.submit("@1", "tool", tool_args("counter", "append", line="after"))
+    assert (same_group.cached, same_inner.cached, same_after.cached) == (True, True, True)
+    await stack.finish_attempt(result="done")
+    await stack.end_attempt(ScriptRunState.EXITED)
+
+    # Edit the saved workflow file and resume: new hash -> group reruns and what follows reruns.
+    (workspace / "workflows" / "sub.py").write_bytes(v2)
+    await stack.resume(stack.run_id)
+    async with stack.http() as client:
+        snap2 = (await client.get("sources/sub")).json()
+    assert snap2["sha256"] == hashlib.sha256(v2).hexdigest()
+    assert snap2["sha256"] != snap1["sha256"]
+
+    edited_group = await stack.submit(
+        "@0",
+        "group",
+        {"op": "run", "name": "sub", "source_sha256": snap2["sha256"]},
+        {"members": ["/0:run"]},
+    )
+    edited_after = await stack.submit("@1", "tool", tool_args("counter", "append", line="after"))
+    assert (edited_group.cached, edited_after.cached) == (False, False)
+    group_node = stack.store.get_node(stack.run_id, "@0")
+    after_node = stack.store.get_node(stack.run_id, "@1")
+    assert group_node is not None
+    assert group_node.generation == 2
+    assert after_node is not None
+    assert after_node.generation == 2
