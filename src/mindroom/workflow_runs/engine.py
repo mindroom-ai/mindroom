@@ -715,7 +715,12 @@ class WorkflowEngine:
             except ValueError as exc:
                 raise WorkflowRunStoreError(str(exc)) from exc
             path = f"{WORKFLOWS_DIR}/{name}.py"
-        return await self.scripts.resolve_source(context, source=source, path=path)
+        return await self.scripts.resolve_source(
+            context,
+            source=source,
+            path=path,
+            create_workspace=name is None,
+        )
 
     async def saved_source(self, attempt: ScriptRunRecord, name: str) -> tuple[bytes, str]:
         """Return the saved workflow bytes and SHA-256 for *name*, snapshotted once per attempt."""
@@ -732,7 +737,12 @@ class WorkflowEngine:
         if isinstance(context, str):
             raise WorkflowRunStoreError(context)
         try:
-            raw = await self.scripts.resolve_source(context, source=None, path=f"{WORKFLOWS_DIR}/{name}.py")
+            raw = await self.scripts.resolve_source(
+                context,
+                source=None,
+                path=f"{WORKFLOWS_DIR}/{name}.py",
+                create_workspace=False,
+            )
         except ValueError as exc:
             missing = isinstance(exc.__cause__, FileNotFoundError)
             if missing:

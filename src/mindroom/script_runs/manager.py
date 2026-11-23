@@ -868,7 +868,14 @@ class ScriptRunManager:
             raise ScriptRunManagerError(not_found)
         return run
 
-    async def resolve_source(self, context: ToolRuntimeContext, *, source: str | None, path: str | None) -> bytes:
+    async def resolve_source(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        source: str | None,
+        path: str | None,
+        create_workspace: bool = True,
+    ) -> bytes:
         """Return the bytes of one inline source, or of one file read inside the agent's workspace."""
         if (source is None) == (path is None):
             msg = "Provide exactly one of source or path."
@@ -877,7 +884,12 @@ class ScriptRunManager:
             source_bytes = source.encode("utf-8")
         else:
             try:
-                source_bytes = await asyncio.to_thread(_read_workspace_source, context, path or "")
+                source_bytes = await asyncio.to_thread(
+                    _read_workspace_source,
+                    context,
+                    path or "",
+                    create_workspace=create_workspace,
+                )
             except (OSError, ValueError) as exc:
                 raise ScriptRunManagerError(str(exc)) from exc
         if not source_bytes:
@@ -1182,9 +1194,14 @@ def _worker_workspace(context: ToolRuntimeContext, worker: WorkerHandle) -> Path
     return resolved_workspace
 
 
-def _read_workspace_source(context: ToolRuntimeContext, relative_path: str) -> bytes:
+def _read_workspace_source(
+    context: ToolRuntimeContext,
+    relative_path: str,
+    *,
+    create_workspace: bool = True,
+) -> bytes:
     """Read one script source, cut one byte past the limit, through no-follow workspace descriptors."""
-    workspace = context.agent_workspace_root(create=False)
+    workspace = context.agent_workspace_root(create=create_workspace)
     relative = Path(relative_path)
     if relative.is_absolute() or relative == Path() or ".." in relative.parts:
         msg = "Script source path must stay within the workspace root."
