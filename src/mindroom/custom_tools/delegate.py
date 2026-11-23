@@ -301,7 +301,7 @@ class DelegateTools(Toolkit):
         Each follow-up gets a separate audit record and returns the same subagent ID.
 
         Args:
-            subagent_id: Exact Subagent ID returned by run_subagent or continue_subagent.
+            subagent_id: Subagent ID (or a unique prefix of at least 8 hex characters) returned by run_subagent or continue_subagent.
             message: Follow-up instructions or question for that child.
 
         Returns:
@@ -326,6 +326,8 @@ class DelegateTools(Toolkit):
         if isinstance(prepared, str):
             return prepared
         child, config, parent_run_id = prepared
+        if function_name == CONTINUE_SUBAGENT:
+            arguments = {**arguments, "subagent_id": child.subagent_id}
         return delegation_call_job(
             child,
             job_id=job_id,

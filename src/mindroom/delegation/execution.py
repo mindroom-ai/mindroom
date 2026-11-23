@@ -932,6 +932,8 @@ async def advance_delegation_call(  # noqa: C901, PLR0911, PLR0912, PLR0915
     )
     if isinstance(target, str):
         return resolve_result(target, failed=True)
+    if target.previous_child is not None:
+        args = {**args, "subagent_id": target.previous_child.subagent_id}
 
     # Recheck current authorization and output policy, including resumed calls.
     authorization = authorize_delegation(

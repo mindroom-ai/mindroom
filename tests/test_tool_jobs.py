@@ -12,6 +12,10 @@ from typing import TYPE_CHECKING, Literal
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import BackgroundToolJobsConfig
+from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import ACKNOWLEDGED_BY, job_acknowledgers
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.mid_turn import MidTurnGate, MidTurnMode
@@ -22,8 +26,11 @@ from mindroom.tool_jobs import runtime as runtime_module
 from mindroom.tool_jobs.consumption import ConsumptionOwner
 from mindroom.tool_jobs.control import job_checkpoint, pending_human_messages_context
 from mindroom.tool_jobs.conversation import ConversationKey
+from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, read_result_payload
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, ToolJobRuntime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, ToolJobRuntime, register_background_runtime
+from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.tool_job_helpers import (
     JOB_TEST_TIMEOUT,
     backdate_job,
@@ -2549,4 +2556,78 @@ async def test_an_adapter_save_keeps_the_jobs_status_and_leaves_an_ended_job_alo
         assert (saved.status, saved.adapter) == ("cancelled", {"step": "started"})
     finally:
         release.set()
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_job_wait_and_cancel_accept_unique_owned_hex_prefix(tmp_path: Path) -> None:
+    """`job(wait/cancel)` resolves a unique 8+ lowercase hex prefix within the caller's own jobs and refuses ambiguity."""
+    runtime = await tool_job_runtime(tmp_path)
+    paths = _runtime_paths(tmp_path)
+    config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        agents={"leader": AgentConfig(display_name="Leader")},
+    )
+    context = _delegate_runtime_context(config, paths)
+    owner = context.execution_identity
+    assert owner is not None
+    other_owner = replace(owner, requester_id="@other:example.org")
+    prefix = "a1b2c3d4"
+    own_first = f"{prefix}{'1' * 56}"
+    own_second = f"{prefix}{'2' * 56}"
+    foreign_id = f"{prefix}{'9' * 56}"
+    running_prefix = "f0e1d2c3"
+    running_id = f"{running_prefix}{'0' * 56}"
+    release = asyncio.Event()
+
+    async def done_op() -> BackgroundOutcome:
+        return BackgroundOutcome("completed", "ok", result_payload=encode_result_payload(ToolResultPayload(value="ok")))
+
+    async def slow_op() -> BackgroundOutcome:
+        await release.wait()
+        return BackgroundOutcome("cancelled")
+
+    instance = pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
+    tools = JobTools(paths)
+    try:
+        await start_job(runtime, own_first, tool_name="tool", depth=0, adapter={}, owner=owner, operation=done_op)
+        await start_job(
+            runtime,
+            foreign_id,
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=other_owner,
+            operation=done_op,
+        )
+        await start_job(runtime, running_id, tool_name="tool", depth=0, adapter={}, owner=owner, operation=slow_op)
+        await wait_for_status(runtime, own_first, "completed")
+        await wait_for_status(runtime, foreign_id, "completed")
+
+        with tool_runtime_context(context):
+            # Unique prefix ignores another requester's job sharing the same prefix.
+            assert await tools.job("wait", job_id=prefix, wait_timeout=0) == "ok"
+
+            # Unique prefix works for cancel too.
+            cancel_reply = await tools.job("cancel", job_id=running_prefix)
+            assert running_id in str(cancel_reply)
+
+            # Too-short or non-hex prefix is unavailable.
+            for invalid in (prefix[:7], prefix.upper(), "zzzzzzzz"):
+                assert "No job with this ID is available" in str(
+                    await tools.job("wait", job_id=invalid, wait_timeout=0),
+                )
+
+            # Ambiguous prefix lists only owned full IDs, never foreign jobs.
+            await start_job(runtime, own_second, tool_name="tool", depth=0, adapter={}, owner=owner, operation=done_op)
+            await wait_for_status(runtime, own_second, "completed")
+            ambiguous = str(await tools.job("wait", job_id=prefix, wait_timeout=0))
+            assert f'Job ID prefix "{prefix}" matches several jobs in this conversation:' in ambiguous
+            assert own_first in ambiguous
+            assert own_second in ambiguous
+            assert foreign_id not in ambiguous
+    finally:
+        release.set()
+        release_background_tool_jobs(paths, instance)
         await runtime.shutdown()

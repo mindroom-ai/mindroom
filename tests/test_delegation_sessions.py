@@ -11,12 +11,14 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
+from mindroom.constants import subagent_sessions_dir
 from mindroom.delegation.lifecycle import reserve_child_turn
 from mindroom.delegation.recovery import load_settled_subagent
 from mindroom.delegation.sessions import (
     SubagentSessionError,
     load_subagent,
     reserve_subagent_turn,
+    resolve_subagent_id,
     subagent_liveness,
     update_subagent_turn,
 )
@@ -209,3 +211,71 @@ async def test_persona_round_trips_through_session_record(tmp_path: Path) -> Non
     ).children == [
         child,
     ]
+
+
+@pytest.mark.asyncio
+async def test_subagent_prefix_resolves_only_unique_owned_handle(tmp_path: Path) -> None:
+    """An 8+ lowercase hex prefix resolves one owned handle, ignores foreign handles, and rejects ambiguity/invalid input."""
+    paths = _runtime_paths(tmp_path)
+    config = Config(agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])})
+    owner = _identity()
+    other_owner = replace(owner, requester_id="@other:example.org")
+    other_room = replace(owner, room_id="!other:example.org")
+    shared_prefix = "c6256cac"
+    own_first = f"{shared_prefix}{'1' * 24}"
+    own_second = f"{shared_prefix}{'2' * 24}"
+    foreign_id = f"{shared_prefix}{'9' * 24}"
+    deeper_id = f"{shared_prefix}{'8' * 24}"
+
+    async def save_child(subagent_id: str, child_owner: ToolExecutionIdentity, *, depth: int = 1) -> None:
+        child = replace(
+            _self_child(config, child_owner),
+            delegation_id=subagent_id,
+            subagent_id=subagent_id,
+            session_id=f"delegate:leader:leader:{subagent_id}",
+            depth=depth,
+            status="completed",
+            result="Done",
+        )
+        await reserve_subagent_turn(child, owner=child_owner, runtime_paths=paths)
+
+    await save_child(own_first, owner)
+    await save_child(foreign_id, other_owner)
+    await save_child(f"{shared_prefix}{'7' * 24}", other_room)
+    await save_child(deeper_id, owner, depth=2)
+
+    # Foreign/other-conversation/other-depth handles with the same prefix are neither matched nor counted.
+    resolved = await resolve_subagent_id(shared_prefix, owner=owner, runtime_paths=paths, depth=0)
+    assert resolved == own_first
+
+    # Another caller with only our handle cannot match or learn of it.
+    with pytest.raises(SubagentSessionError, match="not available"):
+        await resolve_subagent_id(
+            shared_prefix,
+            owner=replace(owner, requester_id="@stranger:example.org"),
+            runtime_paths=paths,
+            depth=0,
+        )
+
+    # Too-short, uppercase, or non-hex prefixes are refused without globbing.
+    for invalid in (shared_prefix[:7], shared_prefix.upper(), "../c6256cac", "c6256ca*", "zzzzzzzz"):
+        with pytest.raises(SubagentSessionError, match="not available"):
+            await resolve_subagent_id(invalid, owner=owner, runtime_paths=paths, depth=0)
+
+    # Ambiguous prefix lists only this caller's own full IDs, never foreign handles.
+    await save_child(own_second, owner)
+    with pytest.raises(SubagentSessionError) as exc_info:
+        await resolve_subagent_id(shared_prefix, owner=owner, runtime_paths=paths, depth=0)
+    message = str(exc_info.value)
+    assert f'Subagent ID prefix "{shared_prefix}" matches several subagents in this conversation:' in message
+    assert own_first in message
+    assert own_second in message
+    assert foreign_id not in message
+    assert deeper_id not in message
+
+    # Symlink refusal still applies during prefix resolution.
+    symlink_prefix = "deadbeef"
+    symlink_path = subagent_sessions_dir(paths) / f"{symlink_prefix}{'0' * 24}.json"
+    symlink_path.symlink_to(subagent_sessions_dir(paths) / f"{own_first}.json")
+    with pytest.raises(SubagentSessionError, match="symlinks"):
+        await resolve_subagent_id(symlink_prefix, owner=owner, runtime_paths=paths, depth=0)
