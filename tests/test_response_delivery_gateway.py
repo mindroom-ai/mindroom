@@ -4475,21 +4475,31 @@ async def test_a_route_lookup_gives_up_at_its_page_bound(tmp_path: Path) -> None
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("http_status", "expect_warning"),
-    [(502, True), (503, True), (504, True), (403, False), (None, False)],
+    ("delivery_turn_id", "http_status", "expect_warning"),
+    [
+        ("$cause", 502, True),
+        ("$cause", 503, True),
+        ("$cause", 504, True),
+        ("$cause", 403, False),
+        ("$cause", None, False),
+        (None, 502, False),
+    ],
 )
 async def test_durable_send_transient_http_status_logs_deferred_warning(
     tmp_path: Path,
+    delivery_turn_id: str | None,
     http_status: int | None,
     expect_warning: bool,
 ) -> None:
-    """A durable send failing with 502/503/504 logs deferred warning with http_status; others stay error."""
+    """Durable 502/503/504 sends log deferred warning; non-durable 502 and non-transient sends stay error."""
     gateway = _gateway(tmp_path)
     gateway.deps.runtime.client.room_send = AsyncMock(
         return_value=nio.RoomSendError("unknown error", room_id=_ROOM_ID, http_status=http_status),
     )
     target = MessageTarget.resolve(_ROOM_ID, None, "$cause")
-    result = await gateway.send_text(SendTextRequest(target=target, response_text="hello", delivery_turn_id="$cause"))
+    result = await gateway.send_text(
+        SendTextRequest(target=target, response_text="hello", delivery_turn_id=delivery_turn_id),
+    )
     assert result is None
     if expect_warning:
         gateway.deps.logger.warning.assert_called_once()

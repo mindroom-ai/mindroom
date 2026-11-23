@@ -1728,16 +1728,8 @@ class DeliveryGateway:
         **log_context: object,
     ) -> None:
         http_status = outcome.status if isinstance(outcome, MatrixDeliveryFailure) else None
-        if isinstance(outcome, MatrixDeliveryFailure) and is_transient_homeserver_status(outcome.status):
-            if durable:
-                self.deps.logger.warning(deferred_event, http_status=http_status, **log_context)
-            else:
-                self.deps.logger.warning(
-                    failed_event,
-                    error=_matrix_delivery_failure_reason(outcome),
-                    http_status=http_status,
-                    **log_context,
-                )
+        if durable and is_transient_homeserver_status(http_status):
+            self.deps.logger.warning(deferred_event, http_status=http_status, **log_context)
             return
         self.deps.logger.error(
             failed_event,
