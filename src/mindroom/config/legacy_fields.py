@@ -263,13 +263,17 @@ _RETIRED_FILE_SETTINGS = {
 #   could appear in tool_approval.rules[].match globs or include_tools/exclude_tools overrides.
 # Last legacy release: v2026.11.480; replacement: unreleased; all 8 were collapsed into a single `triggers`
 #   function taking an `action` parameter.
-# Handling: Reject tool_approval.rules when the first rule matching a retired name is not the first rule matching
-#   `triggers` (unless another registered toolkit still offers the retired name), and reject include_tools or
+# Handling: When the config enables `triggers` (or its alias `external_trigger_manager`), reject
+#   tool_approval.rules when the first rule matching a retired name is not the first rule matching `triggers`,
+#   or when a non-exact glob matching `triggers` weakens `tool_approval.default: require_approval` for a retired
+#   function (unless another registered toolkit still offers the retired name); also reject include_tools or
 #   exclude_tools naming a retired trigger function on a triggers entry, naming `triggers`.
 # Coverage:
 #   tests/test_triggers_tool.py::test_an_approval_rule_that_stops_deciding_a_retired_trigger_function_fails,
 #   tests/test_triggers_tool.py::test_an_earlier_approval_rule_that_takes_triggers_from_a_retired_gate_fails,
 #   tests/test_triggers_tool.py::test_approval_rules_that_decide_triggers_load,
+#   tests/test_triggers_tool.py::test_retired_trigger_approval_check_skips_configs_without_triggers,
+#   tests/test_triggers_tool.py::test_retired_trigger_approval_rule_weakening_require_approval_default_fails,
 #   tests/test_triggers_tool.py::test_retired_trigger_include_exclude_overrides_fail_config_load.
 RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
     "watch_room": "triggers",
@@ -306,14 +310,35 @@ def approval_rule_a_rename_escapes(
     globs: Sequence[str],
     renames: Mapping[str, str],
     offered_elsewhere: Collection[str],
+    *,
+    actions: Sequence[str | None] | None = None,
+    default: str | None = None,
 ) -> str | None:
-    """Return the rule that decided a retired function but not its replacement, as text, or None."""
+    """Return the rule that decided a retired function (or weakens the default for its replacement), or None."""
     for old, new in renames.items():
+        if old in offered_elsewhere:
+            continue
         first_old, first_new = (
             next((index for index, glob in enumerate(globs) if fnmatchcase(name, glob)), None) for name in (old, new)
         )
-        if old not in offered_elsewhere and first_old is not None and first_old != first_new:
-            return f"tool_approval.rules[{first_old}].match {globs[first_old]!r} decided {old}; {old} is now {new}"
+        if first_old is not None and first_old != first_new:
+            return (
+                f"tool_approval.rules[{first_old}].match {globs[first_old]!r} decided {old}; {old} is now {new}, "
+                "which another rule or the default now decides; rewrite the rules for the new names."
+            )
+        if (
+            default == "require_approval"
+            and actions is not None
+            and first_old is None
+            and first_new is not None
+            and globs[first_new] != new
+            and actions[first_new] != default
+        ):
+            return (
+                f"tool_approval.rules[{first_new}].match {globs[first_new]!r} now decides {new}, "
+                f"weakening tool_approval.default {default!r} that previously decided {old}; "
+                f"rewrite the rules for {new}."
+            )
     return None
 
 

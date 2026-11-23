@@ -11,7 +11,11 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 import nio
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_agent_reply_in_room
+from mindroom.authorization import (
+    ReplyMembershipPendingError,
+    administrators_pass_access,
+    is_sender_allowed_for_agent_reply_in_room,
+)
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.config.external_trigger_policy import (
     Ed25519EventSourceConfig,
@@ -37,6 +41,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.room_reconciliation import read_room_state
 from mindroom.matrix.state import resolve_room_id
 from mindroom.reactive_triggers.external_sources import (
+    check_external_event_source_access,
     is_source_subscriber_allowed,
     validate_subscription_against_source,
 )
@@ -331,7 +336,7 @@ class TriggersTools(Toolkit):
         preferred_agent: str | None,
         require_live_membership: bool = False,
     ) -> None:
-        if resolved_room_id == resolve_room_id(context.room_id, context.runtime_paths):
+        if resolved_room_id == resolve_room_id(context.room_id, context.runtime_paths) and not require_live_membership:
             return
         await _verify_owner_joined_room(
             context,
@@ -428,6 +433,27 @@ class TriggersTools(Toolkit):
         except ValueError:
             return False
         return True
+
+    @staticmethod
+    def _firing_allowed_for_history(
+        context: ToolRuntimeContext,
+        rule: ReactiveTriggerRecord,
+        firing: FiringRecord,
+    ) -> bool:
+        if firing.rule_uid != rule.rule_uid:
+            return False
+        if not isinstance(rule.source, ExternalEventSourceSpec):
+            return True
+        return (
+            check_external_event_source_access(
+                owner_user_id=rule.owner_user_id,
+                source_spec=rule.source,
+                event=firing.event,
+                config=context.config,
+                runtime_paths=context.runtime_paths,
+            )
+            is None
+        )
 
     @staticmethod
     def _record_payload(record: ExternalTriggerRecord) -> dict[str, object]:
@@ -947,6 +973,13 @@ class TriggersTools(Toolkit):
             ),
         )
         self._require_reactive_owner_or_admin(context, existing)
+        actor_ids = equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths)
+        if existing.owner_user_id not in actor_ids and not administrators_pass_access(
+            context.config,
+            existing.target.agent,
+        ):
+            msg = "only its owner can update a trigger for a personal or created agent, or a team with one"
+            raise ReactiveTriggerStoreError(msg)
 
         now = time.time()
         validated = _build_updated_reactive_record(context, existing=existing, args=args, now=now)
@@ -1098,42 +1131,73 @@ class TriggersTools(Toolkit):
             ):
                 msg = f"You no longer have access to the source for trigger {record.trigger_id}."
                 raise ReactiveTriggerStoreError(msg)
-            firings = await run_blocking_until_complete(
-                partial(reactive_store.list_firings, trigger_id=stripped_id, limit=clamped_limit),
+            fetch_limit = (
+                _MAX_HISTORY_LIMIT
+                if not is_admin and isinstance(record.source, ExternalEventSourceSpec)
+                else clamped_limit
             )
-            firings = [firing for firing in firings if firing.rule_uid == record.rule_uid]
+            firings = await run_blocking_until_complete(
+                partial(reactive_store.list_firings, trigger_id=stripped_id, limit=fetch_limit),
+            )
+            if is_admin:
+                firings = [firing for firing in firings if firing.rule_uid == record.rule_uid]
+            else:
+                firings = [firing for firing in firings if self._firing_allowed_for_history(context, record, firing)][
+                    :clamped_limit
+                ]
         elif is_admin:
             firings = await run_blocking_until_complete(
                 partial(reactive_store.list_firings, limit=clamped_limit),
             )
         else:
-            owner_ids = equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths)
-            candidate_rules = await run_blocking_until_complete(
-                partial(reactive_store.list_triggers_with_firings, owner_user_ids=owner_ids),
+            firings = await self._list_owner_history(
+                context,
+                reactive_store,
+                limit=clamped_limit,
+                room_access_cache=room_access_cache,
             )
-            allowed_uids: dict[str, str] = {}
-            for candidate in candidate_rules:
-                if await self._has_source_access_for_history(
-                    context,
-                    candidate,
-                    room_access_cache=room_access_cache,
-                ):
-                    allowed_uids[candidate.trigger_id] = candidate.rule_uid
-            if not allowed_uids:
-                firings = []
-            else:
-                raw_firings = await run_blocking_until_complete(
-                    partial(
-                        reactive_store.list_firings,
-                        owner_user_ids=owner_ids,
-                        trigger_ids=allowed_uids,
-                        limit=clamped_limit,
-                    ),
-                )
-                firings = [firing for firing in raw_firings if allowed_uids.get(firing.trigger_id) == firing.rule_uid]
 
         serialized = [_firing_summary_payload(firing) for firing in firings]
         return self._payload("ok", action="history", firings=serialized, count=len(serialized))
+
+    async def _list_owner_history(
+        self,
+        context: ToolRuntimeContext,
+        reactive_store: ReactiveTriggerStore,
+        *,
+        limit: int,
+        room_access_cache: dict[str, bool],
+    ) -> list[FiringRecord]:
+        owner_ids = equivalent_requester_ids(context.requester_id, context.config, context.runtime_paths)
+        candidate_rules = await run_blocking_until_complete(
+            partial(reactive_store.list_triggers_with_firings, owner_user_ids=owner_ids),
+        )
+        allowed_rules: dict[str, ReactiveTriggerRecord] = {}
+        for candidate in candidate_rules:
+            if await self._has_source_access_for_history(
+                context,
+                candidate,
+                room_access_cache=room_access_cache,
+            ):
+                allowed_rules[candidate.trigger_id] = candidate
+        if not allowed_rules:
+            return []
+        has_external = any(isinstance(rule.source, ExternalEventSourceSpec) for rule in allowed_rules.values())
+        fetch_limit = _MAX_HISTORY_LIMIT if has_external else limit
+        raw_firings = await run_blocking_until_complete(
+            partial(
+                reactive_store.list_firings,
+                owner_user_ids=owner_ids,
+                trigger_ids=allowed_rules,
+                limit=fetch_limit,
+            ),
+        )
+        return [
+            firing
+            for firing in raw_firings
+            if (rule := allowed_rules.get(firing.trigger_id)) is not None
+            and self._firing_allowed_for_history(context, rule, firing)
+        ][:limit]
 
     async def _test_trigger(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
         resolved_trigger_id = _require_non_empty_arg(args["trigger_id"], "trigger_id", "test")
@@ -1179,7 +1243,14 @@ class TriggersTools(Toolkit):
             note = skip_note
         else:
             would_fire = matched and (triage_decision is not False)
-            note = "Dry run only: no state changed, no rate-limit/once quota consumed, and no Matrix message sent."
+            if would_fire:
+                matched_what = "rule and triage" if rule.triage is not None else "rule"
+                note = (
+                    f"Dry run matched {matched_what} "
+                    "(does not evaluate live policy, sender permissions, cooldown, or rate limits)."
+                )
+            else:
+                note = "Dry run only: no state changed, no rate-limit/once quota consumed, and no Matrix message sent."
 
         return self._payload(
             "ok",
@@ -1881,7 +1952,7 @@ async def _verify_owner_joined_room(
             msg = f"You must be joined to room {room_id} to access this trigger."
             raise ReactiveTriggerStoreError(msg)
 
-    if room_id == current_room_id:
+    if room_id == current_room_id and not require_live:
         return
     msg = f"Cannot verify that you are joined to room {room_id}."
     raise ReactiveTriggerStoreError(msg)

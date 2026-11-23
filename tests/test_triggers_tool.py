@@ -23,6 +23,11 @@ from mindroom.config.external_trigger_policy import (
 )
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.config.models import lazy_loading_prohibited_reason
+from mindroom.config.personal_agents import (
+    PersonalAgentRoster,
+    PersonalAgentRosterEntry,
+    personal_agent_roster_path,
+)
 from mindroom.config.tool_aliases import TOOL_ALIASES, canonical_tool_name
 from mindroom.constants import RuntimePaths, resolve_primary_runtime_paths
 from mindroom.custom_tools.triggers import TriggersTools
@@ -1498,6 +1503,10 @@ async def test_dry_run_matches_and_runs_triage_without_side_effects(tmp_path: Pa
     ):
         miss = _payload(await tool.triggers(action="test", trigger_id="test-room", text="hello world"))
         assert (miss["matched"], miss["triage_decision"], miss["would_fire"]) == (False, None, False)
+        assert (
+            miss["note"]
+            == "Dry run only: no state changed, no rate-limit/once quota consumed, and no Matrix message sent."
+        )
         assert triage_mock.await_count == 0
 
         hit = _payload(await tool.triggers(action="test", trigger_id="test-room", text="prod deploy failed"))
@@ -1506,6 +1515,10 @@ async def test_dry_run_matches_and_runs_triage_without_side_effects(tmp_path: Pa
             True,
             "llm (gpt-6-mini)",
             True,
+        )
+        assert hit["note"] == (
+            "Dry run matched rule and triage "
+            "(does not evaluate live policy, sender permissions, cooldown, or rate limits)."
         )
 
         fail_closed = _payload(await tool.triggers(action="test", trigger_id="test-room", text="deploy check"))
@@ -1528,6 +1541,9 @@ async def test_dry_run_matches_and_runs_triage_without_side_effects(tmp_path: Pa
             await tool.triggers(action="test", trigger_id="test-ext", sample_data={"repo": "org/app", "number": 8}),
         )
         assert (ext_hit["would_fire"], ext_miss["matched"]) == (True, False)
+        assert ext_hit["note"] == (
+            "Dry run matched rule (does not evaluate live policy, sender permissions, cooldown, or rate limits)."
+        )
 
         tag_hit = _payload(
             await tool.triggers(
@@ -1772,13 +1788,13 @@ async def test_history_hides_and_refuses_firings_after_owner_loses_source_access
     ):
         store.enqueue_firing(trigger_id, event.event_id, event)
 
-    # While still joined to room A, unscoped history returns all 4 firings and caches room A's state check once
+    # While still joined to both rooms, unscoped history returns all 4 firings and caches each room check once
     client.room_get_state.reset_mock()
     with tool_runtime_context(_context(tmp_path, config=config, client=client, orchestrator=orch)):
         before = _payload(await tool.triggers(action="history"))
     assert before["status"] == "ok"
     assert [row["dedupe_key"] for row in before["firings"]] == ["$ev_gh", "$ev_priv_msg", "$ev_priv_tag", "$ev_lobby"]
-    assert client.room_get_state.await_count == 1
+    assert client.room_get_state.await_count == 2
 
     # Owner leaves private room A (stale client.rooms.users intentionally still contains owner!)
     live_members["!other-room:example.org"] = ["@someone_else:example.org"]
@@ -1917,3 +1933,316 @@ async def test_dry_run_skips_target_self_and_non_human_bots_without_invoking_tri
         )
         assert (bot_allow["matched"], bot_allow["would_fire"], bot_allow["triage_decision"]) == (True, True, True)
         assert triage_mock.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_admin_cannot_update_another_owners_reactive_trigger_for_personal_agent_or_team(
+    tmp_path: Path,
+) -> None:
+    """Only the owner can update a reactive trigger targeting a personal agent or a team containing one."""
+    _record_rooms(tmp_path)
+    runtime_paths = _runtime_paths(tmp_path)
+    alice = "@alice:example.org"
+    trigger_admin = "@trigger-admin:example.org"
+    roster = PersonalAgentRoster(
+        entries=[
+            PersonalAgentRosterEntry(
+                template="mind",
+                user_id=alice,
+                username="alice",
+                agent_name="mind_alice",
+                matrix_username=None,
+                user_display_name="Alice",
+                source_room_id="!lobby:example.org",
+            ),
+        ],
+    )
+    roster_path = personal_agent_roster_path(runtime_paths)
+    roster_path.parent.mkdir(parents=True, exist_ok=True)
+    roster_path.write_text(roster.model_dump_json(), encoding="utf-8")
+    data = _config(admin_users=[trigger_admin]).model_dump(exclude_unset=True)
+    data["agents"]["watcher"]["access"]["users"] = [alice, trigger_admin]
+    data["personal_agents"] = {
+        "mind": {"agent": {"display_name": "Mind", "model": "default", "rooms": ["lobby"]}},
+    }
+    data["teams"] = {
+        "alice_crew": {
+            "display_name": "Alice Crew",
+            "role": "Personal crew",
+            "agents": ["mind_alice"],
+            "rooms": ["lobby"],
+            "access": {"users": [alice]},
+        },
+    }
+    config = Config.validate_with_runtime(data, runtime_paths)
+    tool = TriggersTools()
+
+    with tool_runtime_context(_context(tmp_path, requester_id=alice, config=config)):
+        for trigger_id, target_agent in (
+            ("alice-personal", "mind_alice"),
+            ("alice-team", "alice_crew"),
+            ("alice-shared", "watcher"),
+        ):
+            created = _payload(
+                await tool.triggers(
+                    action="watch_room",
+                    trigger_id=trigger_id,
+                    prompt="Initial prompt",
+                    target_agent=target_agent,
+                ),
+            )
+            assert created["status"] == "ok", created
+
+    with tool_runtime_context(_context(tmp_path, requester_id=trigger_admin, config=config)):
+        for trigger_id in ("alice-personal", "alice-team"):
+            blocked = _payload(
+                await tool.triggers(
+                    action="update",
+                    trigger_id=trigger_id,
+                    prompt="Admin hijacked prompt",
+                ),
+            )
+            assert blocked["status"] == "error"
+            assert "only its owner" in blocked["message"].lower()
+
+        shared_updated = _payload(
+            await tool.triggers(
+                action="update",
+                trigger_id="alice-shared",
+                prompt="Admin updated shared",
+            ),
+        )
+        assert shared_updated["status"] == "ok"
+        assert shared_updated["trigger"]["target"]["prompt"] == "Admin updated shared"
+
+    with tool_runtime_context(_context(tmp_path, requester_id=alice, config=config)):
+        for trigger_id in ("alice-personal", "alice-team"):
+            owned_updated = _payload(
+                await tool.triggers(
+                    action="update",
+                    trigger_id=trigger_id,
+                    prompt="Alice updated prompt",
+                ),
+            )
+            assert owned_updated["status"] == "ok"
+            assert owned_updated["trigger"]["target"]["prompt"] == "Alice updated prompt"
+
+
+def test_retired_trigger_approval_check_skips_configs_without_triggers(tmp_path: Path) -> None:
+    """Configs without `triggers` (or its alias) are not rejected for globs like `delete_*`."""
+    data = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        "agents": {"a": {"display_name": "A", "tools": ["filesystem"]}},
+        "tool_approval": {
+            "rules": [{"match": "delete_*", "action": "require_approval"}],
+        },
+    }
+    loaded = Config.validate_with_runtime(data, _runtime_paths(tmp_path))
+    assert loaded.tool_approval.rules[0].match == "delete_*"
+
+
+@pytest.mark.parametrize("match", ["*triggers", "*trigger*"])
+@pytest.mark.parametrize(
+    "tools_config",
+    [
+        {"agents": {"a": {"display_name": "A", "tools": ["triggers"]}}},
+        {"agents": {"a": {"display_name": "A", "tools": [{"triggers": {"defer": True}}]}}},
+        {"agents": {"a": {"display_name": "A", "tools": [{"external_trigger_manager": {"defer": True}}]}}},
+        {"defaults": {"tools": ["triggers"]}, "agents": {"a": {"display_name": "A"}}},
+        {"defaults": {"tools": ["external_trigger_manager"]}, "agents": {"a": {"display_name": "A"}}},
+    ],
+)
+def test_retired_trigger_approval_rule_weakening_require_approval_default_fails(
+    tmp_path: Path,
+    match: str,
+    tools_config: dict[str, object],
+) -> None:
+    """Under default=require_approval, a broad glob now matching `triggers` with auto_approve fails."""
+    data = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        **tools_config,
+        "tool_approval": {
+            "default": "require_approval",
+            "rules": [{"match": match, "action": "auto_approve"}],
+        },
+    }
+    expected = rf"tool_approval\.rules\[0\]\.match {re.escape(repr(match))} .*triggers.*watch_room"
+    with pytest.raises(ConfigRuntimeValidationError, match=expected):
+        Config.validate_with_runtime(data, _runtime_paths(tmp_path))
+
+    # A script rule matching a broad glob under default=require_approval also weakens the default
+    script_path = tmp_path / "check_triggers.py"
+    script_path.write_text("def check(tool_name, arguments, agent_name): return False\n", encoding="utf-8")
+    script_data = {
+        "models": {"default": {"provider": "openai", "id": "x"}},
+        **tools_config,
+        "tool_approval": {
+            "default": "require_approval",
+            "rules": [{"match": match, "script": "check_triggers.py"}],
+        },
+    }
+    with pytest.raises(ConfigRuntimeValidationError, match=expected):
+        Config.validate_with_runtime(script_data, _runtime_paths(tmp_path))
+
+
+def test_explicit_triggers_rule_and_same_decision_glob_load_under_require_approval_default(
+    tmp_path: Path,
+) -> None:
+    """Exact `triggers` rules and non-weakening globs still load under default=require_approval."""
+    for match, action in (
+        ("triggers", "auto_approve"),
+        ("*triggers", "require_approval"),
+        ("*", "auto_approve"),
+    ):
+        data = {
+            "models": {"default": {"provider": "openai", "id": "x"}},
+            "agents": {"a": {"display_name": "A", "tools": ["triggers"]}},
+            "tool_approval": {
+                "default": "require_approval",
+                "rules": [{"match": match, "action": action}],
+            },
+        }
+        loaded = Config.validate_with_runtime(data, _runtime_paths(tmp_path))
+        assert loaded.tool_approval.rules[0].match == match
+
+
+@pytest.mark.asyncio
+async def test_history_same_room_verifies_live_membership_and_fails_closed(tmp_path: Path) -> None:
+    """Same-room history still checks live room state and fails closed when left or unreadable."""
+    _record_rooms(tmp_path)
+    config = _config()
+    tool = TriggersTools()
+    store = ReactiveTriggerStore(_runtime_paths(tmp_path))
+    live_members: dict[str, list[str]] = {"!lobby:example.org": ["@owner:example.org"]}
+    client = _room_state_client(room_members=live_members)
+
+    with tool_runtime_context(_context(tmp_path, config=config, client=client)):
+        assert (
+            _payload(await tool.triggers(action="watch_room", trigger_id="watch-lobby", prompt="Lobby"))["status"]
+            == "ok"
+        )
+
+    store.enqueue_firing(
+        "watch-lobby",
+        "$ev_lobby",
+        TriggerEvent(
+            source_type="room_message",
+            source_id="!lobby:example.org",
+            kind="room.message",
+            event_id="$ev_lobby",
+            timestamp=1_001.0,
+            room_id="!lobby:example.org",
+            actor="@someone:example.org",
+            text="same room message",
+        ),
+    )
+
+    # Still joined in live room state -> visible
+    with tool_runtime_context(_context(tmp_path, config=config, client=client)):
+        scoped_ok = _payload(await tool.triggers(action="history", trigger_id="watch-lobby"))
+        unscoped_ok = _payload(await tool.triggers(action="history"))
+    assert [row["dedupe_key"] for row in scoped_ok["firings"]] == ["$ev_lobby"]
+    assert [row["dedupe_key"] for row in unscoped_ok["firings"]] == ["$ev_lobby"]
+
+    # Requester leaves live room state even though stale client.rooms still contains them
+    live_members["!lobby:example.org"] = ["@someone:example.org"]
+    with tool_runtime_context(_context(tmp_path, config=config, client=client)):
+        scoped_left = _payload(await tool.triggers(action="history", trigger_id="watch-lobby"))
+        unscoped_left = _payload(await tool.triggers(action="history"))
+    assert scoped_left["status"] == "error"
+    assert "no longer have access" in scoped_left["message"].lower()
+    assert unscoped_left["status"] == "ok"
+    assert unscoped_left["firings"] == []
+
+    # Live room state becomes unreadable -> fails closed / omits rows
+    del live_members["!lobby:example.org"]
+    with tool_runtime_context(_context(tmp_path, config=config, client=client)):
+        scoped_unreadable = _payload(await tool.triggers(action="history", trigger_id="watch-lobby"))
+        unscoped_unreadable = _payload(await tool.triggers(action="history"))
+    assert scoped_unreadable["status"] == "error"
+    assert unscoped_unreadable["status"] == "ok"
+    assert unscoped_unreadable["firings"] == []
+
+    # Client without live state support also fails closed instead of using same-room shortcut
+    no_live_client = SimpleNamespace(rooms=client.rooms)
+    with tool_runtime_context(_context(tmp_path, config=config, client=no_live_client)):
+        scoped_no_live = _payload(await tool.triggers(action="history", trigger_id="watch-lobby"))
+        unscoped_no_live = _payload(await tool.triggers(action="history"))
+    assert scoped_no_live["status"] == "error"
+    assert unscoped_no_live["status"] == "ok"
+    assert unscoped_no_live["firings"] == []
+
+
+@pytest.mark.asyncio
+async def test_history_rechecks_per_event_external_source_grants_for_non_admins(tmp_path: Path) -> None:
+    """Removing one repo from allowed_repos omits only that repo's firings for a wildcard-repo rule."""
+    _record_rooms(tmp_path)
+    initial_config = _config(
+        admin_users=["@admin:example.org"],
+        event_sources={
+            "github": GitHubEventSourceConfig(
+                secret_env="GH_SECRET",  # noqa: S106
+                allowed_repos=["org/a", "org/b"],
+                allowed_events=["pull_request"],
+                subscribers=["@owner:example.org"],
+            ),
+        },
+    )
+    tool = TriggersTools()
+    store = ReactiveTriggerStore(_runtime_paths(tmp_path))
+
+    with tool_runtime_context(_context(tmp_path, config=initial_config)):
+        created = _payload(
+            await tool.triggers(
+                action="subscribe_event",
+                trigger_id="watch-prs",
+                source_id="github",
+                kind="pull_request.merged",
+                prompt="Summarize merged PRs",
+            ),
+        )
+        assert created["status"] == "ok"
+
+    for idx, repo in enumerate(("org/a", "org/b"), start=1):
+        store.enqueue_firing(
+            "watch-prs",
+            f"$pr_{repo}",
+            TriggerEvent(
+                source_type="external_event",
+                source_id="github",
+                kind="pull_request.merged",
+                event_id=f"$pr_{repo}",
+                timestamp=1_000.0 + idx,
+                actor="octocat",
+                text=f"merged in {repo}",
+                data={"repo": repo},
+            ),
+        )
+
+    narrowed_config = _config(
+        admin_users=["@admin:example.org"],
+        event_sources={
+            "github": GitHubEventSourceConfig(
+                secret_env="GH_SECRET",  # noqa: S106
+                allowed_repos=["org/a"],
+                allowed_events=["pull_request"],
+                subscribers=["@owner:example.org"],
+            ),
+        },
+    )
+
+    with tool_runtime_context(_context(tmp_path, config=narrowed_config)):
+        scoped = _payload(await tool.triggers(action="history", trigger_id="watch-prs"))
+        scoped_limit1 = _payload(await tool.triggers(action="history", trigger_id="watch-prs", limit=1))
+        unscoped = _payload(await tool.triggers(action="history"))
+        unscoped_limit1 = _payload(await tool.triggers(action="history", limit=1))
+    assert [row["dedupe_key"] for row in scoped["firings"]] == ["$pr_org/a"]
+    assert [row["dedupe_key"] for row in scoped_limit1["firings"]] == ["$pr_org/a"]
+    assert [row["dedupe_key"] for row in unscoped["firings"]] == ["$pr_org/a"]
+    assert [row["dedupe_key"] for row in unscoped_limit1["firings"]] == ["$pr_org/a"]
+
+    with tool_runtime_context(_context(tmp_path, requester_id="@admin:example.org", config=narrowed_config)):
+        admin_scoped = _payload(await tool.triggers(action="history", trigger_id="watch-prs"))
+        admin_unscoped = _payload(await tool.triggers(action="history"))
+    assert [row["dedupe_key"] for row in admin_scoped["firings"]] == ["$pr_org/b", "$pr_org/a"]
+    assert [row["dedupe_key"] for row in admin_unscoped["firings"]] == ["$pr_org/b", "$pr_org/a"]

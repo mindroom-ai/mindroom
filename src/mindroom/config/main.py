@@ -1540,16 +1540,27 @@ class Config(BaseModel):
         from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
 
         globs = [rule.match for rule in self.tool_approval.rules]
+        actions = [rule.action for rule in self.tool_approval.rules]
+        triggers_enabled = any(entry.name == "triggers" for _, entry in entries)
         for toolkit_name, renames in RETIRED_TOOL_FUNCTION_RENAMES:
+            if toolkit_name == "triggers" and not triggers_enabled:
+                continue
             elsewhere = {
                 function
                 for name in tools
                 if name != toolkit_name and (metadata := tools.get(name)) is not None
                 for function in metadata.function_names or ()
             }
-            if (escaped := approval_rule_a_rename_escapes(globs, renames, elsewhere)) is not None:
-                msg = f"{escaped}, which another rule or the default now decides; rewrite the rules for the new names."
-                raise ToolConfigOverrideError(msg)
+            if (
+                escaped := approval_rule_a_rename_escapes(
+                    globs,
+                    renames,
+                    elsewhere,
+                    actions=actions if toolkit_name == "triggers" else None,
+                    default=self.tool_approval.default if toolkit_name == "triggers" else None,
+                )
+            ) is not None:
+                raise ToolConfigOverrideError(escaped)
 
     def _validate_tailnet_ssh_tools(self, tools: ToolRegistry) -> None:
         """Refuse an SSH opt-in when the turn can offer another toolkit's shell instead."""
