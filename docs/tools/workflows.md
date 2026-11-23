@@ -55,13 +55,15 @@ Do not rely on an after-call hook running exactly once for a workflow call.
 ## Functions
 
 ```text
-start_workflow(source=None, path=None, args=None, title=None, max_concurrent=16, resource_profile=None, max_cost_usd=None)
+start_workflow(source=None, path=None, name=None, args=None, title=None, max_concurrent=16, resource_profile=None, max_cost_usd=None)
 get_workflow(run_id, nodes="active")
 cancel_workflow(run_id)
 resume_workflow(run_id, source=None, path=None, rerun=None, max_cost_usd=None)
+list_workflow_runs()
+save_workflow(run_id, name, description=None)
 ```
 
-- `start_workflow` takes exactly one of `source` (inline Python) or `path` (a file in the agent's workspace) and returns `{job_id, run_id, status, title}` at once.
+- `start_workflow` takes exactly one of `source` (inline Python), `path` (a file in the agent's workspace), or `name` (a saved workflow under `workflows/<name>.py`) and returns `{job_id, run_id, status, title}` at once.
   The report reaches the agent through the [background job](agent-orchestration.md#background-jobs) of the run, in full; a failed run delivers the last 4 KiB of the script's output and traceback.
   `max_cost_usd` stops the run as `interrupted` at that cost so it can be resumed with a higher limit; see [Cost Limit](#cost-limit).
 - `get_workflow` returns the run's status, attempt, node counts, usage, waiting and failed calls, and the calls `nodes` selects: `active`, `failed`, or `all`.
@@ -72,6 +74,8 @@ resume_workflow(run_id, source=None, path=None, rerun=None, max_cost_usd=None)
   A call of a run, its script's or one of its agents', cannot cancel that run or a run it is inside: it is refused with `A call of a run cannot cancel that run or one it is inside. Return from main() or raise to end the script.`
   The plain `script` tool's `list_scripts`, `get_script` and `cancel_script` neither list nor stop a run's script.
 - `resume_workflow` starts the next attempt of a run that has ended and returns the same handle, with the ID of a new job; see [Resume A Run](#resume-a-run).
+- `list_workflow_runs` returns this conversation's recent runs for the calling agent and requester, plus the saved workflows in the agent's workspace (`name`, `description`, `args`).
+- `save_workflow` saves an owned run's script to `workflows/<name>.py` so `start_workflow(name=...)` or `run(name, args)` can run it again; see [Saved Workflows](#saved-workflows).
 
 A run belongs to the agent and the requester that started it.
 Another requester, or another agent, gets `No workflow run <id> in your runs.` for its ID, exactly as for an ID that does not exist.
@@ -84,7 +88,7 @@ A run that another call resumed since belongs to that call: the earlier one neit
 ## What The Script Can Call
 
 ```python
-from mindroom.workflow import agent, foreach, parallel, ask_user, shell, tool, phase, log, now, random, PartialFailure
+from mindroom.workflow import agent, foreach, parallel, ask_user, shell, tool, phase, log, now, random, run, PartialFailure
 
 def main(args):
     phase("Test")
@@ -104,6 +108,7 @@ def main(args):
   `tool("delegate", "run_subagent", ...)` and `tool("workflow", "start_workflow", ...)` start an agent and a run; see [Runs Inside Runs](#runs-inside-runs).
 - `foreach(items, fn)` and `parallel([fn1, fn2])` run calls in parallel; see [Fan-Out](#fan-out).
 - `phase(title)` groups the calls that follow, and `log(text)` adds a progress line to the run.
+- `run(name, args=None)` executes the saved workflow `workflows/<name>.py` inline inside the current run and returns what its `main(args)` returns; see [Saved Workflows](#saved-workflows).
 - `now()` returns the current UTC time and `random()` a float in `[0, 1)`; both are saved, so a resumed run gets the same values again.
 - `shell(..., cached=False)` and `tool(..., cached=False)` run again on every resume; use it for a check of something outside the run.
 
@@ -511,3 +516,28 @@ One script process runs for at most 30 days; a run with working time left then c
 - Without a worker backend, the script runs as a child process of MindRoom on Linux, only when `defaults.allow_shell_without_worker` is `true` or `MINDROOM_SANDBOX_EXECUTION_MODE` selects [local execution](background-scripts.md#local-execution).
   Otherwise `start_workflow` fails with `Workflows run code. Route this agent to a worker, or set defaults.allow_shell_without_worker: true to run it on this machine.`
 - The script never runs inside the MindRoom process itself.
+
+## Saved Workflows
+
+A saved workflow is a Python file at `workflows/<name>.py` in the agent's workspace, where `<name>` matches `[a-z0-9][a-z0-9_-]{0,63}`.
+Its description is the first line of its module docstring, and an optional top-level literal `ARGS = {"base": "Branch to compare against"}` documents its arguments.
+`list_workflow_runs()` and the `!workflows` command read both with Python's `ast` module and never import or execute the file.
+
+- `save_workflow(run_id, name, description=None)` writes an owned run's script to `workflows/<name>.py` through a confined, atomic, no-clobber write.
+  When the script has no module docstring and `description` is given, MindRoom adds one.
+  Saving the exact same content again succeeds; if the file already exists with different content, it refuses with `workflows/<name>.py already exists with different content. Pick another name or edit the file.`
+- `start_workflow(name=...)` reads `workflows/<name>.py` through the same confined, no-follow path check as `path=` and snapshots the bytes at start, so later edits do not affect a running attempt.
+- Inside a script, `run(name, args=None)` fetches `workflows/<name>.py` from the workflow gateway, which snapshots the file's bytes and SHA-256 once per attempt.
+  Every `run(name)` call in the same attempt executes those same bytes inside a child lane under a `group` node whose digest includes that hash; editing the file before a resume changes the group's hash and reruns the group and what follows it.
+  `run(name, args)` is an inline call inside the current run and adds no delegation depth.
+- `!workflows` (or `/workflows`) lists the caller's recent workflow runs in the current conversation and the saved workflows of workflow-enabled agents in the room.
+- Saved workflows are workspace code, like skills: anyone who can make that agent write workspace files can create or edit them, and agents that share a workspace share its `workflows/` directory.
+  MindRoom writes no run results into the workspace; stored run records and reports stay in MindRoom's workflow store behind the per-requester owner check.
+
+## Moving From Dynamic Workflows
+
+`workflow` replaces [`dynamic_workflow`](agent-orchestration.md#dynamic_workflow) with plain Python scripts, background execution, live graph frames, resume by replay, and saved workflows under `workflows/<name>.py`.
+
+- Both `workflow` and `dynamic_workflow` can be enabled on the same agent during migration; their tool function names are disjoint.
+- Existing `dynamic_workflow` runs remain readable through `dynamic_workflow`.
+- No Dynamic Workflow YAML spec runs on the `workflow` engine; rewrite workflows you want to migrate as Python files with `def main(args):` in `workflows/<name>.py`.
