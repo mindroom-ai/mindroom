@@ -23575,8 +23575,6 @@ Deploy MindRoom and a standalone Tuwunel Matrix homeserver on a local [`kind`](h
 - `git`, `python3`, and `openssl`.
 - `OPENAI_API_KEY` exported (for other providers, see [Provider API Keys from Kubernetes Secrets](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#provider-api-keys-from-kubernetes-secrets)).
 
-Run every block from the repo root; after cloning, each block starts with `cd "$HOME/mindroom"`.
-
 ### 1. Create the cluster and Secrets
 
 ```bash
@@ -23598,14 +23596,13 @@ cd "$HOME/mindroom"
 helm upgrade --install matrix ./cluster/k8s/tuwunel --namespace mindroom \
   --set tuwunel.serverName=mindroom.local \
   --set tuwunel.registrationToken.existingSecret=matrix-registration \
-  --set tuwunel.registrationToken.key=MATRIX_REGISTRATION_TOKEN \
   --wait --timeout 10m
 ```
 
 ### 3. Install the MindRoom runtime
 
 This values file configures one model, one agent (`helper`), and one room (`lobby`).
-`join_policy: public` lets any account on `mindroom.local` join `#lobby:mindroom.local`; no `access` block is needed because agents admit joined room members and an unset `router.access` restricts nothing (see [Authorization](https://docs.mindroom.chat/authorization/#responder-access)).
+`join_policy: public` lets the test user join `#lobby:mindroom.local` (see [Authorization](https://docs.mindroom.chat/authorization/#responder-access)).
 Custom `config.data` must also set `event_journal.backend: postgres` so MindRoom uses the chart's bundled PostgreSQL journal:
 
 ```bash
@@ -23616,7 +23613,6 @@ matrix:
   serverName: mindroom.local
   registrationToken:
     existingSecret: matrix-registration
-    key: MATRIX_REGISTRATION_TOKEN
 providerCredentials:
   - provider: openai
     existingSecret: llm-credentials
@@ -23650,13 +23646,13 @@ cd "$HOME/mindroom" && python3 cluster/k8s/kind/chat_check.py
 ```
 
 Expected output: `Reply from @mindroom_helper: pong` (wording may vary; exit status `0` is the check).
-[`chat_check.py`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/kind/chat_check.py) port-forwards Tuwunel on a temporary loopback port, registers `@tester:mindroom.local` once from the `matrix-registration` Secret (caching its token in `~/.mindroom-kind-auth.json`), joins `#lobby:mindroom.local`, sends a prompt, and waits for `@mindroom_helper:mindroom.local` to reply; rerunning it reuses the cached token (for example after `kubectl -n mindroom rollout restart deploy/mindroom-runtime`).
+[`chat_check.py`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/kind/chat_check.py) port-forwards Tuwunel, registers a throwaway test user from the `matrix-registration` Secret, joins `#lobby:mindroom.local`, and waits for `@mindroom_helper`'s reply.
 
 ### Uninstall
 
 ```bash
 kind delete cluster --name mindroom
-rm -f "$HOME/.mindroom-kind-auth.json" "$HOME/mindroom/runtime-values.yaml"
+rm -f "$HOME/mindroom/runtime-values.yaml"
 ```
 
 ### Next steps
@@ -23677,7 +23673,7 @@ To provision the hosted multi-tenant platform on Hetzner Cloud, see [SaaS Platfo
 
 ## Prerequisites
 
-These prerequisites apply to production clusters; the [local `kind` quick start](#quick-start-local-kind-cluster) requires Docker plus `kind`, `kubectl`, `helm`, `git`, `python3`, and `openssl` (no `sudo` and no existing cluster).
+These apply to production clusters; for a local try, use the [quick start](#quick-start-local-kind-cluster).
 
 - A Kubernetes cluster (tested with k3s via kube-hetzner)
 - `kubectl` and `helm`
