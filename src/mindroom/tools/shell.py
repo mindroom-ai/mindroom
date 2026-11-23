@@ -131,7 +131,9 @@ _NAMED_WORKERS_NOTE = (
     "command, not detached from it. Give each worker its own output directory, and its own git worktree when it "
     "changes a checkout. Build or install what every worker needs once in the workspace before fanning out, "
     "because package caches start empty in each worker. Network access granted with `request_network_access` "
-    "does not reach named workers."
+    "does not reach named workers. Set `sandbox=true` (empty scratch) or `mount_dir` (one workspace-relative "
+    "directory, optionally with `mount_read_only=true`) on the first call for a name to run that worker in "
+    "isolated sandbox mode without shared directories, knowledge bases, credentials, env secrets, or CLI grants."
 )
 _NO_NAMED_WORKERS_ERROR = (
     "Error: `worker` and `resource_profile` need a shell that runs in a worker on the kubernetes worker backend, "
@@ -464,7 +466,9 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             """Describe ``run_shell_command`` with where and how it runs, offering named workers only where it may."""
             cwd_note = _WORKDIR_CWD_NOTE if self._beside_workdir else _WORKSPACE_CWD_NOTE
             notes = (cwd_note, _WORKING_METHOD_NOTE) if self.base_dir is not None else (_WORKING_METHOD_NOTE,)
-            hidden = () if self._named_workers else ("worker", "resource_profile")
+            hidden = (
+                () if self._named_workers else ("worker", "resource_profile", "sandbox", "mount_dir", "mount_read_only")
+            )
             properties = {
                 name: value for name, value in function.parameters["properties"].items() if name not in hidden
             }
@@ -548,6 +552,9 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             timeout: int | None = None,  # noqa: ASYNC109
             worker: str | None = None,
             resource_profile: ScriptResourceProfileName | None = None,
+            sandbox: bool | None = None,
+            mount_dir: str | None = None,
+            mount_read_only: bool | None = None,
         ) -> str | ToolOutputFileHandled:
             """Runs a shell command and returns the output or error.
 
@@ -584,12 +591,25 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                     hyphens; null runs it in your normal worker.
                 resource_profile: CPU and memory size of the named worker, small, standard, or large, set by the
                     first call that names it; null gives it the normal worker size.
+                sandbox: Run the named worker in isolated sandbox mode (ephemeral scratch only unless mount_dir is
+                    set, without credentials, Agent Keys, env secrets, or mindroom-agent CLI grants).
+                mount_dir: Workspace-relative directory to mount inside the sandboxed named worker (e.g.
+                    "scratch/job1" or "." for workspace root). Always enables sandbox mode.
+                mount_read_only: Mount mount_dir read-only; requires mount_dir.
 
             Returns:
                 The command output or an error message.
 
             """
-            refusal = self._refusal(named_worker=worker is not None or resource_profile is not None)
+            refusal = self._refusal(
+                named_worker=(
+                    worker is not None
+                    or resource_profile is not None
+                    or sandbox is True
+                    or mount_dir is not None
+                    or mount_read_only is True
+                ),
+            )
             if refusal is not None:
                 return refusal
             try:

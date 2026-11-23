@@ -192,7 +192,7 @@ run_shell_command("nohup npm run dev > dev.log 2>&1 &")
 ### Named workers
 
 On the Kubernetes worker backend, an agent's shell commands can run in extra workers that the agent names, so one reply runs several isolated environments side by side, such as end-to-end test stacks that listen on the same ports, or the shards of a test suite or a build.
-Set [`named_workers`](https://docs.mindroom.chat/configuration/agents/#configuration-options) on the agent to the most named workers it may have at once for one requester; MindRoom then offers `worker` and `resource_profile` in its `run_shell_command`.
+Set [`named_workers`](https://docs.mindroom.chat/configuration/agents/#configuration-options) on the agent to the most named workers it may have at once for one requester; MindRoom then offers `worker`, `resource_profile`, `sandbox`, `mount_dir`, and `mount_read_only` in its `run_shell_command`.
 The agent's workers must be per requester and agent: set `worker_scope: user_agent`, or make it a [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances) with `private.per: user_agent`.
 The runtime must also run idle-worker cleanup, as for [dedicated subagent workers](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers).
 
@@ -222,6 +222,10 @@ run_shell_command("bash e2e/shard.sh 1 2", worker="e2e-1", resource_profile="lar
 - A named worker has its own processes, network ports, and `/tmp`.
   It sees the same workspace, shared directories, and knowledge as the agent's normal worker, with the same leased tool settings and shared credentials, but not the packages installed into the normal worker's environment or its package caches.
 - Workers share the workspace, so give each one its own output directory, and its own git worktree when it changes a checkout, and build or install what all of them need once before starting them.
+- Set `sandbox=true` (empty ephemeral scratch directory only) or `mount_dir` (one existing workspace-relative directory without symlinks, or `"."` for the workspace root, optionally with `mount_read_only=true`) on the first call for a name to isolate that worker. `mount_dir` always enables sandbox mode.
+  A sandboxed named worker omits the rest of the workspace, all shared directories, all knowledge bases, mirrored shared credentials, credential leases, Agent Keys broker variables, per-call environment secrets and `extra_env_passthrough`, `MINDROOM_AGENT_CLI_TOKEN`, and `.mindroom/worker-env.sh`. Its pod and Deployment carry the label `mindroom.ai/worker-sandbox: "true"` for optional Kubernetes `NetworkPolicy` egress rules.
+  Its `HOME` and `XDG_*_HOME` stay on the writable worker state root while `cwd` and `MINDROOM_AGENT_WORKSPACE` point to the mounted directory (or ephemeral scratch). Explicit `mindroom_output_path` is refused when `mount_read_only=true`.
+  Sandbox settings lock on the first admitted call alongside `resource_profile`; follow-up calls omitting them reuse the locked sandbox and still strip all credentials, secrets, and CLI grants, while conflicting sandbox options fail.
 
 Named workers are removed, with their processes and package caches, when the reply and its background jobs end.
 A named worker in which no command has run for 10 minutes is removed sooner, and every named worker is removed 4 hours after it started, whatever runs in it; [worker settings](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings) lists both limits.

@@ -131,3 +131,28 @@ def test_hook_failure_raises_workspace_env_hook_error(tmp_path: Path) -> None:
             prepared=None,
             execution_env={},
         )
+
+
+def test_sandbox_mode_skips_workspace_hook_and_keeps_home_on_worker_root(tmp_path: Path) -> None:
+    """Sandbox mode skips .mindroom/worker-env.sh and points HOME/XDG to the writable worker root."""
+    workspace = tmp_path / "mounted-ro"
+    workspace.mkdir()
+    _write_hook(workspace, "export HOOK_LEAKED=1\nexit 9\n")
+    prepared = _prepared_worker(tmp_path)
+    execution_env: dict[str, str] = {}
+
+    trusted_overlay = assembly.build_request_execution_env(
+        request_workspace=workspace,
+        prepared=prepared,
+        execution_env=execution_env,
+        sandbox=True,
+    )
+
+    worker_root = str(prepared.paths.root.resolve())
+    assert trusted_overlay == {}
+    assert "HOOK_LEAKED" not in execution_env
+    assert execution_env["HOME"] == worker_root
+    assert execution_env["XDG_CONFIG_HOME"] == f"{worker_root}/.config"
+    assert execution_env["XDG_DATA_HOME"] == f"{worker_root}/.local/share"
+    assert execution_env["XDG_STATE_HOME"] == f"{worker_root}/.local/state"
+    assert execution_env["MINDROOM_AGENT_WORKSPACE"] == str(workspace.resolve())

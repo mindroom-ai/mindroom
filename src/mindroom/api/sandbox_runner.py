@@ -569,6 +569,7 @@ class PreparedSandboxRunnerExecuteRequest(BaseModel):
     runtime_overrides: dict[str, Any] = Field(default_factory=dict)
     tool_output_workspace_root: str | None = None
     run_as_job: bool = False
+    sandbox: bool = False
 
 
 @dataclass(frozen=True)
@@ -776,7 +777,11 @@ def _route_workspace(
     else in the worker's default workspace. A request without a worker acts in its routing agent's workspace, else
     in its absolute ``base_dir``.
     """
-    if route.routing_agent_name is not None and (worker is None or route.base_dir is None):
+    if (
+        route.routing_agent_name is not None
+        and (worker is None or route.base_dir is None)
+        and not (isinstance(route, ExecuteRequest) and route.sandbox and worker is not None)
+    ):
         return resolve_agent_runtime(
             route.routing_agent_name,
             config,
@@ -790,7 +795,8 @@ def _route_workspace(
         workspace = Path(route.base_dir).expanduser()
     else:
         return None
-    workspace.mkdir(parents=True, exist_ok=True)
+    if not workspace.is_dir():
+        workspace.mkdir(parents=True, exist_ok=True)
     return workspace
 
 
@@ -962,6 +968,7 @@ def _resolve_entrypoint(
     routing_agent_name: str | None = None,
     private_agent_names: frozenset[str] | None = None,
     tool_output_workspace_root: Path | None = None,
+    sandbox: bool = False,
 ) -> tuple[AnyToolkit, Callable[..., object]]:
     """Build one tool's entrypoint from ``tools``, the registry its caller composed for ``config``."""
     worker_target = build_worker_target_from_runtime_env(
@@ -984,7 +991,11 @@ def _resolve_entrypoint(
             tool_config_overrides=tool_config_overrides,
             tool_init_overrides=tool_init_overrides,
             runtime_overrides=runtime_overrides,
-            allowed_shared_services=(config.get_worker_grantable_credentials() if worker_scope is not None else None),
+            allowed_shared_services=(
+                frozenset()
+                if sandbox
+                else (config.get_worker_grantable_credentials() if worker_scope is not None else None)
+            ),
             tool_output_workspace_root=tool_output_workspace_root,
             tool_output_auto_save_threshold_bytes=config.defaults.tool_output_auto_save_threshold_bytes,
             worker_target=worker_target,
@@ -1011,12 +1022,13 @@ def _prepared_shell_execution_env(
         return None
     worker_execution_env = sandbox_exec.worker_subprocess_env(prepared.paths)
     worker_base_path = worker_execution_env.get("PATH")
-    worker_execution_env.update(
-        constants.shell_extra_env_values(
-            extra_env_passthrough=request.extra_env_passthrough,
-            process_env=request.execution_env or runtime_paths.process_env,
-        ),
-    )
+    if not request.sandbox:
+        worker_execution_env.update(
+            constants.shell_extra_env_values(
+                extra_env_passthrough=request.extra_env_passthrough,
+                process_env=request.execution_env or runtime_paths.process_env,
+            ),
+        )
     worker_execution_env.update(execution_env)
     worker_path = constants.subprocess_path_with_prepends(
         os.pathsep.join(
@@ -1037,23 +1049,30 @@ def _prepared_shell_execution_env(
 def _prepare_execute_request(call: _ExecuteCall) -> _PreparedSandboxRequestContext:
     request, route = call.request, call.route
     runtime_paths, prepared = route.runtime_paths, route.worker
-    execution_env = sandbox_exec.request_execution_env(
-        request.tool_name,
-        request.execution_env,
-        runtime_paths,
-        extra_env_passthrough=request.extra_env_passthrough,
-    )
-    # The call's own changes, except where the worker's call env changes the name, as its CA bundle does.
-    kept_set_names = [
-        name
-        for name in request.environment.set_names
-        if name in request.execution_env and execution_env.get(name) == request.execution_env[name]
-    ]
-    removed_names = [
-        name
-        for name in request.environment.unset_names
-        if name not in execution_env and name not in KUBERNETES_POD_LIMIT_ENV_NAMES
-    ]
+    if request.sandbox:
+        execution_env: dict[str, str] = {}
+        kept_set_names: list[str] = []
+        removed_names: list[str] = []
+        call_path_prepend: list[str] = []
+    else:
+        execution_env = sandbox_exec.request_execution_env(
+            request.tool_name,
+            request.execution_env,
+            runtime_paths,
+            extra_env_passthrough=request.extra_env_passthrough,
+        )
+        # The call's own changes, except where the worker's call env changes the name, as its CA bundle does.
+        kept_set_names = [
+            name
+            for name in request.environment.set_names
+            if name in request.execution_env and execution_env.get(name) == request.execution_env[name]
+        ]
+        removed_names = [
+            name
+            for name in request.environment.unset_names
+            if name not in execution_env and name not in KUBERNETES_POD_LIMIT_ENV_NAMES
+        ]
+        call_path_prepend = list(request.environment.path_prepend)
     execution_env = _prepared_shell_execution_env(request, runtime_paths, prepared, execution_env) or execution_env
     # A kept name takes its value as the worker composed it, so its own PATH entries stay around a hook's PATH.
     call_environment: dict[str, str | None] = {name: execution_env[name] for name in kept_set_names}
@@ -1063,6 +1082,7 @@ def _prepare_execute_request(call: _ExecuteCall) -> _PreparedSandboxRequestConte
             request_workspace=route.workspace if request.tool_name in sandbox_exec.EXECUTION_ENV_TOOL_NAMES else None,
             prepared=prepared,
             execution_env=execution_env,
+            sandbox=request.sandbox,
         )
     except sandbox_exec.WorkspaceEnvHookError as exc:
         raise sandbox_worker_prep.WorkerRequestPreparationError(str(exc)) from exc
@@ -1073,10 +1093,26 @@ def _prepare_execute_request(call: _ExecuteCall) -> _PreparedSandboxRequestConte
         include_base_execution_env=request.tool_name not in sandbox_exec.EXECUTION_ENV_TOOL_NAMES,
         trusted_env_overlay=trusted_overlay,
     )
+    tool_output_workspace_root = (
+        str(route.workspace)
+        if route.workspace is not None and (not request.sandbox or os.access(route.workspace, os.W_OK))
+        else None
+    )
     output_path = normalize_output_path_argument(request.kwargs.get(OUTPUT_PATH_ARGUMENT))
+    if request.sandbox and output_path is not None and tool_output_workspace_root is None:
+        msg = "mindroom_output_path cannot write into a read-only sandbox mount."
+        raise sandbox_worker_prep.WorkerRequestPreparationError(msg)
     kwargs = dict(request.kwargs)
     if output_path is None:
         kwargs.pop(OUTPUT_PATH_ARGUMENT, None)
+    tool_config_overrides = dict(request.tool_config_overrides)
+    tool_init_overrides = {
+        **request.tool_init_overrides,
+        **_filter_runtime_tool_init_overrides(request.tool_name, runtime_overrides, call.tools),
+    }
+    if request.sandbox:
+        tool_config_overrides.pop("extra_env_passthrough", None)
+        tool_init_overrides.pop("extra_env_passthrough", None)
     prepared_request = PreparedSandboxRunnerExecuteRequest(
         tool_name=request.tool_name,
         function_name=request.function_name,
@@ -1089,16 +1125,14 @@ def _prepare_execute_request(call: _ExecuteCall) -> _PreparedSandboxRequestConte
             dict(serialize_tool_execution_identity(route.identity)) if route.identity is not None else None
         ),
         private_agent_names=list(request.private_agent_names) if request.private_agent_names is not None else None,
-        credential_overrides=dict(_subprocess_credential_overrides(call)),
-        tool_config_overrides=dict(request.tool_config_overrides),
-        tool_init_overrides={
-            **request.tool_init_overrides,
-            **_filter_runtime_tool_init_overrides(request.tool_name, runtime_overrides, call.tools),
-        },
+        credential_overrides={} if request.sandbox else dict(_subprocess_credential_overrides(call)),
+        tool_config_overrides=tool_config_overrides,
+        tool_init_overrides=tool_init_overrides,
         call_environment=call_environment,
-        call_path_prepend=list(request.environment.path_prepend),
+        call_path_prepend=call_path_prepend,
         runtime_overrides=runtime_overrides,
-        tool_output_workspace_root=str(route.workspace) if route.workspace is not None else None,
+        tool_output_workspace_root=tool_output_workspace_root,
+        sandbox=request.sandbox,
     )
     return _PreparedSandboxRequestContext(
         request=prepared_request,
@@ -1175,6 +1209,7 @@ async def _execute_prepared_request_inprocess(
                 routing_agent_name=prepared.routing_agent_name,
                 private_agent_names=private_agent_names,
                 tool_output_workspace_root=tool_output_workspace_root,
+                sandbox=prepared.sandbox,
             )
         except OAuthConnectionRequired as exc:
             return _oauth_connection_required_response(prepared, exc)
@@ -1268,7 +1303,10 @@ def _shell_launch[Launch](
         worker_scope=shell.worker_scope,
         routing_agent_name=shell.routing_agent_name,
         private_agent_names=_freeze_private_agent_names(shell.private_agent_names),
-        tool_output_workspace_root=route.workspace,
+        tool_output_workspace_root=(
+            Path(shell.tool_output_workspace_root) if shell.tool_output_workspace_root is not None else None
+        ),
+        sandbox=shell.sandbox,
     )
     if not isinstance(toolkit, SupportsTerminalLaunch):
         raise TerminalError(400, "This shell cannot start a terminal.")
@@ -2022,7 +2060,10 @@ async def _execute_worker_browser(
             worker_scope=prepared.worker_scope,
             routing_agent_name=prepared.routing_agent_name,
             private_agent_names=_freeze_private_agent_names(prepared.private_agent_names),
-            tool_output_workspace_root=workspace,
+            tool_output_workspace_root=(
+                Path(prepared.tool_output_workspace_root) if prepared.tool_output_workspace_root is not None else None
+            ),
+            sandbox=prepared.sandbox,
         )
         browser_toolkit = provider.validate_toolkit(toolkit)
 

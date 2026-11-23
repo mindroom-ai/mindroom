@@ -1355,7 +1355,7 @@ def test_the_shell_offers_named_workers_only_to_an_agent_that_may_run_them(
     assert function is not None
 
     offered = set(function.parameters["properties"])
-    assert ({"worker", "resource_profile"} <= offered) is enabled
+    assert ({"worker", "resource_profile", "sandbox", "mount_dir", "mount_read_only"} <= offered) is enabled
     assert {"args", "tail", "timeout"} <= offered
     assert ("mindroom-agent workers run" in (function.description or "")) is enabled
 
@@ -1422,9 +1422,14 @@ async def test_a_shell_outside_a_worker_refuses_to_name_one(tmp_path: Path) -> N
         worker_target=None,
     )
 
-    result = await _offered_entrypoint(shell, "run_shell_command")("true", worker="e2e-0")
-
+    entrypoint = _offered_entrypoint(shell, "run_shell_command")
+    result = await entrypoint("true", worker="e2e-0")
     assert result.startswith("Error: `worker` and `resource_profile` need a shell that runs in a worker")
+    assert (await entrypoint("true", sandbox=True)).startswith(
+        "Error: `worker` and `resource_profile` need a shell that runs in a worker",
+    )
+    # Models filling default false booleans without worker still run as an ordinary local shell call.
+    assert await entrypoint(["echo", "ok"], sandbox=False, mount_read_only=False) == "ok"
 
 
 @pytest.mark.asyncio
@@ -1677,3 +1682,162 @@ async def test_named_workers_a_restart_left_behind_count_until_the_first_mainten
         # A worker this process started stays through its passes.
         restarted.maintain_workers()
         assert apps_api.deployments[started.worker_id].spec.replicas == 1
+
+
+@pytest.mark.asyncio
+async def test_sandboxed_shell_proxy_strips_all_trust_surfaces_including_followups(
+    tmp_path: Path,
+    backend: _FakeBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sandboxed calls and flagless follow-ups strip CLI token, Agent Keys, env secrets, and leases."""
+    from mindroom.egress_broker import service as egress_service  # noqa: PLC0415
+    from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment  # noqa: PLC0415
+
+    storage_root = tmp_path / "storage"
+    mount_sub = storage_root / "agents" / "code" / "workspace" / "scratch" / "job1"
+    mount_sub.mkdir(parents=True)
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=storage_root,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS": "30",
+            "MY_SECRET": "super-secret-value",
+        },
+    )
+    broker_calls: list[object] = []
+    monkeypatch.setattr(sandbox_proxy_module, "egress_broker_enabled", lambda _paths: True)
+    monkeypatch.setattr(sandbox_proxy_module, "egress_agent_scope", lambda _cfg, _name, _paths: "scope-1")
+    monkeypatch.setattr(
+        egress_service,
+        "execution_env_for_worker",
+        lambda *_args, **_kwargs: broker_calls.append(1) or {"HTTPS_PROXY": "http://broker", "BROKER_KEY": "k"},
+    )
+
+    posts = _route_through(monkeypatch, backend)
+    captured_lease_args: list[tuple[object, object]] = []
+    real_execute = sandbox_proxy_module.execute_worker_proxy_request
+
+    def _spy_execute(**kwargs: Any) -> object:  # noqa: ANN401
+        captured_lease_args.append((kwargs["credentials_manager"], kwargs["worker_grantable_credentials"]))
+        return real_execute(**kwargs)
+
+    monkeypatch.setattr(sandbox_proxy_module, "execute_worker_proxy_request", _spy_execute)
+
+    target = resolve_worker_target("user_agent", "code", _identity(), private_agent_names=frozenset())
+    shell = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        runs_in_worker=True,
+        runtime_config=_CONFIG,
+        tool_config_overrides={"extra_env_passthrough": "MY_SECRET"},
+        worker_target=target,
+    )
+    call_shell = _offered_entrypoint(shell, "run_shell_command")
+    cli_grant = "cli-secret"
+    call_env = ToolEnvironment(
+        values={"MINDROOM_AGENT_CLI_TOKEN": cli_grant, "TEMP_SECRET": "temp-val"},
+        pass_through=("MY_SECRET",),
+    )
+
+    with (
+        idle_worker_cleanup_owner(),
+        tool_runtime_context(_tool_context(runtime_paths)),
+        collected_tool_environment(call_env),
+    ):
+        async with execution_resources(response=True):
+            # Default false booleans with worker=None still run as a normal shell call.
+            await call_shell("echo plain", sandbox=False, mount_read_only=False)
+            assert len(broker_calls) == 1
+            assert (posts[-1][1]["sandbox"], posts[-1][1]["execution_env"]["MINDROOM_AGENT_CLI_TOKEN"]) == (
+                False,
+                cli_grant,
+            )
+            assert posts[-1][1]["execution_env"]["HTTPS_PROXY"] == "http://broker"
+            assert captured_lease_args[-1][1] is not None
+
+            # Pre-validation fails fast before admission or backend provisioning.
+            specs_before = len(backend.specs)
+            with pytest.raises(NamedWorkerError, match="does not exist"):
+                await call_shell("ls", worker="sbx-missing", mount_dir="no-such-dir")
+            with pytest.raises(NamedWorkerError, match="cannot write into a read-only sandbox mount"):
+                await call_shell(
+                    "ls",
+                    worker="sbx-ro-out",
+                    mount_dir="scratch/job1",
+                    mount_read_only=True,
+                    mindroom_output_path="out.txt",
+                )
+            assert len(backend.specs) == specs_before
+
+            # Call 1: RO mount_dir sandbox.
+            await call_shell("ls", worker="sbx-dir", mount_dir="scratch/job1", mount_read_only=True)
+            # Call 2: follow-up omitting all sandbox flags must still strip everything and resolve locked base_dir.
+            await call_shell("pwd", worker="sbx-dir")
+            # Call 3: follow-up omitting mount_read_only still refuses mindroom_output_path.
+            with pytest.raises(NamedWorkerError, match="cannot write into a read-only sandbox mount"):
+                await call_shell("ls", worker="sbx-dir", mindroom_output_path="out.txt")
+
+            # Empty-scratch sandbox + follow-up omitting sandbox.
+            await call_shell("pwd", worker="sbx-empty", sandbox=True)
+            await call_shell("pwd", worker="sbx-empty")
+
+    # Agent Keys broker was never invoked for any sandboxed call (still 1 from plain call).
+    assert len(broker_calls) == 1
+    for idx, expected_base_dir in [
+        (1, "agents/code/workspace/scratch/job1"),
+        (2, "agents/code/workspace/scratch/job1"),
+        (3, None),
+        (4, None),
+    ]:
+        _url, body = posts[idx]
+        assert (
+            body["sandbox"],
+            body["base_dir"],
+            body["execution_env"],
+            body["extra_env_passthrough"],
+            body["environment"],
+            captured_lease_args[idx],
+        ) == (
+            True,
+            expected_base_dir,
+            {},
+            None,
+            {"set_names": [], "unset_names": [], "path_prepend": []},
+            (None, None),
+        )
+        assert "extra_env_passthrough" not in body["tool_config_overrides"]
+        assert "extra_env_passthrough" not in body["tool_init_overrides"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sandbox_args",
+    [{"sandbox": True}, {"mount_dir": "sub"}, {"mount_read_only": True}],
+)
+async def test_cli_catalog_explains_sandbox_arguments_when_named_workers_hidden(
+    runtime_paths: RuntimePaths,
+    sandbox_args: dict[str, object],
+) -> None:
+    """When named workers are unavailable, sandbox params produce the named-worker refusal instead of generic invalid args."""
+    from mindroom.tool_system.agent_tool_calls import _invalid_arguments_reason  # noqa: PLC0415
+    from mindroom.tool_system.tool_access import ToolKey  # noqa: PLC0415
+    from tests.test_agent_tool_calls import _catalog  # noqa: PLC0415
+
+    disabled = Config(agents={"code": AgentConfig(display_name="Code", named_workers=0, worker_scope="user_agent")})
+    target = resolve_worker_target("user_agent", "code", _identity(), private_agent_names=frozenset())
+    shell = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        runs_in_worker=True,
+        runtime_config=disabled,
+        worker_target=target,
+    )
+    catalog = await _catalog(runtime_paths.storage_root, [replace(adapt_toolkit(shell, key="shell"), name="shell")])
+    catalog.runtime_context = _tool_context(runtime_paths, config=disabled)
+    binding = await catalog.bind(ToolKey("shell", "run_shell_command"))
+    reason = _invalid_arguments_reason(binding, {"args": "true", **sandbox_args})
+    assert "Named workers are off for this agent" in reason

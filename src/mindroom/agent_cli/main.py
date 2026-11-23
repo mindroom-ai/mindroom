@@ -156,6 +156,24 @@ def _add_workers_run(groups: argparse._SubParsersAction[argparse.ArgumentParser]
         help="CPU and memory size of the worker, set by the first command that names it",
     )
     run.add_argument(
+        "--sandbox",
+        action="store_true",
+        default=False,
+        help="Run in isolated sandbox mode (empty scratch only unless --mount-dir is set)",
+    )
+    run.add_argument(
+        "--mount-dir",
+        default=None,
+        metavar="DIR",
+        help="Workspace-relative directory to mount in the sandboxed worker (implies --sandbox)",
+    )
+    run.add_argument(
+        "--mount-read-only",
+        action="store_true",
+        default=False,
+        help="Mount --mount-dir read-only (requires --mount-dir)",
+    )
+    run.add_argument(
         "--timeout",
         type=int,
         default=_WORKER_COMMAND_TIMEOUT_SECONDS,
@@ -511,6 +529,26 @@ def _submit_once(client: AgentCliClient, payload: dict[str, object]) -> dict[str
         return None
 
 
+def _worker_run_arguments(args: argparse.Namespace) -> dict[str, object]:
+    """Build `run_shell_command` arguments for `workers run`, omitting unset optional flags."""
+    # `tail` stays an argument, as before output was streamed, so approval, hooks and audit see the same call.
+    arguments: dict[str, object] = {
+        "args": args.command,
+        "worker": args.name,
+        "timeout": args.timeout,
+        "tail": args.tail,
+    }
+    if args.resource_profile is not None:
+        arguments["resource_profile"] = args.resource_profile
+    if args.sandbox:
+        arguments["sandbox"] = True
+    if args.mount_dir is not None:
+        arguments["mount_dir"] = args.mount_dir
+    if args.mount_read_only:
+        arguments["mount_read_only"] = True
+    return arguments
+
+
 def _run_in_worker(args: argparse.Namespace) -> int:
     """Run one command in a named worker with its output streamed as it arrives, and return its exit code.
 
@@ -526,11 +564,7 @@ def _run_in_worker(args: argparse.Namespace) -> int:
             "it cannot run from a background script.",
         )
         return _EXIT_NOT_RUN
-    arguments: dict[str, object] = {"args": args.command, "worker": args.name, "timeout": args.timeout}
-    # `tail` stays an argument, as before output was streamed, so approval, hooks and audit see the same call.
-    arguments["tail"] = args.tail
-    if args.resource_profile is not None:
-        arguments["resource_profile"] = args.resource_profile
+    arguments = _worker_run_arguments(args)
     call_id = str(uuid4())
     client: AgentCliClient | None = None
     result: dict[str, object] | None = None
