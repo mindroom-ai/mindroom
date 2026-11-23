@@ -16,18 +16,23 @@ if TYPE_CHECKING:
 # What a question may offer, so that its card always is one event: a card cannot cut an option short, since the
 # answer is the option's own text.
 MAX_OPTIONS, MAX_OPTION_BYTES = 20, 200
-# How much of the question, answer and options the card shows: the first candidate that fits one event.
-_TEXT_CHARS = (2000, 500, 100)
+# How much of the question, answer and options the card shows: (chars, answer_chars, option_chars, body_option_chars).
 _ANSWER_CHARS = 500
-_OPEN_FITS: tuple[tuple[int, int | None], ...] = ((2000, None), (500, None), (100, None), (100, 40), (100, 0))
-_CLOSED_FITS: tuple[tuple[int, int, int | None], ...] = (
-    (2000, 500, None),
-    (500, 500, None),
-    (100, 500, None),
-    (100, 200, 80),
-    (100, 100, 40),
-    (100, 50, 20),
-    (50, 30, 0),
+_OPEN_FITS: tuple[tuple[int, int, int | None, int | None], ...] = (
+    (2000, _ANSWER_CHARS, None, None),
+    (500, _ANSWER_CHARS, None, None),
+    (100, _ANSWER_CHARS, None, None),
+    (100, _ANSWER_CHARS, None, 40),
+    (100, _ANSWER_CHARS, None, 0),
+)
+_CLOSED_FITS: tuple[tuple[int, int, int | None, int | None], ...] = (
+    (2000, 500, None, None),
+    (500, 500, None, None),
+    (100, 500, None, None),
+    (100, 200, 80, None),
+    (100, 100, 40, None),
+    (100, 50, 20, None),
+    (50, 30, 0, None),
 )
 
 
@@ -36,12 +41,18 @@ def question_id(run_id: str, seq: int, generation: int) -> str:
     return "q" + hashlib.sha256(f"{run_id}:{seq}:{generation}".encode()).hexdigest()[:6]
 
 
+def _clip_options(options: list[str], limit: int | None) -> list[str]:
+    if limit is None:
+        return options
+    return [] if limit == 0 else [clip(option, limit) for option in options]
+
+
 def question_content(
     run: WorkflowRun,
     node: WorkflowNode,
     status: Literal["open", "answered", "cancelled"] = "open",
     answer: str | None = None,
-    chars: int = _TEXT_CHARS[0],
+    chars: int = 2000,
     *,
     answer_chars: int = _ANSWER_CHARS,
     option_chars: int | None = None,
@@ -53,12 +64,7 @@ def question_content(
     """
     given = node.request.get("options")
     raw_options = [str(option) for option in given] if isinstance(given, list | tuple) else []
-    if option_chars is None:
-        options = raw_options
-    elif option_chars == 0:
-        options = []
-    else:
-        options = [clip(option, option_chars) for option in raw_options]
+    options = _clip_options(raw_options, option_chars)
     return {
         "run": run.run_id,
         "node": f"n{node.seq}",
@@ -81,11 +87,7 @@ def _message(run: WorkflowRun, content: dict[str, Any], *, body_option_chars: in
     """Return the card as a notice in the run's thread, with a text for a client that does not draw it."""
     text, qid = f"Question {content['question_id']}: {content['text']}", content["question_id"]
     if content["status"] == "open":
-        shown = content["options"]
-        if body_option_chars == 0:
-            shown = []
-        elif body_option_chars is not None:
-            shown = [clip(option, body_option_chars) for option in shown]
+        shown = _clip_options(content["options"], body_option_chars)
         options = f" {options_text(shown)}" if shown else ""
         hint = "number or text" if content["options"] else "text"
         text += f"{options} Answer with !answer {qid} <{hint}>."
@@ -111,25 +113,19 @@ async def show_question(
     event_id = node.links.get("event_id") if status != "open" else None
     if status != "open" and not isinstance(event_id, str):
         return None
-    if status == "open":
-        for chars, body_option_chars in _OPEN_FITS:
-            content = question_content(run, node, status, answer, chars)
-            message = _message(run, content, body_option_chars=body_option_chars)
-            if notice_fits(client, run, message, None, as_edit=False):
-                break
-    else:
-        for chars, answer_chars, option_chars in _CLOSED_FITS:
-            content = question_content(
-                run,
-                node,
-                status,
-                answer,
-                chars,
-                answer_chars=answer_chars,
-                option_chars=option_chars,
-            )
-            message = _message(run, content)
-            if notice_fits(client, run, message, event_id):
-                break
+    as_edit = status != "open"
+    for chars, answer_chars, option_chars, body_option_chars in _CLOSED_FITS if as_edit else _OPEN_FITS:
+        content = question_content(
+            run,
+            node,
+            status,
+            answer,
+            chars,
+            answer_chars=answer_chars,
+            option_chars=option_chars,
+        )
+        message = _message(run, content, body_option_chars=body_option_chars)
+        if notice_fits(client, run, message, event_id, as_edit=as_edit):
+            break
     posted = f"wfq-{run.run_id}-{node.seq}-{node.generation}"
     return await send_notice(client, run, message, event_id=event_id, transaction_id=posted, retries=retries)
