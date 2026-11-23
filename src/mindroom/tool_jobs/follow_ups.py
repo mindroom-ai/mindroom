@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import TYPE_CHECKING
 
 from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
@@ -132,8 +133,10 @@ _SHORT_JOB_ID_LENGTH = 8
 def _held_job_label(job: BackgroundJob) -> str:
     child = job.adapter.get("child") if job.kind == "delegation" and isinstance(job.adapter, dict) else None
     title = child.get("title") if isinstance(child, dict) else None
-    name = (title.strip() if isinstance(title, str) and title.strip() else job.tool_name).replace("`", "'")
-    return f"`{name}` ({job.job_id[:_SHORT_JOB_ID_LENGTH]})"
+    name = title.strip() if isinstance(title, str) and title.strip() else job.tool_name
+    fence = "`" * (max((len(match.group(0)) for match in re.finditer(r"`+", name)), default=0) + 1)
+    padded = f" {name} " if name.startswith("`") or name.endswith("`") else name
+    return f"{fence}{padded}{fence} ({job.job_id[:_SHORT_JOB_ID_LENGTH]})"
 
 
 def held_notice(key: ConversationKey, jobs: Sequence[BackgroundJob], mention: str = "") -> tuple[str, str]:

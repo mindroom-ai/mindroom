@@ -11,7 +11,12 @@ from typing import TYPE_CHECKING, Protocol, cast
 
 import nio
 
-from mindroom.constants import ROUTE_EVENT_TYPE, ROUTE_REVISION_KEY, SILENT_SCHEDULE_EVENT_TYPE
+from mindroom.constants import (
+    CONTEXT_ONLY_CONTENT_KEY,
+    ROUTE_EVENT_TYPE,
+    ROUTE_REVISION_KEY,
+    SILENT_SCHEDULE_EVENT_TYPE,
+)
 from mindroom.event_journal import (
     EventClass,
     EventKind,
@@ -165,6 +170,9 @@ def _event_class_for(
     receives every agent's placeholder, so admitting them as work queued each
     one in every agent's ordered room lane, ahead of the prompts behind it.
 
+    A textual message carrying `CONTEXT_ONLY_CONTENT_KEY` is also context-only
+    from any sender, because the marker can only take authority away.
+
     A message, media, reaction, approval or job cancel marked agent-authored,
     from a sender MindRoom does not manage, is the last one. Such an account
     acts for a person, and the marker says an agent wrote the event there, so
@@ -183,7 +191,10 @@ def _event_class_for(
     if isinstance(event, nio.RoomMessageNotice | nio.RoomMessageUnknown):
         return EventClass.CONTEXT_ONLY
     content = event.source.get("content")
-    if isinstance(event, TEXTUAL_MESSAGE_EVENT_TYPE) and is_unfinished_reply(content or {}):
+    if isinstance(event, TEXTUAL_MESSAGE_EVENT_TYPE) and (
+        is_unfinished_reply(content or {})
+        or (isinstance(content, dict) and content.get(CONTEXT_ONLY_CONTENT_KEY) is True)
+    ):
         return EventClass.CONTEXT_ONLY
     if (
         kind in _AGENT_AUTHORED_MARKER_KINDS

@@ -1152,6 +1152,8 @@ UI_ACTION_CONTENT_KEY = "io.mindroom.ui_action"
 THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
 # Marks a notice that asks its reader to reply in its thread, so clients show it as a conversation, not a status.
 CONVERSATION_CONTENT_KEY = "io.mindroom.conversation"
+# Marks a textual message (e.g. m.text) as context-only so peer bots do not treat it as actionable.
+CONTEXT_ONLY_CONTENT_KEY = "io.mindroom.context_only"
 # A finished call's duration and spoken turns by sender ID, on its transcript message.
 CALL_TRANSCRIPT_CONTENT_KEY = "io.mindroom.call_transcript"
 STREAM_STATUS_KEY = "io.mindroom.stream_status"

@@ -11,8 +11,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mindroom import reply_lifecycle as rl
-from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, ContactsConfig, TeamConfig
 from mindroom.config.main import Config
+from mindroom.constants import CONTEXT_ONLY_CONTENT_KEY, EXACT_MENTIONS_KEY
 from mindroom.custom_tools.job import JobTools
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
@@ -33,7 +34,7 @@ from mindroom.response_turn import (
     stream_response_turn,
 )
 from mindroom.session_storage.store import ConversationStore
-from mindroom.thread_utils import check_agent_mentioned
+from mindroom.thread_utils import check_agent_mentioned, history_mentioned_user_ids
 from mindroom.tool_jobs.client_cancel import JobCancelRequest, cancel_jobs_command, cancel_room_jobs
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import (
@@ -399,7 +400,7 @@ async def test_jobs_the_limit_holds_get_one_notice_of_the_agent(tmp_path: Path) 
             assert f'href="https://matrix.to/#/{key.requester_id}"' in content["formatted_body"]
             assert content["m.relates_to"]["event_id"] == key.thread_id
             assert content["body"] == (
-                f"[{key.requester_id}](https://matrix.to/#/{key.requester_id}) "
+                f"{key.requester_id} "
                 "⏸️ 1 background job finished while I was paused after "
                 "20 automatic follow-ups in a row without a message from you: `tool_capped` (capped). "
                 "Reply here to let me continue."
@@ -425,9 +426,7 @@ async def test_a_room_level_hold_is_a_conversation_notice(tmp_path: Path) -> Non
             assert content["msgtype"] == "m.text"
             assert content["m.mentions"] == {"user_ids": [owner.requester_id]}
             assert content["io.mindroom.conversation"] is True
-            assert content["body"].startswith(
-                f"[{owner.requester_id}](https://matrix.to/#/{owner.requester_id}) ⏸️ 2 background jobs finished",
-            )
+            assert content["body"].startswith(f"{owner.requester_id} ⏸️ 2 background jobs finished")
             assert "`tool_capped_a` (capped_a), `tool_capped_b` (capped_b)" in content["body"]
     finally:
         await runtime.shutdown()
@@ -1235,13 +1234,17 @@ async def test_held_notice_names_subagent_title_caps_list_and_mentions_only_requ
             send.assert_awaited_once()
             content = send.await_args.args[2]
             assert content["msgtype"] == "m.text"
+            assert content[CONTEXT_ONLY_CONTENT_KEY] is True
+            assert content[EXACT_MENTIONS_KEY] is True
             assert content["m.mentions"] == {"user_ids": [key.requester_id]}
+            assert content["body"].startswith(f"{key.requester_id} ⏸️ ")
+            assert "https://matrix.to/" not in content["body"]
             assert f'href="https://matrix.to/#/{key.requester_id}"' in content["formatted_body"]
             assert "`Review @general design` (c6256cac), `research` (d4e5f607)" in content["body"]
             assert ", and 2 more." in content["body"]
             assert "20 automatic follow-ups in a row without a message from you" in content["body"]
 
-            # Mentioning only the human requester dispatches no agent even when a title contains @general.
+            # Mentioning only the human requester dispatches no agent and adds none to thread history even with @general in title.
             config = Config(agents={"general": AgentConfig(display_name="General")})
             paths = _runtime_paths(tmp_path)
             persist_entity_accounts(config, paths)
@@ -1256,19 +1259,20 @@ async def test_held_notice_names_subagent_title_caps_list_and_mentions_only_requ
             assert mentioned_agents == []
             assert am_i_mentioned is False
             assert has_non_agent_mentions is True
+            assert history_mentioned_user_ids(content, config, paths) == [key.requester_id]
     finally:
         await runtime.shutdown()
 
 
 async def test_held_notice_escapes_markdown_and_html_in_titles(tmp_path: Path) -> None:
-    """Markdown and HTML in job titles render as literal text while keeping the intentional requester pill."""
+    """Markdown, HTML, and backticks in job titles render as literal text while keeping the requester pill."""
     runtime = await tool_job_runtime(tmp_path)
     bot = _admitting_bot()
     coordinator = job_coordinator(tmp_path, runtime, bot)
     key = _key(job_owner())
     last = _follow_up_event_id(key, [], _FOLLOW_UP_LIMIT)
     tricky_title = (
-        "**x** [a](https://e.x) <b>y</b> [@general](https://matrix.to/#/@mindroom_general:example.org) `tick`"
+        "**x** [a](https://e.x) <b>y</b> [@general](https://matrix.to/#/@mindroom_general:example.org) ``tick``"
     )
     try:
         with patch(_SEND, AsyncMock()) as send:
@@ -1293,24 +1297,41 @@ async def test_held_notice_escapes_markdown_and_html_in_titles(tmp_path: Path) -
             assert "<b>" not in formatted
             assert (
                 "<code>**x** [a](https://e.x) &lt;b&gt;y&lt;/b&gt; "
-                "[@general](https://matrix.to/#/@mindroom_general:example.org) &#x27;tick&#x27;</code>"
+                "[@general](https://matrix.to/#/@mindroom_general:example.org) ``tick``</code>"
             ) in formatted
     finally:
         await runtime.shutdown()
 
 
-async def test_held_notice_for_managed_agent_requester_stays_unmentioned_notice(tmp_path: Path) -> None:
-    """When the requester is a managed agent account, post an unmentioned m.notice so it cannot wake that agent."""
+@pytest.mark.parametrize("requester_kind", ["managed_agent", "remote_agent", "bot_account"])
+async def test_held_notice_for_non_human_requesters_stays_unmentioned_notice(
+    tmp_path: Path,
+    requester_kind: Literal["managed_agent", "remote_agent", "bot_account"],
+) -> None:
+    """Managed agents, remote contact agents, and bot accounts receive an unmentioned m.notice with exact empty mentions."""
     runtime = await tool_job_runtime(tmp_path)
     bot = _admitting_bot()
     coordinator = job_coordinator(tmp_path, runtime, bot)
     config = Config(
-        agents={"helper": AgentConfig(display_name="Helper"), "general": AgentConfig(display_name="General")},
+        agents={
+            "parent": AgentConfig(
+                display_name="Parent",
+                contacts=ContactsConfig(remote_agents=["@mindroom_*:remote.example.org"]),
+            ),
+            "helper": AgentConfig(display_name="Helper"),
+            "general": AgentConfig(display_name="General"),
+        },
+        bot_accounts=["@bridge_bot:example.org"],
     )
     persist_entity_accounts(config, coordinator.runtime_paths)
     coordinator.config_provider = lambda: config
-    agent_requester = entity_identity_registry(config, coordinator.runtime_paths).current_id("helper").full_id
-    owner = replace(job_owner(), requester_id=agent_requester)
+    requester_by_kind = {
+        "managed_agent": entity_identity_registry(config, coordinator.runtime_paths).current_id("helper").full_id,
+        "remote_agent": "@mindroom_peer:remote.example.org",
+        "bot_account": "@bridge_bot:example.org",
+    }
+    requester = requester_by_kind[requester_kind]
+    owner = replace(job_owner(), requester_id=requester)
     key = _key(owner)
     last = _follow_up_event_id(key, [], _FOLLOW_UP_LIMIT)
     try:
@@ -1323,16 +1344,19 @@ async def test_held_notice_for_managed_agent_requester_stays_unmentioned_notice(
                 source_event_id=last,
                 tool_name="research",
                 kind="delegation",
-                adapter={"child": {"title": "Audit worker"}},
+                adapter={"child": {"title": "Review @general design"}},
             )
             await coordinator._admit_follow_ups(runtime)
             send.assert_awaited_once()
             content = send.await_args.args[2]
             assert content["msgtype"] == "m.notice"
-            assert "m.mentions" not in content
+            assert content[CONTEXT_ONLY_CONTENT_KEY] is True
+            assert content[EXACT_MENTIONS_KEY] is True
+            assert content["m.mentions"] == {"user_ids": []}
             assert content["io.mindroom.conversation"] is True
-            assert agent_requester not in content["body"]
-            assert "`Audit worker` (c6256cac)" in content["body"]
+            assert requester not in content["body"]
+            assert "`Review @general design` (c6256cac)" in content["body"]
             assert "<a " not in content["formatted_body"]
+            assert history_mentioned_user_ids(content, config, coordinator.runtime_paths) == []
     finally:
         await runtime.shutdown()

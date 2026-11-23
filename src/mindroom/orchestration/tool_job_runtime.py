@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
-from mindroom.constants import CONVERSATION_CONTENT_KEY
+from mindroom.constants import CONTEXT_ONLY_CONTENT_KEY, CONVERSATION_CONTENT_KEY, EXACT_MENTIONS_KEY
+from mindroom.contacts.parties import remote_target
 from mindroom.custom_tools.job import JobTools
 from mindroom.delegation.background import delegation_child, reconcile_delegation
 from mindroom.delegation.continuation import continued_subagent_job
@@ -23,7 +24,7 @@ from mindroom.event_journal import turn_rows
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.mentions import format_user_mention
-from mindroom.matrix.message_builder import build_message_content
+from mindroom.matrix.message_builder import build_message_content, markdown_to_html
 from mindroom.message_target import MessageTarget
 from mindroom.requester_identity import is_managed_entity_id
 from mindroom.tool_jobs.approvals import end_tool_call_approval, prune_job_approvals
@@ -111,18 +112,37 @@ def _follow_up_candidates(jobs: Iterable[BackgroundJob]) -> dict[ConversationKey
     return {key: tuple(groups[key]) for key in sorted(groups, key=_key_order)}
 
 
+def _mentions_requester(config: Config, runtime_paths: RuntimePaths, key: ConversationKey) -> bool:
+    """Return whether a held-jobs notice should mention ``key.requester_id`` as a human requester."""
+    return not (
+        is_managed_entity_id(key.requester_id, config, runtime_paths)
+        or key.requester_id in config.bot_accounts
+        or (
+            key.recipient in config.agents
+            and remote_target(config, runtime_paths, key.recipient, key.requester_id) is not None
+        )
+    )
+
+
 async def _post_held_notice(
     client: nio.AsyncClient,
     key: ConversationKey,
     txn: str,
-    text: str,
+    body: str,
+    formatted_body: str | None = None,
     mentioned: list[str] | None = None,
 ) -> bool:
     """Post the agent's notice that the limit holds jobs; a failed send is retried on a later pass, as the same transaction."""
-    # Mention only non-managed requesters so a managed agent requester is not woken; as a conversation a room-level one is listed.
-    extra: dict[str, Any] = {CONVERSATION_CONTENT_KEY: True, **({"msgtype": "m.notice"} if mentioned is None else {})}
+    # Keep the notice context-only and its mentions exact so titles cannot wake peer bots or add agents to thread history.
+    extra: dict[str, Any] = {
+        CONVERSATION_CONTENT_KEY: True,
+        CONTEXT_ONLY_CONTENT_KEY: True,
+        EXACT_MENTIONS_KEY: True,
+        **({"msgtype": "m.notice", "m.mentions": {"user_ids": []}} if mentioned is None else {}),
+    }
     content = build_message_content(
-        text,
+        body,
+        formatted_body=formatted_body,
         mentioned_user_ids=mentioned,
         thread_event_id=key.thread_id,
         latest_thread_event_id=key.thread_id,
@@ -520,14 +540,21 @@ class ToolJobRuntimeCoordinator:
                     self._admitted_follow_ups.add(follow_up_id)
                 due.add(follow_up_id)
             elif (held := held_jobs(ended)) and bot.client is not None:
-                managed = is_managed_entity_id(key.requester_id, self.config_provider(), self.runtime_paths)
-                _, mentioned, mention = ("", None, "") if managed else format_user_mention(key.requester_id)
-                notice_id, text = held_notice(key, held, mention)
+                plain_mention, mentioned, markdown_mention = (
+                    format_user_mention(key.requester_id)
+                    if _mentions_requester(self.config_provider(), self.runtime_paths, key)
+                    else ("", None, "")
+                )
+                notice_id, body = held_notice(key, held, plain_mention)
+                formatted_body = (
+                    markdown_to_html(held_notice(key, held, markdown_mention)[1]) if mentioned is not None else None
+                )
                 if notice_id in self._sent_notices or await _post_held_notice(
                     bot.client,
                     key,
                     notice_id,
-                    text,
+                    body,
+                    formatted_body,
                     mentioned,
                 ):
                     self._sent_notices[notice_id] = frozenset(job.job_id for job in held)
