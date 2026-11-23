@@ -88,7 +88,7 @@ A run that another call resumed since belongs to that call: the earlier one neit
 ## What The Script Can Call
 
 ```python
-from mindroom.workflow import agent, foreach, parallel, ask_user, shell, tool, phase, log, now, random, run, PartialFailure
+from mindroom.workflow import agent, foreach, parallel, spawn, ask_user, shell, tool, phase, log, now, random, run, PartialFailure
 
 def main(args):
     phase("Test")
@@ -100,6 +100,7 @@ def main(args):
 ```
 
 - `agent(prompt)` runs one agent turn and returns its answer as text, or as parsed JSON with `schema`; see [Agents](#agents).
+- `s = spawn(name, **options)` creates an agent that keeps its conversation across `s.ask(message, *, schema=None, timeout=None)` turns; see [Sessions](#sessions).
 - `ask_user(question, options=None)` asks the run's requester in the thread and returns the answer; see [Questions](#questions).
 - `shell(command)` runs a command with the agent's `shell` tool and returns `.ok`, `.exit_code`, and `.output`.
   It returns at most the last 50 KiB of output; redirect to a file and read it for more.
@@ -208,6 +209,38 @@ It needs no special tool, so it works with every model, in standard and in minim
 - `schema` and `output_path` cannot be used together, since the file would hold an answer before it is checked.
   Such a call fails with kind `schema` before any agent starts; return the value and write it from the script.
 - The schema is part of what the call is, so a resume with another schema runs the call again.
+
+## Sessions
+
+```python
+s = spawn(name, *, agent=None, model=None, system=None, tools=None, skills=None, knowledge=None,
+          profile=None, minimal=False, output_path=None, dedicated_worker=False, resource_profile=None)
+answer = s.ask(message, *, schema=None, timeout=None)
+```
+
+`spawn(name, **options)` creates a session node with the options of `agent()` (except `prompt`, `schema`, and `timeout`).
+Each `s.ask(message)` runs one turn of that agent and returns its answer (or parsed JSON when `schema` is given):
+
+```python
+from mindroom.workflow import shell, spawn
+
+def review_loop(task, test_command):
+    dev = spawn("dev")
+    reviewer = spawn("reviewer", system="Review diffs. Reply APPROVE or list problems.")
+    dev.ask(f"Implement and commit: {task}")
+    for _ in range(5):
+        tests, review = shell(test_command), reviewer.ask("Review `git diff main`.")
+        if tests.ok and review.startswith("APPROVE"):
+            return review
+        dev.ask(f"Fix and commit.\n\nTests:\n{tests.output}\n\nReview:\n{review}")
+    return "Not approved after 5 rounds:\n" + review
+```
+
+- Turn 1 launches a fresh child named after the session; later turns continue that same child with `continue_subagent` semantics (same child session, conversation history, model, and persona).
+- Each turn is its own background job and usage entry, and the graph shows turn nodes linked to their session node with a turn count.
+- A session handles one turn at a time: calling `s.ask(...)` while `s` is already in a turn fails with `Session '<name>' is already in a turn. Wait for it or spawn another agent.`.
+- Different sessions can run concurrently, for example `parallel([lambda: a.ask(x), lambda: b.ask(y)])`.
+- On resume, a turn whose message and earlier session history match its saved turn is reused from cache. A new turn after the last saved turn continues the saved child. If an earlier turn changed or reran as a new generation (in any lane), later turns of that session miss too; the first changed turn after saved turns starts a fresh child with an `Earlier conversation:` transcript of the saved turns before it, and later turns continue that fresh child.
 
 ## Questions
 
