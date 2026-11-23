@@ -145,6 +145,7 @@ async def test_set_thread_summary_defaults_to_context_room_and_thread() -> None:
         context.relations,
         context.room_id,
         "$ctx-thread:localhost",
+        allow_standalone_root=False,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -242,6 +243,7 @@ async def test_set_thread_summary_normalizes_explicit_thread_id() -> None:
         context.relations,
         context.room_id,
         "$reply-event:localhost",
+        allow_standalone_root=False,
     )
     mock_set.assert_awaited_once_with(
         context.client,

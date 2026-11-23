@@ -16,6 +16,7 @@ from nio.exceptions import OlmTrustError
 
 from mindroom.llm.media import named_mime_type
 from mindroom.logging_config import get_logger
+from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.guarded_rooms import send_refused
 from mindroom.matrix.large_messages import (
     MatrixEventTooLargeError,
@@ -134,10 +135,8 @@ def _log_matrix_delivery_exception(
     cache_bypass: bool,
 ) -> None:
     """Log one local Matrix send/edit exception without exposing device details."""
-    shutdown_fenced = (
-        durable_session_closed(client)
-        or getattr(client, "process_shutdown_transport_fenced", False) is True
-        or type(error).__name__ == "_MatrixTransportShutdownError"
+    shutdown_fenced = durable_session_closed(client) or (
+        isinstance(client, MindRoomAsyncClient) and client.process_shutdown_transport_fenced
     )
     log = logger.warning if shutdown_fenced else logger.error
     log(

@@ -15,7 +15,6 @@ from mindroom.matrix.conversation_reads import complete_thread_history, refetche
 from mindroom.matrix.event_info import event_type_supports_thread_relations
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
-    ThreadResolutionState,
     resolve_event_thread_membership,
     thread_has_child,
     thread_messages_thread_membership_access,
@@ -121,6 +120,12 @@ async def resolve_thread_root_event_id(
         # Local state only. The homeserver was just asked for this exact
         # event and could not answer; asking it again resolves nothing.
         return await relations.admitted_thread_id(room_id, normalized_event_id)
+    if (
+        allow_standalone_root
+        and event_info.can_be_thread_root
+        and event_type_supports_thread_relations(event_info.event_type)
+    ):
+        return normalized_event_id
 
     resolution = await resolve_event_thread_membership(
         room_id,
@@ -136,11 +141,4 @@ async def resolve_thread_root_event_id(
             ),
         ),
     )
-    if (
-        allow_standalone_root
-        and resolution.state is ThreadResolutionState.ROOM_LEVEL
-        and event_info.can_be_thread_root
-        and event_type_supports_thread_relations(event_info.event_type)
-    ):
-        return normalized_event_id
     return resolution.thread_id

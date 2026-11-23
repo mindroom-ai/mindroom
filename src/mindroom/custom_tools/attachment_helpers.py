@@ -160,21 +160,13 @@ async def resolve_canonical_tool_thread_target(
         )
 
     try:
-        if allow_standalone_root:
-            canonical_thread_id = await resolve_thread_root_event_id(
-                context.conversation_reader,
-                context.relations,
-                room_id,
-                requested_thread_id,
-                allow_standalone_root=True,
-            )
-        else:
-            canonical_thread_id = await resolve_thread_root_event_id(
-                context.conversation_reader,
-                context.relations,
-                room_id,
-                requested_thread_id,
-            )
+        canonical_thread_id = await resolve_thread_root_event_id(
+            context.conversation_reader,
+            context.relations,
+            room_id,
+            requested_thread_id,
+            allow_standalone_root=allow_standalone_root,
+        )
     except Exception:
         if not fail_closed_on_normalization_error:
             raise

@@ -13,7 +13,7 @@ from structlog.testing import capture_logs
 from mindroom.config.main import Config
 from mindroom.matrix.client_delivery import send_message_outcome
 from mindroom.matrix.client_room_admin import get_joined_rooms
-from mindroom.matrix.client_session import _MatrixTransportShutdownError
+from mindroom.matrix.client_session import MindRoomAsyncClient, _MatrixTransportShutdownError
 from mindroom.matrix.large_messages import upload_json_sidecar
 from mindroom.matrix.state_failures import StateFailure, state_failure
 from mindroom.message_target import MessageTarget
@@ -177,10 +177,10 @@ async def test_shutdown_fenced_delivery_exception_and_non_final_stream_edit_log_
     tmp_path: Path,
 ) -> None:
     """Shutdown-fenced delivery exceptions and non-final stream edit failures log warning, not error."""
-    client = AsyncMock(spec=nio.AsyncClient)
-    client.user_id = "@bot:localhost"
+    client = MindRoomAsyncClient("http://127.0.0.1:9", "@bot:localhost", "BOT", store_path=None)
+    client.begin_process_shutdown_transport_fence()
     client.rooms = {_ROOM_ID: MagicMock(encrypted=False)}
-    client.room_send = AsyncMock(side_effect=_MatrixTransportShutdownError())
+    client.room_send = AsyncMock(side_effect=_MatrixTransportShutdownError())  # type: ignore[method-assign]
 
     with capture_logs() as logs:
         await send_message_outcome(client, _ROOM_ID, {"msgtype": "m.text", "body": "hi"})

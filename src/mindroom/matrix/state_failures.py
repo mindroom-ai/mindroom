@@ -43,14 +43,7 @@ def state_failure(response: nio.ErrorResponse) -> StateFailure:
 def response_http_status(response: object) -> int | None:
     """Return the integer HTTP status of a Matrix response, if known."""
     http_status = getattr(response, "http_status", None)
-    if isinstance(http_status, int) and not isinstance(http_status, bool):
-        return http_status
-    transport = getattr(response, "transport_response", None)
-    for attr in ("status", "status_code"):
-        status = getattr(transport, attr, None)
-        if isinstance(status, int) and not isinstance(status, bool):
-            return status
-    return None
+    return http_status if isinstance(http_status, int) and not isinstance(http_status, bool) else None
 
 
 def is_transient_homeserver_status(http_status: int | None) -> bool:
