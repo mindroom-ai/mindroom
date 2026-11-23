@@ -388,6 +388,7 @@ async def test_standalone_room_message_resolves_for_resolution_and_tags_not_thre
     """A relation-free room message with no replies resolves for resolution/tags but stays strict for thread_move."""
     standalone_id = "$standalone:localhost"
     state_event_id = "$topic:localhost"
+    encrypted_id = "$undecrypted:localhost"
     events = {
         standalone_id: {
             "event_id": standalone_id,
@@ -395,6 +396,7 @@ async def test_standalone_room_message_resolves_for_resolution_and_tags_not_thre
             "content": {"msgtype": "m.text", "body": "hi"},
         },
         state_event_id: {"event_id": state_event_id, "type": "m.room.topic", "content": {"topic": "ops"}},
+        encrypted_id: {"event_id": encrypted_id, "type": "m.room.encrypted", "content": {"ciphertext": "opaque"}},
     }
 
     async def get_event(_room_id: str, event_id: str) -> RoomGetEventResponse | RoomGetEventError:
@@ -426,6 +428,7 @@ async def test_standalone_room_message_resolves_for_resolution_and_tags_not_thre
         tagged = json.loads(await ThreadTagsTools().tag_thread("ops", thread_id=standalone_id))
         moved = json.loads(await ThreadMoveTools().move_thread(room_id="!dest:localhost", thread_id=standalone_id))
         rejected_state = json.loads(await ThreadResolutionTools().resolve_thread(thread_id=state_event_id))
+        rejected_encrypted = json.loads(await ThreadResolutionTools().resolve_thread(thread_id=encrypted_id))
 
     assert resolved["status"] == "ok"
     assert resolved["thread_id"] == standalone_id
@@ -437,3 +440,5 @@ async def test_standalone_room_message_resolves_for_resolution_and_tags_not_thre
     assert "canonical thread root" in moved["message"]
     assert rejected_state["status"] == "error"
     assert "canonical thread root" in rejected_state["message"]
+    assert rejected_encrypted["status"] == "error"
+    assert "canonical thread root" in rejected_encrypted["message"]

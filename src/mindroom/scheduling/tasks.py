@@ -923,8 +923,9 @@ async def _parse_workflow_schedule(
 
     provider = provider_registry.build_model_provider(config, runtime_paths, "default")
 
+    parse_timeout = asyncio.timeout(_SCHEDULE_PARSE_TIMEOUT_SECONDS)
     try:
-        async with asyncio.timeout(_SCHEDULE_PARSE_TIMEOUT_SECONDS):
+        async with parse_timeout:
             response = await complete_prompt(
                 provider,
                 prompt,
@@ -932,21 +933,21 @@ async def _parse_workflow_schedule(
                 schema=ScheduledWorkflow,
             )
         await record_system_usage(response.usage, runtime_paths=runtime_paths, kind="schedule_parse")
-    except TimeoutError:
-        logger.exception(
-            "Timed out parsing workflow schedule",
-            request=request,
-            timeout_seconds=_SCHEDULE_PARSE_TIMEOUT_SECONDS,
-        )
-        _raise_parse_failure(
-            f"Timed out parsing the schedule request after {int(_SCHEDULE_PARSE_TIMEOUT_SECONDS)}s",
-            "Try a simpler format like 'Daily at 9am, check my email'",
-        )
     except ModelSafeguardRefusal as refusal:
         logger.warning("Schedule parser model refused the request", request=request)
         msg = f"The schedule parser model declined this request ({refusal})."
         raise SchedulingError(msg) from refusal
     except Exception as e:
+        if isinstance(e, TimeoutError) and parse_timeout.expired():
+            logger.exception(
+                "Timed out parsing workflow schedule",
+                request=request,
+                timeout_seconds=_SCHEDULE_PARSE_TIMEOUT_SECONDS,
+            )
+            _raise_parse_failure(
+                f"Timed out parsing the schedule request after {int(_SCHEDULE_PARSE_TIMEOUT_SECONDS)}s",
+                "Try a simpler format like 'Daily at 9am, check my email'",
+            )
         logger.exception("Error parsing workflow schedule", error=str(e), request=request)
         _raise_parse_failure(
             f"Error parsing schedule: {failure_text(e)}",

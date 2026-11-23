@@ -589,6 +589,24 @@ class TestParseWorkflowSchedule:
             "error",
         ]
 
+        async def provider_timeout(*_args: object, **_kwargs: object) -> object:
+            msg = "upstream read timeout"
+            raise TimeoutError(msg)
+
+        monkeypatch.setattr(scheduling_tasks, "complete_prompt", provider_timeout)
+        monkeypatch.setattr(scheduling_tasks, "_SCHEDULE_PARSE_TIMEOUT_SECONDS", 5.0)
+        with capture_logs() as provider_logs, pytest.raises(SchedulingError, match="Error parsing schedule:"):
+            await _parse_workflow_schedule(
+                "Daily at 9am check my email",
+                config=mock_config,
+                runtime_paths=runtime_paths_for(mock_config),
+                available_responders=[_mid("general")],
+                timezone="UTC",
+            )
+        assert [
+            entry["log_level"] for entry in provider_logs if entry["event"] == "Error parsing workflow schedule"
+        ] == ["error"]
+
 
 @pytest.mark.asyncio
 class TestExecuteScheduledWorkflow:

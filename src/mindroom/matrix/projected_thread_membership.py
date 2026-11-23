@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_reads import complete_thread_history, refetched_thread_history
-from mindroom.matrix.event_info import event_type_supports_thread_relations
 from mindroom.matrix.thread_membership import (
     ThreadMembershipAccess,
     resolve_event_thread_membership,
@@ -120,11 +119,7 @@ async def resolve_thread_root_event_id(
         # Local state only. The homeserver was just asked for this exact
         # event and could not answer; asking it again resolves nothing.
         return await relations.admitted_thread_id(room_id, normalized_event_id)
-    if (
-        allow_standalone_root
-        and event_info.can_be_thread_root
-        and event_type_supports_thread_relations(event_info.event_type)
-    ):
+    if allow_standalone_root and event_info.can_be_thread_root and event_info.event_type == "m.room.message":
         return normalized_event_id
 
     resolution = await resolve_event_thread_membership(
