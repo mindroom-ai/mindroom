@@ -92,7 +92,7 @@ class BackgroundLogFile:
         data = text.encode("utf-8", errors="replace")
         remaining = self._max_bytes - self._written_bytes
         try:
-            if len(data) < remaining:
+            if len(data) <= remaining:
                 self._file.write(data)
                 self._written_bytes += len(data)
             else:

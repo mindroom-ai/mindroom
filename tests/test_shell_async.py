@@ -18,6 +18,7 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, workspace_home_identity_env
+from mindroom.shell.background_scope import format_auto_background_message, open_background_log
 from mindroom.shell.execution import (
     _MAX_OUTPUT_BYTES,
     BackgroundLogPolicy,
@@ -48,6 +49,7 @@ from mindroom.tools.shell import (
     _workspace_home_contract_env_from_process_env,
     shell_tools,
 )
+from tests.process_helpers import assert_linux_pid_not_running
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -1097,8 +1099,6 @@ async def test_scoped_auto_background_untimed_streams_log_and_exits_cleanly(tmp_
             )
             assert f"Stop: kill -- -{pid}" in receipt
             assert "It is stopped automatically when this turn ends." in receipt
-            assert "Output:\nbefore-out" in receipt
-            assert "Stderr:\nbefore-err" in receipt
 
             log_path = workspace / rel_log
             log_text = await _wait_for_log_marker(log_path, "[MindRoom: exited with code 0]")
@@ -1107,6 +1107,25 @@ async def test_scoped_auto_background_untimed_streams_log_and_exits_cleanly(tmp_
             assert "after-out" in log_text
             assert "after-err" in log_text
             assert "[MindRoom: exited with code 0]" in log_text
+
+    # Verify receipt preview formatting deterministically without relying on subprocess startup timing.
+    stdout_buf = _OutputBuffer()
+    stdout_buf.append("before-out\n")
+    stderr_buf = _OutputBuffer()
+    stderr_buf.append("before-err\n")
+    preview = format_auto_background_message(
+        pid=4242,
+        timeout=0.2,
+        log_path=workspace / ".mindroom" / "shell" / "4242-deadbeef.log",
+        display_root=str(workspace),
+        max_runtime_seconds=None,
+        no_output_path=None,
+        stdout_buf=stdout_buf,
+        stderr_buf=stderr_buf,
+        tail=10,
+    )
+    assert "Output:\nbefore-out" in preview
+    assert "Stderr:\nbefore-err" in preview
 
 
 @pytest.mark.asyncio
@@ -1214,6 +1233,25 @@ async def test_background_log_size_cap_writes_truncation_notice_and_exit_trailer
         assert "[MindRoom: exited with code 0]" in log_text
     finally:
         kill_namespace_records(registry, "cap-test")
+
+
+def test_background_log_exact_limit_does_not_truncate_until_overflow(tmp_path: Path) -> None:
+    """Writing exactly max_bytes does not emit a truncation notice until extra bytes actually overflow."""
+    policy = BackgroundLogPolicy(log_dir=str(tmp_path / "exact-limit"), max_bytes=10)
+    exact = open_background_log(policy, pid=100, handle="11111111", active_paths=set())
+    exact.write("0123456789")
+    exact.finish("\n[MindRoom: exited with code 0]\n")
+    exact_text = exact.path.read_text(encoding="utf-8")
+    assert exact_text == "0123456789\n[MindRoom: exited with code 0]\n"
+
+    overflow = open_background_log(policy, pid=101, handle="22222222", active_paths=set())
+    overflow.write("0123456789")
+    overflow.write("X")
+    overflow.finish("\n[MindRoom: exited with code 0]\n")
+    overflow_text = overflow.path.read_text(encoding="utf-8")
+    assert overflow_text.startswith("0123456789\n[Log truncated at 10 bytes limit;")
+    assert "X" not in overflow_text
+    assert overflow_text.endswith("\n[MindRoom: exited with code 0]\n")
 
 
 @pytest.mark.asyncio
@@ -1465,15 +1503,18 @@ async def test_sigterm_to_backgrounded_leader_still_kills_sigterm_ignoring_child
                 assert record._monitor_task is not None
                 await asyncio.wait_for(record._monitor_task, timeout=5.0)
                 assert record.return_code == -signal.SIGTERM
-                kill_deadline = time.monotonic() + 2.0
-                while time.monotonic() < kill_deadline:
-                    try:
-                        os.kill(child_pid, 0)
-                    except ProcessLookupError:
-                        break
-                    await asyncio.sleep(0.02)
+                if sys.platform == "linux":
+                    await assert_linux_pid_not_running(child_pid)
                 else:
-                    pytest.fail(f"SIGTERM-ignoring child {child_pid} stayed alive after leader SIGTERM")
+                    kill_deadline = time.monotonic() + 2.0
+                    while time.monotonic() < kill_deadline:
+                        try:
+                            os.kill(child_pid, 0)
+                        except ProcessLookupError:
+                            break
+                        await asyncio.sleep(0.02)
+                    else:
+                        pytest.fail(f"SIGTERM-ignoring child {child_pid} stayed alive after leader SIGTERM")
     finally:
         if child_pid is not None:
             with contextlib.suppress(ProcessLookupError, PermissionError):
