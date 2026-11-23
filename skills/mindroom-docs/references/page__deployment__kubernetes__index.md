@@ -16,12 +16,12 @@ Deploy MindRoom and a standalone Tuwunel Matrix homeserver on a local [`kind`](h
 ### 1. Create the cluster and Secrets
 
 ```bash
-: "${OPENAI_API_KEY:?export OPENAI_API_KEY first}"
-git clone https://github.com/mindroom-ai/mindroom.git "$HOME/mindroom"
-cd "$HOME/mindroom"
-kind create cluster --name mindroom
-kubectl create namespace mindroom
-openssl rand -hex 32 | tr -d '\n' | kubectl -n mindroom create secret generic matrix-registration --from-file=MATRIX_REGISTRATION_TOKEN=/dev/stdin
+: "${OPENAI_API_KEY:?export OPENAI_API_KEY first}" && \
+git clone https://github.com/mindroom-ai/mindroom.git "$HOME/mindroom" && \
+cd "$HOME/mindroom" && \
+kind create cluster --name mindroom && \
+kubectl create namespace mindroom && \
+openssl rand -hex 32 | tr -d '\n' | kubectl -n mindroom create secret generic matrix-registration --from-file=MATRIX_REGISTRATION_TOKEN=/dev/stdin && \
 printf %s "$OPENAI_API_KEY" | kubectl -n mindroom create secret generic llm-credentials --from-file=OPENAI_API_KEY=/dev/stdin
 ```
 
@@ -45,7 +45,7 @@ Custom `config.data` must also set `event_journal.backend: postgres` so MindRoom
 
 ```bash
 cd "$HOME/mindroom"
-cat <<'YAML' > runtime-values.yaml
+helm upgrade --install mindroom-runtime ./cluster/k8s/runtime --namespace mindroom -f - --wait --timeout 10m <<'YAML'
 matrix:
   homeserverUrl: http://matrix-mindroom-tuwunel.mindroom.svc.cluster.local:8008
   serverName: mindroom.local
@@ -74,7 +74,6 @@ config:
     event_journal:
       backend: postgres
 YAML
-helm upgrade --install mindroom-runtime ./cluster/k8s/runtime --namespace mindroom -f runtime-values.yaml --wait --timeout 10m
 ```
 
 ### 4. Chat with the agent
@@ -90,7 +89,6 @@ Expected output: `Reply from @mindroom_helper: pong` (wording may vary; exit sta
 
 ```bash
 kind delete cluster --name mindroom
-rm -f "$HOME/mindroom/runtime-values.yaml"
 ```
 
 ### Next steps

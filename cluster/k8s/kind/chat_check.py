@@ -13,7 +13,7 @@ import time
 from typing import TYPE_CHECKING, Any
 from urllib.error import HTTPError
 from urllib.parse import quote, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -22,6 +22,7 @@ NAMESPACE, SERVICE, ROOM, AGENT = "mindroom", "svc/matrix-mindroom-tuwunel", "lo
 PROMPT, TIMEOUT = "Reply with the single word: pong", 180.0
 ERROR_STATUSES = frozenset({"error", "cancelled", "interrupted"})
 REG_TOKEN_TEMPLATE = "go-template={{.data.MATRIX_REGISTRATION_TOKEN | base64decode}}"  # noqa: S105
+OPENER = build_opener(ProxyHandler({}))
 
 
 def extract_completed_reply(events: list[dict[str, Any]], sender: str, prompt_id: str) -> str | None:
@@ -54,7 +55,7 @@ def _req(method: str, url: str, token: str = "", body: dict[str, Any] | None = N
     if token:
         headers["Authorization"] = f"Bearer {token}"
     try:
-        resp = urlopen(Request(url, data=data, headers=headers, method=method), timeout=20.0)  # noqa: S310
+        resp = OPENER.open(Request(url, data=data, headers=headers, method=method), timeout=20.0)  # noqa: S310
     except HTTPError as exc:
         resp = exc
     with resp:
@@ -73,22 +74,17 @@ def port_forward() -> Iterator[str]:
     """Port-forward Tuwunel on an ephemeral loopback port and yield its base URL."""
     cmd = ["kubectl", "-n", NAMESPACE, "port-forward", "--address", "127.0.0.1", SERVICE, ":8008"]
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-    port, stdout = "", proc.stdout
+    stdout = proc.stdout
     try:
-        deadline = time.monotonic() + 30.0
-        while stdout and (rem := deadline - time.monotonic()) > 0 and select.select([stdout], [], [], rem)[0]:
-            if not (line := stdout.readline()):
-                break
-            if match := re.search(r"Forwarding from 127\.0\.0\.1:(\d+)", line):
-                port = match.group(1)
-                break
-        if not port:
+        line = stdout.readline() if stdout and select.select([stdout], [], [], 30.0)[0] else ""
+        match = re.search(r"Forwarding from 127\.0\.0\.1:(\d+)", line)
+        if not match:
             with contextlib.suppress(subprocess.TimeoutExpired):
                 proc.wait(timeout=0.5)
             detail = f"exit {proc.returncode}" if proc.returncode is not None else "timed out"
             msg = f"kubectl port-forward failed ({detail})"
             raise RuntimeError(msg)
-        yield f"http://127.0.0.1:{port}"
+        yield f"http://127.0.0.1:{match.group(1)}"
     finally:
         proc.terminate()
         try:
