@@ -1151,6 +1151,33 @@ def test_matches_room_message_times_out_cleanly_on_catastrophic_regex(
     assert elapsed < 0.5
 
 
+def test_matches_room_message_hits_timeout_error_guard_on_backtracking_regex(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuinely backtracking regex hits regex TimeoutError and returns False cleanly in < 0.5s."""
+    from mindroom.reactive_triggers import matching as matching_module  # noqa: PLC0415
+
+    config = _config(tmp_path)
+    spec = RoomMessageSourceSpec(room_id=_ROOM_A, pattern=r"(\w+\s?)+$")
+    event = _room_event(room_id=_ROOM_A, text=("word " * 800) + "!")
+
+    warnings: list[tuple[str, dict[str, object]]] = []
+
+    def _capture_warning(message: str, **kwargs: object) -> None:
+        warnings.append((message, kwargs))
+
+    monkeypatch.setattr(matching_module.logger, "warning", _capture_warning)
+
+    started = time.monotonic()
+    matched = matches_room_message(spec, event, config=config, runtime_paths=runtime_paths_for(config))
+    elapsed = time.monotonic() - started
+
+    assert matched is False
+    assert elapsed < 0.5
+    assert any("timed out" in msg.lower() for msg, _ in warnings)
+
+
 def test_matches_room_message_handles_invalid_regex_and_clips_text_to_4096_chars(tmp_path: Path) -> None:
     """Normal patterns including quantified alternations match within 4,096 chars; invalid regex fails closed."""
     config = _config(tmp_path)

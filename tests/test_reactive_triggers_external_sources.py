@@ -451,7 +451,7 @@ def test_github_webhook_normalizes_pull_request_merged_and_closed(tmp_path: Path
     assert "title" not in event.data
     assert "body" not in event.data
     assert event.data == {
-        "repo": "mindroom-ai/mindroom",
+        "repo": "MindRoom-AI/MindRoom",
         "number": 123,
         "action": "closed",
         "merged": True,
@@ -1297,3 +1297,69 @@ def test_event_sources_endpoint_sqlite_error_returns_503(
             assert resp.status_code == 503
     finally:
         api_main.unbind_external_trigger_runtime(api_main.app)
+
+
+def test_github_webhook_canonicalizes_repo_casing_for_rule_matching(tmp_path: Path) -> None:
+    """GitHub repo casing normalizes to the configured allowed_repos spelling so validated rules match."""
+    source = _github_source(allowed_repos=["mindroom-ai/mindroom"], subscribers=[_ALICE])
+    config = _config()
+    runtime_paths = _runtime_paths(tmp_path, env={"GITHUB_WEBHOOK_SECRET": _GH_SECRET})
+    store = ReactiveTriggerStore(runtime_paths)
+
+    validate_subscription_against_source(
+        source,
+        kind="pull_request.merged",
+        match={"repo": "mindroom-ai/mindroom"},
+    )
+    rule = _make_external_rule(
+        trigger_id="gh-pr-canonical-repo",
+        kind="pull_request.merged",
+        match={"repo": "mindroom-ai/mindroom"},
+    )
+    store.create_trigger(rule)
+
+    payload = {
+        "action": "closed",
+        "repository": {"full_name": "MindRoom-AI/mindroom"},
+        "sender": {"login": "basnijholt"},
+        "pull_request": {
+            "number": 4198,
+            "merged": True,
+            "title": "Add reactive triggers",
+            "body": "Details",
+            "head": {"ref": "feat/reactive-triggers", "sha": "abc123"},
+            "base": {"ref": "main"},
+            "user": {"login": "basnijholt"},
+            "merge_commit_sha": "merge999",
+            "html_url": "https://github.com/MindRoom-AI/mindroom/pull/4198",
+        },
+    }
+    raw_body = json.dumps(payload).encode("utf-8")
+    event = verify_and_normalize_github_webhook(
+        source_id="github",
+        source=source,
+        headers={
+            "X-GitHub-Delivery": "delivery-canonical-repo",
+            "X-GitHub-Event": "pull_request",
+            "X-Hub-Signature-256": _github_signature(raw_body),
+        },
+        body=raw_body,
+        runtime_paths=runtime_paths,
+        now=1700000000.0,
+    )
+
+    assert event.data["repo"] == "mindroom-ai/mindroom"
+
+    matched = fan_out_external_event(
+        source_id="github",
+        source=source,
+        event=event,
+        store=store,
+        config=config,
+        runtime_paths=runtime_paths,
+        now=1700000000.0,
+    )
+    assert matched == 1
+    pending = store.list_due_firings(now=1700000000.0)
+    assert [row.trigger_id for row in pending] == ["gh-pr-canonical-repo"]
+    assert pending[0].event.data["repo"] == "mindroom-ai/mindroom"

@@ -304,11 +304,15 @@ def _extract_allowed_github_repo(payload: Mapping[str, Any], source: GitHubEvent
     if repo is None:
         msg = "Missing repository.full_name in GitHub webhook payload"
         raise ExternalSourceBadRequestError(msg)
-    allowed_repos_lower = {allowed.lower() for allowed in source.allowed_repos}
-    if repo.lower() not in allowed_repos_lower:
+    repo_lower = repo.lower()
+    canonical_repo = next(
+        (allowed for allowed in source.allowed_repos if allowed.lower() == repo_lower),
+        None,
+    )
+    if canonical_repo is None:
         msg = "Repository is not allowed for this event source"
         raise ExternalSourceForbiddenError(msg)
-    return repo
+    return canonical_repo
 
 
 def _normalize_github_payload(
