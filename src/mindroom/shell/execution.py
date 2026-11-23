@@ -51,6 +51,8 @@ _MAX_OUTPUT_BYTES = 50 * 1024
 _STREAM_READ_CHUNK_BYTES = 65536
 # Pause pipe reads briefly after each burst once an uncapped redirect is not active and the buffer is rotating.
 _CAPPED_STREAM_BURST_READS = 16
+_CAPPED_STREAM_SMALL_READ_BYTES = 4096
+_CAPPED_STREAM_BULK_FREE_BYTES = 256 * 1024 * 1024
 _CAPPED_STREAM_PACE_SECONDS = 0.02
 # The most bytes of a streamed command's output handed on at once.
 _STREAM_CHUNK_BYTES = 32 * 1024
@@ -982,6 +984,26 @@ async def _pace_capped_stream(stream: asyncio.StreamReader) -> None:
             paused_transport.resume_reading()
 
 
+def _count_capped_read(
+    buf: _OutputBuffer,
+    capture: CapturedShellStream | None,
+    stream: asyncio.StreamReader,
+    chunk_len: int,
+    capped_bytes: int,
+    capped_reads: int,
+) -> tuple[int, int]:
+    """Update rotating-stream counters once output is capped without an active capture."""
+    if (
+        (buf.bytes_capped or buf.lines_capped)
+        and (capture is None or capture.error is not None)
+        and not stream.at_eof()
+    ):
+        capped_bytes += chunk_len
+        if chunk_len < _CAPPED_STREAM_SMALL_READ_BYTES or capped_bytes >= _CAPPED_STREAM_BULK_FREE_BYTES:
+            capped_reads += 1
+    return capped_bytes, capped_reads
+
+
 async def _read_stream(
     stream: asyncio.StreamReader | None,
     buf: _OutputBuffer,
@@ -994,6 +1016,7 @@ async def _read_stream(
     try:
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         capped_reads = 0
+        capped_bytes = 0
         while True:
             chunk = await stream.read(_STREAM_READ_CHUNK_BYTES)
             if not chunk:
@@ -1002,15 +1025,17 @@ async def _read_stream(
             buf.append(text)
             if capture is not None:
                 capture.append(text)
-            if (
-                (buf.bytes_capped or buf.lines_capped)
-                and (capture is None or capture.error is not None)
-                and not stream.at_eof()
-            ):
-                capped_reads += 1
-                if capped_reads >= _CAPPED_STREAM_BURST_READS:
-                    capped_reads = 0
-                    await _pace_capped_stream(stream)
+            capped_bytes, capped_reads = _count_capped_read(
+                buf,
+                capture,
+                stream,
+                len(chunk),
+                capped_bytes,
+                capped_reads,
+            )
+            if capped_reads >= _CAPPED_STREAM_BURST_READS:
+                capped_reads = 0
+                await _pace_capped_stream(stream)
 
         final = decoder.decode(b"", final=True)
         buf.append(final)

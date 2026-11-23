@@ -1161,6 +1161,16 @@ async def test_read_stream_paces_only_capped_bursts_without_active_capture(tmp_p
         assert overflow.error is not None
         assert pace_calls == 2
 
+    pace_calls = 0
+    bulk_under_free = b"x" * (65536 * (_CAPPED_STREAM_BURST_READS + 2))
+    bulk_two_bursts_past_free = b"x" * (65536 * (3 + 2 * _CAPPED_STREAM_BURST_READS + 1))
+    with patch("mindroom.shell.execution._pace_capped_stream", side_effect=fake_pace):
+        await _read_stream(make_stream(bulk_under_free), _OutputBuffer())
+        assert pace_calls == 0
+        with patch("mindroom.shell.execution._CAPPED_STREAM_BULK_FREE_BYTES", 256 * 1024):
+            await _read_stream(make_stream(bulk_two_bursts_past_free), _OutputBuffer())
+        assert pace_calls == 2
+
     events: list[str] = []
 
     class _FakeTransport(asyncio.ReadTransport):
