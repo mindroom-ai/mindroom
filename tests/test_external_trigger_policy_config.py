@@ -96,3 +96,67 @@ def test_external_trigger_policy_rejects_defaults_above_caps() -> None:
                 },
             },
         )
+
+
+@pytest.mark.parametrize(
+    "subscriber",
+    [
+        "@alice:example.org",
+        "@alice:matrix.example.org:8448",
+        "@alice:127.0.0.1:8448",
+        "@alice:[::1]:8448",
+        "@alice:[2001:db8::1]",
+    ],
+)
+def test_event_source_subscribers_accept_valid_matrix_server_names(subscriber: str) -> None:
+    """Event source subscribers accept valid Matrix user IDs including ports and bracketed IPv6."""
+    config = Config.model_validate(
+        {
+            **_base_config(),
+            "external_trigger_policy": {
+                "event_sources": {
+                    "gh": {
+                        "kind": "github",
+                        "secret_env": "GH_SECRET",
+                        "allowed_repos": ["mindroom-ai/mindroom"],
+                        "subscribers": [subscriber],
+                    },
+                },
+            },
+        },
+    )
+    assert config.external_trigger_policy.event_sources["gh"].subscribers == [subscriber]
+
+
+@pytest.mark.parametrize(
+    "subscriber",
+    [
+        "alice:example.org",
+        "@:example.org",
+        "@alice:",
+        "@alice:bad host",
+        "@alice:example.org:0",
+        "@alice:example.org:99999",
+        "@ali ce:example.org",
+        "@alice:[::1",
+        "@alice:[::1]:",
+    ],
+)
+def test_event_source_subscribers_reject_invalid_matrix_user_ids(subscriber: str) -> None:
+    """Event source subscribers reject malformed Matrix user IDs and invalid server names."""
+    with pytest.raises(ValueError, match="Invalid Matrix user ID"):
+        Config.model_validate(
+            {
+                **_base_config(),
+                "external_trigger_policy": {
+                    "event_sources": {
+                        "gh": {
+                            "kind": "github",
+                            "secret_env": "GH_SECRET",
+                            "allowed_repos": ["mindroom-ai/mindroom"],
+                            "subscribers": [subscriber],
+                        },
+                    },
+                },
+            },
+        )

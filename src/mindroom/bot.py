@@ -1133,6 +1133,7 @@ class AgentBot:
         """Hand a joined room's schedules this bot owns and the room's thread snoozes to the runtime."""
         await self.orchestrator.scheduled_tasks.restore_room(self, room_id)
         await self.orchestrator.thread_snooze.restore_room(self, room_id)
+        await self.orchestrator.reactive_triggers.restore_room(self, room_id)
 
     async def _in_room(self, room_id: str) -> bool:
         """Return whether this bot is in the room: its client lists the room and its journal has no leave of it.
@@ -1193,6 +1194,10 @@ class AgentBot:
             self.orchestrator.thread_snooze.observe_state_event(room.room_id, event.source)
         except Exception:
             self.logger.exception("thread_snooze_observe_failed", room_id=room.room_id)
+        try:
+            self.orchestrator.reactive_triggers.observe_state_event(room.room_id, event.source)
+        except Exception:
+            self.logger.exception("reactive_triggers_observe_failed", room_id=room.room_id)
 
     async def change_local_membership(
         self,

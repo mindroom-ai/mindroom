@@ -6,6 +6,7 @@ from mindroom.dispatch_source import (
     EXTERNAL_TRIGGER_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
     HOOK_SOURCE_KIND,
+    REACTIVE_TRIGGER_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
     SILENT_SCHEDULE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
@@ -378,3 +379,23 @@ def test_router_relay_original_sender_preserves_human_requester_or_inherited_hum
         )
         is None
     )
+
+
+def test_reactive_trigger_classifies_as_external_trigger_not_managed_message() -> None:
+    """Messages stamped with REACTIVE_TRIGGER_SOURCE_KIND classify as synthetic EXTERNAL_TRIGGER."""
+    origin = classify_turn_origin(
+        transport_sender_id="@mindroom_research:localhost",
+        requester_id="@alice:localhost",
+        sender_entity_name="research",
+        requester_entity_name=None,
+        source_kind=REACTIVE_TRIGGER_SOURCE_KIND,
+        original_sender="@alice:localhost",
+        trusted_user_relay=False,
+    )
+
+    assert origin.intent == TurnIntent.EXTERNAL_TRIGGER
+    assert origin.intent != TurnIntent.MANAGED_MESSAGE
+    assert origin.may_dispatch_without_mention
+    assert origin.acting_sender_id is None
+    assert not origin.blocks_unmentioned_managed_sender
+    assert not origin.may_be_superseded_by_newer_requester_turn

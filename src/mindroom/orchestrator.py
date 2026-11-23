@@ -146,6 +146,7 @@ from .orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoordinator
 from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from .orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from .orchestration.turn_recovery import TurnJournalRecovery
+from .reactive_triggers.service import ReactiveTriggerService
 from .room_steward import membership_observers, room_poster, room_steward
 from .steward_duties import reconcile_held_room_states, runs_room_hooks
 from .thread_export.workspace_sync import WorkspaceThreadExportDeps, WorkspaceThreadExportRunner
@@ -280,6 +281,7 @@ class _MultiAgentOrchestrator:
     fleet: EntityFleet = field(init=False)
     scheduled_tasks: ScheduledTaskRuntime = field(init=False)
     thread_snooze: ThreadSnoozeRuntimeCoordinator = field(init=False)
+    reactive_triggers: ReactiveTriggerService = field(init=False)
     # The one journal every bot in this process borrows a store from, opened on
     # first use and closed after the last bot stops.
     _open_journal: OpenEventJournal | None = field(default=None, init=False, repr=False)
@@ -359,6 +361,12 @@ class _MultiAgentOrchestrator:
             config_provider=lambda: self.config,
             bots=lambda: self.agent_bots,
         )
+        self.reactive_triggers = ReactiveTriggerService(
+            runtime_paths=self.runtime_paths,
+            config_provider=lambda: self.config,
+            bots=lambda: self.agent_bots,
+            memberships=self.agent_reply_memberships,
+        )
         self._knowledge_refresh_scheduler = runtime_refresh_scheduler(self.runtime_paths)
         self._knowledge_source_watcher = KnowledgeSourceWatcher(self._knowledge_refresh_scheduler, self.runtime_paths)
         self.agent_reply_membership_sync = AgentReplyMembershipSync(
@@ -379,7 +387,10 @@ class _MultiAgentOrchestrator:
             agent_reply_memberships=self.agent_reply_memberships,
             refresh_agent_reply_memberships_when_needed=self.refresh_agent_reply_memberships_when_needed,
         )
-        self._external_trigger_runtime = ExternalTriggerRuntimeCoordinator(api_enabled=self.api_enabled)
+        self._external_trigger_runtime = ExternalTriggerRuntimeCoordinator(
+            api_enabled=self.api_enabled,
+            on_reactive_event=self.reactive_triggers.notify_work,
+        )
         self._call_transcripts_runtime = CallTranscriptsRuntimeCoordinator(
             runtime_paths=self.runtime_paths,
             config_provider=lambda: self.config,
@@ -441,6 +452,7 @@ class _MultiAgentOrchestrator:
             self._knowledge_graph,
             self._todo_poke_runtime,
             self.thread_snooze,
+            self.reactive_triggers,
             self._automations,
             self._budgets,
             self._thread_export_runner,

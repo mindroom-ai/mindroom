@@ -295,8 +295,9 @@ class ScriptRunManager:
         if unknown_toolkits:
             names = ", ".join(sorted(unknown_toolkits))
             msg = f"Background script allowed_tools contains unknown or ineligible toolkit names: {names}."
-            if unknown_toolkits & TOOL_ALIASES.keys():
-                msg += " The file and coding toolkits are now one; name filesystem in allowed_tools to allow it."
+            if aliased := sorted(unknown_toolkits & TOOL_ALIASES.keys()):
+                replacements = ", ".join(f"name {TOOL_ALIASES[alias]} instead of {alias}" for alias in aliased)
+                msg += f" Renamed toolkits require their canonical names in allowed_tools: {replacements}."
             raise ScriptRunManagerError(msg)
         return tuple(grant for grant in launch_grants if grant.toolkit_name in allowed_tools)
 

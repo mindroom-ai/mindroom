@@ -883,6 +883,7 @@ async def test_joining_a_room_restores_its_schedules_and_snoozes() -> None:
     bot = MagicMock()
     bot.orchestrator.scheduled_tasks.restore_room = AsyncMock()
     bot.orchestrator.thread_snooze.restore_room = AsyncMock()
+    bot.orchestrator.reactive_triggers.restore_room = AsyncMock()
 
     await AgentBot._restore_joined_room(bot, ROOM)
 

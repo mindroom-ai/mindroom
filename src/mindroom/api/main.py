@@ -42,6 +42,7 @@ from mindroom.api.credentials import router as credentials_router
 from mindroom.api.dynamic_workflows import router as dynamic_workflows_router
 from mindroom.api.egress_broker import router as egress_broker_router
 from mindroom.api.egress_credentials import router as egress_credentials_router
+from mindroom.api.external_triggers import event_sources_router
 from mindroom.api.external_triggers import router as external_triggers_router
 from mindroom.api.frontend import router as frontend_router
 from mindroom.api.github_requests import router as github_requests_router
@@ -403,6 +404,7 @@ def bind_external_trigger_runtime(
     *,
     runtime_config: Config,
     target_bot: Callable[[str], AgentBot | None],
+    on_reactive_event: Callable[[], None] | None = None,
 ) -> None:
     """Attach Matrix delivery through each trigger's target to one API app while it serves the config the bots run.
 
@@ -419,6 +421,7 @@ def bind_external_trigger_runtime(
     app_state.external_trigger_runtime = ExternalTriggerRuntime(
         target_bot=target_bot,
         config_generation=snapshot.generation,
+        on_reactive_event=on_reactive_event,
     )
 
 
@@ -520,6 +523,7 @@ app.include_router(workers_router, dependencies=[Depends(verify_user)])
 app.include_router(openai_compat_router)  # Uses its own bearer auth, not verify_user
 app.include_router(report_publishing_public_router)
 app.include_router(external_triggers_router)
+app.include_router(event_sources_router)
 for integration_router in integration_routers():
     app.include_router(integration_router)  # Each integration authenticates its own requests.
 app.include_router(computers_router)

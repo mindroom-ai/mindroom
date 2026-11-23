@@ -4,68 +4,328 @@ icon: lucide/radio-tower
 
 # External Triggers
 
-External triggers let a process outside MindRoom wake an agent or team with one HTTP request, without keeping an agent turn alive while it waits.
+Triggers let MindRoom wake an agent or team automatically in response to events—either from Matrix activity or from external systems—without keeping an agent turn alive or running a polling loop per watch.
 
-Use them for watchers that detect a meaningful change, such as a campground site opening or a Git branch moving, and for background tasks that should report back when they finish.
+Use them for:
 
-A watcher sends a signed event to `POST /api/triggers/<trigger_id>`, and MindRoom posts a Matrix message that mentions the target agent or team in the target room.
-The message contains the event's `title` and `message`, followed by its `data` as a JSON block.
-MindRoom does not run watcher code or poll external systems; the watcher decides when to send.
+- **Reactive triggers**, created with the `triggers` toolkit (`watch_room`, `watch_thread`, `subscribe_event`), to watch Matrix rooms with optional cheap triage, react when a thread resolves or changes tags, or subscribe to shared external event sources such as GitHub webhooks.
+- **Direct signed triggers**, created with `triggers.create_trigger`, to give a dedicated watcher its own `POST /api/triggers/<trigger_id>` endpoint authenticated with an Ed25519 signature.
+- **Single-use [agent callbacks](#agent-callbacks)**, created with the `callback_manager` tool, to give a background task a Bash/curl script that wakes the originating agent and thread once.
 
-There are two kinds of triggers:
+`triggers` is the canonical toolkit name.
+`external_trigger_manager` remains a backward-compatible alias in `config.yaml`, so existing configurations and `create_trigger` workflows keep working unchanged.
 
-- Reusable signed triggers, created with the `external_trigger_manager` tool, authenticate each request with an Ed25519 signature.
-- Single-use [agent callbacks](#agent-callbacks), created with the `callback_manager` tool, give a background task a Bash/curl script that wakes the originating agent and thread once.
-
-Triggers are created and managed by tool calls in a live Matrix conversation, not in `config.yaml`.
-Trigger records are stored in the primary runtime's [control state](deployment/storage.md#data-persistence).
+Triggers are created and managed by tool calls in a live Matrix conversation, not in `config.yaml` (except shared [external event sources](#shared-external-event-sources), which admins declare under `external_trigger_policy.event_sources`).
+Trigger records are stored in the primary runtime's [control state](deployment/storage.md#data-persistence) (`reactive_triggers.db` for reactive triggers, alongside direct trigger records and replay claims).
 Agent workers and sandbox runners do not receive the control state path.
 
 ## Configuration
 
-Add `external_trigger_manager` to agents that may create triggers.
+Add `triggers` (or its alias `external_trigger_manager`) to agents that may create and manage triggers.
 
 ```yaml
 agents:
   ops:
     display_name: Ops
-    role: Watch external systems and report actionable changes.
+    role: Watch rooms and external systems and report actionable changes.
     model: default
     rooms: [lobby]
     tools:
-      - external_trigger_manager
+      - triggers
 
 external_trigger_policy:
   enabled: true
+  reactive_enabled: true
   max_triggers_per_owner: 20
+  max_reactive_triggers_per_owner: 50
+  max_fires_per_hour: 60
   admin_users:
     - "@admin:example.org"
+  event_sources:
+    github:
+      kind: github
+      secret_env: GITHUB_WEBHOOK_SECRET
+      allowed_repos:
+        - mindroom-ai/mindroom
+      allowed_events:
+        - pull_request
+        - pull_request_review
+        - check_suite
+        - release
+        - issues
+        - push
+      subscribers:
+        - "@alice:example.org"
 ```
 
 `external_trigger_policy` is optional; every field has a default.
 
 | Field | Type | Default | Valid values | Meaning |
 | --- | --- | --- | --- | --- |
-| `enabled` | bool | `true` | | When `false`, every trigger endpoint, including callbacks, answers not found, and `callback_manager` refuses to mint callbacks. |
-| `default_replay_window_seconds` | int | `300` | 30 to 3600 | Signature age accepted by new signed triggers that do not set their own window. |
-| `max_replay_window_seconds` | int | `3600` | 30 to 3600 | Cap on any trigger's replay window. |
-| `default_max_body_bytes` | int | `65536` | 1024 to 262144 | Request body limit for new triggers that do not set their own. |
-| `max_body_bytes` | int | `262144` | 1024 to 262144 | Cap on any trigger's body limit. |
-| `max_triggers_per_owner` | int | `20` | 1 to 1000 | Trigger records one owner may hold, including unused callbacks. |
+| `enabled` | bool | `true` | | Master switch. When `false`, every direct trigger, callback, and shared event-source endpoint answers not found, `callback_manager` refuses to mint callbacks, and reactive trigger delivery is disabled. |
+| `reactive_enabled` | bool | `true` | | Enables or disables reactive triggers (`watch_room`, `watch_thread`, `subscribe_event`) and `POST /api/event-sources/{source_id}` independently of direct signed triggers. |
+| `default_replay_window_seconds` | int | `300` | 30 to 3600 | Signature age accepted by new direct signed triggers that do not set their own window. |
+| `max_replay_window_seconds` | int | `3600` | 30 to 3600 | Cap on any direct trigger's replay window. |
+| `default_max_body_bytes` | int | `65536` | 1024 to 262144 | Request body limit for new direct triggers that do not set their own. |
+| `max_body_bytes` | int | `262144` | 1024 to 262144 | Cap on any direct trigger's body limit. |
+| `max_triggers_per_owner` | int | `20` | 1 to 1000 | Direct trigger records one owner may hold, including unused callbacks. |
+| `max_reactive_triggers_per_owner` | int | `50` | 1 to 1000 | Reactive trigger rules one owner may hold. |
+| `max_fires_per_hour` | int | `60` | 1 to 600 | Cap on the per-rule `max_fires_per_hour` rate limit for reactive triggers. |
 | `admin_users` | list of Matrix IDs | `[]` | | Trigger-only administrators. |
+| `event_sources` | mapping | `{}` | Keys matching `^[A-Za-z0-9_-]{1,64}$` | Named [shared external event sources](#shared-external-event-sources) served at `POST /api/event-sources/{source_id}`. |
 
 Each default must not exceed its matching cap.
 Lowering a cap also limits existing triggers.
 
-Top-level `administrators` and `admin_users` can list, enable, disable, rotate, and delete any owner's triggers, and can target other agents, teams, and rooms.
-Only a trigger's owner can rotate the key of a trigger for a [personal agent](personal-agents.md), a created agent, or a team that includes one, because a new key signs events that run as that owner.
+Top-level `administrators` and `admin_users` can list, enable, disable, rotate, and delete any owner's triggers, can subscribe to any configured event source, and can target other agents, teams, and rooms.
+Only a trigger's owner can rotate the key of a direct trigger for a [personal agent](personal-agents.md), a created agent, or a team that includes one, because a new key signs events that run as that owner.
 `admin_users` grants only this trigger authority, not wider administrator rights.
 Both lists match canonical identities after `authorization.aliases` resolution.
 Every trigger function needs a human requester, so agents and bot accounts get no trigger authority, even when listed.
 
-To stop users from creating triggers without review, add [tool approval](tool-approval.md) rules for `create_trigger`, `rotate_trigger_key`, `disable_trigger`, and `delete_trigger`.
+To stop users from creating or modifying triggers without review, add [tool approval](tool-approval.md) rules for `watch_room`, `watch_thread`, `subscribe_event`, `create_trigger`, `rotate_trigger_key`, `disable_trigger`, and `delete_trigger`.
+
+## Reactive Triggers
+
+Reactive triggers run inside the primary runtime's unified pipeline:
+
+1. **Source adapter** observes new Matrix room messages, `com.mindroom.thread.tags` state transitions, or incoming shared external events.
+2. **Deterministic filter** checks room, thread, sender aliases, regex pattern, tag transition, or structured event fields with zero LLM cost.
+3. **Optional tool-less triage** evaluates plain-English criteria using a cheap classifier or model before waking any agent.
+4. **Atomic SQLite claim** enforces `UNIQUE(trigger_id, dedupe_key)` idempotency, cooldown, hourly rate limit, expiry, and `once=True` disablement inside `<control_state>/reactive_triggers.db`.
+5. **Owner-scoped dispatch** posts a Matrix message mentioning the target agent with the owner's `prompt` and the event wrapped in `<untrusted_event_data>` boundaries.
+
+A non-match or failed triage creates neither a Matrix message nor an agent turn, and never consumes a `once=True` trigger.
+
+### Watching a room (`watch_room`)
+
+`watch_room` watches new visible messages arriving in a Matrix room.
+At creation, MindRoom records the room's current journal head so older history is never replayed.
+Messages authored by MindRoom bots or stamped as trigger-originated (`reactive_trigger` or `external_trigger`) are skipped automatically to prevent loops.
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `prompt` | required | Instruction delivered to the woken agent when the rule fires (max 4,000 chars). |
+| `room_id` | current room | Watched Matrix room ID or configured room alias; the owner must be joined to it. |
+| `thread_id` | none | Restrict matching to messages inside this thread root. |
+| `senders` | any | Optional list of Matrix sender IDs (matched with `authorization.aliases`). |
+| `pattern` | none | Optional case-insensitive regex (max 256 chars), evaluated with a strict search timeout over the first 4,096 characters. |
+| `triage_instructions` | none | Optional plain-English criteria for [cheap tool-less triage](#cheap-tool-less-triage) (max 1,000 chars). |
+| `triage_model` | none | Configured model alias from `models`; required when `triage_instructions` is set and `triage_provider="llm"`. |
+| `triage_provider` | `"llm"` | Triage backend: `"llm"`, `"typesafe"`, or `"openai_decisions"`. |
+| `triage_threshold` | none (`0.8` for classifiers) | Confidence threshold (`0.0` to `1.0`) for `"typesafe"` or `"openai_decisions"`; omitted for `"llm"`. |
+| `target_agent` | current agent | Agent or team to wake; non-admins may target only agents they are authorized to address in `target_room_id`. |
+| `target_room_id` | current room | Room where the wake message is posted. |
+| `target_thread_id` | `"origin"` in watched room, else timeline | Fixed thread root ID, `"origin"` to reply in the triggering message's thread/root, or omitted. When `new_thread=False` and `target_thread_id` is omitted, `watch_room` defaults to `"origin"` if targeting the watched room, or the room timeline if targeting another room. |
+| `new_thread` | `false` | Open a fresh thread per firing (or per `thread_key`); mutually exclusive with `target_thread_id`. |
+| `thread_key` | none | Optional grouping key (requires `new_thread=True`) so repeated firings reuse one thread. |
+| `once` | `false` | Disable the trigger automatically after one firing. |
+| `max_fires_per_hour` | `10` | Per-rule hourly cap, bounded by `external_trigger_policy.max_fires_per_hour`. |
+| `cooldown_seconds` | `0` | Minimum seconds between consecutive firings. |
+| `expires_in_hours` | none | Optional lifetime in hours (positive, up to `8760`). |
+| `trigger_id` | auto (`tr_<12 hex>`) | Optional custom ID matching `^[A-Za-z0-9_-]{1,64}$`. |
+| `description` | `""` | Human-readable purpose. |
+
+### Watching a thread tag (`watch_thread`)
+
+`watch_thread` watches a thread's `com.mindroom.thread.tags` state event—for example, waking an agent in thread B as soon as thread A is marked `resolved`.
+
+At creation, MindRoom reads the thread's current tag state into a checkpoint without firing.
+If the tag is already in the requested state (`transition="added"` when already present, or `"removed"` when already absent), `watch_thread` succeeds, reports `already_in_state: true`, and fires only on a future transition.
+Live tag updates fire immediately, and offline transitions that remain in the new state are reconciled on startup without double-firing.
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `prompt` | required | Instruction delivered to the woken agent when the transition occurs. |
+| `tag` | `"resolved"` | Tag name to watch in `com.mindroom.thread.tags`. |
+| `transition` | `"added"` | `"added"` (`absent -> present`) or `"removed"` (`present -> absent`). |
+| `room_id` | current room | Watched Matrix room containing the thread. |
+| `thread_id` | current thread | Watched thread root event ID (required if called outside a thread). |
+| `target_agent` | current agent | Agent or team to wake. |
+| `target_room_id` | current room | Room where the wake message is posted. |
+| `target_thread_id` | none | Fixed thread root ID to post into (mutually exclusive with `new_thread`). |
+| `new_thread` | `false` | Open a fresh thread (or reuse `thread_key`). |
+| `thread_key` | none | Optional grouping key (requires `new_thread=True`). |
+| `once` | `true` | Disable automatically after one firing. |
+| `max_fires_per_hour` | `10` | Per-rule hourly cap, bounded by `external_trigger_policy.max_fires_per_hour`. |
+| `cooldown_seconds` | `0` | Minimum seconds between consecutive firings. |
+| `expires_in_hours` | none | Optional lifetime in hours (positive, up to `8760`). |
+| `trigger_id` | auto (`tr_<12 hex>`) | Optional custom ID matching `^[A-Za-z0-9_-]{1,64}$`. |
+| `description` | `""` | Human-readable purpose. |
+
+### Subscribing to shared event sources (`subscribe_event`)
+
+`subscribe_event` attaches a reactive trigger to a named source configured under `external_trigger_policy.event_sources` (such as GitHub PR merges or shared Ed25519 fan-out events).
+The requester must be listed in that source's `subscribers` (or be a trigger/platform administrator), and `kind` and `match` are validated against the source's `allowed_events`, `allowed_repos`, or `allowed_kinds`.
+
+| Argument | Default | Meaning |
+| --- | --- | --- |
+| `source_id` | required | Key under `external_trigger_policy.event_sources`. |
+| `kind` | required | Normalized event kind to match (for example `"pull_request.merged"`, `"push"`, or a custom Ed25519 `kind`). |
+| `prompt` | required | Instruction delivered to the woken agent when the event matches. |
+| `match` | none | Optional dictionary of exact equality checks (`str`, `int`, or `bool`) against structured `event.data` fields (for example `{"repo": "mindroom-ai/mindroom", "number": 4198}`). Supports dotted keys for nested objects. |
+| `triage_instructions` | none | Optional plain-English criteria for [cheap tool-less triage](#cheap-tool-less-triage). |
+| `triage_model` | none | Configured model alias from `models` when `triage_provider="llm"`. |
+| `triage_provider` | `"llm"` | Triage backend: `"llm"`, `"typesafe"`, or `"openai_decisions"`. |
+| `triage_threshold` | none (`0.8` for classifiers) | Confidence threshold for `"typesafe"` or `"openai_decisions"`. |
+| `target_agent` | current agent | Agent or team to wake. |
+| `target_room_id` | current room | Room where the wake message is posted. |
+| `target_thread_id` | none | Fixed thread root ID to post into (mutually exclusive with `new_thread`). |
+| `new_thread` | `false` | Open a fresh thread (or reuse `thread_key`). |
+| `thread_key` | none | Optional grouping key (requires `new_thread=True`). |
+| `once` | `true` | Disable automatically after one firing. |
+| `max_fires_per_hour` | `10` | Per-rule hourly cap, bounded by `external_trigger_policy.max_fires_per_hour`. |
+| `cooldown_seconds` | `0` | Minimum seconds between consecutive firings. |
+| `expires_in_hours` | none | Optional lifetime in hours (positive, up to `8760`). |
+| `trigger_id` | auto (`tr_<12 hex>`) | Optional custom ID matching `^[A-Za-z0-9_-]{1,64}$`. |
+| `description` | `""` | Human-readable purpose. |
+
+### Cheap tool-less triage
+
+When `triage_instructions` is set on `watch_room` or `subscribe_event`, MindRoom evaluates the event through the judgment subsystem before claiming or firing the rule:
+
+- **`llm`**: calls a configured model alias (`triage_model`) with no tools attached. `triage_threshold` is not used.
+- **`typesafe`**: calls the TypeSafe classifier with `triage_threshold` (default `0.8`). `triage_model` must be omitted.
+- **`openai_decisions`**: calls the OpenAI Decisions classifier with `triage_threshold` (default `0.8`). `triage_model` must be omitted.
+
+Event content is placed inside explicit untrusted-data boundaries.
+Triage is **strictly tool-less** and **fail-closed**: only a `True` decision proceeds to claim and dispatch.
+A `False` decision, `None` result, timeout, missing API key, or provider error drops the candidate as `triaged_no` without incrementing `fire_count` or consuming `once=True`.
+
+### Rate limits, cooldown, and expiry
+
+- **`once`**: disables the rule atomically inside the SQLite claim transaction so retries or concurrent events cannot double-fire.
+- **`max_fires_per_hour`**: counts `claimed` and `delivered` firings over the trailing hour; capped by `external_trigger_policy.max_fires_per_hour`.
+- **`cooldown_seconds`**: minimum elapsed time since `last_fired_at` before the next claim succeeds.
+- **`expires_in_hours`**: sets an absolute Unix expiry timestamp after which the rule stops matching and firing.
+- Finished firing records older than 30 days are pruned periodically.
+
+## Shared External Event Sources
+
+Admins can configure shared inbound event sources under `external_trigger_policy.event_sources` so one webhook or signed emitter can fan out to multiple subscribed reactive triggers.
+
+Every configured source is served at:
+
+```text
+POST /api/event-sources/{source_id}
+```
+
+When verification succeeds, MindRoom fans out the normalized event to all enabled, unexpired, authorized matching rules in SQLite and returns `202 Accepted`:
+
+```json
+{
+  "accepted": true,
+  "source_id": "github",
+  "event_id": "delivery-123",
+  "matched_rules": 2
+}
+```
+
+Verification authenticates the producer only.
+At both `subscribe_event` creation and event fan-out, MindRoom checks that each rule's owner is listed in `subscribers` (or is an administrator) and enforces the source's allowlists.
+
+### GitHub webhooks (`kind: github`)
+
+Configure a GitHub webhook source with an HMAC-SHA256 secret stored in an environment variable (`secret_env` holds only the variable name, never the secret itself):
+
+```yaml
+external_trigger_policy:
+  event_sources:
+    github:
+      kind: github
+      secret_env: GITHUB_WEBHOOK_SECRET
+      allowed_repos:
+        - mindroom-ai/mindroom
+      allowed_events:
+        - pull_request
+        - pull_request_review
+        - check_suite
+        - release
+        - issues
+        - push
+      subscribers:
+        - "@alice:example.org"
+      max_body_bytes: 262144
+```
+
+| Field | Default | Valid values | Meaning |
+| --- | --- | --- | --- |
+| `kind` | `"github"` | `"github"` | Selects GitHub HMAC-SHA256 webhook verification and normalization. |
+| `secret_env` | required | `^[A-Z_][A-Z0-9_]*$` | Environment variable name holding the GitHub webhook secret. |
+| `allowed_repos` | required | Non-empty list of `owner/repo` | Fail-closed allowlist of repositories accepted by this source. |
+| `allowed_events` | `["pull_request", "pull_request_review", "check_suite", "release", "issues", "push"]` | Non-empty GitHub `X-GitHub-Event` names | Allowlisted GitHub webhook event types. |
+| `subscribers` | `[]` | Matrix user IDs | Non-admin users allowed to subscribe rules to this source. |
+| `max_body_bytes` | `262144` | 1024 to 1048576 | Maximum accepted webhook body size in bytes. |
+
+MindRoom verifies `X-Hub-Signature-256` with `hmac.compare_digest`, requires non-empty `X-GitHub-Delivery` (used as `event_id`) and `X-GitHub-Event` headers, checks `repository.full_name` case-insensitively against `allowed_repos`, and normalizes `event.data["repo"]` to the canonical spelling from `allowed_repos`.
+
+Normalized GitHub events:
+
+- **`pull_request`**: `kind = "pull_request.merged"` when `action == "closed"` and `pull_request.merged` is `true`, otherwise `pull_request.<action>`. Structured `data`: `repo`, `number`, `action`, `merged`, `branch`, `base_branch`, `author`, `sha`, `url`.
+- **`pull_request_review`**, **`issues`**, **`release`**, **`check_suite`**: `kind = "<event>.<action>"` with structured `repo`, identifiers (`number`/`tag`/`id`), `action`, `author`, `state`/`conclusion`, and `url`.
+- **`push`**: `kind = "push"` with structured `repo`, `ref`, `branch`, `after`, `pusher`, `url`.
+
+Attacker-controlled free text (such as PR titles and bodies) is isolated in `title` and `summary` as untrusted data and is never placed into structured `match` keys.
+
+!!! note "GitHub header-only replay properties"
+    GitHub's webhook protocol computes `X-Hub-Signature-256` over the raw HTTP body only; it does not sign `X-GitHub-Delivery` or `X-GitHub-Event`, and it does not include a request timestamp or nonce.
+    MindRoom uses `X-GitHub-Delivery` as each rule's `dedupe_key` (retained in SQLite until finished firings are pruned after 30 days), which deduplicates genuine GitHub redeliveries.
+    Because headers and timestamps are unsigned by GitHub, keep the webhook endpoint behind TLS and keep the webhook secret private so an eavesdropper cannot replay a captured body under a fabricated `X-GitHub-Delivery` header.
+
+### Shared Ed25519 fan-out (`kind: ed25519`)
+
+Configure a shared Ed25519 source when one trusted watcher emits structured events that multiple users or rules should subscribe to:
+
+```yaml
+external_trigger_policy:
+  event_sources:
+    ci:
+      kind: ed25519
+      public_key: "BASE64_OR_OPENSSH_ED25519_PUBLIC_KEY"
+      key_id: "ci-main"
+      allowed_kinds:
+        - deploy.finished
+        - build.failed
+      subscribers:
+        - "@alice:example.org"
+      replay_window_seconds: 300
+      max_body_bytes: 65536
+```
+
+| Field | Default | Valid values | Meaning |
+| --- | --- | --- | --- |
+| `kind` | `"ed25519"` | `"ed25519"` | Selects Ed25519 signature verification and nonce replay checks. |
+| `public_key` | required | Raw base64, OpenSSH `ssh-ed25519`, or PEM | Ed25519 public key used to verify requests. |
+| `key_id` | `"default"` | 1 to 128 chars | Expected `X-MindRoom-Trigger-Key-Id` value. |
+| `allowed_kinds` | `[]` (any) | Event `kind` strings | Optional allowlist of accepted `kind` values. |
+| `subscribers` | `[]` | Matrix user IDs | Non-admin users allowed to subscribe rules to this source. |
+| `replay_window_seconds` | `300` | 30 to 3600 | Maximum accepted signature age in seconds. |
+| `max_body_bytes` | `65536` | 1024 to 262144 | Maximum accepted request body size in bytes. |
+
+Senders use the same `MINDROOM-TRIGGER-V1` signature format and JSON payload shape as [direct signed triggers](#sending-events), signing the request path `/api/event-sources/<source_id>`.
+
+!!! tip "Always set `event_id` for Ed25519 fan-out"
+    Include a deterministic `event_id` in every JSON payload sent to a shared Ed25519 event source (for example a CI job ID or upstream event ID).
+    If `event_id` is omitted, MindRoom falls back to `X-MindRoom-Trigger-Nonce` as the rule `dedupe_key`.
+    Because retries must be signed with a fresh nonce, omitting `event_id` means retried deliveries will not deduplicate across subscribed rules.
+
+### Event source responses
+
+| Status | Cause |
+| --- | --- |
+| `202` | Event verified, normalized, and fanned out (`matched_rules` may be `0` if no rule matched or all matching rules already saw `event_id`). |
+| `400` | Malformed JSON or missing required GitHub headers/fields (`X-GitHub-Delivery`, `X-GitHub-Event`, `repository.full_name`). |
+| `401` | Invalid GitHub HMAC signature or invalid/expired Ed25519 signature. |
+| `403` | GitHub event type or repository is not in `allowed_events` / `allowed_repos`. |
+| `404` | Unknown `source_id`, or `external_trigger_policy.enabled` / `reactive_enabled` is `false`. |
+| `409` | Reused Ed25519 signature nonce. |
+| `413` | Request body exceeds the source's `max_body_bytes`. |
+| `422` | Invalid Ed25519 JSON payload or `kind` not in `allowed_kinds`. |
+| `503` | Webhook secret env var missing/empty, configuration unavailable, or replay/reactive trigger store unavailable. |
 
 ## Signed Trigger Setup Flow
+
+For a dedicated single-target watcher that posts directly to `/api/triggers/<trigger_id>`:
 
 1. Generate a signing key where the watcher runs.
 
@@ -76,7 +336,7 @@ To stop users from creating triggers without review, add [tool approval](tool-ap
    The command prints `private_key`, `public_key`, and `public_key_fingerprint`.
    Keep the private key only in the watcher runtime.
 
-2. In a Matrix conversation with the agent, give it the printed `public_key` and ask it to call `external_trigger_manager.create_trigger`.
+2. In a Matrix conversation with the agent, give it the printed `public_key` and ask it to call `triggers.create_trigger` (also reachable under the `external_trigger_manager` alias).
 
    ```json
    {
@@ -121,12 +381,12 @@ Triggers never create rooms or make agents join rooms.
 
 ### Managing triggers
 
-The `external_trigger_manager` tool also provides these functions, available to the trigger owner and administrators:
+The `triggers` toolkit (and its `external_trigger_manager` alias) provides unified management functions across both direct signed triggers and reactive triggers, available to the trigger owner and administrators:
 
-- `list_triggers` lists the requester's triggers, or every trigger for administrators.
-- `disable_trigger(trigger_id, enabled=False)` disables a trigger; pass `enabled=True` to re-enable it.
-- `rotate_trigger_key(trigger_id, public_key, key_id)` replaces the signing key.
-- `delete_trigger(trigger_id)` removes the trigger.
+- `list_triggers(include_disabled=True)` lists the requester's direct and reactive triggers, or every trigger for administrators.
+- `disable_trigger(trigger_id, enabled=False)` disables a direct or reactive trigger; pass `enabled=True` to re-enable it.
+- `delete_trigger(trigger_id)` removes a direct or reactive trigger.
+- `rotate_trigger_key(trigger_id, public_key, key_id="default")` replaces the signing key on a direct Ed25519 trigger.
 
 ## Sending Events
 
@@ -153,7 +413,7 @@ The JSON request body has a required non-empty `kind` and `message`, and optiona
 ### Signing requests without the CLI
 
 A watcher can sign requests itself with the Ed25519 private key.
-Sign the UTF-8 string below, joined with `\n`, where `<path>` is the request path such as `/api/triggers/campground`, `<timestamp>` is Unix seconds, `<nonce>` is a fresh random string, and the last line is the lowercase hex SHA-256 of the exact body bytes.
+Sign the UTF-8 string below, joined with `\n`, where `<path>` is the request path such as `/api/triggers/campground` (or `/api/event-sources/<source_id>` for a shared Ed25519 event source), `<timestamp>` is Unix seconds, `<nonce>` is a fresh random string, and the last line is the lowercase hex SHA-256 of the exact body bytes.
 
 ```text
 MINDROOM-TRIGGER-V1
@@ -204,12 +464,14 @@ Deduplication requires every API process that accepts triggers to share one cont
 
 ## Delivery Requirements
 
-A request is delivered only when all of these hold:
+A trigger delivers only when all of these hold:
 
-- The trigger exists, is enabled, and `external_trigger_policy.enabled` is true.
+- The trigger exists, is enabled, and `external_trigger_policy.enabled` is true (plus `external_trigger_policy.reactive_enabled` for reactive triggers).
 - The owner is still allowed to talk to the target agent in the target room.
 - The owner, or one of the owner's `authorization.aliases`, is currently joined to the target room; bot accounts do not count.
 - The target agent or team is running and joined to the target room.
+- For reactive `room_message` watches, the owner is also still joined to the watched source room and permitted to hear the sender.
+- For reactive `external_event` subscriptions, the owner is still authorized in the source's `subscribers` (or is an administrator).
 
 The triggered turn runs on behalf of the trigger owner.
 For a private agent (`private.per`), the trigger wakes the owner's private instance, so a trigger created by `@alice:example.org` uses Alice's private state.
@@ -217,7 +479,7 @@ An administrator's trigger for a private agent wakes the administrator's private
 
 ## Troubleshooting Responses
 
-A successful request returns `202` with `accepted: true`, the `event_id`, and the posted Matrix event ID, or `duplicate: true` when the `event_id` was already delivered.
+For direct triggers (`POST /api/triggers/{trigger_id}`), a successful request returns `202` with `accepted: true`, the `event_id`, and the posted Matrix event ID, or `duplicate: true` when the `event_id` was already delivered.
 
 | Status | Detail | Cause and fix |
 | --- | --- | --- |
@@ -291,7 +553,7 @@ The [Docker Compose `static_runner` sandbox](deployment/sandbox-proxy.md#sandbox
 The script needs only Bash and curl.
 It posts the summary to the room and thread where the callback was minted, which wakes the agent.
 After a successful delivery the callback is used up and the script deletes itself; if delivery fails, the script remains so it can be run again.
-Unused callbacks never expire, so delete abandoned ones with `external_trigger_manager.delete_trigger`.
+Unused callbacks never expire, so delete abandoned ones with `triggers.delete_trigger` (or `external_trigger_manager.delete_trigger`).
 
 ### Network Access
 

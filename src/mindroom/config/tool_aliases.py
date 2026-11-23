@@ -6,7 +6,11 @@ from typing import Annotated
 
 from pydantic import AfterValidator
 
-TOOL_ALIASES: dict[str, str] = {"file": "filesystem", "coding": "filesystem"}
+TOOL_ALIASES: dict[str, str] = {
+    "file": "filesystem",
+    "coding": "filesystem",
+    "external_trigger_manager": "triggers",
+}
 
 
 def canonical_tool_name(name: str) -> str:
