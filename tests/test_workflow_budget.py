@@ -444,3 +444,49 @@ async def test_raising_parent_limit_continues_stopped_nested_child(stack: Workfl
     await stack.finish_attempt(result=parent_node.result)
     assert stack.store.get_run(parent).result == "firstnext"
     assert len(model.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_delegation_submitted_after_cost_limit_does_not_request_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the cost limit is already reached while another call drains, gated delegation asks for no approval."""
+    options = {
+        "extra_tools": ("workflow",),
+        "other_agents": ("helper",),
+        "delegate_to": ("helper",),
+        "require_approval": ("run_subagent",),
+        "pricing": ModelPricing(input=1, output=2),
+    }
+    with workflow_stack(tmp_path, **options) as gated:
+        monkeypatch.setattr(engine_module, "RECHECK_SECONDS", 0.05)
+        monkeypatch.setattr(agent_nodes, "RECHECK_SECONDS", 0.05)
+        await gated.open_jobs()
+        gated.script_agents(monkeypatch)
+        await gated.start(max_concurrent=2, max_cost_usd=0.10)
+        hold, decision = asyncio.Event(), asyncio.Event()
+        gated.counting_tool.after_effect = hold.wait
+        gated.resolver.hold_approvals = decision
+        try:
+            await gated.submit("@0", "tool", tool_args("counter", "append", line="pending"))
+            await gated.until(lambda: bool(gated.counting_tool.lines))
+            model = gated.child_script(answer("first", _usd(0.20)))
+            assert await gated.result("@1", "agent", {"prompt": "First"}) == "first"
+            assert gated.engine.run_usage(gated.run_id)["cost_usd"] == pytest.approx(0.20)
+
+            delegate = tool_args("delegate", "run_subagent", agent_name="helper", task="Do more work.")
+            receipt = await gated.submit("@2", "tool", delegate)
+            assert receipt.state == "queued"
+            await asyncio.sleep(0.15)
+            assert gated.resolver.asks == []
+            assert len(model.requests) == 1
+
+            hold.set()
+            await gated.until(lambda: gated.store.get_run(gated.run_id).state is WorkflowRunState.INTERRUPTED)
+            assert gated.resolver.asks == []
+            assert gated.store.get_run(gated.run_id).error == "Stopped at the cost limit ($0.20 of $0.10)."
+        finally:
+            decision.set()
+            hold.set()
+            await gated.close()

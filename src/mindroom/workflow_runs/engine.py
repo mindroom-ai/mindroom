@@ -1024,8 +1024,9 @@ class WorkflowEngine:
         """
         queued = replace(node, state=WorkflowNodeState.QUEUED)
         node = await asyncio.to_thread(partial(self.store.put_node, queued, run.epoch, dirty_after=True))
-        gate = partial(self._broker_outcome, attempt, node, run.epoch, tool_call, gate_only=True)
-        self._spawn(run.run_id, self._start_gated(run, node, gate))
+        if not await self._check_budget(run):
+            gate = partial(self._broker_outcome, attempt, node, run.epoch, tool_call, gate_only=True)
+            self._spawn(run.run_id, self._start_gated(run, node, gate))
         return _receipt(node)
 
     async def _start_gated(
