@@ -25,6 +25,7 @@ from mindroom.reactive_triggers.dispatch import (
     DispatchResult,
     check_reactive_source_access,
     check_reactive_target_access,
+    check_room_source_owner_authorization,
     dispatch_reactive_trigger,
 )
 from mindroom.reactive_triggers.matching import is_reactive_trigger_event_content, matches_room_message
@@ -38,7 +39,12 @@ from mindroom.reactive_triggers.models import (
 )
 from mindroom.reactive_triggers.store import ReactiveTriggerStore, ReactiveTriggerStoreError
 from mindroom.reactive_triggers.triage import evaluate_triage
-from mindroom.requester_identity import equivalent_requester_ids, is_human_requester_id
+from mindroom.requester_identity import (
+    equivalent_requester_ids,
+    is_human_requester_id,
+    is_managed_entity_id,
+    managed_entity_user_ids,
+)
 from mindroom.thread_tags import (
     THREAD_TAGS_EVENT_TYPE,
     parse_thread_tag_record,
@@ -930,6 +936,7 @@ class ReactiveTriggerService:
         if (
             is_reactive_trigger_event_content(msg.content)
             or not is_human_requester_id(rule.owner_user_id, config, self.runtime_paths)
+            or msg.sender in managed_entity_user_ids(rule.target.agent, config, self.runtime_paths)
             or (
                 not rule.source.include_bots
                 and (
@@ -946,6 +953,42 @@ class ReactiveTriggerService:
         if not _owner_joined_in_members(joined_members, rule.owner_user_id, config, self.runtime_paths):
             return "skip"
 
+        sender_decision = self._check_room_message_sender_authorization(
+            rule=rule,
+            bot=bot,
+            source_room_id=source_room_id,
+            msg=msg,
+            config=config,
+            observed_room=observed_room,
+        )
+        if sender_decision != "allow":
+            return sender_decision
+        return "hold" if self._should_hold_unfinished_reply(rule.trigger_id, msg) else "allow"
+
+    def _check_room_message_sender_authorization(
+        self,
+        *,
+        rule: ReactiveTriggerRecord,
+        bot: AgentBot,
+        source_room_id: str,
+        msg: ResolvedVisibleMessage,
+        config: Config,
+        observed_room: nio.MatrixRoom | None,
+    ) -> _MessageDecision:
+        assert isinstance(rule.source, RoomMessageSourceSpec)
+        if rule.source.include_bots and is_managed_entity_id(msg.sender, config, self.runtime_paths):
+            owner_check = check_room_source_owner_authorization(
+                rule=rule,
+                source_room_id=source_room_id,
+                source_bot=bot,
+                config=config,
+                runtime_paths=self.runtime_paths,
+                memberships=self.memberships,
+            )
+            if owner_check is not None:
+                return "hold" if owner_check.status == "retry" else "skip"
+            return "allow"
+
         requester_id = self._classify_message_requester(bot, source_room_id, msg)
         try:
             sender_allowed = is_sender_allowed_for_agent_reply_in_room(
@@ -960,9 +1003,7 @@ class ReactiveTriggerService:
             )
         except ReplyMembershipPendingError:
             return "hold"
-        if not sender_allowed:
-            return "skip"
-        return "hold" if self._should_hold_unfinished_reply(rule.trigger_id, msg) else "allow"
+        return "allow" if sender_allowed else "skip"
 
     @staticmethod
     def _classify_message_requester(

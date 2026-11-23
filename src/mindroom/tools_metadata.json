@@ -10317,14 +10317,7 @@
       "executes_code": false,
       "file_access": "none",
       "function_names": [
-        "watch_room",
-        "watch_thread",
-        "subscribe_event",
-        "create_trigger",
-        "list_triggers",
-        "disable_trigger",
-        "delete_trigger",
-        "rotate_trigger_key"
+        "triggers"
       ],
       "helper_text": null,
       "icon": "Webhook",

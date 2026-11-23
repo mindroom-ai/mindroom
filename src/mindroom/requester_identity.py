@@ -54,6 +54,28 @@ def is_managed_entity_id(
     return user_id in _managed_entity_ids(config, runtime_paths)
 
 
+def managed_entity_user_ids(
+    entity_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> frozenset[str]:
+    """Return persisted and generated Matrix user IDs for a configured agent or team (including team members)."""
+    entity_names: set[str] = {entity_name}
+    team_config = config.teams.get(entity_name)
+    if team_config is not None:
+        entity_names.update(team_config.agents)
+    domain = runtime_matrix_domain(runtime_paths)
+    state = matrix_state_for_runtime(runtime_paths)
+    user_ids: set[str] = set()
+    for name in entity_names:
+        account = state.get_account(managed_account_key(name))
+        if account is not None:
+            user_ids.add(matrix_account_user_id(account, domain))
+        if name != ROUTER_AGENT_NAME or account is not None:
+            user_ids.add(MatrixID.from_username(agent_username_localpart(name, runtime_paths), domain).full_id)
+    return frozenset(user_ids)
+
+
 def memoized_entity_identities[T](
     memo: IdentityMemo[T],
     config: Config,

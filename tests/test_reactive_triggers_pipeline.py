@@ -9,11 +9,12 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
+import nio
 import pytest
 from pydantic import ValidationError
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.judgment import (
@@ -47,6 +48,7 @@ from mindroom.reactive_triggers import (
     TriggerEvent,
     TriggerTargetSpec,
     build_reactive_trigger_body,
+    check_reactive_source_access,
     dispatch_reactive_trigger,
     evaluate_triage,
     is_reactive_trigger_event_content,
@@ -1486,4 +1488,144 @@ async def test_hook_send_matrix_message_forwards_transaction_id(monkeypatch: pyt
         {"msgtype": "m.text", "body": "hi"},
         message_type="m.room.message",
         transaction_id="rt_deadbeef",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_include_bots_source_access_allows_other_internal_bot_and_blocks_target_or_team_members(
+    tmp_path: Path,
+) -> None:
+    """include_bots=True allows other internal MindRoom bots under human-only access.users while blocking target/team self-loops."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "research": AgentConfig(
+                    display_name="Research",
+                    rooms=[_ROOM_A],
+                    access={"users": [_OWNER]},
+                ),
+                "helper": AgentConfig(
+                    display_name="Helper",
+                    rooms=[_ROOM_A],
+                    access={"users": [_OWNER]},
+                ),
+                "outsider": AgentConfig(
+                    display_name="Outsider",
+                    rooms=[_ROOM_A],
+                    access={"users": [_OWNER]},
+                ),
+            },
+            teams={
+                "ops_team": TeamConfig(
+                    display_name="Ops Team",
+                    role="Coordinate ops",
+                    agents=["research", "helper"],
+                    rooms=[_ROOM_A],
+                    access={"users": [_OWNER]},
+                ),
+            },
+            bot_accounts=["@ext_bot:example.org"],
+            models={"default": ModelConfig(provider="openai", id="gpt-test")},
+            external_trigger_policy=ExternalTriggerPolicyConfig(enabled=True, reactive_enabled=True),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+    memberships = AgentReplyMembershipIndex()
+    source_bot = SimpleNamespace(
+        agent_name="research",
+        running=True,
+        client=SimpleNamespace(rooms={_ROOM_A: nio.MatrixRoom(_ROOM_A, "@mindroom_research:localhost")}),
+    )
+    room_state = RoomStateSnapshot(
+        room_id=_ROOM_A,
+        events={("m.room.member", _OWNER): {"membership": "join"}},
+        creators=frozenset(),
+    )
+
+    def _event(actor: str) -> TriggerEvent:
+        return TriggerEvent(
+            source_type="room_message",
+            source_id=_ROOM_A,
+            kind="room.message",
+            event_id="$ev1",
+            timestamp=time.time(),
+            room_id=_ROOM_A,
+            actor=actor,
+            text="status update",
+        )
+
+    agent_rule = ReactiveTriggerRecord(
+        trigger_id="tr_bot_agent",
+        owner_user_id=_OWNER,
+        source=RoomMessageSourceSpec(room_id=_ROOM_A, include_bots=True),
+        target=TriggerTargetSpec(agent="research", room_id=_ROOM_A, prompt="React"),
+        created_at=1000.0,
+        updated_at=1000.0,
+    )
+    # Other configured MindRoom bot allowed even though access.users only lists _OWNER
+    assert (
+        await check_reactive_source_access(
+            rule=agent_rule,
+            event=_event("@mindroom_helper:localhost"),
+            source_bot=source_bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            memberships=memberships,
+            known_room_states={_ROOM_A: room_state},
+        )
+        is None
+    )
+    # Target agent's own Matrix user ID is always skipped
+    assert await check_reactive_source_access(
+        rule=agent_rule,
+        event=_event("@mindroom_research:localhost"),
+        source_bot=source_bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        memberships=memberships,
+        known_room_states={_ROOM_A: room_state},
+    ) == DispatchResult(status="skipped", reason="source_sender_is_target")
+    # External unmanaged bot not in access.users is still rejected
+    assert await check_reactive_source_access(
+        rule=agent_rule,
+        event=_event("@ext_bot:example.org"),
+        source_bot=source_bot,
+        config=config,
+        runtime_paths=runtime_paths,
+        memberships=memberships,
+        known_room_states={_ROOM_A: room_state},
+    ) == DispatchResult(status="skipped", reason="source_sender_not_authorized")
+
+    # Team target blocks both the team ID and every member agent ID, while allowing non-member MindRoom agents
+    team_rule = ReactiveTriggerRecord(
+        trigger_id="tr_bot_team",
+        owner_user_id=_OWNER,
+        source=RoomMessageSourceSpec(room_id=_ROOM_A, include_bots=True),
+        target=TriggerTargetSpec(agent="ops_team", room_id=_ROOM_A, prompt="Team react"),
+        created_at=1000.0,
+        updated_at=1000.0,
+    )
+    for self_actor in ("@mindroom_ops_team:localhost", "@mindroom_research:localhost", "@mindroom_helper:localhost"):
+        assert await check_reactive_source_access(
+            rule=team_rule,
+            event=_event(self_actor),
+            source_bot=source_bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            memberships=memberships,
+            known_room_states={_ROOM_A: room_state},
+        ) == DispatchResult(status="skipped", reason="source_sender_is_target")
+    assert (
+        await check_reactive_source_access(
+            rule=team_rule,
+            event=_event("@mindroom_outsider:localhost"),
+            source_bot=source_bot,
+            config=config,
+            runtime_paths=runtime_paths,
+            memberships=memberships,
+            known_room_states={_ROOM_A: room_state},
+        )
+        is None
     )

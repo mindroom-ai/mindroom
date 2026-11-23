@@ -25,7 +25,7 @@ from mindroom.reactive_triggers.models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Collection, Iterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -295,6 +295,66 @@ class ReactiveTriggerStore:
             rows = conn.execute(query, params).fetchall()
         return [_record_from_row(row) for row in rows]
 
+    def update_trigger(
+        self,
+        record: ReactiveTriggerRecord,
+        *,
+        expected_rule_uid: str | None = None,
+    ) -> ReactiveTriggerRecord | None:
+        """Atomically update mutable rule fields while preserving rule_uid, stats, cursors, and checkpoints."""
+        with self._write_transaction() as conn:
+            existing = conn.execute(
+                "SELECT rule_uid, fire_count, last_fired_at FROM reactive_triggers WHERE trigger_id = ?",
+                (record.trigger_id,),
+            ).fetchone()
+            if existing is None:
+                return None
+            live_uid = str(existing["rule_uid"])
+            if expected_rule_uid is not None and live_uid != expected_rule_uid:
+                return None
+            persisted = record.model_copy(
+                update={
+                    "rule_uid": live_uid,
+                    "fire_count": int(existing["fire_count"]),
+                    "last_fired_at": (
+                        float(existing["last_fired_at"]) if existing["last_fired_at"] is not None else None
+                    ),
+                },
+            )
+            cursor = conn.execute(
+                """
+                UPDATE reactive_triggers
+                SET enabled = ?,
+                    disabled_reason = ?,
+                    once = ?,
+                    expires_at = ?,
+                    max_fires_per_hour = ?,
+                    cooldown_seconds = ?,
+                    spec_json = ?,
+                    updated_at = ?
+                WHERE trigger_id = ? AND rule_uid = ?
+                """,
+                (
+                    1 if persisted.enabled else 0,
+                    persisted.disabled_reason,
+                    1 if persisted.once else 0,
+                    persisted.expires_at,
+                    persisted.max_fires_per_hour,
+                    persisted.cooldown_seconds,
+                    persisted.model_dump_json(),
+                    persisted.updated_at,
+                    persisted.trigger_id,
+                    live_uid,
+                ),
+            )
+            if cursor.rowcount == 0:
+                return None
+            row = conn.execute(
+                "SELECT * FROM reactive_triggers WHERE trigger_id = ?",
+                (persisted.trigger_id,),
+            ).fetchone()
+        return _record_from_row(row) if row is not None else None
+
     def set_enabled(
         self,
         trigger_id: str,
@@ -493,6 +553,56 @@ class ReactiveTriggerStore:
                 (firing_id,),
             ).fetchone()
         return _firing_from_row(row) if row is not None else None
+
+    def list_firings(
+        self,
+        *,
+        trigger_id: str | None = None,
+        owner_user_id: str | None = None,
+        owner_user_ids: Collection[str] | None = None,
+        limit: int = 20,
+    ) -> list[FiringRecord]:
+        """Return recent firing ledger rows ordered by id DESC, optionally scoped by trigger or owner."""
+        clamped_limit = max(1, min(limit, 100))
+        clauses: list[str] = []
+        params: list[object] = []
+        join_sql = ""
+
+        if owner_user_ids is not None:
+            unique_owners = sorted(set(owner_user_ids))
+            if not unique_owners:
+                return []
+            join_sql = " JOIN reactive_triggers rt ON rt.trigger_id = f.trigger_id"
+            placeholders = ", ".join("?" for _ in unique_owners)
+            clauses.append(f"rt.owner_user_id IN ({placeholders})")
+            params.extend(unique_owners)
+        elif owner_user_id is not None:
+            join_sql = " JOIN reactive_triggers rt ON rt.trigger_id = f.trigger_id"
+            clauses.append("rt.owner_user_id = ?")
+            params.append(owner_user_id)
+
+        if trigger_id is not None:
+            clauses.append("f.trigger_id = ?")
+            params.append(trigger_id)
+
+        where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        query = f"SELECT f.* FROM trigger_firings f{join_sql}{where_sql} ORDER BY f.id DESC LIMIT ?"  # noqa: S608
+        params.append(clamped_limit)
+
+        with self._read_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        firings: list[FiringRecord] = []
+        for row in rows:
+            try:
+                firings.append(_firing_from_row(row))
+            except (ValidationError, ValueError, KeyError, TypeError):
+                logger.warning(
+                    "Skipping corrupt reactive trigger firing row in history",
+                    firing_id=row["id"],
+                    trigger_id=row["trigger_id"],
+                )
+        return firings
 
     def mark_triaged_no(self, firing_id: int, reason: str | None = None) -> bool:
         """Mark a pending firing as rejected by triage without consuming once=True or rate limits."""

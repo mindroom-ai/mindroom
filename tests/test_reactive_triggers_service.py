@@ -16,7 +16,7 @@ import pytest
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.authorization import ReplyMembershipPendingError
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig, GitHubEventSourceConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
@@ -2451,3 +2451,148 @@ async def test_cross_room_source_responder_pending_membership_retries_before_tri
     assert firing.status == "pending"
     assert firing.error_message == "source_membership_pending"
     assert firing.next_retry_at is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_include_bots_polling_and_dispatch_allow_other_mindroom_bot_and_block_self_and_team(
+    tmp_path: Path,
+) -> None:
+    """include_bots=True polls & delivers other MindRoom bots under human-only access.users, blocking target/team self-loops and trigger loops."""
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "research": AgentConfig(
+                    display_name="Research",
+                    rooms=[_ROOM_A],
+                    access={"users": [_OWNER]},
+                ),
+                "helper": AgentConfig(
+                    display_name="Helper",
+                    rooms=[_ROOM_A],
+                    access={"users": [_OWNER]},
+                ),
+                "outsider": AgentConfig(
+                    display_name="Outsider",
+                    rooms=[_ROOM_A],
+                    access={"users": [_OWNER]},
+                ),
+            },
+            teams={
+                "ops_team": TeamConfig(
+                    display_name="Ops Team",
+                    role="Ops coordination",
+                    agents=["research", "helper"],
+                    rooms=[_ROOM_A],
+                    access={"users": [_OWNER]},
+                ),
+            },
+            bot_accounts=["@unlisted_ext_bot:example.org"],
+            models={"default": ModelConfig(provider="openai", id="gpt-test")},
+            external_trigger_policy=ExternalTriggerPolicyConfig(enabled=True, reactive_enabled=True),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+    store = ReactiveTriggerStore(runtime_paths)
+
+    msgs = (
+        _visible_message(
+            "$m_trigger_loop",
+            sender="@mindroom_helper:localhost",
+            body="trigger echo",
+            created_ts=20_000,
+            content_extra={SOURCE_KIND_KEY: REACTIVE_TRIGGER_SOURCE_KIND, REACTIVE_TRIGGER_ID_KEY: "tr_other"},
+        ),
+        _visible_message(
+            "$m_target_self",
+            sender="@mindroom_research:localhost",
+            body="own reply",
+            created_ts=20_100,
+            content_extra={AGENT_AUTHORED_KEY: True},
+        ),
+        _visible_message(
+            "$m_helper_bot",
+            sender="@mindroom_helper:localhost",
+            body="helper finished build",
+            created_ts=20_200,
+            content_extra={AGENT_AUTHORED_KEY: True},
+        ),
+        _visible_message(
+            "$m_outsider_bot",
+            sender="@mindroom_outsider:localhost",
+            body="outsider alert",
+            created_ts=20_300,
+            content_extra={AGENT_AUTHORED_KEY: True},
+        ),
+        _visible_message(
+            "$m_unlisted_ext",
+            sender="@unlisted_ext_bot:example.org",
+            body="unlisted external bot",
+            created_ts=20_400,
+        ),
+    )
+    page = RoomPage(
+        messages=msgs,
+        refresh_pending=(),
+        more=False,
+        last_cursor=ConversationCursor(created_ts=20_400, logical_event_id="$m_unlisted_ext"),
+        stopped_at=None,
+    )
+    reader = _FakeConversationReader(pages=[page, page])
+    research_bot = _make_fake_bot(agent_name="research", joined_rooms=[_ROOM_A], reader=reader)
+    team_bot = _make_fake_bot(agent_name="ops_team", joined_rooms=[_ROOM_A], reader=reader)
+
+    now = time.time()
+    store.create_trigger(
+        ReactiveTriggerRecord(
+            trigger_id="tr_agent_bots",
+            owner_user_id=_OWNER,
+            source=RoomMessageSourceSpec(room_id=_ROOM_A, include_bots=True),
+            target=TriggerTargetSpec(agent="research", room_id=_ROOM_A, prompt="Follow up"),
+            created_at=now,
+            updated_at=now,
+        ),
+        initial_cursor=RoomCursor(created_ts=10_000, logical_event_id="$init"),
+    )
+    store.create_trigger(
+        ReactiveTriggerRecord(
+            trigger_id="tr_team_bots",
+            owner_user_id=_OWNER,
+            source=RoomMessageSourceSpec(room_id=_ROOM_A, include_bots=True),
+            target=TriggerTargetSpec(agent="ops_team", room_id=_ROOM_A, prompt="Team follow up"),
+            created_at=now,
+            updated_at=now,
+        ),
+        initial_cursor=RoomCursor(created_ts=10_000, logical_event_id="$init"),
+    )
+
+    service = ReactiveTriggerService(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: config,
+        bots=lambda: {"research": research_bot, "ops_team": team_bot},
+        memberships=AgentReplyMembershipIndex(),
+        store=store,
+    )
+    snapshot = _room_state_snapshot(_ROOM_A, [_OWNER, "@mindroom_research:localhost", "@mindroom_helper:localhost"])
+    with patch("mindroom.reactive_triggers.service.read_room_state", new=AsyncMock(return_value=snapshot)):
+        await service.poll_room_messages_once()
+
+    due = store.list_due_firings()
+    by_trigger: dict[str, list[str]] = {}
+    for firing in due:
+        by_trigger.setdefault(firing.trigger_id, []).append(firing.dedupe_key)
+
+    # Agent target sees helper + outsider, skips trigger-loop, own self reply, and unlisted external bot
+    assert by_trigger["tr_agent_bots"] == ["$m_helper_bot", "$m_outsider_bot"]
+    # Team target (members: research, helper) skips BOTH research and helper, sees ONLY outsider
+    assert by_trigger["tr_team_bots"] == ["$m_outsider_bot"]
+
+    # Draining delivers all 3 enqueued firings cleanly even though access.users only lists _OWNER
+    send_mock = AsyncMock(return_value=DeliveredMatrixEvent(event_id="$posted", content_sent={}))
+    with (
+        patch("mindroom.reactive_triggers.dispatch.read_room_state", new=AsyncMock(return_value=snapshot)),
+        patch("mindroom.reactive_triggers.dispatch.send_matrix_message", new=send_mock),
+    ):
+        await service.drain_due_firings_once()
+    assert send_mock.await_count == 3
