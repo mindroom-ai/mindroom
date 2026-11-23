@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 from . import approval_calls
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from .backend import Transaction
 
 
@@ -17,6 +19,16 @@ class SavedToolJob:
 
     job_id: str
     job_json: str
+
+
+@dataclass(frozen=True, slots=True)
+class ToolJobSnapshotUpdate:
+    """One accepted job's snapshot and optional payload update to write in a transaction."""
+
+    job_id: str
+    job_json: str
+    result_payload_json: str | None
+    approval_end_reason: str | None
 
 
 class ToolJobOwnershipLostError(RuntimeError):
@@ -74,6 +86,19 @@ def accept(transaction: Transaction, runtime_generation: str, job_id: str, job_j
         raise ToolJobExistsError(msg)
 
 
+def _apply_save(transaction: Transaction, update: ToolJobSnapshotUpdate) -> None:
+    transaction.execute(
+        "UPDATE tool_jobs SET job_json = ?, result_payload_json = COALESCE(?, result_payload_json) WHERE job_id = ?",
+        (update.job_json, update.result_payload_json, update.job_id),
+    )
+    if update.approval_end_reason is not None:
+        approval_calls.deny_pending(
+            transaction,
+            owner_id=approval_calls.tool_job_run_id(update.job_id),
+            reason=update.approval_end_reason,
+        )
+
+
 def save(
     transaction: Transaction,
     runtime_generation: str,
@@ -88,17 +113,24 @@ def save(
     A snapshot that ends the job's approvals, its end or its cancel request, denies the calls its approval cards still
     ask about with ``approval_end_reason`` and queues the cards' terminal edits, so no card of an ending job stays open.
     """
-    require_ownership(transaction, runtime_generation)
-    transaction.execute(
-        "UPDATE tool_jobs SET job_json = ?, result_payload_json = COALESCE(?, result_payload_json) WHERE job_id = ?",
-        (job_json, result_payload_json, job_id),
+    save_many(
+        transaction,
+        runtime_generation,
+        (ToolJobSnapshotUpdate(job_id, job_json, result_payload_json, approval_end_reason),),
     )
-    if approval_end_reason is not None:
-        approval_calls.deny_pending(
-            transaction,
-            owner_id=approval_calls.tool_job_run_id(job_id),
-            reason=approval_end_reason,
-        )
+
+
+def save_many(
+    transaction: Transaction,
+    runtime_generation: str,
+    updates: Sequence[ToolJobSnapshotUpdate],
+) -> None:
+    """Replace accepted jobs' snapshots in one owned transaction, denying pending cards for any that end."""
+    if not updates:
+        return
+    require_ownership(transaction, runtime_generation)
+    for update in updates:
+        _apply_save(transaction, update)
 
 
 def delete(transaction: Transaction, runtime_generation: str, job_id: str) -> None:

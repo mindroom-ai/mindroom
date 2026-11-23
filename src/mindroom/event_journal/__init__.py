@@ -89,7 +89,7 @@ from .scheduled_approvals import (
     scheduled_call_run_id,
 )
 from .store import EventJournalStore, PrincipalStore, ToolJobStore
-from .tool_jobs import SavedToolJob, ToolJobExistsError, ToolJobOwnershipLostError
+from .tool_jobs import SavedToolJob, ToolJobExistsError, ToolJobOwnershipLostError, ToolJobSnapshotUpdate
 from .turn_rows import TurnRecordStore
 from .views import (
     ApprovalDeliveryView,
@@ -176,6 +176,7 @@ __all__ = [
     "SemanticConsumer",
     "ToolJobExistsError",
     "ToolJobOwnershipLostError",
+    "ToolJobSnapshotUpdate",
     "ToolJobStore",
     "TurnRecordStore",
     "UnreadableMatrixDelivery",

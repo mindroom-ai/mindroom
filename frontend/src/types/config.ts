@@ -340,6 +340,7 @@ export interface VoiceLLMConfig {
 
 export interface VoiceConfig {
   enabled: boolean;
+  dictation?: boolean | null;
   visible_router_echo: boolean;
   stt: VoiceSTTConfig;
   intelligence: VoiceLLMConfig;

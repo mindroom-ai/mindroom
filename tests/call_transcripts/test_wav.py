@@ -8,7 +8,7 @@ import wave
 
 import pytest
 
-from mindroom.call_transcripts.wav import WavError, wav_seconds
+from mindroom.voice.wav import WavError, wav_seconds
 
 
 def _wav(*, seconds: float, rate: int = 16_000, channels: int = 1, sample_width: int = 2) -> bytes:
@@ -72,3 +72,22 @@ def test_wav_seconds_refuses_anything_but_complete_16_bit_pcm_mono(audio: bytes,
     """Only a whole 16-bit PCM mono WAV is accepted; the refusal says why."""
     with pytest.raises(WavError, match=reason):
         wav_seconds(audio)
+
+
+def test_wav_seconds_checks_expected_sample_rate() -> None:
+    """When ``expected_sample_rate`` is given, WAVs at any other rate are rejected."""
+    assert wav_seconds(_wav(seconds=1.5, rate=16_000), expected_sample_rate=16_000) == pytest.approx(1.5)
+    with pytest.raises(WavError, match="48000 Hz sample rate; it must be 16000 Hz"):
+        wav_seconds(_wav(seconds=1.5, rate=48_000), expected_sample_rate=16_000)
+
+
+def test_wav_seconds_maps_runtime_errors_to_wav_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Corrupted WAV chunks that trigger RuntimeError in stdlib wave are mapped to WavError."""
+
+    def boom(*_args: object, **_kwargs: object) -> object:
+        msg = "corrupt chunk length"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr("mindroom.voice.wav.wave.open", boom)
+    with pytest.raises(WavError, match="not a WAV"):
+        wav_seconds(b"RIFF")

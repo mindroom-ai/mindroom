@@ -80,7 +80,7 @@ The private reply type is `io.mindroom.models.response`:
   "capabilities": ["model_selection", "thread_model_on_root"],
   "agent_user_ids": ["@mindroom_helper:example.org"],
   "catalog_revision": "sha256-of-published-entries",
-  "models": [{"key":"fast","display_name":"Quick helper","provider":"openai","id":"gpt-6-astra","icon_url":"mxc://example.org/image","reasoning_levels":["low","high"],"reasoning_default":"low"}],
+  "models": [{"key":"fast","display_name":"Quick helper","provider":"openai","id":"gpt-6.2-astra","icon_url":"mxc://example.org/image","reasoning_levels":["low","high"],"reasoning_default":"low"}],
   "selection": {"override":"fast","reasoning":"high","inherited":[{"entity":"helper","user_id":"@mindroom_helper:example.org","model":"fast","source":"agent"}]}
 }
 ```

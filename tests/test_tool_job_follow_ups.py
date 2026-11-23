@@ -14,8 +14,11 @@ import pytest
 from mindroom import reply_lifecycle as rl
 from mindroom.coalescing.batch import PreparedTurn, active_follow_up_coalescing_key, build_prepared_turn
 from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.contacts import ContactsConfig
 from mindroom.config.main import Config
+from mindroom.config.personal_agents import PersonalAgentInstance
 from mindroom.constants import CONVERSATION_CONTENT_KEY, EXACT_MENTIONS_KEY
+from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, update_contacts
 from mindroom.custom_tools.job import JobTools
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import (
@@ -23,6 +26,7 @@ from mindroom.dispatch_source import (
     MESSAGE_SOURCE_KIND,
     SILENT_SCHEDULE_SOURCE_KIND,
 )
+from mindroom.entity_resolution import current_entity_id
 from mindroom.event_journal.models import EventClass, EventKind, InboundEvent
 from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
@@ -62,9 +66,9 @@ from tests.conftest import (
     make_turn_context,
     message_origin,
     patch_response_runner_module,
+    test_runtime_paths,
     unwrap_extracted_collaborator,
 )
-from tests.delegation_helpers import _runtime_paths
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _envelope, _noop_typing, _target
 from tests.tool_job_helpers import (
@@ -406,15 +410,18 @@ async def test_jobs_the_limit_holds_get_one_notice_of_the_agent(tmp_path: Path) 
                 [job for job in runtime.retained_jobs() if job.job_id == "capped"],
                 0,
             )
-            assert content["msgtype"] == "m.notice"
+            assert content["msgtype"] == "m.text"
             assert content[CONVERSATION_CONTENT_KEY] is True
             assert content[EXACT_MENTIONS_KEY] is True
-            assert content["m.mentions"] == {"user_ids": []}
+            assert content["m.mentions"] == {"user_ids": [key.requester_id]}
             assert content["m.relates_to"]["event_id"] == key.thread_id
             assert content["body"] == (
-                "⏸️ 1 background job finished while I was paused after "
+                f"{key.requester_id} ⏸️ 1 background job finished while I was paused after "
                 "20 automatic follow-ups in a row without a message from you: `tool_capped` (capped). "
                 "Reply here to let me continue."
+            )
+            assert (
+                f'<a href="https://matrix.to/#/{key.requester_id}">{key.requester_id}</a>' in content["formatted_body"]
             )
     finally:
         await runtime.shutdown()
@@ -435,7 +442,7 @@ async def test_a_room_level_hold_is_a_conversation_notice(tmp_path: Path) -> Non
             content = send.await_args.args[2]
             assert "m.relates_to" not in content
             assert content[CONVERSATION_CONTENT_KEY] is True
-            assert content["body"].startswith("⏸️ 2 background jobs finished")
+            assert content["body"].startswith(f"{owner.requester_id} ⏸️ 2 background jobs finished")
             assert "`tool_capped_a` (capped_a), `tool_capped_b` (capped_b)" in content["body"]
     finally:
         await runtime.shutdown()
@@ -1341,10 +1348,19 @@ async def test_follow_up_yields_while_human_turn_prepares_before_lock(tmp_path: 
         await runtime.shutdown()
 
 
-async def _post_held_jobs(tmp_path: Path, specs: list[tuple[str, str, str | None]]) -> dict[str, object]:
+async def _post_held_jobs(
+    tmp_path: Path,
+    specs: list[tuple[str, str, str | None]],
+    *,
+    owner: ToolExecutionIdentity | None = None,
+    config: Config | None = None,
+) -> dict[str, object]:
     runtime = await tool_job_runtime(tmp_path)
     coordinator = job_coordinator(tmp_path, runtime, _admitting_bot())
-    last = _follow_up_event_id(_key(job_owner()), [], _FOLLOW_UP_LIMIT)
+    if config is not None:
+        coordinator.config_provider = lambda: config
+    job_owner_id = owner or job_owner()
+    last = _follow_up_event_id(_key(job_owner_id), [], _FOLLOW_UP_LIMIT)
     try:
         with patch(_SEND, AsyncMock()) as send:
             for job_id, tool_name, title in specs:
@@ -1354,6 +1370,7 @@ async def _post_held_jobs(tmp_path: Path, specs: list[tuple[str, str, str | None
                     runtime,
                     job_id,
                     BackgroundOutcome("completed", "done"),
+                    owner=job_owner_id,
                     source_event_id=last,
                     tool_name=tool_name,
                     kind=kind,
@@ -1367,32 +1384,101 @@ async def _post_held_jobs(tmp_path: Path, specs: list[tuple[str, str, str | None
 
 
 async def test_held_notice_names_subagent_title_caps_list_and_keeps_mentions_exact(tmp_path: Path) -> None:
-    """Held notices list titles or tool names + 8-char IDs, cap at 5, and add no history mentions from titles."""
+    """Held notices list titles or tool names + 8-char IDs, cap at 5, and mention only a human requester."""
+    config, paths = Config(agents={"general": AgentConfig(display_name="General")}), test_runtime_paths(tmp_path)
+    persist_entity_accounts(config, paths)
+    general_id = current_entity_id("general", paths).full_id
+    title = f"Review @general and [{general_id}](https://matrix.to/#/{general_id}) design"
     specs = [
-        ("c6256cac" + "1" * 56, "research", "Review @general design"),
+        ("c6256cac" + "1" * 56, "research", title),
         ("d4e5f607" + "2" * 56, "research", ""),
         *((f"{idx:08x}" + "a" * 56, f"run_tool_{idx}", None) for idx in range(5)),
     ]
-    content = await _post_held_jobs(tmp_path, specs)
+    requester = job_owner().requester_id
+    content = await _post_held_jobs(tmp_path, specs, config=config)
     assert (content["msgtype"], content[EXACT_MENTIONS_KEY], content["m.mentions"]) == (
-        "m.notice",
+        "m.text",
         True,
-        {"user_ids": []},
+        {"user_ids": [requester]},
     )
-    assert "`Review @general design` (c6256cac), `research` (d4e5f607)" in str(content["body"])
+    assert f"`{title}` (c6256cac), `research` (d4e5f607)" in str(content["body"])
     assert ", and 2 more." in str(content["body"])
-
-    config, paths = Config(agents={"general": AgentConfig(display_name="General")}), _runtime_paths(tmp_path)
-    persist_entity_accounts(config, paths)
-    assert history_mentioned_user_ids(content, config, paths) == []
+    assert history_mentioned_user_ids(content, config, paths) == [requester]
 
 
 async def test_held_notice_escapes_markdown_html_and_backticks_in_titles(tmp_path: Path) -> None:
     """Markdown, HTML, and backticks in job titles render as literal code spans without links or formatting."""
     tricky = "**x** [a](https://e.x) <b>y</b> [@general](https://matrix.to/#/@mindroom_general:example.org) ``tick``"
     formatted = str((await _post_held_jobs(tmp_path, [("a1b2c3d4" + "0" * 56, "research", tricky)]))["formatted_body"])
-    assert not any(tag in formatted for tag in ("<a ", "<strong>", "<b>"))
+    requester = job_owner().requester_id
+    pill = f'<p><a href="https://matrix.to/#/{requester}">{requester}</a> '
+    assert formatted.startswith(pill)
+    assert not any(tag in formatted.removeprefix(pill) for tag in ("<a ", "<strong>", "<b>"))
     assert (
         "<code>**x** [a](https://e.x) &lt;b&gt;y&lt;/b&gt; "
         "[@general](https://matrix.to/#/@mindroom_general:example.org) ``tick``</code>"
     ) in formatted
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["managed_agent", "bot_account", "remote_agent", "team_remote_agent", "contact_room", "team_human"],
+)
+async def test_held_notice_mention_policy(tmp_path: Path, case: str) -> None:
+    """Only human requesters outside contact rooms get an m.text mention; agents, bots, remotes, and contacts stay m.notice."""
+    paths = test_runtime_paths(tmp_path)
+    config = Config(
+        agents={
+            "parent": AgentConfig(
+                display_name="Parent",
+                contacts=ContactsConfig(remote_agents=["@mindroom_*:other.org"]),
+            ),
+            "general": AgentConfig(display_name="General"),
+        },
+        teams={"squad": TeamConfig(display_name="Squad", role="Lead", agents=["parent"])},
+        bot_accounts=["@ci_bot:test"],
+    )
+    persist_entity_accounts(config, paths)
+    owner = job_owner()
+    if case == "managed_agent":
+        owner = replace(owner, requester_id=current_entity_id("general", paths).full_id)
+    elif case == "bot_account":
+        owner = replace(owner, requester_id="@ci_bot:test")
+    elif case == "remote_agent":
+        owner = replace(owner, requester_id="@mindroom_dana:other.org")
+    elif case == "team_remote_agent":
+        owner = replace(owner, transport_agent_name="squad", requester_id="@mindroom_dana:other.org")
+    elif case == "contact_room":
+        config._personal_agent_instances = {
+            "parent": PersonalAgentInstance(template="mind", user_id="@alice:test", matrix_username=None),
+        }
+        assert owner.room_id is not None
+        update_contacts(
+            paths,
+            lambda book: book.contacts.append(
+                ContactRecord(
+                    id="c1",
+                    status="active",
+                    requester=ContactParty(kind="agent", id="parent", owner="@alice:test"),
+                    target=ContactParty(kind="person", id="@bob:test", owner="@bob:test"),
+                    reason="Chat",
+                    requester_side=ContactSide(),
+                    target_side=ContactSide(),
+                    origin_room_id="!origin:test",
+                    origin_thread_id=None,
+                    room_id=owner.room_id,
+                ),
+            ),
+        )
+    elif case == "team_human":
+        owner = replace(owner, transport_agent_name="squad")
+
+    content = await _post_held_jobs(tmp_path, [("a1b2c3d4" + "0" * 56, "research", None)], owner=owner, config=config)
+    expected_msgtype = "m.text" if case == "team_human" else "m.notice"
+    expected_mentions = [owner.requester_id] if case == "team_human" else []
+    assert (content["msgtype"], content[EXACT_MENTIONS_KEY], content["m.mentions"]) == (
+        expected_msgtype,
+        True,
+        {"user_ids": expected_mentions},
+    )
+    assert str(content["body"]).startswith(f"{owner.requester_id} ⏸️" if case == "team_human" else "⏸️")
