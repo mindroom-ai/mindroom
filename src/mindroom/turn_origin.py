@@ -100,6 +100,15 @@ class TurnOrigin:
         }
 
     @property
+    def active_human_requester_id(self) -> str | None:
+        """Return the human requester this reply answers, including job follow-ups on their behalf."""
+        if self.may_answer_interactive_prompt or (
+            self.requester_kind == SenderKind.USER and self.intent is TurnIntent.JOB_FOLLOW_UP
+        ):
+            return self.requester_id
+        return None
+
+    @property
     def may_be_superseded_by_newer_requester_turn(self) -> bool:
         """Return whether replay guards may skip this turn when a newer requester prompt exists."""
         return self.may_answer_interactive_prompt

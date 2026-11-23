@@ -119,7 +119,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget, ResponseLifecycleKey
-from mindroom.mid_turn import MidTurnGate, MidTurnOutcome, QueuedMessage
+from mindroom.mid_turn import MidTurnGate, MidTurnMode, MidTurnOutcome, QueuedMessage
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
 from mindroom.reply_turn.enrichment import prepare_memory_and_model_context
@@ -183,6 +183,7 @@ from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_model import TurnModel
+from mindroom.turn_origin import SenderKind, TurnIntent
 from mindroom.turn_policy import PreparedDispatch
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import SourcePreparation
@@ -2618,11 +2619,13 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
         conversation: _Conversation,
         response_envelope: MessageEnvelope,
         signal_queued_message: bool,
+        mid_turn_mode: MidTurnMode = MidTurnMode.AUTO,
     ) -> str | None:
         notice = begin_response_turn_notice(
             conversation=conversation,
             response_envelope=response_envelope,
             signal_queued_message=signal_queued_message,
+            mid_turn_mode=mid_turn_mode,
         )
         if response_envelope.source_event_id == "$source":
             resume_entered.set()
@@ -9016,3 +9019,32 @@ async def test_a_batch_whose_source_ended_answers_the_rest_only_while_no_reply_e
     request_preparer.prepare.assert_not_awaited()
     # Without a reply, the caller settles only the ended source and the rest answer as their own turn.
     assert fate == Unclaimed(UnclaimedReason.TERMINAL_SOURCES, None if reply_exists else preparation)
+
+
+def test_job_follow_up_request_resolves_managed_entity_requester_kind(tmp_path: Path) -> None:
+    """_job_follow_up_request distinguishes managed-entity requesters from humans."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    managed_id = runner.deps.matrix_full_id
+
+    managed_request = runner._job_follow_up_request(
+        ConversationKey("general", "!room:localhost", "$thread", managed_id, silent=False),
+        "job-follow-up:managed",
+    )
+    managed_origin = managed_request.response_envelope.origin
+    assert managed_origin.intent is TurnIntent.JOB_FOLLOW_UP
+    assert managed_origin.requester_entity_name == "general"
+    assert managed_origin.requester_kind is SenderKind.MANAGED_ENTITY
+    assert managed_origin.active_human_requester_id is None
+    assert not managed_origin.may_answer_interactive_prompt
+
+    human_request = runner._job_follow_up_request(
+        ConversationKey("general", "!room:localhost", "$thread", "@user:localhost", silent=False),
+        "job-follow-up:human",
+    )
+    human_origin = human_request.response_envelope.origin
+    assert human_origin.intent is TurnIntent.JOB_FOLLOW_UP
+    assert human_origin.requester_entity_name is None
+    assert human_origin.requester_kind is SenderKind.USER
+    assert human_origin.active_human_requester_id == "@user:localhost"
+    assert not human_origin.may_answer_interactive_prompt

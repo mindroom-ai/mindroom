@@ -37,6 +37,7 @@ from mindroom.conversation_state_writer import ReplySession
 from mindroom.delegation.background import job_acknowledgers
 from mindroom.delegation.cost import carried_receipts, receipts_metadata
 from mindroom.dispatch_source import is_automation_source_kind
+from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.final_delivery import (
     Cancelled,
@@ -563,6 +564,7 @@ class ResponseRunner:
                             locked_operation=lambda: self._run_locked_ending_span(request, locked_operation),
                             signal_queued_message=signal_queued_message and not request.quiet,
                             notices=request.notices,
+                            mid_turn_mode=request.mid_turn_mode,
                         )
                         handle = current_span()
                         if handle is not None and not handle.exited:
@@ -910,7 +912,17 @@ class ResponseRunner:
     def _job_follow_up_request(self, key: ConversationKey, follow_up_id: str) -> ResponseRequest:
         """Build the turn that reports a conversation's ended jobs in a new reply; its start note lists the jobs."""
         prompt = self.deps.runtime.config.get_prompt("BACKGROUND_JOBS_FOLLOW_UP_PROMPT")
-        envelope = follow_up_envelope(key, follow_up_id=follow_up_id, sender_id=self.deps.matrix_full_id, prompt=prompt)
+        requester_entity_name = entity_identity_registry(
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        ).current_entity_name_for_user_id(key.requester_id)
+        envelope = follow_up_envelope(
+            key,
+            follow_up_id=follow_up_id,
+            sender_id=self.deps.matrix_full_id,
+            prompt=prompt,
+            requester_entity_name=requester_entity_name,
+        )
         return ResponseRequest(
             thread_history=(),
             prompt=envelope.body,

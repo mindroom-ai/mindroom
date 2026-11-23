@@ -1108,6 +1108,8 @@ COPIED_MENTIONS_KEY = "io.mindroom.copied_mentions"
 # On each event of one composer submission with attachments: {"id": <per submission>, "more": <bool>}, where
 # ``more`` says the client sends another event of that submission without the person doing anything.
 SUBMISSION_CONTENT_KEY = "io.mindroom.submission"
+# Composer-chosen mid-turn behavior ("steer", "queue", or "auto") on an inbound message.
+MID_TURN_MODE_KEY = "io.mindroom.mid_turn"
 # On a forked thread's root: the parent thread and the last parent message the fork includes.
 FORK_CONTENT_KEY = "io.mindroom.fork"
 # Marks a message's ``m.mentions`` as every mention it makes, so receivers do not look for more in its text.

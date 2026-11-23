@@ -4284,3 +4284,65 @@ async def test_held_notice_hitting_busy_lock_preserves_rich_queued_message_and_r
     assert not notice_v1.active
     assert not notice_v2.active
     assert not conversation.has_pending_human_messages()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [MidTurnMode.STEER, MidTurnMode.QUEUE])
+async def test_lock_race_begin_response_turn_notice_preserves_mid_turn_mode(mode: MidTurnMode) -> None:
+    """When a turn misses ingress reservation and races for the lock, its MidTurnMode survives into the notice."""
+    lifecycle = ResponseLifecycleCoordinator()
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$active")
+    queue = lifecycle._conversation_for(target)
+    alice = "@alice:localhost"
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    observed: dict[str, object] = {}
+
+    async def active_reply() -> None:
+        started.set()
+        await finish.wait()
+        observed["pending"] = queue.pending_message_snapshot()
+        observed["steers"] = queue.requester_steer_snapshot()
+        observed["interrupting"] = queue.interrupting_snapshot()
+        observed["queued"] = queue.queued_snapshot()
+
+    async def racing_reply() -> None:
+        observed["racing_ran"] = True
+
+    first = asyncio.create_task(
+        lifecycle.run_locked_response(
+            target=target,
+            response_envelope=_envelope(source_event_id="$active", requester_id=alice, target=target),
+            pipeline_timing=None,
+            locked_operation=active_reply,
+        ),
+    )
+    await asyncio.wait_for(started.wait(), SETTLE_TIMEOUT_SECONDS)
+
+    # Second turn enters run_locked_response with no prior ingress reservation (lock-race fallback).
+    second = asyncio.create_task(
+        lifecycle.run_locked_response(
+            target=target,
+            response_envelope=_envelope(source_event_id="$racing", requester_id=alice, target=target),
+            pipeline_timing=None,
+            locked_operation=racing_reply,
+            mid_turn_mode=mode,
+        ),
+    )
+    await asyncio.sleep(0)
+    finish.set()
+    await asyncio.wait_for(asyncio.gather(first, second), SETTLE_TIMEOUT_SECONDS)
+
+    [pending] = observed["pending"]
+    assert pending.event_id == "$racing"
+    assert pending.mode is mode
+    if mode is MidTurnMode.STEER:
+        assert [m.event_id for m in observed["steers"]] == ["$racing"]
+        assert [m.event_id for m in observed["interrupting"]] == ["$racing"]
+        assert observed["queued"] == ()
+    else:
+        assert observed["steers"] == ()
+        assert observed["interrupting"] == ()
+        assert [m.event_id for m in observed["queued"]] == ["$racing"]
+    assert observed["racing_ran"] is True
+    assert not queue.has_pending_human_messages()
