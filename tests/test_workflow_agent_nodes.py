@@ -763,6 +763,27 @@ async def test_timeout_counts_the_work_before_and_after_an_approval_and_not_the_
 
 
 @pytest.mark.asyncio
+async def test_approval_wait_does_not_exhaust_schema_correction_working_time(gated: WorkflowStack) -> None:
+    """Approval wait time on turn 1 is not deducted from the schema correction turn's working time (B2)."""
+    cards: JobApprovalCards = gated.cards  # type: ignore[attr-defined]
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}
+    gated.child_script(
+        calls(tool_call("append", "c1", line="a")),
+        answer("not json"),
+        [Await(partial(asyncio.sleep, 0.2)), *answer('```json\n{"ok": true}\n```')],
+    )
+    receipt = await gated.submit("@0", "agent", _PROMPT | {"schema": schema}, {"timeout": 2.0})
+    await asyncio.wait_for(cards.posted.wait(), 10)
+    await asyncio.sleep(2.3)
+    cards.decision.set_result(BackgroundApprovalDecision("approved", None))
+
+    while receipt.state in ("running", "waiting"):
+        receipt = await gated.engine.node_receipt(gated.attempt, receipt.id, wait=10)
+
+    assert (receipt.state, receipt.result) == ("completed", {"ok": True})
+
+
+@pytest.mark.asyncio
 async def test_timeout_is_not_given_again_to_the_attempt_that_finds_the_agent_working(stack: WorkflowStack) -> None:
     """The next attempt waits for the same turn with the time that turn has left, not with all of it."""
     _hanging(stack)

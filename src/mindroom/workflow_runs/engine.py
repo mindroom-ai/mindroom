@@ -1381,9 +1381,11 @@ class WorkflowEngine:
         One that may not start is the node's end, which is returned. While that cannot be decided the turn waits,
         or raises `AgentNotReadyError` without *block*.
         """
-        handle, queued = cast("DispatchHandle", node.handle), False
+        saved = self.store.get_node(node.run_id, node.key)
+        current = saved.handle if saved is not None and saved.generation == node.generation else None
+        handle, queued = current or cast("DispatchHandle", node.handle), False
         while True:
-            left = None if handle.work_until is None else max(0.0, handle.work_until - time.time())
+            left = handle.work_left if handle.work_until is None else max(0.0, handle.work_until - time.time())
             try:
                 if await self._hold_turn(node, epoch, locked=not block, shown=queued):
                     queued = True
