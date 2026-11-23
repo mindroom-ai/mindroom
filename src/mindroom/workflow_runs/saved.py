@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import os
 import re
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -21,10 +22,6 @@ _ENCODING_COOKIE_RE = re.compile(r"^[ \t\f]*#.*?coding[:=][ \t]*([-_.a-zA-Z0-9]+
 _EXISTS_MESSAGE = "workflows/{name}.py already exists with different content. Pick another name or edit the file."
 
 
-class SavedWorkflowExistsError(ValueError):
-    """Raised when saving a workflow would overwrite an existing file with different content."""
-
-
 @dataclass(frozen=True, slots=True)
 class SavedWorkflow:
     """Metadata of one saved workflow file, read via AST without executing the file."""
@@ -32,7 +29,6 @@ class SavedWorkflow:
     name: str
     description: str
     args: dict[str, str]
-    path: Path
 
 
 def validate_workflow_name(name: str) -> str:
@@ -50,7 +46,6 @@ def list_saved(workspace: Path) -> list[SavedWorkflow]:
     """List valid saved workflow files in `<workspace>/workflows`, parsed with AST only."""
     try:
         with open_directory_within_root(workspace, WORKFLOWS_DIR) as directory_fd:
-            workflows_dir = workspace / WORKFLOWS_DIR
             found: list[SavedWorkflow] = []
             with os.scandir(directory_fd) as entries:
                 for entry in entries:
@@ -64,9 +59,7 @@ def list_saved(workspace: Path) -> list[SavedWorkflow]:
                     except (OSError, ValueError):
                         continue
                     description, args = _parse_metadata(raw)
-                    found.append(
-                        SavedWorkflow(name=stem, description=description, args=args, path=workflows_dir / entry.name),
-                    )
+                    found.append(SavedWorkflow(name=stem, description=description, args=args))
     except FileNotFoundError:
         return []
     found.sort(key=lambda item: item.name)
@@ -78,7 +71,7 @@ def save_source(
     name: str,
     source: str | bytes,
     description: str | None = None,
-) -> Path:
+) -> None:
     """Save *source* to `<workspace>/workflows/<name>.py` atomically without clobbering different content."""
     validate_workflow_name(name)
     text = source.decode("utf-8") if isinstance(source, bytes) else source
@@ -93,8 +86,6 @@ def save_source(
         raise ValueError(msg)
 
     filename = f"{name}.py"
-    if not workspace.exists() and not workspace.is_symlink():
-        workspace.mkdir(parents=True, exist_ok=True)
     with open_directory_within_root(workspace, WORKFLOWS_DIR, create=True) as directory_fd:
         try:
             with atomic_write_file_at(directory_fd, filename, file_mode=0o644, replace=False) as output:
@@ -107,8 +98,7 @@ def save_source(
                 truncate=True,
             )
             if existing != payload:
-                raise SavedWorkflowExistsError(_EXISTS_MESSAGE.format(name=name)) from None
-    return workspace / WORKFLOWS_DIR / filename
+                raise ValueError(_EXISTS_MESSAGE.format(name=name)) from None
 
 
 def _parse_metadata(raw: bytes) -> tuple[str, dict[str, str]]:
@@ -118,30 +108,26 @@ def _parse_metadata(raw: bytes) -> tuple[str, dict[str, str]]:
         return "", {}
     raw_doc = ast.get_docstring(tree)
     description = next((line.strip() for line in raw_doc.splitlines() if line.strip()), "") if raw_doc else ""
+    values = [
+        stmt.value
+        for stmt in tree.body
+        if (isinstance(stmt, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "ARGS" for t in stmt.targets))
+        or (
+            isinstance(stmt, ast.AnnAssign)
+            and isinstance(stmt.target, ast.Name)
+            and stmt.target.id == "ARGS"
+            and stmt.value is not None
+        )
+    ]
     args: dict[str, str] = {}
-    for stmt in tree.body:
-        value = _args_value(stmt)
-        if value is None:
-            continue
-        try:
-            evaluated = ast.literal_eval(value)
-        except (ValueError, TypeError):
-            args = {}
-            continue
-        if isinstance(evaluated, dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in evaluated.items()):
-            args = dict(evaluated)
-        else:
-            args = {}
+    if values:
+        with suppress(ValueError, TypeError):
+            evaluated = ast.literal_eval(values[-1])
+            if isinstance(evaluated, dict) and all(
+                isinstance(k, str) and isinstance(v, str) for k, v in evaluated.items()
+            ):
+                args = dict(evaluated)
     return description, args
-
-
-def _args_value(stmt: ast.stmt) -> ast.expr | None:
-    if isinstance(stmt, ast.Assign):
-        if any(isinstance(target, ast.Name) and target.id == "ARGS" for target in stmt.targets):
-            return stmt.value
-    elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name) and stmt.target.id == "ARGS":
-        return stmt.value
-    return None
 
 
 def _with_docstring(source: str, description: str) -> str:
@@ -151,7 +137,7 @@ def _with_docstring(source: str, description: str) -> str:
         return source
     if ast.get_docstring(tree) is not None:
         return source
-    literal = _docstring_literal(description)
+    literal = repr(description.strip())
     lines = source.splitlines(keepends=True)
     insert_at = 0
     if lines and lines[0].startswith("#!"):
@@ -163,10 +149,3 @@ def _with_docstring(source: str, description: str) -> str:
     prefix = "".join(lines[:insert_at])
     rest = "".join(lines[insert_at:]).lstrip("\n")
     return f"{prefix}{literal}\n\n{rest}" if rest else f"{prefix}{literal}\n"
-
-
-def _docstring_literal(description: str) -> str:
-    cleaned = description.strip()
-    if """\"\"\"""" not in cleaned and not cleaned.endswith('"') and "\\" not in cleaned:
-        return f"""\"\"\"{cleaned}\"\"\""""
-    return repr(cleaned)

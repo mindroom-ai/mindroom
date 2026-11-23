@@ -49,7 +49,7 @@ from mindroom.workflow_runs.models import (
     new_workflow_run_id,
 )
 from mindroom.workflow_runs.replay import result_digest
-from mindroom.workflow_runs.saved import SavedWorkflowExistsError, list_saved, save_source
+from mindroom.workflow_runs.saved import list_saved, save_source
 from mindroom.workflow_runs.store import WorkflowRunNotFoundError, WorkflowRunStoreError, owned_run
 
 if TYPE_CHECKING:
@@ -382,8 +382,6 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         try:
             workspace = await asyncio.to_thread(context.agent_workspace_root, create=True)
             await asyncio.to_thread(save_source, workspace, name, run.source, description)
-        except SavedWorkflowExistsError:
-            raise
         except (OSError, ValueError) as exc:
             raise WorkflowRunStoreError(str(exc)) from exc
         return json.dumps({"name": name, "path": f"workflows/{name}.py"})

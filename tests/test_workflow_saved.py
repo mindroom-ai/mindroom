@@ -8,7 +8,6 @@ import json
 import sys
 import threading
 from dataclasses import replace
-from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -32,7 +31,6 @@ from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.workflow_runs.models import WorkflowRunState
 from mindroom.workflow_runs.saved import (
     SavedWorkflow,
-    SavedWorkflowExistsError,
     list_saved,
     save_source,
     validate_workflow_name,
@@ -50,6 +48,7 @@ from tests.workflow_helpers import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
+    from pathlib import Path
     from types import ModuleType
 
 
@@ -121,12 +120,11 @@ def main(args):
     listed = list_saved(tmp_path)
 
     assert listed == [
-        SavedWorkflow(name="bare", description="", args={}, path=workflows / "bare.py"),
+        SavedWorkflow(name="bare", description="", args={}),
         SavedWorkflow(
             name="dangerous",
             description="Audit a branch before merging.",
             args={"base": "Branch to compare against", "strict": "Fail on warnings"},
-            path=workflows / "dangerous.py",
         ),
     ]
 
@@ -134,24 +132,24 @@ def main(args):
 def test_save_refuses_to_replace_a_different_file_and_accepts_an_identical_one(tmp_path: Path) -> None:
     """Saving adds a missing docstring, accepts identical content, and refuses to overwrite different content."""
     source = "def main(args):\n    return 1\n"
+    written = tmp_path / "workflows" / "review-branch.py"
 
-    written = save_source(tmp_path, "review-branch", source, description="Review a branch.")
-    assert written == tmp_path / "workflows" / "review-branch.py"
+    save_source(tmp_path, "review-branch", source, description="Review a branch.")
     saved_bytes = written.read_bytes()
-    assert saved_bytes == b"""\"\"\"Review a branch.\"\"\"\n\ndef main(args):\n    return 1\n"""
+    assert list_saved(tmp_path) == [SavedWorkflow(name="review-branch", description="Review a branch.", args={})]
 
     # Identical effective content is accepted idempotently.
-    assert save_source(tmp_path, "review-branch", source, description="Review a branch.") == written
+    save_source(tmp_path, "review-branch", source, description="Review a branch.")
+    assert written.read_bytes() == saved_bytes
 
     # Existing docstring is preserved rather than duplicated.
     with_doc = """\"\"\"Keep me.\"\"\"\n\ndef main(args):\n    return 2\n"""
-    kept = save_source(tmp_path, "has-doc", with_doc, description="Ignored description.")
-    assert kept.read_bytes() == with_doc.encode("utf-8")
-    assert kept == tmp_path / "workflows" / "has-doc.py"
+    save_source(tmp_path, "has-doc", with_doc, description="Ignored description.")
+    assert (tmp_path / "workflows" / "has-doc.py").read_bytes() == with_doc.encode("utf-8")
 
     # Different content raises the exact plan error message and leaves the file untouched.
     with pytest.raises(
-        SavedWorkflowExistsError,
+        ValueError,
         match=r"^workflows/review-branch\.py already exists with different content\. Pick another name or edit the file\.$",
     ):
         save_source(tmp_path, "review-branch", "def main(args):\n    return 99\n", description="Review a branch.")
@@ -159,15 +157,16 @@ def test_save_refuses_to_replace_a_different_file_and_accepts_an_identical_one(t
 
 
 def test_two_simultaneous_saves_leave_one_winner(tmp_path: Path) -> None:
-    """Two racing saves with different content produce one written file and one SavedWorkflowExistsError."""
+    """Two racing saves with different content produce one written file and one conflict error."""
     barrier = threading.Barrier(2)
-    results: list[Path | BaseException] = []
+    results: list[str | BaseException] = []
     lock = threading.Lock()
 
     def worker(body: str) -> None:
         barrier.wait()
         try:
-            outcome: Path | BaseException = save_source(tmp_path, "race", body, description=None)
+            save_source(tmp_path, "race", body, description=None)
+            outcome: str | BaseException = "ok"
         except BaseException as exc:
             outcome = exc
         with lock:
@@ -181,10 +180,11 @@ def test_two_simultaneous_saves_leave_one_winner(tmp_path: Path) -> None:
     for thread in threads:
         thread.join()
 
-    paths = [item for item in results if isinstance(item, Path)]
-    errors = [item for item in results if isinstance(item, SavedWorkflowExistsError)]
-    assert len(paths) == 1
+    ok = [item for item in results if item == "ok"]
+    errors = [item for item in results if isinstance(item, ValueError)]
+    assert len(ok) == 1
     assert len(errors) == 1
+    assert "already exists with different content" in str(errors[0])
     assert (tmp_path / "workflows" / "race.py").read_text(encoding="utf-8") in {first, second}
 
 
@@ -515,7 +515,6 @@ async def test_workflows_command_is_parsed_and_listed_in_help() -> None:
                     name="audit",
                     description="Audit a repo.",
                     args={"base": "Branch"},
-                    path=Path("workflows/audit.py"),
                 ),
             ),
         ],

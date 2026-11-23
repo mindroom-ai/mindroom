@@ -2711,7 +2711,6 @@ from = ["mindroom.workflow_runs.saved"]
 expose = [
     "SAVED_WORKFLOW_NAME_RE",
     "SavedWorkflow",
-    "SavedWorkflowExistsError",
     "WORKFLOWS_DIR",
     "list_saved",
     "save_source",
