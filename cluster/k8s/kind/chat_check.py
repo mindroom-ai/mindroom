@@ -47,7 +47,8 @@ def extract_latest_reply(
                 matched = replies[target][2] if target in replies else False
                 replies[target] = (str(new.get("body", "")), status, matched)
         elif isinstance(event_id := event.get("event_id"), str):
-            in_reply = rel.get("m.in_reply_to") if isinstance(rel.get("m.in_reply_to"), dict) else {}
+            raw_in_reply = rel.get("m.in_reply_to")
+            in_reply = raw_in_reply if isinstance(raw_in_reply, dict) else {}
             matched = prompt_event_id is not None and prompt_event_id in (rel.get("event_id"), in_reply.get("event_id"))
             replies[event_id] = (str(content.get("body", "")), content.get("io.mindroom.stream_status"), matched)
 
