@@ -113,7 +113,7 @@ class _Step:
             if message.subtype == "init":
                 session.inventoried = _only_mindrooms_tools(message.data, session)
         elif isinstance(message, RateLimitEvent):
-            session.rejected = message.rate_limit_info
+            session.record_rate_limit(message.rate_limit_info)
         elif isinstance(message, UserMessage):
             # Claude Code says which tool results it took before its model goes on with them.
             blocks = message.content if isinstance(message.content, list) else []

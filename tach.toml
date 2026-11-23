@@ -6675,6 +6675,7 @@ depends_on = [
     "mindroom.providers.tool_policy",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.failure_text",
+    "mindroom.usage.limit_store",
 ]
 
 [[modules]]
@@ -8672,6 +8673,7 @@ depends_on = [
     "mindroom.providers.identity",
     "mindroom.providers.tool_policy",
     "mindroom.tool_system.dependencies",
+    "mindroom.usage.limit_store",
 ]
 
 [[modules]]
@@ -9986,6 +9988,10 @@ visibility = ["mindroom.session_storage.legacy_agno3_conversion", "mindroom.sess
 path = "mindroom.usage.legacy_usage_storage"
 depends_on = []
 visibility = []
+
+[[modules]]
+path = "mindroom.usage.limit_store"
+depends_on = []
 
 # Shared judgment leaves; no dependency on the response pipeline.
 [[modules]]
