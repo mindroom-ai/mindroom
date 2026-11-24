@@ -322,7 +322,7 @@ class WorkflowRunStore:
         with self._connection() as connection:
             rows = connection.execute(
                 "SELECT DISTINCT state FROM workflow_nodes "
-                "WHERE run_id = ? AND stale = 0 AND NOT (state = 'waiting' AND waiting_on = 'peer')",
+                "WHERE run_id = ? AND stale = 0 AND NOT (state = 'waiting' AND COALESCE(waiting_on, '') = 'peer')",
                 (run_id,),
             ).fetchall()
         return frozenset(WorkflowNodeState(row["state"]) for row in rows)
