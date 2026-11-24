@@ -57,7 +57,8 @@ async def complete_prompt[T: BaseModel](
     The instructions join with one blank line between them. Returns the answer with the call's usage, under ``run_id``
     when given, which the caller records (``helper_usage.py``).
     ``schema`` asks for structured output the way ``provider`` supports it: a ``forced_tool`` route answers with a
-    forced tool call, and a JSON-mode route also gets the JSON prompt at the end of the system message.
+    forced tool call, and a JSON-mode route also gets the JSON prompt at the end of the system message. A model
+    fallback chain advertises its first model's mode and answers in that mode's shape whichever model answers.
     """
     system = join_sections((*instructions, output_format_prompt(provider.capabilities, schema)))
     messages = (*([Message(role="system", content=system)] if system else []), Message(role="user", content=prompt))
@@ -70,23 +71,26 @@ async def complete_prompt[T: BaseModel](
             overrides=overrides,
         ),
     )
-    identity = provider.identity
+    reply = turn.message
+    # A fallback model (``providers/pipeline/fallback.py``) may have answered in place of ``provider``'s own.
+    answered = read_model_provenance(reply.provider_data)
+    model_id, model_provider = (
+        (answered.model_id, answered.provider) if answered else (provider.identity.id, provider.identity.provider)
+    )
     metrics = RunMetrics(duration=perf_counter() - started)
-    metrics.add(turn.usage, model_id=identity.id, provider=identity.provider)
+    metrics.add(turn.usage, model_id=model_id, provider=model_provider)
     text = turn.content if schema is None else structured_answer_text(turn, provider.capabilities)
     lenient = provider.capabilities.structured_output == "json_mode"
     parsed = None if schema is None else parse_structured(text, schema, lenient=lenient)
     if schema is not None and parsed is None:
         logger.warning("helper_structured_output_unparsed", schema=schema.__name__)
-    reply = turn.message
     requests: tuple[RequestUsage, ...] = ()
     if not usage_sums_attempts(reply.provider_data):
-        model = read_model_provenance(reply.provider_data)
-        requests = (RequestUsage(created_at=reply.created_at, metrics=turn.usage, model=model),)
+        requests = (RequestUsage(created_at=reply.created_at, metrics=turn.usage, model=answered),)
     usage = HelperUsage(
         run_id=run_id or str(uuid4()),
-        model=identity.id,
-        provider=identity.provider,
+        model=model_id,
+        provider=model_provider,
         metrics=metrics,
         requests=requests,
     )

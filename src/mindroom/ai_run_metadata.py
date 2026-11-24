@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.budgets.pricing import format_cost_usd, run_cost_usd
+from mindroom.config.models import fallback_order, split_model_reference
 from mindroom.constants import AI_RUN_METADATA_KEY, PRIOR_USAGE_BY_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY
 from mindroom.delegation.cost import merge_by_key, received_subagent_cost_usd, stored_by_id
 from mindroom.llm.messages import is_own_model_message
@@ -315,6 +316,22 @@ def merge_usage(*views: Mapping[str, RunMetrics]) -> dict[str, RunMetrics]:
     return merge_by_key(views, lambda usage: sum(usage.tokens.to_dict().values()))
 
 
+def _answering_model_name(config: Config, model_name: str, *, model_id: str | None, provider: str | None) -> str:
+    """Return the configured name of the model a run recorded: ``model_name``, or the fallback that answered for it."""
+    model_config = config.models.get(model_name)
+    if model_config is None or model_id is None or provider is None:
+        return model_name
+
+    def answered(name: str) -> bool:
+        identity = model_identity(config.models[name])
+        return (identity.id, identity.provider) == (model_id, provider)
+
+    if answered(model_name):
+        return model_name
+    fallbacks = fallback_order(config.models, split_model_reference(model_name)[0])
+    return next((name for name in fallbacks if answered(name)), model_name)
+
+
 def model_payload(
     config: Config,
     model_name: str,
@@ -397,6 +414,8 @@ def build_ai_run_metadata_content(
     turn running in this context when this builds: an approval resume makes its builder before its calls run.
     """
     metrics = turn_usage(prior_usage, metrics)
+    configured_name = model_name
+    model_name = _answering_model_name(config, model_name, model_id=model, provider=model_provider)
     model_config = config.models.get(model_name)
     model_id = model or (model_config.id if model_config is not None else None)
     provider = model_provider or (model_config.provider if model_config is not None else None)
@@ -409,6 +428,8 @@ def build_ai_run_metadata_content(
         "status": status.value.lower(),
     }
     payload["model"] = model_payload(config, model_name, model_id=model_id, provider=provider)
+    if model_name != configured_name:
+        payload["model"]["fallback_from"] = configured_name
     if metrics is not None:
         usage = ReplyUsage.of(
             metrics,

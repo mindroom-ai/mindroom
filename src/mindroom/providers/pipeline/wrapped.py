@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     )
     from mindroom.llm.usage import MessageMetrics
 
-__all__ = ["RequestProjection", "Retry", "WrappedProvider", "attempts"]
+__all__ = ["RequestProjection", "Retry", "WrappedProvider", "attempts", "commits_attempt", "with_carried_usage"]
 
 type _Stage = Callable[[ModelProvider, ModelRequest], AsyncIterator[StreamEvent]]
 
@@ -179,13 +179,13 @@ async def attempts(
                     except StopAsyncIteration:
                         break
                     usage.observe(event)
-                    committed = committed or _commits_attempt(event)
+                    committed = committed or commits_attempt(event)
                     finished = finished or isinstance(event, TurnCompleted)
                     if isinstance(event, TurnCompleted) and request is not sent:
                         # The attempt was another request than the caller's, so its usage sizes none of the caller's.
                         message = event.message
                         message.provider_data = {**(message.provider_data or {}), REWRITTEN_ATTEMPT_KEY: True}
-                    yield _with_carried_usage(event, carried)
+                    yield with_carried_usage(event, carried)
             if finished:
                 return
             raise incomplete_stream_error(provider=inner.identity.provider)
@@ -199,7 +199,7 @@ async def attempts(
             # A failure raised above the retry stage, such as a download, carries no budget; the request's stays.
             budget = error.retry_budget or request.retry_budget
         if (report := usage.settle()) is not None:
-            yield _with_carried_usage(report, carried)
+            yield with_carried_usage(report, carried)
         if reissue.delay_seconds:
             await asyncio.sleep(reissue.delay_seconds)
         carried = add_usage(carried, usage.settled)
@@ -208,7 +208,7 @@ async def attempts(
         )
 
 
-def _commits_attempt(event: StreamEvent) -> bool:
+def commits_attempt(event: StreamEvent) -> bool:
     """Return whether a retry after this event could repeat work: output the caller received, or a hosted tool's run.
 
     It decides for a failure the adapter raised and for a stage's own stall alike.
@@ -220,7 +220,7 @@ def _commits_attempt(event: StreamEvent) -> bool:
     return isinstance(event, ToolCallReady)
 
 
-def _with_carried_usage(event: StreamEvent, carried: MessageMetrics | None) -> StreamEvent:
+def with_carried_usage(event: StreamEvent, carried: MessageMetrics | None) -> StreamEvent:
     """Add the failed attempts' usage to a reissued attempt's finished turn, marking its usage as summing attempts.
 
     The mark goes on the attempt's reports and its finished turn alike, once the failed attempts reported tokens.

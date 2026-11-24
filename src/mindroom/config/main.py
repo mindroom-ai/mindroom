@@ -533,6 +533,48 @@ class Config(BaseModel):
         return fallback if fallback is not None else f"Unknown {label}: {model!r}"
 
     @model_validator(mode="after")
+    def validate_model_fallbacks(self) -> Config:
+        """Require each model's ``fallbacks`` to name other configured models, once each, without a cycle."""
+        for name, model in self.models.items():
+            for fallback in model.fallbacks:
+                if fallback == name:
+                    msg = f"models.{name}.fallbacks must not name the model itself"
+                    raise ValueError(msg)
+                # A ``name@level`` reference is not a configured name, though the table finds it.
+                if not dict.__contains__(self.models, fallback):
+                    available = ", ".join(sorted(self.models))
+                    msg = f"models.{name}.fallbacks: unknown model {fallback!r}. Configured models: {available}"
+                    raise ValueError(msg)
+            if len(set(model.fallbacks)) != len(model.fallbacks):
+                msg = f"models.{name}.fallbacks must not repeat a model"
+                raise ValueError(msg)
+        if cycle := self._fallback_cycle():
+            msg = f"models fallbacks form a cycle: {' -> '.join(cycle)}"
+            raise ValueError(msg)
+        return self
+
+    def _fallback_cycle(self) -> list[str] | None:
+        """Return a cycle that following fallbacks reaches, or None; each model is explored once."""
+        done: set[str] = set()
+        path: list[str] = []
+
+        def visit(name: str) -> list[str] | None:
+            path.append(name)
+            for fallback in self.models[name].fallbacks:
+                if fallback in path:
+                    return [*path[path.index(fallback) :], fallback]
+                if fallback not in done and (cycle := visit(fallback)):
+                    return cycle
+            path.pop()
+            done.add(name)
+            return None
+
+        for name in self.models:
+            if name not in done and (cycle := visit(name)):
+                return cycle
+        return None
+
+    @model_validator(mode="after")
     def validate_budgets(self) -> Config:
         """Require a configured fallback model for budgets."""
         if self.budgets is not None and self.budgets.fallback_model not in self.models:

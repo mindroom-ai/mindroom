@@ -881,6 +881,7 @@ visibility = [
 [[modules]]
 path = "mindroom.ai_run_metadata"
 depends_on = [
+    "mindroom.config.models",
     "mindroom.constants",
     "mindroom.model_usage",
     "mindroom.llm",
@@ -7225,6 +7226,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.providers.pipeline"
 depends_on = [
+    "mindroom.agent_loop.structured",
     "mindroom.bounded_bytes",
     "mindroom.constants",
     "mindroom.llm",

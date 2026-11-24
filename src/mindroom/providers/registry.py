@@ -2,15 +2,15 @@
 
 A key the dashboard saved for the model (``model:<name>``) beats the configured key, which beats the provider's
 shared key; Codex gets the configured default instructions; and every request goes through the model's idle
-limit, the media fallback prompt, and the request log.
+limit, the media fallback prompt, and the request log, then through its fallback chain when it has one.
 """
 
 from __future__ import annotations
 
-from functools import partial
+from functools import cache, partial
 from typing import TYPE_CHECKING, Any, cast, get_args
 
-from mindroom.config.models import unsupported_level_message
+from mindroom.config.models import fallback_order, split_model_reference, unsupported_level_message
 from mindroom.llm.errors import AuthenticationFailed
 from mindroom.logging_config import get_logger
 from mindroom.providers.anthropic.settings import ACCEPTED_KEYS as CLAUDE_ACCEPTED_KEYS
@@ -31,6 +31,7 @@ from mindroom.providers.openai.build import OPENAI_FAMILY_PROVIDERS, ProviderRun
 from mindroom.providers.openai.build import accepted_extra_kwargs as openai_accepted_extra_kwargs
 from mindroom.providers.openai.build import build_provider as build_openai_provider
 from mindroom.providers.pipeline.compose import wrap_provider
+from mindroom.providers.pipeline.fallback import ChainModel, fallback_stream
 from mindroom.providers.pipeline.request_log import RequestLog
 from mindroom.providers.pipeline.wrapped import WrappedProvider
 from mindroom.providers.reasoning import apply_reasoning_level
@@ -50,6 +51,7 @@ __all__ = [
     "build_model_provider",
     "check_extra_kwargs",
     "configured_model",
+    "fallback_chain",
     "model_token_counter",
     "stream_idle_timeout_seconds",
 ]
@@ -151,14 +153,63 @@ def build_model_provider(
     ``execution_identity`` scopes the prompt-cache and session keys of the Codex and Kimi routes, and the Claude Code
     processes of the ``claude_code`` route.
     Raises ``ValueError`` for an unknown model name, an unsupported provider, or ``extra_kwargs`` its route
-    does not accept.
+    does not accept. A model with ``fallbacks`` answers through its fallback chain (``fallback_chain``), whose
+    providers are built on first use.
     """
+    provider = _build_single_provider(config, runtime_paths, model_name, execution_identity=execution_identity)
+    chain = fallback_chain(config, runtime_paths, model_name, execution_identity=execution_identity)
+    if not chain:
+        return provider
+    stage = partial(fallback_stream, model_name=split_model_reference(model_name)[0], chain=chain)
+    return WrappedProvider(provider, stage)
+
+
+def fallback_chain(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    model_name: str,
+    *,
+    execution_identity: ToolExecutionIdentity | None = None,
+) -> tuple[ChainModel, ...]:
+    """Return the models ``model_name`` falls back to, in ``fallback_order``, each built only when first tried.
+
+    A fallback runs at the reasoning level of a ``name@level`` reference when it offers that level, else at its default.
+    """
+    name, level = split_model_reference(model_name)
+    chain: list[ChainModel] = []
+    for fallback in fallback_order(config.models, name):
+        reasoning = config.models[fallback].reasoning
+        reference = f"{fallback}@{level}" if level is not None and reasoning and level in reasoning.levels else fallback
+        # Built once per chain, on its first failover, and logged at debug since that happens per request.
+        build = cache(
+            partial(
+                _build_single_provider,
+                config,
+                runtime_paths,
+                reference,
+                execution_identity=execution_identity,
+                fallback=True,
+            ),
+        )
+        chain.append(ChainModel(fallback, config.models[fallback].context_window, build))
+    return tuple(chain)
+
+
+def _build_single_provider(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    model_name: str,
+    *,
+    execution_identity: ToolExecutionIdentity | None,
+    fallback: bool = False,
+) -> ModelProvider:
+    """Return the provider of the model configured as ``model_name`` alone, without its fallback chain."""
     model_config = configured_model(config, runtime_paths, model_name)
     adapter = _build_adapter(model_config, config, runtime_paths, execution_identity=execution_identity)
     # A reference ``configured_model`` left in place has no value, so it must not be sent as the key.
     if variable := api_key_env_reference(model_config):
         adapter = WrappedProvider(adapter, partial(_unset_key_stage, variable=variable))
-    logger.info(
+    (logger.debug if fallback else logger.info)(
         "Using AI model",
         model=model_name,
         provider=model_config.provider,

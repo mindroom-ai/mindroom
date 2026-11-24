@@ -75,6 +75,8 @@ _RATE_LIMIT_NAMES = frozenset({"rate_limit_error", "rate_limit_exceeded"})
 # Z.ai's business codes, which it sends with a 429 like a rate limit, for an account without balance or resource
 # package (1113), an expired GLM Coding Plan (1309), and an expired enterprise package (1314); its codes for a usage
 # limit, extra usage included, name the time the limit resets, so they stay rate limits.
+# The Codex backend's error types, sent with a 429, for a ChatGPT plan whose Codex usage limit is reached until the
+# ``resets_at`` the body names, often hours away, and for a plan that does not include Codex.
 _QUOTA_EXHAUSTED_NAMES = frozenset(
     {
         "insufficient_quota",
@@ -88,6 +90,8 @@ _QUOTA_EXHAUSTED_NAMES = frozenset(
         "1113",
         "1309",
         "1314",
+        "usage_limit_reached",
+        "usage_not_included",
     },
 )
 # How providers word a refusal their account's billing causes when they send no billing name, which no retry passes
@@ -99,12 +103,14 @@ _QUOTA_EXHAUSTED_NAMES = frozenset(
 # Studio at https://ai.studio/projects to manage your project and billing." and "Your project has exceeded its monthly
 # spending cap.", or "Your billing account has ..." for the billing account's cap. OpenRouter's 403 for a key that
 # reached the credit limit set on it: "Key limit exceeded (monthly limit). Manage it using ...".
+# The Codex backend's "The usage limit has been reached", for a reply that lost its error type.
 _QUOTA_EXHAUSTED_WORDING = (
     "credit balance is too low",
     "you have reached your specified",
     "prepayment credits are depleted",
     "exceeded its monthly spending cap",
     "key limit exceeded",
+    "the usage limit has been reached",
 )
 # The name Anthropic gives rejected credentials, with or without its 401 status.
 _AUTHENTICATION_ERROR_TYPE = "authentication_error"

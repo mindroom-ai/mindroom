@@ -238,11 +238,13 @@ class UsageReported:
     the output is delivered still settles what the provider billed; each partial report replaces the one before.
     ``sums_attempts`` marks a report a retrying stage forwarded from an attempt reissued after earlier attempts
     reported usage: from that report on, the request's reports add up more than one attempt.
+    ``answered_by`` is the model a fallback stage sent the request to in place of the stream's own, which billed it.
     """
 
     usage: MessageMetrics
     final: bool = True
     sums_attempts: bool = False
+    answered_by: ModelIdentity | None = None
 
 
 @dataclass(frozen=True, slots=True)
