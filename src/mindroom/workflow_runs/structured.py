@@ -55,7 +55,7 @@ def check_schema(schema: object) -> None:
     """
     root_schema = _check_draft_schema(schema)
     root = DRAFT202012.create_resource(root_schema)
-    root_resolver = _NOTHING_ELSE.with_resource("", root).resolver()
+    root_resolver = _NOTHING_ELSE.resolver_with_root(root)
     pending: deque[tuple[object, Any, bool]] = deque([(root_schema, root_resolver, False)])
     seen: set[tuple[int, str, tuple[str, ...]]] = set()
     while pending:

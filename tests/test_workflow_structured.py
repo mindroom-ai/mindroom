@@ -575,3 +575,44 @@ async def test_dangling_ref_inside_components_schema_fails_at_admission_with_zer
     assert stack.jobs.retained_jobs() == ()
     assert model.requests == []
     assert run_usage(stack.store, stack.run_id)["cost_usd"] == 0
+
+
+@pytest.mark.asyncio
+async def test_bundled_recursive_schema_with_root_and_relative_ids_is_accepted(
+    stack: WorkflowStack,
+) -> None:
+    """A valid bundled recursive schema with an absolute root $id and embedded relative $id passes preflight."""
+    bundled = {
+        "$id": "https://example.org/schemas/tree.json",
+        "$ref": "#/$defs/Node",
+        "$defs": {
+            "Node": {
+                "$id": "node.json",
+                "type": "object",
+                "properties": {"child": {"$ref": "#"}},
+            },
+        },
+    }
+    check_schema(bundled)
+    assert validation_error({"child": {}}, bundled) is None
+    assert validation_error({"child": 3}, bundled) is not None
+
+    model = stack.child_script(answer('```json\n{"child": {}}\n```'))
+    assert await stack.result("@0", "agent", {"prompt": "Return a tree.", "schema": bundled}) == {"child": {}}
+    assert len(model.requests) == 1
+
+    # A dangling local reference inside the embedded relative-$id schema stays rejected.
+    broken = {
+        "$id": "https://example.org/schemas/tree.json",
+        "$ref": "#/$defs/Node",
+        "$defs": {
+            "Node": {
+                "$id": "node.json",
+                "type": "object",
+                "properties": {"child": {"$ref": "#/$defs/Missing"}},
+            },
+        },
+    }
+    with pytest.raises(SchemaError) as missing:
+        check_schema(broken)
+    assert str(missing.value) == ("schema is not valid JSON Schema: reference '#/$defs/Missing' does not resolve.")
