@@ -606,6 +606,7 @@ class AgentBot:
                 sending_device_id=lambda: self._sending_device_id,
                 reply_effects=self._reply_runtime.run_effects,
                 reply_row_resolved=self._reply_row_resolved,
+                is_follow_up_settled=principal.is_settled,
             ),
         )
         self._post_response_effects_support = PostResponseEffectsSupport(

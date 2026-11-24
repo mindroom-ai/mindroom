@@ -1184,6 +1184,8 @@ CONVERSATION_CONTENT_KEY = "io.mindroom.conversation"
 # A finished call's duration and spoken turns by sender ID, on its transcript message.
 CALL_TRANSCRIPT_CONTENT_KEY = "io.mindroom.call_transcript"
 STREAM_STATUS_KEY = "io.mindroom.stream_status"
+# Marks a finalized reply or handoff that should not trigger push while work continues.
+SUPPRESS_PUSH_KEY = "io.mindroom.suppress_push"
 # The model reasoning a streamed reply showed, with how long it was observed, on the reply's terminal update.
 REASONING_CONTENT_KEY = "io.mindroom.reasoning"
 STREAM_VISIBLE_BODY_KEY = "io.mindroom.visible_body"

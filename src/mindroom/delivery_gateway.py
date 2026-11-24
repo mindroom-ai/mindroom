@@ -128,10 +128,15 @@ from mindroom.streaming import (
     StreamingResponse,
     current_task_is_process_shutdown,
     interactive_response_for_visible_body,
+    is_error_ai_run,
     send_streaming_response,
     stream_progress_edits,
 )
+from mindroom.tool_jobs.conversation import ConversationKey
+from mindroom.tool_jobs.follow_ups import has_working_jobs_for_conversation
+from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.events import tool_markers_in_text
+from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -560,6 +565,8 @@ class DeliveryGatewayDeps:
     reply_effects: Callable[[tuple[PostCommitEffect, ...]], Awaitable[None]] | None = None
     # Wakes claims that waited for a reply's earlier writes.
     reply_row_resolved: Callable[[str], None] | None = None
+    # Whether a follow-up event ID already settled in this bot's journal.
+    is_follow_up_settled: Callable[[str], Awaitable[bool]] | None = None
 
 
 _MATRIX_DELIVERY_FAILURE_REASONS: dict[MatrixDeliveryFailureKind, str] = {
@@ -1845,6 +1852,12 @@ class DeliveryGateway:
             reply_model=handle.reply_model,
             edited_existing=edited_event_id is not None,
         )
+        await self._maybe_suppress_final_push(
+            delivery_extra_content,
+            target=request.target,
+            identity=request.identity,
+            has_interactive_prompt=interactive_response.interactive_metadata is not None,
+        )
         try:
             event_id = await self._send_reply_write(
                 reply_write,
@@ -2080,6 +2093,47 @@ class DeliveryGateway:
             return {}
         return {ACTING_REQUESTER_KEY: requester_id}
 
+    async def _maybe_suppress_final_push(
+        self,
+        extra_content: dict[str, Any],
+        *,
+        target: MessageTarget,
+        identity: ResponseIdentity,
+        has_interactive_prompt: bool,
+    ) -> None:
+        """Tag a finalized reply with suppress_push when background work continues."""
+        if (
+            not has_interactive_prompt
+            and not is_error_ai_run(extra_content)
+            and await self._should_suppress_final_push(target, identity)
+        ):
+            extra_content[constants.SUPPRESS_PUSH_KEY] = True
+
+    async def _should_suppress_final_push(
+        self,
+        target: MessageTarget,
+        identity: ResponseIdentity,
+    ) -> bool:
+        """Return whether a finalized reply should suppress push while background work stays active."""
+        runtime = get_background_runtime(self.deps.runtime_paths)
+        if runtime is None:
+            return False
+        envelope = identity.response_envelope
+        key = ConversationKey(
+            recipient=self.deps.agent_name,
+            room_id=target.room_id,
+            thread_id=target.resolved_thread_id,
+            requester_id=envelope.requester_id,
+            silent=envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND,
+        )
+        current_follow_up_id = envelope.source_event_id if envelope.origin.intent is TurnIntent.JOB_FOLLOW_UP else None
+        return await has_working_jobs_for_conversation(
+            runtime,
+            key,
+            current_follow_up_id=current_follow_up_id,
+            is_follow_up_settled=self.deps.is_follow_up_settled,
+        )
+
     async def _deliver_stream(
         self,
         request: StreamingDeliveryRequest,
@@ -2126,6 +2180,7 @@ class DeliveryGateway:
             interactive_source_event_id=delivery_turn_id,
             allow_new_terminal_message=request.allow_new_terminal_message,
             placeholder_ready=request.placeholder_ready,
+            suppress_final_push=lambda: self._should_suppress_final_push(request.target, request.identity),
             # What a stopped attempt at the reply showed; the stream continues below it.
             resumed=handle.resumed,
             initial_send=reply_hooks.initial_send,

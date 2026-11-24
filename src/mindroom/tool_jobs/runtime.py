@@ -222,6 +222,15 @@ def _stopped_while_working(job: BackgroundJob) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
+class ConversationWorkingState:
+    """One conversation's live approval, active-job, and unconsumed ended-job state."""
+
+    awaiting_approval: bool = False
+    has_active: bool = False
+    ended_jobs: tuple[BackgroundJob, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class AcknowledgeWait:
     """One claimed outcome to mark consumed in a batched acknowledgement."""
 
@@ -1403,6 +1412,35 @@ class ToolJobRuntime:
                 and self._grant(entry.job) == "allowed"
             ]
         return tuple(sorted(ended, key=lambda job: (job.created_at, job.job_id)))
+
+    async def conversation_working_state(self, key: ConversationKey) -> ConversationWorkingState:
+        """Inspect one conversation's approval, active-job, and unconsumed ended-job state.
+
+        Any matching job waiting on approval (including a workflow-node child) marks
+        ``awaiting_approval=True`` immediately so the conversation surfaces in Needs You.
+        Only non-workflow-node depth-0 jobs count toward active work or follow-ups.
+        """
+        async with self._lock:
+            if self._closed:
+                return ConversationWorkingState()
+            has_active = False
+            ended: list[BackgroundJob] = []
+            for entry in self._by_conversation.get(
+                (key.recipient, key.room_id, key.thread_id, key.requester_id),
+                {},
+            ).values():
+                if (entry.job.source_kind == SILENT_SCHEDULE_SOURCE_KIND) != key.silent:
+                    continue
+                status = entry.job.status
+                if status == "awaiting_approval":
+                    return ConversationWorkingState(awaiting_approval=True)
+                if entry.job.depth != 0 or is_workflow_node_job(entry.job):
+                    continue
+                if status not in TERMINAL_STATUSES:
+                    has_active = True
+                elif not entry.job.consumed and entry.claim is None and self._grant(entry.job) == "allowed":
+                    ended.append(entry.job)
+            return ConversationWorkingState(has_active=has_active, ended_jobs=tuple(ended))
 
     async def expire_ended(
         self,

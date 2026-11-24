@@ -14,10 +14,10 @@ from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.turn_origin import SenderKind, TurnIntent, TurnOrigin, TurnTrust
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     from mindroom.event_journal import JournalEvent
-    from mindroom.tool_jobs.runtime import BackgroundJob
+    from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
 
 # How many follow-ups run in a row in a conversation without a human message; after that, results wait for one.
 _FOLLOW_UP_LIMIT = 20
@@ -128,6 +128,33 @@ def follow_up_jobs(jobs: Sequence[BackgroundJob]) -> tuple[BackgroundJob, ...]:
     return tuple(
         job for job in jobs if job.status != "cancelled" and _follow_up_streak(job.source_event_id) < _FOLLOW_UP_LIMIT
     )
+
+
+async def has_working_jobs_for_conversation(
+    runtime: ToolJobRuntime,
+    key: ConversationKey,
+    *,
+    current_follow_up_id: str | None = None,
+    is_follow_up_settled: Callable[[str], Awaitable[bool]] | None = None,
+) -> bool:
+    """Return whether the conversation stays in Working due to active or pending follow-up jobs.
+
+    Returns False immediately when any matching conversation job awaits human approval so the
+    conversation surfaces in Needs You. Returns True when any other non-terminal depth-0 job
+    is active, or when unconsumed ended jobs will trigger a new follow-up turn.
+    """
+    state = await runtime.conversation_working_state(key)
+    if state.awaiting_approval:
+        return False
+    if state.has_active:
+        return True
+    pending = follow_up_jobs(state.ended_jobs)
+    if not pending:
+        return False
+    follow_up_id = next_follow_up_id(key, pending)
+    if follow_up_id == current_follow_up_id:
+        return False
+    return not (is_follow_up_settled is not None and await is_follow_up_settled(follow_up_id))
 
 
 def held_jobs(jobs: Sequence[BackgroundJob]) -> tuple[BackgroundJob, ...]:
