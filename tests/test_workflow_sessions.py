@@ -462,3 +462,26 @@ async def test_refused_follow_up_falls_back_to_fresh_child_with_transcript(stack
     assert "Step one" in prompt2
     assert "a1" in prompt2
     assert prompt2.endswith("\n\nStep two")
+
+
+@pytest.mark.asyncio
+async def test_resumed_failed_last_turn_continues_same_child(stack: WorkflowStack) -> None:
+    """When the last turn failed with no tool call, resuming continues the same child instead of starting fresh."""
+    stack.child_script(answer("a1"), raising(RuntimeError("boom")))
+    await stack.result("@0", "session", {"name": "dev"}, meta={"name": "dev"})
+    assert await stack.result("@1", "turn", _turn_args("@0", 1, "m1"), meta={"name": "dev"}) == "a1"
+    child1 = delegation_child(stack.node_job("@1"))
+    with pytest.raises(NodeFailed):
+        await stack.result("@2", "turn", _turn_args("@0", 2, "m2"), meta={"name": "dev"})
+    await stack.finish_attempt("v1")
+
+    await stack.resume(stack.run_id)
+    model2 = stack.child_script(answer("a2"))
+    await stack.result("@0", "session", {"name": "dev"}, meta={"name": "dev"})
+    r1 = await stack.submit("@1", "turn", _turn_args("@0", 1, "m1"), meta={"name": "dev"})
+    assert (r1.cached, r1.result) == (True, "a1")
+    assert await stack.result("@2", "turn", _turn_args("@0", 2, "m2"), meta={"name": "dev"}) == "a2"
+
+    child2 = delegation_child(stack.node_job("@2"))
+    assert child2.subagent_id == child1.subagent_id
+    assert _user_texts(model2.requests[0]) == ["m1", "m2"]

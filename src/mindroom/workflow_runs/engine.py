@@ -919,7 +919,14 @@ class WorkflowEngine:
         elif shown in ("agent", "turn"):
             follow_up = None
             if shown == "turn" and session is not None:
-                follow_up, prompt = await self._prepare_turn(run, session, all_turns, earlier, str(asked["message"]))
+                follow_up, prompt = await self._prepare_turn(
+                    run,
+                    session,
+                    all_turns,
+                    earlier,
+                    saved,
+                    str(asked["message"]),
+                )
                 node = replace(node, request={**asked, "prompt": prompt})
             dispatch = partial(self._dispatch_agent, run, timeout=_timeout(meta), follow_up=follow_up)
             start = partial(self._enter, run, node, dispatch)
@@ -1320,19 +1327,30 @@ class WorkflowEngine:
         session: WorkflowNode,
         all_turns: list[WorkflowNode],
         earlier: list[WorkflowNode],
+        saved: WorkflowNode | None,
         message: str,
     ) -> tuple[str | None, str]:
         """Decide whether a session turn continues the saved child or starts a fresh child with a transcript."""
         completed = [turn for turn in earlier if turn.state is WorkflowNodeState.COMPLETED]
         prev = completed[-1] if completed else None
         prev_sub = prev.links.get("subagent_id") if prev is not None else None
+        retry = (
+            saved
+            if saved is not None and saved.state in (WorkflowNodeState.FAILED, WorkflowNodeState.CANCELLED)
+            else None
+        )
+        valid_tips = {f"{prev.key}:{prev.generation}"} if prev is not None else set()
+        ignored = {prev.key} if prev is not None else set()
+        if retry is not None and not retry.links.get("made"):
+            valid_tips.add(f"{retry.key}:{retry.generation}")
+            ignored.add(retry.key)
         can_continue = (
             prev is not None
             and prev_sub is not None
             and session.links.get("subagent_id") == prev_sub
-            and session.links.get("tip") == f"{prev.key}:{prev.generation}"
+            and session.links.get("tip") in valid_tips
             and not any(
-                other.key != prev.key
+                other.key not in ignored
                 and int(other.request["turn"]) >= int(prev.request["turn"])
                 and other.links.get("subagent_id") == prev_sub
                 for other in all_turns
@@ -1355,7 +1373,12 @@ class WorkflowEngine:
         if not completed:
             return None, message
         history = [
-            (str(turn.request["message"]), _answer_text(await asyncio.to_thread(self.store.whole_result, turn)))
+            (
+                str(turn.request["message"]),
+                res
+                if isinstance(res := await asyncio.to_thread(self.store.whole_result, turn), str)
+                else json.dumps(res),
+            )
             for turn in completed
         ]
         return None, _transcript_prompt(history, message)
@@ -2075,11 +2098,6 @@ class WorkflowEngine:
                 reason = child.error or f"Nested run {child.run_id} ended interrupted."
                 return WorkflowNodeState.CANCELLED, None, {"kind": "interrupted", "message": reason}
         return None
-
-
-def _answer_text(value: object) -> str:
-    """Format a saved turn answer for an `Earlier conversation:` transcript prompt."""
-    return value if isinstance(value, str) else json.dumps(value)
 
 
 def _transcript_prompt(earlier: list[tuple[str, str]], message: str) -> str:
