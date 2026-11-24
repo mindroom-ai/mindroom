@@ -148,7 +148,7 @@ Rules:
 
 SKILLS_TOOL_USAGE_PROMPT = """When using skills, use the skill tools (skill names are not callable functions):
 - `get_skill_instructions(skill_name)` to load full instructions and list available references/scripts.
-- `get_skill_reference(skill_name, reference_path)` to read docs, or `get_skill_script(skill_name, script_path)` to read (never execute) scripts; omit the path to list files.
+- `get_skill_reference(skill_name, reference_path)` to read docs, or `get_skill_script(skill_name, script_path)` to read scripts; omit the path to list files.
 - Do not open a global skill's `SKILL.md` directly with file tools.
 """
 
