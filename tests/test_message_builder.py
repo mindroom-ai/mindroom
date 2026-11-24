@@ -104,6 +104,20 @@ def test_matrix_spoiler_span_is_preserved_and_pipes_stay_literal() -> None:
     assert markdown_to_html("||secret||") == "<p>||secret||</p>\n"
 
 
+def test_matrix_event_autolink_does_not_pair_dollar_signs_as_math() -> None:
+    """Autolinking a Matrix event URL prevents its ``$event_id`` from pairing with a later ``$`` as inline math."""
+    html = markdown_to_html(
+        "<https://matrix.to/#/!room:example.org/$first> — <span data-mx-spoiler>hidden</span>. "
+        "[Discussion](https://matrix.to/#/!room:example.org/$next)",
+    )
+    assert html == (
+        '<p><a href="https://matrix.to/#/!room:example.org/$first">'
+        "https://matrix.to/#/!room:example.org/$first</a> — "
+        "<span data-mx-spoiler>hidden</span>. "
+        '<a href="https://matrix.to/#/!room:example.org/$next">Discussion</a></p>\n'
+    )
+
+
 def test_raw_html_blockquote_in_list_item_keeps_inner_markdown_literal() -> None:
     """Nested raw HTML blocks are preserved but not reparsed for markdown."""
     html = markdown_to_html("- <blockquote>\n  **bold**\n  </blockquote>")

@@ -27,9 +27,9 @@ MATRIX_MARKDOWN_OUTPUT_FORMAT = (
     "- For math, use `$inline$` (no spaces just inside `$`) and `$$display$$` on its own line; never use `\\(...\\)` or "
     "`\\[...\\]`, which do not render as math.\n"
     "- Link Matrix rooms and threads/messages instead of writing bare `!room_id` or `$event_id` strings: use "
-    "`https://matrix.to/#/<room_id>` for rooms, and `[title](https://matrix.to/#/<room_id>/<event_id>)` (custom label) "
-    "or bare `https://matrix.to/#/<room_id>/<event_id>` (auto-labeled pill) for threads/messages (optional "
-    "`?via=<server>` for federated rooms; never wrap links in backticks).\n"
+    "`<https://matrix.to/#/!room_id>` for rooms, and `[title](https://matrix.to/#/!room_id/$event_id)` (custom label) "
+    "or `<https://matrix.to/#/!room_id/$event_id>` (auto-labeled pill) for threads/messages (optional `?via=server` "
+    "for federated rooms; never wrap links in backticks).\n"
     "- Mermaid fences, GitHub callouts (`> [!NOTE]`), footnotes, and external image URLs (`![](https://...)`) "
     "are not rendered; link to external URLs instead."
 )
