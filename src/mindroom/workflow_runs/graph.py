@@ -6,6 +6,7 @@ ran in, and the calls. Every text is bounded here, in what is shown, and never i
 
 from __future__ import annotations
 
+from bisect import bisect_left
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
@@ -215,15 +216,6 @@ def _order(row: _Row) -> tuple[int, int]:
     return (4, -(row["ended_at"] or 0)) if status == "completed" else (2, number)
 
 
-def _largest(maximum: int, fits: Callable[[int], bool]) -> int:
-    """Return the largest number up to *maximum* that fits, where zero does and a larger one never fits better."""
-    low, high = 0, maximum
-    while low < high:
-        middle = (low + high + 1) // 2
-        low, high = (middle, high) if fits(middle) else (low, middle - 1)
-    return low
-
-
 def fit_snapshot(graph: Graph, *, fits: Callable[[dict[str, Any]], bool]) -> dict[str, Any]:
     """Return the largest snapshot of *graph* that *fits*, with a count of everything it leaves out.
 
@@ -262,10 +254,12 @@ def fit_snapshot(graph: Graph, *, fits: Callable[[dict[str, Any]], bool]) -> dic
 
     if not fits(built(0, deepest)):
         if deepest and fits(built(0, 0)):
-            return built(0, _largest(deepest, lambda depth: fits(built(0, depth))))
+            depth = bisect_left(range(1, deepest + 1), True, key=lambda d: not fits(built(0, d)))
+            return built(0, depth)
         reduced = (built(0, 0, log=False), built(0, -1, log=False))
         return next((form for form in reduced if fits(form)), built(0, -1, log=False, phases=False))
-    return built(_largest(len(calls) + len(edges), lambda shown: fits(built(shown, deepest))), deepest)
+    shown = bisect_left(range(1, len(calls) + len(edges) + 1), True, key=lambda n: not fits(built(n, deepest)))
+    return built(shown, deepest)
 
 
 def graph_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any] | str | None:
