@@ -80,6 +80,7 @@ from .kubernetes_config import (
     KubernetesWorkerBackendConfig,
     kubernetes_backend_cleanup_signature,
     kubernetes_backend_config_signature,
+    sandbox_mount_dir_runtime_class_refusal,
 )
 
 if TYPE_CHECKING:
@@ -1054,6 +1055,12 @@ class KubernetesWorkerBackend:
         *,
         create_shared: bool,
     ) -> tuple[ScopedWorkspaceMount, ...]:
+        if (
+            spec.sandbox is not None
+            and spec.sandbox.mount_dir is not None
+            and self.config.runtime_class_name is not None
+        ):
+            raise WorkerBackendError(sandbox_mount_dir_runtime_class_refusal(self.config.runtime_class_name))
         return plan_scoped_workspace_mounts(
             worker_key=resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key),
             local_shared_storage_root=self._resources.storage_root,

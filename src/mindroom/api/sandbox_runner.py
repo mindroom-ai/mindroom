@@ -23,7 +23,7 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any
 from uuid import uuid4
 
 import yaml
@@ -189,9 +189,6 @@ class _PinnedSandboxMount:
 
     path: Path
     ino: int
-
-
-_UNSET_SANDBOX_MOUNT = object()
 
 
 def _parse_pinned_sandbox_mount(raw: object) -> _PinnedSandboxMount | None:
@@ -429,22 +426,17 @@ def initialize_sandbox_runner_app(
     *,
     config: Config | None = None,
     runner_token: str | None = None,
-    sandbox_mount: _PinnedSandboxMount | None | object = _UNSET_SANDBOX_MOUNT,
+    sandbox_mount: _PinnedSandboxMount | None = None,
 ) -> None:
     """Attach one explicit runtime context to a sandbox-runner app instance."""
-    resolved_sandbox_mount = (
-        startup_sandbox_mount_from_env()
-        if sandbox_mount is _UNSET_SANDBOX_MOUNT
-        else cast("_PinnedSandboxMount | None", sandbox_mount)
-    )
-    if resolved_sandbox_mount is not None:
-        _verify_pinned_sandbox_mount(resolved_sandbox_mount)
+    if sandbox_mount is not None:
+        _verify_pinned_sandbox_mount(sandbox_mount)
     committed_config = config or _runtime_config_or_empty(runtime_paths)
     context = _SandboxRunnerContext(
         runtime_paths=runtime_paths,
         config=committed_config,
         runner_token=runner_token or sandbox_proxy_config(runtime_paths).proxy_token,
-        sandbox_mount=resolved_sandbox_mount,
+        sandbox_mount=sandbox_mount,
     )
     # Requests load their own config's plugins; loading the startup config's now reports a broken one at startup.
     refresh_plugins(committed_config, runtime_paths)
@@ -776,6 +768,31 @@ async def _prepare_route_beside_setup(app: FastAPI, route: WorkerRoute) -> _Prep
     return prepare_route(app, route)
 
 
+def _verify_sandbox_mount_preflight(
+    route: WorkerRoute,
+    *,
+    runtime_paths: RuntimePaths,
+    sandbox_mount: _PinnedSandboxMount | None,
+) -> WorkerFailure | None:
+    if (
+        isinstance(route, ExecuteRequest)
+        and route.sandbox
+        and route.base_dir is not None
+        and sandbox_mount is None
+        and sandbox_exec.runner_uses_dedicated_worker(runtime_paths)
+    ):
+        return WorkerFailure(
+            error="Sandboxed mount_dir request requires a pinned sandbox_mount in the dedicated worker startup manifest.",
+            failure_kind="worker",
+        )
+    if sandbox_mount is not None:
+        try:
+            _verify_pinned_sandbox_mount(sandbox_mount)
+        except RuntimeError as exc:
+            return WorkerFailure(error=str(exc), failure_kind="worker")
+    return None
+
+
 def _prepare_worker_for_route(
     route: WorkerRoute,
     *,
@@ -785,11 +802,13 @@ def _prepare_worker_for_route(
     runner_token: str | None,
     sandbox_mount: _PinnedSandboxMount | None,
 ) -> sandbox_worker_prep.PreparedWorkerRequest | WorkerFailure | None:
-    if sandbox_mount is not None:
-        try:
-            _verify_pinned_sandbox_mount(sandbox_mount)
-        except RuntimeError as exc:
-            return WorkerFailure(error=str(exc), failure_kind="worker")
+    preflight_failure = _verify_sandbox_mount_preflight(
+        route,
+        runtime_paths=runtime_paths,
+        sandbox_mount=sandbox_mount,
+    )
+    if preflight_failure is not None:
+        return preflight_failure
     worker: sandbox_worker_prep.PreparedWorkerRequest | None = None
     if worker_key is not None:
         try:
@@ -1202,12 +1221,17 @@ def _prepare_execute_request(call: _ExecuteCall) -> _PreparedSandboxRequestConte
     )
     tool_output_workspace_root = (
         str(route.workspace)
-        if route.workspace is not None and (not request.sandbox or os.access(route.workspace, os.W_OK))
+        if route.workspace is not None
+        and (not request.sandbox or (request.base_dir is not None and os.access(route.workspace, os.W_OK)))
         else None
     )
     output_path = normalize_output_path_argument(request.kwargs.get(OUTPUT_PATH_ARGUMENT))
     if request.sandbox and output_path is not None and tool_output_workspace_root is None:
-        msg = "mindroom_output_path cannot write into a read-only sandbox mount."
+        msg = (
+            "mindroom_output_path is not supported in an empty-scratch sandbox without mount_dir."
+            if request.base_dir is None
+            else "mindroom_output_path cannot write into a read-only sandbox mount."
+        )
         raise sandbox_worker_prep.WorkerRequestPreparationError(msg)
     kwargs = dict(request.kwargs)
     if output_path is None:

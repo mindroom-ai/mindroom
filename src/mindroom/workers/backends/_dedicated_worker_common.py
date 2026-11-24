@@ -220,7 +220,14 @@ def normalize_sandbox_mount_dir(mount_dir: str) -> str:
     if "\x00" in mount_dir:
         msg = "mount_dir must not contain NUL bytes."
         raise ValueError(msg)
-    return agent_workspace_relative_path(mount_dir).as_posix()
+    relative = agent_workspace_relative_path(mount_dir)
+    if not relative.parts:
+        msg = "mount_dir must name a subdirectory inside the agent workspace, not the workspace root."
+        raise ValueError(msg)
+    if any(part.startswith(".") for part in relative.parts):
+        msg = "mount_dir cannot target hidden or dot-prefixed directories such as .mindroom, .config, or .git."
+        raise ValueError(msg)
+    return relative.as_posix()
 
 
 def resolve_sandbox_mount_target(
@@ -236,7 +243,7 @@ def resolve_sandbox_mount_target(
         raise ValueError(msg)
     normalized = normalize_sandbox_mount_dir(mount_dir)
     workspace_rel = workspaces[0].relative_to(storage_root)
-    target_rel = workspace_rel if normalized == "." else workspace_rel / normalized
+    target_rel = workspace_rel / normalized
     if not validate:
         return target_rel, None
     with open_directory_within_root(storage_root, target_rel, create=False) as fd:

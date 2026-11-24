@@ -16,7 +16,7 @@ Let an agent run shell commands in a sandboxed Kubernetes named worker that sees
 ### `run_shell_command` (`src/mindroom/tools/shell.py`)
 Add three optional parameters beside `worker` and `resource_profile` (hidden from schema whenever named workers are unavailable, and covered by `_invalid_arguments_reason` in `src/mindroom/tool_system/agent_tool_calls.py`):
 - `sandbox: bool | None = None`: run the named worker in isolated sandbox mode (ephemeral scratch directory only unless `mount_dir` is set).
-- `mount_dir: str | None = None`: workspace-relative directory to mount inside the sandboxed named worker (e.g. `"scratch/job1"`, or `"."` for workspace root). Always enables sandbox mode.
+- `mount_dir: str | None = None`: workspace-relative subdirectory to mount inside the sandboxed named worker (e.g. `"scratch/job1"`; workspace root `"."` and dot-prefixed segments like `.mindroom`, `.config`, or `.git` are refused). Always enables sandbox mode. Note that a writable `mount_dir` still allows repo-local files like `.git/hooks` if the normal worker later runs `git` there.
 - `mount_read_only: bool | None = None`: mount `mount_dir` read-only. Requires `mount_dir`.
 
 ### `mindroom-agent workers run` (`src/mindroom/agent_cli/main.py`)
@@ -34,7 +34,7 @@ Update minimal-mode prompt guidance (`src/mindroom/agent_cli/context.py`) briefl
 Define in `src/mindroom/workers/models.py`:
 - `LABEL_WORKER_SANDBOX = "mindroom.ai/worker-sandbox"`
 - `WorkerSandboxConfig(frozen=True, slots=True)`:
-  - `mount_dir: str | None = None` (normalized POSIX relative path, e.g. `"scratch/job1"` or `"."`, or `None` for empty scratch)
+  - `mount_dir: str | None = None` (normalized POSIX relative subdirectory path, e.g. `"scratch/job1"`, or `None` for empty scratch)
   - `mount_read_only: bool = False`
 - Add `sandbox: WorkerSandboxConfig | None = None` to `WorkerSpec`.
 
@@ -47,7 +47,8 @@ Validation in `named_worker_call(...)`:
   - `sandbox is False and mount_dir is not None` -> raise `NamedWorkerError("mount_dir always runs in sandbox mode; omit sandbox or set sandbox=true.")`.
   - `mount_read_only is True and mount_dir is None` -> raise `NamedWorkerError("mount_read_only requires mount_dir.")`.
 - `mount_dir` normalization:
-  - Reject NUL bytes; validate with `agent_workspace_relative_path(mount_dir)` (rejects empty/blank, `$`, absolute, `..`); normalize with `Path(rel).as_posix()`.
+  - Reject NUL bytes; validate with `agent_workspace_relative_path(mount_dir)` (rejects empty/blank, `$`, absolute, `..`); reject empty `relative.parts` (`"."` workspace root) and any dot-prefixed segment (`part.startswith(".")`); normalize with `relative.as_posix()`.
+  - Fail fast when `mount_dir` is set and `workers.kubernetes.runtimeClassName` is configured (runtimes such as gVisor synthesize inode numbers incompatible with `st_ino` mount verification); empty-scratch `sandbox=true` remains supported with `runtimeClassName`.
 - Track `sandbox_specified: bool` (True whenever any of `sandbox`, `mount_dir`, `mount_read_only` is not `None`) and `sandbox: WorkerSandboxConfig | None`.
 - On `_NamedWorkerFleet.admit`:
   - First call for `worker_key` locks `(resource_profile, sandbox)`.
@@ -61,7 +62,7 @@ When a named worker's admitted `sandbox` is not `None`:
 
 1. **Workspace mount** (`_dedicated_worker_common.py`, `kubernetes.py`, `kubernetes_resources.py`):
    - `mount_dir is None`: mount **no** workspace `subPath`.
-   - `mount_dir is not None`: resolve the agent's single `user_agent` workspace root, verify `workspace` and `mount_dir` exist without following symlinks (`open_directory_within_root(..., create=False)`), and mount only `subPath: <workspace_rel>[/<mount_dir>]` at canonical `mountPath: <storage_mount_path>/<workspace_rel>[/<mount_dir>]`, with `readOnly: True` when `mount_read_only=True`. Skip private legacy alias mounts.
+   - `mount_dir is not None`: resolve the agent's single `user_agent` workspace root, verify `workspace` and `mount_dir` exist without following symlinks (`open_directory_within_root(..., create=False)`), and mount only `subPath: <workspace_rel>/<mount_dir>` at canonical `mountPath: <storage_mount_path>/<workspace_rel>/<mount_dir>`, with `readOnly: True` when `mount_read_only=True`. Skip private legacy alias mounts and omit ordinary-worker `extra_containers`/`extra_volumes` and primary manifest env/secrets.
    - Pre-validate `mount_dir` existence/no-symlink on the primary before admission/pod creation so typos or symlinks fail fast with `NamedWorkerError` (CLI exit `125`) without creating worker state directories or Deployments; keep the authoritative check in `plan_scoped_workspace_mounts`.
 2. **Shared directories**: omit all `plan_shared_directory_mounts` (`kubernetes.py` + `kubernetes_resources.py`).
 3. **Knowledge bases**: omit all `_knowledge_storage_mounts` (`kubernetes_resources.py`).
@@ -78,16 +79,16 @@ When a named worker's admitted `sandbox` is not `None`:
 - In `src/mindroom/tool_system/sandbox_proxy.py`:
   - When admitted `sandbox` is not `None`:
     - If `sandbox.mount_dir is None`: `route.base_dir = None` (worker runs in its own ephemeral `<state_subpath>/workspace`).
-    - If `sandbox.mount_dir == "."`: `route.base_dir` is the workspace root relative to `storage_root`.
-    - If `sandbox.mount_dir` is a subdirectory: `route.base_dir` is `<workspace_rel>/<mount_dir>`.
-    - If `sandbox.mount_read_only` is `True` and explicit `mindroom_output_path` was supplied: raise `NamedWorkerError` (cannot write redirected output into a read-only mount).
+    - If `sandbox.mount_dir` is set: `route.base_dir` is `<workspace_rel>/<mount_dir>`.
+    - If explicit `mindroom_output_path` was supplied on either empty scratch (`mount_dir is None`) or `mount_read_only=True`: raise `NamedWorkerError`.
+    - For writable `mount_dir`, rewrite runner `saved_to_file` receipt paths to `<mount_dir>/<path>` so paths stay agent-workspace-relative.
     - Set `request.sandbox = True`.
 - In `src/mindroom/api/sandbox_runner.py` & `src/mindroom/api/sandbox_env_assembly.py`:
   - `_route_workspace`: when `isinstance(route, ExecuteRequest) and route.sandbox` and `worker is not None` and `route.base_dir is None`, return `worker.base_dir` (`paths.workspace.resolve()`) instead of calling `resolve_agent_runtime(..., create=True)`. When `workspace.is_dir()` is already true, do not call `mkdir`.
   - `_prepare_execute_request`: when `request.sandbox` is `True`:
     - Force `execution_env = {}` (never fall back to `sandbox_exec.request_execution_env` / `build_execution_tool_env`), empty `call_environment`, empty `call_path_prepend`, `credential_overrides = {}`.
     - Call `build_request_execution_env(..., sandbox=True)` which skips `.mindroom/worker-env.sh`, points `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` to `prepared.paths.root` (writable worker state root so RO mounts work and mounted dirs aren't polluted), and keeps `MINDROOM_AGENT_WORKSPACE = str(request_workspace)`.
-    - Set `tool_output_workspace_root = None` if `route.workspace` is not writable (`not os.access(route.workspace, os.W_OK)`), so large output auto-save never crashes on a read-only mount.
+    - Set `tool_output_workspace_root = None` when `request.base_dir is None` (empty scratch) or `route.workspace` is not writable (`not os.access(route.workspace, os.W_OK)`), so large output never auto-saves to an unreachable ephemeral worker path or crashes on a read-only mount.
     - Pass `sandbox=True` on `PreparedSandboxRunnerExecuteRequest` so `_resolve_entrypoint` sets `allowed_shared_services=frozenset()`.
   - Streamed execution (`stream_io=True`, `_shell_launch`) shares `_prepare_execute_request`, so `mindroom-agent workers run --sandbox` gets identical isolation.
 

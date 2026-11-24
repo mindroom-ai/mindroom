@@ -8548,7 +8548,6 @@ def test_kubernetes_sandbox_empty_scratch_strips_mounts_credentials_and_stamps_l
     [
         ("scratch/job1", False, "agents/general/workspace/scratch/job1"),
         ("scratch/job1", True, "agents/general/workspace/scratch/job1"),
-        (".", True, "agents/general/workspace"),
     ],
 )
 def test_kubernetes_sandbox_mount_dir_mounts_only_requested_subpath(
@@ -8606,10 +8605,13 @@ def test_kubernetes_sandbox_mount_dir_mounts_only_requested_subpath(
 
 
 def test_kubernetes_sandbox_mount_dir_refuses_missing_file_and_symlink(tmp_path: Path) -> None:
-    """Missing, file, or symlinked mount_dir raises WorkerBackendError and never creates directories."""
+    """Root, hidden/dot-prefixed, missing, file, or symlinked mount_dir raises WorkerBackendError without creating dirs."""
     storage_root = tmp_path / "storage"
     workspace = storage_root / "agents" / "general" / "workspace"
     workspace.mkdir(parents=True)
+    (workspace / ".mindroom").mkdir()
+    (workspace / ".config").mkdir()
+    (workspace / "a" / ".git").mkdir(parents=True)
     (workspace / "not_a_dir.txt").write_text("x", encoding="utf-8")
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -8618,7 +8620,15 @@ def test_kubernetes_sandbox_mount_dir_refuses_missing_file_and_symlink(tmp_path:
     runtime_paths = resolve_primary_runtime_paths(config_path=Path("config.yaml"), storage_path=storage_root)
     backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
 
-    for bad_dir in ("missing/sub", "not_a_dir.txt", "escape_link"):
+    for bad_dir, expected_pattern in (
+        (".", "not the workspace root"),
+        (".mindroom", "hidden or dot-prefixed"),
+        (".config", "hidden or dot-prefixed"),
+        ("a/.git", "hidden or dot-prefixed"),
+        ("missing/sub", "real directory without symlinks"),
+        ("not_a_dir.txt", "real directory without symlinks"),
+        ("escape_link", "real directory without symlinks"),
+    ):
         spec = WorkerSpec(
             named_worker_key(user_agent_key, "d" * 32),
             private_agent_names=frozenset(),
@@ -8626,7 +8636,7 @@ def test_kubernetes_sandbox_mount_dir_refuses_missing_file_and_symlink(tmp_path:
             sandbox=WorkerSandboxConfig(mount_dir=bad_dir),
             mirror_grantable_credentials=False,
         )
-        with pytest.raises(WorkerBackendError, match="real directory without symlinks"):
+        with pytest.raises(WorkerBackendError, match=expected_pattern):
             backend.ensure_worker(spec, now=10.0)
     assert not (workspace / "missing").exists()
     assert apps_api.created_bodies == []
@@ -8829,3 +8839,132 @@ def test_kubernetes_sandbox_pod_filters_extra_env_and_authenticated_proxy_urls(t
         assert ordinary_env[key] == value
     ordinary_manifest_env = _load_startup_manifest(backend, worker_key=user_agent_key)["runtime_paths"]["process_env"]
     assert ordinary_manifest_env["MINDROOM_CUSTOM_EXTRA"] == "should-be-dropped-on-sandbox"
+
+
+def test_kubernetes_sandbox_mount_dir_fails_fast_when_runtime_class_name_is_set(tmp_path: Path) -> None:
+    """Kubernetes backend refuses mount_dir when runtimeClassName is set (e.g. gVisor) while empty scratch succeeds."""
+    storage_root = tmp_path / "storage"
+    (storage_root / "agents" / "general" / "workspace" / "scratch" / "job1").mkdir(parents=True)
+    user_agent_key = "v1:tenant-123:user_agent:@alice:example.org:general"
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=storage_root,
+        process_env={
+            "MINDROOM_KUBERNETES_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "mindroom-storage",
+            "MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME": "gvisor",
+        },
+    )
+    config_from_env = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+    assert config_from_env.runtime_class_name == "gvisor"
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        runtime_class_name=config_from_env.runtime_class_name,
+    )
+
+    mounted_spec = WorkerSpec(
+        named_worker_key(user_agent_key, "a" * 32),
+        private_agent_names=frozenset(),
+        state_scope_worker_key=user_agent_key,
+        sandbox=WorkerSandboxConfig(mount_dir="scratch/job1"),
+        mirror_grantable_credentials=False,
+    )
+    with pytest.raises(WorkerBackendError, match=r"runtimeClassName.*gvisor.*sandbox=true without mount_dir"):
+        backend.ensure_worker(mounted_spec, now=10.0)
+    assert apps_api.created_bodies == []
+
+    scratch_key = named_worker_key(user_agent_key, "b" * 32)
+    scratch_spec = WorkerSpec(
+        scratch_key,
+        private_agent_names=frozenset(),
+        state_scope_worker_key=user_agent_key,
+        sandbox=WorkerSandboxConfig(),
+        mirror_grantable_credentials=False,
+    )
+    backend.ensure_worker(scratch_spec, now=10.0)
+    assert len(apps_api.created_bodies) == 1
+    assert apps_api.created_bodies[0]["spec"]["template"]["spec"]["runtimeClassName"] == "gvisor"
+    assert STARTUP_MANIFEST_SANDBOX_MOUNT not in _load_startup_manifest(backend, worker_key=scratch_key)
+
+
+def test_kubernetes_sandbox_startup_manifest_uses_minimal_allowlist(tmp_path: Path) -> None:
+    """Sandbox startup_manifest.json excludes primary process_env and env_file_values; ordinary workers keep them."""
+    storage_root = tmp_path / "storage"
+    (storage_root / "agents" / "general" / "workspace").mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("MINDROOM_DEPLOY_KEY=env-file-secret\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=storage_root,
+        process_env={"MINDROOM_DEPLOY_KEY": "process-env-secret"},
+    )
+    assert runtime_paths.process_env["MINDROOM_DEPLOY_KEY"] == "process-env-secret"
+    assert runtime_paths.env_file_values["MINDROOM_DEPLOY_KEY"] == "env-file-secret"
+
+    backend, _apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        extra_env={"MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "180"},
+    )
+    user_agent_key = "v1:tenant-123:user_agent:@alice:example.org:general"
+    sandbox_key = named_worker_key(user_agent_key, "c" * 32)
+    backend.ensure_worker(
+        WorkerSpec(
+            sandbox_key,
+            private_agent_names=frozenset(),
+            state_scope_worker_key=user_agent_key,
+            sandbox=WorkerSandboxConfig(),
+            mirror_grantable_credentials=False,
+        ),
+        now=10.0,
+    )
+    sandbox_manifest = _load_startup_manifest(backend, worker_key=sandbox_key)
+    serialized_sandbox_manifest = json.dumps(sandbox_manifest)
+    assert "MINDROOM_DEPLOY_KEY" not in serialized_sandbox_manifest
+    assert "process-env-secret" not in serialized_sandbox_manifest
+    assert "env-file-secret" not in serialized_sandbox_manifest
+    assert sandbox_manifest["runtime_paths"]["env_file_values"] == {}
+    sandbox_process_env = sandbox_manifest["runtime_paths"]["process_env"]
+    assert sandbox_process_env["MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS"] == "180"
+    assert sandbox_process_env["MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX"] == "workers"
+
+    backend.ensure_worker(WorkerSpec(user_agent_key, private_agent_names=frozenset()), now=10.0)
+    ordinary_manifest = _load_startup_manifest(backend, worker_key=user_agent_key)
+    assert ordinary_manifest["runtime_paths"]["process_env"]["MINDROOM_DEPLOY_KEY"] == "process-env-secret"
+    assert ordinary_manifest["runtime_paths"]["env_file_values"]["MINDROOM_DEPLOY_KEY"] == "env-file-secret"
+
+
+def test_kubernetes_sandbox_omits_extra_containers_and_extra_volumes(tmp_path: Path) -> None:
+    """Sandbox pods omit ordinary-worker extra_containers and extra_volumes, while ordinary pods preserve them."""
+    storage_root = tmp_path / "storage"
+    (storage_root / "agents" / "general" / "workspace").mkdir(parents=True)
+    runtime_paths = resolve_primary_runtime_paths(config_path=Path("config.yaml"), storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        extra_containers=({"name": "sidecar-proxy", "image": "example.com/sidecar:1"},),
+        extra_volumes=({"name": "sidecar-secret", "emptyDir": {}},),
+    )
+    user_agent_key = "v1:tenant-123:user_agent:@alice:example.org:general"
+    sandbox_key = named_worker_key(user_agent_key, "d" * 32)
+    backend.ensure_worker(
+        WorkerSpec(
+            sandbox_key,
+            private_agent_names=frozenset(),
+            state_scope_worker_key=user_agent_key,
+            sandbox=WorkerSandboxConfig(),
+            mirror_grantable_credentials=False,
+        ),
+        now=10.0,
+    )
+    sandbox_pod_spec = apps_api.created_bodies[-1]["spec"]["template"]["spec"]
+    assert [container["name"] for container in sandbox_pod_spec["containers"]] == ["sandbox-runner"]
+    assert [volume["name"] for volume in sandbox_pod_spec["volumes"]] == ["worker-storage", "worker-tmp"]
+
+    backend.ensure_worker(WorkerSpec(user_agent_key, private_agent_names=frozenset()), now=10.0)
+    ordinary_pod_spec = apps_api.created_bodies[-1]["spec"]["template"]["spec"]
+    assert [container["name"] for container in ordinary_pod_spec["containers"]] == ["sandbox-runner", "sidecar-proxy"]
+    assert [volume["name"] for volume in ordinary_pod_spec["volumes"]] == [
+        "worker-storage",
+        "worker-tmp",
+        "sidecar-secret",
+    ]

@@ -37,7 +37,12 @@ from mindroom.workers.backends._dedicated_worker_common import (
     normalize_sandbox_mount_dir,
     resolve_sandbox_mount_target,
 )
-from mindroom.workers.backends.kubernetes_config import NAMED_WORKERS_MAX_ENV, configured_named_workers_max
+from mindroom.workers.backends.kubernetes_config import (
+    NAMED_WORKERS_MAX_ENV,
+    configured_named_workers_max,
+    configured_runtime_class_name,
+    sandbox_mount_dir_runtime_class_refusal,
+)
 from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES, WorkerSandboxConfig
 from mindroom.workers.runtime import idle_worker_cleanup_runs, lease_configured_primary_worker_manager
 
@@ -155,12 +160,6 @@ class _NamedWorkerFleet:
         self.runtime_paths = call.runtime_paths
         return worker.resource_profile, worker.sandbox
 
-    def admitted_sandbox(self, worker_key: str) -> WorkerSandboxConfig | None:
-        """Return the locked sandbox config of an admitted worker in this fleet."""
-        with _lock:
-            worker = self.workers.get(worker_key)
-            return None if worker is None else worker.sandbox
-
     def header(self, name: str, handle: WorkerHandle) -> str:
         """Return the line a call's result starts with: its worker, and whether this call ran in a new start of it."""
         start = (handle.incarnation, handle.startup_count)
@@ -214,10 +213,6 @@ class NamedWorkerCall:
             mirror_grantable_credentials=normal_spec.mirror_grantable_credentials and self.sandbox is None,
         )
 
-    def admitted_sandbox(self, worker_key: str) -> WorkerSandboxConfig | None:
-        """Return the locked sandbox config of an admitted worker in this call's fleet."""
-        return self._fleet.admitted_sandbox(worker_key)
-
     def header(self, handle: WorkerHandle) -> str:
         """Return the line the call's result starts with, which names its worker and says when it is a new start."""
         return self._fleet.header(self.name, handle)
@@ -267,6 +262,8 @@ def _parse_sandbox_config(
     sandbox: object,
     mount_dir: object,
     mount_read_only: object,
+    *,
+    runtime_paths: RuntimePaths,
 ) -> tuple[WorkerSandboxConfig | None, bool]:
     if sandbox is False and mount_dir is not None:
         msg = "mount_dir always runs in sandbox mode; omit sandbox or set sandbox=true."
@@ -281,6 +278,9 @@ def _parse_sandbox_config(
         except ValueError as exc:
             msg = f"Invalid mount_dir: {exc}"
             raise NamedWorkerError(msg) from exc
+        runtime_class_name = configured_runtime_class_name(runtime_paths)
+        if runtime_class_name is not None:
+            raise NamedWorkerError(sandbox_mount_dir_runtime_class_refusal(runtime_class_name))
     sandbox_specified = sandbox is not None or mount_dir is not None or mount_read_only is not None
     sandbox_config = (
         WorkerSandboxConfig(mount_dir=normalized_mount_dir, mount_read_only=bool(mount_read_only))
@@ -373,7 +373,12 @@ def named_worker_call(
     if resource_profile is not None and resource_profile not in SCRIPT_RESOURCE_PROFILE_NAMES:
         msg = "resource_profile must be small, standard, or large."
         raise NamedWorkerError(msg)
-    sandbox_config, sandbox_specified = _parse_sandbox_config(sandbox, mount_dir, mount_read_only)
+    sandbox_config, sandbox_specified = _parse_sandbox_config(
+        sandbox,
+        mount_dir,
+        mount_read_only,
+        runtime_paths=runtime_paths,
+    )
     fleet = _owned_fleet(turn_id)
     if fleet is None:
         msg = (

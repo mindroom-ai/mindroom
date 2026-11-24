@@ -706,6 +706,12 @@ def test_a_call_that_names_no_worker_asks_for_none(runtime_paths: RuntimePaths) 
         ("s1", {"mount_dir": "$HOME/sub"}, "Invalid mount_dir"),
         ("s1", {"mount_dir": "~/sub"}, "Invalid mount_dir"),
         ("s1", {"mount_dir": "a\x00b"}, "NUL bytes"),
+        ("s1", {"mount_dir": "."}, "not the workspace root"),
+        ("s1", {"mount_dir": "./"}, "not the workspace root"),
+        ("s1", {"mount_dir": ".mindroom"}, "hidden or dot-prefixed"),
+        ("s1", {"mount_dir": ".config"}, "hidden or dot-prefixed"),
+        ("s1", {"mount_dir": "a/.git"}, "hidden or dot-prefixed"),
+        ("s1", {"mount_dir": "./.mindroom"}, "hidden or dot-prefixed"),
     ],
 )
 async def test_sandbox_argument_validation(
@@ -758,7 +764,6 @@ async def test_sandbox_options_lock_on_first_call_and_reuse_without_repeating(
         assert followup_handle.worker_key == first_handle.worker_key
         assert followup_admitted.sandbox == WorkerSandboxConfig(mount_dir="scratch/job1", mount_read_only=True)
         assert followup_admitted.mirror_grantable_credentials is False
-        assert followup_call.admitted_sandbox(followup_handle.worker_key) == first_admitted.sandbox
 
         # Repeating the exact same sandbox options is allowed.
         same_call = _call(runtime_paths, "sbx", sandbox=True, mount_dir="scratch/job1", mount_read_only=True)
@@ -781,10 +786,13 @@ async def test_sandbox_options_lock_on_first_call_and_reuse_without_repeating(
 
 
 def test_sandbox_mount_relative_path_validates_directory_without_symlinks(tmp_path: Path) -> None:
-    """Pre-validation accepts real directories (including '.') and rejects missing paths, files, and symlinks."""
+    """Pre-validation accepts non-hidden subdirectories and rejects root, hidden dirs, missing paths, files, and symlinks."""
     workspace = tmp_path / "agents" / "code" / "workspace"
     sub = workspace / "scratch" / "job1"
     sub.mkdir(parents=True)
+    (workspace / ".mindroom").mkdir()
+    (workspace / ".config").mkdir()
+    (workspace / "a" / ".git").mkdir(parents=True)
     (workspace / "file.txt").write_text("hi", encoding="utf-8")
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -800,13 +808,23 @@ def test_sandbox_mount_relative_path_validates_directory_without_symlinks(tmp_pa
         )
         is None
     )
-    assert sandbox_mount_relative_path(
-        storage_root=tmp_path,
-        worker_key=_ALICE,
-        private_agent_names=frozenset(),
-        config=_CONFIG,
-        sandbox=WorkerSandboxConfig(mount_dir="."),
-    ) == Path("agents/code/workspace")
+    with pytest.raises(NamedWorkerError, match="not the workspace root"):
+        sandbox_mount_relative_path(
+            storage_root=tmp_path,
+            worker_key=_ALICE,
+            private_agent_names=frozenset(),
+            config=_CONFIG,
+            sandbox=WorkerSandboxConfig(mount_dir="."),
+        )
+    for hidden_dir in (".mindroom", ".config", "a/.git"):
+        with pytest.raises(NamedWorkerError, match="hidden or dot-prefixed"):
+            sandbox_mount_relative_path(
+                storage_root=tmp_path,
+                worker_key=_ALICE,
+                private_agent_names=frozenset(),
+                config=_CONFIG,
+                sandbox=WorkerSandboxConfig(mount_dir=hidden_dir),
+            )
     assert sandbox_mount_relative_path(
         storage_root=tmp_path,
         worker_key=_ALICE,
@@ -1780,9 +1798,13 @@ async def test_sandboxed_shell_proxy_strips_all_trust_surfaces_including_followu
             with pytest.raises(NamedWorkerError, match="cannot write into a read-only sandbox mount"):
                 await call_shell("ls", worker="sbx-dir", mindroom_output_path="out.txt")
 
-            # Empty-scratch sandbox + follow-up omitting sandbox.
+            # Empty-scratch sandbox refuses mindroom_output_path before admission and on flagless follow-ups.
+            with pytest.raises(NamedWorkerError, match="empty-scratch sandbox"):
+                await call_shell("pwd", worker="sbx-empty-out", sandbox=True, mindroom_output_path="out.txt")
             await call_shell("pwd", worker="sbx-empty", sandbox=True)
             await call_shell("pwd", worker="sbx-empty")
+            with pytest.raises(NamedWorkerError, match="empty-scratch sandbox"):
+                await call_shell("pwd", worker="sbx-empty", mindroom_output_path="out.txt")
 
     # Agent Keys broker was never invoked for any sandboxed call (still 1 from plain call).
     assert len(broker_calls) == 1
@@ -1841,3 +1863,141 @@ async def test_cli_catalog_explains_sandbox_arguments_when_named_workers_hidden(
     binding = await catalog.bind(ToolKey("shell", "run_shell_command"))
     reason = _invalid_arguments_reason(binding, {"args": "true", **sandbox_args})
     assert "Named workers are off for this agent" in reason
+
+
+@pytest.mark.asyncio
+async def test_named_worker_mount_dir_fails_fast_when_runtime_class_name_is_set(tmp_path: Path) -> None:
+    """mount_dir fails fast under runtimeClassName (e.g. gVisor), while empty-scratch sandbox=True succeeds."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS": "30",
+            "MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME": "gvisor",
+        },
+    )
+    with idle_worker_cleanup_owner():
+        async with execution_resources(response=True):
+            with pytest.raises(NamedWorkerError, match=r"runtimeClassName.*gvisor.*sandbox=true without mount_dir"):
+                named_worker_call(
+                    "sbx-dir",
+                    None,
+                    mount_dir="scratch/job1",
+                    agent_name="code",
+                    config=_CONFIG,
+                    runtime_paths=runtime_paths,
+                    turn_id=_TURN,
+                )
+            empty_call = named_worker_call(
+                "sbx-empty",
+                None,
+                sandbox=True,
+                agent_name="code",
+                config=_CONFIG,
+                runtime_paths=runtime_paths,
+                turn_id=_TURN,
+            )
+            assert empty_call is not None
+            assert empty_call.sandbox == WorkerSandboxConfig(mount_dir=None, mount_read_only=False)
+
+
+@pytest.mark.asyncio
+async def test_sandboxed_writable_mount_dir_rewrites_saved_output_receipt_paths(
+    tmp_path: Path,
+    backend: _FakeBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Saved-output receipts from writable mount_dir sandboxes translate to agent-workspace-relative paths."""
+    storage_root = tmp_path / "storage"
+    (storage_root / "agents" / "code" / "workspace" / "scratch" / "job1").mkdir(parents=True)
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=storage_root,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS": "30",
+        },
+    )
+    responses = iter(
+        [
+            {
+                "ok": True,
+                "result": {
+                    "mindroom_tool_output": {
+                        "status": "saved_to_file",
+                        "path": "mindroom_tool_outputs/2026-11-23/auto.txt",
+                        "bytes": 2048,
+                        "format": "text",
+                        "preview": "hello preview",
+                    },
+                },
+            },
+            {
+                "ok": True,
+                "result": {
+                    "mindroom_tool_output": {
+                        "status": "saved_to_file",
+                        "path": "reports/out.txt",
+                        "bytes": 128,
+                        "format": "text",
+                    },
+                },
+            },
+            {
+                "ok": True,
+                "result": {
+                    "mindroom_tool_output": {
+                        "status": "saved_to_file",
+                        "path": "scratch/job1/already-prefixed.txt",
+                        "bytes": 64,
+                        "format": "text",
+                    },
+                },
+            },
+        ],
+    )
+    _route_through(monkeypatch, backend, responder=lambda _url, _body: next(responses))
+    target = resolve_worker_target("user_agent", "code", _identity(), private_agent_names=frozenset())
+    shell = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        runs_in_worker=True,
+        runtime_config=_CONFIG,
+        worker_target=target,
+    )
+    call_shell = _offered_entrypoint(shell, "run_shell_command")
+
+    with idle_worker_cleanup_owner(), tool_runtime_context(_tool_context(runtime_paths)):
+        async with execution_resources(response=True):
+            auto_saved = await call_shell("cat big.log", worker="sbx-rw", mount_dir="scratch/job1")
+            # Follow-up omitting mount_dir still translates saved receipt paths using the admitted sandbox.
+            explicit_saved = await call_shell("echo done", worker="sbx-rw", mindroom_output_path="reports/out.txt")
+            prefixed_saved = await call_shell("echo pre", worker="sbx-rw")
+
+    assert auto_saved == {
+        "mindroom_tool_output": {
+            "status": "saved_to_file",
+            "path": "scratch/job1/mindroom_tool_outputs/2026-11-23/auto.txt",
+            "bytes": 2048,
+            "format": "text",
+            "preview": "[worker: sbx-rw, started]\nhello preview",
+        },
+    }
+    assert explicit_saved == {
+        "mindroom_tool_output": {
+            "status": "saved_to_file",
+            "path": "scratch/job1/reports/out.txt",
+            "bytes": 128,
+            "format": "text",
+        },
+    }
+    assert prefixed_saved == {
+        "mindroom_tool_output": {
+            "status": "saved_to_file",
+            "path": "scratch/job1/already-prefixed.txt",
+            "bytes": 64,
+            "format": "text",
+        },
+    }

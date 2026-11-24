@@ -69,7 +69,11 @@ from mindroom.workers.backends.dedicated_launch import (
     dedicated_worker_startup_runtime_paths,
     write_dedicated_worker_startup_manifest,
 )
-from mindroom.workers.backends.kubernetes_config import resolve_kubeconfig_paths, validated_kubernetes_object
+from mindroom.workers.backends.kubernetes_config import (
+    resolve_kubeconfig_paths,
+    sandbox_mount_dir_runtime_class_refusal,
+    validated_kubernetes_object,
+)
 from mindroom.workers.backends.kubernetes_pod_names import (
     SANDBOX_RUNNER_CONTAINER_NAME,
     WORKER_STORAGE_VOLUME_NAME,
@@ -1407,14 +1411,15 @@ class KubernetesResourceManager:
                     },
                 },
             ],
-            "volumes": self._volumes(),
+            "volumes": self._volumes(sandbox=sandbox),
         }
-        containers = cast("list[dict[str, object]]", template_spec["containers"])
-        _extend_unique_named_pod_entries(
-            containers,
-            self.config.extra_containers,
-            field_name="extra_containers",
-        )
+        if sandbox is None:
+            containers = cast("list[dict[str, object]]", template_spec["containers"])
+            _extend_unique_named_pod_entries(
+                containers,
+                self.config.extra_containers,
+                field_name="extra_containers",
+            )
         if self.config.runtime_class_name is not None:
             template_spec["runtimeClassName"] = self.config.runtime_class_name
         # Added only when configured so the default template, and its hash, stay unchanged.
@@ -1640,7 +1645,6 @@ class KubernetesResourceManager:
     ) -> RuntimePaths:
         # Kubernetes passes on only what isolated workers may inherit, so its manifests keep fewer
         # provider settings than Docker's; the runner recovers the shared storage root from the subpath prefix.
-        isolated = constants.isolated_runtime_paths(self.runtime_paths)
         extra_env = (
             sandbox_worker_extra_env(self.config.extra_env)
             if sandbox is not None
@@ -1651,11 +1655,19 @@ class KubernetesResourceManager:
             **extra_env,
             **VENDOR_TELEMETRY_ENV_VALUES,
         }
+        worker_runtime_env = isolated_worker_runtime_env(worker_env)
+        if sandbox is not None:
+            process_env = worker_runtime_env
+            env_file_values: Mapping[str, str] = {}
+        else:
+            isolated = constants.isolated_runtime_paths(self.runtime_paths)
+            process_env = {**isolated.process_env, **worker_runtime_env}
+            env_file_values = isolated.env_file_values
         return dedicated_worker_startup_runtime_paths(
             self._worker_layout(state_subpath),
             worker_key=worker_key,
-            process_env={**isolated.process_env, **isolated_worker_runtime_env(worker_env)},
-            env_file_values=isolated.env_file_values,
+            process_env=process_env,
+            env_file_values=env_file_values,
         )
 
     def _volume_mounts(
@@ -1711,7 +1723,7 @@ class KubernetesResourceManager:
         )
         return mounts
 
-    def _volumes(self) -> list[dict[str, object]]:
+    def _volumes(self, *, sandbox: WorkerSandboxConfig | None = None) -> list[dict[str, object]]:
         volumes: list[dict[str, object]] = [
             {
                 "name": WORKER_STORAGE_VOLUME_NAME,
@@ -1722,11 +1734,12 @@ class KubernetesResourceManager:
                 "emptyDir": {"sizeLimit": self.config.tmp_size_limit or _WORKER_TMP_SIZE_LIMIT},
             },
         ]
-        _extend_unique_named_pod_entries(
-            volumes,
-            self.config.extra_volumes,
-            field_name="extra_volumes",
-        )
+        if sandbox is None:
+            _extend_unique_named_pod_entries(
+                volumes,
+                self.config.extra_volumes,
+                field_name="extra_volumes",
+            )
         return volumes
 
     def _worker_node_name_or_none(self) -> str | None:
@@ -1854,6 +1867,8 @@ class KubernetesResourceManager:
         state_scope_worker_key: str | None,
         sandbox: WorkerSandboxConfig | None = None,
     ) -> tuple[ScopedWorkspaceMount, ...]:
+        if sandbox is not None and sandbox.mount_dir is not None and self.config.runtime_class_name is not None:
+            raise WorkerBackendError(sandbox_mount_dir_runtime_class_refusal(self.config.runtime_class_name))
         return plan_scoped_workspace_mounts(
             worker_key=resolve_state_scope_worker_key(worker_key, state_scope_worker_key),
             local_shared_storage_root=self.storage_root,

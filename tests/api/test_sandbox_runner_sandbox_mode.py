@@ -161,6 +161,32 @@ def test_empty_scratch_sandbox_uses_worker_workspace_without_resolve_agent_runti
     assert output == f"{expected_workspace}|{expected_workspace}|{worker_root}|unset:unset"
     assert not (storage_root / "agents" / "code" / "workspace").exists()
 
+    if not stream_io:
+        # Empty scratch disables auto-save so large output is not lost to an ephemeral worker path.
+        large_frames = _post_execute(
+            client,
+            worker_key=worker_key,
+            base_dir=None,
+            args=["printf 'x%.0s' {1..2000}"],
+            kwargs={"worker": "scratch", "sandbox": True},
+            sandbox=True,
+        )
+        assert large_frames[-1]["ok"] is True
+        assert large_frames[-1]["result"] == "x" * 2000
+        assert not (expected_workspace / "mindroom_tool_outputs").exists()
+
+    refused_frames = _post_execute(
+        client,
+        worker_key=worker_key,
+        base_dir=None,
+        args=["echo hi"],
+        kwargs={"worker": "scratch", "sandbox": True, "mindroom_output_path": "out.txt"},
+        sandbox=True,
+        stream_io=stream_io,
+    )
+    assert refused_frames[-1]["ok"] is False
+    assert "empty-scratch sandbox" in refused_frames[-1]["error"]
+
 
 @pytest.mark.parametrize("stream_io", [False, True], ids=["execute", "stream_io"])
 def test_readonly_mount_dir_keeps_home_writable_skips_hook_and_autosave(
@@ -496,5 +522,107 @@ def test_sandbox_startup_manifest_mount_inode_pinning(
         sandbox_runner_app.state.sandbox_runner_context = None
         with pytest.raises(RuntimeError, match="inode mismatch"), TestClient(sandbox_runner_app):
             pass
+    finally:
+        sandbox_runner_app.state.sandbox_runner_context = None
+
+
+def test_writable_mount_dir_autosaves_into_mounted_directory(
+    sandbox_runner_env: tuple[TestClient, Path],
+) -> None:
+    """Writable mount_dir auto-saves large output under the mounted directory with a mount-relative receipt path."""
+    client, storage_root = sandbox_runner_env
+    worker_key = named_worker_key(_NORMAL_KEY, "7" * 32)
+    mounted_dir = storage_root / "agents" / "code" / "workspace" / "scratch" / "rw_job"
+    mounted_dir.mkdir(parents=True)
+
+    frames = _post_execute(
+        client,
+        worker_key=worker_key,
+        base_dir="agents/code/workspace/scratch/rw_job",
+        args=["printf 'y%.0s' {1..2000}"],
+        kwargs={"worker": "rw", "mount_dir": "scratch/rw_job"},
+        sandbox=True,
+    )
+    assert frames[-1]["ok"] is True
+    saved = frames[-1]["result"]["mindroom_tool_output"]
+    assert saved["status"] == "saved_to_file"
+    assert saved["path"].startswith("mindroom_tool_outputs/")
+    assert (mounted_dir / saved["path"]).read_text(encoding="utf-8") == "y" * 2000
+
+
+def test_dedicated_worker_refuses_sandbox_mount_dir_without_startup_pin(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Dedicated workers fail closed when a sandbox mount_dir request arrives without a pinned sandbox_mount."""
+    storage_root = tmp_path / "storage"
+    mounted_dir = storage_root / "agents" / "code" / "workspace" / "scratch" / "unpinned"
+    mounted_dir.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-6-astra\n"
+        "agents:\n"
+        "  code:\n"
+        "    display_name: Code\n"
+        "    tools: [shell]\n"
+        "    worker_tools: [shell]\n"
+        "    worker_scope: user_agent\n"
+        "    named_workers: 4\n"
+        "router:\n"
+        "  model: default\n",
+        encoding="utf-8",
+    )
+    worker_key = named_worker_key(_NORMAL_KEY, "6" * 32)
+    worker_root = worker_root_path(storage_root, worker_key)
+    worker_root.mkdir(parents=True)
+    startup_env = {
+        "PATH": os.environ.get("PATH", ""),
+        "MINDROOM_CONFIG_PATH": str(config_path),
+        "MINDROOM_STORAGE_PATH": str(worker_root),
+        "MINDROOM_SANDBOX_PROXY_TOKEN": _TOKEN,
+        "MINDROOM_SANDBOX_RUNNER_MODE": "true",
+        "MINDROOM_SANDBOX_RUNNER_USE_SUBPROCESS": "false",
+        "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": worker_key,
+        "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": str(worker_root),
+        "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT": str(storage_root),
+    }
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=worker_root,
+        process_env=startup_env,
+    )
+    manifest_path = write_startup_manifest(worker_root, runtime_paths)
+    monkeypatch.delenv("MINDROOM_WORKER_COMPUTER_ENABLED", raising=False)
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", _TOKEN)
+    monkeypatch.setenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH", str(manifest_path))
+    try:
+        sandbox_runner_app.state.sandbox_runner_context = None
+        with TestClient(sandbox_runner_app) as client:
+            refused = _post_execute(
+                client,
+                worker_key=worker_key,
+                base_dir="agents/code/workspace/scratch/unpinned",
+                args=["pwd"],
+                kwargs={"worker": "unpinned", "mount_dir": "scratch/unpinned"},
+                sandbox=True,
+            )
+            assert refused[-1]["ok"] is False
+            assert refused[-1]["failure_kind"] == "worker"
+            assert "pinned sandbox_mount" in refused[-1]["error"]
+
+            # Empty-scratch sandbox (base_dir=None) does not require a mount pin.
+            empty_ok = _post_execute(
+                client,
+                worker_key=worker_key,
+                base_dir=None,
+                args=["echo ok"],
+                kwargs={"worker": "unpinned", "sandbox": True},
+                sandbox=True,
+            )
+            assert empty_ok[-1]["ok"] is True
+            assert empty_ok[-1]["result"].strip() == "ok"
     finally:
         sandbox_runner_app.state.sandbox_runner_context = None

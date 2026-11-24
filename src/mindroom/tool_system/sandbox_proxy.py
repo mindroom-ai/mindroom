@@ -348,9 +348,6 @@ def worker_route(
     return route, worker_handle
 
 
-_default_worker_route = worker_route
-
-
 def _worker_route_with_sandbox(
     *,
     runtime_paths: RuntimePaths,
@@ -886,14 +883,56 @@ def _worker_call_arguments(
     return [_worker_argument_value(arg) for arg in args], cast("dict[str, object]", _worker_argument_value(kwargs))
 
 
-def _reject_readonly_sandbox_output_path(
+def _reject_sandbox_output_path(
     *,
     has_output_path: bool,
     sandbox: WorkerSandboxConfig | None,
 ) -> None:
-    if has_output_path and sandbox is not None and sandbox.mount_read_only:
+    if not has_output_path or sandbox is None:
+        return
+    if sandbox.mount_dir is None:
+        msg = "mindroom_output_path is not supported in an empty-scratch sandbox without mount_dir."
+        raise NamedWorkerError(msg)
+    if sandbox.mount_read_only:
         msg = "mindroom_output_path cannot write into a read-only sandbox mount."
         raise NamedWorkerError(msg)
+
+
+def _sandbox_agent_workspace_output_path(saved_path: str, mount_dir: str) -> str:
+    """Rewrite one runner-saved relative output path from ``mount_dir``-relative to agent-workspace-relative."""
+    normalized = saved_path.removeprefix("./")
+    if not normalized or Path(normalized).is_absolute():
+        return saved_path
+    if normalized == mount_dir or normalized.startswith(f"{mount_dir}/"):
+        return normalized
+    return f"{mount_dir}/{normalized}"
+
+
+def _format_named_worker_result(
+    result: object,
+    *,
+    header: str,
+    admitted_sandbox: WorkerSandboxConfig | None,
+) -> object:
+    """Prepend the named-worker header and rewrite sandboxed saved-output receipt paths."""
+    if isinstance(result, str):
+        return f"{header}\n{result}"
+    # The runner can save its shell result before it gets here. The preview has the same exit line,
+    # and a sandboxed mount_dir saves relative to that mount rather than the agent workspace root.
+    saved = result.get("mindroom_tool_output") if isinstance(result, dict) else None
+    if not (isinstance(saved, dict) and saved.get("status") == "saved_to_file"):
+        return result
+    updated_saved = dict(saved)
+    preview = saved.get("preview")
+    if isinstance(preview, str):
+        updated_saved["preview"] = f"{header}\n{preview}"
+    if admitted_sandbox is not None and admitted_sandbox.mount_dir is not None:
+        saved_path = saved.get("path")
+        if isinstance(saved_path, str):
+            updated_saved["path"] = _sandbox_agent_workspace_output_path(saved_path, admitted_sandbox.mount_dir)
+    if updated_saved != saved:
+        return {**result, "mindroom_tool_output": updated_saved}
+    return result
 
 
 def _build_execute_request(
@@ -907,8 +946,8 @@ def _build_execute_request(
     start: bool = True,
     include_execution_env: bool = True,
     named: NamedWorkerCall | None = None,
-) -> tuple[ExecuteRequest, WorkerHandle | None]:
-    """Build one call that ``stand_ins`` sends, unsent, and return it with the handle of the worker that serves it.
+) -> tuple[ExecuteRequest, WorkerHandle | None, WorkerSandboxConfig | None]:
+    """Build one call that ``stand_ins`` sends, unsent, and return it with its worker handle and admitted sandbox.
 
     That worker starts unless ``start`` is False, and is the worker ``named`` asks for, as ``worker_route`` describes.
     """
@@ -918,41 +957,25 @@ def _build_execute_request(
     runtime_config = stand_ins.runtime_config
     # The tool's workspace travels as the request's workspace, which the worker confines before acting in it.
     has_output_path = normalize_output_path_argument(wire_kwargs.get(OUTPUT_PATH_ARGUMENT)) is not None
-    _reject_readonly_sandbox_output_path(
+    _reject_sandbox_output_path(
         has_output_path=has_output_path,
         sandbox=named.sandbox if named is not None else None,
     )
     init_overrides = dict(stand_ins.tool_init_overrides or {})
     base_dir = init_overrides.pop("base_dir", None)
-    resolved_base_dir = str(base_dir) if base_dir is not None else None
-    if worker_route is _default_worker_route:
-        route, worker_handle, admitted_sandbox = _worker_route_with_sandbox(
-            runtime_paths=runtime_paths,
-            runtime_config=runtime_config,
-            tool_name=tool_name,
-            function_name=function_name,
-            worker_target=worker_target,
-            worker_manager=worker_manager,
-            base_dir=resolved_base_dir,
-            progress_sink=progress_sink,
-            start=start,
-            named=named,
-        )
-    else:
-        route, worker_handle = worker_route(
-            runtime_paths=runtime_paths,
-            runtime_config=runtime_config,
-            tool_name=tool_name,
-            function_name=function_name,
-            worker_target=worker_target,
-            worker_manager=worker_manager,
-            base_dir=resolved_base_dir,
-            progress_sink=progress_sink,
-            start=start,
-            named=named,
-        )
-        admitted_sandbox = named.sandbox if named is not None else None
-    _reject_readonly_sandbox_output_path(has_output_path=has_output_path, sandbox=admitted_sandbox)
+    route, worker_handle, admitted_sandbox = _worker_route_with_sandbox(
+        runtime_paths=runtime_paths,
+        runtime_config=runtime_config,
+        tool_name=tool_name,
+        function_name=function_name,
+        worker_target=worker_target,
+        worker_manager=worker_manager,
+        base_dir=str(base_dir) if base_dir is not None else None,
+        progress_sink=progress_sink,
+        start=start,
+        named=named,
+    )
+    _reject_sandbox_output_path(has_output_path=has_output_path, sandbox=admitted_sandbox)
     sandboxed = admitted_sandbox is not None
     config_overrides = dict(stand_ins.tool_config_overrides or {})
     if sandboxed:
@@ -1020,7 +1043,7 @@ def _build_execute_request(
         extra_env_passthrough=extra_env_passthrough,
         sandbox=sandboxed,
     )
-    return request, worker_handle
+    return request, worker_handle, admitted_sandbox
 
 
 def _call_proxy_sync(
@@ -1060,7 +1083,7 @@ def _call_proxy_sync(
         else None
     )
     with lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
-        request, worker_handle = _build_execute_request(
+        request, worker_handle, admitted_sandbox = _build_execute_request(
             stand_ins,
             worker_manager=worker_manager,
             function_name=function_name,
@@ -1127,18 +1150,11 @@ def _call_proxy_sync(
             decoded = decode_media_result(result)
             return finalize_tool_media(decoded) if isinstance(decoded, ToolValue) else decoded
         if named is not None and worker_handle is not None:
-            header = header or named.header(worker_handle)
-            if isinstance(result, str):
-                return f"{header}\n{result}"
-            # The runner can save its shell result before it gets here. The preview has the same exit line.
-            saved = result.get("mindroom_tool_output") if isinstance(result, dict) else None
-            if isinstance(saved, dict) and saved.get("status") == "saved_to_file":
-                preview = saved.get("preview")
-                if isinstance(preview, str):
-                    return {
-                        **result,
-                        "mindroom_tool_output": {**saved, "preview": f"{header}\n{preview}"},
-                    }
+            return _format_named_worker_result(
+                result,
+                header=header or named.header(worker_handle),
+                admitted_sandbox=admitted_sandbox,
+            )
         return result
 
 
@@ -1322,7 +1338,7 @@ def worker_call(
     runtime_paths = stand_ins.runtime_paths
     proxy_config = sandbox_proxy_config(runtime_paths)
     with lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
-        request, worker_handle = _build_execute_request(
+        request, worker_handle, _admitted_sandbox = _build_execute_request(
             stand_ins,
             worker_manager=worker_manager,
             function_name=function_name,
