@@ -244,6 +244,13 @@ class FakeClaude:
         echoed = {"type": "tool_result", "tool_use_id": call["id"], "content": result["content"]}
         self.emit("user", message={"role": "user", "content": [echoed]}, parent_tool_use_id=None)
 
+    def refuse_call(self, call: dict[str, Any]) -> None:
+        """Answer a call to a tool the process does not have with an error, as Claude Code does."""
+        text = f"<tool_use_error>Error: No such tool available: {call['raw_name']}</tool_use_error>"
+        self.results[call["id"]] = text
+        answer = {"type": "tool_result", "tool_use_id": call["id"], "content": text, "is_error": True}
+        self.emit("user", message={"role": "user", "content": [answer]}, parent_tool_use_id=None)
+
     def model_message(self, step: dict[str, Any]) -> str:
         """Stream one scripted model message, run its tool calls, and return its text."""
         self.messages += 1
@@ -321,6 +328,8 @@ class FakeClaude:
         for call in calls[1 if step.get("call_before_stop") else 0 :]:
             if call.get("denied"):
                 self.results[call["id"]] = "(denied)"
+            elif call.get("unknown"):
+                self.refuse_call(call)
             elif call.get("unused"):
                 self.finish(self.start_call(call, with_id=with_id))
                 self.results[call["id"]] = "(unused)"

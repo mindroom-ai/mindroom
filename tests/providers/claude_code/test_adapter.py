@@ -1429,7 +1429,7 @@ async def test_an_unusable_call_fails_before_any_call_is_handed_over(
 @pytest.mark.parametrize("name", ["Bash", "lookup"], ids=["another tool", "an offered tool without its prefix"])
 async def test_a_call_to_a_tool_mindroom_did_not_offer_is_left_to_claude_code(tmp_path: Path, name: str) -> None:
     """Claude Code answers such a call with an error itself, so the model can correct it and the turn goes on."""
-    steps = [{"tools": [{"id": "toolu_x", "raw_name": name, "input": {}, "denied": True}]}, {"text": "Done."}]
+    steps = [{"tools": [{"id": "toolu_x", "raw_name": name, "input": {}, "unknown": True}]}, {"text": "Saw {toolu_x}"}]
     cli = fake_cli(tmp_path, {"turns": [steps]})
     events: list[StreamEvent] = []
     request = ModelRequest(messages=[user("Look up the markers.")], tools=[LOOKUP])
@@ -1439,7 +1439,7 @@ async def test_a_call_to_a_tool_mindroom_did_not_offer_is_left_to_claude_code(tm
     assert not any(isinstance(event, ToolCallReady) for event in events)
     completed = [event for event in events if isinstance(event, TurnCompleted)]
     assert len(completed) == 1
-    assert completed[0].message.content == "Done."
+    assert completed[0].message.content == f"Saw <tool_use_error>Error: No such tool available: {name}</tool_use_error>"
     assert completed[0].message.tool_calls in (None, [])
 
 
