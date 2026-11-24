@@ -135,7 +135,7 @@ def graph_rows(
     for node in current:
         if node.kind == "group":
             # A run inside this one hangs under the call that started it; any other group under the group around it.
-            under = node.group_key or parent_group(node.lane)
+            under = node.lane if node.request.get("op") == "workflow" else parent_group(node.lane)
             groups[node.key] = {
                 "id": ids[node.key],
                 "kind": str(node.request.get("op") or "group"),

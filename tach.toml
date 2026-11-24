@@ -2751,6 +2751,7 @@ expose = [
 [[modules]]
 path = "mindroom.workflow_runs.view"
 depends_on = [
+    "mindroom.live_frames.subagents",
     "mindroom.live_frames.workflow",
     "mindroom.workflow_runs.faults",
     "mindroom.workflow_runs.graph",
@@ -8721,7 +8722,7 @@ depends_on = [
     "mindroom.llm",
     "mindroom.tool_system.events",
 ]
-visibility = ["mindroom.delegation.lifecycle", "mindroom.live_frames.workflow"]
+visibility = ["mindroom.delegation.lifecycle", "mindroom.live_frames.workflow", "mindroom.workflow_runs.view"]
 
 [[modules]]
 path = "mindroom.live_frames.workflow"

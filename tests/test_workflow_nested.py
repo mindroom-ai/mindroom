@@ -118,7 +118,7 @@ async def test_agent_starts_a_nested_run_inline_and_gets_its_report(stack: Workf
     assert (child.parent_run_id, child.parent_node_key, child.depth, child.max_concurrent) == (parent, "@0", 1, 16)
     assert str(child.origin_job_id).startswith("nested:")
     group = _group(stack, child)
-    assert (group.kind, group.group_key, group.state, group.links) == (
+    assert (group.kind, group.lane, group.state, group.links) == (
         "group",
         "@0",
         _RUNNING,
@@ -734,7 +734,7 @@ async def test_script_tool_start_workflow_passes_the_same_gate(gated: WorkflowSt
 
     # A script is no agent: the run it starts is as deep as its own.
     assert (child.parent_run_id, child.parent_node_key, child.depth) == (parent, "@0", 1)
-    assert _group(gated, child).group_key == "@0"
+    assert _group(gated, child).lane == "@0"
     await _report(gated, child.run_id, "the nested report")
     assert (await _settled(gated, receipt)).result == "the nested report"
     assert _group(gated, child).state is _COMPLETED

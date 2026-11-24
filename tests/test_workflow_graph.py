@@ -418,7 +418,7 @@ def test_stale_nodes_are_not_in_the_graph() -> None:
 def test_run_inside_a_run_is_a_group_under_the_call_that_started_it() -> None:
     """The group of a nested run names the call it is under, and counts the calls it is told the run has."""
     call = _node(1, state=WorkflowNodeState.RUNNING)
-    nested = _group(2, "@1/wf-" + "b" * 32, op="workflow", group_key="@1", lane="@1", idx=0)
+    nested = _group(2, "@1/wf-" + "b" * 32, op="workflow", lane="@1", idx=0)
     graph = graph_rows([call, nested], {}, [], [], inside={nested.key: Counter(completed=2, failed=1, queued=4)})
 
     assert graph.groups == [

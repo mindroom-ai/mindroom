@@ -151,8 +151,3 @@ def publish_run(
         client=client,
         homeserver_url=homeserver_url,
     )
-
-
-def stop_run(account: str, room_id: str, run_id: str) -> None:
-    """Close a run's open frame stream so nothing more is sent for it."""
-    stop_stream(account, room_id, run_id)

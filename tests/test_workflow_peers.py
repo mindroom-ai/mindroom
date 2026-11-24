@@ -780,7 +780,7 @@ async def test_oversized_text_is_refused_with_the_file_hint(stack: WorkflowStack
         PeerTooLargeError,
         match=r"Too large \(.*bytes, limit 1 MiB\)\. Write it to a workspace file and send the path\.",
     ):
-        peers.set_state(stack.store, stack.run_id, op_id="big-state", key="k", value=big, updated_by="a")
+        peers.set_state(stack.store, stack.run_id, op_id="big-state", key="k", value=big)
 
 
 @pytest.mark.asyncio
@@ -790,7 +790,7 @@ async def test_prune_removes_peer_tables(stack: WorkflowStack) -> None:
     reader = NodeRef(key="@1", generation=1, name="b")
     peers.send(stack.store, stack.run_id, op_id="p1", sender=sender, to="b", text="hi")
     peers.read_call(stack.store, stack.run_id, op_id="p2", reader=reader, names=("b", "*"))
-    peers.set_state(stack.store, stack.run_id, op_id="p3", key="k", value=1, updated_by="a")
+    peers.set_state(stack.store, stack.run_id, op_id="p3", key="k", value=1)
 
     old_time = (datetime.now(UTC) - timedelta(days=40)).isoformat()
     cutoff = (datetime.now(UTC) - timedelta(days=30)).isoformat()
@@ -1153,13 +1153,13 @@ agents:
             for seq, (key, name) in enumerate([("@0", "backend"), ("@1", "frontend"), ("@2", "integrator")], start=1):
                 conn.execute(
                     "INSERT INTO workflow_nodes VALUES "
-                    "(?, ?, ?, 'agent', '', ?, 'd', '{}', 1, 1, 'running', NULL, '{}', 0, ?, ?, NULL, NULL, '[]', NULL, 0, "
+                    "(?, ?, ?, 'agent', '', ?, 'd', '{}', 1, 1, 'running', NULL, '{}', 0, ?, ?, NULL, '[]', NULL, 0, "
                     "'2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z', ?, NULL, '{}', '{}')",
                     ("wf-1", key, seq, seq, name, name, json.dumps("ok")),
                 )
         peers.send(store, "wf-1", op_id="m1", sender=NodeRef("@0", 1, "backend"), to="frontend", text="propose v1")
         peers.send(store, "wf-1", op_id="m2", sender=NodeRef("@1", 1, "frontend"), to="backend", text="accept v1")
-        peers.set_state(store, "wf-1", op_id="s1", key="contract", value={"endpoint": "/avatar"}, updated_by="backend")
+        peers.set_state(store, "wf-1", op_id="s1", key="contract", value={"endpoint": "/avatar"})
         with store.write_transaction() as conn:
             conn.execute("UPDATE workflow_nodes SET state = 'completed' WHERE run_id = 'wf-1'")
         return "$ev1"

@@ -131,7 +131,6 @@ def test_node_round_trips_every_field(tmp_path: Path) -> None:
             label="Check item",
             name="checker",
             phase="review",
-            group_key="@0",
             members=("/0:ab12", "/0:cd34"),
             session_key="@1",
             cached=False,

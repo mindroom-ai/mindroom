@@ -1146,7 +1146,6 @@ class WorkflowEngine:
                     attempt=run.attempt,
                     label=node_label("ask", req),
                     phase=parent.phase,
-                    group_key=parent.key,
                     started_at=utc_timestamp(),
                 )
                 ask_node = await asyncio.to_thread(self.store.put_node, ask_node, run.epoch, dirty_after=False)
@@ -1370,7 +1369,6 @@ class WorkflowEngine:
             handle=DispatchHandle("run", child.run_id, dispatched=True),
             attempt=outer.attempt,
             label=child.title or "workflow",
-            group_key=child.parent_node_key,
             started_at=utc_timestamp(),
             links={"child_run_id": child.run_id},
         )

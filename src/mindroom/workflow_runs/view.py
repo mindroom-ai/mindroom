@@ -16,7 +16,8 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
-from mindroom.live_frames.workflow import publish_run, stop_run
+from mindroom.live_frames.subagents import stop_stream
+from mindroom.live_frames.workflow import publish_run
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_types import WORKFLOW_RUN_CONTENT_KEY
 from mindroom.redaction import redact_sensitive_text
@@ -252,7 +253,7 @@ class RunViews:
             return
         place = (account, run.room_id)
         if (old := self._streams.get(run.run_id)) is not None and old != place:
-            stop_run(*old, run.run_id)
+            stop_stream(*old, run.run_id)
         # By the account alone, as its sub-agent frames are sent: they share one publisher, which keeps the
         # first lookup it gets, so a run that can no longer post must not end the account's other frames.
         live, url = partial(self.client, account), self.homeserver_url
@@ -271,7 +272,7 @@ class RunViews:
     def _stop_frame(self, run_id: str) -> None:
         """Close *run_id*'s open frame stream when it may no longer publish."""
         if (place := self._streams.pop(run_id, None)) is not None:
-            stop_run(*place, run_id)
+            stop_stream(*place, run_id)
 
     def _forget(self, run_id: str) -> None:
         """Keep nothing of a run whose card says how it ended, or that is gone."""

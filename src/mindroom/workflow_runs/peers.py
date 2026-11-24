@@ -198,7 +198,6 @@ def set_state(
     op_id: str,
     key: str,
     value: object,
-    updated_by: str,
 ) -> dict[str, object]:
     """Write one shared-state key in one transaction keyed by *op_id*; last write wins."""
     encoded = json.dumps(value, allow_nan=False, separators=(",", ":"))
@@ -206,10 +205,10 @@ def set_state(
 
     def _effect(conn: sqlite3.Connection) -> dict[str, object]:
         q = (
-            "INSERT INTO workflow_state VALUES (?, ?, ?, ?, ?) ON CONFLICT(run_id, key) DO UPDATE SET "
-            "value_json = excluded.value_json, updated_by = excluded.updated_by, updated_at = excluded.updated_at"
+            "INSERT INTO workflow_state VALUES (?, ?, ?) ON CONFLICT(run_id, key) "
+            "DO UPDATE SET value_json = excluded.value_json"
         )
-        conn.execute(q, (run_id, key, encoded, updated_by, datetime.now(UTC).isoformat()))
+        conn.execute(q, (run_id, key, encoded))
         return {"key": key, "saved": True}
 
     return cast("dict[str, object]", _once(store, run_id, op_id, _effect))
@@ -238,7 +237,7 @@ def script_op(
     if op == "get":
         return True, get_state(store, run_id, op_id=op_id, key=state_key)
     if op == "set":
-        return True, set_state(store, run_id, op_id=op_id, key=state_key, value=args.get("value"), updated_by="script")
+        return True, set_state(store, run_id, op_id=op_id, key=state_key, value=args.get("value"))
     msg = f"Unknown state operation '{op}'."
     raise WorkflowRunStoreError(msg)
 

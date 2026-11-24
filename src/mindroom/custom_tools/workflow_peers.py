@@ -129,8 +129,8 @@ class WorkflowPeerTools(Toolkit):
 
     async def set_shared_state(self, key: str, value: Any) -> str:  # noqa: ANN401 - arbitrary JSON value
         """Write any JSON value (dict, list, or primitive; pass the value directly, don't json.dumps it; up to 1 MiB) under `key`. Last write wins, so pick one writer per key."""
-        engine, run_id, _, ref, op_id = self._bound("set_shared_state", {"key": key, "value": value})
-        call = partial(set_state, engine.store, run_id, op_id=op_id, key=key, value=value, updated_by=ref.name)
+        engine, run_id, _, _, op_id = self._bound("set_shared_state", {"key": key, "value": value})
+        call = partial(set_state, engine.store, run_id, op_id=op_id, key=key, value=value)
         return json.dumps(await asyncio.to_thread(call))
 
     async def ask_user(self, question: str, options: list[str] | None = None) -> str:

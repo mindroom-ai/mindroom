@@ -160,7 +160,6 @@ class WorkflowNode:
     label: str = ""
     name: str | None = None
     phase: str | None = None
-    group_key: str | None = None
     members: tuple[str, ...] | None = None
     session_key: str | None = None
     cached: bool = False

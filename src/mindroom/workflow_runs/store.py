@@ -50,7 +50,7 @@ _RUN_UPDATE_FIELDS = frozenset(field.name for field in fields(WorkflowRun)) - {
 _ENDED_NODE_STATES = frozenset(WorkflowNodeState) - LIVE_NODE_STATES
 # What a stamp may change on a node: never its identity, its generation, or its outcome.
 _NODE_STAMP_FIELDS = frozenset(
-    {"state", "waiting_on", "handle", "attempt", "stale", "label", "name", "phase", "group_key", "members"}
+    {"state", "waiting_on", "handle", "attempt", "stale", "label", "name", "phase", "members"}
     | {"session_key", "cached", "started_at", "links"},
 )
 _TERMINAL_STATE_VALUES = tuple(sorted(TERMINAL_RUN_STATES))
@@ -87,7 +87,7 @@ class WorkflowRunStore:
         # Told the run of each write that changed what the run shows, after the write is saved, on the writer's thread.
         self.on_change: Callable[[str], None] | None = None
         self.directory.mkdir(parents=True, exist_ok=True)
-        with self._connection() as connection:
+        with self.read_connection() as connection:
             enter_wal(connection, timeout_seconds=_BUSY_TIMEOUT_SECONDS)
         self._migrate()
 
@@ -108,7 +108,7 @@ class WorkflowRunStore:
         """
         validated_workflow_run_id(run.run_id)
         values = {**_row_values(asdict(run), _RUN_JSON_FIELDS), "reservation_digest": _reservation_digest(run)}
-        with self._write_transaction() as connection:
+        with self.write_transaction() as connection:
             row = None
             if run.origin_job_id is not None:
                 row = connection.execute(
@@ -140,7 +140,7 @@ class WorkflowRunStore:
 
     def delete_intent(self, run_id: str, owner: str | None, epoch: int) -> bool:
         """Delete a run that never got an attempt and is still *owner*'s at *epoch*; return whether one was deleted."""
-        with self._write_transaction() as connection:
+        with self.write_transaction() as connection:
             deleted = connection.execute(
                 "DELETE FROM workflow_runs WHERE run_id = ? AND state = ? AND attempt = 0 AND owner IS ? AND epoch = ?",
                 (run_id, WorkflowRunState.STARTING, owner, epoch),
@@ -149,7 +149,7 @@ class WorkflowRunStore:
 
     def get_run(self, run_id: str) -> WorkflowRun:
         """Return one run, or raise `WorkflowRunNotFoundError`."""
-        with self._connection() as connection:
+        with self.read_connection() as connection:
             return _select_run(connection, run_id)
 
     def update_run(
@@ -175,7 +175,7 @@ class WorkflowRunStore:
         if unknown:
             msg = f"Workflow runs have no field to update named {', '.join(sorted(unknown))}."
             raise WorkflowRunStoreError(msg)
-        with self._write_transaction(run_id) as connection:
+        with self.write_transaction(run_id) as connection:
             run = _fenced(connection, run_id, epoch, when)
             if (taker := changes.get("owner")) is not None:
                 if taker in run.claims:
@@ -239,7 +239,7 @@ class WorkflowRunStore:
         A result over the inline limit moves to a file. With *dirty_after*, here and where a node is stamped or
         settled, the same write makes what earlier attempts left after the node run again (`_forget_after`).
         """
-        with self._write_transaction(node.run_id) as connection:
+        with self.write_transaction(node.run_id) as connection:
             _fenced(connection, node.run_id, epoch)
             saved = connection.execute(
                 "SELECT seq, generation FROM workflow_nodes WHERE run_id = ? AND key = ?",
@@ -288,7 +288,7 @@ class WorkflowRunStore:
             raise WorkflowRunStoreError(msg)
         values = _row_values(changes, _NODE_JSON_FIELDS)
         unsettled = " AND state IN ('queued', 'running', 'waiting')" if "state" in changes else ""
-        with self._write_transaction(run_id) as connection:
+        with self.write_transaction(run_id) as connection:
             _fenced(connection, run_id, epoch)
             updated = connection.execute(
                 f"UPDATE workflow_nodes SET {', '.join(f'{column} = ?' for column in values)} "  # noqa: S608
@@ -327,7 +327,7 @@ class WorkflowRunStore:
 
     def node_states(self, run_id: str) -> frozenset[WorkflowNodeState]:
         """Return the states the run's current nodes are in, excluding peer waits (which do not pause for a person)."""
-        with self._connection() as connection:
+        with self.read_connection() as connection:
             rows = connection.execute(
                 "SELECT DISTINCT state FROM workflow_nodes "
                 "WHERE run_id = ? AND stale = 0 AND NOT (state = 'waiting' AND COALESCE(waiting_on, '') = 'peer')",
@@ -354,7 +354,7 @@ class WorkflowRunStore:
         if state not in _ENDED_NODE_STATES:
             msg = f"A node settles into an ended state, not {state}."
             raise WorkflowRunStoreError(msg)
-        with self._write_transaction(run_id) as connection:
+        with self.write_transaction(run_id) as connection:
             _fenced(connection, run_id, epoch)
             saved = connection.execute(
                 "SELECT seq, state, result_file FROM workflow_nodes WHERE run_id = ? AND key = ? AND generation = ?",
@@ -387,7 +387,7 @@ class WorkflowRunStore:
 
     def mark_stale(self, run_id: str, epoch: int) -> None:
         """Take nodes not reached by *run_id*'s current attempt out of its current view, for the holder of *epoch*."""
-        with self._write_transaction(run_id) as connection:
+        with self.write_transaction(run_id) as connection:
             run = _fenced(connection, run_id, epoch)
             connection.execute(
                 "UPDATE workflow_nodes SET stale = 1 WHERE run_id = ? AND attempt != ? AND stale = 0",
@@ -410,7 +410,7 @@ class WorkflowRunStore:
         *turn* is a number for a turn of the node's own agent, and `sub:<delegation id>` for what the subagents of
         that agent's turn cost. With *epoch*, a write from a superseded attempt is refused.
         """
-        with self._write_transaction(run_id) as connection:
+        with self.write_transaction(run_id) as connection:
             if epoch is not None:
                 _fenced(connection, run_id, epoch)
             inserted = connection.execute(
@@ -446,7 +446,7 @@ class WorkflowRunStore:
 
     def append_log(self, run_id: str, epoch: int, text: str) -> None:
         """Append one line to a run's log, for the holder of *epoch*."""
-        with self._write_transaction(run_id) as connection:
+        with self.write_transaction(run_id) as connection:
             _fenced(connection, run_id, epoch)
             connection.execute(
                 "INSERT INTO workflow_log (run_id, created_at, text) VALUES (?, ?, ?)",
@@ -455,7 +455,7 @@ class WorkflowRunStore:
 
     def log(self, run_id: str, limit: int = 50) -> list[str]:
         """Return the newest *limit* lines of a run's log, oldest first."""
-        with self._connection() as connection:
+        with self.read_connection() as connection:
             rows = connection.execute(
                 "SELECT text FROM workflow_log WHERE run_id = ? ORDER BY id DESC LIMIT ?",
                 (run_id, limit),
@@ -464,7 +464,7 @@ class WorkflowRunStore:
 
     def get_source(self, run_id: str, attempt: int, name: str) -> tuple[bytes, str] | None:
         """Return the saved workflow bytes and SHA-256 snapshotted for *name* in *attempt*, if any."""
-        with self._connection() as connection:
+        with self.read_connection() as connection:
             row = connection.execute(
                 "SELECT source, sha256 FROM workflow_sources WHERE run_id = ? AND attempt = ? AND name = ?",
                 (run_id, attempt, name),
@@ -481,7 +481,7 @@ class WorkflowRunStore:
         sha256: str,
     ) -> tuple[bytes, str]:
         """Snapshot *source* for *name* in *attempt* once, returning the winning bytes and SHA-256."""
-        with self._write_transaction() as connection:
+        with self.write_transaction() as connection:
             _fenced(connection, run_id, epoch)
             connection.execute(
                 "INSERT OR IGNORE INTO workflow_sources (run_id, attempt, name, source, sha256) VALUES (?, ?, ?, ?, ?)",
@@ -502,7 +502,7 @@ class WorkflowRunStore:
         The timestamps are compared as instants, because their text leaves out a zero fraction of a second.
         """
         cutoff = datetime.fromisoformat(finished_before)
-        with self._write_transaction() as connection:
+        with self.write_transaction() as connection:
             rows = connection.execute(
                 f"SELECT run_id, job_id, finished_at, parent_run_id FROM workflow_runs "  # noqa: S608
                 f"WHERE state IN ({_TERMINAL_STATE_PLACEHOLDERS}) AND finished_at IS NOT NULL",
@@ -553,12 +553,12 @@ class WorkflowRunStore:
         if limit is not None:
             query += " LIMIT ?"
             bound = (*bound, limit)
-        with self._connection() as connection:
+        with self.read_connection() as connection:
             rows = connection.execute(query, bound).fetchall()
         return [_run_from_row(row) for row in rows]
 
     def _select_nodes(self, where: str, params: tuple[object, ...], columns: str = "*") -> list[WorkflowNode]:
-        with self._connection() as connection:
+        with self.read_connection() as connection:
             rows = connection.execute(
                 f"SELECT {columns} FROM workflow_nodes WHERE {where} ORDER BY seq",  # noqa: S608
                 params,
@@ -566,7 +566,7 @@ class WorkflowRunStore:
         return [_node_from_row(row) for row in rows]
 
     def _usage(self, run_id: str) -> list[tuple[str, int | str, int, dict[str, Any]]]:
-        with self._connection() as connection:
+        with self.read_connection() as connection:
             rows = connection.execute(
                 "SELECT key, turn, attempt, usage_json FROM workflow_usage WHERE run_id = ?",
                 (run_id,),
@@ -574,7 +574,7 @@ class WorkflowRunStore:
         return [(row["key"], row["turn"], row["attempt"], json.loads(row["usage_json"])) for row in rows]
 
     def _migrate(self) -> None:
-        with self._write_transaction() as connection:
+        with self.write_transaction() as connection:
             connection.execute("CREATE TABLE IF NOT EXISTS workflow_schema (version INTEGER NOT NULL)")
             row = connection.execute("SELECT version FROM workflow_schema").fetchone()
             version = 0 if row is None else int(row["version"])
@@ -591,7 +591,8 @@ class WorkflowRunStore:
                 connection.execute("INSERT INTO workflow_schema (version) VALUES (?)", (len(_MIGRATIONS),))
 
     @contextmanager
-    def _connection(self) -> Iterator[sqlite3.Connection]:
+    def read_connection(self) -> Iterator[sqlite3.Connection]:
+        """Open a read connection to the workflow store."""
         connection = sqlite3.connect(self.database_path, isolation_level=None, timeout=_BUSY_TIMEOUT_SECONDS)
         try:
             connection.row_factory = sqlite3.Row
@@ -602,21 +603,9 @@ class WorkflowRunStore:
             connection.close()
 
     @contextmanager
-    def read_connection(self) -> Iterator[sqlite3.Connection]:
-        """Open a read connection to the workflow store."""
-        with self._connection() as connection:
-            yield connection
-
-    @contextmanager
     def write_transaction(self, changed: str | None = None) -> Iterator[sqlite3.Connection]:
         """Run one write transaction; notify `on_change` for *changed* once committed."""
-        with self._write_transaction(changed) as connection:
-            yield connection
-
-    @contextmanager
-    def _write_transaction(self, changed: str | None = None) -> Iterator[sqlite3.Connection]:
-        """Run one write; *changed* is the run whose view the write changes, told to `on_change` once it is saved."""
-        with self._connection() as connection, begun(connection, write=True):
+        with self.read_connection() as connection, begun(connection, write=True):
             yield connection
         if changed is not None and self.on_change is not None:
             self.on_change(changed)
@@ -814,7 +803,7 @@ _SCHEMA_STATEMENTS = (
         key TEXT NOT NULL, seq INTEGER NOT NULL, kind TEXT NOT NULL, lane TEXT NOT NULL, idx INTEGER NOT NULL,
         digest TEXT NOT NULL, request_json TEXT NOT NULL, generation INTEGER NOT NULL, attempt INTEGER NOT NULL,
         state TEXT NOT NULL, waiting_on TEXT, handle_json TEXT NOT NULL, stale INTEGER NOT NULL,
-        label TEXT NOT NULL, name TEXT, phase TEXT, group_key TEXT, members_json TEXT NOT NULL, session_key TEXT,
+        label TEXT NOT NULL, name TEXT, phase TEXT, members_json TEXT NOT NULL, session_key TEXT,
         cached INTEGER NOT NULL, started_at TEXT, ended_at TEXT,
         result_json TEXT NOT NULL, result_file TEXT, error_json TEXT NOT NULL, links_json TEXT NOT NULL,
         PRIMARY KEY (run_id, key), UNIQUE (run_id, seq)
@@ -884,8 +873,6 @@ _SCHEMA_STATEMENTS = (
         run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
         key TEXT NOT NULL,
         value_json TEXT NOT NULL,
-        updated_by TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
         PRIMARY KEY (run_id, key)
     )
     """,
