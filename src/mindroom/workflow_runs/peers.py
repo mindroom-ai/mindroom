@@ -39,15 +39,7 @@ class NodeRef:
     key: str
     generation: int
     name: str
-    reader_key: str | None = None
-    reader_generation: int | None = None
-
-    @property
-    def cursor_key(self) -> tuple[str, int]:
-        """Return `(reader_key, reader_generation)` for cursor lookup (shared across session turns)."""
-        if self.reader_key and self.reader_generation:
-            return self.reader_key, self.reader_generation
-        return self.key, self.generation
+    session_key: str | None = None
 
 
 def peer_op_id(node_key: str, gen: int, model_run_id: str, call_id: str, op: str, args: object) -> str:
@@ -82,17 +74,17 @@ def _once(
 
 def _self_keys(conn: sqlite3.Connection, run_id: str, ref: NodeRef) -> set[str]:
     keys = {ref.key}
-    if ref.reader_key is not None:
+    if ref.session_key is not None:
         q = "SELECT key FROM workflow_nodes WHERE run_id = ? AND session_key = ?"
-        keys.update([ref.reader_key, *(r["key"] for r in conn.execute(q, (run_id, ref.reader_key)).fetchall())])
+        keys.update([ref.session_key, *(r["key"] for r in conn.execute(q, (run_id, ref.session_key)).fetchall())])
     return keys
 
 
 def _unread_rows(conn: sqlite3.Connection, run_id: str, reader: NodeRef, names: Collection[str]) -> list[sqlite3.Row]:
-    r_key, r_gen = reader.cursor_key
     cur_q = "SELECT seq FROM workflow_cursors WHERE run_id = ? AND reader_key = ? AND reader_generation = ?"
-    row = conn.execute(cur_q, (run_id, r_key, r_gen)).fetchone()
+    row = conn.execute(cur_q, (run_id, reader.key, reader.generation)).fetchone()
     cursor, self_keys, name_set = (0 if row is None else int(row["seq"])), _self_keys(conn, run_id, reader), set(names)
+    target = reader.session_key or reader.key
     msg_q = (
         "SELECT seq, sender_key, sender_name, recipient_name, recipient_keys_json, text, created_at "
         "FROM workflow_messages WHERE run_id = ? AND seq > ? AND withdrawn = 0 ORDER BY seq ASC"
@@ -103,7 +95,7 @@ def _unread_rows(conn: sqlite3.Connection, run_id: str, reader: NodeRef, names: 
         if r["recipient_name"] in name_set
         and r["sender_key"] not in self_keys
         and (
-            r["recipient_name"] != "*" or not r["recipient_keys_json"] or r_key in json.loads(r["recipient_keys_json"])
+            r["recipient_name"] != "*" or not r["recipient_keys_json"] or target in json.loads(r["recipient_keys_json"])
         )
     ]
 
@@ -123,8 +115,13 @@ def send(store: WorkflowRunStore, run_id: str, *, op_id: str, sender: NodeRef, t
     def _effect(conn: sqlite3.Connection) -> dict[str, object]:
         self_keys, frozen, delivered = _self_keys(conn, run_id, sender), None, 1
         if to != "script":
-            q = "SELECT key, kind, name, state FROM workflow_nodes WHERE run_id = ? AND stale = 0 AND kind IN ('agent', 'session')"
-            rows = conn.execute(q, (run_id,)).fetchall()
+            q = (
+                "SELECT key, kind, name, state FROM workflow_nodes "
+                "WHERE run_id = ? AND stale = 0 "
+                "AND attempt = (SELECT attempt FROM workflow_runs WHERE run_id = ?) "
+                "AND kind IN ('agent', 'session')"
+            )
+            rows = conn.execute(q, (run_id, run_id)).fetchall()
             if to == "*":
                 live = [
                     r["key"]
@@ -163,7 +160,6 @@ def read_call(
     empty_note: str | None = None,
 ) -> dict[str, object] | None:
     """Read unread messages for *reader* in one transaction keyed by *op_id*, or None if empty and `not record_empty`."""
-    r_key, r_gen = reader.cursor_key
 
     def _effect(conn: sqlite3.Connection) -> object:
         matched = _unread_rows(conn, run_id, reader, names)
@@ -174,7 +170,7 @@ def read_call(
                 "INSERT INTO workflow_cursors VALUES (?, ?, ?, ?) "
                 "ON CONFLICT(run_id, reader_key, reader_generation) DO UPDATE SET seq = excluded.seq"
             )
-            conn.execute(q, (run_id, r_key, r_gen, int(matched[-1]["seq"])))
+            conn.execute(q, (run_id, reader.key, reader.generation, int(matched[-1]["seq"])))
         msgs = [{"from": r["sender_name"], "text": r["text"], "sent_at": r["created_at"]} for r in matched]
         return {"messages": msgs, **({"note": empty_note} if not msgs and empty_note else {})}
 
@@ -247,14 +243,6 @@ def script_op(
     raise WorkflowRunStoreError(msg)
 
 
-def format_session_message(message: str, msgs: Collection[dict[str, object]]) -> str:
-    """Prepend between-turn peer *msgs* to a session turn *message*."""
-    if not msgs:
-        return message
-    lines = "\n".join(f"{m['from']}: {m['text']}" for m in msgs)
-    return f"Messages received since your last turn:\n{lines}\n\n{message}"
-
-
 def session_turn_message(
     store: WorkflowRunStore,
     run_id: str,
@@ -262,23 +250,31 @@ def session_turn_message(
     turn_key: str,
     turn_gen: int,
     message: str,
-    saved_node: WorkflowNode | None = None,
-    lineage_key: str = "",
-) -> tuple[str, list[dict[str, object]]]:
-    """Drain unread mail queued for *session*, preserve any prior batch for *lineage_key*, and format."""
-    saved_mail = (
-        saved_node.request.get("peer_mail")
-        if saved_node and saved_node.request.get("peer_mail_lineage") == lineage_key
-        else None
-    )
-    prior = cast("list[dict[str, object]]", saved_mail) if isinstance(saved_mail, list) else ()
+    *,
+    prev_turn: WorkflowNode | None = None,
+) -> str:
+    """Seed `(turn_key, turn_gen)` from *prev_turn*'s ending cursor, drain between-turn mail, and format."""
+    with store.write_transaction() as conn:
+        seed = 0
+        if prev_turn is not None:
+            q = "SELECT seq FROM workflow_cursors WHERE run_id = ? AND reader_key = ? AND reader_generation = ?"
+            row = conn.execute(q, (run_id, prev_turn.key, prev_turn.generation)).fetchone()
+            seed = 0 if row is None else int(row["seq"])
+        conn.execute(
+            "INSERT OR IGNORE INTO workflow_cursors VALUES (?, ?, ?, ?)",
+            (run_id, turn_key, turn_gen, seed),
+        )
+    if prev_turn is None:
+        return message
     name = session.name or str(session.request.get("name") or "")
-    reader = NodeRef(turn_key, turn_gen, name or f"n{session.seq}", session.key, session.generation)
+    reader = NodeRef(turn_key, turn_gen, name or f"n{session.seq}", session.key)
     names = (name, "*") if name else ("*",)
     res = read_call(store, run_id, op_id=f"session_inbox:{turn_key}:{turn_gen}", reader=reader, names=names)
-    new_msgs = cast("list[dict[str, object]]", res["messages"]) if res is not None else ()
-    mail = [*prior, *new_msgs]
-    return format_session_message(message, mail), mail
+    msgs = cast("list[dict[str, object]]", res["messages"]) if res is not None else ()
+    if not msgs:
+        return message
+    lines = "\n".join(f"{m['from']}: {m['text']}" for m in msgs)
+    return f"Messages received since your last turn:\n{lines}\n\n{message}"
 
 
 def withdraw_unread(store: WorkflowRunStore, run_id: str, sender_key: str, old_generation: int) -> int:
@@ -288,12 +284,17 @@ def withdraw_unread(store: WorkflowRunStore, run_id: str, sender_key: str, old_g
         WHERE run_id = ? AND sender_key = ? AND sender_generation = ? AND withdrawn = 0
           AND NOT EXISTS (
             SELECT 1 FROM workflow_cursors c
+            LEFT JOIN workflow_nodes rn ON rn.run_id = c.run_id AND rn.key = c.reader_key
+            LEFT JOIN workflow_nodes sn ON sn.run_id = workflow_messages.run_id AND sn.key = workflow_messages.sender_key
             WHERE c.run_id = workflow_messages.run_id AND c.seq >= workflow_messages.seq
-              AND c.reader_key != workflow_messages.sender_key
-              AND c.reader_key != COALESCE((SELECT session_key FROM workflow_nodes WHERE run_id = workflow_messages.run_id AND key = workflow_messages.sender_key), '')
-              AND ((workflow_messages.recipient_name = 'script' AND c.reader_key = 'script')
-                OR (workflow_messages.recipient_name = '*' AND c.reader_key != 'script' AND (workflow_messages.recipient_keys_json IS NULL OR EXISTS (SELECT 1 FROM json_each(workflow_messages.recipient_keys_json) WHERE value = c.reader_key)))
-                OR EXISTS (SELECT 1 FROM workflow_nodes n WHERE n.run_id = c.run_id AND n.key = c.reader_key AND n.name = workflow_messages.recipient_name)))
+              AND COALESCE(rn.session_key, c.reader_key) != COALESCE(sn.session_key, workflow_messages.sender_key)
+              AND (
+                (workflow_messages.recipient_name = 'script' AND c.reader_key = 'script')
+                OR (workflow_messages.recipient_name = '*' AND c.reader_key != 'script'
+                    AND (workflow_messages.recipient_keys_json IS NULL OR EXISTS (
+                      SELECT 1 FROM json_each(workflow_messages.recipient_keys_json)
+                      WHERE value = COALESCE(rn.session_key, c.reader_key))))
+                OR rn.name = workflow_messages.recipient_name))
     """
     with store.write_transaction(run_id) as conn:
         return int(conn.execute(sql, (run_id, sender_key, old_generation)).rowcount)

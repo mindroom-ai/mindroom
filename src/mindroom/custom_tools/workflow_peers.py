@@ -31,9 +31,8 @@ def _bind(op: str = "", args: object = None) -> tuple[WorkflowEngine, str, Workf
     if node is None:
         msg = f"Workflow node {key} is no longer available."
         raise WorkflowRunStoreError(msg)
-    sess = engine.store.get_node(run_id, node.session_key) if node.session_key else None
     gen = obs.child.workflow_generation or node.generation
-    ref = NodeRef(key, gen, node.name or f"n{node.seq}", sess.key if sess else None, sess.generation if sess else None)
+    ref = NodeRef(key, gen, node.name or f"n{node.seq}", node.session_key)
     call = current_tool_call()
     model_run = (call.context.run_id if call and call.context.run_id else obs.child.run_id) or ""
     call_id = call.context.call_id if call and call.context.call_id else uuid4().hex

@@ -1158,3 +1158,92 @@ agents:
     assert not passed_noop
     passed_one_way, _ = blind_authoring._verify_task(negotiate, run, nodes, messages[:1], state)
     assert not passed_one_way
+
+
+@pytest.mark.asyncio
+async def test_resume_edited_send_resolves_reachability_against_current_attempt(stack: WorkflowStack) -> None:
+    """Fresh Astra Major 2: on resume, send resolves reachability and '*' against current attempt's nodes only."""
+    seen: list[list[str]] = []
+
+    def _handle(req: ModelRequest) -> list[ScriptStep]:
+        outs = _tool_outputs(req)
+        if not outs:
+            return calls(tool_call("read_peer_messages", "r1", wait_seconds=0))
+        seen.append([m["text"] for m in outs[0]["messages"]])
+        return answer("reviewed")
+
+    _route_agents(stack, _handle)
+    assert await stack.result("@0", "send", {"to": "reviewer", "text": "draft 1"}) == {"delivered": 0, "held": True}
+    assert (
+        await stack.result("@1", "agent", {"prompt": "review", "name": "reviewer"}, meta={"name": "reviewer"})
+        == "reviewed"
+    )
+    assert seen == [["draft 1"]]
+
+    # Resume as attempt 2 with an edited send BEFORE the reviewer node is reached in attempt 2.
+    await stack.finish_attempt(result="done-1")
+    await stack.resume(stack.run_id)
+    assert await stack.result("@0", "send", {"to": "reviewer", "text": "draft 2"}) == {"delivered": 0, "held": True}
+    assert await stack.result("@2", "send", {"to": "*", "text": "bcast-before-start"}) == {"delivered": 0, "held": True}
+
+    # Reviewer runs as generation 2 in attempt 2 and reads the new draft (not the broadcast frozen before it started).
+    assert (
+        await stack.result("@1", "agent", {"prompt": "review", "name": "reviewer"}, meta={"name": "reviewer"})
+        == "reviewed"
+    )
+    assert seen[-1] == ["draft 1", "draft 2"]
+
+    # After the current attempt's reviewer finishes, sending to it still fails with PeerUnreachableError.
+    with pytest.raises(NodeFailed, match=r"'reviewer' has finished and will not read this\. Use spawn\(\)"):
+        await stack.result("@3", "send", {"to": "reviewer", "text": "too late"})
+
+
+@pytest.mark.asyncio
+async def test_session_turn_rerun_re_reads_explicitly_read_mail_from_predecessor_cursor(stack: WorkflowStack) -> None:
+    """Fresh Astra Major 3: rerunning a session turn starts its cursor from its predecessor turn's ending cursor."""
+    explicit_reads: list[list[str]] = []
+    turn2_prompts: list[str] = []
+
+    def _handle(req: ModelRequest) -> list[ScriptStep]:
+        prompt = _user_texts(req)[-1]
+        last_user = max(i for i, m in enumerate(req.messages) if m.role == "user")
+        outs = [
+            json.loads(m.content)
+            for m in req.messages[last_user + 1 :]
+            if m.role == "tool" and isinstance(m.content, str)
+        ]
+        if "turn-1" in prompt:
+            if not outs:
+                return calls(tool_call("read_peer_messages", "r-t1", wait_seconds=0))
+            explicit_reads.append([m["text"] for m in outs[-1]["messages"]])
+            return answer("t1-ok")
+        if "turn-2" in prompt:
+            if not outs:
+                turn2_prompts.append(prompt)
+                return calls(tool_call("read_peer_messages", "r-t2", wait_seconds=0))
+            explicit_reads.append([m["text"] for m in outs[-1]["messages"]])
+            return answer("t2-ok")
+        return answer("ok")
+
+    _route_agents(stack, _handle)
+    await stack.result("@0", "session", {"name": "coder"}, meta={"name": "coder"})
+    await stack.result("@1", "send", {"to": "coder", "text": "draft 1"})
+    assert await stack.result("@2", "turn", {"session": "@0", "turn": 1, "message": "turn-1"}) == "t1-ok"
+    assert explicit_reads == [["draft 1"]]
+
+    await stack.result("@3", "send", {"to": "coder", "text": "draft 2"})
+    assert await stack.result("@4", "turn", {"session": "@0", "turn": 2, "message": "turn-2"}) == "t2-ok"
+    assert "draft 2" in turn2_prompts[-1]
+    assert "draft 1" not in turn2_prompts[-1]
+    assert explicit_reads == [["draft 1"], []]
+
+    # Finish and rerun ONLY turn 1: generation 2 starts from cursor 0 and re-reads "draft 1" explicitly.
+    turn1 = stack.store.get_node(stack.run_id, "@2")
+    assert turn1 is not None
+    await stack.finish_attempt(result="done-1")
+    await stack.resume(stack.run_id, rerun=[f"n{turn1.seq}"])
+
+    await stack.result("@0", "session", {"name": "coder"}, meta={"name": "coder"})
+    await stack.result("@1", "send", {"to": "coder", "text": "draft 1"})
+    assert await stack.result("@2", "turn", {"session": "@0", "turn": 1, "message": "turn-1"}) == "t1-ok"
+    assert "draft 1" in explicit_reads[-1]

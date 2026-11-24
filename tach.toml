@@ -2654,7 +2654,6 @@ expose = [
     "PeerUnreachableError",
     "all_messages",
     "all_state",
-    "format_session_message",
     "get_state",
     "list_peers",
     "message_edges",

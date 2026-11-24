@@ -68,7 +68,6 @@ from mindroom.workflow_runs.models import (
 from mindroom.workflow_runs.notices import RETRY_SECONDS
 from mindroom.workflow_runs.peers import (
     NodeRef,
-    format_session_message,
     read_call,
     script_op,
     session_turn_message,
@@ -932,18 +931,19 @@ class WorkflowEngine:
                 await asyncio.to_thread(withdraw_unread, self.store, run.run_id, key, saved.generation)
             follow_up = None
             if shown == "turn" and session is not None:
-                raw_msg = str(asked["message"])
-                lin = [(session.digest, session.generation), *((t.key, t.digest, t.generation) for t in earlier)]
-                lineage_key = result_digest(lin)
-                mail_call = partial(session_turn_message, self.store, run.run_id, session, key, generation, raw_msg)
-                turn_msg, turn_mail = (
-                    await asyncio.to_thread(mail_call, saved_node=saved, lineage_key=lineage_key)
-                    if any(t.state is WorkflowNodeState.COMPLETED for t in earlier)
-                    else (raw_msg, [])
+                prev_turn = next((t for t in reversed(earlier) if t.state is WorkflowNodeState.COMPLETED), None)
+                mail_call = partial(
+                    session_turn_message,
+                    self.store,
+                    run.run_id,
+                    session,
+                    key,
+                    generation,
+                    str(asked["message"]),
                 )
+                turn_msg = await asyncio.to_thread(mail_call, prev_turn=prev_turn)
                 follow_up, prompt = await self._prepare_turn(run, session, all_turns, earlier, saved, turn_msg)
-                req_out = {**asked, "prompt": prompt, "peer_mail": turn_mail, "peer_mail_lineage": lineage_key}
-                node = replace(node, request=req_out)
+                node = replace(node, request={**asked, "prompt": prompt, "effective_message": turn_msg})
             dispatch = partial(self._dispatch_agent, run, timeout=_timeout(meta), follow_up=follow_up)
             start = partial(self._enter, run, node, dispatch)
             return await (self._ask_gate(run, attempt, node, (grant, arguments)) if grant is not None else start())
@@ -1055,12 +1055,7 @@ class WorkflowEngine:
             async with condition:
                 cur = await asyncio.to_thread(self.store.get_node, run_id, ask_key)
                 run = await asyncio.to_thread(self.store.get_run, run_id)
-                if (
-                    cur is None
-                    or cur.state is WorkflowNodeState.CANCELLED
-                    or run_id in self._stopping
-                    or run.state in TERMINAL_RUN_STATES
-                ):
+                if cur is None or cur.state is WorkflowNodeState.CANCELLED or self._run_ended(run_id):
                     raise WorkflowRunStoreError(_NOT_ANSWERED)
                 if cur.state is WorkflowNodeState.COMPLETED:
                     return str(cur.result)
@@ -1224,13 +1219,9 @@ class WorkflowEngine:
         """Take a concurrency place back for *key* before a peer or child-question wait returns."""
         granted = False
         async with (condition := self._condition(run_id)):
-            if (
-                self._closed
-                or run_id in self._stopping
-                or (run := self.store.get_run(run_id)).state in TERMINAL_RUN_STATES
-            ):
+            if self._closed or self._run_ended(run_id):
                 return
-            places = self._places_for(run)
+            places = self._places_for(self.store.get_run(run_id))
             if key in places.working or len(places.working) < places.limit:
                 places.working.add(key)
                 return
@@ -1243,12 +1234,7 @@ class WorkflowEngine:
             entry = (key, wake)
             places.queued.appendleft(entry)
             try:
-                while (
-                    not granted
-                    and not self._closed
-                    and run_id not in self._stopping
-                    and self.store.get_run(run_id).state not in TERMINAL_RUN_STATES
-                ):
+                while not granted and not self._closed and not self._run_ended(run_id):
                     await condition.wait()
             except BaseException:
                 if granted:
@@ -1647,12 +1633,7 @@ class WorkflowEngine:
             return None, message
         history = [
             (
-                format_session_message(
-                    str(turn.request["message"]),
-                    cast("list[dict[str, object]]", turn.request["peer_mail"])
-                    if isinstance(turn.request.get("peer_mail"), list)
-                    else (),
-                ),
+                str(turn.request.get("effective_message") or turn.request["message"]),
                 res
                 if isinstance(res := await asyncio.to_thread(self.store.whole_result, turn), str)
                 else json.dumps(res),
