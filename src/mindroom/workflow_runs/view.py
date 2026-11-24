@@ -32,6 +32,7 @@ from mindroom.workflow_runs.graph import (
     graph_rows,
     projected_cost_usd,
 )
+from mindroom.workflow_runs.interactions import retry_question_cards
 from mindroom.workflow_runs.limits import run_usage
 from mindroom.workflow_runs.models import (
     TERMINAL_RUN_STATES,
@@ -210,7 +211,7 @@ class RunViews:
             # Else the run may not act now, or nobody can post for it: its next view tries again.
             self._publish_frame(run, account, meta, graph)
             shown = await self._card(run, meta, graph, client)
-            await self.engine.ask.retry_question_cards(run_id)
+            await retry_question_cards(self.engine, run_id)
         else:
             self._stop_frame(run_id)
         if run.state not in TERMINAL_RUN_STATES:

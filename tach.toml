@@ -2124,6 +2124,7 @@ depends_on = [
     "mindroom.json_utils",
     "mindroom.workflow_runs.engine",
     "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.nodes",
     "mindroom.workflow_runs.store",
 ]
 
@@ -2716,29 +2717,10 @@ expose = [
 ]
 
 [[modules]]
-path = "mindroom.workflow_runs.coordination"
-depends_on = [
-    "mindroom.workflow_runs.limits",
-    "mindroom.workflow_runs.models",
-    "mindroom.workflow_runs.replay",
-    "mindroom.workflow_runs.store",
-]
-
-[[interfaces]]
-from = ["mindroom.workflow_runs.coordination"]
-expose = [
-    "ADMISSIONS",
-    "Places",
-    "RunCoordinator",
-    "wait_for_change",
-]
-
-[[modules]]
 path = "mindroom.workflow_runs.interactions"
 depends_on = [
-    "mindroom.workflow_runs.coordination",
-    "mindroom.workflow_runs.graph",
     "mindroom.workflow_runs.answers",
+    "mindroom.workflow_runs.graph",
     "mindroom.workflow_runs.models",
     "mindroom.workflow_runs.peers",
     "mindroom.workflow_runs.replay",
@@ -2747,45 +2729,27 @@ depends_on = [
 
 [[interfaces]]
 from = ["mindroom.workflow_runs.interactions"]
-expose = ["RunInteractions"]
-
-[[modules]]
-path = "mindroom.workflow_runs.dispatch"
-depends_on = [
-    "mindroom.workflow_runs.agent_nodes",
-    "mindroom.workflow_runs.faults",
-    "mindroom.workflow_runs.models",
-    "mindroom.workflow_runs.replay",
-    "mindroom.workflow_runs.store",
-]
-
-[[interfaces]]
-from = ["mindroom.workflow_runs.dispatch"]
-expose = ["NodeDispatcher"]
-
-[[modules]]
-path = "mindroom.workflow_runs.endings"
-depends_on = [
-    "mindroom.workflow_runs.agent_nodes",
-    "mindroom.workflow_runs.models",
-    "mindroom.workflow_runs.replay",
-    "mindroom.workflow_runs.store",
-]
-
-[[interfaces]]
-from = ["mindroom.workflow_runs.endings"]
 expose = [
-    "RunEndings",
-    "run_outcome",
+    "answer",
+    "ask_child_question",
+    "asked",
+    "close_card",
+    "peer_send",
+    "poster",
+    "retry_question_cards",
+    "validate_question_options",
+    "wait_for_messages",
+    "wait_inbox",
 ]
 
 [[modules]]
-path = "mindroom.workflow_runs.script_calls"
+path = "mindroom.workflow_runs.nodes"
 depends_on = [
     "mindroom.delegation.state",
     "mindroom.workflow_runs.agent_nodes",
-    "mindroom.workflow_runs.coordination",
+    "mindroom.workflow_runs.faults",
     "mindroom.workflow_runs.graph",
+    "mindroom.workflow_runs.interactions",
     "mindroom.workflow_runs.limits",
     "mindroom.workflow_runs.models",
     "mindroom.workflow_runs.peers",
@@ -2795,23 +2759,34 @@ depends_on = [
 ]
 
 [[interfaces]]
-from = ["mindroom.workflow_runs.script_calls"]
-expose = ["ScriptCalls"]
+from = ["mindroom.workflow_runs.nodes"]
+expose = [
+    "admit",
+    "append_log",
+    "finish",
+    "node_by_id",
+    "node_receipt",
+    "node_record",
+    "reconcile",
+    "resolve_source",
+    "run_info",
+    "saved_source",
+    "settle_from_handle",
+    "start_gated",
+    "submit_node",
+]
 
 [[modules]]
 path = "mindroom.workflow_runs.engine"
 depends_on = [
     "mindroom.delegation.personas",
     "mindroom.workflow_runs.agent_nodes",
-    "mindroom.workflow_runs.coordination",
-    "mindroom.workflow_runs.dispatch",
-    "mindroom.workflow_runs.endings",
     "mindroom.workflow_runs.interactions",
     "mindroom.workflow_runs.limits",
     "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.nodes",
     "mindroom.workflow_runs.recovery",
     "mindroom.workflow_runs.replay",
-    "mindroom.workflow_runs.script_calls",
     "mindroom.workflow_runs.store",
 ]
 
@@ -2873,10 +2848,11 @@ path = "mindroom.workflow_runs.view"
 depends_on = [
     "mindroom.live_frames.subagents",
     "mindroom.live_frames.workflow",
+    "mindroom.workflow_runs.answers",
     "mindroom.workflow_runs.faults",
     "mindroom.workflow_runs.graph",
+    "mindroom.workflow_runs.interactions",
     "mindroom.workflow_runs.limits",
-    "mindroom.workflow_runs.answers",
     "mindroom.workflow_runs.models",
     "mindroom.workflow_runs.peers",
     "mindroom.workflow_runs.store",
@@ -2922,6 +2898,7 @@ depends_on = [
     "mindroom.workflow_runs.answers",
     "mindroom.workflow_runs.limits",
     "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.nodes",
     "mindroom.workflow_runs.peers",
     "mindroom.workflow_runs.replay",
     "mindroom.workflow_runs.saved",
@@ -2936,6 +2913,7 @@ depends_on = [
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.invocation",
     "mindroom.tool_system.runtime_context",
+    "mindroom.workflow_runs.interactions",
     "mindroom.workflow_runs.peers",
     "mindroom.workflow_runs.store",
 ]

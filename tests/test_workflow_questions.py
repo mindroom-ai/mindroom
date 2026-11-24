@@ -297,7 +297,7 @@ async def test_question_whose_card_was_not_posted_takes_no_answer(stack: Workflo
 
     assert await _answer(stack, card, option="Yes") == "no_longer_open"
     assert await answer_command(stack.engine, text="1", **here) == "No open question for you in this thread."
-    assert not await stack.engine.ask.answer(stack.run_id, "@0", node.generation, "Yes")
+    assert not await stack.engine.answer(stack.run_id, "@0", node.generation, "Yes")
 
     assert _node_state(stack) == (WorkflowNodeState.WAITING, "user")
 

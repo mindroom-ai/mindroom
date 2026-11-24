@@ -313,12 +313,12 @@ async def launch_child(
     jobs: ToolJobRuntime | None = None,
 ) -> WorkflowNode:
     """Authorize and start one agent turn job for *node*, saving its handle before launching."""
-    context, runtime = engine.authorize(run), engine.live.agents()
+    context, runtime = engine.authorize(run), engine.agents()
     if context is None:
         raise ScriptRuntimeUnavailableError(OWNER_NOT_READY)
     if isinstance(context, str) or runtime is None:
         raise AgentNodeError(context if isinstance(context, str) else NO_AGENTS)
-    store, job_runtime = engine.live.store, jobs or runtime.jobs
+    store, job_runtime = engine.store, jobs or runtime.jobs
     session = store.get_node(run.run_id, node.session_key) if node.session_key else None
     source = session.request if session is not None else node.request
     first_turn = node.kind != "turn" or int(node.request.get("turn", 1)) == 1
@@ -569,31 +569,32 @@ async def dispatch_agent(
         node = await launch_child(engine, run, node, run.epoch, timeout=timeout, follow_up=follow_up)
     except AgentNodeError as exc:
         error: dict[str, object] = {"kind": "refused", "message": str(exc)}
-        if not await engine.live.settle(node, run.epoch, state=WorkflowNodeState.FAILED, error=error) and not node.seq:
+        if not await engine.settle_node(node, run.epoch, state=WorkflowNodeState.FAILED, error=error) and not node.seq:
             refused = replace(node, state=WorkflowNodeState.FAILED, error=error, ended_at=utc_timestamp())
-            await asyncio.to_thread(engine.live.store.put_node, refused, run.epoch, dirty_after=True)
-        engine.live.drop_slot(run.run_id, node.key)
-        return receipt(cast("WorkflowNode", engine.live.store.get_node(run.run_id, node.key)))
+            await asyncio.to_thread(engine.store.put_node, refused, run.epoch, dirty_after=True)
+        engine.drop_slot(run.run_id, node.key)
+        return receipt(cast("WorkflowNode", engine.store.get_node(run.run_id, node.key)))
     except BaseException:
-        saved = engine.live.store.get_node(run.run_id, node.key)
+        saved = engine.store.get_node(run.run_id, node.key)
         if saved is not None and saved.generation == node.generation and saved.handle is not None:
             wait_for_agent(engine, run, saved, run.epoch)
         raise
     wait_for_agent(engine, run, node, run.epoch)
-    await engine.live.restate(run.run_id)
+    await engine.restate(run.run_id)
     return receipt(node)
 
 
 def wait_for_agent(engine: WorkflowEngine, run: WorkflowRun, node: WorkflowNode, epoch: int) -> None:
     """Attach an engine task waiting on *node*'s job, replacing any earlier timed watcher."""
     assert node.handle is not None
-    if engine.live.closed:
+    if engine.closed:
         return
     name = f"{TIMED_PREFIX}{node.handle.ref}"
-    for stale in [task for task in engine.live.tasks.get(run.run_id, ()) if task.get_name() == name]:
+    tasks = engine._runs[run.run_id].tasks if run.run_id in engine._runs else ()
+    for stale in [task for task in tasks if task.get_name() == name]:
         stale.cancel()
-    engine.live.places_for(run).working.add(node.key)
-    task = engine.live.spawn(run.run_id, _run_agent_node(engine, run, node, epoch))
+    engine.places_for(run).working.add(node.key)
+    task = engine.spawn(run.run_id, _run_agent_node(engine, run, node, epoch))
     if node.handle.work_until is not None or node.handle.work_left is not None:
         task.set_name(name)
 
@@ -601,9 +602,9 @@ def wait_for_agent(engine: WorkflowEngine, run: WorkflowRun, node: WorkflowNode,
 async def _run_agent_node(engine: WorkflowEngine, run: WorkflowRun, node: WorkflowNode, epoch: int) -> None:
     try:
         await settle_agent(engine, run, node, epoch)
-        await engine.live.release_slot(node.run_id, node.key)
+        await engine.release_slot(node.run_id, node.key)
     except BaseException:
-        engine.live.drop_slot(node.run_id, node.key)
+        engine.drop_slot(node.run_id, node.key)
         raise
 
 
@@ -634,7 +635,7 @@ async def _settle_turn(
     block: bool,
 ) -> WorkflowNode | None:
     assert node.handle is not None
-    if (runtime := engine.live.agents()) is None:
+    if (runtime := engine.agents()) is None:
         raise ScriptRuntimeUnavailableError(NO_AGENTS)
     try:
         waits = partial(node_waits, engine, node, epoch) if block else None
@@ -649,7 +650,7 @@ async def _settle_turn(
     further = None
     try:
         with suppress(SupersededAttemptError):
-            add = partial(engine.live.store.add_usage, node.run_id, node.key, node.generation, epoch=epoch)
+            add = partial(engine.store.add_usage, node.run_id, node.key, node.generation, epoch=epoch)
             for entry, attempt, used in usage:
                 await asyncio.to_thread(add, entry, attempt, used)
             outcome: Outcome | str | WorkflowNode = _turn_outcome(
@@ -658,7 +659,7 @@ async def _settle_turn(
                 text,
                 last=turn >= SCHEMA_TURNS,
                 made=made,
-                stopping=node.run_id in engine.live.stopping,
+                stopping=engine.is_stopping(node.run_id),
             )
             if isinstance(outcome, str):
                 outcome = await _correct(engine, run, node, epoch, outcome, turn=turn + 1, made=made, block=block)
@@ -666,7 +667,7 @@ async def _settle_turn(
                 further = outcome
             else:
                 state, result, error = outcome
-                await engine.live.settle(node, epoch, state=state, result=result, error=error)
+                await engine.settle_node(node, epoch, state=state, result=result, error=error)
             if claim is not None:
                 await runtime.jobs.acknowledge_wait(node.handle.ref, claim)
     finally:
@@ -685,7 +686,7 @@ async def _correct(
     made: bool,
     block: bool,
 ) -> WorkflowNode | Outcome:
-    saved = engine.live.store.get_node(node.run_id, node.key)
+    saved = engine.store.get_node(node.run_id, node.key)
     current = saved.handle if saved is not None and saved.generation == node.generation else None
     handle = current or cast("DispatchHandle", node.handle)
     while True:
@@ -693,8 +694,8 @@ async def _correct(
         try:
             reason = await asyncio.to_thread(
                 budget_exceeded,
-                engine.live.store,
-                engine.live.store.get_run(node.run_id),
+                engine.store,
+                engine.store.get_run(node.run_id),
             )
             if reason is not None:
                 stopped: Outcome = WorkflowNodeState.CANCELLED, None, {"kind": "cancelled", "message": reason}
@@ -736,16 +737,16 @@ async def node_waits(
             work_left=left if on else None,
             work_until=None if on else time.time() + left,
         )
-    await engine.live.stamp(node, epoch, ignore=True, **changes)
-    await engine.live.notify(node.run_id)
+    await engine.stamp(node, epoch, ignore=True, **changes)
+    await engine.notify(node.run_id)
 
 
 def node_prompt(engine: WorkflowEngine, run_id: str, key: str | None, generation: int | None) -> str | None:
     """Return the initial prompt for a live agent node generation, or None once ended/stopped."""
-    node = engine.live.store.get_node(run_id, key) if key else None
+    node = engine.store.get_node(run_id, key) if key else None
     live = node is not None and node.generation == generation and node.state in LIVE_NODE_STATES
-    if live and (runtime := engine.live.agents()) is not None:
-        owner = engine.live.store.get_run(run_id).job_id
+    if live and (runtime := engine.agents()) is not None:
+        owner = engine.store.get_run(run_id).job_id
         job = runtime.jobs.retained_job(owner) if owner is not None else None
         live = job is None or job.status not in _STOPPED_JOB_STATUSES
     if node is None or not live or not isinstance(node.request.get("prompt"), str):

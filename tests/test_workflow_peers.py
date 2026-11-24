@@ -44,6 +44,7 @@ from mindroom.tool_system.tool_function import ToolGate
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from mindroom.workflow_runs import agent_nodes, peers
 from mindroom.workflow_runs import engine as engine_module
+from mindroom.workflow_runs import interactions as interactions_module
 from mindroom.workflow_runs.graph import graph_rows
 from mindroom.workflow_runs.models import TERMINAL_RUN_STATES, WorkflowNodeState, WorkflowRunState
 from mindroom.workflow_runs.peers import (
@@ -166,7 +167,7 @@ async def test_message_to_a_name_nobody_has_yet_is_held_and_delivered_when_it_st
     await stack.submit("/0:p0@0", "agent", {"prompt": "be", "name": "backend"}, meta={"name": "backend"})
     backend = _ref(stack, "/0:p0@0")
 
-    sent = await stack.engine.ask.peer_send(
+    sent = await interactions_module.peer_send(stack.engine,
         stack.run_id,
         op_id="op-1",
         sender=backend,
@@ -333,14 +334,14 @@ async def test_waiting_reader_returns_timeout_note_and_retries_persist_it(stack:
     )
     # Before wait_seconds elapses, no deadlock notice fires; advancing fake clock past 30s ends the wait with the note.
     stack.now += 10.0
-    async with stack.engine.live.condition(stack.run_id):
-        stack.engine.live.condition(stack.run_id).notify_all()
+    async with stack.engine.condition(stack.run_id):
+        stack.engine.condition(stack.run_id).notify_all()
     await asyncio.sleep(0.02)
     assert not seen_tool_results
 
     stack.now += 25.0
-    async with stack.engine.live.condition(stack.run_id):
-        stack.engine.live.condition(stack.run_id).notify_all()
+    async with stack.engine.condition(stack.run_id):
+        stack.engine.condition(stack.run_id).notify_all()
     await stack.until(
         lambda: (n := stack.store.get_node(stack.run_id, "@0")) is not None and n.state is WorkflowNodeState.COMPLETED,
     )
@@ -358,7 +359,7 @@ async def test_waiting_reader_returns_timeout_note_and_retries_persist_it(stack:
         {"wait_seconds": 15},
     )
     wait_task = asyncio.create_task(
-        stack.engine.ask.wait_for_messages(
+        interactions_module.wait_for_messages(stack.engine,
             stack.run_id,
             reader,
             15.0,
@@ -368,12 +369,12 @@ async def test_waiting_reader_returns_timeout_note_and_retries_persist_it(stack:
     )
     await asyncio.sleep(0.02)
     stack.now += 20.0
-    async with stack.engine.live.condition(stack.run_id):
-        stack.engine.live.condition(stack.run_id).notify_all()
+    async with stack.engine.condition(stack.run_id):
+        stack.engine.condition(stack.run_id).notify_all()
     first = await asyncio.wait_for(wait_task, timeout=SETTLE_TIMEOUT_SECONDS)
     expected = {"messages": [], "note": "No message arrived within 15 s."}
     assert first == expected
-    replayed = await stack.engine.ask.wait_for_messages(
+    replayed = await interactions_module.wait_for_messages(stack.engine,
         stack.run_id,
         reader,
         15.0,
@@ -386,8 +387,8 @@ async def test_waiting_reader_returns_timeout_note_and_retries_persist_it(stack:
     inbox_receipt = await stack.submit("@1", "inbox", {"wait_seconds": 12})
     assert inbox_receipt.state is WorkflowNodeState.WAITING
     stack.now += 15.0
-    async with stack.engine.live.condition(stack.run_id):
-        stack.engine.live.condition(stack.run_id).notify_all()
+    async with stack.engine.condition(stack.run_id):
+        stack.engine.condition(stack.run_id).notify_all()
     await stack.until(
         lambda: (n := stack.store.get_node(stack.run_id, "@1")) is not None and n.state is WorkflowNodeState.COMPLETED,
     )
@@ -1582,7 +1583,7 @@ async def test_non_finite_peer_wait_seconds_is_refused_and_records_nothing(
     reader = NodeRef("@0", 1, "reader")
     with pytest.raises(WorkflowRunStoreError, match="finite"):
         await asyncio.wait_for(
-            stack.engine.ask.wait_for_messages(
+            interactions_module.wait_for_messages(stack.engine,
                 stack.run_id,
                 reader,
                 bad_wait,

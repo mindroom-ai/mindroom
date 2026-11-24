@@ -18,8 +18,8 @@ from mindroom.approval import manager as approval_manager
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.workflow_runs import agent_nodes
-from mindroom.workflow_runs import dispatch as dispatch_module
 from mindroom.workflow_runs import engine as engine_module
+from mindroom.workflow_runs import nodes as nodes_module
 from mindroom.workflow_runs.limits import WorkflowLimits
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
 from mindroom.workflow_runs.replay import calling_node
@@ -75,7 +75,7 @@ def _append(line: str) -> dict[str, object]:
 
 async def _settled(stack: WorkflowStack, receipt: NodeReceipt) -> NodeReceipt:
     while receipt.state not in ("completed", "failed", "cancelled", "indeterminate"):
-        receipt = await stack.engine.calls.node_receipt(stack.attempt, receipt.id, wait=5)
+        receipt = await nodes_module.node_receipt(stack.engine, stack.attempt, receipt.id, wait=5)
     return receipt
 
 
@@ -275,7 +275,7 @@ async def test_cancel_starts_no_queued_node(stack: WorkflowStack) -> None:
     assert _states(stack)[1:] == [_CANCELLED, _CANCELLED]
     assert stack.store.get_run(stack.run_id).state is WorkflowRunState.CANCELLED
     # An ended run keeps no count of working calls behind.
-    assert stack.engine.live.places == {}
+    assert all(st.places is None for st in stack.engine._runs.values())
 
 
 @pytest.mark.asyncio
@@ -310,7 +310,7 @@ async def test_queued_agent_whose_node_ended_meanwhile_starts_nothing(stack: Wor
     gate.set()
 
     assert (await _settled(stack, first)).result == "done"
-    await stack.until(lambda: stack.engine.live.places[stack.run_id].working == set())
+    await stack.until(lambda: stack.engine._runs[stack.run_id].places.working == set())
     assert (len(stack.models["watcher"].requests), _states(stack)[1]) == (1, _CANCELLED)
     assert len(stack.jobs.retained_jobs()) == 1
 
@@ -329,7 +329,7 @@ async def test_queued_tool_call_whose_node_ended_meanwhile_runs_nothing(stack: W
     written.set()
 
     assert (await _settled(stack, first)).result == "appended"
-    await stack.until(lambda: stack.engine.live.places[stack.run_id].working == set())
+    await stack.until(lambda: stack.engine._runs[stack.run_id].places.working == set())
     assert (stack.counting_tool.lines, _states(stack)[1]) == (["a"], _CANCELLED)
 
 
@@ -344,7 +344,7 @@ async def test_attempt_that_failed_starts_no_queued_call_and_keeps_no_places(sta
 
     await stack.finish_attempt(error="KeyError: 'x'")
 
-    assert (stack.counting_tool.lines, stack.engine.live.places) == (["a"], {})
+    assert (stack.counting_tool.lines, [st.places for st in stack.engine._runs.values() if st.places is not None]) == (["a"], [])
     assert stack.store.get_run(stack.run_id).state is WorkflowRunState.FAILED
 
 
@@ -420,7 +420,7 @@ async def test_workflow_tool_calls_run_in_parallel(stack: WorkflowStack) -> None
 @pytest.mark.asyncio
 async def test_tool_rate_limit_delays_and_does_not_fail(stack: WorkflowStack, monkeypatch: pytest.MonkeyPatch) -> None:
     """A call above the attempt's calls per minute waits until the minute has room for it, and then runs."""
-    monkeypatch.setattr(dispatch_module, "_RATE_WAIT_SECONDS", 0.02)
+    monkeypatch.setattr(nodes_module, "_RATE_WAIT_SECONDS", 0.02)
     stack.limits = WorkflowLimits(max_tool_calls_per_minute=2)
     await stack.start()
     assert [await stack.result(f"@{n}", "tool", _COUNT) for n in range(2)] == [1, 2]

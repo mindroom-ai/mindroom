@@ -19,6 +19,7 @@ from mindroom.delegation.sessions import subagent_sessions_dir
 from mindroom.delegation.state import SubagentPersona
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
+from mindroom.workflow_runs import nodes as nodes_module
 from mindroom.workflow_runs.agent_nodes import turn_job_id
 from mindroom.workflow_runs.graph import graph_rows
 from mindroom.workflow_runs.models import WorkflowNodeState
@@ -295,8 +296,8 @@ async def test_two_asks_at_once_on_one_session_are_refused_and_two_sessions_run_
 
     gate_a.set()
     gate_b.set()
-    assert (await stack.engine.calls.node_receipt(stack.attempt, receipt_a.id, wait=5.0)).result == "from_a"
-    assert (await stack.engine.calls.node_receipt(stack.attempt, receipt_b.id, wait=5.0)).result == "from_b"
+    assert (await nodes_module.node_receipt(stack.engine, stack.attempt, receipt_a.id, wait=5.0)).result == "from_a"
+    assert (await nodes_module.node_receipt(stack.engine, stack.attempt, receipt_b.id, wait=5.0)).result == "from_b"
 
 
 @pytest.mark.asyncio

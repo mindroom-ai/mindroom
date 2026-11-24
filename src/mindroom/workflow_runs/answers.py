@@ -253,7 +253,7 @@ async def answer_question(
     answer = option if options else (text or "").strip()
     if not answer or (option is not None and not options) or (options and answer not in options):
         return "not_an_option" if _open(node) else "no_longer_open"
-    return "accepted" if await engine.ask.answer(run_id, node.key, node.generation, answer) else "no_longer_open"
+    return "accepted" if await engine.answer(run_id, node.key, node.generation, answer) else "no_longer_open"
 
 
 async def handle_workflow_answer(
@@ -288,7 +288,7 @@ async def handle_workflow_answer(
         option=option if isinstance(option, str) else None,
         text=text if isinstance(text, str) else None,
     )
-    if outcome != "accepted" and (client := workflows.ask.poster(run)) is not None:
+    if outcome != "accepted" and (client := workflows.poster(run)) is not None:
         rejection = {
             "run": run.run_id,
             "node": content.get("node"),
@@ -334,6 +334,6 @@ async def answer_command(engine: WorkflowEngine, *, room_id: str, thread_id: str
         answer = options[number - 1] if 0 < number <= len(options) else answer
         if answer not in options:
             return f"Answer with one of: {options_text(options)}"
-    if not await engine.ask.answer(run_id, node.key, node.generation, answer):
+    if not await engine.answer(run_id, node.key, node.generation, answer):
         return f"Question {qid} is no longer open."
     return f"Answered {qid}: {answer}."
