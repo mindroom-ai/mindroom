@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import statistics
 import time
@@ -186,9 +187,11 @@ async def _audit_selected(
         if prev is None or inc.run_seq < prev:
             deferred_min_seq[inc.session_id] = inc.run_seq
 
-    records: list[FindingRecord] = []
-    for inc, session in selected:
-        finding = await audit_evidence_card(build_evidence_card(inc, session), judge_fn=judge_fn)
+    sem = asyncio.Semaphore(max(1, cfg.audit_concurrency))
+
+    async def _audit_one(inc: Incident, session: AuditedSession) -> FindingRecord:
+        async with sem:
+            finding = await audit_evidence_card(build_evidence_card(inc, session), judge_fn=judge_fn)
         sig = (
             max(Counter(f.signature for f in inc.failures).items(), key=lambda kv: kv[1])[0]
             if inc.failures
@@ -196,27 +199,27 @@ async def _audit_selected(
         )
         tool_name, operation, kind, family = sig
         eff_scope = _effective_scope(scope_key, session.room_id)
-        records.append(
-            FindingRecord(
-                cluster_key=_cluster_key(eff_scope, finding, tool_name=tool_name, operation=operation, kind=kind),
-                scope_key=eff_scope,
-                session_id=inc.session_id,
-                run_id=inc.run_id,
-                created_at=inc.created_at,
-                verdict=finding.verdict,
-                teachable=finding.teachable,
-                category=finding.category,
-                remedy=finding.remedy,
-                tool_name=tool_name,
-                operation=operation,
-                kind=kind,
-                diagnostic_family=family,
-                root_cause=finding.root_cause,
-                proposed_rule=finding.proposed_rule,
-                has_verified_fix=finding.has_verified_fix,
-                target_skill=finding.target_skill,
-            ),
+        return FindingRecord(
+            cluster_key=_cluster_key(eff_scope, finding, tool_name=tool_name, operation=operation, kind=kind),
+            scope_key=eff_scope,
+            session_id=inc.session_id,
+            run_id=inc.run_id,
+            created_at=inc.created_at,
+            verdict=finding.verdict,
+            teachable=finding.teachable,
+            category=finding.category,
+            remedy=finding.remedy,
+            tool_name=tool_name,
+            operation=operation,
+            kind=kind,
+            diagnostic_family=family,
+            root_cause=finding.root_cause,
+            proposed_rule=finding.proposed_rule,
+            has_verified_fix=finding.has_verified_fix,
+            target_skill=finding.target_skill,
         )
+
+    records = list(await asyncio.gather(*(_audit_one(inc, session) for inc, session in selected)))
     return records, deferred_min_seq, len(selected_clean)
 
 

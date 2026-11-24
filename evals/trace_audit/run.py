@@ -46,7 +46,7 @@ from mindroom.trace_audit.models import (
     TraceAuditSettings,
 )
 from mindroom.trace_audit.pipeline import run_audit_pass
-from mindroom.trace_audit.source import load_audited_sessions
+from mindroom.trace_audit.source import latest_run_timestamp, load_audited_sessions
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -130,7 +130,7 @@ def split_sessions_chronologically(
     train_sids, unseen_sids, cont_sids = set(), set(), set()
     train_runs = unseen_runs = cont_runs = 0
     for s in all_sessions:
-        first_ts = min(r.created_at for r in s.runs)
+        first_ts = min(s.created_at, *(r.created_at for r in s.runs)) if s.runs else s.created_at
         tr = sum(window_start <= r.created_at <= cutoff for r in s.runs)
         ho = sum(cutoff < r.created_at <= snapshot_now for r in s.runs)
         if tr:
@@ -365,6 +365,7 @@ async def _run_train_phase(
                 min_cluster_sessions=options.min_cluster_sessions,
                 window_days=max(options.window_days + 1, 30),
                 max_nominations_per_run=max(1, options.max_audits_train),
+                audit_concurrency=6,
             ),
             nominate_fn=_nominate,
             since_ts=split.window_start,
@@ -409,6 +410,7 @@ async def _run_holdout_split(
             max_clean_samples_per_run=min(2, budget),
             min_cluster_sessions=options.min_cluster_sessions,
             window_days=max(options.window_days + 1, 30),
+            audit_concurrency=6,
         ),
         nominate_fn=None,
         since_ts=math.nextafter(split.cutoff, math.inf),
@@ -522,22 +524,33 @@ async def run_backtest(
 ) -> dict[str, Any]:
     """Execute one offline chronological trace-audit backtest and write ``report.md`` & ``artifacts.json``."""
     options.out_dir.mkdir(parents=True, exist_ok=True)
-    runtime_paths = resolve_runtime_paths(config_path=options.config_path, storage_path=options.out_dir / "_runtime")
+    scratch_storage = options.out_dir / "_runtime"
+    roster_src = options.config_path.parent / "mindroom_data" / "tracking" / "personal_agents.json"
+    if roster_src.is_file():
+        roster_dst = scratch_storage / "tracking" / "personal_agents.json"
+        roster_dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(roster_src, roster_dst)
+    runtime_paths = resolve_runtime_paths(config_path=options.config_path, storage_path=scratch_storage)
     config = load_config(runtime_paths, tolerate_plugin_load_errors=True)
     prices = model_prices(config)
 
-    all_sessions = load_audited_sessions(options.db_path, options.agent_name, allowed_room_id=options.room_id)
-    split = split_sessions_chronologically(all_sessions, window_days=options.window_days, train_days=options.train_days)
+    snapshot_now = latest_run_timestamp(options.db_path, options.agent_name)
+    window_start = snapshot_now - options.window_days * _SECONDS_PER_DAY if snapshot_now > 0 else 0.0
     window_sessions = (
         load_audited_sessions(
             options.db_path,
             options.agent_name,
-            since_ts=split.window_start,
-            until_ts=split.snapshot_now,
+            since_ts=window_start,
+            until_ts=snapshot_now,
             allowed_room_id=options.room_id,
         )
-        if split.snapshot_now > 0
+        if snapshot_now > 0
         else []
+    )
+    split = split_sessions_chronologically(
+        window_sessions,
+        window_days=options.window_days,
+        train_days=options.train_days,
     )
     stage1_now = (
         max(split.snapshot_now, *(s.last_updated_at for s in window_sessions)) + _MIN_IDLE_SECONDS
@@ -621,7 +634,7 @@ async def run_backtest(
             holdout_cards[card.run_id] = card
             return await raw_holdout(card)
 
-        all_sids = frozenset(s.session_id for s in all_sessions)
+        all_sids = frozenset(s.session_id for s in window_sessions)
         unseen = await _run_holdout_split(
             options,
             state_name="holdout_unseen_state.json",

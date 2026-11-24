@@ -216,6 +216,9 @@ def _shell_tokens(raw: object) -> list[str] | None:
     return None
 
 
+_PREAMBLE_BINS = frozenset({"cd", "set", "export", "unset", "umask"})
+
+
 def _parse_shell_command(tool_args: dict[str, Any]) -> tuple[list[str], bool]:
     """Return ``(primary_tokens, is_simple_command)`` without executing anything."""
     tokens = _shell_tokens(tool_args.get("command") or tool_args.get("args") or tool_args.get("cmd"))
@@ -228,6 +231,14 @@ def _parse_shell_command(tool_args: dict[str, Any]) -> tuple[list[str], bool]:
         head, tail = _strip_env(tokens[: ops[0]]), _strip_env(tokens[ops[0] + 1 :])
         if head and head[0] == "cd" and tail:
             return tail, True
+    # Split on command separators and skip leading setup preambles (cd/set/export/unset) for operation extraction,
+    # while keeping is_simple_command=False so compound scripts are never treated as benign single-command exit-1.
+    start = 0
+    for op_idx in (*ops, len(tokens)):
+        seg = _strip_env(tokens[start:op_idx])
+        if seg and seg[0] not in _PREAMBLE_BINS:
+            return seg, False
+        start = op_idx + 1
     return _strip_env(tokens[: ops[0]]), False
 
 
@@ -444,6 +455,76 @@ def _clean_sample_selected(run: AuditedRun, *, sample_rate: float, sample_salt: 
     return (int.from_bytes(digest[:8], "big") / float(1 << 64)) < sample_rate
 
 
+def _evaluate_run_incident(
+    session: AuditedSession,
+    idx: int,
+    *,
+    median_tools: float | None,
+    baseline_run_count: int | None,
+    sample_rate: float,
+    sample_salt: str,
+) -> Incident | None:
+    run = session.runs[idx]
+    run_outcomes = [classify_tool_execution(t) for t in run.tools]
+    has_run_error = run.status == "ERROR" or bool((run.error or "").strip())
+    has_failing_tools = any(count > 0 for count in run.failing_tools.values())
+    has_cancel = _is_settled_cancel(run)
+    correction = _find_user_correction(session.runs, idx)
+    if not (any(o.is_failure for o in run_outcomes) or has_run_error or has_failing_tools or has_cancel or correction):
+        if not _clean_sample_selected(run, sample_rate=sample_rate, sample_salt=sample_salt):
+            return None
+        return Incident(
+            session_id=session.session_id,
+            room_id=session.room_id,
+            run_id=run.run_id,
+            run_seq=run.seq,
+            created_at=run.created_at,
+            window_run_ids=(run.run_id,),
+            reasons=("clean_sample",),
+            is_clean_sample=True,
+            failures=(),
+            correction_text=None,
+        )
+
+    prev = [
+        p
+        for p in reversed(session.runs[:idx])
+        if p.status in _TERMINAL_STATUSES and run.created_at - p.created_at <= _WINDOW_SECONDS
+    ][:2]
+    window = (*reversed(prev), run)
+    window_outcomes = [*(classify_tool_execution(t) for item in reversed(prev) for t in item.tools), *run_outcomes]
+    window_failures = [o for o in window_outcomes if o.is_failure]
+    material, weak = _tool_signals(
+        run,
+        window_outcomes,
+        window_failures,
+        median_tools=median_tools,
+        baseline_run_count=baseline_run_count,
+    )
+    if has_run_error:
+        material.insert(0, "run_error")
+    if has_failing_tools:
+        material.append("failing_tools")
+    if has_cancel:
+        weak.append("settled_cancel")
+    if correction is not None:
+        weak.append("user_correction")
+    if not (material or len(weak) >= 2):
+        return None
+    return Incident(
+        session_id=session.session_id,
+        room_id=session.room_id,
+        run_id=run.run_id,
+        run_seq=run.seq,
+        created_at=run.created_at,
+        window_run_ids=tuple(item.run_id for item in window),
+        reasons=(*material, *weak),
+        is_clean_sample=False,
+        failures=tuple(window_failures),
+        correction_text=correction,
+    )
+
+
 def detect_session_incidents(
     session: AuditedSession,
     *,
@@ -462,48 +543,14 @@ def detect_session_incidents(
     for idx, run in enumerate(session.runs):
         if run.seq <= after_seq or run.status not in _TERMINAL_STATUSES:
             continue
-        prev = [
-            p
-            for p in reversed(session.runs[:idx])
-            if p.status in _TERMINAL_STATUSES and run.created_at - p.created_at <= _WINDOW_SECONDS
-        ][:2]
-        window = (*reversed(prev), run)
-        window_outcomes = [classify_tool_execution(t) for item in window for t in item.tools]
-        window_failures = [o for o in window_outcomes if o.is_failure]
-
-        material, weak = _tool_signals(
-            run,
-            window_outcomes,
-            window_failures,
+        incident = _evaluate_run_incident(
+            session,
+            idx,
             median_tools=median_tools,
             baseline_run_count=baseline_run_count,
+            sample_rate=sample_rate,
+            sample_salt=sample_salt,
         )
-        if run.status == "ERROR" or bool((run.error or "").strip()):
-            material.insert(0, "run_error")
-        if any(count > 0 for count in run.failing_tools.values()):
-            material.append("failing_tools")
-        if _is_settled_cancel(run):
-            weak.append("settled_cancel")
-        if (correction := _find_user_correction(session.runs, idx)) is not None:
-            weak.append("user_correction")
-
-        is_friction = bool(material or len(weak) >= 2)
-        if not is_friction and (
-            weak or not _clean_sample_selected(run, sample_rate=sample_rate, sample_salt=sample_salt)
-        ):
-            continue
-        incidents.append(
-            Incident(
-                session_id=session.session_id,
-                room_id=session.room_id,
-                run_id=run.run_id,
-                run_seq=run.seq,
-                created_at=run.created_at,
-                window_run_ids=tuple(item.run_id for item in window) if is_friction else (run.run_id,),
-                reasons=(*material, *weak) if is_friction else ("clean_sample",),
-                is_clean_sample=not is_friction,
-                failures=tuple(window_failures) if is_friction else (),
-                correction_text=correction if is_friction else None,
-            ),
-        )
+        if incident is not None:
+            incidents.append(incident)
     return incidents

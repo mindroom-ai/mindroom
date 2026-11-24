@@ -202,7 +202,7 @@ def _read_session_index(
         f"SELECT session_id, metadata, created_at, updated_at FROM {quote_identifier(names.sessions)}",  # noqa: S608
     ):
         sid = str(session_id)
-        if _WORKFLOW_MARKER in sid or sid in excluded_sessions:
+        if _WORKFLOW_MARKER in sid or sid.startswith("delegate:") or sid in excluded_sessions:
             continue
         if contact_session_check is not None and contact_session_check(sid):
             continue
@@ -243,6 +243,21 @@ def _read_terminal_runs(
         updated = float(updated_at) if updated_at is not None else created
         by_session[sid_s].append((rid_s, sid_s, str(status), int(seq), created, updated, meta, _json_dict(raw_record)))
     return by_session
+
+
+def latest_run_timestamp(db_path: Path, storage_name: str) -> float:
+    """Return the latest terminal top-level agent run timestamp in the database, or ``0.0`` if empty."""
+    if not db_path.exists():
+        return 0.0
+    names = TableNames(storage_name)
+    with _open_read_only(db_path) as conn:
+        if names.log_runs not in table_names(conn):
+            return 0.0
+        row = conn.execute(
+            f"SELECT MAX(COALESCE(updated_at, created_at)) FROM {quote_identifier(names.log_runs)} "  # noqa: S608
+            "WHERE parent_run_id IS NULL AND kind = 'agent' AND status IN ('COMPLETED', 'ERROR', 'CANCELLED')",
+        ).fetchone()
+    return float(row[0]) if row and isinstance(row[0], (int, float)) else 0.0
 
 
 def load_audited_sessions(

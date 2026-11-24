@@ -28,6 +28,7 @@ from mindroom.trace_audit import (
     build_evidence_card,
     classify_tool_execution,
     detect_session_incidents,
+    latest_run_timestamp,
     load_audited_sessions,
     load_usage_rows,
     make_llm_audit_judge,
@@ -760,3 +761,97 @@ async def test_pipeline_reserves_clean_samples_and_defers_overflow_cursor(tmp_pa
     )
     assert pass2.incidents_audited == 1
     assert seen_runs == ["err_1", "clean_1", "err_2"]
+
+
+def test_shell_preamble_extraction_clean_followup_and_delegate_exclusion(tmp_path: Path) -> None:
+    """Pin real-data backtest fixes: shell preambles, no duplicate follow-up friction, delegate exclusion, latest_ts."""
+    preamble_err = classify_tool_execution(
+        ToolExecutionRecord(
+            ord=0,
+            tool_call_id="tc_pre",
+            tool_name="run_shell_command",
+            tool_args={"args": "set -e\ncd /tmp\nexport FOO=1\npython3 script.py"},
+            is_error=False,
+            result="Exit code 1\nStderr:\nTraceback",
+        ),
+    )
+    assert preamble_err.is_failure is True
+    assert preamble_err.operation == "python3"
+
+    # A clean follow-up run after an earlier multi-error run must NOT re-emit a duplicate friction incident.
+    failing_tool = ToolExecutionRecord(
+        ord=0,
+        tool_call_id="tc_f1",
+        tool_name="run_shell_command",
+        tool_args={"args": "pytest"},
+        is_error=False,
+        result="Exit code 1\nfailed",
+    )
+    session = AuditedSession(
+        session_id="!roomA:example.com:$t1",
+        room_id="!roomA:example.com",
+        created_at=NOW - 3_000,
+        last_updated_at=NOW - 1_000,
+        runs=(
+            AuditedRun(
+                run_id="r_fail",
+                session_id="!roomA:example.com:$t1",
+                seq=1,
+                status="COMPLETED",
+                created_at=NOW - 2_000,
+                updated_at=NOW - 1_900,
+                duration_seconds=5.0,
+                error=None,
+                content="failed",
+                tools=(
+                    failing_tool,
+                    ToolExecutionRecord(1, "tc_f2", "run_shell_command", {"args": "pytest"}, False, "Exit code 1"),
+                ),
+                messages=(),
+            ),
+            AuditedRun(
+                run_id="r_clean_followup",
+                session_id="!roomA:example.com:$t1",
+                seq=2,
+                status="COMPLETED",
+                created_at=NOW - 1_500,
+                updated_at=NOW - 1_000,
+                duration_seconds=2.0,
+                error=None,
+                content="all good now",
+                tools=(ToolExecutionRecord(0, "tc_ok", "run_shell_command", {"args": "pytest"}, False, "passed"),),
+                messages=(),
+            ),
+        ),
+    )
+    incidents = detect_session_incidents(session, now=NOW, sample_rate=0.0)
+    assert [inc.run_id for inc in incidents] == ["r_fail"]
+
+    db_path = tmp_path / "delegate.db"
+    _seed_v8_db(
+        db_path,
+        "harry",
+        sessions=[
+            {"session_id": "!roomA:example.com:$t1", "created_at": NOW - 2_000, "updated_at": NOW - 1_000},
+            {"session_id": "delegate:harry:harry:abc123", "created_at": NOW - 2_000, "updated_at": NOW - 1_000},
+        ],
+        runs=[
+            {
+                "run_id": "r1",
+                "session_id": "!roomA:example.com:$t1",
+                "seq": 1,
+                "created_at": NOW - 1_500,
+                "updated_at": NOW - 1_200,
+            },
+            {
+                "run_id": "r_del",
+                "session_id": "delegate:harry:harry:abc123",
+                "seq": 1,
+                "created_at": NOW - 1_400,
+                "updated_at": NOW - 1_100,
+            },
+        ],
+    )
+    loaded = load_audited_sessions(db_path, "harry")
+    assert [s.session_id for s in loaded] == ["!roomA:example.com:$t1"]
+    assert latest_run_timestamp(db_path, "harry") == NOW - 1_100

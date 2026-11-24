@@ -266,6 +266,7 @@ class TraceAuditSettings:
     window_days: int = 30
     max_nominations_per_run: int = 1
     max_stored_findings: int = 300
+    audit_concurrency: int = 1
 
 
 @dataclass(frozen=True, slots=True)
