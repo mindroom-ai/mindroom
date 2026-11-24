@@ -13,9 +13,9 @@ from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
-from mindroom.live_frames.frames import FRAME_VERSION, new_publisher_id
-from mindroom.live_frames.subagents import publish_stream, stop_stream
-from mindroom.live_frames.transport import LiveSendOutcome, frame_fits, send_live_frame
+from mindroom.live_frames.frames import new_publisher_id
+from mindroom.live_frames.subagents import RunFrameStream, publish_stream, stop_stream
+from mindroom.live_frames.transport import LiveSendOutcome, frame_fits
 from mindroom.matrix.event_types import WORKFLOW_FRAME_EVENT_TYPE
 from mindroom.workflow_runs.faults import capture
 from mindroom.workflow_runs.graph import REPLACE, Graph, fit_snapshot, graph_delta
@@ -29,24 +29,16 @@ if TYPE_CHECKING:
 # A snapshot this often lets a client that missed frames, or opened the room during the run, catch up.
 _SNAPSHOT_INTERVAL_SECONDS = 10.0
 
-type _Frame = dict[str, object]
 
-
-@dataclass
-class _RunStream:
-    """One run's frames: its stream id, the highest sequence number used, its latest view, and what landed."""
+@dataclass(kw_only=True)
+class _RunStream(RunFrameStream[tuple[dict[str, Any], dict[str, Any]]]):
+    """One workflow run's frames: its latest meta and graph view plus permission check."""
 
     account: str
     run: str
-    sid: str
     meta: dict[str, Any]
     graph: Graph
     allowed: Callable[[], bool] = lambda: True
-    seq: int = -1
-    dirty: bool = True
-    # The meta and the snapshot of the last frame that landed; None makes the next frame a snapshot.
-    landed: tuple[dict[str, Any], dict[str, Any]] | None = None
-    snapshot_at: float = 0.0
 
     @property
     def status(self) -> str:
@@ -61,10 +53,6 @@ class _RunStream:
     def keepalive_at(self) -> float:
         """Return when a run that has not ended owes clients its next snapshot."""
         return math.inf if self.ended else self.snapshot_at + _SNAPSHOT_INTERVAL_SECONDS
-
-    def _frame(self, meta: dict[str, Any], **part: object) -> _Frame:
-        """Return the next frame of the stream, carrying either a ``snapshot`` or a ``delta``."""
-        return {"v": FRAME_VERSION, "run": self.run, "sid": self.sid, "seq": self.seq + 1, "meta": meta, **part}
 
     async def send_next(self, client: nio.AsyncClient, room_id: str, now: float) -> LiveSendOutcome | None:
         """Send the latest view as the next frame; return the outcome, None when nothing changed.
@@ -83,31 +71,25 @@ class _RunStream:
         snapshot = await asyncio.to_thread(
             fit_snapshot,
             graph,
-            fits=lambda candidate: fits(self._frame(meta, snapshot=candidate)),
+            fits=lambda candidate: fits(self.envelope(self.run, meta, snapshot=candidate)),
         )
-        frame = self._frame(meta, snapshot=snapshot)
+        frame = self.envelope(self.run, meta, snapshot=snapshot)
         delta = None if landed is None else graph_delta(landed[1], snapshot)
         if landed is not None and delta != REPLACE and not self.ended and now < self.keepalive_at():
             if delta is None and landed[0] == meta:
                 return None
-            changed = self._frame(meta, delta=delta or {})
+            changed = self.envelope(self.run, meta, delta=delta or {})
             frame = changed if fits(changed) else frame
-        self.seq += 1
-        outcome = await send_live_frame(
+        outcome = await self.send_frame(
             client,
             room_id,
             frame,
-            transaction_id=f"workflow.{self.sid}.{self.seq}",
+            now,
+            txn_prefix="workflow",
             event_type=WORKFLOW_FRAME_EVENT_TYPE,
+            view=(meta, snapshot),
         )
         capture("workflow_frames", {"outcome": outcome.value, "frame": frame})
-        if outcome is LiveSendOutcome.SENT:
-            self.landed = (meta, snapshot)
-            if "snapshot" in frame:
-                self.snapshot_at = now
-        elif outcome is LiveSendOutcome.RETRY:
-            self.landed = None
-            self.dirty = True
         return outcome
 
 

@@ -158,19 +158,57 @@ def _trimmed(before: SubagentSnapshot, after: SubagentSnapshot) -> bool:
     return after.items_dropped != before.items_dropped or (oldest is not None and not now_oldest.startswith(oldest))
 
 
-@dataclass
-class _Stream:
-    """One run's frames: its stream id, the highest sequence number used, its latest snapshot, and what landed."""
+@dataclass(kw_only=True)
+class RunFrameStream[Landed]:
+    """Shared envelope, watermark, and send/ack transition for one live run stream."""
 
     sid: str
+    seq: int = -1
+    dirty: bool = True
+    # The view of the last frame that landed; None makes the next frame a snapshot.
+    landed: Landed | None = None
+    snapshot_at: float = 0.0
+
+    def envelope(self, run: str, meta: object, **part: object) -> _Frame:
+        """Return the next frame envelope carrying *meta* and either `snapshot` or `delta`."""
+        return {"v": FRAME_VERSION, "run": run, "sid": self.sid, "seq": self.seq + 1, "meta": meta, **part}
+
+    async def send_frame(
+        self,
+        client: nio.AsyncClient,
+        room_id: str,
+        frame: _Frame,
+        now: float,
+        *,
+        txn_prefix: str,
+        event_type: str,
+        view: Landed,
+    ) -> LiveSendOutcome:
+        """Send *frame* with the next sequence number and update watermark state from the outcome."""
+        self.seq += 1
+        outcome = await send_live_frame(
+            client,
+            room_id,
+            frame,
+            transaction_id=f"{txn_prefix}.{self.sid}.{self.seq}",
+            event_type=event_type,
+        )
+        if outcome is LiveSendOutcome.SENT:
+            self.landed = view
+            if "snapshot" in frame:
+                self.snapshot_at = now
+        elif outcome is LiveSendOutcome.RETRY:
+            self.landed = None
+            self.dirty = True
+        return outcome
+
+
+@dataclass(kw_only=True)
+class _Stream(RunFrameStream["tuple[SubagentSnapshot, LiveDocs]"]):
+    """One subagent run's frames: its latest snapshot, preview toggle, and last snapshot fit."""
+
     snapshot: SubagentSnapshot
     previews: bool
-    seq: int = -1
-    # Whether the latest snapshot has not gone out yet.
-    dirty: bool = True
-    # The snapshot and documents of the last frame that landed; None makes the next frame a snapshot.
-    landed: tuple[SubagentSnapshot, LiveDocs] | None = None
-    snapshot_at: float = 0.0
     # How the last snapshot fitted the size limit: whether it kept the previews and how much of the oldest text it
     # cut. Deltas keep that fit, so they stay appends.
     fit: tuple[bool, int] = (True, 0)
@@ -215,22 +253,15 @@ class _Stream:
             frame = self._frame(snapshot, delta=delta)
             if not fits(frame):
                 frame, docs = self._fitted_snapshot(snapshot, fits)
-        self.seq += 1
-        outcome = await send_live_frame(
+        return await self.send_frame(
             client,
             room_id,
             frame,
-            transaction_id=f"subagents.{self.sid}.{self.seq}",
+            now,
+            txn_prefix="subagents",
             event_type=_SUBAGENT_EVENT_TYPE,
+            view=(snapshot, docs),
         )
-        if outcome is LiveSendOutcome.SENT:
-            self.landed = (snapshot, docs)
-            if "snapshot" in frame:
-                self.snapshot_at = now
-        elif outcome is LiveSendOutcome.RETRY:
-            self.landed = None
-            self.dirty = True
-        return outcome
 
     def _frame(
         self,
@@ -240,19 +271,15 @@ class _Stream:
         delta: _Frame | None = None,
     ) -> _Frame:
         """Return the next frame of the run's stream, carrying either a whole snapshot, ``docs``, or a ``delta``."""
-        frame: _Frame = {"v": FRAME_VERSION, "run": snapshot.delegation_id, "sid": self.sid, "seq": self.seq + 1}
         meta = _run_meta(snapshot, full=docs is not None)
         if snapshot.usage is not None:
             # Not in ``_run_meta``, whose change alone sends a snapshot: each tool call changes the usage, and its
             # frame stays the delta that adds its row.
             meta["usage"] = dict(snapshot.usage)
-        frame["meta"] = meta
         if docs is not None:
-            frame["snapshot"] = docs.to_json()
-        else:
-            assert delta, "a delta frame carries at least one change"
-            frame["delta"] = delta
-        return frame
+            return self.envelope(snapshot.delegation_id, meta, snapshot=docs.to_json())
+        assert delta, "a delta frame carries at least one change"
+        return self.envelope(snapshot.delegation_id, meta, delta=delta)
 
     def _fitted_snapshot(self, snapshot: SubagentSnapshot, fits: Callable[[_Frame], bool]) -> tuple[_Frame, LiveDocs]:
         """Return a snapshot frame within the size limit: without previews if need be, then without the oldest text.
