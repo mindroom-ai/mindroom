@@ -37,6 +37,7 @@ from mindroom.llm.provider import (
     DeferredTools,
     ModelIdentity,
     ModelRequest,
+    ReasoningDelta,
     ReportedUsage,
     StopReason,
     StreamProgress,
@@ -241,6 +242,53 @@ async def test_a_retry_after_hint_of_at_most_a_minute_replaces_the_backoff(hint:
 
     assert [entry["delay_seconds"] for entry in logs if entry["event"] == "provider_request_retried"] == [delay]
     assert (len(inner.requests), loop.time() - started >= delay) == (2, True)
+
+
+@pytest.mark.asyncio
+async def test_empty_incomplete_turn_retries_uncommitted_with_carried_usage_and_fails_when_committed() -> None:
+    """An uncommitted empty incomplete turn retries and carries usage; after ReasoningDelta it fails immediately."""
+    first_usage = MessageMetrics(tokens=TokenCounts(input_tokens=40, output_tokens=5, total_tokens=45))
+    second_usage = MessageMetrics(tokens=TokenCounts(input_tokens=60, output_tokens=8, total_tokens=68))
+    empty_incomplete = TurnCompleted(
+        message=Message(role="assistant", metrics=first_usage),
+        stop_reason="incomplete",
+        raw_stop_reason="OTHER",
+    )
+    inner = _ScriptedProvider(
+        [
+            [UsageReported(first_usage), empty_incomplete],
+            [TextDelta("Recovered."), UsageReported(second_usage), _turn(text="Recovered.", usage=second_usage)],
+        ],
+    )
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+
+    finished = (await drain(provider, ModelRequest(messages=[_user()])))[-1]
+
+    assert isinstance(finished, TurnCompleted)
+    assert (finished.message.content, len(inner.requests)) == ("Recovered.", 2)
+    assert (finished.message.metrics.tokens.input_tokens, finished.message.metrics.tokens.output_tokens) == (100, 13)
+    assert (finished.message.provider_data or {}).get(AGGREGATE_USAGE_KEY) is True
+
+    committed_inner = _ScriptedProvider(
+        [
+            [
+                ReasoningDelta("Thinking..."),
+                TurnCompleted(
+                    message=Message(role="assistant", reasoning_content="Thinking..."),
+                    stop_reason="incomplete",
+                    raw_stop_reason="OTHER",
+                ),
+            ],
+            [_turn(text="Should not run.")],
+        ],
+    )
+    committed_provider = WrappedProvider(committed_inner, partial(retrying_stream, idle_timeout_seconds=None))
+
+    with pytest.raises(ProviderUnavailable) as raised:
+        await drain(committed_provider, ModelRequest(messages=[_user()]))
+
+    assert raised.value.provider_code == "OTHER"
+    assert len(committed_inner.requests) == 1
 
 
 @pytest.mark.asyncio

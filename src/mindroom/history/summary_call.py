@@ -210,9 +210,11 @@ async def _request_summary(
     usage = (
         completed.message.metrics
         if completed is not None
+        else reported.received
+        if reported.received is not None and reported.received.reported
         else failure.usage
         if isinstance(failure, ModelSafeguardRefusal)
-        else reported.received
+        else None
     )
     if on_usage is not None and usage is not None and usage.reported:
         try:

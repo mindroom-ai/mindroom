@@ -22,9 +22,11 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.llm.errors import ProviderError, ProviderUnavailable
+from mindroom.llm.provider import TurnCompleted
 from mindroom.logging_config import get_logger
-from mindroom.providers.pipeline.wrapped import Retry, attempts
+from mindroom.providers.pipeline.wrapped import Retry, WrappedProvider, attempts
 from mindroom.redaction import redact_sensitive_text
+from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -136,6 +138,27 @@ def _log_retry(
     )
 
 
+async def _fail_empty_incomplete(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+    """Raise ``ProviderUnavailable`` for an empty ``incomplete`` turn so ``attempts`` retries it when uncommitted."""
+    events = inner.stream(request)
+    async with closing_async_stream(events):
+        async for event in events:
+            if (
+                isinstance(event, TurnCompleted)
+                and event.stop_reason == "incomplete"
+                and not event.message.tool_calls
+                and not event.message.get_content_string().strip()
+            ):
+                detail = f" ({event.raw_stop_reason})" if event.raw_stop_reason else ""
+                msg = f"Model stopped with incomplete response{detail} before producing output"
+                raise ProviderUnavailable(
+                    msg,
+                    provider=inner.identity.provider,
+                    provider_code=event.raw_stop_reason,
+                )
+            yield event
+
+
 def retrying_stream(
     inner: ModelProvider,
     request: ModelRequest,
@@ -175,4 +198,4 @@ def retrying_stream(
         return Retry(recovered)
 
     next_event = partial(_next_event, idle_timeout_seconds=idle_timeout_seconds, provider=identity.provider)
-    return attempts(inner, request, reissue, next_event=next_event)
+    return attempts(WrappedProvider(inner, _fail_empty_incomplete), request, reissue, next_event=next_event)
