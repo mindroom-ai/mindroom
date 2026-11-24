@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -40,6 +41,8 @@ _TriggerRelation = Literal["target", "watch"]
 _TriggerThreadMode = Literal["room", "thread", "new_thread", "origin"]
 _TriggerRecord = ExternalTriggerRecord | ReactiveTriggerRecord
 _MatchedTrigger = tuple[_TriggerRecord, _TriggerRelation, str]
+# Matches the bounded Matrix lookup deadline in orchestration/plugin_http_runtime.py.
+_WATCH_TAG_READ_TIMEOUT_SECONDS = 20
 
 
 @dataclass(frozen=True)
@@ -134,8 +137,9 @@ async def update_room_trigger(
         if steward is None or steward.client is None:
             raise HTTPException(503, "No running MindRoom bot is in the watched room.")
         try:
-            refreshed_tag_present = await read_thread_tag_present(steward.client, record.source)
-        except ThreadTagsError as exc:
+            async with asyncio.timeout(_WATCH_TAG_READ_TIMEOUT_SECONDS):
+                refreshed_tag_present = await read_thread_tag_present(steward.client, record.source)
+        except (ThreadTagsError, TimeoutError) as exc:
             raise HTTPException(503, "Watched thread tags could not be read; try again.") from exc
 
     updated = await _run_store(
@@ -145,6 +149,7 @@ async def update_room_trigger(
             trigger_id,
             enabled=body.enabled,
             actor_user_id=room.user.user_id,
+            authorize_reactive=partial(_require_owner, room.user.user_id, config, runtime_paths),
             refreshed_tag_present=refreshed_tag_present,
         ),
     )
@@ -160,18 +165,28 @@ async def delete_room_trigger(request: Request, room: _Room, room_id: str, trigg
     """Delete one trigger belonging to ``room_id``; owner only."""
     config, runtime_paths = _require_trigger_runtime(request)
     await _require_owned_room_trigger(runtime_paths, config, room_id, trigger_id, room.user.user_id)
-    await _run_store(lambda: delete_trigger_sync(runtime_paths, config, trigger_id, actor_user_id=room.user.user_id))
+    await _run_store(
+        lambda: delete_trigger_sync(
+            runtime_paths,
+            config,
+            trigger_id,
+            actor_user_id=room.user.user_id,
+            authorize_reactive=partial(_require_owner, room.user.user_id, config, runtime_paths),
+        ),
+    )
     return Response(status_code=204)
 
 
 def _require_trigger_runtime(request: Request) -> tuple[Config, RuntimePaths]:
-    try:
-        snapshot = bind_current_request_snapshot(request)
-    except TypeError as exc:
-        raise HTTPException(503, "Trigger configuration is not available.") from exc
+    snapshot = bind_current_request_snapshot(request)
     if snapshot.runtime_config is None or snapshot.runtime_paths.control_state_root is None:
         raise HTTPException(503, "Trigger store is not available.")
     return snapshot.runtime_config, snapshot.runtime_paths
+
+
+def _require_owner(user_id: str, config: Config, runtime_paths: RuntimePaths, record: ReactiveTriggerRecord) -> None:
+    if not is_trigger_owner(user_id, record.owner_user_id, config, runtime_paths):
+        raise HTTPException(403, "Only the trigger owner can manage this trigger.")
 
 
 async def _run_store[T](call: Callable[[], T]) -> T:

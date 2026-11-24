@@ -864,7 +864,7 @@ def test_old_trigger_record_without_last_fired_at_loads_as_none_and_records_fire
     """Legacy records lacking last_fired_at load with None, and record_fired updates live records only."""
     runtime_paths = _runtime_paths(tmp_path)
     store = ExternalTriggerStore(runtime_paths)
-    store.create_record(
+    record = store.create_record(
         trigger_id="deploy",
         owner_user_id=_OWNER,
         created_by_agent_name="watcher",
@@ -882,8 +882,12 @@ def test_old_trigger_record_without_last_fired_at_loads_as_none_and_records_fire
     assert loaded is not None
     assert loaded.last_fired_at is None
 
-    store.record_fired("missing", fired_at=1_764_000_000)
-    store.record_fired("deploy", fired_at=1_764_000_100)
+    store.record_fired("deploy", expected_uid="stale-uid", fired_at=1_764_000_000)
+    still_unset = store.get_record("deploy")
+    assert still_unset is not None
+    assert still_unset.last_fired_at is None
+
+    store.record_fired("deploy", expected_uid=record.uid, fired_at=1_764_000_100)
     updated = store.get_record("deploy")
     assert updated is not None
     assert updated.last_fired_at == 1_764_000_100

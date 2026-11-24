@@ -426,7 +426,7 @@ async def test_watch_thread_initializes_checkpoint_and_reports_already_in_state(
         tags={"resolved": ThreadTagRecord(set_by="@owner:example.org", set_at=now)},
     )
     get_tags_mock = AsyncMock(side_effect=[None, tagged_state, ThreadTagsError("homeserver down")])
-    monkeypatch.setattr("mindroom.custom_tools.triggers.get_thread_tags", get_tags_mock)
+    monkeypatch.setattr("mindroom.reactive_triggers.management.get_thread_tags", get_tags_mock)
 
     tool = TriggersTools()
     with tool_runtime_context(
@@ -729,7 +729,7 @@ async def test_watch_thread_removed_transition_and_origin_rejected(
         tags={"blocked": ThreadTagRecord(set_by="@owner:example.org", set_at=now)},
     )
     monkeypatch.setattr(
-        "mindroom.custom_tools.triggers.get_thread_tags",
+        "mindroom.reactive_triggers.management.get_thread_tags",
         AsyncMock(side_effect=[None, tagged_state]),
     )
     tool = TriggersTools()
@@ -966,7 +966,7 @@ async def test_triggers_tool_factory_and_async_disable_trigger(tmp_path: Path) -
     absent_state = ThreadTagsState(room_id="!lobby:example.org", thread_root_id="$thread1", tags={})
     with (
         tool_runtime_context(_context(tmp_path)),
-        patch("mindroom.custom_tools.triggers.get_thread_tags", new=AsyncMock(return_value=absent_state)),
+        patch("mindroom.reactive_triggers.management.get_thread_tags", new=AsyncMock(return_value=absent_state)),
     ):
         created_direct = _payload(
             await tool.triggers(action="create", trigger_id="direct-toggle", public_key=_PUBLIC_KEY),
@@ -1013,7 +1013,7 @@ async def test_watch_thread_normalizes_tag_names_and_rejects_invalid_tags(tmp_pa
 
     with (
         tool_runtime_context(_context(tmp_path, config=config)),
-        patch("mindroom.custom_tools.triggers.get_thread_tags", new=AsyncMock(return_value=existing_state)),
+        patch("mindroom.reactive_triggers.management.get_thread_tags", new=AsyncMock(return_value=existing_state)),
     ):
         created = _payload(
             await tool.triggers(
@@ -1051,7 +1051,7 @@ async def test_reenabling_thread_tag_trigger_refreshes_checkpoint_from_live_room
 
     with (
         tool_runtime_context(_context(tmp_path, config=config)),
-        patch("mindroom.custom_tools.triggers.get_thread_tags", new=AsyncMock(return_value=absent_state)),
+        patch("mindroom.reactive_triggers.management.get_thread_tags", new=AsyncMock(return_value=absent_state)),
     ):
         res = _payload(
             await tool.triggers(
@@ -1089,7 +1089,7 @@ async def test_reenabling_thread_tag_trigger_refreshes_checkpoint_from_live_room
     # Scenario A: thread reopened offline while disabled -> disable_trigger(enabled=True) refreshes checkpoint to False
     with (
         tool_runtime_context(_context(tmp_path, config=config)),
-        patch("mindroom.custom_tools.triggers.get_thread_tags", new=AsyncMock(return_value=absent_state)),
+        patch("mindroom.reactive_triggers.management.get_thread_tags", new=AsyncMock(return_value=absent_state)),
     ):
         reenabled = _payload(await tool.triggers(action="set_enabled", trigger_id="rearm-tag", enabled=True))
     assert reenabled["status"] == "ok", reenabled
@@ -1105,7 +1105,7 @@ async def test_reenabling_thread_tag_trigger_refreshes_checkpoint_from_live_room
         )
     with (
         tool_runtime_context(_context(tmp_path, config=config)),
-        patch("mindroom.custom_tools.triggers.get_thread_tags", new=AsyncMock(return_value=present_state)),
+        patch("mindroom.reactive_triggers.management.get_thread_tags", new=AsyncMock(return_value=present_state)),
     ):
         reenabled2 = _payload(await tool.triggers(action="set_enabled", trigger_id="rearm-tag", enabled=True))
     assert reenabled2["status"] == "ok", reenabled2
@@ -1508,7 +1508,7 @@ async def test_dry_run_matches_and_runs_triage_without_side_effects(tmp_path: Pa
 
     with (
         tool_runtime_context(_context(tmp_path, config=config)),
-        patch("mindroom.custom_tools.triggers.get_thread_tags", new=AsyncMock(return_value=absent_state)),
+        patch("mindroom.reactive_triggers.management.get_thread_tags", new=AsyncMock(return_value=absent_state)),
     ):
         await tool.triggers(
             action="watch_room",
@@ -1806,7 +1806,7 @@ async def test_history_hides_and_refuses_firings_after_owner_loses_source_access
     # Owner watches private room A (!other-room) targeting room B (!lobby), plus lobby and github
     with (
         tool_runtime_context(_context(tmp_path, config=config, client=client, orchestrator=orch)),
-        patch("mindroom.custom_tools.triggers.get_thread_tags", new=AsyncMock(return_value=absent_state)),
+        patch("mindroom.reactive_triggers.management.get_thread_tags", new=AsyncMock(return_value=absent_state)),
     ):
         assert (
             _payload(

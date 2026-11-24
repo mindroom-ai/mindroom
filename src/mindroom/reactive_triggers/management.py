@@ -14,10 +14,10 @@ from mindroom.reactive_triggers.models import (
 )
 from mindroom.reactive_triggers.store import ReactiveTriggerStore
 from mindroom.requester_identity import equivalent_requester_ids
-from mindroom.thread_tags import ThreadTagsState, get_thread_tags
+from mindroom.thread_tags import get_thread_tags
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Callable
 
     import nio
 
@@ -30,14 +30,9 @@ def is_trigger_owner(actor_user_id: str, owner_user_id: str, config: Config, run
     return owner_user_id in equivalent_requester_ids(actor_user_id, config, runtime_paths)
 
 
-async def read_thread_tag_present(
-    client: nio.AsyncClient,
-    source: ThreadTagSourceSpec,
-    *,
-    fetch_tags: Callable[[nio.AsyncClient, str, str], Awaitable[ThreadTagsState | None]] = get_thread_tags,
-) -> bool:
+async def read_thread_tag_present(client: nio.AsyncClient, source: ThreadTagSourceSpec) -> bool:
     """Return whether ``source.tag`` is currently present on ``source.thread_id`` in ``source.room_id``."""
-    tag_state = await fetch_tags(client, source.room_id, source.thread_id)
+    tag_state = await get_thread_tags(client, source.room_id, source.thread_id)
     return tag_state is not None and source.tag.lower() in {tag.lower() for tag in tag_state.tags}
 
 
@@ -71,8 +66,8 @@ def set_trigger_enabled_sync(
     *,
     enabled: bool,
     actor_user_id: str,
+    authorize_reactive: Callable[[ReactiveTriggerRecord], None],
     refreshed_tag_present: bool | None = None,
-    authorize_reactive: Callable[[ReactiveTriggerRecord], None] | None = None,
 ) -> ExternalTriggerRecord | ReactiveTriggerRecord:
     """Enable or disable a webhook or reactive trigger across both stores."""
     external_store = ExternalTriggerStore(runtime_paths)
@@ -84,8 +79,7 @@ def set_trigger_enabled_sync(
     if record is None:
         msg = f"external trigger not found: {trigger_id}"
         raise ExternalTriggerStoreError(msg)
-    if authorize_reactive is not None:
-        authorize_reactive(record)
+    authorize_reactive(record)
     if enabled and not record.enabled:
         refresh_reactive_state_on_reenable(
             reactive_store,
@@ -106,7 +100,7 @@ def delete_trigger_sync(
     trigger_id: str,
     *,
     actor_user_id: str,
-    authorize_reactive: Callable[[ReactiveTriggerRecord], None] | None = None,
+    authorize_reactive: Callable[[ReactiveTriggerRecord], None],
 ) -> None:
     """Delete a webhook or reactive trigger across both stores."""
     external_store = ExternalTriggerStore(runtime_paths)
@@ -119,8 +113,7 @@ def delete_trigger_sync(
     if record is None:
         msg = f"external trigger not found: {trigger_id}"
         raise ExternalTriggerStoreError(msg)
-    if authorize_reactive is not None:
-        authorize_reactive(record)
+    authorize_reactive(record)
     if not reactive_store.delete_trigger(trigger_id, expected_rule_uid=record.rule_uid):
         msg = f"external trigger not found: {trigger_id}"
         raise ExternalTriggerStoreError(msg)

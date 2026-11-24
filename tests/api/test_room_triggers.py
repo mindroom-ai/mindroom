@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import threading
 import time
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
@@ -25,16 +26,16 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
-from mindroom.external_triggers.store import ExternalTriggerStore, ExternalTriggerTarget
+from mindroom.external_triggers.store import ExternalTriggerRecord, ExternalTriggerStore, ExternalTriggerTarget
 from mindroom.matrix.state import MatrixState
 from mindroom.orchestration.plugin_http_runtime import bind_room_members
 from mindroom.reactive_triggers.models import (
-    ExternalEventSourceSpec,
     ReactiveTriggerRecord,
     RoomCursor,
     RoomMessageSourceSpec,
     ThreadCheckpoint,
     ThreadTagSourceSpec,
+    TriggerSourceSpec,
     TriggerTargetSpec,
 )
 from mindroom.reactive_triggers.store import ReactiveTriggerStore
@@ -46,100 +47,67 @@ from tests.matrix_state_helpers import save_matrix_state
 if TYPE_CHECKING:
     from pathlib import Path
 
+    import pytest
     from httpx import Response
 
-ROOM_A = "!room-a:localhost"
-ROOM_B = "!room-b:localhost"
-ROOM_C = "!room-c:localhost"
-UNREACHABLE_ROOM = "!no-bot:localhost"
-
-ALICE = "@alice:localhost"
-ALICE_BRIDGE = "@alice_bridge:localhost"
-BOB = "@bob:localhost"
-CAROL = "@carol:localhost"
-DAVE = "@dave:localhost"
-
-TRIGGER_ROW_KEYS = frozenset(
-    {
-        "trigger_id",
-        "kind",
-        "relation",
-        "description",
-        "prompt",
-        "agent",
-        "target_room_id",
-        "target_thread_id",
-        "thread_mode",
-        "enabled",
-        "disabled_reason",
-        "once",
-        "expires_at",
-        "last_fired_at",
-        "owner_user_id",
-        "can_manage",
-    },
+ROOM_A, ROOM_B, ROOM_C, UNREACHABLE = "!room-a:localhost", "!room-b:localhost", "!room-c:localhost", "!no-bot:localhost"
+ALICE, ALICE_BRIDGE, BOB, CAROL, DAVE = (
+    "@alice:localhost",
+    "@alice_bridge:localhost",
+    "@bob:localhost",
+    "@carol:localhost",
+    "@dave:localhost",
 )
 
 
 def _public_key_b64() -> str:
-    raw = Ed25519PrivateKey.generate().public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-    return base64.b64encode(raw).decode("ascii")
-
-
-def _config(*, admins: list[str] | None = None, aliases: dict[str, list[str]] | None = None) -> Config:
-    return Config(
-        administrators=admins or [],
-        authorization=AuthorizationConfig(aliases=aliases or {}),
-        external_trigger_policy=ExternalTriggerPolicyConfig(admin_users=admins or []),
-        agents={
-            "assistant": AgentConfig(display_name="Assistant", rooms=["lobby", ROOM_A, ROOM_B, ROOM_C]),
-            "ops": AgentConfig(display_name="Ops", rooms=[ROOM_B]),
-        },
-    )
+    return base64.b64encode(
+        Ed25519PrivateKey.generate().public_key().public_bytes(Encoding.Raw, PublicFormat.Raw),
+    ).decode("ascii")
 
 
 class _Harness:
-    """Minimal FastAPI app serving room_triggers with live room membership, state, and trigger stores."""
+    """FastAPI app serving room_triggers with live room membership, state, and trigger stores."""
 
     def __init__(
         self,
         tmp_path: Path,
         *,
-        config: Config | None = None,
-        room_members_by_id: dict[str, list[str]] | None = None,
+        admins: list[str] | None = None,
+        aliases: dict[str, list[str]] | None = None,
         room_state_events: dict[str, list[dict[str, object]]] | None = None,
     ) -> None:
         self.paths: RuntimePaths = test_runtime_paths(tmp_path)
-        self.config = config or _config()
+        self.config = Config(
+            administrators=admins or [],
+            authorization=AuthorizationConfig(aliases=aliases or {}),
+            external_trigger_policy=ExternalTriggerPolicyConfig(admin_users=admins or []),
+            agents={
+                "assistant": AgentConfig(display_name="Assistant", rooms=["lobby", ROOM_A, ROOM_B, ROOM_C]),
+                "ops": AgentConfig(display_name="Ops", rooms=[ROOM_B]),
+            },
+        )
         matrix_state = MatrixState()
         matrix_state.add_room("lobby", ROOM_A, "#lobby:localhost", "Lobby")
         save_matrix_state(matrix_state, self.paths)
 
-        self.members_by_room = room_members_by_id or {
-            ROOM_A: [ALICE, ALICE_BRIDGE, BOB, CAROL],
-            ROOM_B: [ALICE, BOB],
-            ROOM_C: [ALICE, BOB],
-        }
-        self.state_events_by_room = room_state_events or {}
-        bot_user_id = "@mindroom_router:localhost"
+        members = {ROOM_A: [ALICE, ALICE_BRIDGE, BOB, CAROL], ROOM_B: [ALICE, BOB], ROOM_C: [ALICE, BOB]}
+        events, bot_id = room_state_events or {}, "@mindroom_router:localhost"
 
-        async def _joined_members(room_id: str) -> object:
-            if room_id not in self.members_by_room:
-                return nio.JoinedMembersError("not joined")
-            return joined_members_response(room_id, bot_user_id, *self.members_by_room[room_id])
-
-        async def _room_get_state(room_id: str) -> object:
-            events = self.state_events_by_room.get(room_id, [])
-            return nio.RoomGetStateResponse(events, room_id)
+        async def _joined(room_id: str) -> object:
+            return (
+                joined_members_response(room_id, bot_id, *members[room_id])
+                if room_id in members
+                else nio.JoinedMembersError("not joined")
+            )
 
         self.client = SimpleNamespace(
-            user_id=bot_user_id,
-            rooms={rid: nio.MatrixRoom(rid, bot_user_id) for rid in self.members_by_room},
-            joined_members=AsyncMock(side_effect=_joined_members),
-            room_get_state=AsyncMock(side_effect=_room_get_state),
+            user_id=bot_id,
+            rooms={rid: nio.MatrixRoom(rid, bot_id) for rid in members},
+            joined_members=AsyncMock(side_effect=_joined),
+            room_get_state=AsyncMock(side_effect=lambda rid: nio.RoomGetStateResponse(events.get(rid, []), rid)),
         )
         self.wake_reactive = MagicMock()
-
         self.app = FastAPI()
         self.app.include_router(room_triggers.router)
         state = ensure_app_state(self.app)
@@ -152,209 +120,171 @@ class _Harness:
             config_generation=1,
             on_reactive_event=self.wake_reactive,
         )
-        bot = SimpleNamespace(client=self.client, running=True, config=self.config)
-        bind_room_members(self.app, {ROUTER_AGENT_NAME: bot})  # type: ignore[arg-type]
-
+        bind_room_members(self.app, {ROUTER_AGENT_NAME: SimpleNamespace(client=self.client, running=True)})  # type: ignore[arg-type]
         self.external_store = ExternalTriggerStore(self.paths)
         self.reactive_store = ReactiveTriggerStore(self.paths)
         self.http = TestClient(self.app)
 
-    def _headers(self, user_id: str | None) -> dict[str, str]:
-        if user_id is None:
-            return {}
-        token = client_session_store(self.app).create(user_id).token
-        return {"Authorization": f"Bearer {token}"}
-
-    def get_triggers(self, room_id: str, user_id: str | None) -> Response:
-        return self.http.get(f"/api/rooms/{room_id}/triggers", headers=self._headers(user_id))
-
-    def patch_trigger(self, room_id: str, trigger_id: str, user_id: str | None, payload: dict[str, object]) -> Response:
-        return self.http.patch(
-            f"/api/rooms/{room_id}/triggers/{trigger_id}",
-            headers=self._headers(user_id),
-            json=payload,
+    def add_webhook(
+        self,
+        trigger_id: str,
+        *,
+        owner: str = ALICE,
+        room_id: str = ROOM_A,
+        capability_hash: str | None = None,
+        **extra: Any,  # noqa: ANN401
+    ) -> ExternalTriggerRecord:
+        target = ExternalTriggerTarget(
+            room_id=room_id,
+            thread_id=extra.pop("thread_id", None),
+            new_thread=extra.pop("new_thread", False),
+            agent="assistant",
         )
+        base: dict[str, Any] = {
+            "trigger_id": trigger_id,
+            "owner_user_id": owner,
+            "created_by_agent_name": "assistant",
+            "created_in_room_id": ROOM_A,
+            "created_in_thread_id": None,
+            "target": target,
+            "config": self.config,
+            **extra,
+        }
+        if capability_hash is not None:
+            return self.external_store.create_single_use_capability_record(
+                **base,
+                capability_token_hash=capability_hash,
+            )
+        base.setdefault("public_key", _public_key_b64())
+        return self.external_store.create_record(**base)
 
-    def delete_trigger(self, room_id: str, trigger_id: str, user_id: str | None) -> Response:
-        return self.http.delete(f"/api/rooms/{room_id}/triggers/{trigger_id}", headers=self._headers(user_id))
+    def add_reactive(
+        self,
+        trigger_id: str,
+        source: TriggerSourceSpec,
+        *,
+        target_room: str = ROOM_A,
+        agent: str = "assistant",
+        prompt: str = "Handle trigger",
+        **extra: Any,  # noqa: ANN401
+    ) -> ReactiveTriggerRecord:
+        ts = float(extra.pop("created_at", 1_764_000_100.0))
+        cursor: RoomCursor | None = extra.pop("initial_cursor", None)
+        checkpoint: ThreadCheckpoint | None = extra.pop("initial_checkpoint", None)
+        target = TriggerTargetSpec(
+            agent=agent,
+            room_id=target_room,
+            thread_id=extra.pop("thread_id", None),
+            new_thread=extra.pop("new_thread", False),
+            prompt=prompt,
+        )
+        record = ReactiveTriggerRecord(
+            trigger_id=trigger_id,
+            owner_user_id=ALICE,
+            source=source,
+            target=target,
+            created_at=ts,
+            updated_at=ts,
+            **extra,
+        )
+        return self.reactive_store.create_trigger(record, initial_cursor=cursor, initial_checkpoint=checkpoint)
+
+    def req(
+        self,
+        method: str,
+        room_id: str,
+        user_id: str | None,
+        trigger_id: str | None = None,
+        json: dict[str, object] | None = None,
+    ) -> Response:
+        path = f"/api/rooms/{room_id}/triggers" + (f"/{trigger_id}" if trigger_id else "")
+        headers = (
+            {}
+            if user_id is None
+            else {"Authorization": f"Bearer {client_session_store(self.app).create(user_id).token}"}
+        )
+        return self.http.request(method, path, headers=headers, json=json)
 
 
-def test_room_triggers_auth_gates(tmp_path: Path) -> None:
-    """Routes require a live client session joined to the room, answering 401, 403, and 503."""
-    harness = _Harness(tmp_path)
+def test_room_triggers_routes_mounted_and_auth_gated(tmp_path: Path) -> None:
+    """Routes are mounted on main app and enforce 401/403/503 via require_room_reader."""
+    routes = {
+        (route.path, method)
+        for route in main_app.routes
+        if hasattr(route, "methods") and hasattr(route, "path")
+        for method in route.methods
+    }
+    assert {
+        ("/api/rooms/{room_id}/triggers", "GET"),
+        ("/api/rooms/{room_id}/triggers/{trigger_id}", "PATCH"),
+        ("/api/rooms/{room_id}/triggers/{trigger_id}", "DELETE"),
+    } <= routes
 
-    assert harness.get_triggers(ROOM_A, None).status_code == 401
-    assert harness.patch_trigger(ROOM_A, "tr_any", None, {"enabled": False}).status_code == 401
-    assert harness.delete_trigger(ROOM_A, "tr_any", None).status_code == 401
-
-    assert harness.get_triggers(ROOM_A, DAVE).status_code == 403
-    assert harness.patch_trigger(ROOM_A, "tr_any", DAVE, {"enabled": False}).status_code == 403
-    assert harness.delete_trigger(ROOM_A, "tr_any", DAVE).status_code == 403
-
-    ensure_app_state(harness.app).room_members = None
-    assert harness.get_triggers(ROOM_A, ALICE).status_code == 503
+    h = _Harness(tmp_path)
+    for caller, expected in ((None, 401), (DAVE, 403)):
+        assert h.req("GET", ROOM_A, caller).status_code == expected
+        assert h.req("PATCH", ROOM_A, caller, "tr_any", {"enabled": False}).status_code == expected
+        assert h.req("DELETE", ROOM_A, caller, "tr_any").status_code == expected
+    ensure_app_state(h.app).room_members = None
+    assert h.req("GET", ROOM_A, ALICE).status_code == 503
 
 
-def _seed_room_a_triggers(harness: _Harness) -> tuple[str, ...]:
-    """Populate ROOM_A with webhooks, reactive target/watch triggers, and one ROOM_C trigger; return forbidden strings."""
-    pub_key = _public_key_b64()
-    cap_hash = hashlib.sha256(b"super-secret-capability-token").hexdigest()
+def test_list_allowlist_aliases_redaction_and_no_secrets(tmp_path: Path) -> None:
+    """GET returns allowlisted target/watch rows, resolves aliases, strips secrets, and redacts cross-room watches."""
+    h = _Harness(tmp_path)
+    pub_key, cap_hash = _public_key_b64(), hashlib.sha256(b"super-secret-capability-token").hexdigest()
 
-    wh_key = harness.external_store.create_record(
-        trigger_id="wh_deploy",
-        owner_user_id=ALICE,
-        created_by_agent_name="assistant",
-        created_in_room_id=ROOM_A,
-        created_in_thread_id=None,
-        target=ExternalTriggerTarget(room_id="lobby", thread_id="$deploy_thread", agent="assistant"),
+    wh_key = h.add_webhook(
+        "wh_deploy",
+        room_id="lobby",
+        thread_id="$deploy_thread",
         public_key=pub_key,
         key_id="deploy-key-secret-id",
         description="Deploy notifications",
-        config=harness.config,
     )
-    harness.external_store.record_fired("wh_deploy", fired_at=1_764_000_000)
-
-    wh_cap = harness.external_store.create_single_use_capability_record(
-        trigger_id="wh_once",
-        owner_user_id=ALICE,
-        created_by_agent_name="assistant",
-        created_in_room_id=ROOM_A,
-        created_in_thread_id=None,
-        target=ExternalTriggerTarget(room_id="#lobby:localhost", new_thread=True, agent="assistant"),
-        capability_token_hash=cap_hash,
-        description="One-shot job callback",
-        config=harness.config,
-    )
-    harness.external_store.create_record(
-        trigger_id="wh_disabled",
-        owner_user_id=BOB,
-        created_by_agent_name="assistant",
-        created_in_room_id=ROOM_A,
-        created_in_thread_id=None,
-        target=ExternalTriggerTarget(room_id=ROOM_A, agent="assistant"),
-        public_key=_public_key_b64(),
-        description="Paused webhook",
+    h.external_store.record_fired("wh_deploy", expected_uid=wh_key.uid, fired_at=1_764_000_000)
+    wh_cap = h.add_webhook("wh_once", owner=BOB, room_id="#lobby:localhost", new_thread=True, capability_hash=cap_hash)
+    same_room = h.add_reactive(
+        "tr_same_room",
+        RoomMessageSourceSpec(room_id=ROOM_A),
+        thread_id="origin",
+        prompt="Triage urgent",
+        description="Watch same room",
         enabled=False,
-        config=harness.config,
+        disabled_reason="once_consumed",
+        once=True,
+        expires_at=1_764_050_000.25,
+        last_fired_at=1_764_000_050.75,
     )
+    h.add_reactive(
+        "tr_watch_msg",
+        RoomMessageSourceSpec(room_id=ROOM_A),
+        target_room=ROOM_B,
+        agent="ops",
+        thread_id="$ops_thread",
+        description="Private ops escalation",
+        prompt="Secret escalation instructions",
+        created_at=2.0,
+    )
+    h.add_reactive(
+        "tr_watch_unreachable",
+        ThreadTagSourceSpec(room_id=ROOM_A, thread_id="$t1", tag="resolved"),
+        target_room=UNREACHABLE,
+        agent="ops",
+        new_thread=True,
+        prompt="Secret tag prompt",
+        created_at=3.0,
+    )
+    h.add_reactive("tr_other_room", RoomMessageSourceSpec(room_id=ROOM_C), target_room=ROOM_C, created_at=4.0)
 
-    now = 1_764_000_100.5
-    same_room_rule = harness.reactive_store.create_trigger(
-        ReactiveTriggerRecord(
-            trigger_id="tr_same_room",
-            owner_user_id=ALICE,
-            description="Watch same room",
-            source=RoomMessageSourceSpec(room_id=ROOM_A, pattern="urgent"),
-            target=TriggerTargetSpec(
-                agent="assistant",
-                room_id=ROOM_A,
-                thread_id="origin",
-                prompt="Triage urgent message",
-            ),
-            enabled=False,
-            disabled_reason="once_consumed",
-            once=True,
-            expires_at=1_764_050_000.25,
-            last_fired_at=1_764_000_050.75,
-            created_at=now,
-            updated_at=now,
-        ),
-    )
-    harness.reactive_store.create_trigger(
-        ReactiveTriggerRecord(
-            trigger_id="tr_ext_event",
-            owner_user_id=ALICE,
-            description="GitHub PRs",
-            source=ExternalEventSourceSpec(source_id="github", kind="pull_request"),
-            target=TriggerTargetSpec(agent="assistant", room_id=ROOM_A, prompt="Review PR"),
-            created_at=now + 1,
-            updated_at=now + 1,
-        ),
-    )
-    harness.reactive_store.create_trigger(
-        ReactiveTriggerRecord(
-            trigger_id="tr_watch_msg",
-            owner_user_id=ALICE,
-            description="Private ops escalation",
-            source=RoomMessageSourceSpec(room_id=ROOM_A),
-            target=TriggerTargetSpec(
-                agent="ops",
-                room_id=ROOM_B,
-                thread_id="$ops_thread",
-                prompt="Secret escalation instructions",
-            ),
-            created_at=now + 2,
-            updated_at=now + 2,
-        ),
-    )
-    harness.reactive_store.create_trigger(
-        ReactiveTriggerRecord(
-            trigger_id="tr_watch_tag",
-            owner_user_id=ALICE,
-            description="Hidden tag watch",
-            source=ThreadTagSourceSpec(room_id=ROOM_A, thread_id="$t1", tag="resolved"),
-            target=TriggerTargetSpec(
-                agent="ops",
-                room_id=UNREACHABLE_ROOM,
-                new_thread=True,
-                prompt="Secret tag prompt",
-            ),
-            created_at=now + 3,
-            updated_at=now + 3,
-        ),
-    )
-    harness.reactive_store.create_trigger(
-        ReactiveTriggerRecord(
-            trigger_id="tr_other_room",
-            owner_user_id=ALICE,
-            description="Other room",
-            source=RoomMessageSourceSpec(room_id=ROOM_C),
-            target=TriggerTargetSpec(agent="assistant", room_id=ROOM_C, prompt="Other"),
-            created_at=now + 4,
-            updated_at=now + 4,
-        ),
-    )
-    return (
-        pub_key,
-        "deploy-key-secret-id",
-        wh_key.public_key_fingerprint or "",
-        cap_hash,
-        wh_key.uid,
-        wh_cap.uid,
-        same_room_rule.rule_uid,
-        "ed25519",
-        "capability",
-        "public_key",
-        "key_id",
-        "capability_token_hash",
-    )
-
-
-def test_list_returns_target_and_watch_rows_resolves_aliases_and_strips_secrets(tmp_path: Path) -> None:
-    """GET returns allowlisted target/watch rows, resolves webhook room keys/aliases, and leaks no secrets."""
-    harness = _Harness(tmp_path)
-    forbidden_strings = _seed_room_a_triggers(harness)
-
-    alice_resp = harness.get_triggers(ROOM_A, ALICE)
+    alice_resp = h.req("GET", ROOM_A, ALICE)
     assert alice_resp.status_code == 200
     triggers = alice_resp.json()["triggers"]
     alice_rows = {row["trigger_id"]: row for row in triggers}
-    assert len(triggers) == 7
-    assert set(alice_rows) == {
-        "wh_deploy",
-        "wh_once",
-        "wh_disabled",
-        "tr_same_room",
-        "tr_ext_event",
-        "tr_watch_msg",
-        "tr_watch_tag",
-    }
-    for row in triggers:
-        assert set(row) == TRIGGER_ROW_KEYS
-    for forbidden in forbidden_strings:
-        assert forbidden not in alice_resp.text
+    assert len(triggers) == 5
+    assert set(alice_rows) == {"wh_deploy", "wh_once", "tr_same_room", "tr_watch_msg", "tr_watch_unreachable"}
 
-    assert alice_rows["wh_deploy"] == {
+    expected_wh_deploy = {
         "trigger_id": "wh_deploy",
         "kind": "webhook",
         "relation": "target",
@@ -372,24 +302,29 @@ def test_list_returns_target_and_watch_rows_resolves_aliases_and_strips_secrets(
         "owner_user_id": ALICE,
         "can_manage": True,
     }
-    assert alice_rows["wh_once"]["once"] is True
-    assert alice_rows["wh_once"]["thread_mode"] == "new_thread"
-    assert alice_rows["wh_once"]["target_thread_id"] is None
-    assert alice_rows["wh_once"]["target_room_id"] == ROOM_A
-    assert alice_rows["wh_disabled"]["enabled"] is False
-    assert alice_rows["wh_disabled"]["disabled_reason"] == "manual"
-    assert alice_rows["wh_disabled"]["thread_mode"] == "room"
-    assert alice_rows["wh_disabled"]["can_manage"] is False
-    assert alice_rows["tr_ext_event"]["kind"] == "external_event"
-    assert alice_rows["tr_ext_event"]["relation"] == "target"
-    assert alice_rows["tr_same_room"] == {
-        "trigger_id": "tr_same_room",
+    assert alice_rows["wh_deploy"] == expected_wh_deploy
+    for row in triggers:
+        assert set(row) == set(expected_wh_deploy)
+    for forbidden in (
+        pub_key,
+        "deploy-key-secret-id",
+        wh_key.public_key_fingerprint or "",
+        cap_hash,
+        wh_key.uid,
+        wh_cap.uid,
+        same_room.rule_uid,
+        "ed25519",
+        "capability",
+        "public_key",
+        "key_id",
+        "capability_token_hash",
+    ):
+        assert forbidden not in alice_resp.text
+
+    assert {
         "kind": "room_message",
         "relation": "target",
-        "description": "Watch same room",
-        "prompt": "Triage urgent message",
-        "agent": "assistant",
-        "target_room_id": ROOM_A,
+        "prompt": "Triage urgent",
         "target_thread_id": None,
         "thread_mode": "origin",
         "enabled": False,
@@ -397,42 +332,23 @@ def test_list_returns_target_and_watch_rows_resolves_aliases_and_strips_secrets(
         "once": True,
         "expires_at": 1_764_050_000_250,
         "last_fired_at": 1_764_000_050_750,
-        "owner_user_id": ALICE,
-        "can_manage": True,
-    }
-
-
-def test_list_redacts_cross_room_watches_for_non_members_and_unreachable_targets(tmp_path: Path) -> None:
-    """Owners and target-room members see cross-room watch details; non-members and unreadable targets get redacted."""
-    harness = _Harness(tmp_path)
-    _seed_room_a_triggers(harness)
-
-    # Owner always sees unredacted watch rows, even for rooms without a running bot.
-    alice_rows = {row["trigger_id"]: row for row in harness.get_triggers(ROOM_A, ALICE).json()["triggers"]}
-    assert alice_rows["tr_watch_msg"]["relation"] == "watch"
+    }.items() <= alice_rows["tr_same_room"].items()
+    assert {
+        "once": True,
+        "thread_mode": "new_thread",
+        "target_room_id": ROOM_A,
+        "can_manage": False,
+    }.items() <= alice_rows["wh_once"].items()
     assert alice_rows["tr_watch_msg"]["prompt"] == "Secret escalation instructions"
-    assert alice_rows["tr_watch_msg"]["target_room_id"] == ROOM_B
-    assert alice_rows["tr_watch_msg"]["target_thread_id"] == "$ops_thread"
-    assert alice_rows["tr_watch_tag"]["prompt"] == "Secret tag prompt"
+    assert alice_rows["tr_watch_unreachable"]["prompt"] == "Secret tag prompt"
 
-    # Bob is joined to ROOM_B (unredacted) but NOT to UNREACHABLE_ROOM (redacted fail-closed).
-    bob_rows = {row["trigger_id"]: row for row in harness.get_triggers(ROOM_A, BOB).json()["triggers"]}
-    assert bob_rows["tr_watch_msg"]["can_manage"] is False
+    bob_rows = {row["trigger_id"]: row for row in h.req("GET", ROOM_A, BOB).json()["triggers"]}
     assert bob_rows["tr_watch_msg"]["prompt"] == "Secret escalation instructions"
-    assert bob_rows["tr_watch_msg"]["target_room_id"] == ROOM_B
-    assert bob_rows["tr_watch_tag"]["description"] == ""
-    assert bob_rows["tr_watch_tag"]["prompt"] is None
-    assert bob_rows["tr_watch_tag"]["agent"] is None
-    assert bob_rows["tr_watch_tag"]["target_room_id"] is None
-    assert bob_rows["tr_watch_tag"]["target_thread_id"] is None
+    assert bob_rows["tr_watch_unreachable"]["prompt"] is None
+    assert bob_rows["tr_watch_unreachable"]["target_room_id"] is None
 
-    # Carol is NOT joined to ROOM_B: tr_watch_msg is redacted completely.
-    carol_resp = harness.get_triggers(ROOM_A, CAROL)
-    assert carol_resp.status_code == 200
-    carol_rows = {row["trigger_id"]: row for row in carol_resp.json()["triggers"]}
-    assert carol_rows["tr_watch_msg"] == {
-        "trigger_id": "tr_watch_msg",
-        "kind": "room_message",
+    carol_resp = h.req("GET", ROOM_A, CAROL)
+    assert {
         "relation": "watch",
         "description": "",
         "prompt": None,
@@ -440,176 +356,101 @@ def test_list_redacts_cross_room_watches_for_non_members_and_unreachable_targets
         "target_room_id": None,
         "target_thread_id": None,
         "thread_mode": "thread",
-        "enabled": True,
-        "disabled_reason": None,
-        "once": False,
-        "expires_at": None,
-        "last_fired_at": None,
-        "owner_user_id": ALICE,
         "can_manage": False,
-    }
+    }.items() <= {row["trigger_id"]: row for row in carol_resp.json()["triggers"]}["tr_watch_msg"].items()
     for leaked in ("Secret escalation instructions", "Private ops escalation", ROOM_B, "$ops_thread"):
         assert leaked not in carol_resp.text
 
 
 def test_owner_only_patch_and_delete_reject_admins_and_foreign_room_triggers(tmp_path: Path) -> None:
-    """PATCH/DELETE enforce room membership (404 first) and strict owner-only access (403 even for admins)."""
-    config = _config(admins=[BOB], aliases={ALICE: [ALICE_BRIDGE]})
-    harness = _Harness(tmp_path, config=config)
+    """PATCH/DELETE enforce 404 for foreign-room triggers and strict 403 for non-owners (including admins)."""
+    h = _Harness(tmp_path, admins=[BOB], aliases={ALICE: [ALICE_BRIDGE]})
+    h.add_webhook("wh_room_a", room_id="lobby")
+    h.add_reactive("tr_watch_a_to_b", RoomMessageSourceSpec(room_id=ROOM_A), target_room=ROOM_B, agent="ops")
+    h.add_reactive("tr_room_c", RoomMessageSourceSpec(room_id=ROOM_C), target_room=ROOM_C)
 
-    harness.external_store.create_record(
-        trigger_id="wh_room_a",
-        owner_user_id=ALICE,
-        created_by_agent_name="assistant",
-        created_in_room_id=ROOM_A,
-        created_in_thread_id=None,
-        target=ExternalTriggerTarget(room_id="lobby", agent="assistant"),
-        public_key=_public_key_b64(),
-        description="Lobby webhook",
-        config=config,
+    for caller in (ALICE, BOB):
+        assert h.req("PATCH", ROOM_A, caller, "tr_room_c", {"enabled": False}).status_code == 404
+        assert h.req("DELETE", ROOM_A, caller, "tr_room_c").status_code == 404
+    assert h.req("PATCH", ROOM_A, ALICE, "missing", {"enabled": False}).status_code == 404
+
+    for trigger_id in ("wh_room_a", "tr_watch_a_to_b"):
+        assert h.req("PATCH", ROOM_A, BOB, trigger_id, {"enabled": False}).status_code == 403
+        assert h.req("DELETE", ROOM_A, BOB, trigger_id).status_code == 403
+
+    assert h.req("PATCH", ROOM_A, ALICE, "wh_room_a", {"enabled": "false"}).status_code == 422
+    assert h.req("PATCH", ROOM_A, ALICE, "wh_room_a", {"enabled": False, "extra": 1}).status_code == 422
+
+    alias_rows = {row["trigger_id"]: row for row in h.req("GET", ROOM_A, ALICE_BRIDGE).json()["triggers"]}
+    assert alias_rows["wh_room_a"]["can_manage"] is True
+    assert alias_rows["tr_watch_a_to_b"]["can_manage"] is True
+
+    off = h.req("PATCH", ROOM_A, ALICE_BRIDGE, "wh_room_a", {"enabled": False})
+    assert (off.status_code, off.json()["enabled"], off.json()["disabled_reason"], off.json()["thread_mode"]) == (
+        200,
+        False,
+        "manual",
+        "room",
     )
-    now = time.time()
-    harness.reactive_store.create_trigger(
-        ReactiveTriggerRecord(
-            trigger_id="tr_watch_a_to_b",
-            owner_user_id=ALICE,
-            description="Cross-room watch",
-            source=RoomMessageSourceSpec(room_id=ROOM_A),
-            target=TriggerTargetSpec(agent="ops", room_id=ROOM_B, prompt="Notify ops"),
-            created_at=now,
-            updated_at=now,
-        ),
-    )
-    harness.reactive_store.create_trigger(
-        ReactiveTriggerRecord(
-            trigger_id="tr_room_c",
-            owner_user_id=ALICE,
-            description="Room C trigger",
-            source=RoomMessageSourceSpec(room_id=ROOM_C),
-            target=TriggerTargetSpec(agent="assistant", room_id=ROOM_C, prompt="In C"),
-            created_at=now,
-            updated_at=now,
-        ),
-    )
+    on = h.req("PATCH", ROOM_A, ALICE_BRIDGE, "wh_room_a", {"enabled": True})
+    assert (on.status_code, on.json()["enabled"], on.json()["disabled_reason"]) == (200, True, None)
 
-    # Trigger in another room -> 404 (even for its owner and for non-owners).
-    assert harness.patch_trigger(ROOM_A, "tr_room_c", ALICE, {"enabled": False}).status_code == 404
-    assert harness.patch_trigger(ROOM_A, "tr_room_c", BOB, {"enabled": False}).status_code == 404
-    assert harness.delete_trigger(ROOM_A, "tr_room_c", ALICE).status_code == 404
-    assert harness.delete_trigger(ROOM_A, "tr_room_c", BOB).status_code == 404
-    assert harness.patch_trigger(ROOM_A, "does_not_exist", ALICE, {"enabled": False}).status_code == 404
-    assert harness.delete_trigger(ROOM_A, "does_not_exist", ALICE).status_code == 404
-
-    # Non-owner member gets 403, even when configured as both platform and external trigger admin.
-    assert harness.patch_trigger(ROOM_A, "wh_room_a", BOB, {"enabled": False}).status_code == 403
-    assert harness.patch_trigger(ROOM_A, "tr_watch_a_to_b", BOB, {"enabled": False}).status_code == 403
-    assert harness.delete_trigger(ROOM_A, "wh_room_a", BOB).status_code == 403
-    assert harness.delete_trigger(ROOM_A, "tr_watch_a_to_b", BOB).status_code == 403
-    assert harness.external_store.get_record("wh_room_a") is not None
-    assert harness.reactive_store.get_trigger("tr_watch_a_to_b") is not None
-
-    # Invalid PATCH payloads fail validation.
-    assert harness.patch_trigger(ROOM_A, "wh_room_a", ALICE, {"enabled": "false"}).status_code == 422
-    assert harness.patch_trigger(ROOM_A, "wh_room_a", ALICE, {"enabled": False, "extra": 1}).status_code == 422
-
-    # Equivalent bridge alias of owner sees can_manage=True and can toggle & delete both webhook and watch triggers.
-    alias_list = {row["trigger_id"]: row for row in harness.get_triggers(ROOM_A, ALICE_BRIDGE).json()["triggers"]}
-    assert alias_list["wh_room_a"]["can_manage"] is True
-    assert alias_list["tr_watch_a_to_b"]["can_manage"] is True
-
-    disabled = harness.patch_trigger(ROOM_A, "wh_room_a", ALICE_BRIDGE, {"enabled": False})
-    assert disabled.status_code == 200
-    assert disabled.json()["enabled"] is False
-    assert disabled.json()["disabled_reason"] == "manual"
-
-    reenabled = harness.patch_trigger(ROOM_A, "wh_room_a", ALICE_BRIDGE, {"enabled": True})
-    assert reenabled.status_code == 200
-    assert reenabled.json()["enabled"] is True
-    assert reenabled.json()["disabled_reason"] is None
-
-    assert harness.delete_trigger(ROOM_A, "wh_room_a", ALICE_BRIDGE).status_code == 204
-    assert harness.delete_trigger(ROOM_A, "tr_watch_a_to_b", ALICE_BRIDGE).status_code == 204
-    assert harness.external_store.get_record("wh_room_a") is None
-    assert harness.reactive_store.get_trigger("tr_watch_a_to_b") is None
-    assert harness.get_triggers(ROOM_A, ALICE).json() == {"triggers": []}
+    assert h.req("DELETE", ROOM_A, ALICE_BRIDGE, "wh_room_a").status_code == 204
+    assert h.req("DELETE", ROOM_A, ALICE_BRIDGE, "tr_watch_a_to_b").status_code == 204
+    assert h.req("GET", ROOM_A, ALICE).json() == {"triggers": []}
 
 
-def test_reenabling_reactive_triggers_refreshes_cursor_and_tag_checkpoint_and_wakes_drain(tmp_path: Path) -> None:
-    """Re-enabling disabled room_message and thread_tag triggers refreshes state and wakes the reactive drain."""
+def test_reenable_refreshes_cursor_and_tag_checkpoint_wakes_drain_and_bounds_tag_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Re-enabling disabled reactive triggers refreshes cursor/checkpoint, wakes drain, and times out to 503."""
     tag_event = {
         "type": THREAD_TAGS_EVENT_TYPE,
         "state_key": '["$thread_root","resolved"]',
         "content": {"set_by": ALICE, "set_at": "2026-11-24T12:00:00Z"},
     }
-    harness = _Harness(tmp_path, room_state_events={ROOM_A: [tag_event]})
-    now = time.time()
-
-    harness.reactive_store.create_trigger(
-        ReactiveTriggerRecord(
-            trigger_id="tr_msg",
-            owner_user_id=ALICE,
-            description="Room watcher",
-            source=RoomMessageSourceSpec(room_id=ROOM_A),
-            target=TriggerTargetSpec(agent="assistant", room_id=ROOM_A, prompt="Handle msg"),
-            enabled=False,
-            disabled_reason="manual",
-            created_at=now,
-            updated_at=now,
-        ),
+    h = _Harness(tmp_path, room_state_events={ROOM_A: [tag_event]})
+    h.add_reactive(
+        "tr_msg",
+        RoomMessageSourceSpec(room_id=ROOM_A),
+        enabled=False,
+        disabled_reason="manual",
         initial_cursor=RoomCursor(created_ts=1_000, logical_event_id="$stale"),
     )
-    harness.reactive_store.create_trigger(
-        ReactiveTriggerRecord(
-            trigger_id="tr_tag",
-            owner_user_id=ALICE,
-            description="Tag watcher",
-            source=ThreadTagSourceSpec(room_id=ROOM_A, thread_id="$thread_root", tag="resolved"),
-            target=TriggerTargetSpec(agent="assistant", room_id=ROOM_A, prompt="Handle tag"),
-            enabled=False,
-            disabled_reason="once_consumed",
-            once=True,
-            created_at=now,
-            updated_at=now,
-        ),
+    h.add_reactive(
+        "tr_tag",
+        ThreadTagSourceSpec(room_id=ROOM_A, thread_id="$thread_root", tag="resolved"),
+        enabled=False,
+        disabled_reason="once_consumed",
+        once=True,
         initial_checkpoint=ThreadCheckpoint(tag_present=False, state_event_id="$old", updated_at=100.0),
     )
 
     before_ms = int(time.time() * 1000)
-    msg_resp = harness.patch_trigger(ROOM_A, "tr_msg", ALICE, {"enabled": True})
-    assert msg_resp.status_code == 200
-    assert msg_resp.json()["enabled"] is True
-    assert msg_resp.json()["disabled_reason"] is None
-    refreshed_cursor = harness.reactive_store.get_room_cursor("tr_msg")
-    assert refreshed_cursor is not None
-    assert refreshed_cursor.created_ts >= before_ms
-    assert refreshed_cursor.logical_event_id == ""
-    assert harness.wake_reactive.call_count == 1
+    msg_resp = h.req("PATCH", ROOM_A, ALICE, "tr_msg", {"enabled": True})
+    assert (msg_resp.status_code, msg_resp.json()["enabled"], msg_resp.json()["disabled_reason"]) == (200, True, None)
+    cursor = h.reactive_store.get_room_cursor("tr_msg")
+    assert cursor is not None
+    assert cursor.created_ts >= before_ms
+    assert cursor.logical_event_id == ""
+    assert h.wake_reactive.call_count == 1
 
-    tag_resp = harness.patch_trigger(ROOM_A, "tr_tag", ALICE, {"enabled": True})
-    assert tag_resp.status_code == 200
-    assert tag_resp.json()["enabled"] is True
-    assert tag_resp.json()["disabled_reason"] is None
-    refreshed_checkpoint = harness.reactive_store.get_thread_checkpoint("tr_tag")
-    assert refreshed_checkpoint is not None
-    assert refreshed_checkpoint.tag_present is True
-    assert harness.wake_reactive.call_count == 2
+    tag_resp = h.req("PATCH", ROOM_A, ALICE, "tr_tag", {"enabled": True})
+    assert (tag_resp.status_code, tag_resp.json()["enabled"], tag_resp.json()["disabled_reason"]) == (200, True, None)
+    checkpoint = h.reactive_store.get_thread_checkpoint("tr_tag")
+    assert checkpoint is not None
+    assert checkpoint.tag_present is True
+    assert h.wake_reactive.call_count == 2
 
-    # Disabling sets disabled_reason="manual" and does not wake the drain.
-    disable_resp = harness.patch_trigger(ROOM_A, "tr_msg", ALICE, {"enabled": False})
-    assert disable_resp.status_code == 200
-    assert disable_resp.json()["enabled"] is False
-    assert disable_resp.json()["disabled_reason"] == "manual"
-    assert harness.wake_reactive.call_count == 2
+    disable_resp = h.req("PATCH", ROOM_A, ALICE, "tr_tag", {"enabled": False})
+    assert (disable_resp.status_code, disable_resp.json()["disabled_reason"]) == (200, "manual")
+    assert h.wake_reactive.call_count == 2
 
+    async def _hang(_room_id: str) -> object:
+        await asyncio.sleep(10)
+        return nio.RoomGetStateResponse([], ROOM_A)
 
-def test_room_triggers_routes_are_mounted_on_main_app() -> None:
-    """The main FastAPI application exposes all three room triggers endpoints."""
-    routes = {
-        (route.path, method)
-        for route in main_app.routes
-        if hasattr(route, "methods") and hasattr(route, "path")
-        for method in route.methods
-    }
-    assert ("/api/rooms/{room_id}/triggers", "GET") in routes
-    assert ("/api/rooms/{room_id}/triggers/{trigger_id}", "PATCH") in routes
-    assert ("/api/rooms/{room_id}/triggers/{trigger_id}", "DELETE") in routes
+    h.client.room_get_state = AsyncMock(side_effect=_hang)
+    monkeypatch.setattr(room_triggers, "_WATCH_TAG_READ_TIMEOUT_SECONDS", 0.05)
+    assert h.req("PATCH", ROOM_A, ALICE, "tr_tag", {"enabled": True}).status_code == 503

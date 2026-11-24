@@ -432,13 +432,13 @@ class ExternalTriggerStore:
             records.triggers.pop(trigger_id)
             self._write_records(records)
 
-    def record_fired(self, trigger_id: str, *, fired_at: int | None = None) -> None:
-        """Record one successful, non-duplicate delivery timestamp if the trigger still exists."""
+    def record_fired(self, trigger_id: str, *, expected_uid: str, fired_at: int | None = None) -> None:
+        """Record one successful, non-duplicate delivery timestamp if the same trigger still exists."""
         timestamp = int(time.time()) if fired_at is None else fired_at
         with advisory_file_lock(self._lock_path):
             records = self._read_records()
             record = records.triggers.get(trigger_id)
-            if record is None:
+            if record is None or record.uid != expected_uid:
                 return
             records.triggers[trigger_id] = _validate_record_update(
                 record.model_copy(update={"last_fired_at": timestamp}),

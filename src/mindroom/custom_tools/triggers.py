@@ -78,7 +78,7 @@ from mindroom.requester_identity import (
     is_human_requester_id,
     managed_entity_user_ids,
 )
-from mindroom.thread_tags import ThreadTagsError, get_thread_tags, normalize_tag_name
+from mindroom.thread_tags import ThreadTagsError, normalize_tag_name
 from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
@@ -1742,7 +1742,7 @@ async def _read_thread_tag_present(
     preferred_agent: str,
 ) -> bool:
     watch_client = _client_for_room(context, source.room_id, preferred_agent=preferred_agent) or context.client
-    return await read_thread_tag_present(watch_client, source, fetch_tags=get_thread_tags)
+    return await read_thread_tag_present(watch_client, source)
 
 
 async def _read_reenable_tag_state(

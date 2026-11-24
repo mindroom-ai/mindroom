@@ -297,7 +297,7 @@ async def _claim_and_execute_trigger(
     if snapshot.delivery_mode == "single_use":
         await _consume_single_use_trigger(snapshot, runtime_paths)
     else:
-        await _record_external_trigger_fired(snapshot.trigger_id, runtime_paths, fired_at=delivered_at)
+        await _record_external_trigger_fired(snapshot, runtime_paths, fired_at=delivered_at)
     return ExternalTriggerAcceptedResponse(
         accepted=True,
         duplicate=False,
@@ -461,11 +461,21 @@ async def _consume_single_use_trigger(snapshot: TriggerDeliverySnapshot, runtime
         raise HTTPException(status_code=503, detail="Single-use trigger could not be consumed") from exc
 
 
-async def _record_external_trigger_fired(trigger_id: str, runtime_paths: RuntimePaths, *, fired_at: int) -> None:
+async def _record_external_trigger_fired(
+    snapshot: TriggerDeliverySnapshot,
+    runtime_paths: RuntimePaths,
+    *,
+    fired_at: int,
+) -> None:
     try:
-        await asyncio.to_thread(_trigger_store(runtime_paths).record_fired, trigger_id, fired_at=fired_at)
-    except ExternalTriggerStoreError:
-        logger.warning("Failed to record webhook last_fired_at", trigger_id=trigger_id, exc_info=True)
+        await asyncio.to_thread(
+            _trigger_store(runtime_paths).record_fired,
+            snapshot.trigger_id,
+            expected_uid=snapshot.uid,
+            fired_at=fired_at,
+        )
+    except (ExternalTriggerStoreError, OSError):
+        logger.warning("Failed to record webhook last_fired_at", trigger_id=snapshot.trigger_id, exc_info=True)
 
 
 def _parse_payload(body: bytes) -> ExternalTriggerPayload:
