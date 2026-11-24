@@ -167,6 +167,9 @@ def claim_desktop_pairing(
         if pending.agent_name != agent_name:
             msg = "Desktop pairing code belongs to another agent."
             raise DesktopPairingError(msg)
+        if device_user_id != pending.requester_id:
+            msg = "Desktop pairing code does not belong to this Matrix account."
+            raise DesktopPairingError(msg)
         claimed_identity = (pending.device_user_id, pending.device_id, pending.device_ed25519)
         new_identity = (device_user_id, device_id, device_ed25519)
         if pending.claimed and claimed_identity != new_identity:

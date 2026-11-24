@@ -60,7 +60,7 @@ def test_pairing_binds_claim_and_confirmation_to_requester_agent(tmp_path: Path)
             runtime_paths,
             token=pairing.token,
             agent_name="other",
-            device_user_id="@desktop:example.org",
+            device_user_id="@alice:example.org",
             device_id="DEVICE",
             device_ed25519="fingerprint",
             now=101,
@@ -70,7 +70,7 @@ def test_pairing_binds_claim_and_confirmation_to_requester_agent(tmp_path: Path)
         runtime_paths,
         token=pairing.token,
         agent_name="computer",
-        device_user_id="@desktop:example.org",
+        device_user_id="@alice:example.org",
         device_id="DEVICE",
         device_ed25519="fingerprint",
         now=101,
@@ -105,7 +105,7 @@ def test_pairing_binds_claim_and_confirmation_to_requester_agent(tmp_path: Path)
         verification=verification,
         now=102,
     )
-    assert confirmed.device_user_id == "@desktop:example.org"
+    assert confirmed.device_user_id == "@alice:example.org"
     assert confirmed.device_id == "DEVICE"
     assert confirmed.device_ed25519 == "fingerprint"
 
@@ -141,7 +141,7 @@ def test_pairing_stores_only_a_hash_and_expires(tmp_path: Path) -> None:
             runtime_paths,
             token=pairing.token,
             agent_name="computer",
-            device_user_id="@desktop:example.org",
+            device_user_id="@alice:example.org",
             device_id="DEVICE",
             device_ed25519="fingerprint",
             now=pairing.expires_at,
@@ -162,13 +162,13 @@ async def test_pairing_claim_uses_authenticated_device_store_identity(
     )
     device = SimpleNamespace(ed25519="signed-fingerprint", curve25519="curve-key", deleted=False, blacklisted=False)
     client = SimpleNamespace(
-        olm=SimpleNamespace(device_store={"@desktop:example.org": {"SIGNED": device}}),
+        olm=SimpleNamespace(device_store={"@alice:example.org": {"SIGNED": device}}),
     )
     event = AuthenticatedToDeviceEvent(
         source={"content": DesktopPairingClaim(pairing.token).to_content()},
-        sender="@desktop:example.org",
+        sender="@alice:example.org",
         type=DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
-        authenticated_sender=AuthenticatedDevice("@desktop:example.org", "SIGNED", "curve-key", "signed-fingerprint"),
+        authenticated_sender=AuthenticatedDevice("@alice:example.org", "SIGNED", "curve-key", "signed-fingerprint"),
     )
     send_ack = AsyncMock()
     monkeypatch.setattr("mindroom.desktop.pairing_receiver.send_encrypted_to_device", send_ack)
@@ -190,7 +190,7 @@ async def test_pairing_claim_uses_authenticated_device_store_identity(
         confirmed.device_user_id,
         confirmed.device_id,
         confirmed.device_ed25519,
-    ) == ("@desktop:example.org", "SIGNED", "signed-fingerprint")
+    ) == ("@alice:example.org", "SIGNED", "signed-fingerprint")
     assert send_ack.await_args.kwargs["event_type"] == DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE
     assert DesktopPairingAccepted.from_content(send_ack.await_args.kwargs["content"]).verification == (
         desktop_pairing_verification(pairing.token, "signed-fingerprint")
@@ -555,7 +555,7 @@ def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(
         runtime_paths,
         token=token,
         agent_name="computer",
-        device_user_id="@alice-desktop:example.org",
+        device_user_id="@alice:example.org",
         device_id="ALICE",
         device_ed25519="alice-fingerprint",
     )
@@ -588,7 +588,7 @@ def test_chat_confirmation_saves_only_the_initiating_requester_agent_scope(
             runtime_paths,
             token=scope_token,
             agent_name=scope.agent_name,
-            device_user_id=f"@{device_id.lower()}-desktop:example.org",
+            device_user_id=scope.requester_id,
             device_id=device_id,
             device_ed25519=fingerprint,
         )
@@ -625,3 +625,47 @@ def test_desktop_command_contains_pairing_database_errors(
     response = handle_desktop_command("status", scope=scope)  # type: ignore[arg-type]
 
     assert "temporarily unavailable" in response
+
+
+def test_claim_rejects_different_matrix_account(tmp_path: Path) -> None:
+    """A Matrix account other than the initiating requester cannot claim a pairing code."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    pairing = create_desktop_pairing(
+        runtime_paths,
+        requester_id="@alice:example.org",
+        agent_name="computer",
+        now=100,
+    )
+
+    with pytest.raises(DesktopPairingError, match="does not belong to this Matrix account"):
+        claim_desktop_pairing(
+            runtime_paths,
+            token=pairing.token,
+            agent_name="computer",
+            device_user_id="@mallory:example.org",
+            device_id="MALLORY",
+            device_ed25519="mallory-fingerprint",
+            now=101,
+        )
+
+    claimed = claim_desktop_pairing(
+        runtime_paths,
+        token=pairing.token,
+        agent_name="computer",
+        device_user_id="@alice:example.org",
+        device_id="ALICE",
+        device_ed25519="alice-fingerprint",
+        now=102,
+    )
+    assert claimed.device_user_id == "@alice:example.org"
+
+    with pytest.raises(DesktopPairingError, match="does not belong to this Matrix account"):
+        claim_desktop_pairing(
+            runtime_paths,
+            token=pairing.token,
+            agent_name="computer",
+            device_user_id="@mallory:example.org",
+            device_id="MALLORY",
+            device_ed25519="mallory-fingerprint",
+            now=103,
+        )

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 import stat
 import sys
@@ -115,6 +116,7 @@ class NativeDesktopHost:
         self._lock = asyncio.Lock()
         self._runtime: _NativeBridgeRuntimeProtocol | None = None
         self._startup_task: asyncio.Task[None] | None = None
+        self._host_lock_fd: int | None = None
         self._helper_state = "running"
         self._last_error: dict[str, object] | None = None
         self._pairing_state = "unpaired"
@@ -421,24 +423,31 @@ class NativeDesktopHost:
                 )
             if self._runtime is not None:
                 raise NativeProtocolError("already_running", "The desktop bridge is already running.")
-            runtime = (self._dependencies.runtime_factory or NativeBridgeRuntime)(self._runtime_paths, config)
-            self._helper_state = "starting"
-            self._startup_task = asyncio.create_task(runtime.start())
+            self._host_lock_fd = _acquire_host_lock(self._runtime_paths.storage_root)
+            started = False
             try:
-                await self._startup_task
-            except asyncio.CancelledError as exc:
-                self._helper_state = "running"
-                raise NativeProtocolError("not_running", "Desktop bridge startup was stopped.") from exc
-            except Exception as exc:
-                from mindroom.desktop.startup_errors import desktop_startup_error
+                runtime = (self._dependencies.runtime_factory or NativeBridgeRuntime)(self._runtime_paths, config)
+                self._helper_state = "starting"
+                self._startup_task = asyncio.create_task(runtime.start())
+                try:
+                    await self._startup_task
+                except asyncio.CancelledError as exc:
+                    self._helper_state = "running"
+                    raise NativeProtocolError("not_running", "Desktop bridge startup was stopped.") from exc
+                except Exception as exc:
+                    from mindroom.desktop.startup_errors import desktop_startup_error
 
-                self._helper_state = "faulted"
-                raise desktop_startup_error(exc) from exc
+                    self._helper_state = "faulted"
+                    raise desktop_startup_error(exc) from exc
+                finally:
+                    self._startup_task = None
+                self._runtime = runtime
+                self._helper_state = "running"
+                started = True
+                return {"status": self.status()}
             finally:
-                self._startup_task = None
-            self._runtime = runtime
-            self._helper_state = "running"
-            return {"status": self.status()}
+                if not started:
+                    self._release_host_lock()
         if action == "stop":
             _expect_keys(parameters, set())
             if self._startup_task is not None:
@@ -459,6 +468,7 @@ class NativeDesktopHost:
                 # A stopped runtime is retired even when a release failed; that failure is this stop's response.
                 if self._runtime is runtime:
                     self._runtime = None
+                    self._release_host_lock()
                 self._helper_state = "running"
             return {"status": self.status()}
         if action == "grant_control":
@@ -597,10 +607,17 @@ class NativeDesktopHost:
         """Clear local authority and close owned runtime resources."""
         async with self._lock:
             self._helper_state = "stopping"
-            if self._runtime is not None:
-                runtime, self._runtime = self._runtime, None
-                await runtime.stop()
-            self._helper_state = "stopped"
+            try:
+                if self._runtime is not None:
+                    runtime, self._runtime = self._runtime, None
+                    await runtime.stop()
+            finally:
+                self._release_host_lock()
+                self._helper_state = "stopped"
+
+    def _release_host_lock(self) -> None:
+        lock_fd, self._host_lock_fd = self._host_lock_fd, None
+        _release_host_lock(lock_fd)
 
     def _require_config(self) -> NativeDesktopConfig:
         if self._config is None:
@@ -1146,6 +1163,84 @@ def _redacted_identity(details: dict[str, object]) -> dict[str, object]:
 def _matrix_http_headers_path(runtime_paths: RuntimePaths) -> Path | None:
     value = runtime_paths.env_value("MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE")
     return Path(value) if value else None
+
+
+if sys.platform == "win32":
+    import msvcrt
+
+    def _try_lock_host_fd(fd: int) -> bool:
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except PermissionError:
+            return False
+        return True
+
+    def _unlock_host_fd(fd: int) -> None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+else:
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - non-POSIX fallback
+
+        def _try_lock_host_fd(fd: int) -> bool:  # noqa: ARG001
+            return True
+
+        def _unlock_host_fd(fd: int) -> None:  # noqa: ARG001
+            return None
+
+    else:
+
+        def _try_lock_host_fd(fd: int) -> bool:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            return True
+
+        def _unlock_host_fd(fd: int) -> None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def _host_lock_path(storage_root: Path) -> Path:
+    return storage_root / "desktop_bridge" / "host.lock"
+
+
+def _acquire_host_lock(storage_root: Path) -> int:
+    lock_path = _host_lock_path(storage_root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name != "nt":
+        lock_path.parent.chmod(0o700)
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(lock_path, flags, 0o600)
+    locked = False
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise NativeProtocolError("invalid_request", "Native desktop host lock path must be a regular file.")
+        if not _try_lock_host_fd(fd):
+            raise NativeProtocolError(
+                "already_running",
+                "Another MindRoom app is already running Desktop access for this storage path.",
+                recovery="Stop Computer Access in the other MindRoom app and try again.",
+            )
+        if os.name != "nt":
+            os.fchmod(fd, 0o600)
+        locked = True
+        return fd
+    finally:
+        if not locked:
+            os.close(fd)
+
+
+def _release_host_lock(fd: int | None) -> None:
+    if fd is None:
+        return
+    try:
+        _unlock_host_fd(fd)
+    finally:
+        os.close(fd)
 
 
 __all__ = [

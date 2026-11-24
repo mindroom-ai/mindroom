@@ -12,6 +12,7 @@ import os
 import shlex
 import signal
 import ssl
+import stat
 import sys
 import time
 from contextlib import suppress
@@ -2257,5 +2258,96 @@ def test_stop_cancels_pending_start_before_it_can_publish_running(tmp_path: Path
         await host.handle(_request("start"))
         assert runtime.running
         await host.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_start_refuses_when_host_lock_is_held(tmp_path: Path) -> None:
+    """Only one host bridge may hold <storage>/desktop_bridge/host.lock at a time."""
+    lock_path = tmp_path / "desktop_bridge" / "host.lock"
+
+    async def scenario() -> None:
+        runtime = FakeRuntime()
+        host = _host(tmp_path, runtime)
+        await host.handle(_request("configure", expected_revision=0, config=_config_payload()))
+
+        with advisory_file_lock(lock_path):
+            with pytest.raises(NativeProtocolError) as locked_error:
+                await host.handle(_request("start"))
+            assert locked_error.value.code == "already_running"
+            assert "Another MindRoom app" in str(locked_error.value)
+            assert locked_error.value.recovery is not None
+            assert not runtime.running
+
+        await host.handle(_request("start"))
+        assert runtime.running
+        assert file_lock_is_held(lock_path)
+        if os.name != "nt":
+            assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
+            assert stat.S_IMODE(lock_path.parent.stat().st_mode) == 0o700
+
+        other_runtime = FakeRuntime()
+        other_host = _host(tmp_path, other_runtime)
+        with pytest.raises(NativeProtocolError) as second_error:
+            await other_host.handle(_request("start"))
+        assert second_error.value.code == "already_running"
+        assert not other_runtime.running
+
+        await host.handle(_request("stop"))
+        assert not file_lock_is_held(lock_path)
+
+        class FailingStopRuntime(FakeRuntime):
+            async def stop(self) -> None:
+                raise RuntimeError("stop failed")
+
+        failing_stop_host = _host(tmp_path, FailingStopRuntime())
+        await failing_stop_host.handle(_request("start"))
+        assert file_lock_is_held(lock_path)
+        with pytest.raises(NativeProtocolError):
+            await failing_stop_host.handle(_request("stop"))
+        assert not file_lock_is_held(lock_path)
+
+        await other_host.handle(_request("start"))
+        assert file_lock_is_held(lock_path)
+        await other_host.shutdown()
+        assert not file_lock_is_held(lock_path)
+
+    asyncio.run(scenario())
+
+
+def test_start_releases_host_lock_on_startup_failure_and_cancellation(tmp_path: Path) -> None:
+    """Failed or cancelled startup never leaves host.lock stuck."""
+    lock_path = tmp_path / "desktop_bridge" / "host.lock"
+
+    class FailingStartRuntime(FakeRuntime):
+        async def start(self) -> None:
+            raise RuntimeError("boom")
+
+    class SlowStartRuntime(FakeRuntime):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+
+        async def start(self) -> None:
+            self.entered.set()
+            await asyncio.Event().wait()
+
+    async def scenario() -> None:
+        failing_host = _host(tmp_path, FailingStartRuntime())
+        await failing_host.handle(_request("configure", expected_revision=0, config=_config_payload()))
+        with pytest.raises(NativeProtocolError):
+            await failing_host.handle(_request("start"))
+        assert not file_lock_is_held(lock_path)
+
+        slow_runtime = SlowStartRuntime()
+        cancelling_host = _host(tmp_path, slow_runtime)
+        starting = asyncio.create_task(cancelling_host.handle(_request("start")))
+        await slow_runtime.entered.wait()
+        assert file_lock_is_held(lock_path)
+        await cancelling_host.handle(_request("stop"))
+        with pytest.raises(NativeProtocolError) as cancelled:
+            await starting
+        assert cancelled.value.code == "not_running"
+        assert not file_lock_is_held(lock_path)
 
     asyncio.run(scenario())
