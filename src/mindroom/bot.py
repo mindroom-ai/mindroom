@@ -1752,6 +1752,7 @@ class AgentBot:
                 agent_name=self.agent_name,
                 runtime_paths=self.runtime_paths,
                 callback_wrapper=partial(_create_best_effort_task_wrapper, owner=self._runtime_view),
+                config_getter=lambda: self.config,
             )
             register_model_catalog_receiver(
                 client=client,

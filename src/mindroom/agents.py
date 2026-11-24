@@ -22,6 +22,7 @@ from mindroom.agent_loop.prompt import (
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import offered_toolkits, toolkit_instructions
 from mindroom.approval.tool_approval import tool_may_require_approval, toolkit_approval_alias
+from mindroom.config.models import EffectiveToolConfig
 from mindroom.config.resolution import memory_backend
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.attachments import AttachmentTools
@@ -34,6 +35,8 @@ from mindroom.delegation.personas import (
     require_built_persona_tools,
 )
 from mindroom.delegation.state import is_delegation_function
+from mindroom.desktop.configuration import DesktopConfigurationStatus, desktop_configuration_state
+from mindroom.desktop.credentials import load_desktop_credentials
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.failure_text import failure_text
@@ -96,7 +99,7 @@ if TYPE_CHECKING:
     from mindroom.agent_modes import AgentMode
     from mindroom.config.agent import AgentConfig
     from mindroom.config.main import Config
-    from mindroom.config.models import EffectiveToolConfig, FileAccess
+    from mindroom.config.models import FileAccess
     from mindroom.config.resolution import ResolvedAgent
     from mindroom.delegation.state import SubagentPersona
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -979,6 +982,29 @@ def _agent_create_timing(label: str, **event_data: object) -> AbstractContextMan
     return timed_block(f"system_prompt_assembly.agent_create.{label}", scope=None, **event_data)
 
 
+def _has_ready_self_service_desktop(
+    config: Config,
+    runtime_paths: constants.RuntimePaths,
+    agent_name: str,
+    execution_identity: ToolExecutionIdentity | None,
+) -> bool:
+    """Return whether self-service desktop pairing is READY for this requester and agent."""
+    if (
+        config.defaults.desktop_pairing != "self_service"
+        or agent_name not in config.agents
+        or execution_identity is None
+        or not execution_identity.requester_id
+        or not turn_keeps_room_tools(execution_identity)
+    ):
+        return False
+    credentials = load_desktop_credentials(
+        get_runtime_credentials_manager(runtime_paths),
+        requester_id=execution_identity.requester_id,
+        agent_name=agent_name,
+    )
+    return desktop_configuration_state(credentials).status is DesktopConfigurationStatus.READY
+
+
 def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools share one construction path
     agent_tools: AgentTools,
     runtime_paths: constants.RuntimePaths,
@@ -1046,6 +1072,21 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             for entry in complete
             if entry.name not in resolved_tool_configs and entry.name not in disabled_tool_names
         }
+    if (
+        not disable_runtime_capabilities
+        and narrowed_tools is None
+        and "desktop" not in resolved_tool_configs
+        and "desktop" not in deferred_configs
+        and "desktop" not in disabled_tool_names
+        and agent_tools.tools.available("desktop")
+        and _has_ready_self_service_desktop(config, runtime_paths, agent_name, execution_identity)
+    ):
+        resolved_tool_configs["desktop"] = EffectiveToolConfig(
+            name="desktop",
+            tool_config_overrides={},
+            authored_order=len(resolved_tool_configs) + len(deferred_configs),
+            authored_name="desktop",
+        )
     placement = tool_placement(runtime_paths, agent_tools.tools)
     workspace_in_worker = agent_tools.workspace_in_worker([*resolved_tool_configs, *deferred_configs], placement)
     entries: list[_ToolkitEntry] = []
@@ -1798,7 +1839,15 @@ def create_agent(
         # The roster names each toolkit by the registered tool the agent CLI reaches it under.
         # A persona's or narrowed build's roster names the toolkits it actually built, deferred ones it named included.
         roster = (
-            agent_tools.toolkit_names(agent_tools.candidates())
+            list(
+                dict.fromkeys(
+                    [
+                        *agent_tools.toolkit_names(agent_tools.candidates()),
+                        *tool_assembly.local_tool_names,
+                        *tool_assembly.worker_routed_tool_names,
+                    ],
+                ),
+            )
             if persona is None and tool_names is None
             else [*tool_assembly.local_tool_names, *tool_assembly.worker_routed_tool_names]
         )

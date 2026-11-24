@@ -10,7 +10,11 @@ from typing import TYPE_CHECKING
 
 from mindroom.constants import runtime_matrix_homeserver
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.desktop.configuration import DesktopConfigurationStatus, desktop_configuration_state
+from mindroom.desktop.configuration import (
+    DesktopConfigurationStatus,
+    desktop_configuration_state,
+    desktop_pairing_error,
+)
 from mindroom.desktop.credentials import (
     delete_desktop_credentials,
     load_desktop_credentials,
@@ -50,11 +54,7 @@ class DesktopCommandScope:
 
 def chat_pairing_desktop_error(config: Config, agent_name: str) -> str | None:
     """Return why an agent cannot own requester-scoped Desktop pairing."""
-    if agent_name not in config.agents:
-        return "Run this command while talking directly to a configured agent."
-    if "desktop" not in config.resolve_agent(agent_name).tools.tool_names:
-        return f"Agent '{agent_name}' does not declare the Desktop tool."
-    return None
+    return desktop_pairing_error(config, agent_name)
 
 
 @dataclass(frozen=True, slots=True)

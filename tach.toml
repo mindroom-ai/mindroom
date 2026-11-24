@@ -969,7 +969,10 @@ depends_on = [
     "mindroom.tool_system.toolkit_connections",
     "mindroom.failure_text",
     "mindroom.tool_system.agent_tools",
+    "mindroom.config.models",
     "mindroom.config.resolution",
+    "mindroom.desktop.configuration",
+    "mindroom.desktop.credentials",
 ]
 
 [[modules]]
@@ -4552,6 +4555,7 @@ depends_on = [
 path = "mindroom.desktop.credentials"
 depends_on = ["mindroom.tool_system.worker_routing"]
 visibility = [
+    "mindroom.agents",
     "mindroom.commands.desktop_commands",
     "mindroom.custom_tools.desktop",
     "mindroom.desktop.pairing_receiver",
@@ -9840,6 +9844,7 @@ depends_on = [
     "mindroom.tool_system.construction",
     "mindroom.tool_system.filters",
     "mindroom.config.knowledge_graph",
+    "mindroom.config.models",
     "mindroom.tool_system.agent_tools",
     "mindroom.config.resolution",
 ]

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
+from mindroom.config.models import EffectiveToolConfig
 from mindroom.config.resolution import edits_knowledge_graph
 from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_keeps_room_tools
 from mindroom.tool_system.construction import get_toolkit_construction, tool_config_signature
@@ -14,7 +15,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from mindroom.config.main import Config
-    from mindroom.config.models import EffectiveToolConfig
     from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -82,6 +82,16 @@ def locally_allowed(
         ),
         None,
     )
+    if (
+        entry is None
+        and toolkit_name == "desktop"
+        and construction.get("name") == "desktop"
+        and config.defaults.desktop_pairing == "self_service"
+        and turn_keeps_room_tools(owner)
+        and tools.available("desktop")
+        and bool(owner.requester_id)
+    ):
+        entry = EffectiveToolConfig(name="desktop", tool_config_overrides={}, authored_name="desktop")
     if entry is None:
         return False
     # Graph edits are functions of the knowledge_graph toolkit that only an agent allowed to edit its graph gets.

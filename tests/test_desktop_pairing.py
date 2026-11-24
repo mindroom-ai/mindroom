@@ -355,7 +355,7 @@ async def test_pairing_claim_contains_database_errors(
 
 
 def test_pairing_receiver_registration_owns_desktop_enablement_check(tmp_path: Path) -> None:
-    """The transport collaborator, not AgentBot, decides whether to register."""
+    """The transport collaborator registers only concrete agents, skipping router/unknown entities."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {
@@ -381,7 +381,7 @@ def test_pairing_receiver_registration_owns_desktop_enablement_check(tmp_path: P
     register_desktop_pairing_receiver(
         config,
         client=client,  # type: ignore[arg-type]
-        agent_name="chat",
+        agent_name="router",
         runtime_paths=runtime_paths,
         callback_wrapper=lambda callback: callback,
     )
@@ -917,13 +917,16 @@ async def test_olm_pairing_happy_path_setup_claim_confirm(
     await receiver.on_event(confirm_event)
     assert DesktopPairingConfirmed.from_content(sent.pop()[2]).ok is False
 
-    # Ineligible agent replies with eligible=False and no code.
+    # Ineligible agent under explicit_only replies with eligible=False and no code.
+    explicit_config = config.model_copy(
+        update={"defaults": config.defaults.model_copy(update={"desktop_pairing": "explicit_only"})},
+    )
     ineligible_receiver, sent2 = _olm_receiver(
         runtime_paths,
         monkeypatch,
         devices=devices,
         agent_name="notes",
-        config=config,
+        config=explicit_config,
     )
     await ineligible_receiver.on_event(
         _olm_event(
@@ -1141,9 +1144,19 @@ async def test_slash_desktop_setup_named_agent_in_multi_agent_room_and_rejects_o
     )
     assert await ensure_room_membership_synced(client, room, sender_id="@alice:localhost")
 
-    # Unnamed /desktop is ambiguous in a multi-agent room; named dev works; non-desktop notes is refused.
+    # Unnamed /desktop is ambiguous in a multi-agent room; under self_service both named concrete agents work.
     assert desktop_room_agent(config, runtime_paths, room, "@alice:localhost", args_text="setup") is None
-    assert desktop_room_agent(config, runtime_paths, room, "@alice:localhost", args_text="setup notes") is None
+    assert desktop_room_agent(config, runtime_paths, room, "@alice:localhost", args_text="setup notes") == "notes"
+
+    explicit_config = config.model_copy(
+        update={"defaults": config.defaults.model_copy(update={"desktop_pairing": "explicit_only"})},
+    )
+    disabled_config = config.model_copy(
+        update={"defaults": config.defaults.model_copy(update={"desktop_pairing": "disabled"})},
+    )
+    assert desktop_room_agent(explicit_config, runtime_paths, room, "@alice:localhost", args_text="setup notes") is None
+    assert desktop_room_agent(explicit_config, runtime_paths, room, "@alice:localhost", args_text="setup dev") == "dev"
+    assert desktop_room_agent(disabled_config, runtime_paths, room, "@alice:localhost", args_text="setup dev") is None
     for args_text in (
         "setup dev",
         "status dev",
@@ -1216,3 +1229,131 @@ async def test_slash_desktop_setup_named_agent_in_multi_agent_room_and_rejects_o
     )
     assert await ensure_room_membership_synced(client, room_with_bob, sender_id="@alice:localhost")
     assert desktop_room_agent(config, runtime_paths, room_with_bob, "@alice:localhost", args_text="setup dev") is None
+
+
+@pytest.mark.asyncio
+async def test_self_service_registers_pairing_receiver_without_static_desktop_tool(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """self_service registers pairing on concrete agents without desktop tool and honors live config reloads."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    sent: list[tuple[PinnedMatrixDevice, str, dict[str, object]]] = []
+
+    async def capture_send(
+        _client: object,
+        target: PinnedMatrixDevice,
+        *,
+        event_type: str,
+        content: dict[str, object],
+    ) -> None:
+        sent.append((target, event_type, content))
+
+    monkeypatch.setattr("mindroom.desktop.pairing_receiver.send_encrypted_to_device", capture_send)
+    base_config = _desktop_config(runtime_paths)
+    current_config = base_config.model_copy(
+        update={"defaults": base_config.defaults.model_copy(update={"desktop_pairing": "disabled"})},
+    )
+    devices = {"@alice:example.org": {"CHAT1": _olm_device("chat1-key")}}
+    client = SimpleNamespace(add_to_device_callback=Mock(), olm=SimpleNamespace(device_store=devices))
+
+    register_desktop_pairing_receiver(
+        current_config,
+        client=client,  # type: ignore[arg-type]
+        agent_name="notes",
+        runtime_paths=runtime_paths,
+        callback_wrapper=lambda callback: callback,
+        config_getter=lambda: current_config,
+    )
+    callback, event_type = client.add_to_device_callback.call_args.args
+    assert event_type is AuthenticatedToDeviceEvent
+
+    request_event = _olm_event(
+        sender="@alice:example.org",
+        device_id="CHAT1",
+        ed25519="chat1-key",
+        event_type=DESKTOP_SETUP_REQUEST_EVENT_TYPE,
+        content=DesktopSetupRequest(nonce="reload-nonce-0123456", agent_name="notes").to_content(),
+    )
+    await callback(request_event)
+    offer = DesktopSetupOffer.from_content(sent.pop()[2])
+    assert offer.eligible is False
+    assert offer.error == "Desktop pairing is disabled by configuration."
+
+    current_config = base_config
+    await callback(request_event)
+    offer = DesktopSetupOffer.from_content(sent.pop()[2])
+    assert offer.eligible is True
+    assert offer.code is not None
+
+
+@pytest.mark.asyncio
+async def test_setup_request_reports_ineligible_when_policy_disabled_or_explicit_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """setup_request.v1 returns eligible=False with clear errors for disabled or explicit_only without desktop."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    base_config = _desktop_config(runtime_paths)
+    devices = {"@alice:example.org": {"CHAT1": _olm_device("chat1-key"), "HELPER1": _olm_device("helper1-key")}}
+
+    def with_policy(policy: str) -> Config:
+        return base_config.model_copy(
+            update={"defaults": base_config.defaults.model_copy(update={"desktop_pairing": policy})},
+        )
+
+    def setup_event(agent_name: str, nonce: str) -> AuthenticatedToDeviceEvent:
+        return _olm_event(
+            sender="@alice:example.org",
+            device_id="CHAT1",
+            ed25519="chat1-key",
+            event_type=DESKTOP_SETUP_REQUEST_EVENT_TYPE,
+            content=DesktopSetupRequest(nonce=nonce, agent_name=agent_name).to_content(),
+        )
+
+    disabled_receiver, sent = _olm_receiver(
+        runtime_paths,
+        monkeypatch,
+        devices=devices,
+        agent_name="computer",
+        config=with_policy("disabled"),
+    )
+    await disabled_receiver.on_event(setup_event("computer", "disabled-nonce-01234"))
+    offer = DesktopSetupOffer.from_content(sent.pop()[2])
+    assert (offer.eligible, offer.error) == (False, "Desktop pairing is disabled by configuration.")
+
+    pending = create_desktop_pairing(runtime_paths, requester_id="@alice:example.org", agent_name="computer")
+    await disabled_receiver.on_event(
+        _olm_event(
+            sender="@alice:example.org",
+            device_id="HELPER1",
+            ed25519="helper1-key",
+            event_type=DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
+            content=DesktopPairingClaim(pending.token).to_content(),
+        ),
+    )
+    assert sent == []
+
+    explicit_config = with_policy("explicit_only")
+    notes_receiver, sent = _olm_receiver(
+        runtime_paths,
+        monkeypatch,
+        devices=devices,
+        agent_name="notes",
+        config=explicit_config,
+    )
+    await notes_receiver.on_event(setup_event("notes", "explicit-notes-01234"))
+    notes_offer = DesktopSetupOffer.from_content(sent.pop()[2])
+    assert (notes_offer.eligible, notes_offer.error) == (False, "Agent 'notes' does not declare the Desktop tool.")
+
+    computer_receiver, sent = _olm_receiver(
+        runtime_paths,
+        monkeypatch,
+        devices=devices,
+        agent_name="computer",
+        config=explicit_config,
+    )
+    await computer_receiver.on_event(setup_event("computer", "explicit-comp-012345"))
+    comp_offer = DesktopSetupOffer.from_content(sent.pop()[2])
+    assert comp_offer.eligible is True
+    assert comp_offer.code is not None

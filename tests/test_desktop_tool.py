@@ -10,22 +10,31 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import mindroom.tools  # noqa: F401
+from mindroom.agents import create_agent
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
-from mindroom.credentials.manager import CredentialsManager
+from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
 from mindroom.custom_tools.desktop import DesktopTools
+from mindroom.delegation.state import SubagentPersona
 from mindroom.desktop.client import DesktopRequestError
 from mindroom.desktop.configuration import DesktopConfigurationStatus, desktop_configuration_state
+from mindroom.desktop.credentials import save_desktop_credentials
 from mindroom.desktop.media import DesktopMediaError
 from mindroom.desktop.protocol import MAX_SHELL_OUTPUT_BYTES, DesktopResponse, EncryptedDesktopMedia
+from mindroom.tool_jobs.authorization import locally_allowed
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, WorkerScope
 from tests.agent_tool_helpers import toolkit_offers
-from tests.conftest import test_runtime_paths
+from tests.conftest import persist_entity_accounts, test_runtime_paths
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.agent_loop.build import AgentBuild
+    from mindroom.constants import RuntimePaths
 
 MEDIA = EncryptedDesktopMedia(
     url="mxc://example.org/screenshot",
@@ -1190,3 +1199,139 @@ async def test_large_shell_output_uses_the_workspace_output_file_wrapper(
     assert redirected["mindroom_tool_output"]["status"] == "saved_to_file"
     written = json.loads((workspace / "logs" / "shell.json").read_text(encoding="utf-8"))
     assert written["result"]["output"] == output
+
+
+def _build_assistant(
+    tmp_path: Path,
+    *,
+    requester_id: str,
+    desktop_pairing: str | None = None,
+    tools: list[str] | None = None,
+    room_id: str | None = "!room:example.org",
+    agent_mode: str = "standard",
+    persona: SubagentPersona | None = None,
+    pair: bool = False,
+) -> tuple[Config, RuntimePaths, AgentBuild, ToolExecutionIdentity]:
+    runtime_paths = test_runtime_paths(tmp_path)
+    defaults: dict[str, object] = {"tools": []}
+    if desktop_pairing is not None:
+        defaults["desktop_pairing"] = desktop_pairing
+    config = Config.validate_with_runtime(
+        {
+            "defaults": defaults,
+            "models": {"default": {"provider": "openai", "id": "gpt-4o-mini"}},
+            "agents": {
+                "assistant": {
+                    "display_name": "Assistant",
+                    "role": "Help",
+                    "tools": tools if tools is not None else ["calculator"],
+                },
+            },
+        },
+        runtime_paths,
+    )
+    persist_entity_accounts(config, runtime_paths)
+    if pair:
+        save_desktop_credentials(
+            get_runtime_credentials_manager(runtime_paths),
+            {"device_user_id": "@mac:example.org", "device_id": "MAC1", "device_ed25519": "mac-key"},
+            requester_id=requester_id,
+            agent_name="assistant",
+        )
+    identity = ToolExecutionIdentity(
+        channel="matrix" if room_id is not None else "openai_compat",
+        agent_name="assistant",
+        requester_id=requester_id,
+        room_id=room_id,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session",
+    )
+    build = create_agent(
+        "assistant",
+        config,
+        runtime_paths,
+        execution_identity=identity,
+        knowledge=None,
+        model=turn_model(config, runtime_paths, "assistant"),
+        plugins=config_plugins(config, runtime_paths),
+        agent_mode=agent_mode,  # type: ignore[arg-type]
+        persona=persona,
+    )
+    return config, runtime_paths, build, identity
+
+
+def test_dynamic_desktop_tool_absent_when_unpaired_and_injected_when_paired(tmp_path: Path) -> None:
+    """Under self_service, desktop is absent for unpaired requesters and injected only for paired ones."""
+    config, _, unpaired, _ = _build_assistant(tmp_path, requester_id="@alice:example.org")
+    assert config.defaults.desktop_pairing == "self_service"
+    assert "desktop" not in {t.name for t in unpaired.spec.toolkits}
+
+    config, runtime_paths, paired, alice_id = _build_assistant(tmp_path, requester_id="@alice:example.org", pair=True)
+    assert "desktop" in {t.name for t in paired.spec.toolkits}
+    assert paired.tool_jobs is not None
+    assert locally_allowed(
+        config,
+        alice_id,
+        tools=config_plugins(config, runtime_paths).tools,
+        tool_name="desktop",
+        toolkit_name="desktop",
+        origin={},
+        depth=0,
+        authority=dict(paired.tool_jobs.tools["desktop"].authority),
+    )
+
+    _, _, bob_build, _ = _build_assistant(tmp_path, requester_id="@bob:example.org")
+    assert "desktop" not in {t.name for t in bob_build.spec.toolkits}
+
+    _, _, roomless, _ = _build_assistant(tmp_path, requester_id="@alice:example.org", room_id=None)
+    assert "desktop" not in {t.name for t in roomless.spec.toolkits}
+
+    _, _, minimal, _ = _build_assistant(
+        tmp_path / "minimal",
+        requester_id="@alice:example.org",
+        tools=["shell"],
+        agent_mode="minimal",
+        pair=True,
+    )
+    assert "desktop" in {t.name for t in minimal.spec.toolkits}
+    assert "desktop" in minimal.surface.toolkit_names
+
+
+@pytest.mark.parametrize("policy", ["explicit_only", "disabled"])
+def test_explicit_only_and_disabled_policies_block_dynamic_injection(tmp_path: Path, policy: str) -> None:
+    """explicit_only and disabled block dynamic injection, and narrowed personas are never bypassed."""
+    blocked_cfg, blocked_paths, blocked, alice_id = _build_assistant(
+        tmp_path / policy,
+        requester_id="@alice:example.org",
+        desktop_pairing=policy,
+        pair=True,
+    )
+    assert "desktop" not in {t.name for t in blocked.spec.toolkits}
+
+    persona = SubagentPersona(
+        source_kind="inline",
+        source_name="narrow",
+        system_prompt="Only calculator.",
+        tools=("calculator",),
+    )
+    _, _, narrowed, _ = _build_assistant(
+        tmp_path / f"{policy}-ss",
+        requester_id="@alice:example.org",
+        persona=persona,
+        pair=True,
+    )
+    assert "desktop" not in {t.name for t in narrowed.spec.toolkits}
+
+    _, _, full, _ = _build_assistant(tmp_path / f"{policy}-ss", requester_id="@alice:example.org")
+    assert full.tool_jobs is not None
+    assert not locally_allowed(
+        blocked_cfg,
+        alice_id,
+        tools=config_plugins(blocked_cfg, blocked_paths).tools,
+        tool_name="desktop",
+        toolkit_name="desktop",
+        origin={},
+        depth=0,
+        authority=dict(full.tool_jobs.tools["desktop"].authority),
+    )

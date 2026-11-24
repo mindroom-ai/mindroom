@@ -140,6 +140,15 @@ async def required_approval_tool_names(
     for name in required:
         # A call names its authored entry; the toolkits a preset or an implied tool brings in share that name.
         owned = [entry for entry in offered if (entry.authored_name or entry.name) == name]
+        if (
+            not owned
+            and name == "desktop"
+            and config.defaults.desktop_pairing == "self_service"
+            and turn_keeps_room_tools(execution_identity)
+            and agent_tools.tools.available("desktop")
+            and bool(execution_identity.requester_id)
+        ):
+            continue
         if not owned:
             in_room = agent_tools.candidates(depth=delegation_depth, portable_search=True)
             needs_room = any((entry.authored_name or entry.name) == name for entry in in_room)

@@ -11,7 +11,11 @@ from nio import AuthenticatedToDeviceEvent
 
 from mindroom.constants import runtime_matrix_homeserver
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.desktop.configuration import DesktopConfigurationStatus, desktop_configuration_state
+from mindroom.desktop.configuration import (
+    DesktopConfigurationStatus,
+    desktop_configuration_state,
+    desktop_pairing_error,
+)
 from mindroom.desktop.credentials import delete_desktop_credentials, save_desktop_credentials
 from mindroom.desktop.pairing import (
     DesktopPairingError,
@@ -78,18 +82,16 @@ class DesktopPairingReceiver:
     agent_name: str
     runtime_paths: RuntimePaths
     config: Config | None = None
+    config_getter: Callable[[], Config] | None = None
     eligibility_error: Callable[[], str | None] | None = None
 
     def _check_eligibility(self) -> str | None:
         if self.eligibility_error is not None:
             return self.eligibility_error()
-        if self.config is None:
+        config = self.config_getter() if self.config_getter is not None else self.config
+        if config is None:
             return None
-        if self.agent_name not in self.config.agents:
-            return f"Agent '{self.agent_name}' is not configured."
-        if "desktop" not in self.config.resolve_agent(self.agent_name).tools.tool_names:
-            return f"Agent '{self.agent_name}' does not declare the Desktop tool."
-        return None
+        return desktop_pairing_error(config, self.agent_name)
 
     async def _send_reply(
         self,
@@ -179,6 +181,9 @@ class DesktopPairingReceiver:
             claim = DesktopPairingClaim.from_content(event_content(event.source))
         except DesktopProtocolError as exc:
             logger.warning("desktop_pairing_claim_malformed", agent=self.agent_name, reason=str(exc))
+            return
+        if (error := self._check_eligibility()) is not None:
+            logger.warning("desktop_pairing_claim_ineligible", agent=self.agent_name, reason=error)
             return
         try:
             await asyncio.to_thread(
@@ -368,15 +373,17 @@ def register_desktop_pairing_receiver(
         [Callable[[AuthenticatedToDeviceEvent], Awaitable[None]]],
         Callable[..., Awaitable[None]],
     ],
+    config_getter: Callable[[], Config] | None = None,
 ) -> None:
-    """Register a receiver only for concrete agents configured with Desktop."""
-    if agent_name not in config.agents or "desktop" not in config.resolve_agent(agent_name).tools.tool_names:
+    """Register a pairing receiver for any concrete agent and check policy dynamically."""
+    if agent_name not in config.agents:
         return
     receiver = DesktopPairingReceiver(
         client=client,
         agent_name=agent_name,
         runtime_paths=runtime_paths,
         config=config,
+        config_getter=config_getter,
     )
     client.add_to_device_callback(
         callback_wrapper(receiver.on_event),  # ty: ignore[invalid-argument-type]  # nio types reject async wrappers
