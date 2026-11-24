@@ -21,6 +21,7 @@ from mindroom.live_frames.workflow import publish_run
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_types import WORKFLOW_RUN_CONTENT_KEY
 from mindroom.redaction import redact_sensitive_text
+from mindroom.workflow_runs.answers import notice, notice_fits, send_notice
 from mindroom.workflow_runs.faults import capture
 from mindroom.workflow_runs.graph import (
     AGENT_KINDS,
@@ -37,7 +38,6 @@ from mindroom.workflow_runs.models import (
     UNSETTLED_NODE_STATES,
     WorkflowRunState,
 )
-from mindroom.workflow_runs.notices import notice, notice_fits, send_notice
 from mindroom.workflow_runs.peers import message_edges
 from mindroom.workflow_runs.store import SupersededAttemptError, WorkflowRunNotFoundError
 
