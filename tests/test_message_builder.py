@@ -10,6 +10,7 @@ from mindroom.matrix.message_builder import (
     build_reaction_content,
     build_thread_relation,
     markdown_to_html,
+    opens_with_markdown_block,
 )
 
 
@@ -260,3 +261,96 @@ def test_unloadable_image_inside_link_keeps_the_link() -> None:
     """A linked image with no usable source leaves the link around the note."""
     html = markdown_to_html("[![a](bad)](https://example.org)")
     assert '<a href="https://example.org">⚠️ Image not sent: a (no uploaded file)</a>' in html
+
+
+def test_numbered_and_repeated_footnotes_render_expected_html() -> None:
+    """Numbered footnotes and repeated references emit sanitized Matrix HTML with backrefs."""
+    html = markdown_to_html("Note[^1] and again[^1].\n\n[^1]: Detail.\n")
+    assert html == (
+        '<p>Note<sup class="footnote-ref"><a href="#fn1" id="fnref1">[1]</a></sup> '
+        'and again<sup class="footnote-ref"><a href="#fn1" id="fnref1:1">[1:1]</a></sup>.</p>\n'
+        '<hr class="footnotes-sep">\n'
+        '<section class="footnotes">\n'
+        '<ol class="footnotes-list">\n'
+        '<li id="fn1" class="footnote-item"><p>Detail. '
+        '<a href="#fnref1" class="footnote-backref">↩︎</a> '
+        '<a href="#fnref1:1" class="footnote-backref">↩︎</a></p>\n'
+        "</li>\n"
+        "</ol>\n"
+        "</section>\n"
+    )
+
+
+def test_named_and_multi_paragraph_footnotes_render() -> None:
+    """Named labels and indented continuation paragraphs render inside the footnote item."""
+    html = markdown_to_html("Claim[^src].\n\n[^src]: First paragraph.\n\n    Second paragraph.\n")
+    assert html == (
+        '<p>Claim<sup class="footnote-ref"><a href="#fn1" id="fnref1">[1]</a></sup>.</p>\n'
+        '<hr class="footnotes-sep">\n'
+        '<section class="footnotes">\n'
+        '<ol class="footnotes-list">\n'
+        '<li id="fn1" class="footnote-item"><p>First paragraph.</p>\n'
+        '<p>Second paragraph. <a href="#fnref1" class="footnote-backref">↩︎</a></p>\n'
+        "</li>\n"
+        "</ol>\n"
+        "</section>\n"
+    )
+
+
+def test_inline_footnote_syntax_and_undefined_refs_stay_literal() -> None:
+    """Regexes like ``^[a-z]`` are not inline footnotes, and undefined ``[^1]`` stays literal while streaming."""
+    assert markdown_to_html("Match ^[a-z]+ and pending[^1].") == "<p>Match ^[a-z]+ and pending[^1].</p>\n"
+    assert (
+        markdown_to_html("Inline `[^1]` stays code.\n\n[^1]: Unused.")
+        == "<p>Inline <code>[^1]</code> stays code.</p>\n"
+    )
+
+    streamed = "Fact[^1].\n\n[^1]: Source."
+    for end in range(1, len(streamed) + 1):
+        prefix = streamed[:end]
+        rendered = markdown_to_html(prefix)
+        if "[^1]:" not in prefix and "[^1]" in prefix:
+            assert "[^1]" in rendered
+            assert 'class="footnote-ref"' not in rendered
+
+
+@pytest.mark.parametrize(
+    ("raw_html", "expected"),
+    [
+        ('<a id="evil" class="evil" href="#fn1">x</a>', '<p><a href="#fn1">x</a></p>\n'),
+        ('<a id="fnref1" class="footnote-ref" href="javascript:alert(1)">x</a>', '<p><a id="fnref1">x</a></p>\n'),
+        (
+            '<a id="fn1&#10;" class="footnote-backref extra" href="#fnref1:1">x</a>',
+            '<p><a href="#fnref1:1">x</a></p>\n',
+        ),
+        ('<a id="fn\u0661" href="#fn1">x</a>', '<p><a href="#fn1">x</a></p>\n'),
+        ('<li id="bad" class="evil">item</li>', "<li>item</li>"),
+        ('<li id="fn1:a" class="footnotes">item</li>', "<li>item</li>"),
+        ('<section id="fn1" class="evil">body</section>', "<section>body</section>"),
+        ('<sup id="fnref1" class="evil">1</sup>', "<p><sup>1</sup></p>\n"),
+        ('<hr class="evil">', "<hr>"),
+        ('<ol id="fn1" class="evil" start="2"><li>a</li></ol>', '<ol start="2"><li>a</li></ol>'),
+        (
+            '<pre class="language-python"><code class="language-python">x = 1</code></pre>',
+            '<pre class="language-python"><code class="language-python">x = 1</code></pre>',
+        ),
+    ],
+)
+def test_footnote_sanitizer_strips_arbitrary_ids_and_classes(raw_html: str, expected: str) -> None:
+    """Only exact footnote ids and tag-specific classes survive sanitization; code/pre classes stay intact."""
+    assert markdown_to_html(raw_html) == expected
+
+
+@pytest.mark.parametrize(
+    ("markdown", "expected"),
+    [
+        ("[^1]: Detail.\n\nSee[^1].", True),
+        ("[^1]: Detail.\nSee[^1].", True),
+        ("[^1]:\nSee[^1].", True),
+        ("[^1] starts a paragraph.\n\n[^1]: Detail.", False),
+        ("Note[^1]\n[^1]: Detail.", False),
+    ],
+)
+def test_opens_with_markdown_block_handles_footnotes(markdown: str, expected: bool) -> None:
+    """Footnote definitions open a line-start block; paragraphs opening with a reference do not."""
+    assert opens_with_markdown_block(markdown) is expected

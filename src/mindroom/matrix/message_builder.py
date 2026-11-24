@@ -11,6 +11,7 @@ from markdown_it import MarkdownIt
 from markdown_it.rules_block import StateBlock, heading, html_block
 from markdown_it.token import Token
 from mdit_py_plugins.dollarmath import dollarmath_plugin
+from mdit_py_plugins.footnote import footnote_plugin
 from pygments import highlight
 from pygments.formatters.html import HtmlFormatter
 from pygments.lexers import get_lexer_by_name
@@ -47,6 +48,7 @@ _GENERAL_FORMATTED_BODY_TAGS = frozenset(
         "p",
         "pre",
         "s",
+        "section",
         "span",
         "strike",
         "strong",
@@ -82,6 +84,7 @@ _BLOCK_FORMATTED_BODY_TAGS = frozenset(
         "ol",
         "p",
         "pre",
+        "section",
         "table",
         "tbody",
         "td",
@@ -93,14 +96,27 @@ _BLOCK_FORMATTED_BODY_TAGS = frozenset(
 )
 assert _BLOCK_FORMATTED_BODY_TAGS <= _ALLOWED_FORMATTED_BODY_TAGS
 _ALLOWED_FORMATTED_BODY_ATTRIBUTES = {
-    "a": frozenset({"href", "title"}),
+    "a": frozenset({"class", "href", "id", "title"}),
     "code": frozenset({"class"}),
     "details": frozenset({"open"}),
     "font": frozenset({"color", "data-mx-bg-color", "data-mx-color"}),
+    "hr": frozenset({"class"}),
     "img": frozenset({"alt", "height", "src", "title", "width"}),
-    "ol": frozenset({"start"}),
+    "li": frozenset({"class", "id"}),
+    "ol": frozenset({"class", "start"}),
     "pre": frozenset({"class"}),
+    "section": frozenset({"class"}),
     "span": frozenset({"data-mx-bg-color", "data-mx-color", "data-mx-maths", "data-mx-spoiler", "style"}),
+    "sup": frozenset({"class"}),
+}
+_FOOTNOTE_ID_PATTERN = re.compile(r"fn(?:ref)?[0-9]+(?::[0-9]+)?")
+_FOOTNOTE_TAG_CLASSES = {
+    "a": "footnote-backref",
+    "hr": "footnotes-sep",
+    "li": "footnote-item",
+    "ol": "footnotes-list",
+    "section": "footnotes",
+    "sup": "footnote-ref",
 }
 _VOID_FORMATTED_BODY_TAGS = frozenset({"br", "hr", "img"})
 _URL_ATTRIBUTES = frozenset({"href", "src"})
@@ -338,12 +354,16 @@ def _image_not_sent_note(attrs: list[tuple[str, str | None]]) -> str | None:
     return escape(f"⚠️ Image not sent: {alt} (no uploaded file)")
 
 
-def _sanitize_attribute_value(attr_name: str, attr_value: str) -> str | None:
+def _sanitize_attribute_value(tag_name: str, attr_name: str, attr_value: str) -> str | None:
     if attr_name in _URL_ATTRIBUTES:
         allowed_schemes = _ALLOWED_HREF_SCHEMES if attr_name == "href" else _ALLOWED_URL_SCHEMES
         return _sanitize_url_attribute(attr_value, allowed_schemes)
     if attr_name == "style":
         return _sanitize_style_attribute(attr_value)
+    if attr_name == "id":
+        return attr_value if _FOOTNOTE_ID_PATTERN.fullmatch(attr_value) else None
+    if attr_name == "class" and (allowed_class := _FOOTNOTE_TAG_CLASSES.get(tag_name)) is not None:
+        return attr_value if attr_value == allowed_class else None
     return attr_value
 
 
@@ -364,7 +384,7 @@ def _format_sanitized_attributes(tag_name: str, attrs: list[tuple[str, str | Non
             if normalized_attr_name == "data-mx-spoiler":
                 sanitized_attributes.append(" data-mx-spoiler")
             continue
-        sanitized_value = _sanitize_attribute_value(normalized_attr_name, attr_value)
+        sanitized_value = _sanitize_attribute_value(tag_name, normalized_attr_name, attr_value)
         if sanitized_value is None:
             continue
         sanitized_attributes.append(f' {normalized_attr_name}="{escape(sanitized_value, quote=True)}"')
@@ -518,6 +538,12 @@ def _build_markdown_renderer() -> MarkdownIt:
     )
     renderer.add_render_rule("math_inline", _render_preserved_math_inline)
     renderer.add_render_rule("math_block", _render_preserved_math_block)
+    renderer.use(
+        footnote_plugin,
+        inline=False,
+        move_to_end=True,
+        always_match_refs=False,
+    )
     return renderer
 
 
@@ -542,11 +568,16 @@ def markdown_to_html(text: str) -> str:
 def opens_with_markdown_block(text: str) -> bool:
     """Return whether markdown text opens with a block that only renders at the start of a line.
 
-    Tables, headings, lists, quotes, code fences, and rules qualify; a paragraph does not.
+    Tables, headings, lists, quotes, code fences, rules, and footnote definitions qualify; a paragraph does not.
     Only the first two lines are parsed, which keeps per-chunk streaming renders cheap and still decides a table or one-line setext heading.
     """
-    tokens = _MARKDOWN_RENDERER.parse("\n".join(text.lstrip().split("\n", 2)[:2]))
-    return bool(tokens) and tokens[0].type != "paragraph_open"
+    env: dict[str, Any] = {}
+    tokens = _MARKDOWN_RENDERER.parse("\n".join(text.lstrip().split("\n", 2)[:2]), env)
+    if not tokens:
+        return bool(env.get("footnotes", {}).get("refs"))
+    if tokens[0].type != "paragraph_open":
+        return True
+    return bool(tokens[0].map and tokens[0].map[0] > 0)
 
 
 def build_thread_relation(
