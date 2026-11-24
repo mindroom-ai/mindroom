@@ -1289,6 +1289,7 @@ visibility = [
     "mindroom.providers.gemini",
     "mindroom.providers.openai",
     "mindroom.providers.registry",
+    "mindroom.usage.provider_accounts",
 ]
 
 [[modules]]
@@ -2516,6 +2517,7 @@ depends_on = [
     "mindroom.api.auth",
     "mindroom.api.config_lifecycle",
     "mindroom.api.usage_export",
+    "mindroom.usage.provider_limits",
 ]
 
 [[modules]]
@@ -5273,6 +5275,7 @@ depends_on = [
     "mindroom.response_lifecycle",
     "mindroom.tool_jobs.client_cancel",
     "mindroom.model_catalog_receiver",
+    "mindroom.usage.limits_receiver",
     "mindroom.tool_jobs.follow_ups",
     "mindroom.reply_scope",
     "mindroom.knowledge.utils",
@@ -6675,6 +6678,7 @@ depends_on = [
     "mindroom.providers.tool_policy",
     "mindroom.tool_system.context_bound_streams",
     "mindroom.failure_text",
+    "mindroom.usage.limit_store",
 ]
 
 [[modules]]
@@ -8672,6 +8676,7 @@ depends_on = [
     "mindroom.providers.identity",
     "mindroom.providers.tool_policy",
     "mindroom.tool_system.dependencies",
+    "mindroom.usage.limit_store",
 ]
 
 [[modules]]
@@ -9985,7 +9990,47 @@ visibility = ["mindroom.session_storage.legacy_agno3_conversion", "mindroom.sess
 [[modules]]
 path = "mindroom.usage.legacy_usage_storage"
 depends_on = []
-visibility = []
+visibility = ["mindroom.usage.provider_limits"]
+
+[[modules]]
+path = "mindroom.usage.limit_store"
+depends_on = []
+
+[[modules]]
+path = "mindroom.usage.provider_probes"
+depends_on = [
+    "mindroom.providers.claude_code",
+    "mindroom.providers.openai",
+    "mindroom.usage.limit_store",
+]
+visibility = ["mindroom.usage.provider_limits"]
+
+[[modules]]
+path = "mindroom.usage.provider_accounts"
+depends_on = [
+    "mindroom.config.schema_hints",
+    "mindroom.providers.credentials",
+    "mindroom.providers.identity",
+    "mindroom.providers.names",
+    "mindroom.usage.limit_store",
+]
+visibility = ["mindroom.usage.provider_limits"]
+
+[[modules]]
+path = "mindroom.usage.provider_limits"
+depends_on = [
+    "mindroom.usage.legacy_usage_storage",
+    "mindroom.usage.limit_store",
+    "mindroom.usage.provider_accounts",
+    "mindroom.usage.provider_probes",
+]
+
+[[modules]]
+path = "mindroom.usage.limits_receiver"
+depends_on = [
+    "mindroom.matrix.olm_to_device",
+    "mindroom.usage.provider_limits",
+]
 
 # Shared judgment leaves; no dependency on the response pipeline.
 [[modules]]
