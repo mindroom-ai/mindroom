@@ -491,6 +491,7 @@ Delivery semantics:
   N has no ceiling: no provider request is open while a tool call waits.
 - **No silent deadlock.** Every SDK request reports how many lanes of the script can still act (not started yet, or running Python between calls).
   When every unfinished agent waits for a message, nothing is queued or running, and the newest report says zero, every wait returns at once with no messages and the note `Every agent is waiting for a message and nobody is left to send one.`
+  (Amended 2026-11-24: automatic deadlock notice removed; waits end on mail or at `wait_seconds` with `{"messages": [], "note": "No message arrived within <N> s."}`.)
 - A session that is between turns keeps its mailbox; queued messages are put in front of its next `ask` as "Messages received since your last turn".
 - A message or a state value is at most 1 MiB, the request limit; larger data goes in a workspace file whose path is sent.
 - Messages and shared state survive restarts and resume with the run.

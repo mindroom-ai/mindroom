@@ -314,7 +314,7 @@ set_shared_state(key, value)       write a JSON value under key (last write wins
 ask_user(question, options=None)   ask the run's requester with the same question card as the script
 ```
 
-The script participates under the name `script` with `send(to, text)`, `inbox(wait_seconds=0)` (returns `[{from, text, sent_at}]`), `state.get(key, default=None)` and `state.set(key, value)`.
+The script participates under the name `script` with `send(to, text)`, `inbox(wait_seconds=0)` (returns `{messages: [{from, text, sent_at}], note?}`), `state.get(key, default=None)` and `state.set(key, value)`.
 
 ```python
 from mindroom.workflow import agent, parallel
@@ -343,9 +343,10 @@ def main(args):
   A provider retry of the same tool call returns the saved result without sending twice or advancing the cursor twice; a reused call ID in a continued turn or with different arguments is a new operation.
   Script `send`, `inbox`, `state.get` and `state.set` calls are saved as run nodes and replayed on resume like other SDK calls.
 - **Reruns.** When an agent runs again as a new generation, unread outgoing messages from its earlier generation are withdrawn, and the new generation starts its read cursor at 0 so it sees what its predecessor saw.
-- **Waiting and deadlocks.** `read_peer_messages(wait_seconds)` and `inbox(wait_seconds)` wake on the first message and have no ceiling on `wait_seconds`.
+- **Waiting.** `read_peer_messages(wait_seconds)` and `inbox(wait_seconds)` wake on the first message and end when mail arrives or after `wait_seconds`.
   While waiting, the node releases its concurrency slot and shows `waiting` on `peer` (which does not mark the run as waiting for a person).
-  A wait can end early when every unfinished agent is waiting on `peer`, nothing is `queued` or `running`, and no script lane can still act: agents receive `{"messages": [], "note": "Every agent is waiting for a message and nobody is left to send one."}` and the script's `inbox()` returns `[]`.
+  When `wait_seconds` runs out with no mail, both return `{"messages": [], "note": "No message arrived within <N> s."}`.
+  To avoid long idle waits, use a sensible `wait_seconds` and the run's own limits.
 - **Size limit.** A message or shared-state value over 1 MiB is refused with `Too large (<n> bytes, limit 1 MiB). Write it to a workspace file and send the path.`
 - **Visibility.** Everything workflow agents say or send each other is visible to the room, so run workflows in a private room for private work.
   Graph frames and the finished run card carry only message-count `edges` (`{"from", "to", "kind": "message", "count"}`), never message text.

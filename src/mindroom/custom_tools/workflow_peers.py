@@ -73,8 +73,8 @@ class WorkflowPeerTools(Toolkit):
     async def read_peer_messages(self, wait_seconds: float = 0) -> str:
         """Return unread messages as `{"messages": [{"from", "text", "sent_at"}], "note"?: ...}`.
 
-        Waiting (`wait_seconds > 0`, no ceiling) releases your concurrency slot and returns on the first message,
-        or with `"messages": []` and `"note": "No message arrived within <N> s."` when `wait_seconds` elapses.
+        Waiting (`wait_seconds > 0`) releases your concurrency slot and ends when mail arrives or after `wait_seconds`
+        with `"messages": []` and `"note": "No message arrived within <N> s."`. Use a sensible `wait_seconds` to avoid long idle waits.
         """
         if isinstance(wait_seconds, bool) or wait_seconds < 0:
             msg = "wait_seconds must be a non-negative number."

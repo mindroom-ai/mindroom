@@ -674,7 +674,7 @@ def send(to: str, text: str) -> dict[str, object]:
 
 
 def inbox(wait_seconds: float = 0) -> dict[str, object]:
-    """Return unread messages sent to "script" as {"messages": [{"from", "text", "sent_at"}], "note"?: ...}."""
+    """Return unread mail sent to "script" as {messages, note?}; waits end on mail or after wait_seconds with note."""
     _current_lane()
     wait = float(wait_seconds)
     if not math.isfinite(wait) or wait < 0:
