@@ -27,6 +27,7 @@ from mindroom.agent_loop.tools import MAX_CONSECUTIVE_TOOL_FAILURES
 from mindroom.constants import TOOL_TRACE_CONTENT_KEY
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.llm.errors import (
+    ContextWindowExceeded,
     ModelOutputLimitError,
     ModelSafeguardRefusal,
     ProviderError,
@@ -1463,9 +1464,22 @@ async def test_empty_or_reasoning_only_output_limit_raises_while_partial_text_co
     with pytest.raises(ModelOutputLimitError, match="while reasoning"):
         await run_loop(spec(ScriptedModel([reasoning_only])), _prompt())
 
-    empty_limit = [TurnCompleted(message=Message(role="assistant"), stop_reason="output_limit")]
+    empty_limit = [
+        TurnCompleted(message=Message(role="assistant"), stop_reason="output_limit", raw_stop_reason="max_tokens"),
+    ]
     with pytest.raises(ModelOutputLimitError, match="before producing any text or tool calls"):
         await run_loop(spec(ScriptedModel([empty_limit])), _prompt())
+
+    context_window_limit = [
+        TurnCompleted(
+            message=Message(role="assistant"),
+            stop_reason="output_limit",
+            raw_stop_reason="model_context_window_exceeded",
+        ),
+    ]
+    with pytest.raises(ContextWindowExceeded, match="model_context_window_exceeded") as context_exc:
+        await run_loop(spec(ScriptedModel([context_window_limit])), _prompt())
+    assert context_exc.value.provider_code == "model_context_window_exceeded"
 
     partial_text = [
         TextDelta("Partial answer"),
