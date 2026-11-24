@@ -38,7 +38,7 @@ from mindroom.matrix.guarded_rooms import allowed_send
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_reaction_content
 from mindroom.matrix.message_extras import build_message_extras_content
-from mindroom.matrix.thread_fork_access import authorize_cross_room_fork_hop
+from mindroom.matrix.thread_fork_access import authorize_cross_room_fork_access
 from mindroom.matrix.thread_forks import with_fork_prefix
 from mindroom.requester_identity import is_human_requester_id
 from mindroom.tool_system.events import body_without_tool_markers, has_tool_trace, strip_visible_tool_markers
@@ -560,14 +560,16 @@ class MatrixMessageOperations:
             room_id=room_id,
             thread_id=thread_id,
             read_thread=lambda parent_room_id, parent_id: complete_thread_history(reader, parent_room_id, parent_id),
-            authorize_cross_room=lambda hop: authorize_cross_room_fork_hop(
+            authorize_cross_room=lambda hop: authorize_cross_room_fork_access(
                 client=context.client,
                 config=context.config,
                 runtime_paths=context.runtime_paths,
                 hop=hop,
                 requester_id=context.requester_id,
                 nonblocking=False,
-                target_room=context.room,
+                target_room=context.room if context.room is not None and context.room.room_id == room_id else None,
+                output_room_id=context.room_id,
+                output_room=context.room,
             ),
             logger=logger,
         )

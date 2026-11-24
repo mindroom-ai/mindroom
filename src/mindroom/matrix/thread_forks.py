@@ -29,6 +29,14 @@ class CrossRoomForkDecision(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class CrossRoomForkAuthorization:
+    """Pre-read cross-room authorization plus an optional post-cut segment check."""
+
+    decision: CrossRoomForkDecision
+    allow_segment: Callable[[Sequence[ResolvedVisibleMessage]], Awaitable[CrossRoomForkDecision]] | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class ThreadForkReference:
     """The optional parent room, parent thread, and last parent message a forked thread includes."""
 
@@ -105,14 +113,12 @@ def fork_root_message(
     thread_id: str,
     *,
     room_id: str | None = None,
-    default_room_id: str | None = None,
 ) -> ResolvedVisibleMessage | None:
     """Return the root message of ``thread_id`` in ``history``, scoped to ``room_id`` when given."""
-    fallback = default_room_id if default_room_id is not None else room_id
     for message in history:
         if message.event_id != thread_id:
             continue
-        if room_id is not None and fallback is not None and _message_room_id(message, fallback) != room_id:
+        if room_id is not None and message.room_id not in (None, room_id):
             continue
         return message
     return None
@@ -128,10 +134,9 @@ def fork_reference(
     thread_id: str,
     *,
     room_id: str | None = None,
-    default_room_id: str | None = None,
 ) -> ThreadForkReference | None:
     """Return the fork reference on ``thread_id``'s root in ``history``, or None."""
-    root = fork_root_message(history, thread_id, room_id=room_id, default_room_id=default_room_id)
+    root = fork_root_message(history, thread_id, room_id=room_id)
     return None if root is None else thread_fork_reference(root.content)
 
 
@@ -155,51 +160,102 @@ def fork_parent_scopes(
     """Return the ``(room_id, thread_id)`` parent scopes whose messages a fork's resolved history holds."""
     scopes: set[tuple[str, str]] = {(room_id, thread_id)}
     current_room_id = room_id
-    reference = fork_reference(history, thread_id, room_id=room_id, default_room_id=room_id)
+    reference = fork_reference(history, thread_id, room_id=room_id)
     while reference is not None:
         parent_room_id = reference.resolved_room_id(current_room_id)
         scope = (parent_room_id, reference.thread_id)
         if scope in scopes:
             break
-        if not any(
-            _message_room_id(message, room_id) == parent_room_id
-            and reference.thread_id in (message.event_id, message.thread_id)
+        parent_messages = [
+            message
             for message in history
-        ):
+            if _message_room_id(message, room_id) == parent_room_id
+            and reference.thread_id in (message.event_id, message.thread_id)
+        ]
+        if not parent_messages:
             break
         scopes.add(scope)
         current_room_id = parent_room_id
-        reference = fork_reference(history, reference.thread_id, room_id=parent_room_id, default_room_id=room_id)
+        reference = fork_reference(parent_messages, reference.thread_id)
     return frozenset(scopes - {(room_id, thread_id)})
 
 
-def fork_parent_thread_ids(history: Sequence[ResolvedVisibleMessage], thread_id: str) -> frozenset[str]:
-    """Return the parent threads whose messages a same-room fork's resolved history holds."""
-    return frozenset(parent_thread_id for _, parent_thread_id in fork_parent_scopes(history, thread_id, room_id=""))
+def _log_cross_room_denied(
+    logger: BoundLogger,
+    *,
+    hop: CrossRoomForkHop,
+    thread_id: str,
+    parent_thread_id: str,
+) -> None:
+    logger.info(
+        "Cross-room thread fork prefix denied",
+        room_id=hop.target_room_id,
+        thread_id=thread_id,
+        child_room_id=hop.child_room_id,
+        parent_room_id=hop.parent_room_id,
+        parent_thread_id=parent_thread_id,
+    )
 
 
 async def _authorize_hop(
-    authorize_cross_room: Callable[[CrossRoomForkHop], Awaitable[CrossRoomForkDecision]] | None,
+    authorize_cross_room: Callable[
+        [CrossRoomForkHop],
+        Awaitable[CrossRoomForkDecision | CrossRoomForkAuthorization],
+    ]
+    | None,
     hop: CrossRoomForkHop,
     *,
     thread_id: str,
     parent_thread_id: str,
     logger: BoundLogger,
-) -> CrossRoomForkDecision:
+) -> CrossRoomForkAuthorization:
     """Evaluate one cross-room hop, failing closed when no authorization gate was supplied."""
     if hop.parent_room_id == hop.target_room_id and hop.child_room_id == hop.parent_room_id:
-        return CrossRoomForkDecision.ALLOWED
-    decision = CrossRoomForkDecision.DENIED if authorize_cross_room is None else await authorize_cross_room(hop)
-    if decision is CrossRoomForkDecision.DENIED:
-        logger.info(
-            "Cross-room thread fork prefix denied",
-            room_id=hop.target_room_id,
-            thread_id=thread_id,
-            child_room_id=hop.child_room_id,
-            parent_room_id=hop.parent_room_id,
-            parent_thread_id=parent_thread_id,
-        )
-    return decision
+        return CrossRoomForkAuthorization(CrossRoomForkDecision.ALLOWED)
+    raw = CrossRoomForkDecision.DENIED if authorize_cross_room is None else await authorize_cross_room(hop)
+    auth = raw if isinstance(raw, CrossRoomForkAuthorization) else CrossRoomForkAuthorization(raw)
+    if auth.decision is CrossRoomForkDecision.DENIED:
+        _log_cross_room_denied(logger, hop=hop, thread_id=thread_id, parent_thread_id=parent_thread_id)
+    return auth
+
+
+async def _read_authorized_parent_segment(
+    *,
+    read_thread: Callable[[str, str], Awaitable[ThreadHistoryResult]],
+    auth: CrossRoomForkAuthorization,
+    hop: CrossRoomForkHop,
+    thread_id: str,
+    parent_thread_id: str,
+    logger: BoundLogger,
+) -> tuple[list[ResolvedVisibleMessage] | None, bool, bool]:
+    """Read, cut, and post-authorize one parent segment; returns ``(segment, is_full_history, degraded)``."""
+    parent = await read_thread(hop.parent_room_id, parent_thread_id)
+    own = _own_messages(parent, parent_thread_id, room_id=hop.parent_room_id)
+    cut = next((i for i, m in enumerate(own) if m.event_id == hop.fork_point_event_id), None)
+    if cut is None:
+        if own:
+            logger.info(
+                "Thread fork point missing from its parent",
+                room_id=hop.target_room_id,
+                thread_id=thread_id,
+                parent_room_id=hop.parent_room_id,
+                parent_thread_id=parent_thread_id,
+                fork_point_event_id=hop.fork_point_event_id,
+            )
+        # A parent read that is incomplete may only lack the fork point for now, so the fork is incomplete too.
+        return None, parent.is_full_history, is_thread_history_degraded(parent)
+    segment = [
+        replace(message, room_id=hop.parent_room_id) if message.room_id != hop.parent_room_id else message
+        for message in own[: cut + 1]
+    ]
+    if auth.allow_segment is not None:
+        segment_decision = await auth.allow_segment(segment)
+        if segment_decision is CrossRoomForkDecision.DEFERRED:
+            return None, False, True
+        if segment_decision is not CrossRoomForkDecision.ALLOWED:
+            _log_cross_room_denied(logger, hop=hop, thread_id=thread_id, parent_thread_id=parent_thread_id)
+            return None, True, False
+    return segment, parent.is_full_history, is_thread_history_degraded(parent)
 
 
 async def with_fork_prefix(
@@ -208,7 +264,11 @@ async def with_fork_prefix(
     room_id: str,
     thread_id: str,
     read_thread: Callable[[str, str], Awaitable[ThreadHistoryResult]],
-    authorize_cross_room: Callable[[CrossRoomForkHop], Awaitable[CrossRoomForkDecision]] | None = None,
+    authorize_cross_room: Callable[
+        [CrossRoomForkHop],
+        Awaitable[CrossRoomForkDecision | CrossRoomForkAuthorization],
+    ]
+    | None = None,
     logger: BoundLogger,
 ) -> ThreadHistoryResult:
     """Return the history with the parent chain's messages up to each fork point in front."""
@@ -235,47 +295,38 @@ async def with_fork_prefix(
                 depth=len(segments),
             )
             break
-        decision = await _authorize_hop(
+        hop = CrossRoomForkHop(
+            target_room_id=room_id,
+            child_room_id=current_room_id,
+            parent_room_id=parent_room_id,
+            fork_root=current_root,
+            fork_point_event_id=reference.event_id,
+        )
+        auth = await _authorize_hop(
             authorize_cross_room,
-            CrossRoomForkHop(
-                target_room_id=room_id,
-                child_room_id=current_room_id,
-                parent_room_id=parent_room_id,
-                fork_root=current_root,
-                fork_point_event_id=reference.event_id,
-            ),
+            hop,
             thread_id=thread_id,
             parent_thread_id=reference.thread_id,
             logger=logger,
         )
-        if decision is CrossRoomForkDecision.DEFERRED:
-            is_full_history = False
-            degraded = True
+        if auth.decision is CrossRoomForkDecision.DEFERRED:
+            is_full_history, degraded = False, True
             break
-        if decision is not CrossRoomForkDecision.ALLOWED:
+        if auth.decision is not CrossRoomForkDecision.ALLOWED:
             break
         visited.add((parent_room_id, reference.thread_id))
-        parent = await read_thread(parent_room_id, reference.thread_id)
-        # A parent read that is incomplete may only lack the fork point for now, so the fork is incomplete too.
-        is_full_history = is_full_history and parent.is_full_history
-        degraded = degraded or is_thread_history_degraded(parent)
-        own = _own_messages(parent, reference.thread_id, room_id=parent_room_id)
-        cut = next((i for i, m in enumerate(own) if m.event_id == reference.event_id), None)
-        if cut is None:
-            if own:
-                logger.info(
-                    "Thread fork point missing from its parent",
-                    room_id=room_id,
-                    thread_id=thread_id,
-                    parent_room_id=parent_room_id,
-                    parent_thread_id=reference.thread_id,
-                    fork_point_event_id=reference.event_id,
-                )
+        segment, segment_full, segment_degraded = await _read_authorized_parent_segment(
+            read_thread=read_thread,
+            auth=auth,
+            hop=hop,
+            thread_id=thread_id,
+            parent_thread_id=reference.thread_id,
+            logger=logger,
+        )
+        is_full_history = is_full_history and segment_full
+        degraded = degraded or segment_degraded
+        if segment is None:
             break
-        segment = [
-            replace(message, room_id=parent_room_id) if message.room_id != parent_room_id else message
-            for message in own[: cut + 1]
-        ]
         segments.append(segment)
         current_room_id = parent_room_id
         next_root = fork_root_message(segment, reference.thread_id, room_id=parent_room_id)

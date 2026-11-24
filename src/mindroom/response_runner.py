@@ -65,6 +65,7 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.judgment.cold_cache import idle_seconds_before_turn, select_cold_cache_model
 from mindroom.matrix.guarded_rooms import allowed_send, guarded_room
 from mindroom.matrix.presence import should_use_streaming
+from mindroom.matrix.thread_forks import fork_parent_scopes
 from mindroom.message_target import MessageTarget
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.orchestration.runtime import (
@@ -257,6 +258,20 @@ def _turn_run_metadata(request: ResponseRequest) -> dict[str, Any]:
     if envelope.hook_source is not None:
         recorded[HOOK_SOURCE_RUN_METADATA_KEY] = envelope.hook_source
     return recorded
+
+
+def _request_fork_parent_scopes(
+    request: ResponseRequest,
+    target: MessageTarget,
+) -> frozenset[tuple[str, str]]:
+    """Return vetted fork parent ``(room_id, thread_id)`` scopes loaded in ``request.thread_history``."""
+    if target.resolved_thread_id is None:
+        return frozenset()
+    return fork_parent_scopes(
+        request.thread_history,
+        target.resolved_thread_id,
+        room_id=target.room_id,
+    )
 
 
 def _request_has_media(request: ResponseRequest) -> bool:
@@ -1822,6 +1837,7 @@ class ResponseRunner:
             user_id=request.user_id or "",
             active_model_name=team_models.team_model_name,
             attachment_ids=request.attachment_ids,
+            fork_parent_scopes=_request_fork_parent_scopes(request, target),
             correlation_id=correlation_id_for_request(request),
             source_envelope=request.response_envelope,
             turn_id=request.turn_id,
@@ -2324,6 +2340,7 @@ class ResponseRunner:
             user_id=request.user_id,
             active_model_name=active_model_name,
             attachment_ids=request.attachment_ids,
+            fork_parent_scopes=_request_fork_parent_scopes(request, resolved_target),
             correlation_id=correlation_id_for_request(request),
             source_envelope=request.response_envelope,
             turn_id=request.turn_id,

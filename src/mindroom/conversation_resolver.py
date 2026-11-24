@@ -29,7 +29,7 @@ from mindroom.matrix.conversation_reads import (
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
-from mindroom.matrix.thread_fork_access import authorize_cross_room_fork_hop
+from mindroom.matrix.thread_fork_access import authorize_cross_room_fork_access
 from mindroom.matrix.thread_forks import is_thread_fork_root, with_fork_prefix
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import (
@@ -668,7 +668,7 @@ class ConversationResolver:
                 parent_id,
                 mode=mode,
             ),
-            authorize_cross_room=lambda hop: authorize_cross_room_fork_hop(
+            authorize_cross_room=lambda hop: authorize_cross_room_fork_access(
                 client=self.deps.runtime.client,
                 config=self.deps.runtime.config,
                 runtime_paths=self.deps.runtime_paths,

@@ -679,6 +679,7 @@ async def test_prepare_dispatch_keeps_standard_context_for_non_router_internal_r
         turn.event,
         thread_id=None,
         payload_metadata=turn.payload,
+        requester_id="@mindroom_code:localhost",
     )
     bot._conversation_resolver.extract_trusted_router_relay_context.assert_not_called()
 

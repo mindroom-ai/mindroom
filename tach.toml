@@ -4351,6 +4351,7 @@ visibility = ["mindroom.custom_tools.matrix_voice_message"]
 path = "mindroom.matrix.history_visibility"
 depends_on = []
 visibility = [
+    "mindroom.matrix.thread_fork_access",
     "mindroom.orchestration.plugin_http_runtime",
     "mindroom.plugin_http",
 ]
@@ -6522,7 +6523,9 @@ depends_on = [
     "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.history_visibility",
     "mindroom.matrix.room_membership",
+    "mindroom.matrix.state_failures",
 ]
 
 [[modules]]

@@ -350,9 +350,11 @@ class _RoomState:
             return nio.RoomGetStateEventResponse(rules, event_type, state_key, room_id)
         if event_type == THREAD_TAGS_EVENT_TYPE:
             return self._tag_event(room_id, state_key)
-        if event_type == "m.room.create":
-            return nio.RoomGetStateEventResponse({"room_version": "10"}, event_type, state_key, room_id)
-        content = {"users": {self.user_id: self.power_level}, "state_default": 50}
+        static_state: dict[str, dict[str, object]] = {
+            "m.room.create": {"room_version": "10"},
+            "m.room.history_visibility": {"history_visibility": "shared"},
+        }
+        content = static_state.get(event_type, {"users": {self.user_id: self.power_level}, "state_default": 50})
         return nio.RoomGetStateEventResponse(content, event_type, state_key, room_id)
 
     def _tag_event(self, room_id: str, state_key: str) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:

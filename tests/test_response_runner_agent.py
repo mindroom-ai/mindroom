@@ -542,6 +542,18 @@ class TestAgentBot(AgentBotTestBase):
         if not authorized:
             target_room.add_member("@outsider:localhost", "Outsider", None)
         bot.client.rooms = {source_room_id: source_room, "!test:localhost": target_room}
+        bot.client.room_get_state_event = AsyncMock(
+            side_effect=lambda room_id, event_type, state_key="": (
+                nio.RoomGetStateEventResponse(
+                    {"history_visibility": bot.client.rooms[room_id].history_visibility},
+                    event_type,
+                    state_key,
+                    room_id,
+                )
+                if event_type == "m.room.history_visibility" and room_id in bot.client.rooms
+                else nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND")
+            ),
+        )
 
         await seed_thread_history(
             bot,
@@ -571,7 +583,17 @@ class TestAgentBot(AgentBotTestBase):
         )
         await seed_thread_history(bot, room_id="!test:localhost", thread_id="$fork", messages=[root])
 
-        mock_ai = AsyncMock(return_value="Handled")
+        from mindroom.tool_system.runtime_context import get_tool_runtime_context  # noqa: PLC0415
+
+        captured_fork_parent_scopes: list[frozenset[tuple[str, str]]] = []
+
+        async def capture_turn(*_args: object, **_kwargs: object) -> str:
+            active_tool_context = get_tool_runtime_context()
+            assert active_tool_context is not None
+            captured_fork_parent_scopes.append(active_tool_context.fork_parent_scopes)
+            return "Handled"
+
+        mock_ai = AsyncMock(side_effect=capture_turn)
         with patch_response_runner_module(
             typing_indicator=_noop_typing_indicator,
             stream_agent_response=streamed_answer(mock_ai),
@@ -602,6 +624,7 @@ class TestAgentBot(AgentBotTestBase):
         if not authorized:
             assert items == []
             assert "@carol:localhost" not in turn.member_display_names
+            assert captured_fork_parent_scopes == [frozenset()]
             return
         (note,) = items
         assert note.text == config.render_prompt(
@@ -614,6 +637,73 @@ class TestAgentBot(AgentBotTestBase):
         assert "including the model" in note.text
         assert turn.member_display_names["@carol:localhost"] == "Carol Source"
         assert turn.member_display_names["@user:localhost"] == "Alice Target"
+        assert captured_fork_parent_scopes == [frozenset({(source_room_id, "$parent")})]
+
+    @pytest.mark.asyncio
+    async def test_cross_room_fork_refresh_failure_does_not_reuse_expanded_snapshot(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """If post-lock refresh fails, a turn with a cross-room prefix aborts instead of reusing the earlier snapshot."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
+        from tests.conftest import make_matrix_client_mock  # noqa: PLC0415
+
+        bot.client = make_matrix_client_mock(user_id=mock_agent_user.user_id)
+        room = nio.MatrixRoom("!test:localhost", mock_agent_user.user_id)
+        bot.client.rooms = {room.room_id: room}
+        unique_room_send_responses(bot.client, prefix="$response")
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+
+        source_msg = replace(
+            _visible_message(sender="@user:localhost", body="secret source text", event_id="$parent"),
+            room_id="!source:localhost",
+        )
+        fork_root = _visible_message(
+            sender="@user:localhost",
+            body="carry on",
+            event_id="$fork",
+            content={
+                "body": "carry on",
+                "msgtype": "m.text",
+                FORK_CONTENT_KEY: {
+                    "room_id": "!source:localhost",
+                    "thread_id": "$parent",
+                    "event_id": "$parent",
+                },
+            },
+        )
+        bot._conversation_resolver.fetch_thread_history = AsyncMock(side_effect=RuntimeError("homeserver down"))
+
+        mock_ai = AsyncMock(return_value="Should never run")
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+        with patch_response_runner_module(
+            typing_indicator=_noop_typing_indicator,
+            stream_agent_response=streamed_answer(mock_ai),
+        ):
+            await runner.generate_response(
+                replace(
+                    _response_request(
+                        room_id="!test:localhost",
+                        thread_id="$fork",
+                        thread_history=[source_msg, fork_root],
+                        prompt="carry on",
+                        reply_to_event_id="$fork",
+                        response_envelope=request_envelope(
+                            room_id="!test:localhost",
+                            thread_id="$fork",
+                            reply_to_event_id="$fork",
+                            prompt="carry on",
+                            user_id="@user:localhost",
+                        ),
+                    ),
+                    requires_model_history_refresh=False,
+                ),
+            )
+
+        mock_ai.assert_not_awaited()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

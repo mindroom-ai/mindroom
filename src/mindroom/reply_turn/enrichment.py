@@ -122,11 +122,7 @@ def thread_fork_item(
     runtime: BotRuntimeView | None = None,
 ) -> EnrichmentItem | None:
     """Tell a fork's turn which thread it was forked from when that prefix is loaded in history."""
-    reference = (
-        None
-        if thread_id is None
-        else fork_reference(thread_history, thread_id, room_id=room_id, default_room_id=room_id)
-    )
+    reference = None if thread_id is None else fork_reference(thread_history, thread_id, room_id=room_id)
     if reference is None:
         return None
     parent_room_id = None if room_id is None else reference.resolved_room_id(room_id)

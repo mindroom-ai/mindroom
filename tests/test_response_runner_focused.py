@@ -1339,7 +1339,13 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
 
     refresh_calls = 0
 
-    async def fake_fetch(room_id: str, thread_id: str) -> ThreadHistoryResult:
+    async def fake_fetch(
+        room_id: str,
+        thread_id: str,
+        *,
+        requester_id: str | None = None,
+    ) -> ThreadHistoryResult:
+        del requester_id
         nonlocal refresh_calls
         assert (room_id, thread_id) == ("!room:localhost", "$thread")
         refresh_calls += 1

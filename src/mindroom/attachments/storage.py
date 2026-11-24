@@ -200,9 +200,10 @@ def parent_attachment_refs_in_history(
     *,
     room_id: str,
     parent_scopes: Collection[tuple[str, str]],
-) -> frozenset[tuple[str, str, str]]:
-    """Return ``(room_id, thread_id, attachment_id)`` tuples referenced by parent messages in ``thread_history``."""
-    refs: set[tuple[str, str, str]] = set()
+) -> tuple[tuple[str, str, str], ...]:
+    """Return ordered ``(room_id, thread_id, attachment_id)`` refs carried by in-cut parent messages."""
+    refs: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
     for message in thread_history:
         message_room_id = room_id if message.room_id is None else message.room_id
         parent_thread_id = next(
@@ -215,14 +216,12 @@ def parent_attachment_refs_in_history(
         )
         if parent_thread_id is None:
             continue
-        for attachment_id in parse_attachment_ids_from_event_source({"content": message.content}):
-            refs.add((message_room_id, parent_thread_id, attachment_id))
-        msgtype = message.content.get("msgtype")
-        if is_matrix_media_msgtype(msgtype):
-            event_id = message.event_id if msgtype == "m.audio" else message.visible_event_id
-            if event_id:
-                refs.add((message_room_id, parent_thread_id, _attachment_id_for_event(event_id)))
-    return frozenset(refs)
+        for attachment_id in _attachment_ids_for_visible_message(message):
+            ref = (message_room_id, parent_thread_id, attachment_id)
+            if ref not in seen:
+                seen.add(ref)
+                refs.append(ref)
+    return tuple(refs)
 
 
 def attachment_records_for_visible_message(
@@ -1201,11 +1200,10 @@ def filter_attachments_for_context(
     *,
     room_id: str,
     thread_id: str | None = None,
-    parent_thread_ids: Collection[str] = (),
     parent_scopes: Collection[tuple[str, str]] = (),
 ) -> tuple[list[AttachmentRecord], list[str]]:
     """Keep only attachments registered for the current room/thread context, or a forked thread's parents."""
-    allowed_parent_scopes = {(room_id, parent_id) for parent_id in parent_thread_ids} | set(parent_scopes)
+    allowed_parent_scopes = set(parent_scopes)
     allowed_records: list[AttachmentRecord] = []
     rejected_attachment_ids: list[str] = []
     for record in attachment_records:
@@ -1344,7 +1342,6 @@ async def register_thread_history_media_attachments(
     room_id: str,
     thread_id: str | None,
     thread_history: Sequence[ResolvedVisibleMessage],
-    parent_thread_ids: Collection[str] = (),
     parent_scopes: Collection[tuple[str, str]] = (),
 ) -> list[str]:
     """Register unannotated image/file/video events visible in thread history.
@@ -1353,7 +1350,7 @@ async def register_thread_history_media_attachments(
     The turn's download budget goes to the newest media first, so older media
     that keeps failing cannot hold back newer media turn after turn.
     """
-    allowed_parent_scopes = {(room_id, parent_id) for parent_id in parent_thread_ids} | set(parent_scopes)
+    allowed_parent_scopes = set(parent_scopes)
     attachment_ids: list[str] = []
     seen_attachment_ids: set[str] = set()
     downloads = 0

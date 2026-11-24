@@ -1121,6 +1121,115 @@ class TestAgentBot(AgentBotTestBase):
         assert (fresh_record.room_id, fresh_record.thread_id) == ("!source:localhost", "$parent")
 
     @pytest.mark.asyncio
+    async def test_cross_room_fork_cut_at_parent_audio_before_transcript_echo_resolves_and_matches_annotations(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Cutting a fork at an m.audio event before its transcript echo includes the audio ID for both annotations and get_attachment."""
+        from mindroom.attachments.storage import (  # noqa: PLC0415
+            attachment_records_for_visible_message,
+            register_audio_attachment,
+        )
+        from mindroom.custom_tools.attachments import AttachmentTools  # noqa: PLC0415
+        from mindroom.matrix.thread_forks import fork_parent_scopes  # noqa: PLC0415
+        from mindroom.tool_system.runtime_context import tool_runtime_context  # noqa: PLC0415
+        from mindroom.tool_system.tool_function import ToolValue  # noqa: PLC0415
+        from tests.authorization_helpers import make_test_tool_runtime_context  # noqa: PLC0415
+
+        config = self._config_for_storage(tmp_path)
+        paths = runtime_paths_for(config)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=paths)
+        bot.client = _make_matrix_client_mock()
+
+        in_cut_audio = await register_audio_attachment(
+            bot.storage_path,
+            event_id="$src-audio",
+            audio_bytes=b"ID3 in-cut audio",
+            mime_type="audio/mpeg",
+            room_id="!source:localhost",
+            thread_id="$parent",
+            sender="@user:localhost",
+            filename="voice.mp3",
+        )
+        post_cut_audio = await register_audio_attachment(
+            bot.storage_path,
+            event_id="$src-audio-after-cut",
+            audio_bytes=b"ID3 post-cut audio",
+            mime_type="audio/mpeg",
+            room_id="!source:localhost",
+            thread_id="$parent",
+            sender="@user:localhost",
+            filename="after.mp3",
+        )
+        assert in_cut_audio is not None
+        assert post_cut_audio is not None
+
+        audio_msg = make_visible_message(
+            event_id="$src-audio",
+            thread_id="$parent",
+            content={"msgtype": "m.audio", "body": "voice.mp3", "url": "mxc://localhost/voice"},
+            room_id="!source:localhost",
+        )
+        thread_history = [
+            make_visible_message(event_id="$parent", body="source root", room_id="!source:localhost"),
+            audio_msg,
+            make_visible_message(
+                event_id="$thread",
+                content={
+                    "body": "forked right at the voice message",
+                    FORK_CONTENT_KEY: {
+                        "room_id": "!source:localhost",
+                        "thread_id": "$parent",
+                        "event_id": "$src-audio",
+                    },
+                },
+            ),
+        ]
+
+        payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
+            DispatchPayloadWithAttachmentsRequest(
+                room_id="!test:localhost",
+                prompt="transcribe that",
+                current_attachment_ids=[post_cut_audio.attachment_id],
+                thread_id="$thread",
+                media_thread_id="$thread",
+                thread_history=thread_history,
+            ),
+        )
+
+        # Annotations and resolved turn attachment IDs agree on the exact in-cut audio ID and exclude post-cut audio.
+        annotated = attachment_records_for_visible_message(
+            bot.storage_path,
+            audio_msg,
+            room_id="!source:localhost",
+        )
+        assert [record.attachment_id for record in annotated] == [in_cut_audio.attachment_id]
+        assert payload.attachment_ids == [in_cut_audio.attachment_id]
+
+        # get_attachment(..., view=True) succeeds for the resolved in-cut audio attachment.
+        scopes = fork_parent_scopes(thread_history, "$thread", room_id="!test:localhost")
+        assert scopes == frozenset({("!source:localhost", "$parent")})
+        tool_ctx = make_test_tool_runtime_context(
+            agent_name=mock_agent_user.agent_name,
+            target=MessageTarget.resolve("!test:localhost", "$thread", "$thread"),
+            requester_id="@user:localhost",
+            client=bot.client,
+            config=config,
+            runtime_paths=paths,
+            relations=MagicMock(),
+            conversation_reader=AsyncMock(),
+            storage_path=bot.storage_path,
+            attachment_ids=tuple(payload.attachment_ids),
+            fork_parent_scopes=scopes,
+        )
+        with tool_runtime_context(tool_ctx):
+            viewed = await AttachmentTools().get_attachment(in_cut_audio.attachment_id, view=True)
+        assert isinstance(viewed, ToolValue)
+        assert len(viewed.audios) == 1
+        assert viewed.audios[0].content == b"ID3 in-cut audio"
+
+    @pytest.mark.asyncio
     async def test_dispatch_payload_inline_media_empty_when_no_attachments(
         self,
         mock_agent_user: AgentMatrixUser,

@@ -126,7 +126,7 @@ def _same_room_fork_parent_thread_id(
     room_id: str,
 ) -> str | None:
     """Return the parent thread ID only when ``thread_id`` is a same-room fork."""
-    reference = fork_reference(thread_history, thread_id, room_id=room_id, default_room_id=room_id)
+    reference = fork_reference(thread_history, thread_id, room_id=room_id)
     if reference is None or reference.is_cross_room(room_id):
         return None
     return reference.thread_id

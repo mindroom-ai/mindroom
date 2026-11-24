@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -13,10 +13,12 @@ from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.models import ModelConfig
-from mindroom.constants import ORIGINAL_SENDER_KEY, RuntimePaths
+from mindroom.constants import FORK_CONTENT_KEY, ORIGINAL_SENDER_KEY, RuntimePaths
 from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, update_contacts
-from mindroom.matrix.thread_fork_access import authorize_cross_room_fork_hop
-from mindroom.matrix.thread_forks import CrossRoomForkDecision, CrossRoomForkHop
+from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
+from mindroom.matrix.thread_fork_access import authorize_cross_room_fork_access, authorize_cross_room_fork_hop
+from mindroom.matrix.thread_forks import CrossRoomForkDecision, CrossRoomForkHop, with_fork_prefix
+from mindroom.matrix.thread_history_result import thread_history_result
 from tests.conftest import bind_runtime_paths, make_visible_message, test_runtime_paths
 
 if TYPE_CHECKING:
@@ -85,7 +87,22 @@ def _client(rooms: dict[str, nio.MatrixRoom], *, user_id: str = _AGENT) -> Async
     client.olm = MagicMock()
     client.joined_members = AsyncMock(return_value=nio.JoinedMembersError("forbidden"))
     client.room_get_state = AsyncMock(return_value=nio.RoomGetStateError("forbidden"))
-    client.room_get_state_event = AsyncMock(return_value=nio.RoomGetStateEventError("forbidden"))
+
+    async def _state_event(
+        room_id: str,
+        event_type: str,
+        state_key: str = "",
+    ) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
+        if event_type == "m.room.history_visibility" and room_id in rooms:
+            return nio.RoomGetStateEventResponse(
+                {"history_visibility": rooms[room_id].history_visibility},
+                event_type,
+                state_key,
+                room_id,
+            )
+        return nio.RoomGetStateEventError("forbidden")
+
+    client.room_get_state_event = AsyncMock(side_effect=_state_event)
     return client
 
 
@@ -116,9 +133,9 @@ async def test_authorized_encryption_and_audience_subset_allowed(
     source_encrypted: bool,
     target_encrypted: bool,
 ) -> None:
-    """Matching or upgraded encryption with subset human audience (ignoring agents/bots) is ALLOWED."""
+    """Matching or upgraded encryption with subset audience (ignoring managed entities) is ALLOWED."""
     config, paths = _setup(tmp_path)
-    source = _room(_SOURCE, joined=(_AGENT, _ALICE, _BOB), encrypted=source_encrypted)
+    source = _room(_SOURCE, joined=(_AGENT, _ALICE, _BOB, _BOT_ACCOUNT), encrypted=source_encrypted)
     target = _room(
         _TARGET,
         joined=(_AGENT, _OTHER_AGENT, _BOT_ACCOUNT, _ALICE_BRIDGE),
@@ -449,3 +466,520 @@ async def test_nonblocking_defers_on_incomplete_cache_and_strict_resolves(tmp_pa
         )
         is CrossRoomForkDecision.DENIED
     )
+
+
+@pytest.mark.asyncio
+async def test_non_managed_bot_in_target_must_be_in_parent(tmp_path: Path) -> None:
+    """Non-managed bots (configured bot_accounts or unknown external relays) are checked as room audience."""
+    config, paths = _setup(tmp_path)
+    source = _room(_SOURCE, joined=(_AGENT, _ALICE))
+
+    for bot_id in (_BOT_ACCOUNT, "@external_relay:localhost"):
+        target_with_bot = _room(_TARGET, joined=(_AGENT, _OTHER_AGENT, _ALICE, bot_id))
+        client = _client({_SOURCE: source, _TARGET: target_with_bot})
+        for nonblocking in (True, False):
+            assert (
+                await authorize_cross_room_fork_hop(
+                    client=client,
+                    config=config,
+                    runtime_paths=paths,
+                    hop=_hop(),
+                    requester_id=_ALICE,
+                    nonblocking=nonblocking,
+                )
+                is CrossRoomForkDecision.DENIED
+            )
+
+        # Once the same non-managed bot is also joined in source, the hop is ALLOWED.
+        source_with_bot = _room(_SOURCE, joined=(_AGENT, _ALICE, bot_id))
+        client_both = _client({_SOURCE: source_with_bot, _TARGET: target_with_bot})
+        for nonblocking in (True, False):
+            assert (
+                await authorize_cross_room_fork_hop(
+                    client=client_both,
+                    config=config,
+                    runtime_paths=paths,
+                    hop=_hop(),
+                    requester_id=_ALICE,
+                    nonblocking=nonblocking,
+                )
+                is CrossRoomForkDecision.ALLOWED
+            )
+
+
+@pytest.mark.asyncio
+async def test_sliding_sync_defers_unknown_history_visibility_and_strict_reads_authoritatively(
+    tmp_path: Path,
+) -> None:
+    """Sliding sync never trusts cached history_visibility defaults; strict reads authoritatively and fails closed."""
+    config, paths = _setup(tmp_path, sync_mode="sliding")
+    # Cached rooms both report nio's default "shared" and members_synced=True, yet _TARGET is world_readable on server.
+    source = _room(_SOURCE, joined=(_AGENT, _ALICE), members_synced=True)
+    target = _room(_TARGET, joined=(_AGENT, _ALICE), members_synced=True)
+    client = _client({_SOURCE: source, _TARGET: target})
+
+    async def server_visibility(
+        room_id: str,
+        event_type: str,
+        state_key: str = "",
+    ) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
+        if event_type == "m.room.history_visibility" and room_id == _TARGET:
+            return nio.RoomGetStateEventResponse(
+                {"history_visibility": "world_readable"},
+                event_type,
+                state_key,
+                room_id,
+            )
+        if event_type == "m.room.history_visibility" and room_id == _SOURCE:
+            return nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND")
+        return nio.RoomGetStateEventError("forbidden")
+
+    client.room_get_state_event = AsyncMock(side_effect=server_visibility)
+
+    # Nonblocking cannot trust nio's "shared" default under sliding sync -> DEFERRED.
+    assert (
+        await authorize_cross_room_fork_hop(
+            client=client,
+            config=config,
+            runtime_paths=paths,
+            hop=_hop(),
+            requester_id=_ALICE,
+            nonblocking=True,
+        )
+        is CrossRoomForkDecision.DEFERRED
+    )
+    # Strict reads authoritative state -> world_readable DENIED!
+    assert (
+        await authorize_cross_room_fork_hop(
+            client=client,
+            config=config,
+            runtime_paths=paths,
+            hop=_hop(),
+            requester_id=_ALICE,
+            nonblocking=False,
+        )
+        is CrossRoomForkDecision.DENIED
+    )
+
+    # M_NOT_FOUND on both rooms defaults to Matrix's "shared" -> ALLOWED in strict mode.
+    client.room_get_state_event = AsyncMock(
+        return_value=nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND"),
+    )
+    assert (
+        await authorize_cross_room_fork_hop(
+            client=client,
+            config=config,
+            runtime_paths=paths,
+            hop=_hop(),
+            requester_id=_ALICE,
+            nonblocking=False,
+        )
+        is CrossRoomForkDecision.ALLOWED
+    )
+
+    # Forbidden/error reading visibility fails closed -> DENIED.
+    client.room_get_state_event = AsyncMock(
+        return_value=nio.RoomGetStateEventError("forbidden", status_code="M_FORBIDDEN"),
+    )
+    assert (
+        await authorize_cross_room_fork_hop(
+            client=client,
+            config=config,
+            runtime_paths=paths,
+            hop=_hop(),
+            requester_id=_ALICE,
+            nonblocking=False,
+        )
+        is CrossRoomForkDecision.DENIED
+    )
+
+
+@pytest.mark.asyncio
+async def test_network_errors_on_state_and_membership_calls_fail_closed(tmp_path: Path) -> None:
+    """Network exceptions from room_get_state, room_get_state_event, and joined_members fail closed as DENIED."""
+    config, paths = _setup(tmp_path, sync_mode="sliding")
+
+    # 1) room_get_state_event raises -> DENIED (never crashes turn).
+    client_state_event_err = _client(
+        {_SOURCE: _room(_SOURCE, joined=(_AGENT, _ALICE)), _TARGET: _room(_TARGET, joined=(_AGENT, _ALICE))},
+    )
+    client_state_event_err.room_get_state_event = AsyncMock(side_effect=OSError("connection reset"))
+    assert (
+        await authorize_cross_room_fork_hop(
+            client=client_state_event_err,
+            config=config,
+            runtime_paths=paths,
+            hop=_hop(),
+            requester_id=_ALICE,
+            nonblocking=False,
+        )
+        is CrossRoomForkDecision.DENIED
+    )
+
+    # 2) room_get_state raises (unseen invites fallback) -> DENIED.
+    target_unseen = _room(_TARGET, joined=(_AGENT, _ALICE), members_synced=False, invited_member_count=1)
+    client_state_err = _client({_SOURCE: _room(_SOURCE, joined=(_AGENT, _ALICE)), _TARGET: target_unseen})
+    client_state_err.joined_members = AsyncMock(
+        return_value=nio.JoinedMembersResponse(
+            room_id=_TARGET,
+            members=[nio.RoomMember(_AGENT, "General", None), nio.RoomMember(_ALICE, "Alice", None)],
+        ),
+    )
+    client_state_err.room_get_state = AsyncMock(side_effect=OSError("timeout"))
+    assert (
+        await authorize_cross_room_fork_hop(
+            client=client_state_err,
+            config=config,
+            runtime_paths=paths,
+            hop=_hop(),
+            requester_id=_ALICE,
+            nonblocking=False,
+        )
+        is CrossRoomForkDecision.DENIED
+    )
+
+    # 3) joined_members raises when parent room is not cached -> DENIED.
+    client_members_err = _client({_TARGET: _room(_TARGET, joined=(_AGENT, _ALICE))})
+    client_members_err.joined_members = AsyncMock(side_effect=OSError("dns failed"))
+    assert (
+        await authorize_cross_room_fork_hop(
+            client=client_members_err,
+            config=config,
+            runtime_paths=paths,
+            hop=_hop(),
+            requester_id=_ALICE,
+            nonblocking=False,
+        )
+        is CrossRoomForkDecision.DENIED
+    )
+
+
+@pytest.mark.asyncio
+async def test_output_room_checked_independently_from_fork_target_room(tmp_path: Path) -> None:
+    """When output_room_id differs from hop.target_room_id, encryption, visibility, and audience check output_room_id."""
+    config, paths = _setup(tmp_path)
+    output_room_id = "!output-c:localhost"
+    source = _room(_SOURCE, joined=(_AGENT, _ALICE), encrypted=True)
+    target_b = _room(_TARGET, joined=(_AGENT, _ALICE), encrypted=True)
+
+    # Unencrypted output room C -> DENIED even though target B is encrypted.
+    client_unenc = _client(
+        {
+            _SOURCE: source,
+            _TARGET: target_b,
+            output_room_id: _room(output_room_id, joined=(_AGENT, _ALICE), encrypted=False),
+        },
+    )
+    assert (
+        await authorize_cross_room_fork_hop(
+            client=client_unenc,
+            config=config,
+            runtime_paths=paths,
+            hop=_hop(),
+            requester_id=_ALICE,
+            nonblocking=False,
+            target_room=target_b,
+            output_room_id=output_room_id,
+            output_room=client_unenc.rooms[output_room_id],
+        )
+        is CrossRoomForkDecision.DENIED
+    )
+
+    # Output room C has an outsider -> DENIED even though target B only has Alice.
+    client_outsider = _client(
+        {
+            _SOURCE: source,
+            _TARGET: target_b,
+            output_room_id: _room(output_room_id, joined=(_AGENT, _ALICE, _BOB), encrypted=True),
+        },
+    )
+    assert (
+        await authorize_cross_room_fork_hop(
+            client=client_outsider,
+            config=config,
+            runtime_paths=paths,
+            hop=_hop(),
+            requester_id=_ALICE,
+            nonblocking=False,
+            target_room=target_b,
+            output_room_id=output_room_id,
+            output_room=client_outsider.rooms[output_room_id],
+        )
+        is CrossRoomForkDecision.DENIED
+    )
+
+    # Output room C is world_readable -> DENIED.
+    client_world = _client(
+        {
+            _SOURCE: source,
+            _TARGET: target_b,
+            output_room_id: _room(
+                output_room_id,
+                joined=(_AGENT, _ALICE),
+                encrypted=True,
+                history_visibility="world_readable",
+            ),
+        },
+    )
+    assert (
+        await authorize_cross_room_fork_hop(
+            client=client_world,
+            config=config,
+            runtime_paths=paths,
+            hop=_hop(),
+            requester_id=_ALICE,
+            nonblocking=False,
+            target_room=target_b,
+            output_room_id=output_room_id,
+            output_room=client_world.rooms[output_room_id],
+        )
+        is CrossRoomForkDecision.DENIED
+    )
+
+    # Output room C is encrypted, private, and subset audience -> ALLOWED.
+    client_ok = _client(
+        {
+            _SOURCE: source,
+            _TARGET: target_b,
+            output_room_id: _room(output_room_id, joined=(_AGENT, _ALICE), encrypted=True),
+        },
+    )
+    assert (
+        await authorize_cross_room_fork_hop(
+            client=client_ok,
+            config=config,
+            runtime_paths=paths,
+            hop=_hop(),
+            requester_id=_ALICE,
+            nonblocking=False,
+            target_room=target_b,
+            output_room_id=output_room_id,
+            output_room=client_ok.rooms[output_room_id],
+        )
+        is CrossRoomForkDecision.ALLOWED
+    )
+
+
+def _member_state_event(
+    user_id: str,
+    *,
+    membership: str,
+    origin_server_ts: int,
+    replaces_state: str | None = None,
+) -> dict[str, object]:
+    event: dict[str, object] = {
+        "type": "m.room.member",
+        "state_key": user_id,
+        "sender": user_id,
+        "origin_server_ts": origin_server_ts,
+        "content": {"membership": membership},
+    }
+    if replaces_state is not None:
+        event["unsigned"] = {"replaces_state": replaces_state}
+    return event
+
+
+@pytest.mark.asyncio
+async def test_parent_shared_visibility_makes_zero_read_room_history_calls(tmp_path: Path) -> None:
+    """Common-case parent rooms with history_visibility='shared' never call read_room_history."""
+    config, paths = _setup(tmp_path)
+    client = _client(
+        {
+            _SOURCE: _room(_SOURCE, joined=(_AGENT, _ALICE), history_visibility="shared"),
+            _TARGET: _room(_TARGET, joined=(_AGENT, _ALICE), history_visibility="shared"),
+        },
+    )
+    with patch("mindroom.matrix.thread_fork_access.read_room_history") as mock_read_history:
+        auth = await authorize_cross_room_fork_access(
+            client=client,
+            config=config,
+            runtime_paths=paths,
+            hop=_hop(),
+            requester_id=_ALICE,
+            nonblocking=False,
+        )
+    assert auth.decision is CrossRoomForkDecision.ALLOWED
+    assert auth.allow_segment is None
+    mock_read_history.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_parent_invited_visibility_allows_member_invited_before_thread_start(tmp_path: Path) -> None:
+    """An 'invited' personal parent room passes when the member was invited before the thread started."""
+    config, paths = _setup(tmp_path)
+    source = _room(_SOURCE, joined=(_AGENT, _ALICE), history_visibility="invited")
+    target = _room(_TARGET, joined=(_AGENT, _ALICE), history_visibility="shared")
+    client = _client({_SOURCE: source, _TARGET: target})
+
+    # Nonblocking defers because invited visibility requires membership start timestamp check.
+    assert (
+        await authorize_cross_room_fork_hop(
+            client=client,
+            config=config,
+            runtime_paths=paths,
+            hop=_hop(),
+            requester_id=_ALICE,
+            nonblocking=True,
+        )
+        is CrossRoomForkDecision.DEFERRED
+    )
+
+    # Alice was invited at ts=1000, joined at ts=2000; parent thread starts at ts=1500.
+    client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse(
+            room_id=_SOURCE,
+            events=[
+                {"type": "m.room.history_visibility", "state_key": "", "content": {"history_visibility": "invited"}},
+                _member_state_event(_ALICE, membership="join", origin_server_ts=2000, replaces_state="$alice-invite"),
+            ],
+        ),
+    )
+    invite_source = {
+        "event_id": "$alice-invite",
+        **_member_state_event(_ALICE, membership="invite", origin_server_ts=1000),
+    }
+    client.room_get_event = AsyncMock(return_value=nio.RoomGetEventResponse.from_dict(invite_source))
+
+    fork_root = make_visible_message(
+        event_id="$fork",
+        sender=_ALICE,
+        timestamp=3000,
+        content={
+            "body": "forked",
+            FORK_CONTENT_KEY: {"room_id": _SOURCE, "thread_id": "$p1", "event_id": "$p2"},
+        },
+    )
+    parent_messages = [
+        make_visible_message(event_id="$p1", sender=_AGENT, timestamp=1500, body="early personal message"),
+        make_visible_message(event_id="$p2", thread_id="$p1", sender=_ALICE, timestamp=2500, body="reply"),
+    ]
+
+    async def read_thread(_room_id: str, _thread_id: str) -> object:
+        return thread_history_result(parent_messages, is_full_history=True)
+
+    result = await with_fork_prefix(
+        thread_history_result([fork_root], is_full_history=True),
+        room_id=_TARGET,
+        thread_id="$fork",
+        read_thread=read_thread,  # type: ignore[arg-type]
+        authorize_cross_room=lambda hop: authorize_cross_room_fork_access(
+            client=client,
+            config=config,
+            runtime_paths=paths,
+            hop=hop,
+            requester_id=_ALICE,
+            nonblocking=False,
+        ),
+        logger=MagicMock(),
+    )
+    assert [m.event_id for m in result] == ["$p1", "$p2", "$fork"]
+    assert result.is_full_history is True
+    assert not is_thread_history_degraded(result)
+
+
+@pytest.mark.asyncio
+async def test_parent_joined_visibility_denies_late_joiner_cleanly_without_degrading(tmp_path: Path) -> None:
+    """A 'joined' parent room denies the hop cleanly without degrading when an audience member joined after thread start."""
+    config, paths = _setup(tmp_path)
+    source = _room(_SOURCE, joined=(_AGENT, _ALICE, _BOB), history_visibility="joined")
+    target = _room(_TARGET, joined=(_AGENT, _ALICE, _BOB), history_visibility="shared")
+    client = _client({_SOURCE: source, _TARGET: target})
+
+    # Alice joined at ts=1000, Bob joined at ts=2000; parent thread starts at ts=1500.
+    client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse(
+            room_id=_SOURCE,
+            events=[
+                {"type": "m.room.history_visibility", "state_key": "", "content": {"history_visibility": "joined"}},
+                _member_state_event(_ALICE, membership="join", origin_server_ts=1000),
+                _member_state_event(_BOB, membership="join", origin_server_ts=2000),
+            ],
+        ),
+    )
+
+    fork_root = make_visible_message(
+        event_id="$fork",
+        sender=_ALICE,
+        timestamp=3000,
+        content={
+            "body": "forked",
+            FORK_CONTENT_KEY: {"room_id": _SOURCE, "thread_id": "$p1", "event_id": "$p2"},
+        },
+    )
+    parent_messages = [
+        make_visible_message(event_id="$p1", sender=_ALICE, timestamp=1500, body="before bob joined"),
+        make_visible_message(event_id="$p2", thread_id="$p1", sender=_BOB, timestamp=2500, body="after bob joined"),
+    ]
+
+    async def read_thread(_room_id: str, _thread_id: str) -> object:
+        return thread_history_result(parent_messages, is_full_history=True)
+
+    denied = await with_fork_prefix(
+        thread_history_result([fork_root], is_full_history=True),
+        room_id=_TARGET,
+        thread_id="$fork",
+        read_thread=read_thread,  # type: ignore[arg-type]
+        authorize_cross_room=lambda hop: authorize_cross_room_fork_access(
+            client=client,
+            config=config,
+            runtime_paths=paths,
+            hop=hop,
+            requester_id=_ALICE,
+            nonblocking=False,
+        ),
+        logger=MagicMock(),
+    )
+    assert [m.event_id for m in denied] == ["$fork"]
+    assert denied.is_full_history is True
+    assert not is_thread_history_degraded(denied)
+
+    # Once Bob joined at or before ts=1500, the same hop succeeds.
+    client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse(
+            room_id=_SOURCE,
+            events=[
+                {"type": "m.room.history_visibility", "state_key": "", "content": {"history_visibility": "joined"}},
+                _member_state_event(_ALICE, membership="join", origin_server_ts=1000),
+                _member_state_event(_BOB, membership="join", origin_server_ts=1500),
+            ],
+        ),
+    )
+    allowed = await with_fork_prefix(
+        thread_history_result([fork_root], is_full_history=True),
+        room_id=_TARGET,
+        thread_id="$fork",
+        read_thread=read_thread,  # type: ignore[arg-type]
+        authorize_cross_room=lambda hop: authorize_cross_room_fork_access(
+            client=client,
+            config=config,
+            runtime_paths=paths,
+            hop=hop,
+            requester_id=_ALICE,
+            nonblocking=False,
+        ),
+        logger=MagicMock(),
+    )
+    assert [m.event_id for m in allowed] == ["$p1", "$p2", "$fork"]
+    assert allowed.is_full_history is True
+    assert not is_thread_history_degraded(allowed)
+
+    # Network failure during read_room_history denies cleanly without crashing or degrading.
+    client.room_get_state = AsyncMock(side_effect=OSError("state read failed"))
+    errored = await with_fork_prefix(
+        thread_history_result([fork_root], is_full_history=True),
+        room_id=_TARGET,
+        thread_id="$fork",
+        read_thread=read_thread,  # type: ignore[arg-type]
+        authorize_cross_room=lambda hop: authorize_cross_room_fork_access(
+            client=client,
+            config=config,
+            runtime_paths=paths,
+            hop=hop,
+            requester_id=_ALICE,
+            nonblocking=False,
+        ),
+        logger=MagicMock(),
+    )
+    assert [m.event_id for m in errored] == ["$fork"]
+    assert errored.is_full_history is True
+    assert not is_thread_history_degraded(errored)

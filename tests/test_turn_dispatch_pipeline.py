@@ -3182,3 +3182,136 @@ async def test_cross_room_fork_routing_uses_target_room_participation(tmp_path: 
     runner.deps.resolver.fetch_thread_history = AsyncMock(side_effect=RuntimeError("homeserver down"))
     with pytest.raises(RuntimeError, match="homeserver down"):
         await runner.locked.refresh_model_history(request)
+
+
+@pytest.mark.asyncio
+async def test_mentions_mode_keeps_departed_local_agent_behavior_while_ignoring_cross_room_prefix_agents(
+    tmp_path: Path,
+) -> None:
+    """In mentions mode, a departed local agent still unlocks continuation, while a source-room fork agent does not."""
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General", rooms=["!target:localhost"]),
+                "departed": AgentConfig(display_name="Departed", rooms=[]),
+                "source_only": AgentConfig(display_name="Source Only", rooms=["!source:localhost"]),
+            },
+            rooms={"!target:localhost": RoomConfig(reply_mode="mentions")},
+        ),
+        tmp_path,
+    )
+    paths = runtime_paths_for(config)
+    ids = entity_ids(config, paths)
+    general_user = AgentMatrixUser(
+        agent_name="general",
+        password=TEST_PASSWORD,
+        display_name="General",
+        user_id=ids["general"].full_id,
+    )
+    bot = make_test_agent_bot(general_user, config=config, runtime_paths=paths)
+    _wrap_extracted_collaborators(bot)
+    bot.client = _make_matrix_client_mock()
+    bot.client.user_id = general_user.user_id
+
+    # Target room only has General and Alice; Departed has already left the room.
+    target_room = _matrix_room(room_id="!target:localhost", own_user_id=general_user.user_id)
+    target_room.members_synced = True
+    target_room.add_member(general_user.user_id, "General", None)
+    target_room.add_member("@alice:localhost", "Alice", None)
+    bot.client.rooms = {"!target:localhost": target_room}
+
+    policy = unwrap_extracted_collaborator(bot._turn_policy)
+
+    # (a) Local non-fork thread: Departed replied locally and later left; sole eligible General continues unmentioned.
+    local_target = MessageTarget.resolve("!target:localhost", "$local_root", "$local_followup")
+    local_history = thread_history_result(
+        [
+            ResolvedVisibleMessage.synthetic(sender="@alice:localhost", body="hello", event_id="$local_root"),
+            ResolvedVisibleMessage.synthetic(
+                sender=ids["departed"].full_id,
+                body="earlier local reply",
+                event_id="$departed_reply",
+                thread_id="$local_root",
+            ),
+            ResolvedVisibleMessage.synthetic(
+                sender="@alice:localhost",
+                body="follow up without mention",
+                event_id="$local_followup",
+                thread_id="$local_root",
+            ),
+        ],
+        is_full_history=True,
+    )
+    local_dispatch = PreparedDispatch(
+        requester_user_id="@alice:localhost",
+        context=MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$local_root",
+            thread_history=local_history,
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        ),
+        target=local_target,
+        correlation_id="$local_followup",
+        envelope=replace(
+            _hook_envelope(body="follow up without mention", source_event_id="$local_followup", target=local_target),
+            origin=message_origin(sender_id="@alice:localhost"),
+        ),
+    )
+    local_plan = await policy.plan_turn(target_room, local_dispatch, has_active_response_for_target=lambda _t: False)
+    assert local_plan == DispatchPlan(kind="respond", response_action=ResponseAction(kind="individual"))
+
+    # (b) Cross-room fork: source-room agent (source-only OR even General in source room) does not bypass mentions mode.
+    for foreign_agent_id in (ids["source_only"].full_id, ids["general"].full_id):
+        fork_target = MessageTarget.resolve("!target:localhost", "$fork_root", "$fork_root")
+        fork_history = thread_history_result(
+            [
+                ResolvedVisibleMessage.synthetic(
+                    sender="@alice:localhost",
+                    body="source question",
+                    event_id="$src_root",
+                    room_id="!source:localhost",
+                ),
+                ResolvedVisibleMessage.synthetic(
+                    sender=foreign_agent_id,
+                    body="source reply",
+                    event_id="$src_reply",
+                    thread_id="$src_root",
+                    room_id="!source:localhost",
+                ),
+                ResolvedVisibleMessage.synthetic(
+                    sender="@alice:localhost",
+                    body="continue unmentioned in target",
+                    event_id="$fork_root",
+                    content={
+                        "body": "continue unmentioned in target",
+                        FORK_CONTENT_KEY: {
+                            "room_id": "!source:localhost",
+                            "thread_id": "$src_root",
+                            "event_id": "$src_reply",
+                        },
+                    },
+                ),
+            ],
+            is_full_history=True,
+        )
+        fork_dispatch = PreparedDispatch(
+            requester_user_id="@alice:localhost",
+            context=MessageContext(
+                am_i_mentioned=False,
+                is_thread=True,
+                thread_id="$fork_root",
+                thread_history=fork_history,
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
+            target=fork_target,
+            correlation_id="$fork_root",
+            envelope=replace(
+                _hook_envelope(body="continue unmentioned in target", source_event_id="$fork_root", target=fork_target),
+                origin=message_origin(sender_id="@alice:localhost"),
+            ),
+        )
+        fork_plan = await policy.plan_turn(target_room, fork_dispatch, has_active_response_for_target=lambda _t: False)
+        assert fork_plan == DispatchPlan(kind="ignore")

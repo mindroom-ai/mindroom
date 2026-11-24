@@ -35,6 +35,7 @@ from mindroom.history.session_context import (
 )
 from mindroom.history.types import HistoryScope
 from mindroom.llm.runs import RunRecord
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
 from mindroom.matrix.thread_history_result import thread_history_result
@@ -481,6 +482,23 @@ async def test_read_fresh_thread_history_handles_room_mode_normal_and_strict_deg
     resolver.fetch_thread_history = AsyncMock(side_effect=RuntimeError("boom"))
     fallback = await runner.locked.refresh_model_history(_plain_request(thread_target))
     assert fallback.requires_model_history_refresh is True
+
+    # A request carrying an earlier expanded cross-room prefix never falls back to that snapshot when refresh fails.
+    cross_room_request = replace(
+        _plain_request(thread_target),
+        thread_history=[
+            ResolvedVisibleMessage.synthetic(
+                sender="@user:localhost",
+                body="earlier cross-room prefix",
+                event_id="$parent",
+                room_id="!source:localhost",
+            ),
+            ResolvedVisibleMessage.synthetic(sender="@user:localhost", body="fork root", event_id="$thread"),
+        ],
+        requires_model_history_refresh=False,
+    )
+    with pytest.raises(RuntimeError, match="boom"):
+        await runner.locked.refresh_model_history(cross_room_request)
 
 
 def test_reply_refresh_and_compaction_read_threads_only_through_the_fresh_read_helper() -> None:

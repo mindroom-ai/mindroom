@@ -1224,6 +1224,18 @@ async def test_cross_room_fork_authorized_denied_and_deferred_to_strict(config: 
     client = resolver.deps.runtime.client
     assert client is not None
     client.user_id = _BOT_USER_ID
+    client.room_get_state_event = AsyncMock(
+        side_effect=lambda room_id, event_type, state_key="": (
+            nio.RoomGetStateEventResponse(
+                {"history_visibility": client.rooms[room_id].history_visibility},
+                event_type,
+                state_key,
+                room_id,
+            )
+            if event_type == "m.room.history_visibility" and room_id in client.rooms
+            else nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND")
+        ),
+    )
 
     # 1) Authorized: source and target share the same human requester and agent.
     source_room = _cross_room_matrix_room(_SOURCE_ROOM_ID, joined=(_BOT_USER_ID, _HUMAN_USER_ID))

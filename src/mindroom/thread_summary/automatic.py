@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_reads import refetched_thread_history, with_delivered_response
-from mindroom.matrix.thread_fork_access import authorize_cross_room_fork_hop
+from mindroom.matrix.thread_fork_access import authorize_cross_room_fork_access
 from mindroom.matrix.thread_forks import (
     CrossRoomForkDecision,
     CrossRoomForkHop,
@@ -38,6 +38,7 @@ from mindroom.thread_summary.state import (
     SummaryState,
     TruncatedThreadHistoryError,
     current_thread_summary,
+    current_thread_summary_from_history,
     human_summary_authorizer,
     load_complete_thread_history,
     summary_state,
@@ -124,13 +125,14 @@ async def _read_authorized_parent_summary(
     requester_id: str | None,
 ) -> SummaryState | None:
     """Read the immediate fork parent's summary, enforcing cross-room fork authorization."""
-    root = fork_root_message(history, thread_id, room_id=room_id, default_room_id=room_id)
+    root = fork_root_message(history, thread_id, room_id=room_id)
     reference = None if root is None else thread_fork_reference(root.content)
     if root is None or reference is None:
         return None
     parent_room_id = reference.resolved_room_id(room_id)
+    allow_segment = None
     if parent_room_id != room_id:
-        decision = await authorize_cross_room_fork_hop(
+        auth = await authorize_cross_room_fork_access(
             client=client,
             config=config,
             runtime_paths=runtime_paths,
@@ -144,8 +146,24 @@ async def _read_authorized_parent_summary(
             requester_id=requester_id,
             nonblocking=False,
         )
-        if decision is not CrossRoomForkDecision.ALLOWED:
+        if auth.decision is not CrossRoomForkDecision.ALLOWED:
             return None
+        allow_segment = auth.allow_segment
+    if allow_segment is not None:
+        parent_history = await _countable_thread_history(conversation_reader, parent_room_id, reference.thread_id)
+        if parent_history is None or await allow_segment(parent_history) is not CrossRoomForkDecision.ALLOWED:
+            return None
+        return current_thread_summary_from_history(
+            client,
+            parent_room_id,
+            reference.thread_id,
+            parent_history,
+            config=config,
+            runtime_paths=runtime_paths,
+            entity_name=entity_name,
+            membership_index=membership_index,
+            trusted_sender_ids=trusted_sender_ids,
+        )
     return await current_thread_summary(
         client,
         parent_room_id,

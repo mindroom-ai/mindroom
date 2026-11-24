@@ -357,6 +357,15 @@ class InboundTurnNormalizer:
             if request.media_thread_id is not None
             else frozenset()
         )
+        parent_refs = (
+            parent_attachment_refs_in_history(
+                request.thread_history,
+                room_id=request.room_id,
+                parent_scopes=parent_scopes,
+            )
+            if parent_scopes
+            else ()
+        )
         history_media_attachment_ids = await register_thread_history_media_attachments(
             self._client(),
             self.deps.storage_path,
@@ -371,6 +380,7 @@ class InboundTurnNormalizer:
             thread_attachment_ids,
             history_attachment_ids,
             history_media_attachment_ids,
+            [attachment_id for _, _, attachment_id in parent_refs],
         )
         scoped_attachment_ids = [
             attachment_id for attachment_id in attachment_ids if attachment_id not in trusted_current_attachment_ids
@@ -383,11 +393,7 @@ class InboundTurnNormalizer:
             parent_scopes=parent_scopes,
         )
         if parent_scopes:
-            parent_refs = parent_attachment_refs_in_history(
-                request.thread_history,
-                room_id=request.room_id,
-                parent_scopes=parent_scopes,
-            )
+            parent_ref_set = frozenset(parent_refs)
             scoped_records = [
                 record
                 for record in scoped_records
@@ -395,7 +401,7 @@ class InboundTurnNormalizer:
                 or (
                     record.room_id is not None
                     and record.thread_id is not None
-                    and (record.room_id, record.thread_id, record.attachment_id) in parent_refs
+                    and (record.room_id, record.thread_id, record.attachment_id) in parent_ref_set
                 )
             ]
         trusted_records = (

@@ -42,7 +42,6 @@ from mindroom.thread_utils import (
     AgentResponseDecision,
     check_agent_mentioned,
     decide_agent_response,
-    filter_thread_agents_for_sender,
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
     has_multiple_non_agent_users_in_thread,
@@ -637,7 +636,6 @@ class TurnPolicy:
         """
         is_router = self.deps.agent_name == ROUTER_AGENT_NAME
         if await self._reply_mode_awaits_mention(
-            room,
             dispatch,
             has_active_response_for_target=has_active_response_for_target,
         ):
@@ -660,7 +658,6 @@ class TurnPolicy:
 
     async def _reply_mode_awaits_mention(
         self,
-        room: nio.MatrixRoom,
         dispatch: PreparedDispatch,
         *,
         has_active_response_for_target: Callable[[MessageTarget], bool],
@@ -692,26 +689,14 @@ class TurnPolicy:
         ):
             return False
         # A thread whose history could not be read in full proves no reply, so it needs a mention too.
-        agents_in_thread = get_agents_in_thread(
-            context.planning_thread_history,
-            self.deps.runtime.config,
-            self.deps.runtime_paths,
-        )
-        if agents_in_thread:
-            candidates = self._classify_candidates(room, dispatch.requester_user_id)
-            available_in_room = self._filter_materializable_responders(
-                [*candidates.allowed, *candidates.pending],
-                self._responder_availability(),
-            )
-            if filter_thread_agents_for_sender(
-                agents_in_thread,
-                dispatch.requester_user_id,
-                self.deps.runtime.config,
-                self.deps.runtime_paths,
-                self.deps.agent_reply_memberships,
-                available_responders_in_room=available_in_room,
-            ):
-                return False
+        # Exclude foreign cross-room fork prefix rows so a source-room reply does not bypass this room's mentions mode.
+        local_planning_history = [
+            message
+            for message in context.planning_thread_history
+            if message.room_id is None or message.room_id == dispatch.target.room_id
+        ]
+        if get_agents_in_thread(local_planning_history, self.deps.runtime.config, self.deps.runtime_paths):
+            return False
         return not self._should_queue_follow_up_in_active_response_thread(
             context=context,
             target=dispatch.target,
