@@ -19,7 +19,7 @@ from mindroom.coalescing.batch import (
     requester_coalescing_key,
 )
 from mindroom.coalescing.gate import ReadyPendingEvent
-from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig, RoomConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
@@ -59,7 +59,7 @@ from mindroom.message_target import MessageTarget
 from mindroom.reply_turn.locked_turn import LockedTurns
 from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparer
 from mindroom.response_runner import ResponseRunner
-from mindroom.response_sources import Owned
+from mindroom.response_sources import Owned, ResponseSources
 from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamResolution, TeamResolutionMember
 from mindroom.teams.spec import TeamMode
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction, TurnPolicy
@@ -2972,3 +2972,141 @@ class TestAgentBot(AgentBotTestBase):
         summary.assert_awaited_once()
         assert summary.await_args.kwargs["prompt"] is None
         assert summary.await_args.kwargs["prompt_event_ids"] == ("$fork",)
+
+
+@pytest.mark.asyncio
+async def test_cross_room_fork_routing_uses_target_room_participation(tmp_path: Path) -> None:
+    """Cross-room forks ignore source-room humans and source-only agents when routing in the target room."""
+    from mindroom.reply_turn.request import ResponseRequest  # noqa: PLC0415
+
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General", rooms=["!target:localhost"]),
+                "source_only": AgentConfig(display_name="Source Only", rooms=["!source:localhost"]),
+            },
+            rooms={"!target:localhost": RoomConfig(reply_mode="auto")},
+        ),
+        tmp_path,
+    )
+    paths = runtime_paths_for(config)
+    ids = entity_ids(config, paths)
+    general_user = AgentMatrixUser(
+        agent_name="general",
+        password=TEST_PASSWORD,
+        display_name="General",
+        user_id=ids["general"].full_id,
+    )
+    bot = make_test_agent_bot(general_user, config=config, runtime_paths=paths)
+    _wrap_extracted_collaborators(bot)
+    bot.client = _make_matrix_client_mock()
+    bot.client.user_id = general_user.user_id
+
+    target_room = _matrix_room(room_id="!target:localhost", own_user_id=general_user.user_id)
+    target_room.members_synced = True
+    target_room.add_member(general_user.user_id, "General", None)
+    target_room.add_member("@alice:localhost", "Alice", None)
+    bot.client.rooms = {"!target:localhost": target_room}
+
+    source_only_id = ids["source_only"].full_id
+    multi_human_and_source_agent_history = thread_history_result(
+        [
+            ResolvedVisibleMessage.synthetic(
+                sender="@alice:localhost",
+                body="source q",
+                event_id="$src1",
+                room_id="!source:localhost",
+            ),
+            ResolvedVisibleMessage.synthetic(
+                sender="@bob:localhost",
+                body="second human in source",
+                event_id="$src2",
+                thread_id="$src1",
+                room_id="!source:localhost",
+            ),
+            ResolvedVisibleMessage.synthetic(
+                sender=source_only_id,
+                body="source-only agent reply",
+                event_id="$src3",
+                thread_id="$src1",
+                room_id="!source:localhost",
+            ),
+            ResolvedVisibleMessage.synthetic(
+                sender="@alice:localhost",
+                body="continue in target",
+                event_id="$fork",
+                content={
+                    "body": "continue in target",
+                    FORK_CONTENT_KEY: {"room_id": "!source:localhost", "thread_id": "$src1", "event_id": "$src3"},
+                },
+            ),
+        ],
+        is_full_history=True,
+    )
+    target = MessageTarget.resolve("!target:localhost", "$fork", "$fork")
+    envelope = replace(
+        _hook_envelope(
+            body="continue in target",
+            source_event_id="$fork",
+            target=target,
+        ),
+        origin=message_origin(sender_id="@alice:localhost"),
+    )
+    dispatch = PreparedDispatch(
+        requester_user_id="@alice:localhost",
+        context=MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$fork",
+            thread_history=multi_human_and_source_agent_history,
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        ),
+        target=target,
+        correlation_id="$fork",
+        envelope=envelope,
+    )
+
+    policy = unwrap_extracted_collaborator(bot._turn_policy)
+    # 1) Auto mode: multi-human parent + source-only agent do not block target sole agent.
+    plan_auto = await policy.plan_turn(target_room, dispatch, has_active_response_for_target=lambda _t: False)
+    assert plan_auto == DispatchPlan(kind="respond", response_action=ResponseAction(kind="individual"))
+
+    # 2) Auto mode with 2 target agents: steward routes instead of treating source humans/agents as blockers.
+    bot.config.agents["research"] = AgentConfig(display_name="Research", rooms=["!target:localhost"])
+    research_id = entity_ids(bot.config, paths)["research"].full_id
+    target_room.add_member(research_id, "Research", None)
+    bot.orchestrator.room_steward = lambda _room_id: bot
+    plan_route = await policy.plan_turn(target_room, dispatch, has_active_response_for_target=lambda _t: False)
+    assert plan_route == DispatchPlan(kind="route")
+    bot.config.agents.pop("research")
+    target_room.users.pop(research_id, None)
+
+    # 3) Mentions mode: source-only agent in parent does not bypass target room's mentions requirement.
+    bot.config.rooms["!target:localhost"] = RoomConfig(reply_mode="mentions")
+    plan_mentions = await policy.plan_turn(target_room, dispatch, has_active_response_for_target=lambda _t: False)
+    assert plan_mentions == DispatchPlan(kind="ignore")
+
+    # 4) LockedTurns strict refresh: denial drops earlier cross-room prefix; failure raises instead of falling back.
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    fork_root = multi_human_and_source_agent_history[-1]
+    request = ResponseRequest(
+        thread_history=multi_human_and_source_agent_history,
+        prompt="continue in target",
+        response_envelope=envelope,
+        sources=ResponseSources(pending_event_ids=("$fork",), logical_source_event_ids=("$fork",)),
+        requires_model_history_refresh=False,
+    )
+    denied_history = thread_history_result([fork_root], is_full_history=True)
+    runner.deps.resolver.fetch_thread_history = AsyncMock(return_value=denied_history)
+    refreshed = await runner.locked.refresh_model_history(request)
+    assert [m.event_id for m in refreshed.thread_history] == ["$fork"]
+    runner.deps.resolver.fetch_thread_history.assert_awaited_once_with(
+        "!target:localhost",
+        "$fork",
+        requester_id="@alice:localhost",
+    )
+
+    runner.deps.resolver.fetch_thread_history = AsyncMock(side_effect=RuntimeError("homeserver down"))
+    with pytest.raises(RuntimeError, match="homeserver down"):
+        await runner.locked.refresh_model_history(request)

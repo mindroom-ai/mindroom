@@ -29,6 +29,7 @@ from mindroom.matrix.conversation_reads import (
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
+from mindroom.matrix.thread_fork_access import authorize_cross_room_fork_hop
 from mindroom.matrix.thread_forks import is_thread_fork_root, with_fork_prefix
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import (
@@ -550,6 +551,7 @@ class ConversationResolver:
         *,
         thread_id: str | None,
         payload_metadata: DispatchPayloadMetadata | None = None,
+        requester_id: str | None = None,
     ) -> MessageContext:
         """Extract dispatch context in the thread this turn was decided to belong to.
 
@@ -561,9 +563,19 @@ class ConversationResolver:
         """
         history: ThreadHistoryResult | None = None
         if thread_id is not None:
-            snapshot = await self._dispatch_thread_snapshot(room.room_id, thread_id)
+            snapshot = await self._dispatch_thread_snapshot(
+                room.room_id,
+                thread_id,
+                requester_id=requester_id,
+                target_room=room,
+            )
             history = (
-                await self.fetch_thread_history(room.room_id, thread_id)
+                await self.fetch_thread_history(
+                    room.room_id,
+                    thread_id,
+                    requester_id=requester_id,
+                    target_room=room,
+                )
                 if is_thread_history_degraded(snapshot)
                 else snapshot
             )
@@ -598,9 +610,19 @@ class ConversationResolver:
         event: DispatchEvent,
         *,
         thread_id: str | None,
+        requester_id: str | None = None,
     ) -> MessageContext:
         """Extract strict context in a recorded thread, whatever the room's thread mode is now."""
-        history = None if thread_id is None else await self.fetch_thread_history(room.room_id, thread_id)
+        history = (
+            None
+            if thread_id is None
+            else await self.fetch_thread_history(
+                room.room_id,
+                thread_id,
+                requester_id=requester_id,
+                target_room=room,
+            )
+        )
         return await self._message_context(
             room,
             event,
@@ -628,6 +650,8 @@ class ConversationResolver:
         thread_id: str,
         *,
         mode: ThreadReadMode,
+        requester_id: str | None = None,
+        target_room: nio.MatrixRoom | None = None,
     ) -> ThreadHistoryResult:
         """Read a thread and, when it is a fork, put its parent chain's messages in front.
 
@@ -644,6 +668,15 @@ class ConversationResolver:
                 parent_id,
                 mode=mode,
             ),
+            authorize_cross_room=lambda hop: authorize_cross_room_fork_hop(
+                client=self.deps.runtime.client,
+                config=self.deps.runtime.config,
+                runtime_paths=self.deps.runtime_paths,
+                hop=hop,
+                requester_id=requester_id,
+                nonblocking=mode is ThreadReadMode.NONBLOCKING,
+                target_room=target_room,
+            ),
             logger=self.deps.logger,
         )
 
@@ -651,21 +684,39 @@ class ConversationResolver:
         self,
         room_id: str,
         thread_id: str,
+        *,
+        requester_id: str | None = None,
+        target_room: nio.MatrixRoom | None = None,
     ) -> ThreadHistoryResult:
         """Read one thread, and the parents it forks from, without waiting for the homeserver.
 
         For callers that run before a turn is accepted and must not block on
         Matrix to decide whether to look at it at all.
         """
-        return await self._with_fork_prefix(room_id, thread_id, mode=ThreadReadMode.NONBLOCKING)
+        return await self._with_fork_prefix(
+            room_id,
+            thread_id,
+            mode=ThreadReadMode.NONBLOCKING,
+            requester_id=requester_id,
+            target_room=target_room,
+        )
 
     async def fetch_thread_history(
         self,
         room_id: str,
         thread_id: str,
+        *,
+        requester_id: str | None = None,
+        target_room: nio.MatrixRoom | None = None,
     ) -> ThreadHistoryResult:
         """Fetch complete thread history, and the parents it forks from, from the conversation projection."""
-        return await self._with_fork_prefix(room_id, thread_id, mode=ThreadReadMode.STRICT)
+        return await self._with_fork_prefix(
+            room_id,
+            thread_id,
+            mode=ThreadReadMode.STRICT,
+            requester_id=requester_id,
+            target_room=target_room,
+        )
 
     async def consecutive_agent_messages(self, room_id: str, thread_id: str | None, *, limit: int) -> int:
         """Count the newest agent or team messages in one conversation, looking back at most ``limit``."""
@@ -688,11 +739,20 @@ async def read_fresh_thread_history(
     target: MessageTarget,
     *,
     strict: bool = False,
+    requester_id: str | None = None,
 ) -> ThreadHistoryResult | None:
     """Read a locked target's thread with its fork parents, or None in a room; ``strict`` refuses a degraded read."""
     if target.resolved_thread_id is None:
         return None
-    history = await resolver.fetch_thread_history(target.room_id, target.resolved_thread_id)
+    history = (
+        await resolver.fetch_thread_history(target.room_id, target.resolved_thread_id)
+        if requester_id is None
+        else await resolver.fetch_thread_history(
+            target.room_id,
+            target.resolved_thread_id,
+            requester_id=requester_id,
+        )
+    )
     if strict and is_thread_history_degraded(history):
         raise DegradedThreadHistoryError(target.resolved_thread_id)
     return history

@@ -45,7 +45,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.media import is_matrix_media_msgtype
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
-from mindroom.matrix.thread_forks import fork_parent_thread_id
+from mindroom.matrix.thread_forks import fork_parent_thread_id, fork_reference
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionRefusedError
@@ -119,6 +119,19 @@ _SCHEDULED_RUN_INTENTS = frozenset({TurnIntent.SCHEDULED_FIRE, TurnIntent.ROUTER
 _PER_RUN_MODEL_INTENTS = _SCHEDULED_RUN_INTENTS | {TurnIntent.HOOK_DISPATCH}
 
 
+def _same_room_fork_parent_thread_id(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    thread_id: str,
+    *,
+    room_id: str,
+) -> str | None:
+    """Return the parent thread ID only when ``thread_id`` is a same-room fork."""
+    reference = fork_reference(thread_history, thread_id, room_id=room_id, default_room_id=room_id)
+    if reference is None or reference.is_cross_room(room_id):
+        return None
+    return reference.thread_id
+
+
 def _apply_root_thread_model(
     deps: TurnDispatchDeps,
     turn: PreparedTurn,
@@ -163,7 +176,7 @@ def _apply_root_thread_model(
         root_timestamp_ms=timestamp_ms if root is None else root.timestamp_ms,
         model_name=choice.model,
         entity_names=names,
-        parent_thread_id=fork_parent_thread_id(thread_history, thread_id),
+        parent_thread_id=_same_room_fork_parent_thread_id(thread_history, thread_id, room_id=turn.room.room_id),
     )
 
 
@@ -176,7 +189,7 @@ def _inherit_fork_thread_models(
     """Give a fork's first turn a snapshot of its parent thread's models, before any model of the turn resolves."""
     if thread_id is None or thread_id not in turn.handled_turn.source_event_ids:
         return
-    parent_thread_id = fork_parent_thread_id(thread_history, thread_id)
+    parent_thread_id = _same_room_fork_parent_thread_id(thread_history, thread_id, room_id=turn.room.room_id)
     if parent_thread_id is None:
         return
     try:
@@ -992,6 +1005,7 @@ class TurnDispatcher:
                 context_event,
                 thread_id=target.source_thread_id,
                 payload_metadata=turn.payload,
+                requester_id=requester_user_id,
             )
             context_path = "normal" if turn.command is None else "command"
         emit_elapsed_timing(

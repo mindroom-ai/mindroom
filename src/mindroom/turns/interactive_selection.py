@@ -284,6 +284,8 @@ class InteractiveSelections:
             await self.deps.resolver.fetch_thread_history(
                 room.room_id,
                 selection.thread_id,
+                requester_id=facts.run_requester_id,
+                target_room=room,
             )
             if selection.thread_id
             else []

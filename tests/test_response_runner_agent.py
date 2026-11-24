@@ -2384,6 +2384,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_fetch_thread_history.assert_awaited_once_with(
             "!test:localhost",
             "$thread",
+            requester_id="@alice:localhost",
         )
         turn = answer.call_args.args[0]
         assert list(turn.thread_history) == fresh_history

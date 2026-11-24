@@ -476,7 +476,7 @@ async def test_read_fresh_thread_history_handles_room_mode_normal_and_strict_deg
     refreshed = await runner.locked.refresh_model_history(_plain_request(thread_target))
     assert refreshed.thread_history is degraded
     assert refreshed.requires_model_history_refresh is False
-    resolver.fetch_thread_history.assert_awaited_with("!room:localhost", "$thread")
+    resolver.fetch_thread_history.assert_awaited_with("!room:localhost", "$thread", requester_id="@user:localhost")
 
     resolver.fetch_thread_history = AsyncMock(side_effect=RuntimeError("boom"))
     fallback = await runner.locked.refresh_model_history(_plain_request(thread_target))

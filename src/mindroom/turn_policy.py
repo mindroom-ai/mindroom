@@ -42,6 +42,7 @@ from mindroom.thread_utils import (
     AgentResponseDecision,
     check_agent_mentioned,
     decide_agent_response,
+    filter_thread_agents_for_sender,
     get_agents_in_thread,
     get_all_mentioned_agents_in_thread,
     has_multiple_non_agent_users_in_thread,
@@ -173,6 +174,8 @@ class TurnPolicy:
         self,
         context: MessageContext,
         requester_user_id: str,
+        *,
+        room_id: str,
     ) -> ParticipationConfig | None:
         """Resolve this agent's participation for proven untagged multi-human context."""
         agent = self.deps.runtime.config.agents.get(self.deps.agent_name)
@@ -189,6 +192,7 @@ class TurnPolicy:
                 self.deps.runtime.config,
                 self.deps.runtime_paths,
                 current_sender_id=requester_user_id,
+                room_id=room_id,
             )
         ):
             return participation
@@ -220,7 +224,7 @@ class TurnPolicy:
         requester_user_id: str,
     ) -> ParticipationConfig | None:
         """Select an authorized existing agent for a proven multi-human thread."""
-        participation = self._adaptive_thread_participation(context, requester_user_id)
+        participation = self._adaptive_thread_participation(context, requester_user_id, room_id=room.room_id)
         if participation is None or not self._is_participating_thread_agent(context):
             return None
         candidates = self._classify_candidates(room, requester_user_id)
@@ -473,6 +477,7 @@ class TurnPolicy:
                 planning_thread_history,
                 self.deps.runtime.config,
                 self.deps.runtime_paths,
+                room_id=room.room_id,
             )
         ):
             return TeamResolution.none()
@@ -609,6 +614,7 @@ class TurnPolicy:
             runtime_paths=self.deps.runtime_paths,
             membership_index=self.deps.agent_reply_memberships,
             available_responders_in_room=available_responders,
+            room_id=room.room_id,
         ):
             self.deps.logger.info("Skipping routing: thread already requires explicit responder targeting")
             return ignore
@@ -631,6 +637,7 @@ class TurnPolicy:
         """
         is_router = self.deps.agent_name == ROUTER_AGENT_NAME
         if await self._reply_mode_awaits_mention(
+            room,
             dispatch,
             has_active_response_for_target=has_active_response_for_target,
         ):
@@ -653,6 +660,7 @@ class TurnPolicy:
 
     async def _reply_mode_awaits_mention(
         self,
+        room: nio.MatrixRoom,
         dispatch: PreparedDispatch,
         *,
         has_active_response_for_target: Callable[[MessageTarget], bool],
@@ -684,8 +692,26 @@ class TurnPolicy:
         ):
             return False
         # A thread whose history could not be read in full proves no reply, so it needs a mention too.
-        if get_agents_in_thread(context.planning_thread_history, self.deps.runtime.config, self.deps.runtime_paths):
-            return False
+        agents_in_thread = get_agents_in_thread(
+            context.planning_thread_history,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+        )
+        if agents_in_thread:
+            candidates = self._classify_candidates(room, dispatch.requester_user_id)
+            available_in_room = self._filter_materializable_responders(
+                [*candidates.allowed, *candidates.pending],
+                self._responder_availability(),
+            )
+            if filter_thread_agents_for_sender(
+                agents_in_thread,
+                dispatch.requester_user_id,
+                self.deps.runtime.config,
+                self.deps.runtime_paths,
+                self.deps.agent_reply_memberships,
+                available_responders_in_room=available_in_room,
+            ):
+                return False
         return not self._should_queue_follow_up_in_active_response_thread(
             context=context,
             target=dispatch.target,
@@ -804,6 +830,7 @@ class TurnPolicy:
         participation = self._adaptive_thread_participation(
             dispatch.context,
             dispatch.requester_user_id,
+            room_id=dispatch.target.room_id,
         )
         if participation is None:
             return None

@@ -910,7 +910,7 @@ class ResponseRunner:
             return _COMPACTION_DEFERRED
         if (epoch := await self._compaction_epoch(room, origin, source, wait=True)) is None:
             return None
-        await read_fresh_thread_history(self.deps.resolver, target, strict=True)
+        await read_fresh_thread_history(self.deps.resolver, target, strict=True, requester_id=requester)
         budget = TurnBudget(self.deps.runtime.orchestrator.budgets, requester, log_fallback=False)
         plan = resolve_manual_compaction_plan(scope, config, paths, room, thread, budget)
         if isinstance(plan, str):
