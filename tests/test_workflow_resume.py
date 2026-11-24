@@ -19,7 +19,7 @@ import pytest_asyncio
 from mindroom.approval.tool_approval import ToolApprovalDecision
 from mindroom.script_runs.models import ScriptRunState, utc_timestamp
 from mindroom.script_runs.reasons import PLUGIN_TOOLS_CHANGED, RUNTIME_RESTARTED
-from mindroom.workflow_runs import engine as engine_module
+from mindroom.workflow_runs import endings as endings_module
 from mindroom.workflow_runs.engine import SupersededAttemptError
 from mindroom.workflow_runs.limits import WorkflowLimits
 from mindroom.workflow_runs.models import DispatchHandle, NodeRequest, WorkflowNode, WorkflowNodeState, WorkflowRunState
@@ -601,7 +601,7 @@ async def test_resume_whose_script_cannot_start_fails_the_run_with_the_reason(st
 @pytest_asyncio.fixture
 async def timed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[WorkflowStack]:
     """The harness with a run that may work for one hour, and an engine that charges working time every 10 ms."""
-    monkeypatch.setattr(engine_module, "_CHARGE_SECONDS", 0.01)
+    monkeypatch.setattr(endings_module, "_CHARGE_SECONDS", 0.01)
     with workflow_stack(tmp_path) as stack:
         stack.limits = WorkflowLimits(max_runtime_hours=1)
         await stack.start(runtime_seconds_left=3600.0)
@@ -779,7 +779,7 @@ async def test_working_time_is_saved_when_the_attempt_ends(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """What the run used is saved at its end too, not only once a minute."""
-    monkeypatch.setattr(engine_module, "_CHARGE_SECONDS", 3600)
+    monkeypatch.setattr(endings_module, "_CHARGE_SECONDS", 3600)
     await timed.end_attempt(ScriptRunState.FAILED)
     await timed.resume(timed.run_id, limits=WorkflowLimits(max_runtime_hours=1))
     timed.now += 900
@@ -830,12 +830,12 @@ async def test_attempt_end_whose_writer_is_cancelled_at_its_commit_makes_the_nex
     with pytest.raises(asyncio.CancelledError):
         await timed_out
     await held.release()
-    await stack.until(lambda: old not in stack.engine._launched)
+    await stack.until(lambda: old not in stack.engine.live.launched)
 
     assert await stack.maintain() == [stack.run_id]
     assert [(await stack.submit(key, "tool", args)).cached for key, args in (("@0", _A), ("@1", _B))] == [True, True]
     assert stack.counting_tool.lines == ["a", "b"]
-    assert list(stack.engine._launched) == [stack.attempt.run_id]
+    assert list(stack.engine.live.launched) == [stack.attempt.run_id]
 
 
 @pytest.mark.asyncio

@@ -32,9 +32,7 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-    from mindroom.workflow_runs.agent_nodes import AgentRuntime
     from mindroom.workflow_runs.coordination import RunCoordinator
-    from mindroom.workflow_runs.store import WorkflowRunStore
 
 _NOT_ASKED = "The question could not be posted in the run's thread yet. Try again in a moment."
 _NOT_ANSWERED = "The run ended before the question was answered."
@@ -46,15 +44,11 @@ class RunInteractions:
 
     def __init__(
         self,
-        store: WorkflowRunStore,
         live: RunCoordinator,
         authorize: Callable[[WorkflowRun], ToolRuntimeContext | str | None],
-        agents: Callable[[], AgentRuntime | None],
     ) -> None:
-        self.store = store
         self.live = live
         self._authorize = authorize
-        self._agents = agents
 
     def poster(self, run: WorkflowRun) -> nio.AsyncClient | None:
         """Return the client of the bot that serves *run*, which posts for it, or None while the run may not act."""
@@ -93,23 +87,23 @@ class RunInteractions:
 
         def live_tree(run_id: str) -> list[str]:
             try:
-                run = self.store.get_run(run_id)
+                run = self.live.store.get_run(run_id)
             except WorkflowRunNotFoundError:
                 return []
             if run.state in TERMINAL_RUN_STATES:
                 return []
             ids = [run_id]
-            for child in self.store.child_runs(run_id):
+            for child in self.live.store.child_runs(run_id):
                 ids.extend(live_tree(child.run_id))
             return ids
 
         for run_id in await asyncio.to_thread(live_tree, root):
             async with self.live.condition(run_id):
                 with suppress(WorkflowRunNotFoundError):
-                    run = self.store.get_run(run_id)
+                    run = self.live.store.get_run(run_id)
                     if run.state in TERMINAL_RUN_STATES:
                         continue
-                    for node in await asyncio.to_thread(self.store.unposted_questions, run_id):
+                    for node in await asyncio.to_thread(self.live.store.unposted_questions, run_id):
                         with suppress(ScriptRuntimeUnavailableError, SupersededAttemptError):
                             await self.asked(run, node, run.epoch)
 
@@ -128,8 +122,8 @@ class RunInteractions:
         condition = self.live.condition(run_id)
         while True:
             async with condition:
-                cur = await asyncio.to_thread(self.store.get_node, run_id, ask_key)
-                run = await asyncio.to_thread(self.store.get_run, run_id)
+                cur = await asyncio.to_thread(self.live.store.get_node, run_id, ask_key)
+                run = await asyncio.to_thread(self.live.store.get_run, run_id)
                 ended = run_id in self.live.stopping or run.state in TERMINAL_RUN_STATES
                 if cur is None or cur.state is WorkflowNodeState.CANCELLED or ended:
                     raise WorkflowRunStoreError(_NOT_ANSWERED)
@@ -158,7 +152,7 @@ class RunInteractions:
         req: dict[str, object] = {"question": question, "options": options}
         condition, cancelled = self.live.condition(run_id), False
         async with condition:
-            run, saved = self.store.get_run(run_id), self.store.get_node(run_id, ask_key)
+            run, saved = self.live.store.get_run(run_id), self.live.store.get_node(run_id, ask_key)
             if saved is not None and saved.state in (WorkflowNodeState.COMPLETED, WorkflowNodeState.WAITING):
                 if saved.attempt != run.attempt or saved.stale:
                     await self.live.stamp(saved, run.epoch, ignore=True, attempt=run.attempt, stale=False)
@@ -183,13 +177,13 @@ class RunInteractions:
                     phase=parent.phase,
                     started_at=utc_timestamp(),
                 )
-                ask_node = await asyncio.to_thread(self.store.put_node, ask_node, run.epoch, dirty_after=False)
+                ask_node = await asyncio.to_thread(self.live.store.put_node, ask_node, run.epoch, dirty_after=False)
             if ask_node.state is WorkflowNodeState.COMPLETED:
                 return str(ask_node.result)
             self.live.drop_slot(run_id, parent.key)
             await self.live.restate(run_id)
             condition.notify_all()
-        runtime, job_id = self._agents(), parent.links.get("job_id")
+        runtime, job_id = self.live.agents(), parent.links.get("job_id")
         wait_job = (
             (runtime.jobs, job_id)
             if runtime is not None and isinstance(job_id, str) and runtime.jobs.retained_job(job_id)
@@ -219,7 +213,7 @@ class RunInteractions:
         runs: the next attempt reads it back and does not ask again.
         """
         async with (condition := self.live.condition(run_id)):
-            run, node = self.store.get_run(run_id), self.store.get_node(run_id, key)
+            run, node = self.live.store.get_run(run_id), self.live.store.get_node(run_id, key)
             waits = node is not None and (node.state, node.waiting_on) == (WorkflowNodeState.WAITING, "user")
             # An answer is an act of the run, to a card somebody was shown: both are checked as they are now.
             context = self._authorize(run)
@@ -236,7 +230,7 @@ class RunInteractions:
 
     async def peer_send(self, run_id: str, *, op_id: str, sender: NodeRef, to: str, text: str) -> dict[str, object]:
         """Send one peer message in a single transaction and wake any waiters of *run_id*."""
-        send_call = partial(send_peer_message, self.store, run_id, op_id=op_id, sender=sender)
+        send_call = partial(send_peer_message, self.live.store, run_id, op_id=op_id, sender=sender)
         result = await asyncio.to_thread(send_call, to=to, text=text)
         async with (condition := self.live.condition(run_id)):
             condition.notify_all()
@@ -255,21 +249,21 @@ class RunInteractions:
         if isinstance(wait_seconds, bool) or not math.isfinite(wait_seconds) or wait_seconds < 0:
             msg = "wait_seconds must be a finite non-negative number."
             raise WorkflowRunStoreError(msg)
-        read_fn = partial(read_call, self.store, run_id, op_id=op_id, reader=reader, names=names)
+        read_fn = partial(read_call, self.live.store, run_id, op_id=op_id, reader=reader, names=names)
         condition, deadline, cancelled = self.live.condition(run_id), self.live.clock() + wait_seconds, False
         async with condition:
             if (found := await asyncio.to_thread(read_fn, record_empty=wait_seconds <= 0)) is not None:
                 return found
             if self.live.run_ended(run_id):
                 return {"messages": []}
-            node = self.store.get_node(run_id, reader.key)
+            node = self.live.store.get_node(run_id, reader.key)
             same = node if node is not None and node.generation == reader.generation else None
 
             async def stamp_state(state: WorkflowNodeState, waiting_on: str | None = None) -> None:
                 if same is None:
                     return
                 with suppress(WorkflowRunNotFoundError):
-                    if (cur := self.store.get_run(run_id)).state not in TERMINAL_RUN_STATES:
+                    if (cur := self.live.store.get_run(run_id)).state not in TERMINAL_RUN_STATES:
                         await self.live.stamp(same, cur.epoch, ignore=True, state=state, waiting_on=waiting_on)
 
             await stamp_state(WorkflowNodeState.WAITING, "peer")
@@ -315,7 +309,7 @@ class RunInteractions:
         """Wait for a script's `inbox()` message call and settle its node when mail arrives or the deadline expires."""
         reader = NodeRef("script", 1, "script")
         op_id = f"{node.key}:{node.generation}"
-        read_fn = partial(read_call, self.store, run.run_id, op_id=op_id, reader=reader, names=("script",))
+        read_fn = partial(read_call, self.live.store, run.run_id, op_id=op_id, reader=reader, names=("script",))
         condition, deadline = self.live.condition(run.run_id), self.live.clock() + wait_seconds
         async with condition:
             outcome = await self._await_peer_mail(condition, run.run_id, read_fn, wait_seconds, deadline)

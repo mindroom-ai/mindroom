@@ -2553,7 +2553,12 @@ expose = [
     "CALLING_NODE",
     "DIRTY_DIGEST",
     "INTERRUPTED",
+    "NO_AGENTS",
+    "OUT_OF_TIME",
+    "OWNER_NOT_READY",
     "Outcome",
+    "RUN_ENDED",
+    "TIMED_PREFIX",
     "call_outcome",
     "calling_node",
     "changed",
@@ -2563,6 +2568,7 @@ expose = [
     "nested_key",
     "node_digest",
     "parent_group",
+    "receipt",
     "result_digest",
     "split_key",
     "unless_proven",
@@ -2647,6 +2653,7 @@ expose = [
     "first_prompt",
     "load_follow_up_child",
     "launch_child",
+    "works",
 ]
 
 [[modules]]
@@ -2712,7 +2719,6 @@ expose = [
     "ADMISSIONS",
     "Places",
     "RunCoordinator",
-    "receipt",
     "wait_for_change",
 ]
 
@@ -2736,9 +2742,7 @@ expose = ["RunInteractions"]
 [[modules]]
 path = "mindroom.workflow_runs.agent_dispatch"
 depends_on = [
-    "mindroom.tool_jobs.runtime",
     "mindroom.workflow_runs.agent_nodes",
-    "mindroom.workflow_runs.coordination",
     "mindroom.workflow_runs.limits",
     "mindroom.workflow_runs.models",
     "mindroom.workflow_runs.replay",
@@ -2748,20 +2752,12 @@ depends_on = [
 
 [[interfaces]]
 from = ["mindroom.workflow_runs.agent_dispatch"]
-expose = [
-    "NO_AGENTS",
-    "OWNER_NOT_READY",
-    "RUN_ENDED",
-    "TIMED_PREFIX",
-    "AgentDispatcher",
-    "works",
-]
+expose = ["AgentDispatcher"]
 
 [[modules]]
 path = "mindroom.workflow_runs.dispatch"
 depends_on = [
-    "mindroom.workflow_runs.agent_dispatch",
-    "mindroom.workflow_runs.coordination",
+    "mindroom.workflow_runs.agent_nodes",
     "mindroom.workflow_runs.faults",
     "mindroom.workflow_runs.models",
     "mindroom.workflow_runs.replay",
@@ -2775,8 +2771,9 @@ expose = ["NodeDispatcher"]
 [[modules]]
 path = "mindroom.workflow_runs.endings"
 depends_on = [
-    "mindroom.workflow_runs.agent_dispatch",
+    "mindroom.workflow_runs.agent_nodes",
     "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.replay",
     "mindroom.workflow_runs.store",
 ]
 
@@ -2791,7 +2788,6 @@ expose = [
 path = "mindroom.workflow_runs.script_calls"
 depends_on = [
     "mindroom.delegation.state",
-    "mindroom.workflow_runs.agent_dispatch",
     "mindroom.workflow_runs.agent_nodes",
     "mindroom.workflow_runs.coordination",
     "mindroom.workflow_runs.graph",
@@ -2819,6 +2815,7 @@ depends_on = [
     "mindroom.workflow_runs.limits",
     "mindroom.workflow_runs.models",
     "mindroom.workflow_runs.recovery",
+    "mindroom.workflow_runs.replay",
     "mindroom.workflow_runs.script_calls",
     "mindroom.workflow_runs.store",
 ]
@@ -9961,7 +9958,6 @@ visibility = [
     # A secret request waits on its card as an approval does, so a Stop cancels its job.
     "mindroom.secret_request_cards",
     "mindroom.orchestration.workflow_runtime",
-    "mindroom.workflow_runs.agent_dispatch",
     "mindroom.workflow_runs.agent_nodes",
 ]
 

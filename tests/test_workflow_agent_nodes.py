@@ -1371,7 +1371,7 @@ async def test_run_whose_agent_waits_for_a_person_is_running_while_a_tool_of_it_
     gated.child_script(calls(tool_call("append", "c1", line="a")), answer("sent"))
     await gated.submit("@0", "agent", _PROMPT)
     await gated.until(lambda: gated.store.get_run(gated.run_id).state is WorkflowRunState.WAITING)
-    release, broker = asyncio.Event(), type(gated.engine.broker)
+    release, broker = asyncio.Event(), type(gated.engine.dispatch.broker)
     execute = broker.execute_for_workflow
 
     async def held(*args: Any, **options: Any) -> object:  # noqa: ANN401

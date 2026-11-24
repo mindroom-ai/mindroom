@@ -14,13 +14,12 @@ from typing import TYPE_CHECKING, Any, cast
 from mindroom.delegation.state import RUN_SUBAGENT, SubagentPersona
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
 from mindroom.script_runs.models import ScriptToolGrant, utc_timestamp
-from mindroom.workflow_runs.agent_dispatch import OWNER_NOT_READY
 from mindroom.workflow_runs.agent_nodes import (
     delegated_request,
     load_follow_up_child,
     schema_failure,
 )
-from mindroom.workflow_runs.coordination import ADMISSIONS, receipt, wait_for_change
+from mindroom.workflow_runs.coordination import ADMISSIONS, wait_for_change
 from mindroom.workflow_runs.graph import node_label
 from mindroom.workflow_runs.limits import fits_ceiling
 from mindroom.workflow_runs.models import (
@@ -37,8 +36,10 @@ from mindroom.workflow_runs.peers import (
 )
 from mindroom.workflow_runs.replay import (
     DIRTY_DIGEST,
+    OWNER_NOT_READY,
     decide,
     node_digest,
+    receipt,
     result_digest,
     split_key,
 )
@@ -49,7 +50,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping
 
     from mindroom.delegation.state import DelegationChild
-    from mindroom.script_runs.manager import ScriptRunManager
     from mindroom.script_runs.models import ScriptRunRecord
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.workflow_runs.agent_dispatch import AgentDispatcher
@@ -58,7 +58,6 @@ if TYPE_CHECKING:
     from mindroom.workflow_runs.dispatch import NodeDispatcher
     from mindroom.workflow_runs.interactions import RunInteractions
     from mindroom.workflow_runs.models import NodeReceipt, NodeRequest
-    from mindroom.workflow_runs.store import WorkflowRunStore
 
 _CHANGED_WITHOUT_EDIT = (
     "Call n{seq} changed between attempts without a script edit. It probably contains the time or a random value; "
@@ -127,27 +126,19 @@ class ScriptCalls:
 
     def __init__(
         self,
-        store: WorkflowRunStore,
-        scripts: ScriptRunManager,
         live: RunCoordinator,
         ask: RunInteractions,
         agent_dispatch: AgentDispatcher,
         dispatch: NodeDispatcher,
         *,
-        launched: dict[str, int],
         authorize: Callable[..., ToolRuntimeContext | str | None],
-        agents: Callable[[], AgentRuntime | None],
         observe_exit: Callable[[str, str], Coroutine[None, None, None]],
     ) -> None:
-        self.store = store
-        self.scripts = scripts
         self.live = live
         self.ask = ask
         self.agent_dispatch = agent_dispatch
         self.dispatch = dispatch
-        self._launched = launched
         self._authorize = authorize
-        self._agents = agents
         self._observe_exit = observe_exit
 
     async def run_info(self, attempt: ScriptRunRecord) -> dict[str, object]:
@@ -167,7 +158,7 @@ class ScriptCalls:
             except ValueError as exc:
                 raise WorkflowRunStoreError(str(exc)) from exc
             path = f"{WORKFLOWS_DIR}/{name}.py"
-        return await self.scripts.resolve_source(
+        return await self.live.scripts.resolve_source(
             context,
             source=source,
             path=path,
@@ -181,7 +172,7 @@ class ScriptCalls:
             validate_workflow_name(name)
         except ValueError as exc:
             raise WorkflowRunStoreError(str(exc)) from exc
-        if (existing := await asyncio.to_thread(self.store.get_source, run.run_id, run.attempt, name)) is not None:
+        if (existing := await asyncio.to_thread(self.live.store.get_source, run.run_id, run.attempt, name)) is not None:
             return existing
         context = self._authorize(run)
         if context is None:
@@ -197,7 +188,15 @@ class ScriptCalls:
                 raise LookupError(msg) from exc
             raise WorkflowRunStoreError(str(exc)) from exc
         sha256 = hashlib.sha256(raw).hexdigest()
-        return await asyncio.to_thread(self.store.put_source, run.run_id, run.attempt, run.epoch, name, raw, sha256)
+        return await asyncio.to_thread(
+            self.live.store.put_source,
+            run.run_id,
+            run.attempt,
+            run.epoch,
+            name,
+            raw,
+            sha256,
+        )
 
     async def submit_node(self, attempt: ScriptRunRecord, request: NodeRequest) -> NodeReceipt:
         """Save and dispatch one call of the attempt's script, or return the receipt of the node its key has."""
@@ -209,7 +208,7 @@ class ScriptCalls:
         # Held from the lookup to the dispatch: two requests with one key cannot both find it free, and the run
         # cannot end in between.
         async with (condition := self.live.condition(asked.run_id)):
-            result = await self._admit_gated(self.store.get_run(asked.run_id), asked.epoch, attempt, request)
+            result = await self._admit_gated(self.live.store.get_run(asked.run_id), asked.epoch, attempt, request)
             condition.notify_all()
             return result
 
@@ -243,7 +242,7 @@ class ScriptCalls:
         members: tuple[str, ...] | None,
     ) -> tuple[WorkflowNode | None, WorkflowNode | None, NodeReceipt | None]:
         """Apply the replay rules to any saved row at `request.key`; return `(saved, previous, reused_receipt)`."""
-        saved = self.store.get_node(run.run_id, request.key)
+        saved = self.live.store.get_node(run.run_id, request.key)
         if saved is None:
             return None, None, None
         if saved.attempt == run.attempt and not saved.stale:
@@ -251,7 +250,7 @@ class ScriptCalls:
         live, handle = False, None
         if saved.state in LIVE_NODE_STATES:
             live, handle = await self.dispatch.reconcile(run, saved, epoch), saved.handle
-            saved = cast("WorkflowNode", self.store.get_node(run.run_id, request.key))
+            saved = cast("WorkflowNode", self.live.store.get_node(run.run_id, request.key))
         cached = request.meta.get("cached") is not False
         action = decide(saved, digest, cached=cached)
         if action != "run":
@@ -259,7 +258,7 @@ class ScriptCalls:
         if live and saved.kind == "ask":
             await self.ask.close_card(run, saved, "cancelled")
         if live and handle is not None:
-            await cast("AgentRuntime", self._agents()).jobs.request_cancel(handle.ref)
+            await cast("AgentRuntime", self.live.agents()).jobs.request_cancel(handle.ref)
             raise ScriptRuntimeUnavailableError(_STOPPING)
         marked = saved.digest in ("", DIRTY_DIGEST)
         previous = saved if saved.state is WorkflowNodeState.COMPLETED and not marked else None
@@ -272,7 +271,7 @@ class ScriptCalls:
             and run.source_digest == run.previous_source_digest
         ):
             msg = _CHANGED_WITHOUT_EDIT.format(seq=previous.seq)
-            await asyncio.to_thread(self.store.append_log, run.run_id, epoch, msg)
+            await asyncio.to_thread(self.live.store.append_log, run.run_id, epoch, msg)
         return saved, previous, None
 
     async def _reuse_saved(
@@ -345,9 +344,9 @@ class ScriptCalls:
         )
         if (error := self._new_call_error(run, node, grant, delegated, turn_ctx)) is not None:
             failed = replace(node, state=WorkflowNodeState.FAILED, error=error, ended_at=node.started_at)
-            return receipt(await asyncio.to_thread(self.store.put_node, failed, epoch, dirty_after=True))
+            return receipt(await asyncio.to_thread(self.live.store.put_node, failed, epoch, dirty_after=True))
         if saved is not None and shown in ("agent", "turn", "send"):
-            await asyncio.to_thread(withdraw_unread, self.store, run.run_id, key, saved.generation)
+            await asyncio.to_thread(withdraw_unread, self.live.store, run.run_id, key, saved.generation)
         if shown in ("agent", "turn"):
             if grant is not None:
                 return await self.dispatch.ask_gate(run, attempt, node, (grant, arguments))
@@ -355,7 +354,7 @@ class ScriptCalls:
             if turn_ctx is not None:
                 mail = partial(
                     session_turn_message,
-                    self.store,
+                    self.live.store,
                     run.run_id,
                     turn_ctx.session,
                     key,
@@ -370,7 +369,7 @@ class ScriptCalls:
         if grant is not None:
             cached = meta.get("cached") is not False
             same_as = (
-                result_digest(await asyncio.to_thread(self.store.whole_result, previous))
+                result_digest(await asyncio.to_thread(self.live.store.whole_result, previous))
                 if previous is not None and not cached
                 else None
             )
@@ -396,20 +395,20 @@ class ScriptCalls:
                 waiting_on=None if over else "user",
                 ended_at=None,
             )
-            ask_node = await asyncio.to_thread(self.store.put_node, ask_node, epoch, dirty_after=True)
+            ask_node = await asyncio.to_thread(self.live.store.put_node, ask_node, epoch, dirty_after=True)
             if ask_node.state is WorkflowNodeState.WAITING:
                 await self.live.restate(run.run_id)
             return receipt(await self.ask.asked(run, ask_node, epoch))
         if kind in ("send", "inbox", "state"):
             try:
-                call = partial(script_op, self.store, run.run_id, node.key, node.generation, kind, request.args)
+                call = partial(script_op, self.live.store, run.run_id, node.key, node.generation, kind, request.args)
                 done, value = await asyncio.to_thread(call)
             except WorkflowRunStoreError as exc:
                 node = replace(node, state=WorkflowNodeState.FAILED, error={"kind": "failed", "message": str(exc)})
             else:
                 if not done:
                     waiting = replace(node, state=WorkflowNodeState.WAITING, waiting_on="peer", ended_at=None)
-                    wait_node = await asyncio.to_thread(self.store.put_node, waiting, epoch, dirty_after=True)
+                    wait_node = await asyncio.to_thread(self.live.store.put_node, waiting, epoch, dirty_after=True)
                     self.live.spawn(run.run_id, self.ask.wait_inbox(run, wait_node, epoch, float(value)))
                     return receipt(wait_node)
                 node = replace(node, result=value)
@@ -422,7 +421,7 @@ class ScriptCalls:
             msg = f"This MindRoom cannot run a '{kind}' call in a workflow yet."
             raise WorkflowRunStoreError(msg)
         done_node = replace(node, ended_at=node.started_at)
-        return receipt(await asyncio.to_thread(self.store.put_node, done_node, epoch, dirty_after=True))
+        return receipt(await asyncio.to_thread(self.live.store.put_node, done_node, epoch, dirty_after=True))
 
     def _new_call_error(
         self,
@@ -456,7 +455,7 @@ class ScriptCalls:
     def _turn_context(self, run: WorkflowRun, key: str, args: dict[str, object]) -> _TurnContext:
         """Resolve a `turn` call's session, its earlier turns in this attempt, and its lineage-hashed digest."""
         session_key, turn_num = args.get("session"), args.get("turn")
-        session = self.store.get_node(run.run_id, session_key) if isinstance(session_key, str) else None
+        session = self.live.store.get_node(run.run_id, session_key) if isinstance(session_key, str) else None
         if session is None or session.kind != "session":
             msg = f"Unknown session '{session_key}'."
             raise WorkflowRunStoreError(msg)
@@ -465,7 +464,7 @@ class ScriptCalls:
             raise WorkflowRunStoreError(msg)
         in_attempt = [
             turn
-            for turn in self.store.session_turns(run.run_id, session.key)
+            for turn in self.live.store.session_turns(run.run_id, session.key)
             if turn.attempt == run.attempt and not turn.stale
         ]
         earlier = sorted(
@@ -518,7 +517,7 @@ class ScriptCalls:
             (
                 str(turn.request.get("effective_message") or turn.request["message"]),
                 res
-                if isinstance(res := await asyncio.to_thread(self.store.whole_result, turn), str)
+                if isinstance(res := await asyncio.to_thread(self.live.store.whole_result, turn), str)
                 else json.dumps(res),
             )
             for turn in completed
@@ -556,7 +555,7 @@ class ScriptCalls:
     async def append_log(self, attempt: ScriptRunRecord, text: str) -> None:
         """Add one progress line to the attempt's run."""
         run = await self._current_run(attempt)
-        await asyncio.to_thread(self.store.append_log, run.run_id, run.epoch, text)
+        await asyncio.to_thread(self.live.store.append_log, run.run_id, run.epoch, text)
 
     async def finish(self, attempt: ScriptRunRecord, *, result: object, error: str | None) -> None:
         """Store what the script's `main` returned or raised; the run ends when the attempt's process has.
@@ -565,7 +564,7 @@ class ScriptCalls:
         script did not reach, takes nothing from the report of the attempt the run serves.
         """
         run = await self._current_run(attempt)
-        report = partial(self.store.update_run, run.run_id, run.epoch, when=SERVED_RUN_STATES)
+        report = partial(self.live.store.update_run, run.run_id, run.epoch, when=SERVED_RUN_STATES)
         await asyncio.to_thread(report, result=result, error=error, finished_at=utc_timestamp())
         self.live.spawn(run.run_id, self._observe_exit(run.run_id, attempt.run_id))
 
@@ -575,15 +574,15 @@ class ScriptCalls:
             msg = f"{attempt.run_id} is not a workflow attempt."
             raise LookupError(msg)
         async with self.live.condition(attempt.workflow_run_id):
-            run = self.store.get_run(attempt.workflow_run_id)
-        if run.epoch != self._launched.get(attempt.run_id):
+            run = self.live.store.get_run(attempt.workflow_run_id)
+        if run.epoch != self.live.launched.get(attempt.run_id):
             msg = f"Attempt {attempt.run_id} is no longer the attempt of {run.run_id}."
             raise SupersededAttemptError(msg)
         return run
 
     def node_by_id(self, run_id: str, node_id: str) -> WorkflowNode:
         """Return the saved node *node_id* of *run_id*, raising `LookupError` when missing."""
-        node = self.store.node_by_id(run_id, node_id)
+        node = self.live.store.node_by_id(run_id, node_id)
         if node is None:
             msg = f"Run {run_id} has no call {node_id}."
             raise LookupError(msg)

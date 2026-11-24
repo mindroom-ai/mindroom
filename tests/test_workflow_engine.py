@@ -340,8 +340,8 @@ async def test_engine_remembers_an_attempt_only_until_it_has_ended(stack: Workfl
     await stack.end_attempt(ScriptRunState.FAILED)
     await stack.resume(stack.run_id)
 
-    assert first not in stack.engine._launched
-    assert list(stack.engine._launched) == [stack.attempt.run_id]
+    assert first not in stack.engine.live.launched
+    assert list(stack.engine.live.launched) == [stack.attempt.run_id]
 
 
 @pytest.mark.asyncio
@@ -359,7 +359,7 @@ async def test_request_that_was_let_in_before_its_attempt_was_replaced_gets_no_r
     with pytest.raises(SupersededAttemptError):
         await stack.engine.calls._admit(let_in, old, NodeRequest("@0", "tool", _APPEND, {}))
     # And the engine keeps nothing for the attempt that the run left behind.
-    assert list(stack.engine._launched) == [stack.attempt.run_id]
+    assert list(stack.engine.live.launched) == [stack.attempt.run_id]
 
 
 @pytest.mark.asyncio

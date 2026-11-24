@@ -16,8 +16,7 @@ from mindroom.script_runs.store import (
     ScriptRunNotFoundError,
     ScriptRunStoreError,
 )
-from mindroom.workflow_runs.agent_dispatch import NO_AGENTS, RUN_ENDED, works
-from mindroom.workflow_runs.coordination import receipt
+from mindroom.workflow_runs.agent_nodes import works
 from mindroom.workflow_runs.faults import hold
 from mindroom.workflow_runs.models import (
     DispatchHandle,
@@ -29,11 +28,14 @@ from mindroom.workflow_runs.models import (
 from mindroom.workflow_runs.replay import (
     CALLING_NODE,
     INTERRUPTED,
+    NO_AGENTS,
+    RUN_ENDED,
     Outcome,
     call_outcome,
     changed,
     indeterminate,
     nested_key,
+    receipt,
     unless_proven,
 )
 from mindroom.workflow_runs.store import SupersededAttemptError
@@ -42,13 +44,10 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from mindroom.script_runs.broker import ScriptToolBroker
-    from mindroom.script_runs.manager import ScriptRunManager
     from mindroom.script_runs.models import ScriptRunRecord, ScriptToolGrant
     from mindroom.workflow_runs.agent_dispatch import AgentDispatcher
-    from mindroom.workflow_runs.agent_nodes import AgentRuntime
     from mindroom.workflow_runs.coordination import RunCoordinator
     from mindroom.workflow_runs.models import NodeReceipt
-    from mindroom.workflow_runs.store import WorkflowRunStore
 
 _NOT_CONTINUED_YET = "The agent of this call has not been continued yet after a restart. Try again in a moment."
 _NOT_ANSWERED = "The run ended before the question was answered."
@@ -65,22 +64,16 @@ class NodeDispatcher:
 
     def __init__(
         self,
-        store: WorkflowRunStore,
-        scripts: ScriptRunManager,
-        broker: ScriptToolBroker,
         live: RunCoordinator,
+        broker: ScriptToolBroker,
         agent_dispatch: AgentDispatcher,
         *,
-        agents: Callable[[], AgentRuntime | None],
         close_card: Callable[..., Awaitable[None]],
         cancel: Callable[..., Awaitable[WorkflowRun]],
     ) -> None:
-        self.store = store
-        self.scripts = scripts
-        self.broker = broker
         self.live = live
+        self.broker = broker
         self.agent_dispatch = agent_dispatch
-        self._agents = agents
         self._close_card = close_card
         self._cancel = cancel
 
@@ -97,7 +90,7 @@ class NodeDispatcher:
         restart or a stop meanwhile finds a call that never ran. The caller holds the run's lock.
         """
         queued = replace(node, state=WorkflowNodeState.QUEUED)
-        node = await asyncio.to_thread(self.store.put_node, queued, run.epoch, dirty_after=True)
+        node = await asyncio.to_thread(self.live.store.put_node, queued, run.epoch, dirty_after=True)
         if not await self.live.check_budget(run):
             gate = partial(self._broker_outcome, attempt, node, run.epoch, tool_call, gate_only=True)
             self.live.spawn(run.run_id, self.start_gated(run, node, gate))
@@ -112,7 +105,7 @@ class NodeDispatcher:
         """Start the agent of a call the broker let pass, in its turn among the run's calls; a refusal is its end."""
         outcome = await gate()
         async with self.live.condition(run.run_id):
-            now = await asyncio.to_thread(self.store.get_run, run.run_id)
+            now = await asyncio.to_thread(self.live.store.get_run, run.run_id)
             if now.epoch != run.epoch or run.run_id in self.live.stopping:
                 # The run ended while the gate was open: its end settled the call, and nothing of it starts now.
                 return
@@ -146,7 +139,7 @@ class NodeDispatcher:
         # Saved before the dispatch, so a crash after the tool ran reads the broker's receipt for this call.
         handle = DispatchHandle("broker", f"{attempt.run_id}:{call_id}", dispatched=False, same_as=same_as)
         node = replace(node, state=WorkflowNodeState.RUNNING, handle=handle)
-        saved = await asyncio.to_thread(self.store.save_dispatched, node, run.epoch, dirty_after=same_as is None)
+        saved = await asyncio.to_thread(self.live.store.save_dispatched, node, run.epoch, dirty_after=same_as is None)
         if saved is None:
             # The node that waited for its place has an end by now: its run ended.
             raise SupersededAttemptError(RUN_ENDED)
@@ -217,11 +210,11 @@ class NodeDispatcher:
         assert node.handle is not None
         script_run_id, _, call_id = node.handle.ref.partition(":")
         try:
-            outcome = call_outcome(node, self.scripts.store.get_call(script_run_id, call_id))
+            outcome = call_outcome(node, self.live.scripts.store.get_call(script_run_id, call_id))
         except ScriptCallNotFoundError:
             # No claim proves the call never started only while the attempt's records are still there to hold one.
             try:
-                self.scripts.store.get_run(script_run_id)
+                self.live.scripts.store.get_run(script_run_id)
                 started = False
             except ScriptRunNotFoundError:
                 started = None
@@ -232,7 +225,7 @@ class NodeDispatcher:
         if outcome[0] is WorkflowNodeState.COMPLETED and (interrupted := self._nested_interrupted(node)) is not None:
             outcome = interrupted
         state, result, error = outcome
-        settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
+        settle = partial(self.live.store.settle_node, node.run_id, node.key, node.generation, epoch)
         settle(state=state, result=result, error=error, dirty_after=changed(node, outcome))
         return state
 
@@ -270,7 +263,7 @@ class NodeDispatcher:
         if node.handle.kind != "job":
             await asyncio.to_thread(self.settle_from_handle, node, epoch)
             return False
-        runtime, job_id = self._agents(), node.handle.ref
+        runtime, job_id = self.live.agents(), node.handle.ref
         if runtime is None and not stop:
             # Nobody can say how the job stands: the script's SDK asks again.
             raise ScriptRuntimeUnavailableError(NO_AGENTS)
@@ -289,7 +282,7 @@ class NodeDispatcher:
         try:
             await self.agent_dispatch.settle_agent(run, node, epoch, block=False)
             if not stop:
-                await self.live.check_budget(self.store.get_run(run.run_id))
+                await self.live.check_budget(self.live.store.get_run(run.run_id))
         except ScriptRuntimeUnavailableError:
             if not stop:
                 # The lock is not held while access resolves: the script's SDK asks again, and a Stop gets in.
@@ -305,7 +298,7 @@ class NodeDispatcher:
         """Return a non-completed outcome when this generation's nested run ended interrupted."""
         if (node.request.get("toolkit"), node.request.get("function")) != ("workflow", "start_workflow"):
             return None
-        for child in self.store.child_runs(node.run_id):
+        for child in self.live.store.child_runs(node.run_id):
             if child.parent_node_key != node.key or child.state is not WorkflowRunState.INTERRUPTED:
                 continue
             expected = nested_key((node.run_id, node.key, node.generation), child.source.encode(), child.args)

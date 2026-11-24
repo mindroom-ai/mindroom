@@ -83,7 +83,7 @@ async def _authenticated(
     if engine is None:
         raise HTTPException(status_code=503, detail="Workflow gateway is unavailable.")
     try:
-        return engine, await asyncio.to_thread(engine.broker.authenticate, script_run_id, authorization)
+        return engine, await asyncio.to_thread(engine.dispatch.broker.authenticate, script_run_id, authorization)
     except WorkflowAttemptRevokedError as exc:
         # The process proved it is an attempt of ours, and a revoked one is told to exit as a replaced one is.
         raise HTTPException(status_code=409, detail="superseded") from exc

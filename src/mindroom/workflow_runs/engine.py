@@ -23,10 +23,7 @@ from mindroom.script_runs.models import (
     utc_timestamp,
 )
 from mindroom.script_runs.store import ScriptRunNotFoundError
-from mindroom.workflow_runs.agent_dispatch import (
-    OWNER_NOT_READY,
-    AgentDispatcher,
-)
+from mindroom.workflow_runs.agent_dispatch import AgentDispatcher
 from mindroom.workflow_runs.coordination import ADMISSIONS, RunCoordinator, wait_for_change
 from mindroom.workflow_runs.dispatch import NodeDispatcher
 from mindroom.workflow_runs.endings import RunEndings, run_outcome
@@ -48,6 +45,7 @@ from mindroom.workflow_runs.models import (
     WorkflowRunState,
 )
 from mindroom.workflow_runs.recovery import AUTO_RESUME_REASONS, NO_ACCESS
+from mindroom.workflow_runs.replay import OUT_OF_TIME, OWNER_NOT_READY
 from mindroom.workflow_runs.script_calls import ScriptCalls
 from mindroom.workflow_runs.store import SupersededAttemptError, WorkflowRunNotFoundError, WorkflowRunStoreError
 
@@ -70,11 +68,6 @@ _TAKEN = "Run {} was resumed by another call."
 _IDLE = "Stopped resuming after {attempts} attempts that finished nothing. Fix the script and call resume_workflow."
 # How many attempts in a row an interrupted run is given on its own while none of them finishes a call.
 _MAX_IDLE_RESUMES = 5
-_OUT_OF_TIME = "The run used its {hours:g} hours of working time. resume_workflow continues it."
-# How often a running run's working time is saved, so a primary that dies loses at most this much of the count.
-_CHARGE_SECONDS = 60.0
-# How long after its report a script's exit is looked for, before the script runtime's own pass finds it.
-_EXIT_POLL_SECONDS = (0.05, 0.2, 0.5, 1.0, 2.0, 5.0)
 
 
 # What the saved owner of a run has now in the run's conversation: its live context once access is confirmed,
@@ -94,17 +87,13 @@ class WorkflowEngine:
     ) -> None:
         self.store = store
         self.scripts = scripts
-        self.broker = broker
         self.live = RunCoordinator(store, scripts, clock, self.cancel_as_task)
-        self.ask = RunInteractions(store, self.live, self.authorize, lambda: self.agents())
-        self.agent_dispatch = AgentDispatcher(store, self.live, self.authorize, lambda: self.agents())
+        self.ask = RunInteractions(self.live, self.authorize)
+        self.agent_dispatch = AgentDispatcher(self.live, self.authorize)
         self.dispatch = NodeDispatcher(
-            store,
-            scripts,
-            broker,
             self.live,
+            broker,
             self.agent_dispatch,
-            agents=lambda: self.agents(),
             close_card=self.ask.close_card,
             cancel=lambda *a, **kw: self.cancel(*a, **kw),
         )
@@ -114,39 +103,34 @@ class WorkflowEngine:
         self.owner_limits: Callable[[ToolRuntimeContext, str], WorkflowLimits] = lambda _context, _agent: (
             WorkflowLimits()
         )
-        # What agent turns run on, None while there is no job runtime; set by the runtime that knows it.
-        self.agents: Callable[[], AgentRuntime | None] = lambda: None
         # The bot that serves a run, which posts its cards and acts on the events people send to them: its agent's,
         # or the bot its agent answers through. None while that bot is not running; set by the same runtime.
         self.served_by: Callable[[WorkflowRun], str | None] = lambda run: run.agent_name
-        # The attempts this engine started, each with the epoch its run got when it began: all it may ever write
-        # with. No other attempt is served: one an earlier primary left is a leftover process.
-        self._launched: dict[str, int] = {}
-        # The runs whose wait for an attempt was logged as refused, so the tries that follow say nothing.
-        self._refused: set[str] = set()
         self._attending: Counter[str | None] = Counter()
         self._inline_runs: dict[str, str] = {}
         self.endings = RunEndings(
-            store,
             self.live,
             self.dispatch,
-            launched=self._launched,
-            refused=self._refused,
-            agents=lambda: self.agents(),
             cancel=lambda *a, **kw: self.cancel(*a, **kw),
+            settle=self.settle,
         )
         self.calls = ScriptCalls(
-            store,
-            scripts,
             self.live,
             self.ask,
             self.agent_dispatch,
             self.dispatch,
-            launched=self._launched,
             authorize=self.authorize,
-            agents=lambda: self.agents(),
-            observe_exit=self._observe_exit,
+            observe_exit=self.endings.observe_exit,
         )
+
+    @property
+    def agents(self) -> Callable[[], AgentRuntime | None]:
+        """What agent turns run on, None while there is no job runtime; set by the runtime that knows it."""
+        return self.live.agents
+
+    @agents.setter
+    def agents(self, provider: Callable[[], AgentRuntime | None]) -> None:
+        self.live.agents = provider
 
     def authorize(self, run: WorkflowRun, grant: ScriptToolGrant | None = None) -> ToolRuntimeContext | str | None:
         """Say whether *run* may act now: its owner's live context, why not, or None while that cannot be said yet.
@@ -192,7 +176,7 @@ class WorkflowEngine:
         else:
             resolved_limits = self.owner_limits(context, run.agent_name)
         if run.state is WorkflowRunState.STARTING and run.runtime_seconds_left == 0:
-            return _OUT_OF_TIME.format(hours=resolved_limits.max_runtime_hours)
+            return OUT_OF_TIME.format(hours=resolved_limits.max_runtime_hours)
         if replay and run.idle_resumes >= _MAX_IDLE_RESUMES:
             return _IDLE.format(attempts=_MAX_IDLE_RESUMES)
         return context, resolved_limits
@@ -261,9 +245,9 @@ class WorkflowEngine:
                         limits=ScriptRunLimits(max_tool_calls_per_minute=limits.max_tool_calls_per_minute),
                     )
                 except Exception as exc:
-                    if run_id not in self._refused:
+                    if run_id not in self.live.refused:
                         logger.warning("workflow_launch_refused", run_id=run_id, error=str(exc))
-                    self._refused.add(run_id)
+                    self.live.refused.add(run_id)
                     if replay or (run.job_id is not None and isinstance(exc, ScriptRuntimeNotReadyError)):
                         return run
                     state, refusal = WorkflowRunState.FAILED, str(exc)
@@ -295,8 +279,8 @@ class WorkflowEngine:
             await self.scripts.reconcile_durable(run_id=attempt.run_id)
             self.live.charged.pop(run.run_id, None)
         else:
-            self._launched[attempt.run_id] = launched.epoch
-            self.live.spawn(run.run_id, self._watch_time(run.run_id, launched.epoch, hours))
+            self.live.launched[attempt.run_id] = launched.epoch
+            self.live.spawn(run.run_id, self.endings.watch_time(run.run_id, launched.epoch, hours))
         return launched
 
     async def cancel(
@@ -587,34 +571,3 @@ class WorkflowEngine:
         named = ", ".join(failed[:_MAX_FAILED_NAMED]) + (", ..." if len(failed) > _MAX_FAILED_NAMED else "")
         calls = "call" if len(failed) == 1 else "calls"
         return f'{len(failed)} {calls} failed ({named}); get_workflow(run_id, nodes="failed") shows them.\n\n{text}'
-
-    async def _watch_time(self, run_id: str, epoch: int, hours: float) -> None:
-        """Save the working time the attempt that began with *epoch* uses, and stop it when none is left."""
-        left = self.store.get_run(run_id).runtime_seconds_left
-        with suppress(SupersededAttemptError):
-            while left is not None and left > 0:
-                await asyncio.sleep(min(_CHARGE_SECONDS, left))
-                # Under the run's lock, as a change of the run's state charges it: the time left is read and written
-                # by one of them at a time, so neither takes the same time off twice or writes back an older time.
-                async with self.live.condition(run_id):
-                    run = self.store.get_run(run_id)
-                    if charge := self.live.time_left(run):
-                        run = await asyncio.to_thread(self.store.update_run, run_id, epoch, **charge)
-                left = run.runtime_seconds_left
-            if left is not None:
-                # An attempt that had ended already is judged as the pass judges it, before the run is stopped.
-                await self.settle(self.store.get_run(run_id), replay=True)
-                out_of_time = _OUT_OF_TIME.format(hours=hours)
-                await self.cancel(run_id, reason=out_of_time, state=WorkflowRunState.INTERRUPTED, epoch=epoch)
-
-    async def _observe_exit(self, run_id: str, script_run_id: str) -> None:
-        """End the run soon after its script reported: look for the exit instead of waiting for the next pass."""
-        for delay in _EXIT_POLL_SECONDS:
-            await asyncio.sleep(delay)
-            if (await self.scripts.reconcile_durable(run_id=script_run_id)).state in TERMINAL_SCRIPT_RUN_STATES:
-                # Only the run that reported: another run's ended attempt is the next pass's to judge.
-                with suppress(WorkflowRunNotFoundError):
-                    run = await asyncio.to_thread(self.store.get_run, run_id)
-                    if run.script_run_id == script_run_id:
-                        await self.settle(run)
-                break

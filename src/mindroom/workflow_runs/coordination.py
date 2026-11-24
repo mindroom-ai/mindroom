@@ -20,19 +20,20 @@ from mindroom.workflow_runs.models import (
     SERVED_RUN_STATES,
     TERMINAL_RUN_STATES,
     UNSETTLED_NODE_STATES,
-    NodeReceipt,
     WorkflowNode,
     WorkflowNodeState,
     WorkflowRun,
     WorkflowRunState,
 )
-from mindroom.workflow_runs.replay import CALLING_NODE
+from mindroom.workflow_runs.replay import CALLING_NODE, receipt
 from mindroom.workflow_runs.store import SupersededAttemptError, WorkflowRunNotFoundError, WorkflowRunStoreError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
 
     from mindroom.script_runs.manager import ScriptRunManager
+    from mindroom.workflow_runs.agent_nodes import AgentRuntime
+    from mindroom.workflow_runs.models import NodeReceipt
     from mindroom.workflow_runs.store import WorkflowRunStore
 
 
@@ -61,22 +62,8 @@ async def wait_for_change(condition: asyncio.Condition, remaining: float | None 
         await asyncio.wait_for(condition.wait(), timeout)
 
 
-def receipt(node: WorkflowNode) -> NodeReceipt:
-    """Return what the script is told about *node*; a result too large for the row is named, not inlined."""
-    node_id = f"n{node.seq}"
-    spilled = node.result_file is not None
-    return NodeReceipt(
-        id=node_id,
-        state=node.state,
-        cached=False,
-        result=None if spilled else node.result,
-        error=node.error,
-        result_ref=f"results/{node_id}" if spilled else None,
-    )
-
-
 class RunCoordinator:
-    """Single owner of live per-run state: conditions, tasks, places, stopping set, closed flag, and charge clock."""
+    """Single owner of live per-run state: store, scripts, agents, launched/refused attempts, conditions, tasks, places, and clock."""
 
     def __init__(
         self,
@@ -89,6 +76,13 @@ class RunCoordinator:
         self.scripts = scripts
         self.clock = clock
         self._cancel_run = cancel_run
+        # What agent turns run on, None while there is no job runtime; set by the runtime that knows it.
+        self.agents: Callable[[], AgentRuntime | None] = lambda: None
+        # The attempts this engine started, each with the epoch its run got when it began: all it may ever write
+        # with. No other attempt is served: one an earlier primary left is a leftover process.
+        self.launched: dict[str, int] = {}
+        # The runs whose wait for an attempt was logged as refused, so the tries that follow say nothing.
+        self.refused: set[str] = set()
         # The runs that are ending and wait, without their lock, for their agents to stop: they take no call.
         self.stopping: set[str] = set()
         # When each running run's working time was last charged, by the engine's clock.

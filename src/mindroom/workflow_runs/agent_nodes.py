@@ -472,3 +472,9 @@ def _spent(run: RunRecord, used: RunMetrics | None, cost: float | None) -> dict[
 def _never_started(tool: ToolExecution) -> bool:
     """Return whether a call of a child's run still waited for a decision, or did when a restart ended its turn."""
     return tool.is_paused or tool.result == RESTART_INTERRUPTION_REASON
+
+
+def works(runtime: AgentRuntime | None, job_id: str) -> bool:
+    """Return whether the job still works in *runtime*."""
+    job = None if runtime is None else runtime.jobs.retained_job(job_id)
+    return job is not None and job.status not in TERMINAL_STATUSES

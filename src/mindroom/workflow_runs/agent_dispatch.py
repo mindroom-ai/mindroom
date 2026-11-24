@@ -12,14 +12,12 @@ from typing import TYPE_CHECKING, cast
 from mindroom.logging_config import get_logger
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
 from mindroom.script_runs.models import utc_timestamp
-from mindroom.tool_jobs.runtime import TERMINAL_STATUSES
 from mindroom.workflow_runs.agent_nodes import (
     AgentNodeError,
     await_child,
     first_prompt,
     launch_child,
 )
-from mindroom.workflow_runs.coordination import receipt
 from mindroom.workflow_runs.limits import budget_exceeded
 from mindroom.workflow_runs.models import (
     LIVE_NODE_STATES,
@@ -28,7 +26,16 @@ from mindroom.workflow_runs.models import (
     WorkflowNodeState,
     WorkflowRun,
 )
-from mindroom.workflow_runs.replay import Outcome, indeterminate, unless_proven
+from mindroom.workflow_runs.replay import (
+    NO_AGENTS,
+    OWNER_NOT_READY,
+    RUN_ENDED,
+    TIMED_PREFIX,
+    Outcome,
+    indeterminate,
+    receipt,
+    unless_proven,
+)
 from mindroom.workflow_runs.store import SupersededAttemptError
 from mindroom.workflow_runs.structured import (
     SCHEMA_TURNS,
@@ -42,29 +49,16 @@ if TYPE_CHECKING:
 
     from mindroom.delegation.state import DelegationChild
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-    from mindroom.workflow_runs.agent_nodes import AgentRuntime
     from mindroom.workflow_runs.coordination import RunCoordinator
     from mindroom.workflow_runs.models import DispatchHandle, NodeReceipt
-    from mindroom.workflow_runs.store import WorkflowRunStore
 
 logger = get_logger(__name__)
 
-# How the engine's wait for an agent with a timeout is named, before its job's ID.
-TIMED_PREFIX = "timed:"
-OWNER_NOT_READY = "The run's agent is not ready in the run's room yet. Try again in a moment."
-NO_AGENTS = "A workflow runs agents as background tool jobs. Set background_tool_jobs.enabled: true."
-RUN_ENDED = "The run ended before the agent did."
 _NAME_LABELS = 'name="{name}" only labels the node. Use agent="{name}" to run that agent.'
 _STOPPED_JOB_STATUSES = frozenset({"cancel_requested", "cancelled", "denied"})
 _CORRECTION = "Your answer did not match the schema: {error}. Reply with only the corrected fenced json block."
 _NO_MATCH = "Agent '{name}' did not return JSON matching the schema after {turns} attempts. Last error: {error}."
 _CORRECTING = "The agent of this call is correcting its answer. Try again in a moment."
-
-
-def works(runtime: AgentRuntime | None, job_id: str) -> bool:
-    """Return whether the job still works in *runtime*."""
-    job = None if runtime is None else runtime.jobs.retained_job(job_id)
-    return job is not None and job.status not in TERMINAL_STATUSES
 
 
 def _turn_outcome(
@@ -126,15 +120,11 @@ class AgentDispatcher:
 
     def __init__(
         self,
-        store: WorkflowRunStore,
         live: RunCoordinator,
         authorize: Callable[[WorkflowRun], ToolRuntimeContext | str | None],
-        agents: Callable[[], AgentRuntime | None],
     ) -> None:
-        self.store = store
         self.live = live
         self._authorize = authorize
-        self._agents = agents
 
     async def dispatch_agent(
         self,
@@ -160,14 +150,14 @@ class AgentDispatcher:
                 and not node.seq
             ):
                 refused = replace(node, state=WorkflowNodeState.FAILED, error=error, ended_at=utc_timestamp())
-                await asyncio.to_thread(self.store.put_node, refused, run.epoch, dirty_after=True)
+                await asyncio.to_thread(self.live.store.put_node, refused, run.epoch, dirty_after=True)
             self.live.drop_slot(run.run_id, node.key)
-            return receipt(cast("WorkflowNode", self.store.get_node(run.run_id, node.key)))
+            return receipt(cast("WorkflowNode", self.live.store.get_node(run.run_id, node.key)))
         except BaseException:
             # The start failed in some other way, or the request was cancelled. A node that names its job already
             # is settled from that job, which ran nothing if it never started; the request itself fails, and the
             # script's SDK sends it again.
-            saved = self.store.get_node(run.run_id, node.key)
+            saved = self.live.store.get_node(run.run_id, node.key)
             if saved is not None and saved.generation == node.generation and saved.handle is not None:
                 self.wait_for_agent(run, saved, run.epoch)
             raise
@@ -188,22 +178,22 @@ class AgentDispatcher:
         follow_up: DelegationChild | None = None,
     ) -> WorkflowNode:
         """Authorize and start one turn of an agent node; turn 1 logs the label-vs-agent notice when applicable."""
-        context, runtime = self._authorize(run), self._agents()
+        context, runtime = self._authorize(run), self.live.agents()
         if context is None:
             raise ScriptRuntimeUnavailableError(OWNER_NOT_READY)
         if isinstance(context, str) or runtime is None:
             raise AgentNodeError(context if isinstance(context, str) else NO_AGENTS)
-        session = self.store.get_node(run.run_id, node.session_key) if node.session_key else None
+        session = self.live.store.get_node(run.run_id, node.session_key) if node.session_key else None
         source = session.request if session is not None else node.request
         first_turn = node.kind != "turn" or int(node.request.get("turn", 1)) == 1
         if turn == 1 and first_turn and not source.get("agent") and node.name in context.current_config.agents:
-            await asyncio.to_thread(self.store.append_log, run.run_id, epoch, _NAME_LABELS.format(name=node.name))
+            await asyncio.to_thread(self.live.store.append_log, run.run_id, epoch, _NAME_LABELS.format(name=node.name))
         return await launch_child(
             context,
             run,
             node,
             epoch,
-            store=self.store,
+            store=self.live.store,
             jobs=runtime.jobs,
             timeout=timeout,
             turn=turn,
@@ -271,7 +261,7 @@ class AgentDispatcher:
     ) -> WorkflowNode | None:
         """Read the job of one turn of an agent node and settle the node, or return it with its further turn started."""
         assert node.handle is not None
-        if (runtime := self._agents()) is None:
+        if (runtime := self.live.agents()) is None:
             # Without a job runtime nobody can read the job, now.
             raise ScriptRuntimeUnavailableError(NO_AGENTS)
         try:
@@ -291,7 +281,7 @@ class AgentDispatcher:
         further = None
         try:
             with suppress(SupersededAttemptError):
-                add = partial(self.store.add_usage, node.run_id, node.key, node.generation, epoch=epoch)
+                add = partial(self.live.store.add_usage, node.run_id, node.key, node.generation, epoch=epoch)
                 for entry, attempt, used in usage:
                     await asyncio.to_thread(add, entry, attempt, used)
                 outcome = _turn_outcome(node, kind, text, last=turn >= SCHEMA_TURNS, made=made, stopping=stopping)
@@ -328,14 +318,18 @@ class AgentDispatcher:
         One that may not start is the node's end, which is returned. While that cannot be decided the turn waits,
         or raises `ScriptRuntimeUnavailableError` without *block*.
         """
-        saved = self.store.get_node(node.run_id, node.key)
+        saved = self.live.store.get_node(node.run_id, node.key)
         current = saved.handle if saved is not None and saved.generation == node.generation else None
         handle = current or cast("DispatchHandle", node.handle)
         while True:
             left = handle.work_left if handle.work_until is None else max(0.0, handle.work_until - time.time())
             try:
                 if (
-                    reason := await asyncio.to_thread(budget_exceeded, self.store, self.store.get_run(node.run_id))
+                    reason := await asyncio.to_thread(
+                        budget_exceeded,
+                        self.live.store,
+                        self.live.store.get_run(node.run_id),
+                    )
                 ) is not None:
                     stopped: Outcome = WorkflowNodeState.CANCELLED, None, {"kind": "cancelled", "message": reason}
                     return unless_proven(node, made, stopped)
@@ -386,11 +380,11 @@ class AgentDispatcher:
 
         None once the call has an outcome, was replaced, or went with its run: nothing waits for its job any more.
         """
-        node = self.store.get_node(run_id, key) if key else None
+        node = self.live.store.get_node(run_id, key) if key else None
         live = node is not None and node.generation == generation and node.state in LIVE_NODE_STATES
-        if live and (runtime := self._agents()) is not None:
+        if live and (runtime := self.live.agents()) is not None:
             # A Stop of the run's own job ends the run at its next pass: until then nothing of the run goes on.
-            owner = self.store.get_run(run_id).job_id
+            owner = self.live.store.get_run(run_id).job_id
             job = runtime.jobs.retained_job(owner) if owner is not None else None
             live = job is None or job.status not in _STOPPED_JOB_STATUSES
         if node is None or not live or not isinstance(node.request.get("prompt"), str):

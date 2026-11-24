@@ -8,7 +8,7 @@ from contextvars import ContextVar
 from typing import Literal, cast
 
 from mindroom.script_runs.models import ScriptCallRecord, ScriptCallState, ScriptToolGrant
-from mindroom.workflow_runs.models import LIVE_NODE_STATES, WorkflowNode, WorkflowNodeState
+from mindroom.workflow_runs.models import LIVE_NODE_STATES, NodeReceipt, WorkflowNode, WorkflowNodeState
 
 type _Action = Literal["hit", "attach", "raise_indeterminate", "run"]
 type Outcome = tuple[WorkflowNodeState, object, dict[str, object] | None]
@@ -16,6 +16,12 @@ type Outcome = tuple[WorkflowNodeState, object, dict[str, object] | None]
 # Written onto earlier-attempt rows after a node that ran, so they rerun without colliding with explicit reruns ('').
 DIRTY_DIGEST = "dirty"
 INTERRUPTED: dict[str, object] = {"kind": "interrupted", "message": "The call was interrupted before its tool ran."}
+# How the engine's wait for an agent with a timeout is named, before its job's ID.
+TIMED_PREFIX = "timed:"
+OWNER_NOT_READY = "The run's agent is not ready in the run's room yet. Try again in a moment."
+NO_AGENTS = "A workflow runs agents as background tool jobs. Set background_tool_jobs.enabled: true."
+RUN_ENDED = "The run ended before the agent did."
+OUT_OF_TIME = "The run used its {hours:g} hours of working time. resume_workflow continues it."
 _SHELL_COMMAND = ScriptToolGrant("shell", "run_shell_command")
 # The node of the script's tool call that the current task runs, for a call of the `workflow` toolkit made in it.
 CALLING_NODE: ContextVar[tuple[str, str, int] | None] = ContextVar("workflow_calling_node", default=None)
@@ -141,3 +147,17 @@ def call_outcome(node: WorkflowNode, call: ScriptCallRecord) -> Outcome:
     started = call.effect_started_at is not None and not details.get("not_started")
     said = details.get("message") if failed else None
     return unless_proven(node, started, (WorkflowNodeState.FAILED, None, safe), said)
+
+
+def receipt(node: WorkflowNode) -> NodeReceipt:
+    """Return what the script is told about *node*; a result too large for the row is named, not inlined."""
+    node_id = f"n{node.seq}"
+    spilled = node.result_file is not None
+    return NodeReceipt(
+        id=node_id,
+        state=node.state,
+        cached=False,
+        result=None if spilled else node.result,
+        error=node.error,
+        result_ref=f"results/{node_id}" if spilled else None,
+    )
