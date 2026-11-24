@@ -35,13 +35,18 @@ Before you start:
 uvx mindroom run
 ```
 
-When no config exists and MindRoom runs in a terminal, it asks a few setup questions:
+When no config exists and MindRoom runs in a terminal, it checks for local logins (`claude`, `codex`, `kimi`), provider API keys in your environment, and running local Ollama chat models, then asks a few setup questions:
 
-1. Pick a model provider from the menu (default OpenAI).
-2. For Anthropic, OpenAI, or OpenRouter, paste the API key; input is hidden.
-   Press Enter to skip, then connect the provider later through the [dashboard](dashboard.md#connect-your-ai-provider), or add the key to `~/.mindroom/.env` and restart `mindroom run`.
-   MindRoom does not ask when the key is already set in your environment.
-   Other presets print their remaining step instead, such as `codex login`, `ollama pull`, or the Azure, Bedrock, or Vertex AI settings to add to `~/.mindroom/.env` before restarting.
+1. Pick a model provider from the menu.
+   Detected logins, keys, and running Ollama models appear at the top; when both Claude Code and Codex are signed in, `Claude + Codex` is offered as the recommended combined preset and lets you pick `Mind`'s default model (`Claude Sonnet 5.5`, `Codex Sol`, or `Claude Opus 5.5`).
+   When nothing is detected, the default menu starts with OpenAI.
+2. Finish provider setup when needed:
+   - For Anthropic, OpenAI, or OpenRouter, paste the API key (input is hidden).
+     MindRoom verifies it with a cheap, non-billable check (unless a custom endpoint variable such as `OPENAI_BASE_URL` is set) and lets you retry or press Enter to skip, then connect later through the [dashboard](dashboard.md#connect-your-ai-provider) or by editing `~/.mindroom/.env` and restarting `mindroom run`.
+     MindRoom does not ask when the key is already set in your environment.
+   - For `codex` or `claude_code` when the CLI is installed but signed out, MindRoom offers to run `codex login` or `claude auth login` inline.
+   - For `ollama` when local chat models are already pulled, pick the default model directly from your pulled models.
+   - Other presets print their remaining step instead, such as `ollama pull` or the Azure, Bedrock, or Vertex AI settings to add to `~/.mindroom/.env` before restarting.
 
 MindRoom then writes `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted Matrix defaults (`MATRIX_HOMESERVER=https://mindroom.chat`) and a starter `Mind` agent in a `Personal` room.
 

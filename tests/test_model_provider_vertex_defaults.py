@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Literal
 import pytest
 import yaml
 
-from mindroom.cli.config import _model_template_block, _write_env_file
+from mindroom.cli.config import _full_template, _write_env_file
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.providers.anthropic.messages import ClaudeProvider
@@ -70,7 +70,8 @@ def test_generated_vertex_environment_reaches_runtime_endpoint(
         replace_existing=replace_existing,
     )
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
-    config = Config(models={"default": yaml.safe_load(_model_template_block("vertexai_claude"))})
+    starter = yaml.safe_load(_full_template("vertexai_claude", matrix_server=matrix_server))
+    config = Config(models={"default": starter["models"]["default"]})
 
     model = _vertex_adapter(config, runtime_paths)
     assert model.identity.id == "claude-sonnet-5-5"
@@ -104,7 +105,8 @@ def test_vertex_generated_environment_keeps_override_precedence(
     )
     process_env = {"CLOUD_ML_REGION": process_region} if process_region is not None else {}
     runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env=process_env)
-    config = Config(models={"default": yaml.safe_load(_model_template_block("vertexai_claude"))})
+    starter = yaml.safe_load(_full_template("vertexai_claude", matrix_server="mindroom.chat"))
+    config = Config(models={"default": starter["models"]["default"]})
     if model_region is not None:
         config.models["default"].extra_kwargs = {"region": model_region}
 

@@ -1307,7 +1307,7 @@ depends_on = ["mindroom.llm", "mindroom.providers.names"]
 [[modules]]
 path = "mindroom.providers.key_checks"
 depends_on = []
-visibility = ["mindroom.cli.doctor", "mindroom.api.provider_setup"]
+visibility = ["mindroom.cli.doctor", "mindroom.cli.setup_detection", "mindroom.api.provider_setup"]
 
 [[modules]]
 path = "mindroom.metadata_merge"
@@ -5377,6 +5377,7 @@ depends_on = [
     "mindroom.cli.help_format",
     "mindroom.cli.interactive",
     "mindroom.cli.owner",
+    "mindroom.cli.setup_wizard",
     "mindroom.config.main",
     "mindroom.config.yaml_includes",
     "mindroom.constants",
@@ -5428,6 +5429,7 @@ visibility = [
     "mindroom.cli.connect",
     "mindroom.cli.main",
     "mindroom.cli.service",
+    "mindroom.cli.setup_wizard",
 ]
 
 [[modules]]
@@ -5437,6 +5439,25 @@ visibility = [
     "mindroom.cli.config",
     "mindroom.cli.connect",
 ]
+
+[[modules]]
+path = "mindroom.cli.setup_detection"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.providers.claude_code",
+    "mindroom.providers.key_checks",
+    "mindroom.providers.openai",
+]
+visibility = ["mindroom.cli.setup_wizard"]
+
+[[modules]]
+path = "mindroom.cli.setup_wizard"
+depends_on = [
+    "mindroom.cli.interactive",
+    "mindroom.cli.setup_detection",
+    "mindroom.constants",
+]
+visibility = ["mindroom.cli.config"]
 
 [[modules]]
 path = "mindroom.cli.doctor"

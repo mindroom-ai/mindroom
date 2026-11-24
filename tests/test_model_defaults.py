@@ -332,9 +332,21 @@ def test_openai_presets_use_current_models() -> None:
         "claude_code",
         "claude-sonnet-5-5",
         200_000,
+        display_name="Claude Sonnet 5.5",
     )
     assert dict(model_defaults.CONFIG_INIT_ADDITIONAL_MODELS["claude_code"]) == {
-        "haiku": model_defaults.ModelPreset("claude_code", "claude-haiku-5-5", 200_000),
+        "opus": model_defaults.ModelPreset(
+            "claude_code",
+            "claude-opus-5-5",
+            200_000,
+            display_name="Claude Opus 5.5",
+        ),
+        "haiku": model_defaults.ModelPreset(
+            "claude_code",
+            "claude-haiku-5-5",
+            200_000,
+            display_name="Claude Haiku 5.5",
+        ),
     }
     assert model_defaults.CONFIG_INIT_HELPER_MODELS["claude_code"] == "haiku"
     assert dict(model_defaults.CONFIG_INIT_ADDITIONAL_MODELS["codex"])["luna"].to_config_dict() == {
