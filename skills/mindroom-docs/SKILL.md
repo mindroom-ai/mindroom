@@ -22,6 +22,7 @@ Use this skill when the user asks how MindRoom works, how to configure it, or wh
 6. Keep the Matrix homeserver, Matrix client, and MindRoom dashboard distinct.
    Use the runtime context for the active homeserver instead of assuming one.
    MindRoom Chat at `https://chat.mindroom.chat` supports custom homeservers.
+   Canonical links: docs at `https://docs.mindroom.chat`, backend repo at `https://github.com/mindroom-ai/mindroom`, and MindRoom Chat repo at `https://github.com/mindroom-ai/mindroom-chat`.
    For questions about the MindRoom-hosted service, load `page__deployment__hosted-matrix__index.md`; for dashboard questions, load the dashboard page reference.
 7. Answer with concrete steps and include the exact reference filenames used.
 

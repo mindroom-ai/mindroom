@@ -115,6 +115,17 @@ def test_show_canvas_instructions_prefer_canvas_over_ascii_and_mermaid() -> None
     assert "Prefer show_canvas over ASCII art or Mermaid fences" in canvas_instructions
 
 
+def test_show_canvas_guidance_places_new_canvases_below_the_reply() -> None:
+    """Canvas instructions and docstring note that a new canvas renders below the reply text."""
+    default_instructions = ChatUITools().instructions
+    toolkit = ChatUITools(enable_show_canvas=True)
+    description = toolkit_offers(toolkit, "show_canvas").description or ""
+
+    assert "below your reply text" not in default_instructions
+    assert "below your reply text" in toolkit.instructions
+    assert "below your reply text" in description
+
+
 def test_excluding_a_function_an_option_left_off_is_a_no_op(tmp_path: Path) -> None:
     """``show_canvas`` is declared but off by default, so excluding it keeps the toolkit and its other functions."""
     context = _context(tmp_path)

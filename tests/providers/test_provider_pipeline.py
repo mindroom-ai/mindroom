@@ -59,6 +59,7 @@ from mindroom.providers.pipeline import request_log as request_log_stage
 from mindroom.providers.pipeline import retry as retry_stage
 from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE, guidance_retry_stream
 from mindroom.providers.pipeline.media import (
+    ANSWERED_AUDIO_MARKER,
     FALLBACK_MARKER,
     media_fallback_projection,
     media_fallback_stream,
@@ -1169,6 +1170,143 @@ async def test_the_note_names_each_removed_item_by_its_file_name_or_kind() -> No
     named = "Not sent: audio, report.pdf (att_report), file."
     assert retried.content == f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{named}\n{_FALLBACK_PROMPT}"
     assert (retried.images, retried.files, retried.audio) == ([_image("att_photo")], None, [_CLIP])
+
+
+def _tool_call_assistant(call_id: str) -> Message:
+    return Message(
+        role="assistant",
+        tool_calls=[{"id": call_id, "type": "function", "function": {"name": "lookup", "arguments": "{}"}}],
+    )
+
+
+@pytest.mark.asyncio
+async def test_answered_audio_drops_after_an_assistant_message_and_stays_byte_stable() -> None:
+    """Request 1 keeps audio; after any assistant message it is replaced by a stable note while other media stay."""
+    inner = _ScriptedProvider([[_turn()], [_turn()], [_turn()]])
+    provider = WrappedProvider(
+        inner,
+        partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT),
+        media_fallback_projection(_FALLBACK_PROMPT),
+    )
+    voice = _user("Voice transcript", audio=[_CLIP], images=[_image("att_photo")], files=[_REPORT])
+    req_1 = ModelRequest(messages=[voice])
+    req_2 = ModelRequest(
+        messages=[voice, _tool_call_assistant("call_1"), Message(role="tool", tool_call_id="call_1", content="ok")],
+    )
+    req_3 = ModelRequest(
+        messages=[
+            *req_2.messages,
+            _tool_call_assistant("call_2"),
+            Message(role="tool", tool_call_id="call_2", content="done"),
+        ],
+    )
+
+    for request in (req_1, req_2, req_3):
+        await drain(provider, request)
+
+    first, second, third = (sent.messages[0] for sent in inner.requests)
+    assert (first.audio, first.content, first.images, first.files) == (
+        [_CLIP],
+        "Voice transcript",
+        [_image("att_photo")],
+        [_REPORT],
+    )
+    assert (second.audio, second.images, second.files) == (None, [_image("att_photo")], [_REPORT])
+    assert isinstance(second.content, str)
+    assert second.content.startswith(f"Voice transcript\n\n{ANSWERED_AUDIO_MARKER}\nNot sent: audio (att_clip).\n")
+    assert "get_attachment(attachment_id, view=True)" in second.content
+    assert FALLBACK_MARKER not in second.content
+    assert (third.audio, third.content, third.images, third.files) == (
+        second.audio,
+        second.content,
+        second.images,
+        second.files,
+    )
+    # Stored message is untouched and the projection sizes the dropped audio without its media allowance.
+    assert (voice.audio, voice.content) == ([_CLIP], "Voice transcript")
+    assert provider.request_tokens(req_2) == inner.request_tokens(ModelRequest(messages=inner.requests[1].messages))
+    assert provider.request_tokens(req_2) < inner.request_tokens(req_2)
+
+
+@pytest.mark.asyncio
+async def test_unanswered_later_audio_is_kept_while_earlier_answered_audio_is_omitted() -> None:
+    inner = _ScriptedProvider([[_turn()]])
+    later_clip = Audio(id="att_later", content=b"RIFF later", mime_type="audio/wav")
+    unnamed_clip = Audio(id="temp-clip", content=b"RIFF temp", mime_type="audio/wav")
+    request = ModelRequest(
+        messages=[
+            _user("First voice", audio=[_CLIP]),
+            Message(role="user", content=[{"type": "text", "text": "Second voice"}], audio=[unnamed_clip]),
+            Message(role="assistant", content="Heard both."),
+            _user("Follow-up voice", audio=[later_clip]),
+        ],
+    )
+
+    await drain(_fallback_stage(inner), request)
+
+    sent = inner.requests[0].messages
+    assert sent[0].audio is None
+    assert "Not sent: audio (att_clip)." in str(sent[0].content)
+    assert sent[1].audio is None
+    assert isinstance(sent[1].content, list)
+    assert "Not sent: audio." in sent[1].content[-1]["text"]
+    assert (sent[3].audio, sent[3].content) == ([later_clip], "Follow-up voice")
+
+
+@pytest.mark.asyncio
+async def test_audio_omitting_and_learned_routes_keep_one_unchanged_fallback_note() -> None:
+    """Routes that omit or learned to reject audio never emit a double note or change the note across turns."""
+    omitted_inner = _ScriptedProvider(
+        [[_turn()], [_turn()]],
+        capabilities=Capabilities(omitted_media=frozenset({"audio"})),
+    )
+    omitted = _fallback_stage(omitted_inner)
+    voice = _user("Voice transcript", audio=[_CLIP])
+    follow_up = ModelRequest(
+        messages=[voice, _tool_call_assistant("call_1"), Message(role="tool", tool_call_id="call_1", content="ok")],
+    )
+
+    await drain(omitted, ModelRequest(messages=[voice]))
+    await drain(omitted, follow_up)
+
+    expected = f"Voice transcript\n\n{FALLBACK_MARKER}\n{_FALLBACK_PROMPT}"
+    assert omitted_inner.requests[0].messages[0].content == expected
+    assert omitted_inner.requests[1].messages[0].content == expected
+
+    gap = InvalidRequest("No endpoints found that support input audio", provider="Scripted", status_code=404)
+    learned_inner = _ScriptedProvider(
+        [[gap], [_turn()], [_turn()]],
+        identity=replace(_IDENTITY, endpoint="http://learn-audio/v1"),
+    )
+    learned = _fallback_stage(learned_inner)
+    await drain(learned, ModelRequest(messages=[voice]))
+    await drain(learned, follow_up)
+    assert learned_inner.requests[1].messages[0].content == expected
+    assert learned_inner.requests[2].messages[0].content == expected
+
+
+@pytest.mark.asyncio
+async def test_answered_audio_never_causes_a_spurious_retry_or_resends_on_later_media_rejection() -> None:
+    voice = _user("Voice transcript", audio=[_CLIP])
+    asst = _tool_call_assistant("call_1")
+    tool = Message(role="tool", tool_call_id="call_1", content="ok")
+
+    no_media_left = _ScriptedProvider([[_rejection(message="Bad tool schema")], [_turn()]])
+    with pytest.raises(InvalidRequest):
+        await drain(_fallback_stage(no_media_left), ModelRequest(messages=[voice, asst, tool]))
+    assert len(no_media_left.requests) == 1
+
+    later_bad_image = _ScriptedProvider([[_rejection("att_bad")], [_turn()]])
+    await drain(
+        _fallback_stage(later_bad_image),
+        ModelRequest(messages=[voice, asst, tool, _user("Look", images=[_image("att_bad")])]),
+    )
+    retried_voice, _, _, retried_look = later_bad_image.requests[1].messages
+    assert retried_voice.audio is None
+    assert ANSWERED_AUDIO_MARKER in str(retried_voice.content)
+    assert FALLBACK_MARKER not in str(retried_voice.content)
+    assert retried_look.images is None
+    assert FALLBACK_MARKER in str(retried_look.content)
 
 
 # --- Portable tool search -------------------------------------------------------------------------------------

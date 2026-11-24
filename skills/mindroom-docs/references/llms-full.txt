@@ -5055,7 +5055,7 @@ Hidden entries such as `.usage.json`, `.history/`, and `.archive/` are never loa
 
 Agents never need write access to a global skill root to create skills, so the bundled, plugin, and user roots can stay read-only, for example in container or Kubernetes deployments.
 An agent with workspace-rooted file or shell tools can write a skill to `<workspace>/skills/<skill-name>/SKILL.md`, which its file tools address as `skills/<skill-name>/SKILL.md`.
-Such agents are told how in their system prompt through the `WORKSPACE_SKILL_AUTHORING_PROMPT` built-in prompt, which you can change through [Built-In Prompt Overrides](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides).
+Such agents (unless `skill_manage` is offered) are told how in their system prompt through the `WORKSPACE_SKILL_AUTHORING_PROMPT` built-in prompt, which you can change through [Built-In Prompt Overrides](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides).
 A new or edited workspace skill is picked up on the agent's next run without a config change.
 
 Being able to write workspace skills does not make an agent create them.
@@ -27754,6 +27754,15 @@ If the device store is missing, restore the deployment's matching storage backup
 A hard logout, a deleted server device, a changed returned identity, corrupt storage, or an unknown storage format requires operator recovery.
 Clearing the journal or the crypto directory is not a supported repair, because a Nio 1.0 device session is bound to its journal.
 Preserve the failed deployment's state while recovering it, because pending input and attempted deliveries may still need reconciliation.
+
+### Rolling back
+
+Changing only the image back to an older release is unsafe once the new release has opened persistent storage, because older releases can write to upgraded crypto stores and do not reliably reject the newer records.
+Before upgrading, stop all primary, worker, script, and background writers and take one coordinated backup of configuration, credentials, workspaces, memories, the event journal, every Matrix device store and trust sidecar, continuity files, and session storage, including separately mounted session and state volumes.
+Verify that this backup can be restored before proceeding.
+To roll back, stop all writers and keep ingress closed, set the failed upgraded state aside, and restore the complete backup before starting the previous release.
+Restore the journal and device stores together, because each is upgraded separately and a device session is bound to its journal.
+Keep the set-aside upgraded state, because user work and tool actions after the upgrade may not exist in the restored backup.
 
 ## Private storage migration
 

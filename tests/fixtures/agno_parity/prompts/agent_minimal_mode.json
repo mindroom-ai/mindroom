@@ -55,7 +55,7 @@
           "role": "system"
         },
         {
-          "content": "<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>",
+          "content": "<mindroom_session_context>\nCurrent date: <DATE> (UTC, UTC).\n</mindroom_session_context>",
           "role": "system"
         },
         {
