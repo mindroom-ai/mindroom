@@ -51,7 +51,9 @@ logger = get_logger(__name__)
 
 FALLBACK_MARKER = "[Inline media unavailable for this model]"
 ANSWERED_AUDIO_MARKER = "[Earlier inline audio omitted]"
-_ANSWERED_AUDIO_PROMPT = "Already sent in an earlier request; fetch the raw audio again with get_attachment if needed."
+_ANSWERED_AUDIO_PROMPT = (
+    "Already sent in an earlier request; call get_attachment(attachment_id, view=True) to hear it again if needed."
+)
 _UNSUPPORTED_VIEW_MESSAGE = (
     "The active model rejected the viewed image input; the retained attachment is still available."
 )
@@ -144,9 +146,15 @@ def _without_answered_audio(messages: Sequence[Message]) -> list[Message]:
     ]
 
 
-def _base_messages(messages: Sequence[Message], unsupported: frozenset[MediaKind]) -> Sequence[Message]:
-    """Return ``messages`` without answered audio unless ``unsupported`` already omits audio on this route."""
-    return messages if "audio" in unsupported else _without_answered_audio(messages)
+def _prepared_messages(
+    inner: ModelProvider,
+    messages: Sequence[Message],
+) -> tuple[Sequence[Message], frozenset[MediaKind], frozenset[MediaKind]]:
+    """Return ``(base, present, known)`` after dropping answered audio on audio-capable routes."""
+    unsupported = _unsupported_kinds(inner)
+    base = messages if "audio" in unsupported else _without_answered_audio(messages)
+    present = _media_kinds(base)
+    return base, present, unsupported & present
 
 
 def _kept[T: (Image, Audio, Video, File)](
@@ -281,9 +289,7 @@ def _unsupported_kinds(inner: ModelProvider) -> frozenset[MediaKind]:
 
 def _first_attempt(inner: ModelProvider, request: ModelRequest, *, fallback_prompt: str) -> ModelRequest:
     """Return the first attempt the media fallback sends ``inner``: answered audio and unsupported media replaced."""
-    unsupported = _unsupported_kinds(inner)
-    base = _base_messages(request.messages, unsupported)
-    known = unsupported & _media_kinds(base)
+    base, _present, known = _prepared_messages(inner, request.messages)
     return replace(request, messages=_without_media(base, known, frozenset(), fallback_prompt))
 
 
@@ -308,10 +314,7 @@ async def media_fallback_stream(
 ) -> AsyncIterator[StreamEvent]:
     """Stream ``request`` with unsupported media replaced, retrying without what a rejection names, then media-free."""
     identity = inner.identity
-    unsupported = _unsupported_kinds(inner)
-    base = _base_messages(request.messages, unsupported)
-    present = _media_kinds(base)
-    known = unsupported & present
+    base, present, known = _prepared_messages(inner, request.messages)
     remaining = present - known
     first = replace(request, messages=_without_media(base, known, frozenset(), fallback_prompt))
     sent = {item.id: kind for message in first.messages for kind, item in media_items(message)}

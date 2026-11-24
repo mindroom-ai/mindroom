@@ -1166,6 +1166,7 @@ async def test_answered_audio_drops_after_an_assistant_message_and_stays_byte_st
     assert (second.audio, second.images, second.files) == (None, [_image("att_photo")], [_REPORT])
     assert isinstance(second.content, str)
     assert second.content.startswith(f"Voice transcript\n\n{ANSWERED_AUDIO_MARKER}\nNot sent: audio (att_clip).\n")
+    assert "get_attachment(attachment_id, view=True)" in second.content
     assert FALLBACK_MARKER not in second.content
     assert (third.audio, third.content, third.images, third.files) == (
         second.audio,
