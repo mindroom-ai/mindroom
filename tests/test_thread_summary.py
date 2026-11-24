@@ -294,8 +294,10 @@ class _RoomState:
     title_rules: dict[str, object] | Exception | nio.RoomGetStateEventError | None = None
     # The room's thread_summary_model setting, served the same way.
     title_model: dict[str, object] | Exception | nio.RoomGetStateEventError | None = None
+    _client: AsyncMock | None = field(default=None, init=False)
 
     def serve(self, client: AsyncMock) -> None:
+        self._client = client
         client.room_get_state.side_effect = self.room_get_state
         client.room_get_state_event.side_effect = self.room_get_state_event
         client.room_put_state.side_effect = self.room_put_state
@@ -326,10 +328,17 @@ class _RoomState:
         failure = self._count_read()
         if failure is not None:
             return failure
-        events = [
+        events: list[dict[str, object]] = [
             {"type": THREAD_TAGS_EVENT_TYPE, "state_key": key, "content": content}
             for key, content in self.events.items()
         ]
+        rooms = self._client.rooms if self._client is not None and isinstance(self._client.rooms, dict) else {}
+        room = rooms.get(room_id)
+        if room is not None:
+            events.extend(
+                {"type": "m.room.member", "state_key": user_id, "content": {"membership": "join"}}
+                for user_id in room.users
+            )
         return nio.RoomGetStateResponse(events=events, room_id=room_id)
 
     async def room_get_state_event(

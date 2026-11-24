@@ -4422,7 +4422,6 @@ visibility = [
     "mindroom.room_tree.note",
     "mindroom.email_invites.policy",
     "mindroom.custom_tools.email_invite",
-    "mindroom.matrix.thread_fork_access",
 ]
 
 [[modules]]
@@ -6521,7 +6520,6 @@ depends_on = [
     "mindroom.constants",
     "mindroom.contacts.store",
     "mindroom.matrix.client_delivery",
-    "mindroom.matrix.client_room_admin",
     "mindroom.matrix.history_visibility",
     "mindroom.matrix.room_membership",
     "mindroom.matrix.state_failures",

@@ -26,6 +26,8 @@ from tests.matrix_state_helpers import save_matrix_state
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.matrix.conversation_reads import ConversationReader
+
 _SOURCE = "!source:localhost"
 _TARGET = "!target:localhost"
 _AGENT = "@mindroom_general:localhost"
@@ -102,7 +104,13 @@ def _client(rooms: dict[str, nio.MatrixRoom], *, user_id: str = _AGENT) -> Async
         if room_id not in rooms:
             return nio.RoomGetStateError("forbidden")
         room = rooms[room_id]
-        events: list[dict[str, object]] = []
+        events: list[dict[str, object]] = [
+            _member_state_event(member_id, membership="join", origin_server_ts=0) for member_id in room.users
+        ]
+        events.extend(
+            _member_state_event(invited_id, membership="invite", origin_server_ts=0)
+            for invited_id in room.invited_users
+        )
         if room.history_visibility != "shared":
             events.append(
                 {
@@ -480,14 +488,17 @@ async def test_strict_resolves_incomplete_cache_and_sliding_sync_unseen_invites(
     """Strict mode refreshes incomplete parent membership and checks room_get_state for unseen sliding-sync invites."""
     config, paths = _setup(tmp_path, sync_mode="sliding")
 
-    # Parent membership incomplete -> strict refreshes joined_members -> ALLOWED.
+    # Parent membership incomplete in cache -> strict reads authoritative room_get_state -> ALLOWED without joined_members.
     source_partial = _room(_SOURCE, joined=(_AGENT,), members_synced=False)
     target_synced = _room(_TARGET, joined=(_AGENT, _ALICE), members_synced=True)
     client = _client({_SOURCE: source_partial, _TARGET: target_synced})
-    client.joined_members = AsyncMock(
-        return_value=nio.JoinedMembersResponse(
+    client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse(
             room_id=_SOURCE,
-            members=[nio.RoomMember(_AGENT, "General", None), nio.RoomMember(_ALICE, "Alice", None)],
+            events=[
+                _member_state_event(_AGENT, membership="join", origin_server_ts=0),
+                _member_state_event(_ALICE, membership="join", origin_server_ts=0),
+            ],
         ),
     )
     assert (
@@ -500,6 +511,7 @@ async def test_strict_resolves_incomplete_cache_and_sliding_sync_unseen_invites(
             nonblocking=False,
         )
     ).decision is CrossRoomForkDecision.ALLOWED
+    client.joined_members.assert_not_awaited()
 
     # Sliding sync target room with unseen invite (invited_member_count=1, invited_users empty):
     # strict reads room_get_state and denies outsider invite!
@@ -686,8 +698,13 @@ async def test_network_errors_on_state_and_membership_calls_fail_closed(tmp_path
         )
     ).decision is CrossRoomForkDecision.DENIED
 
-    # 3) joined_members raises when parent room is not cached -> DENIED.
-    client_members_err = _client({_TARGET: _room(_TARGET, joined=(_AGENT, _ALICE))})
+    # 3) joined_members raises when refreshing an unsynced destination room -> DENIED.
+    client_members_err = _client(
+        {
+            _SOURCE: _room(_SOURCE, joined=(_AGENT, _ALICE)),
+            _TARGET: _room(_TARGET, joined=(_AGENT, _ALICE), members_synced=False),
+        },
+    )
     client_members_err.joined_members = AsyncMock(side_effect=OSError("dns failed"))
     assert (
         await authorize_cross_room_fork_access(
@@ -831,6 +848,8 @@ async def test_parent_shared_visibility_makes_zero_read_room_history_calls(tmp_p
         return_value=nio.RoomGetStateResponse(
             room_id=_SOURCE,
             events=[
+                _member_state_event(_AGENT, membership="join", origin_server_ts=0),
+                _member_state_event(_ALICE, membership="join", origin_server_ts=0),
                 {
                     "type": "m.room.history_visibility",
                     "state_key": "",
@@ -896,6 +915,7 @@ async def test_parent_visibility_relaxed_from_joined_to_shared_after_message_den
                     "origin_server_ts": 1800,
                     "content": {"history_visibility": "shared"},
                 },
+                _member_state_event(_AGENT, membership="join", origin_server_ts=0),
                 _member_state_event(_ALICE, membership="join", origin_server_ts=1000),
                 _member_state_event(_BOB, membership="join", origin_server_ts=2000),
             ],
@@ -931,6 +951,7 @@ async def test_parent_visibility_relaxed_from_joined_to_shared_after_message_den
                     "origin_server_ts": 1800,
                     "content": {"history_visibility": "shared"},
                 },
+                _member_state_event(_AGENT, membership="join", origin_server_ts=0),
                 _member_state_event(_ALICE, membership="join", origin_server_ts=1000),
                 _member_state_event(_BOB, membership="join", origin_server_ts=1500),
             ],
@@ -960,6 +981,9 @@ async def test_parent_visibility_relaxed_from_joined_to_shared_after_message_den
         return_value=nio.RoomGetStateResponse(
             room_id=_SOURCE,
             events=[
+                _member_state_event(_AGENT, membership="join", origin_server_ts=0),
+                _member_state_event(_ALICE, membership="join", origin_server_ts=1000),
+                _member_state_event(_BOB, membership="join", origin_server_ts=1500),
                 {
                     "type": "m.room.history_visibility",
                     "state_key": "",
@@ -998,6 +1022,7 @@ async def test_parent_invited_visibility_allows_member_invited_before_thread_sta
                     "origin_server_ts": 500,
                     "content": {"history_visibility": "invited"},
                 },
+                _member_state_event(_AGENT, membership="join", origin_server_ts=0),
                 _member_state_event(_ALICE, membership="join", origin_server_ts=2000, replaces_state="$alice-invite"),
             ],
         ),
@@ -1059,6 +1084,7 @@ async def test_parent_joined_visibility_denies_late_joiner_cleanly_without_degra
             room_id=_SOURCE,
             events=[
                 {"type": "m.room.history_visibility", "state_key": "", "content": {"history_visibility": "joined"}},
+                _member_state_event(_AGENT, membership="join", origin_server_ts=0),
                 _member_state_event(_ALICE, membership="join", origin_server_ts=1000),
                 _member_state_event(_BOB, membership="join", origin_server_ts=2000),
             ],
@@ -1107,6 +1133,7 @@ async def test_parent_joined_visibility_denies_late_joiner_cleanly_without_degra
             room_id=_SOURCE,
             events=[
                 {"type": "m.room.history_visibility", "state_key": "", "content": {"history_visibility": "joined"}},
+                _member_state_event(_AGENT, membership="join", origin_server_ts=0),
                 _member_state_event(_ALICE, membership="join", origin_server_ts=1000),
                 _member_state_event(_BOB, membership="join", origin_server_ts=1500),
             ],
@@ -1138,6 +1165,9 @@ async def test_parent_joined_visibility_denies_late_joiner_cleanly_without_degra
                 room_id=_SOURCE,
                 events=[
                     {"type": "m.room.history_visibility", "state_key": "", "content": {"history_visibility": "joined"}},
+                    _member_state_event(_AGENT, membership="join", origin_server_ts=0),
+                    _member_state_event(_ALICE, membership="join", origin_server_ts=1000),
+                    _member_state_event(_BOB, membership="join", origin_server_ts=1500),
                 ],
             ),
             OSError("state read failed"),
@@ -1161,3 +1191,167 @@ async def test_parent_joined_visibility_denies_late_joiner_cleanly_without_degra
     assert [m.event_id for m in errored] == ["$fork"]
     assert errored.is_full_history is True
     assert not is_thread_history_degraded(errored)
+
+
+@pytest.mark.asyncio
+async def test_stale_cached_parent_membership_denies_cross_room_prefix_and_provisional_title(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When cached_room says Bob is joined in parent but room_get_state says leave, prefix and provisional title are denied."""
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex  # noqa: PLC0415
+    from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY  # noqa: PLC0415
+    from mindroom.thread_summary import automatic  # noqa: PLC0415
+    from tests.conftest import (  # noqa: PLC0415
+        fresh_thread_summary_baselines,
+        make_conversation_reader_mock,
+        serve_conversation_reader,
+    )
+
+    fresh_thread_summary_baselines(monkeypatch)
+
+    config, paths = _setup(tmp_path, sync_mode="sliding")
+    # Cached parent room is stale: it still reports Bob as joined in _SOURCE.
+    source = _room(_SOURCE, joined=(_AGENT, _ALICE, _BOB), members_synced=True)
+    target = _room(_TARGET, joined=(_AGENT, _ALICE, _BOB), members_synced=True)
+    client = _client({_SOURCE: source, _TARGET: target})
+    client.room_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$summary-sent", room_id=_TARGET))
+
+    parent_summary = make_visible_message(
+        event_id="$p-summary",
+        thread_id="$p1",
+        sender=_AGENT,
+        timestamp=1600,
+        body="Confidential parent title",
+        content={
+            "msgtype": "m.notice",
+            "body": "Confidential parent title",
+            "m.relates_to": {
+                "rel_type": "m.thread",
+                "event_id": "$p1",
+                "is_falling_back": True,
+                "m.in_reply_to": {"event_id": "$p1"},
+            },
+            THREAD_SUMMARY_CONTENT_KEY: {
+                "version": 1,
+                "summary": "Confidential parent title",
+                "message_count": 2,
+                "model": "manual",
+                "generated_at": "2026-01-01T00:00:00+00:00",
+                "initial_enrichment_complete": True,
+            },
+        },
+    )
+    parent_messages = [
+        make_visible_message(event_id="$p1", sender=_ALICE, timestamp=1000, body="parent question"),
+        make_visible_message(event_id="$p2", thread_id="$p1", sender=_AGENT, timestamp=1500, body="parent answer"),
+        parent_summary,
+    ]
+    fork_content: dict[str, object] = {
+        "body": "forked",
+        FORK_CONTENT_KEY: {"room_id": _SOURCE, "thread_id": "$p1", "event_id": "$p2"},
+    }
+
+    async def read_thread(_room_id: str, _thread_id: str) -> object:
+        return thread_history_result(parent_messages, is_full_history=True)
+
+    def _make_reader(fork_root_msg: object) -> ConversationReader:
+        reader = make_conversation_reader_mock()
+        pages = {}
+        for key, msgs in (((_SOURCE, "$p1"), parent_messages), ((_TARGET, fork_root_msg.event_id), [fork_root_msg])):  # type: ignore[attr-defined]
+            serve_conversation_reader(reader, msgs, room_id=key[0], thread_id=key[1])
+            pages[key] = reader.read_strict.return_value  # type: ignore[attr-defined]
+
+        async def _read(*, room_id: str, thread_id: str, **_kwargs: object) -> object:
+            return pages[(room_id, thread_id)]
+
+        reader.read.side_effect = _read  # type: ignore[attr-defined]
+        reader.read_strict.side_effect = _read  # type: ignore[attr-defined]
+        return reader
+
+    # Control: authoritative room_get_state agrees Bob is joined -> both prefix and provisional title succeed.
+    control_fork = make_visible_message(event_id="$fork-ok", sender=_ALICE, timestamp=2000, content=fork_content)
+    allowed_prefix = await with_fork_prefix(
+        thread_history_result([control_fork], is_full_history=True),
+        room_id=_TARGET,
+        thread_id="$fork-ok",
+        read_thread=read_thread,  # type: ignore[arg-type]
+        authorize_cross_room=lambda hop: authorize_cross_room_fork_access(
+            client=client,
+            config=config,
+            runtime_paths=paths,
+            hop=hop,
+            requester_id=_ALICE,
+            nonblocking=False,
+        ),
+        logger=MagicMock(),
+    )
+    assert [m.event_id for m in allowed_prefix] == ["$p1", "$p2", "$fork-ok"]
+    await automatic.maybe_generate_prompt_summary(
+        client,
+        _TARGET,
+        "$fork-ok",
+        config,
+        paths,
+        prompt_event_ids=("$fork-ok",),
+        prompt=None,
+        conversation_reader=_make_reader(control_fork),
+        entity_name="general",
+        membership_index=AgentReplyMembershipIndex(),
+        requester_id=_ALICE,
+    )
+    assert client.room_send.await_count == 1
+    assert client.room_send.await_args.kwargs["content"][THREAD_SUMMARY_CONTENT_KEY]["summary"] == (
+        "Confidential parent title (forked)"
+    )
+
+    # Stale cache regression: cached_room(_SOURCE) still has Bob joined, but room_get_state(_SOURCE) says Bob left.
+    client.room_send.reset_mock()
+    client.joined_members.reset_mock()
+    client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse(
+            room_id=_SOURCE,
+            events=[
+                _member_state_event(_AGENT, membership="join", origin_server_ts=0),
+                _member_state_event(_ALICE, membership="join", origin_server_ts=0),
+                _member_state_event(_BOB, membership="leave", origin_server_ts=1800),
+            ],
+        ),
+    )
+    assert _BOB in client.rooms[_SOURCE].users
+
+    stale_fork = make_visible_message(event_id="$fork-stale", sender=_ALICE, timestamp=2000, content=fork_content)
+    denied_prefix = await with_fork_prefix(
+        thread_history_result([stale_fork], is_full_history=True),
+        room_id=_TARGET,
+        thread_id="$fork-stale",
+        read_thread=read_thread,  # type: ignore[arg-type]
+        authorize_cross_room=lambda hop: authorize_cross_room_fork_access(
+            client=client,
+            config=config,
+            runtime_paths=paths,
+            hop=hop,
+            requester_id=_ALICE,
+            nonblocking=False,
+        ),
+        logger=MagicMock(),
+    )
+    assert [m.event_id for m in denied_prefix] == ["$fork-stale"]
+    assert denied_prefix.is_full_history is True
+    assert not is_thread_history_degraded(denied_prefix)
+
+    await automatic.maybe_generate_prompt_summary(
+        client,
+        _TARGET,
+        "$fork-stale",
+        config,
+        paths,
+        prompt_event_ids=("$fork-stale",),
+        prompt=None,
+        conversation_reader=_make_reader(stale_fork),
+        entity_name="general",
+        membership_index=AgentReplyMembershipIndex(),
+        requester_id=_ALICE,
+    )
+    client.room_send.assert_not_awaited()
+    client.joined_members.assert_not_awaited()

@@ -556,7 +556,13 @@ class TestAgentBot(AgentBotTestBase):
         )
         bot.client.room_get_state = AsyncMock(
             side_effect=lambda room_id: (
-                nio.RoomGetStateResponse(room_id=room_id, events=[])
+                nio.RoomGetStateResponse(
+                    room_id=room_id,
+                    events=[
+                        {"type": "m.room.member", "state_key": user_id, "content": {"membership": "join"}}
+                        for user_id in bot.client.rooms[room_id].users
+                    ],
+                )
                 if room_id in bot.client.rooms
                 else nio.RoomGetStateError("forbidden")
             ),

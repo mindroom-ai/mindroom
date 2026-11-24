@@ -1238,7 +1238,13 @@ async def test_cross_room_fork_authorized_denied_and_deferred_to_strict(config: 
     )
     client.room_get_state = AsyncMock(
         side_effect=lambda room_id: (
-            nio.RoomGetStateResponse(room_id=room_id, events=[])
+            nio.RoomGetStateResponse(
+                room_id=room_id,
+                events=[
+                    {"type": "m.room.member", "state_key": user_id, "content": {"membership": "join"}}
+                    for user_id in client.rooms[room_id].users
+                ],
+            )
             if room_id in client.rooms
             else nio.RoomGetStateError("forbidden")
         ),
@@ -1285,17 +1291,17 @@ async def test_cross_room_fork_authorized_denied_and_deferred_to_strict(config: 
         for call in reader.read_strict.await_args_list  # type: ignore[attr-defined]
     ] == [(_ROOM_ID, _FORK)]
 
-    # 3) DEFERRED in NONBLOCKING (source room membership incomplete) upgrades to STRICT and loads prefix.
+    # 3) DEFERRED in NONBLOCKING (source room cache incomplete) upgrades to STRICT, reading authoritative room_get_state.
     reader.read.reset_mock()  # type: ignore[attr-defined]
     reader.read_strict.reset_mock()  # type: ignore[attr-defined]
     source_unsynced = _cross_room_matrix_room(_SOURCE_ROOM_ID, joined=(_BOT_USER_ID,), members_synced=False)
     client.rooms = {_SOURCE_ROOM_ID: source_unsynced, _ROOM_ID: target_room}
-    client.joined_members = AsyncMock(
-        return_value=nio.JoinedMembersResponse(
+    client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse(
             room_id=_SOURCE_ROOM_ID,
-            members=[
-                nio.RoomMember(_BOT_USER_ID, "General", None),
-                nio.RoomMember(_HUMAN_USER_ID, "Human", None),
+            events=[
+                {"type": "m.room.member", "state_key": _BOT_USER_ID, "content": {"membership": "join"}},
+                {"type": "m.room.member", "state_key": _HUMAN_USER_ID, "content": {"membership": "join"}},
             ],
         ),
     )

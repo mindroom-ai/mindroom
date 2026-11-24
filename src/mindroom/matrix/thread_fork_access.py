@@ -15,10 +15,8 @@ from mindroom.matrix.client_delivery import (
     cached_room,
     resolve_room_encryption_outcome,
 )
-from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.history_visibility import read_room_history
 from mindroom.matrix.room_membership import (
-    cached_joined_member_ids,
     cached_member_ids,
     ensure_room_membership_synced,
 )
@@ -137,44 +135,45 @@ async def _read_room_history_visibility_strict(client: nio.AsyncClient, room_id:
     return None
 
 
-async def _read_parent_history_visibility(client: nio.AsyncClient, room_id: str) -> tuple[str, int | None] | None:
-    """Read ``m.room.history_visibility`` and its ``origin_server_ts`` from room state, or None on error."""
+def _parse_parent_history_visibility_event(event: dict[str, object]) -> tuple[str, int | None] | None:
+    """Parse ``m.room.history_visibility`` and its ``origin_server_ts``, failing closed when incomplete."""
+    content = event.get("content")
+    visibility = content.get("history_visibility") if isinstance(content, dict) else None
+    if not isinstance(visibility, str):
+        return None
+    origin_server_ts = event.get("origin_server_ts")
+    if isinstance(origin_server_ts, int) and not isinstance(origin_server_ts, bool):
+        return visibility, origin_server_ts
+    return (visibility, None) if visibility == "joined" else None
+
+
+async def _read_parent_state(
+    client: nio.AsyncClient,
+    room_id: str,
+) -> tuple[frozenset[str], str, int | None] | None:
+    """Authoritatively read joined members and history visibility (+ timestamp) from ``room_get_state``."""
     events = await _room_state_events(client, room_id)
     if events is None:
         return None
+    joined_members: set[str] = set()
+    parent_visibility = "shared"
+    visibility_ts: int | None = None
     for event in events:
-        if event.get("type") != "m.room.history_visibility" or event.get("state_key") != "":
-            continue
-        content = event.get("content")
-        visibility = content.get("history_visibility") if isinstance(content, dict) else None
-        if not isinstance(visibility, str):
-            return None
-        origin_server_ts = event.get("origin_server_ts")
-        if isinstance(origin_server_ts, int) and not isinstance(origin_server_ts, bool):
-            return visibility, origin_server_ts
-        return (visibility, None) if visibility == "joined" else None
-    return "shared", None
-
-
-async def _resolve_parent_joined(
-    client: nio.AsyncClient,
-    parent_room_id: str,
-    requester_id: str,
-) -> frozenset[str] | None:
-    """Return current joined members of ``parent_room_id``, or None on failure."""
-    parent_room = cached_room(client, parent_room_id)
-    if parent_room is not None:
-        try:
-            synced = await ensure_room_membership_synced(client, parent_room, sender_id=requester_id)
-        except Exception:
-            return None
-        return cached_joined_member_ids(parent_room) if synced else None
-
-    try:
-        fetched = await get_room_members(client, parent_room_id)
-    except Exception:
-        return None
-    return None if fetched is None else frozenset(fetched)
+        event_type = event.get("type")
+        if event_type == "m.room.member":
+            state_key = event.get("state_key")
+            content = event.get("content")
+            if isinstance(state_key, str) and state_key:
+                if isinstance(content, dict) and content.get("membership") == "join":
+                    joined_members.add(state_key)
+                else:
+                    joined_members.discard(state_key)
+        elif event_type == "m.room.history_visibility" and event.get("state_key") == "":
+            parsed = _parse_parent_history_visibility_event(event)
+            if parsed is None:
+                return None
+            parent_visibility, visibility_ts = parsed
+    return frozenset(joined_members), parent_visibility, visibility_ts
 
 
 async def _encryption_allowed(
@@ -339,20 +338,18 @@ async def _collect_authorized_destination_audience(
     return audience
 
 
-async def _authorize_parent_history_visibility(
+def _authorize_parent_history_visibility(
     client: nio.AsyncClient,
     config: Config,
     runtime_paths: RuntimePaths,
     *,
     parent_room_id: str,
     parent_joined: frozenset[str],
+    parent_visibility: str,
+    visibility_ts: int | None,
     audience_members: set[str],
 ) -> CrossRoomForkAuthorization:
     """Verify parent room history visibility, attaching a post-cut timestamp check when needed."""
-    visibility_state = await _read_parent_history_visibility(client, parent_room_id)
-    if visibility_state is None:
-        return _DENIED
-    parent_visibility, visibility_ts = visibility_state
     if parent_visibility in _FULL_PARENT_HISTORY_VISIBILITIES and visibility_ts is None:
         return _ALLOWED
 
@@ -401,11 +398,15 @@ async def authorize_cross_room_fork_access(
     ):
         return _DENIED
 
-    parent_joined = await _resolve_parent_joined(client, hop.parent_room_id, requester_id)
-    if (
-        parent_joined is None
-        or client.user_id not in parent_joined
-        or not _audience_joined_to_parent(required_humans, parent_joined, config, runtime_paths)
+    parent_state = await _read_parent_state(client, hop.parent_room_id)
+    if parent_state is None:
+        return _DENIED
+    parent_joined, parent_visibility, visibility_ts = parent_state
+    if client.user_id not in parent_joined or not _audience_joined_to_parent(
+        required_humans,
+        parent_joined,
+        config,
+        runtime_paths,
     ):
         return _DENIED
 
@@ -428,11 +429,13 @@ async def authorize_cross_room_fork_access(
     if destination_audience is None:
         return _DENIED
 
-    return await _authorize_parent_history_visibility(
+    return _authorize_parent_history_visibility(
         client,
         config,
         runtime_paths,
         parent_room_id=hop.parent_room_id,
         parent_joined=parent_joined,
+        parent_visibility=parent_visibility,
+        visibility_ts=visibility_ts,
         audience_members=set(required_humans) | destination_audience,
     )

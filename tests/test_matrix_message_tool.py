@@ -1719,7 +1719,13 @@ async def test_matrix_message_read_cross_room_fork_auth_room_id_and_edit_options
     )
     ctx.client.room_get_state = AsyncMock(
         side_effect=lambda room_id: (
-            nio.RoomGetStateResponse(room_id=room_id, events=[])
+            nio.RoomGetStateResponse(
+                room_id=room_id,
+                events=[
+                    {"type": "m.room.member", "state_key": user_id, "content": {"membership": "join"}}
+                    for user_id in ctx.client.rooms[room_id].users
+                ],
+            )
             if room_id in ctx.client.rooms
             else nio.RoomGetStateError("forbidden")
         ),
@@ -1819,7 +1825,13 @@ async def test_matrix_message_read_from_room_c_checks_output_room_encryption_and
     )
     ctx.client.room_get_state = AsyncMock(
         side_effect=lambda room_id: (
-            nio.RoomGetStateResponse(room_id=room_id, events=[])
+            nio.RoomGetStateResponse(
+                room_id=room_id,
+                events=[
+                    {"type": "m.room.member", "state_key": user_id, "content": {"membership": "join"}}
+                    for user_id in ctx.client.rooms[room_id].users
+                ],
+            )
             if room_id in ctx.client.rooms
             else nio.RoomGetStateError("forbidden")
         ),
