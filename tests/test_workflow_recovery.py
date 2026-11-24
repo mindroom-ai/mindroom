@@ -9,10 +9,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import re
+import signal
 import sqlite3
+import sys
 import threading
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -59,7 +63,6 @@ from tests.workflow_live import kill_after_write
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-    from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.script_runs.models import ScriptCallRecord, ScriptRunRecord
@@ -1754,3 +1757,67 @@ def test_live_fault_script_finds_a_slot_that_only_the_agent_stack_started(
     )
     with pytest.raises(kill_after_write.LiveError, match="no ready live deployment on slot 42"):
         kill_after_write.Deployment.find(42)
+
+
+def test_live_fault_script_start_tolerates_empty_proc_cmdline_during_exec(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`Backend.start()` tracks its child `Popen` instead of racing Linux's transient empty `/proc/<pid>/cmdline`."""
+    slot = tmp_path / "slot-50"
+    slot.mkdir()
+    state = {"pids": {"backend": 0}, "logs": {"backend": str(slot / "backend.log")}, "apiUrl": "http://127.0.0.1:1"}
+    (slot / "state.json").write_text(json.dumps(state))
+    deployment = kill_after_write.Deployment(50, {}, slot)
+    backend = kill_after_write.Backend(
+        deployment,
+        0,
+        [sys.executable, "-c", "import time; time.sleep(60)", str(slot)],
+        slot,
+        {},
+    )
+    real_read_bytes = Path.read_bytes
+
+    def empty_cmdline(self: Path) -> bytes:
+        if self.parts[:2] == ("/", "proc") and self.name == "cmdline":
+            return b""
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", empty_cmdline)
+    monkeypatch.setattr(
+        kill_after_write.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: contextlib.nullcontext(SimpleNamespace(status=200)),
+    )
+
+    try:
+        backend.start()
+        assert backend.running
+        assert deployment.state["pids"]["backend"] == backend.pid
+        backend.stop()
+        assert not backend.running
+    finally:
+        if backend.pid > 0:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(backend.pid, signal.SIGKILL)
+            with contextlib.suppress(ChildProcessError):
+                os.waitpid(backend.pid, 0)
+
+
+def test_live_fault_script_start_raises_when_backend_actually_exits(tmp_path: Path) -> None:
+    """`Backend.start()` still fails fast when the spawned backend genuinely exits before `/api/health` responds."""
+    slot = tmp_path / "slot-50"
+    slot.mkdir()
+    state = {"pids": {"backend": 0}, "logs": {"backend": str(slot / "backend.log")}, "apiUrl": "http://127.0.0.1:1"}
+    (slot / "state.json").write_text(json.dumps(state))
+    deployment = kill_after_write.Deployment(50, {}, slot)
+    backend = kill_after_write.Backend(
+        deployment,
+        0,
+        [sys.executable, "-c", "raise SystemExit(7)", str(slot)],
+        slot,
+        {},
+    )
+
+    with pytest.raises(kill_after_write.LiveError, match=r"the backend exited while starting \(exit 7\)"):
+        backend.start()

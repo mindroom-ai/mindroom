@@ -301,10 +301,13 @@ class Backend:
     command: list[str]
     directory: Path
     environment: dict[str, str]
+    _process: subprocess.Popen[bytes] | None = None
 
     @property
     def running(self) -> bool:
         """Return whether the process this script last started or found still runs."""
+        if self._process is not None:
+            return self._process.poll() is None
         try:
             return str(self.deployment.directory) in Path(f"/proc/{self.pid}/cmdline").read_bytes().decode()
         except OSError:
@@ -344,6 +347,7 @@ class Backend:
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
+        self._process = process
         self.pid = process.pid
         # `just live down` stops the process the state file names.
         state = self.deployment.state
@@ -353,7 +357,9 @@ class Backend:
 
     def _healthy(self) -> bool:
         if not self.running:
-            msg = f"the backend exited while starting; see {self.deployment.state['logs']['backend']}"
+            code = None if self._process is None else self._process.returncode
+            status = "" if code is None else f" (exit {code})"
+            msg = f"the backend exited while starting{status}; see {self.deployment.state['logs']['backend']}"
             raise LiveError(msg)
         with contextlib.suppress(OSError):
             url = f"{self.deployment.state['apiUrl']}/api/health"
