@@ -182,7 +182,7 @@ async def probe_codex(codex_home: str | None, now: datetime) -> ProbeResult:
 
 
 async def probe_openrouter(api_key: str | None, now: datetime) -> ProbeResult:
-    """Probe OpenRouter key credit cap via ``GET https://openrouter.ai/api/v1/key``."""
+    """Probe OpenRouter key credit cap via ``OPENROUTER_KEY_URL``."""
     if not api_key:
         return ProbeResult(unavailable_reason="not_signed_in")
     fetched = await _fetch_json_or_error(
