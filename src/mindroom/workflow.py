@@ -12,6 +12,7 @@ import functools
 import hashlib
 import http.client
 import json
+import math
 import os
 import sys
 import threading
@@ -41,6 +42,7 @@ __all__ = [
     "agent",
     "ask_user",
     "foreach",
+    "inbox",
     "log",
     "now",
     "parallel",
@@ -48,8 +50,10 @@ __all__ = [
     "random",
     "run",
     "run_workflow",
+    "send",
     "shell",
     "spawn",
+    "state",
     "tool",
 ]
 
@@ -81,6 +85,8 @@ _SAME_LOOP_VARIABLE = (
     "Use foreach(prompts, lambda p: agent(p))."
 )
 _BAD_LIMIT = "max_concurrent must be a whole number of at least 1."
+_MAX_PEER_BYTES = 1024 * 1024
+_TOO_LARGE = "Too large ({size:,} bytes, limit 1 MiB). Write it to a workspace file and send the path."
 
 
 class WorkflowError(RuntimeError):
@@ -146,7 +152,31 @@ class _Local(threading.local):
     loading: bool = False
 
 
+class _Runnable:
+    """Tracks lanes that can still run Python (unstarted or between calls) with a monotonic change counter."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._seq = 0
+        self._count = 0
+
+    def reset(self, count: int) -> None:
+        with self._lock:
+            self._seq += 1
+            self._count = max(0, count)
+
+    def change(self, delta: int) -> None:
+        with self._lock:
+            self._seq += 1
+            self._count = max(0, self._count + delta)
+
+    def header(self) -> str:
+        with self._lock:
+            return f"{self._seq}:{self._count}"
+
+
 _local = _Local()
+_runnable = _Runnable()
 
 
 def _current_lane() -> _Lane:
@@ -171,11 +201,23 @@ class _Gateway:
         self._base = f"{os.environ[GATEWAY_URL_ENV].rstrip('/')}/workflow/{run_id}"
         self._token = Path(os.environ[TOKEN_PATH_ENV]).read_text(encoding="utf-8").strip()
 
-    def _request(self, method: str, route: str, body: dict[str, object] | None = None) -> object:
+    def _request(
+        self,
+        method: str,
+        route: str,
+        body: dict[str, object] | None = None,
+        *,
+        extra_headers: dict[str, str] | None = None,
+    ) -> object:
         data = None if body is None else json.dumps(body, allow_nan=False, separators=(",", ":")).encode()
-        headers = {"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}
         faults = 0
         while True:
+            headers = {
+                "Authorization": f"Bearer {self._token}",
+                "Content-Type": "application/json",
+                "X-Workflow-Runnable": _runnable.header(),
+                **(extra_headers or {}),
+            }
             request = urllib.request.Request(  # noqa: S310 - the launcher sets the gateway URL.
                 f"{self._base}/{route}",
                 data=data,
@@ -211,10 +253,11 @@ class _Gateway:
         body: dict[str, object] = {"key": key, "kind": kind, "args": args, "meta": meta}
         return cast("dict[str, object]", self._request("POST", "nodes", body))
 
-    def poll(self, node_id: str) -> dict[str, object]:
+    def poll(self, node_id: str, *, state: str | None = None) -> dict[str, object]:
         """Return the node's receipt, held by the gateway until the node changes or the wait is over."""
         route = f"nodes/{urllib.parse.quote(node_id, safe='')}?wait={_NODE_WAIT_SECONDS}"
-        return cast("dict[str, object]", self._request("GET", route))
+        extra = {"X-Workflow-State": state} if state is not None else None
+        return cast("dict[str, object]", self._request("GET", route, extra_headers=extra))
 
     def result(self, node_id: str) -> object:
         return self._request("GET", f"results/{urllib.parse.quote(node_id, safe='')}")
@@ -272,20 +315,31 @@ def _call(
     meta = {"cached": cached, "phase": lane.phase, "label": label, "name": name, "timeout": timeout}
     gateway = _gateway()
     node_key = _next_key() if key is None else key
-    receipt = gateway.submit(node_key, kind, args, {k: value for k, value in meta.items() if value is not None})
-    node_id = str(receipt["id"])
-    # A call that waits for a person is no active lane of its fan-out: the next lane starts in its place, and the
-    # call takes a place again before it goes on.
-    place, waiting = _local.place, False
-    while receipt["state"] not in _SETTLED_STATES or waiting:
-        if place is not None and waiting != (receipt["state"] == "waiting"):
-            waiting = not waiting
-            (place.release if waiting else place.acquire)()
-        if receipt["state"] not in _SETTLED_STATES:
-            receipt = gateway.poll(node_id)
-    if receipt["state"] == "completed":
-        return gateway.result(node_id) if receipt.get("result_ref") else receipt.get("result")
-    raise _failure(receipt, {"tool": ToolError, "ask": WorkflowError}.get(kind, AgentError))
+    _runnable.change(-1)
+    try:
+        receipt = gateway.submit(node_key, kind, args, {k: value for k, value in meta.items() if value is not None})
+        node_id = str(receipt["id"])
+        # A call that waits for a person or peer is no active lane of its fan-out: the next lane starts in its place,
+        # and the call takes a place again before it goes on.
+        place, waiting = _local.place, False
+        while receipt["state"] not in _SETTLED_STATES or waiting:
+            if place is not None and waiting != (receipt["state"] == "waiting"):
+                waiting = not waiting
+                (place.release if waiting else place.acquire)()
+            if receipt["state"] not in _SETTLED_STATES:
+                receipt = gateway.poll(node_id, state=str(receipt["state"]))
+        if receipt["state"] == "completed":
+            return gateway.result(node_id) if receipt.get("result_ref") else receipt.get("result")
+        error_type = {
+            "tool": ToolError,
+            "ask": WorkflowError,
+            "send": WorkflowError,
+            "inbox": WorkflowError,
+            "state": WorkflowError,
+        }.get(kind, AgentError)
+        raise _failure(receipt, error_type)
+    finally:
+        _runnable.change(1)
 
 
 def _failure(receipt: dict[str, object], error_type: type[WorkflowError]) -> WorkflowError:
@@ -482,19 +536,28 @@ def _fan_out(
     positional = items is not None and any(name.startswith("p") for name in names)
     args: dict[str, object] = {"op": op, "positional": True} if positional else {"op": op}
     _submit_group(key, args, lane, members)
-    active = min(len(calls), max_concurrent or _MAX_ACTIVE_LANES, _MAX_ACTIVE_LANES) or 1
+    if not calls:
+        return []
+    active = min(len(calls), max_concurrent or _MAX_ACTIVE_LANES, _MAX_ACTIVE_LANES)
     lanes = _Lanes(threading.Semaphore(active), [None] * len(calls))
     threads: list[threading.Thread] = []
-    for position, call in enumerate(calls):
-        # Waits for a lane to end, or to wait for a person, so 1,000 items are never 1,000 threads at work.
-        lanes.places.acquire()
-        if lanes.stopped:
-            break
-        work = (position, call, _Lane(members[position], phase=lane.phase))
-        threads.append(threading.Thread(target=lanes.run, args=work, daemon=True))
-        threads[-1].start()
-    for thread in threads:
-        thread.join()
+    started = 0
+    _runnable.change(len(calls) - 1)
+    try:
+        for position, call in enumerate(calls):
+            # Waits for a lane to end, or to wait for a person/peer, so 1,000 items are never 1,000 threads at work.
+            lanes.places.acquire()
+            if lanes.stopped:
+                lanes.places.release()
+                break
+            started += 1
+            work = (position, call, _Lane(members[position], phase=lane.phase))
+            threads.append(threading.Thread(target=lanes.run, args=work, daemon=True))
+            threads[-1].start()
+        for thread in threads:
+            thread.join()
+    finally:
+        _runnable.change(1 - (len(calls) - started))
     if lanes.stopped:
         raise lanes.stopped[0]
     if lanes.errors:
@@ -526,6 +589,7 @@ class _Lanes:
                 report: dict[str, object] = {"type": type(error).__name__, "message": str(error)[:_ERROR_BYTES]}
                 _gateway().submit(_next_key(), "error", report, {"phase": lane.phase} if lane.phase else {})
         finally:
+            _runnable.change(-1)
             self.places.release()
 
 
@@ -598,6 +662,46 @@ def random() -> float:
     return float(cast("float", _call("value", {"op": "random"})))
 
 
+def send(to: str, text: str) -> dict[str, object]:
+    """Message an agent of this run by name; "*" reaches every agent that has not finished."""
+    _current_lane()
+    body = str(text)
+    raw = body.encode("utf-8")
+    if len(raw) > _MAX_PEER_BYTES:
+        raise WorkflowError(_TOO_LARGE.format(size=len(raw)))
+    return cast("dict[str, object]", _call("send", {"to": str(to), "text": body}))
+
+
+def inbox(wait_seconds: float = 0) -> list[dict[str, object]]:
+    """Return messages agents sent to "script", waiting up to wait_seconds for the first one."""
+    _current_lane()
+    wait = float(wait_seconds)
+    if not math.isfinite(wait) or wait < 0:
+        msg = "wait_seconds must be a finite non-negative number."
+        raise WorkflowError(msg)
+    return cast("list[dict[str, object]]", _call("inbox", {"wait_seconds": wait}))
+
+
+class state:  # noqa: N801 - public SDK namespace matching the spec (`state.get` / `state.set`).
+    """The run's shared values, also readable and writable by its agents."""
+
+    @staticmethod
+    def get(key: str, default: object = None) -> object:
+        """Return the shared value stored under *key*, or *default* when absent."""
+        _current_lane()
+        entry = cast("dict[str, object]", _call("state", {"op": "get", "key": str(key)}))
+        return entry["value"] if entry.get("found") else default
+
+    @staticmethod
+    def set(key: str, value: object) -> None:
+        """Store *value* under *key* in the run's shared state; last write wins."""
+        _current_lane()
+        raw = json.dumps(value, allow_nan=False, separators=(",", ":")).encode("utf-8")
+        if len(raw) > _MAX_PEER_BYTES:
+            raise WorkflowError(_TOO_LARGE.format(size=len(raw)))
+        _call("state", {"op": "set", "key": str(key), "value": value})
+
+
 def _submit_group(key: str, args: dict[str, object], lane: _Lane, members: list[str]) -> None:
     meta: dict[str, object] = {"cached": True, "phase": lane.phase, "members": members}
     group = _gateway().submit(
@@ -660,9 +764,11 @@ def run_workflow(source_path: str) -> None:
             raise WorkflowError(_NO_MAIN)  # noqa: TRY301 - reported like any failure of the script.
         args = gateway.run_info()["args"]
         _local.lane = _Lane("")
+        _runnable.reset(1)
         try:
             result = main(args)
         finally:
+            _runnable.change(-1)
             _local.lane = None
         gateway.finish(result=result)
     except Exception:

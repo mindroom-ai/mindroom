@@ -66,6 +66,17 @@ from mindroom.workflow_runs.models import (
     WorkflowRunState,
 )
 from mindroom.workflow_runs.notices import RETRY_SECONDS
+from mindroom.workflow_runs.peers import (
+    NodeRef,
+    PeerTooLargeError,
+    PeerUnreachableError,
+    get_state_entry,
+    read_call,
+    record_deadlock,
+    withdraw_unread,
+)
+from mindroom.workflow_runs.peers import send as send_peer_message
+from mindroom.workflow_runs.peers import set_state as set_peer_state
 from mindroom.workflow_runs.questions import MAX_OPTION_BYTES, MAX_OPTIONS, show_question
 from mindroom.workflow_runs.recovery import AUTO_RESUME_REASONS, NO_ACCESS
 from mindroom.workflow_runs.replay import (
@@ -239,13 +250,22 @@ class WorkflowLimits:
 class _Places:
     """The places among one run's working calls: at most `limit` agent and tool calls of the run work at one time.
 
-    A call holds its place from its start to its end. The calls that found no place wait in `queued`, saved as such,
-    in the order they came, each with what starts it.
+    A call holds its place from its start to its end (except while waiting on peer messages or a child ask_user).
+    The calls that found no place wait in `queued`, and waking waiters re-acquire in `resuming`.
     """
 
     limit: int
     working: set[str] = field(default_factory=set)
     queued: deque[tuple[str, Callable[[], Awaitable[object]]]] = field(default_factory=deque)
+    resuming: deque[tuple[str, asyncio.Event]] = field(default_factory=deque)
+
+
+@dataclass(slots=True, eq=False)
+class _PeerWaiter:
+    """One active wait for peer messages, marked `deadlocked` when no sender can act."""
+
+    key: str
+    deadlocked: bool = False
 
 
 # What the saved owner of a run has now in the run's conversation: its live context once access is confirmed,
@@ -293,6 +313,11 @@ class WorkflowEngine:
         # Which calls of each run work now and which wait for a place, counted here and not from the saved nodes: a
         # node that an ended attempt left running holds no place until the attempt that reaches it waits for it.
         self._places: dict[str, _Places] = {}
+        self._peer_waiters: dict[str, set[_PeerWaiter]] = {}
+        # Newest `X-Workflow-Runnable: <counter>:<runnable>` report per script attempt ID.
+        self._runnable: dict[str, tuple[int, int]] = {}
+        # Runnable counter observed when a node settled, cleared once a higher counter arrives from the script.
+        self._settled_at: dict[str, int] = {}
         self._attending: Counter[str | None] = Counter()
         self._inline_runs: dict[str, str] = {}
         self._closed = False
@@ -766,19 +791,35 @@ class WorkflowEngine:
         sha256 = hashlib.sha256(raw).hexdigest()
         return await asyncio.to_thread(self.store.put_source, run.run_id, run.attempt, run.epoch, name, raw, sha256)
 
-    async def submit_node(self, attempt: ScriptRunRecord, request: NodeRequest) -> NodeReceipt:
+    async def submit_node(
+        self,
+        attempt: ScriptRunRecord,
+        request: NodeRequest,
+        *,
+        runnable: str | None = None,
+    ) -> NodeReceipt:
         """Save and dispatch one call of the attempt's script, or return the receipt of the node its key has."""
         run = await self._current_run(attempt)
         # The engine owns a call from its insert to its dispatch, so a caller that goes away strands no running node.
-        return await asyncio.shield(self._spawn(_ADMISSIONS, self._admit(run, attempt, request)))
+        return await asyncio.shield(self._spawn(_ADMISSIONS, self._admit(run, attempt, request, runnable=runnable)))
 
-    async def _admit(self, asked: WorkflowRun, attempt: ScriptRunRecord, request: NodeRequest) -> NodeReceipt:
+    async def _admit(
+        self,
+        asked: WorkflowRun,
+        attempt: ScriptRunRecord,
+        request: NodeRequest,
+        *,
+        runnable: str | None = None,
+    ) -> NodeReceipt:
         # Held from the lookup to the dispatch: two requests with one key cannot both find it free, and the run
-        # cannot end in between.
-        async with self._condition(asked.run_id):
-            return await self._admit_gated(self.store.get_run(asked.run_id), asked.epoch, attempt, request)
+        # cannot end in between. Recording `runnable` after admitting ensures the submitted node is visible first.
+        async with (condition := self._condition(asked.run_id)):
+            receipt = await self._admit_gated(self.store.get_run(asked.run_id), asked.epoch, attempt, request)
+            if self._record_runnable_locked(attempt, runnable):
+                condition.notify_all()
+            return receipt
 
-    async def _admit_gated(  # noqa: C901, PLR0912, PLR0915
+    async def _admit_gated(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         run: WorkflowRun,
         epoch: int,
@@ -917,15 +958,25 @@ class WorkflowEngine:
         ):
             node = replace(node, state=WorkflowNodeState.FAILED, error={"kind": "schema", "message": bad_schema})
         elif shown in ("agent", "turn"):
+            if saved is not None:
+                await asyncio.to_thread(withdraw_unread, self.store, run.run_id, key, saved.generation)
             follow_up = None
             if shown == "turn" and session is not None:
+                turn_message = await self._session_turn_message(
+                    run.run_id,
+                    session,
+                    earlier,
+                    key,
+                    generation,
+                    str(asked["message"]),
+                )
                 follow_up, prompt = await self._prepare_turn(
                     run,
                     session,
                     all_turns,
                     earlier,
                     saved,
-                    str(asked["message"]),
+                    turn_message,
                 )
                 node = replace(node, request={**asked, "prompt": prompt})
             dispatch = partial(self._dispatch_agent, run, timeout=_timeout(meta), follow_up=follow_up)
@@ -938,6 +989,74 @@ class WorkflowEngine:
                 same_as = result_digest(await asyncio.to_thread(self.store.whole_result, previous))
             start = partial(self._dispatch_tool, run, attempt, tool_call=(grant, arguments), same_as=same_as)
             return await self._enter(run, node, start, dirty_after=same_as is None)
+        elif kind == "send":
+            if saved is not None:
+                await asyncio.to_thread(withdraw_unread, self.store, run.run_id, key, saved.generation)
+            try:
+                sent = await asyncio.to_thread(
+                    send_peer_message,
+                    self.store,
+                    run.run_id,
+                    op_id=f"{key}:{generation}",
+                    sender=NodeRef(key=key, generation=generation, name="script"),
+                    to=str(request.args.get("to") or ""),
+                    text=str(request.args.get("text") or ""),
+                )
+            except (PeerUnreachableError, PeerTooLargeError, WorkflowRunStoreError) as exc:
+                node = replace(node, state=WorkflowNodeState.FAILED, error={"kind": "failed", "message": str(exc)})
+            else:
+                node = replace(node, result=sent)
+        elif kind == "inbox":
+            wait_seconds = max(0.0, float(request.args.get("wait_seconds") or 0))
+            reader = NodeRef(key="script", generation=1, name="script")
+            immediate = await asyncio.to_thread(
+                read_call,
+                self.store,
+                run.run_id,
+                op_id=f"{key}:{generation}",
+                reader=reader,
+                names=("script",),
+                record_empty=wait_seconds <= 0,
+            )
+            if immediate is not None:
+                node = replace(node, result=immediate[0])
+            else:
+                waiting_node = replace(node, state=WorkflowNodeState.WAITING, waiting_on="peer", ended_at=None)
+                waiting_node = await asyncio.to_thread(
+                    partial(self.store.put_node, waiting_node, epoch, dirty_after=True),
+                )
+                self._spawn(run.run_id, self._wait_inbox(run, waiting_node, epoch, reader, wait_seconds))
+                return _receipt(waiting_node)
+        elif kind == "state":
+            op = request.args.get("op")
+            state_key = str(request.args.get("key") or "")
+            if op == "get":
+                entry = await asyncio.to_thread(
+                    get_state_entry,
+                    self.store,
+                    run.run_id,
+                    op_id=f"{key}:{generation}",
+                    key=state_key,
+                )
+                node = replace(node, result=entry)
+            elif op == "set":
+                try:
+                    saved_state = await asyncio.to_thread(
+                        set_peer_state,
+                        self.store,
+                        run.run_id,
+                        op_id=f"{key}:{generation}",
+                        key=state_key,
+                        value=request.args.get("value"),
+                        updated_by="script",
+                    )
+                except (PeerTooLargeError, WorkflowRunStoreError) as exc:
+                    node = replace(node, state=WorkflowNodeState.FAILED, error={"kind": "failed", "message": str(exc)})
+                else:
+                    node = replace(node, result=saved_state)
+            else:
+                msg = f"Unknown state operation '{op}'."
+                raise WorkflowRunStoreError(msg)
         elif kind == "ask":
             options = [str(option) for option in request.args.get("options") or ()]
             if len(options) > MAX_OPTIONS or any(len(option.encode()) > MAX_OPTION_BYTES for option in options):
@@ -964,6 +1083,8 @@ class WorkflowEngine:
         ended_at = None if kind == "ask" else node.started_at
         put = partial(self.store.put_node, replace(node, ended_at=ended_at), epoch, dirty_after=True)
         node = await asyncio.to_thread(put)
+        if kind == "send" and node.state is WorkflowNodeState.COMPLETED:
+            self._condition(run.run_id).notify_all()
         if node.state is WorkflowNodeState.WAITING:
             await self._restate(run.run_id)
         return _receipt(await self._asked(run, node, epoch))
@@ -1027,7 +1148,9 @@ class WorkflowEngine:
             settle = partial(self.store.settle_node, run_id, key, generation, run.epoch)
             if not await asyncio.to_thread(partial(settle, state=WorkflowNodeState.COMPLETED, result=answer)):
                 return False
+            self._note_settled(run_id)
             await self._restate(run_id)
+            self._check_deadlock(run_id)
             condition.notify_all()
         # Without the lock, which no send to the room holds up for long.
         await self._close_card(run, node, "answered", answer, RETRY_SECONDS)
@@ -1072,21 +1195,60 @@ class WorkflowEngine:
         self._leave(run.run_id, None)
 
     def _leave(self, run_id: str, key: str | None) -> None:
-        """Give up the place of the call at *key*, which ended, and start the calls there is room for."""
+        """Give up the place of the call at *key*, wake resuming waiters first, then start queued calls."""
         places = self._places.get(run_id)
         if places is None:
             return
         places.working.discard(key or "")
+        while places.resuming and len(places.working) < places.limit:
+            resuming_key, ready = places.resuming.popleft()
+            places.working.add(resuming_key)
+            ready.set()
         while places.queued and len(places.working) < places.limit and not self._closed:
             queued, start = places.queued.popleft()
             places.working.add(queued)
             self._spawn(run_id, self._start_queued(run_id, queued, start))
+
+    def _drop_places(self, run_id: str) -> None:
+        """Drop *run_id*'s concurrency table and release any waiter blocked on re-acquiring a slot."""
+        if (places := self._places.pop(run_id, None)) is not None:
+            while places.resuming:
+                _, ready = places.resuming.popleft()
+                ready.set()
+
+    async def _reacquire_place(self, run_id: str, key: str) -> None:
+        """Take a concurrency place back for *key* before a peer or child-question wait returns."""
+        ready: asyncio.Event | None = None
+        async with self._condition(run_id):
+            if self._closed or run_id in self._stopping:
+                return
+            run = self.store.get_run(run_id)
+            if run.state in TERMINAL_RUN_STATES:
+                return
+            places = self._places_for(run)
+            if key in places.working or len(places.working) < places.limit:
+                places.working.add(key)
+                return
+            ready = asyncio.Event()
+            places.resuming.append((key, ready))
+        try:
+            await ready.wait()
+        except asyncio.CancelledError:
+            async with self._condition(run_id):
+                places = self._places.get(run_id)
+                if places is not None:
+                    with suppress(ValueError):
+                        places.resuming.remove((key, ready))
+                    if ready.is_set():
+                        self._leave(run_id, key)
+            raise
 
     async def _finish_call(self, run_id: str, key: str) -> None:
         """Release *key* and stop at the cost limit if reached; the caller's `_leave` starts queued work otherwise."""
         async with self._condition(run_id):
             if (places := self._places.get(run_id)) is not None:
                 places.working.discard(key)
+            self._note_settled(run_id)
             with suppress(WorkflowRunNotFoundError):
                 await self._check_budget(self.store.get_run(run_id))
 
@@ -1320,6 +1482,249 @@ class WorkflowEngine:
         ]
         digest = result_digest({"kind": "turn", "args": args, "lineage": lineage})
         return session, all_turns, in_attempt, earlier, digest
+
+    async def _session_turn_message(
+        self,
+        run_id: str,
+        session: WorkflowNode,
+        earlier: list[WorkflowNode],
+        turn_key: str,
+        generation: int,
+        message: str,
+    ) -> str:
+        """Prepend peer messages queued for *session* between turns to *message*."""
+        if not any(turn.state is WorkflowNodeState.COMPLETED for turn in earlier):
+            return message
+        reader = NodeRef(
+            key=turn_key,
+            generation=generation,
+            name=session.name or "",
+            reader_key=session.key,
+            reader_generation=session.generation,
+        )
+        names = (session.name, "*") if session.name else ("*",)
+        unread = await asyncio.to_thread(
+            read_call,
+            self.store,
+            run_id,
+            op_id=f"{turn_key}:{generation}:session_inbox",
+            reader=reader,
+            names=names,
+            record_empty=True,
+        )
+        msgs = unread[0] if unread is not None else []
+        if not msgs:
+            return message
+        lines = "\n".join(f"{m['from']}: {m['text']}" for m in msgs)
+        return f"Messages received since your last turn:\n{lines}\n\n{message}"
+
+    async def peer_send(
+        self,
+        run_id: str,
+        *,
+        op_id: str,
+        sender: NodeRef,
+        to: str,
+        text: str,
+    ) -> dict[str, object]:
+        """Send one peer message in a single transaction and wake any waiters of *run_id*."""
+        result = await asyncio.to_thread(
+            send_peer_message,
+            self.store,
+            run_id,
+            op_id=op_id,
+            sender=sender,
+            to=to,
+            text=text,
+        )
+        async with (condition := self._condition(run_id)):
+            condition.notify_all()
+        return result
+
+    def _record_runnable_locked(self, attempt: ScriptRunRecord, header: str | None) -> bool:
+        """Record a newer `X-Workflow-Runnable` header under the run's lock; return whether deadlock triggered."""
+        if header is None or attempt.workflow_run_id is None:
+            return False
+        raw_seq, sep, raw_count = header.partition(":")
+        if not sep or not raw_seq.isdecimal() or not raw_count.isdecimal():
+            return False
+        counter, count = int(raw_seq), int(raw_count)
+        prev = self._runnable.get(attempt.run_id)
+        if prev is not None and counter <= prev[0]:
+            return False
+        self._runnable[attempt.run_id] = (counter, count)
+        if (settled := self._settled_at.get(attempt.run_id)) is not None and counter > settled:
+            self._settled_at.pop(attempt.run_id, None)
+        return self._check_deadlock(attempt.workflow_run_id)
+
+    async def record_runnable(self, attempt: ScriptRunRecord, header: str | None) -> None:
+        """Record the SDK's `X-Workflow-Runnable: <counter>:<runnable>` report if newer, and check deadlock."""
+        if header is None or attempt.workflow_run_id is None:
+            return
+        async with (condition := self._condition(attempt.workflow_run_id)):
+            if self._record_runnable_locked(attempt, header):
+                condition.notify_all()
+
+    def _note_settled(self, run_id: str) -> None:
+        """Mark *run_id*'s current attempt runnable report stale until the script sends a higher counter."""
+        with suppress(WorkflowRunNotFoundError):
+            attempt_id = self.store.get_run(run_id).script_run_id
+            if attempt_id and (current := self._runnable.get(attempt_id)) is not None:
+                self._settled_at[attempt_id] = current[0]
+
+    def _is_deadlocked(self, run_id: str) -> bool:
+        """Return whether every live call of *run_id* waits on peer and no script lane can still act."""
+        waiters = self._peer_waiters.get(run_id)
+        if not waiters or run_id in self._stopping or self._closed:
+            return False
+        with suppress(WorkflowRunNotFoundError):
+            run = self.store.get_run(run_id)
+            if run.state in TERMINAL_RUN_STATES:
+                return False
+            attempt_id = run.script_run_id or ""
+            if attempt_id in self._settled_at:
+                return False
+            report = self._runnable.get(attempt_id)
+            if report is not None and report[1] > 0:
+                return False
+            live = [node for node in self.store.nodes(run_id, light=True) if node.state in LIVE_NODE_STATES]
+            return bool(live) and all(
+                node.state is WorkflowNodeState.WAITING and node.waiting_on == "peer" for node in live
+            )
+        return False
+
+    def _check_deadlock(self, run_id: str) -> bool:
+        """Mark all peer waiters of *run_id* deadlocked when no unfinished peer or script lane can send."""
+        if not self._is_deadlocked(run_id):
+            return False
+        for waiter in self._peer_waiters.get(run_id, ()):
+            waiter.deadlocked = True
+        return True
+
+    def _needs_runnable_refresh(self, run: WorkflowRun) -> bool:
+        """Return whether *run* has peer waiters blocked solely on a stale runnable counter after a settle."""
+        attempt_id = run.script_run_id or ""
+        if attempt_id not in self._settled_at or not self._peer_waiters.get(run.run_id):
+            return False
+        live = [node for node in self.store.nodes(run.run_id, light=True) if node.state in LIVE_NODE_STATES]
+        return bool(live) and all(
+            node.state is WorkflowNodeState.WAITING and node.waiting_on == "peer" for node in live
+        )
+
+    async def _poll_peer_wait(
+        self,
+        condition: asyncio.Condition,
+        run_id: str,
+        waiter: _PeerWaiter,
+        read_fn: Callable[[bool], tuple[list[dict[str, object]], str | None] | None],
+        op_id: str,
+        deadline: float,
+    ) -> tuple[list[dict[str, object]], str | None]:
+        loop = asyncio.get_running_loop()
+        while True:
+            if (found := await asyncio.to_thread(read_fn, False)) is not None:
+                return found
+            if waiter.deadlocked or self._check_deadlock(run_id):
+                dead = await asyncio.to_thread(record_deadlock, self.store, run_id, op_id=op_id)
+                condition.notify_all()
+                return dead
+            if self._closed or run_id in self._stopping or self.store.get_run(run_id).state in TERMINAL_RUN_STATES:
+                return [], None
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                final = await asyncio.to_thread(read_fn, True)
+                return final if final is not None else ([], None)
+            with suppress(TimeoutError):
+                await asyncio.wait_for(condition.wait(), min(remaining, RECHECK_SECONDS))
+
+    async def wait_for_messages(
+        self,
+        run_id: str,
+        reader: NodeRef,
+        wait_seconds: float,
+        *,
+        op_id: str,
+        names: tuple[str, ...],
+        node_key: str | None = None,
+        node_generation: int | None = None,
+        holds_slot: bool = True,
+    ) -> tuple[list[dict[str, object]], str | None]:
+        """Read unread messages, or wait on *run_id*'s condition without holding a concurrency slot."""
+        read_fn = lambda record_empty: read_call(  # noqa: E731
+            self.store,
+            run_id,
+            op_id=op_id,
+            reader=reader,
+            names=names,
+            record_empty=record_empty,
+        )
+        if (immediate := await asyncio.to_thread(read_fn, wait_seconds <= 0)) is not None:
+            return immediate
+        key = reader.key if node_key is None else node_key
+        generation = reader.generation if node_generation is None else node_generation
+        deadline = asyncio.get_running_loop().time() + wait_seconds
+        waiter, released, cancelled = _PeerWaiter(key=key), False, False
+        condition = self._condition(run_id)
+        try:
+            async with condition:
+                if (again := await asyncio.to_thread(read_fn, False)) is not None:
+                    return again
+                run = self.store.get_run(run_id)
+                if run.state in TERMINAL_RUN_STATES or run_id in self._stopping:
+                    return [], None
+                if holds_slot:
+                    stamp = partial(self.store.update_node, run_id, key, generation, run.epoch)
+                    with suppress(SupersededAttemptError):
+                        await asyncio.to_thread(partial(stamp, state=WorkflowNodeState.WAITING, waiting_on="peer"))
+                    self._leave(run_id, key)
+                    released = True
+                self._peer_waiters.setdefault(run_id, set()).add(waiter)
+                self._check_deadlock(run_id)
+                condition.notify_all()
+                return await self._poll_peer_wait(condition, run_id, waiter, read_fn, op_id, deadline)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            if (waiters := self._peer_waiters.get(run_id)) is not None:
+                waiters.discard(waiter)
+                if not waiters:
+                    self._peer_waiters.pop(run_id, None)
+            if released and not cancelled:
+                await self._reacquire_place(run_id, key)
+                async with condition:
+                    with suppress(WorkflowRunNotFoundError, SupersededAttemptError):
+                        current = self.store.get_run(run_id)
+                        if current.state not in TERMINAL_RUN_STATES:
+                            stamp = partial(self.store.update_node, run_id, key, generation, current.epoch)
+                            await asyncio.to_thread(partial(stamp, state=WorkflowNodeState.RUNNING, waiting_on=None))
+                    condition.notify_all()
+
+    async def _wait_inbox(
+        self,
+        run: WorkflowRun,
+        node: WorkflowNode,
+        epoch: int,
+        reader: NodeRef,
+        wait_seconds: float,
+    ) -> None:
+        """Wait for script inbox messages and settle the `inbox` node when messages arrive or wait ends."""
+        messages, _note = await self.wait_for_messages(
+            run.run_id,
+            reader,
+            wait_seconds,
+            op_id=f"{node.key}:{node.generation}",
+            names=("script",),
+            node_key=node.key,
+            node_generation=node.generation,
+            holds_slot=False,
+        )
+        settle = partial(self.store.settle_node, run.run_id, node.key, node.generation, epoch)
+        with suppress(SupersededAttemptError):
+            await asyncio.to_thread(partial(settle, state=WorkflowNodeState.COMPLETED, result=messages))
+        async with self._condition(run.run_id):
+            self._note_settled(run.run_id)
+        await self._notify(run.run_id)
 
     async def _prepare_turn(
         self,
@@ -1747,8 +2152,15 @@ class WorkflowEngine:
                     return True
         return False
 
-    async def node_receipt(self, attempt: ScriptRunRecord, node_id: str, *, wait: float) -> NodeReceipt:
-        """Return a node's receipt, held up to *wait* seconds until the node has ended, while the attempt is served."""
+    async def node_receipt(
+        self,
+        attempt: ScriptRunRecord,
+        node_id: str,
+        *,
+        wait: float,
+        known_state: str | None = None,
+    ) -> NodeReceipt:
+        """Return a node's receipt, held up to *wait* seconds until it settles or enters/leaves `waiting`."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + wait
         while True:
@@ -1757,10 +2169,16 @@ class WorkflowEngine:
             async with (condition := self._condition(run.run_id)):
                 node = self._node(run.run_id, node_id)
                 remaining = deadline - loop.time()
-                if node.state not in LIVE_NODE_STATES or remaining <= 0:
+                waiting_changed = known_state is not None and (
+                    (node.state is WorkflowNodeState.WAITING) != (known_state == WorkflowNodeState.WAITING)
+                )
+                if node.state not in LIVE_NODE_STATES or waiting_changed or remaining <= 0:
                     return _receipt(node)
+                refresh = self._needs_runnable_refresh(run)
                 with suppress(TimeoutError):
                     await asyncio.wait_for(condition.wait(), min(remaining, RECHECK_SECONDS))
+                if refresh:
+                    return _receipt(self._node(run.run_id, node_id))
 
     def node_prompt(self, run_id: str, key: str | None, generation: int | None) -> str | None:
         """Return the prompt of the agent call that is *generation* of the node at *key*, while it waits for its agent.
@@ -1836,6 +2254,7 @@ class WorkflowEngine:
         """Wake the run's waiters after a call of it changed, and show whether the run waits for a person now."""
         async with (condition := self._condition(run_id)):
             await self._restate(run_id)
+            self._check_deadlock(run_id)
             condition.notify_all()
 
     def _spawn[T](self, owner: str, work: Coroutine[None, None, T]) -> asyncio.Task[T]:
@@ -1985,7 +2404,7 @@ class WorkflowEngine:
                 return
             self._stopping.add(run.run_id)
             # Before any call of the run is stopped: the place it gives up starts no call that waited for one.
-            self._places.pop(run.run_id, None)
+            self._drop_places(run.run_id)
             nodes = self.store.nodes(run.run_id, include_stale=True)
         deadline = asyncio.get_running_loop().time() + _STOP_SECONDS
         handles = [node.handle for node in nodes if node.state in LIVE_NODE_STATES and node.handle is not None]
@@ -2023,7 +2442,7 @@ class WorkflowEngine:
                     return current
                 ended = state in TERMINAL_RUN_STATES
                 # Before any call of the run is stopped: the place it gives up starts no call that waited for one.
-                self._places.pop(run.run_id, None)
+                self._drop_places(run.run_id)
                 mine = self._tasks.get(run.run_id, set()) if not ended else self._tasks.pop(run.run_id, set())
                 # The wait for a timed agent outlives the attempt: it stops the turn on time while no attempt waits.
                 kept = () if ended else [task for task in mine if task.get_name().startswith(_TIMED)]
@@ -2050,6 +2469,8 @@ class WorkflowEngine:
                 def forget(written: asyncio.Future[WorkflowRun]) -> None:
                     if not written.cancelled() and written.exception() is None:
                         self._launched.pop(attempt, None)
+                        self._runnable.pop(attempt, None)
+                        self._settled_at.pop(attempt, None)
 
                 write = partial(self.store.update_run, run.run_id, run.epoch, **changes)
                 end = asyncio.ensure_future(asyncio.to_thread(write))

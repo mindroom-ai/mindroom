@@ -318,10 +318,11 @@ class WorkflowRunStore:
         return self._select_nodes("run_id = ? AND kind = 'turn' AND session_key = ?", (run_id, session_key))
 
     def node_states(self, run_id: str) -> frozenset[WorkflowNodeState]:
-        """Return the states the run's current nodes are in."""
+        """Return the states the run's current nodes are in, excluding peer waits (which do not pause for a person)."""
         with self._connection() as connection:
             rows = connection.execute(
-                "SELECT DISTINCT state FROM workflow_nodes WHERE run_id = ? AND stale = 0",
+                "SELECT DISTINCT state FROM workflow_nodes "
+                "WHERE run_id = ? AND stale = 0 AND NOT (state = 'waiting' AND waiting_on = 'peer')",
                 (run_id,),
             ).fetchall()
         return frozenset(WorkflowNodeState(row["state"]) for row in rows)
@@ -591,6 +592,18 @@ class WorkflowRunStore:
             connection.close()
 
     @contextmanager
+    def read_connection(self) -> Iterator[sqlite3.Connection]:
+        """Open a read connection to the workflow store."""
+        with self._connection() as connection:
+            yield connection
+
+    @contextmanager
+    def write_transaction(self, changed: str | None = None) -> Iterator[sqlite3.Connection]:
+        """Run one write transaction; notify `on_change` for *changed* once committed."""
+        with self._write_transaction(changed) as connection:
+            yield connection
+
+    @contextmanager
     def _write_transaction(self, changed: str | None = None) -> Iterator[sqlite3.Connection]:
         """Run one write; *changed* is the run whose view the write changes, told to `on_change` once it is saved."""
         with self._connection() as connection, begun(connection, write=True):
@@ -830,6 +843,47 @@ _SCHEMA_STATEMENTS = (
         source BLOB NOT NULL,
         sha256 TEXT NOT NULL,
         PRIMARY KEY (run_id, attempt, name)
+    )
+    """,
+    """
+    CREATE TABLE workflow_messages (
+        run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+        seq INTEGER NOT NULL,
+        sender_key TEXT NOT NULL,
+        sender_generation INTEGER NOT NULL,
+        sender_name TEXT NOT NULL,
+        recipient_name TEXT NOT NULL,
+        text TEXT NOT NULL,
+        withdrawn INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (run_id, seq)
+    )
+    """,
+    """
+    CREATE TABLE workflow_cursors (
+        run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+        reader_key TEXT NOT NULL,
+        reader_generation INTEGER NOT NULL,
+        seq INTEGER NOT NULL,
+        PRIMARY KEY (run_id, reader_key, reader_generation)
+    )
+    """,
+    """
+    CREATE TABLE workflow_state (
+        run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+        key TEXT NOT NULL,
+        value_json TEXT NOT NULL,
+        updated_by TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (run_id, key)
+    )
+    """,
+    """
+    CREATE TABLE workflow_peer_calls (
+        run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
+        op_id TEXT NOT NULL,
+        result_json TEXT NOT NULL,
+        PRIMARY KEY (run_id, op_id)
     )
     """,
 )

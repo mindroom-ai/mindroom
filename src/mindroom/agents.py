@@ -22,6 +22,7 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.computer_announcement import computer_announcement_middleware
 from mindroom.custom_tools.job import JobTools
+from mindroom.custom_tools.workflow_peers import WorkflowPeerTools
 from mindroom.delegation.personas import (
     caller_toolkit_names,
     persona_allows,
@@ -1221,6 +1222,10 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     )
     if controls is not None:
         entries.append(_job_controls_entry(controls))
+    peer_tools = WorkflowPeerTools.build(enabled=not disable_runtime_capabilities)
+    if peer_tools is not None:
+        entries.append(_job_controls_entry(peer_tools))
+        local_tool_names.append(peer_tools.name)
     built = [
         *entries,
         *_generated_entries(
@@ -1792,7 +1797,10 @@ def create_agent(
         # The roster names each toolkit by the registered tool the agent CLI reaches it under.
         # A persona's or narrowed build's roster names the toolkits it actually built, deferred ones it named included.
         roster = (
-            agent_tools.toolkit_names(agent_tools.candidates())
+            [
+                *agent_tools.toolkit_names(agent_tools.candidates()),
+                *(name for name in tool_assembly.local_tool_names if name == "workflow_peers"),
+            ]
             if persona is None and tool_names is None
             else [*tool_assembly.local_tool_names, *tool_assembly.worker_routed_tool_names]
         )

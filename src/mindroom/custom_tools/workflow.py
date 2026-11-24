@@ -48,6 +48,7 @@ from mindroom.workflow_runs.models import (
     WorkflowRunState,
     new_workflow_run_id,
 )
+from mindroom.workflow_runs.peers import all_messages, all_state
 from mindroom.workflow_runs.replay import result_digest
 from mindroom.workflow_runs.saved import list_saved, save_source
 from mindroom.workflow_runs.store import WorkflowRunNotFoundError, WorkflowRunStoreError, owned_run
@@ -74,7 +75,8 @@ Use it when a task needs many agents, the same step over many items, an independ
 Give exactly one of `source` (inline Python), `path` (a file in your workspace), or `name` (a saved workflow, `workflows/<name>.py`).
 The script defines `def main(args):` and returns the final report, a string or a JSON value. MindRoom calls `main`; do not call it yourself.
 
-    from mindroom.workflow import agent, foreach, parallel, spawn, ask_user, shell, tool, phase, log, now, random, run, PartialFailure
+    from mindroom.workflow import (agent, foreach, parallel, spawn, ask_user, shell, tool, phase, log,
+                                   run, send, inbox, state, now, random, PartialFailure)
 
     def main(args):
         phase("Research")                        # the same step over many items, in parallel
@@ -109,7 +111,7 @@ The script defines `def main(args):` and returns the final report, a string or a
   With schema the agent is asked again until its answer matches, up to 5 turns; then AgentError with kind "schema",
   or "indeterminate" when one of its turns used a tool. schema and output_path cannot be used together.
   The agent is a fresh copy of you with all your tools and no memory of this conversation: put everything it needs in the prompt.
-  agent="other" runs that configured agent with its own tools. name is only a label; it does not pick an agent.
+  agent="other" runs that configured agent with its own tools. name is only a label and the address for messages; it does not pick an agent.
   model: one of the models below. system: replaces the system prompt. tools, skills, knowledge: lists that narrow a copy of you.
   profile: a subagents/<profile>.md file. minimal=True: a cheap copy with one shell tool. timeout: seconds, then the turn is cancelled.
   output_path: also write the answer to this workspace file. dedicated_worker=True: its own container. resource_profile: a worker size.
@@ -127,6 +129,11 @@ The script defines `def main(args):` and returns the final report, a string or a
 - shell(command) runs a command with your shell tool and returns .ok, .exit_code and .output. tool(toolkit, function, **arguments) calls any other tool of yours.
   shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.
 - phase(title) groups the calls that follow; log(text) shows a progress line. run(name, args) calls a saved workflow inside this one.
+- Agents in a run can talk to each other: each automatically has the tools send_peer_message(to, text),
+  read_peer_messages(wait_seconds=0), list_peers(), get_shared_state(key=None) and set_shared_state(key, value),
+  addressed by the name you gave them ("*" reaches every unfinished agent, "script" reaches the script).
+  Say in each prompt whom to talk to. The script joins in with send(to, text), inbox(wait_seconds=0),
+  state.get(key, default=None) and state.set(key, value); agents read and write the same state.
 
 Every agent, tool and shell call is saved with its result. The Python between the calls runs again on every resume,
 so do writes (files, git, HTTP) through shell(), tool() or an agent, never with plain Python.
@@ -253,12 +260,18 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
             action = partial(self._reserve, engine, context, origin, arguments, outer=outer, source=text)
         return await engine.delivery(await engine.attend(origin, action, context, self.limits))
 
-    async def get_workflow(self, run_id: str, nodes: Literal["active", "failed", "all"] = "active") -> str:
-        """Return a run's status, cost, open questions, failed calls and nodes. nodes is "active" (default), "failed" or "all".
+    async def get_workflow(
+        self,
+        run_id: str,
+        nodes: Literal["active", "failed", "all"] = "active",
+        messages: bool = False,
+    ) -> str:
+        """Return a run's status, cost, open questions, failed calls and nodes. nodes is "active" (default), "failed" or "all"; messages=True adds peer messages and shared state.
 
         Args:
             run_id: The run's ID, as start_workflow returned it.
             nodes: Which calls to list: "active", "failed" or "all".
+            messages: When True, include full peer message history and shared state.
 
         """
         engine, context = _runtime()
@@ -267,7 +280,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         shown = {"active": LIVE_NODE_STATES, "failed": _FAILED, "all": frozenset(WorkflowNodeState)}[nodes]
         # What each call used, over every time it ran; a call that asked no model has none.
         used = await asyncio.to_thread(engine.store.node_usage, run.run_id)
-        status = {
+        status: dict[str, Any] = {
             "run_id": run.run_id,
             "title": run.title,
             "status": run.state.value,
@@ -290,6 +303,9 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
                 if node.state in shown
             ],
         }
+        if messages:
+            status["messages"] = await asyncio.to_thread(all_messages, engine.store, run.run_id)
+            status["shared_state"] = await asyncio.to_thread(all_state, engine.store, run.run_id)
         if run.state in TERMINAL_RUN_STATES:
             # The report, or why there is none, also for a run whose caller is gone.
             status["result"] = run.outcome_text()

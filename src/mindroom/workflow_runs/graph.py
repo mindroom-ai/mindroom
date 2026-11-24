@@ -54,8 +54,14 @@ def node_label(kind: str, args: Mapping[str, object], name: object = None) -> st
     """
     text = name or args.get("prompt") or (args.get("message") if kind == "turn" else None) or args.get("question")
     if not text:
-        function = f"{args.get('toolkit')}.{args.get('function')}"
-        text = function if kind == "tool" else args.get("op") or args.get("type") or kind
+        if kind == "tool":
+            text = f"{args.get('toolkit')}.{args.get('function')}"
+        elif kind == "send" and args.get("to"):
+            text = f"send -> {args.get('to')}"
+        elif kind == "state" and args.get("op"):
+            text = f"state.{args.get('op')}({args.get('key')})" if args.get("key") else f"state.{args.get('op')}"
+        else:
+            text = args.get("op") or args.get("type") or kind
     return redact_sensitive_text(str(text).strip().partition("\n")[0], max_length=_NAME_CHARS)
 
 

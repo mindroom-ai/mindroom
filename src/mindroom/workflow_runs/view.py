@@ -37,6 +37,7 @@ from mindroom.workflow_runs.models import (
     WorkflowRunState,
 )
 from mindroom.workflow_runs.notices import notice, notice_fits, send_notice
+from mindroom.workflow_runs.peers import message_edges
 from mindroom.workflow_runs.store import SupersededAttemptError, WorkflowRunNotFoundError
 
 if TYPE_CHECKING:
@@ -307,7 +308,13 @@ class RunViews:
             )
             for child in store.child_runs(run_id)
         }
-        graph = graph_rows(nodes, used, [], store.log(run_id, LOG_LINES), inside=inside)
+        graph = graph_rows(
+            nodes,
+            used,
+            message_edges(store, run_id, nodes),
+            store.log(run_id, LOG_LINES),
+            inside=inside,
+        )
         return run, nodes, usage, graph
 
     async def _card(self, run: WorkflowRun, meta: dict[str, Any], graph: Graph, client: nio.AsyncClient) -> bool:

@@ -939,6 +939,7 @@ depends_on = [
     "mindroom.custom_tools.dynamic_workflow",
     "mindroom.custom_tools.job",
     "mindroom.custom_tools.memory",
+    "mindroom.custom_tools.workflow_peers",
     "mindroom.entity_resolution",
     "mindroom.hooks",
     "mindroom.mcp.toolkit",
@@ -2638,6 +2639,37 @@ expose = [
 ]
 
 [[modules]]
+path = "mindroom.workflow_runs.peers"
+depends_on = [
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.replay",
+    "mindroom.workflow_runs.store",
+]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.peers"]
+expose = [
+    "DEADLOCK_NOTE",
+    "MAX_PEER_BYTES",
+    "NodeRef",
+    "PeerTooLargeError",
+    "PeerUnreachableError",
+    "all_messages",
+    "all_state",
+    "get_state",
+    "get_state_entry",
+    "list_peers",
+    "message_edges",
+    "peer_op_id",
+    "read",
+    "read_call",
+    "record_deadlock",
+    "send",
+    "set_state",
+    "withdraw_unread",
+]
+
+[[modules]]
 path = "mindroom.workflow_runs.engine"
 depends_on = [
     "mindroom.delegation.personas",
@@ -2648,6 +2680,7 @@ depends_on = [
     "mindroom.workflow_runs.graph",
     "mindroom.workflow_runs.models",
     "mindroom.workflow_runs.notices",
+    "mindroom.workflow_runs.peers",
     "mindroom.workflow_runs.questions",
     "mindroom.workflow_runs.recovery",
     "mindroom.workflow_runs.saved",
@@ -2726,6 +2759,7 @@ depends_on = [
     "mindroom.workflow_runs.graph",
     "mindroom.workflow_runs.models",
     "mindroom.workflow_runs.notices",
+    "mindroom.workflow_runs.peers",
     "mindroom.workflow_runs.store",
 ]
 
@@ -2769,10 +2803,26 @@ depends_on = [
     "mindroom.workflow_runs.answers",
     "mindroom.workflow_runs.engine",
     "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.peers",
     "mindroom.workflow_runs.replay",
     "mindroom.workflow_runs.saved",
     "mindroom.workflow_runs.store",
 ]
+
+[[modules]]
+path = "mindroom.custom_tools.workflow_peers"
+depends_on = [
+    "mindroom.delegation.lifecycle",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.invocation",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.workflow_runs.peers",
+    "mindroom.workflow_runs.store",
+]
+
+[[interfaces]]
+from = ["mindroom.custom_tools.workflow_peers"]
+expose = ["WorkflowPeerTools"]
 
 [[modules]]
 path = "mindroom.api.schedules"
@@ -9057,6 +9107,7 @@ depends_on = [
 ]
 visibility = [
     "mindroom.custom_tools.workflow",
+    "mindroom.custom_tools.workflow_peers",
     "mindroom.ai",
     "mindroom.custom_tools.delegate",
     "mindroom.custom_tools.dynamic_workflow",
