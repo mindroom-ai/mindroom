@@ -238,7 +238,7 @@ export function ProviderLimits() {
     const timer = window.setInterval(() => setNowMs(Date.now()), 60_000);
     return () => window.clearInterval(timer);
   }, []);
-  const authError = isAuthError(refreshError) ? refreshError : null;
+  const refreshAuthError = isAuthError(refreshError) ? refreshError : null;
   const query = useQuery({
     queryKey: PROVIDER_LIMITS_QUERY_KEY,
     queryFn: async ({ signal }) => {
@@ -254,7 +254,7 @@ export function ProviderLimits() {
       }
       return result;
     },
-    enabled: authError === null,
+    enabled: refreshAuthError === null,
     retry: false,
     staleTime: 60_000,
     gcTime: 0,
@@ -266,6 +266,14 @@ export function ProviderLimits() {
         ? PARTIAL_POLL_INTERVAL_MS
         : false,
   });
+  const queryAuthError =
+    query.isError && isAuthError(query.error) ? query.error : null;
+  useEffect(() => {
+    if (queryAuthError) {
+      setRefreshError(queryAuthError);
+      queryClient.removeQueries({ queryKey: PROVIDER_LIMITS_QUERY_KEY });
+    }
+  }, [queryAuthError, queryClient]);
 
   const handleRefresh = async () => {
     setRefreshing(true);
@@ -297,11 +305,17 @@ export function ProviderLimits() {
     void query.refetch();
   };
 
+  const authError = refreshAuthError ?? queryAuthError;
   const snapshot = authError ? undefined : query.data;
   const blockingError =
-    authError?.message ?? (query.isError ? query.error.message : null);
+    authError?.message ??
+    (!snapshot && query.isError ? query.error.message : null);
   const nonBlockingError =
-    snapshot && !authError && refreshError ? refreshError.message : null;
+    snapshot && !authError
+      ? (refreshError?.message ?? (query.isError ? query.error.message : null))
+      : null;
+  const pollingUsage =
+    Boolean(snapshot?.partial) && !partialPollExhausted && !query.isError;
   const busy = query.isFetching || refreshing;
 
   return (
@@ -368,7 +382,7 @@ export function ProviderLimits() {
               role="status"
               className="flex items-center gap-2 rounded-lg border border-border bg-muted/50 px-3 py-2 text-xs text-muted-foreground"
             >
-              {!partialPollExhausted && (
+              {pollingUsage && (
                 <Loader2
                   className="h-3.5 w-3.5 shrink-0 animate-spin"
                   aria-hidden="true"
@@ -384,7 +398,7 @@ export function ProviderLimits() {
                 account={account}
                 nowMs={nowMs}
                 partial={snapshot.partial}
-                loadingUsage={snapshot.partial && !partialPollExhausted}
+                loadingUsage={pollingUsage}
               />
             ))}
           </div>
