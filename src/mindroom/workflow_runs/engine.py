@@ -399,7 +399,8 @@ class WorkflowEngine:
             if run.state in SERVED_RUN_STATES:
                 states = self.store.node_states(run_id)
                 st = self._runs.get(run_id)
-                blocked = st is not None and st.places is not None and len(st.places.working) >= st.places.limit
+                places = None if st is None else st.places
+                blocked = places is not None and len(places.working) >= places.limit
                 # A queued call behind full approval-held slots cannot start until a person acts.
                 working = states & UNSETTLED_NODE_STATES - ({WorkflowNodeState.QUEUED} if blocked else set())
                 waits = WorkflowNodeState.WAITING in states and not working

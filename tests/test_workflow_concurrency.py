@@ -519,3 +519,27 @@ async def test_start_queued_survives_places_cleared_during_budget_check(
     await stack.engine.start_queued(stack.run_id, "@1", start)
     assert started
     await stack.end_attempt(ScriptRunState.EXITED)
+
+
+@pytest.mark.asyncio
+async def test_restated_reads_places_once_on_worker_thread(stack: WorkflowStack) -> None:
+    """_restated must read st.places once so clearing it on the event loop cannot raise AttributeError."""
+    await stack.start(max_concurrent=1)
+    places = engine_module.Places(limit=1, working={"@0"})
+
+    class _VanishingPlaces:
+        reads = 0
+
+        @property
+        def places(self) -> engine_module.Places | None:
+            self.reads += 1
+            return places if self.reads == 1 else None
+
+    holder = _VanishingPlaces()
+    stack.engine._runs[stack.run_id] = holder  # type: ignore[assignment]
+    try:
+        assert stack.engine._restated(stack.run_id, (0.0, 0.0)) is False
+        assert holder.reads == 1
+    finally:
+        stack.engine._runs.pop(stack.run_id, None)
+    await stack.end_attempt(ScriptRunState.EXITED)
