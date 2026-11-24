@@ -14,6 +14,7 @@ A run that a MindRoom restart interrupts is resumed the same way on its own.
 Treat `workflow` as trusted arbitrary code with authority comparable to `python` or `shell`.
 The script is ordinary Python, so nothing restricts its imports, file access, subprocesses, or network clients.
 Enabling `workflow` also lets the agent run the other agents of its room; see [Agents](#agents).
+Everything workflow agents say or send each other is visible to the room, so run workflows in a private room for private work.
 
 ## Enable The Tool
 
@@ -56,7 +57,7 @@ Do not rely on an after-call hook running exactly once for a workflow call.
 
 ```text
 start_workflow(source=None, path=None, name=None, args=None, title=None, max_concurrent=16, resource_profile=None, max_cost_usd=None)
-get_workflow(run_id, nodes="active")
+get_workflow(run_id, nodes="active", messages=False)
 cancel_workflow(run_id)
 resume_workflow(run_id, source=None, path=None, rerun=None, max_cost_usd=None)
 list_workflow_runs()
@@ -67,6 +68,7 @@ save_workflow(run_id, name, description=None)
   The report reaches the agent through the [background job](agent-orchestration.md#background-jobs) of the run, in full; a failed run delivers the last 4 KiB of the script's output and traceback.
   `max_cost_usd` stops the run as `interrupted` at that cost so it can be resumed with a higher limit; see [Cost Limit](#cost-limit).
 - `get_workflow` returns the run's status, attempt, node counts, usage, waiting and failed calls, and the calls `nodes` selects: `active`, `failed`, or `all`.
+  Pass `messages=True` to include the full, uncapped peer message history (`messages`) and shared state (`shared_state`).
   For a run that has ended it also returns `result`: the report, or why the run has none.
   See [Cost](#cost) for `usage`.
 - `cancel_workflow` stops the run's script and ends the run `cancelled`; its finished calls stay saved.
@@ -88,7 +90,24 @@ A run that another call resumed since belongs to that call: the earlier one neit
 ## What The Script Can Call
 
 ```python
-from mindroom.workflow import agent, foreach, parallel, spawn, ask_user, shell, tool, phase, log, now, random, run, PartialFailure
+from mindroom.workflow import (
+    PartialFailure,
+    agent,
+    ask_user,
+    foreach,
+    inbox,
+    log,
+    now,
+    parallel,
+    phase,
+    random,
+    run,
+    send,
+    shell,
+    spawn,
+    state,
+    tool,
+)
 
 def main(args):
     phase("Test")
@@ -102,6 +121,7 @@ def main(args):
 - `agent(prompt)` runs one agent turn and returns its answer as text, or as parsed JSON with `schema`; see [Agents](#agents).
 - `s = spawn(name, **options)` creates an agent that keeps its conversation across `s.ask(message, *, schema=None, timeout=None)` turns; see [Sessions](#sessions).
 - `ask_user(question, options=None)` asks the run's requester in the thread and returns the answer; see [Questions](#questions).
+- `send(to, text)`, `inbox(wait_seconds=0)`, `state.get(key, default=None)` and `state.set(key, value)` exchange messages and shared state with the run's agents; see [Peer Messages And Shared State](#peer-messages-and-shared-state).
 - `shell(command)` runs a command with the agent's `shell` tool and returns `.ok`, `.exit_code`, and `.output`.
   It returns at most the last 50 KiB of output; redirect to a file and read it for more.
 - `tool(toolkit, function, **arguments)` calls any other tool of the agent and returns its result.
@@ -241,6 +261,7 @@ def review_loop(task, test_command):
 - A session handles one turn at a time: calling `s.ask(...)` while `s` is already in a turn fails with `Session '<name>' is already in a turn. Wait for it or spawn another agent.`.
 - Different sessions can run concurrently, for example `parallel([lambda: a.ask(x), lambda: b.ask(y)])`.
 - On resume, a turn whose message and earlier session history match its saved turn is reused from cache. A new turn after the last saved turn continues the saved child. If an earlier turn changed or reran as a new generation (in any lane), later turns of that session miss too; the first changed turn after saved turns starts a fresh child with an `Earlier conversation:` transcript of the saved turns before it, and later turns continue that fresh child.
+- Peer messages queued for a session between turns are placed in front of its next `s.ask(...)` message under `Messages received since your last turn:`.
 
 ## Questions
 
@@ -276,7 +297,59 @@ The run shows `waiting` once nothing else of it works, and that time is not char
   More, or longer ones, fail the call with `A question takes at most 20 options of at most 200 bytes each.` before anything waits.
 - The card shows the first 2,000 characters of a long question, or fewer if the card would not be one event, and the first 500 of a long answer, each ending in `... [truncated]`.
   The script gets the whole answer.
-- A card that could not be posted is posted again when the script asks again, and every ten seconds by the run itself; the question of a [cost limit](#cost-limit) is posted the same way.
+- A card that could not be posted is posted again when the script asks again, and every ten seconds by the run itself.
+- Agents inside a workflow run can also ask the requester directly through `workflow_peers.ask_user(question, options=None)`.
+  It posts the same question card, releases the agent's concurrency slot while waiting, marks the agent `waiting` on `user` (with its job `awaiting_approval`), and returns the stored answer immediately if the same question is asked again after a restart.
+
+## Peer Messages And Shared State
+
+Every agent running inside a workflow automatically receives the run-scoped `workflow_peers` toolkit, which always resolves the run from the child agent's own binding:
+
+```text
+send_peer_message(to, text)        send to an agent's name, "*" (all unfinished agents), or "script"
+read_peer_messages(wait_seconds=0) return unread messages as [{from, text, sent_at}]; waits for the first one
+list_peers()                       return id, name, status and label of every current agent and session in the run
+get_shared_state(key=None)         read one shared-state key or all keys
+set_shared_state(key, value)       write a JSON value under key (last write wins)
+ask_user(question, options=None)   ask the run's requester with the same question card as the script
+```
+
+The script participates under the name `script` with `send(to, text)`, `inbox(wait_seconds=0)`, `state.get(key, default=None)` and `state.set(key, value)`.
+
+```python
+from mindroom.workflow import agent, parallel
+
+def main(args):
+    fe, be = parallel([
+        lambda: agent(
+            "Build the frontend. Message 'backend' to agree on the API contract, "
+            "wait with read_peer_messages(wait_seconds=600) for their reply, then implement.",
+            name="frontend",
+        ),
+        lambda: agent(
+            "Build the backend. Wait for 'frontend' with read_peer_messages(wait_seconds=600), "
+            "agree on the API contract, then implement.",
+            name="backend",
+        ),
+    ])
+    return f"Frontend:\n{fe}\n\nBackend:\n{be}"
+```
+
+- **Addressing.** Mailboxes belong to names, not individual nodes.
+  A message sent to a name that no agent holds yet is held (`held: true`) and delivered when an agent with that name starts, so parallel start order does not matter.
+  When multiple agents share a name, each gets its own copy, and `"*"` reaches every unfinished agent other than the sender.
+  Sending to a name whose agents have all finished fails with `'<name>' has finished and will not read this. Use spawn() to keep an agent you want to talk to.`
+- **Exactly once.** Every peer message, read cursor update, and shared-state operation runs in a single transaction keyed by its operation ID.
+  A provider retry of the same tool call returns the saved result without sending twice or advancing the cursor twice; a reused call ID in a continued turn or with different arguments is a new operation.
+  Script `send`, `inbox`, `state.get` and `state.set` calls are saved as run nodes and replayed on resume like other SDK calls.
+- **Reruns.** When an agent runs again as a new generation, unread outgoing messages from its earlier generation are withdrawn, and the new generation starts its read cursor at 0 so it sees what its predecessor saw.
+- **Waiting and deadlocks.** `read_peer_messages(wait_seconds)` and `inbox(wait_seconds)` wake on the first message and have no ceiling on `wait_seconds`.
+  While waiting, the node releases its concurrency slot and shows `waiting` on `peer` (which does not mark the run as waiting for a person).
+  When every unfinished agent is waiting on `peer`, nothing is `queued` or `running`, and no script lane can still act, every waiter returns `[]` with `note: "Every agent is waiting for a message and nobody is left to send one."`
+- **Size limit.** A message or shared-state value over 1 MiB is refused with `Too large (<n> bytes, limit 1 MiB). Write it to a workspace file and send the path.`
+- **Visibility.** Everything workflow agents say or send each other is visible to the room, so run workflows in a private room for private work.
+  Graph frames and the finished run card carry only message-count `edges` (`{"from", "to", "kind": "message", "count"}`), never message text.
+  Peer tool calls and results appear in the room's Sub-agents feed like any tool call (redacted and capped), and `get_workflow(run_id, messages=True)` returns the full uncapped message history and shared state to the run's owner.
 
 ## Runs Inside Runs
 
@@ -366,6 +439,7 @@ While the run works, clients that show live updates get its graph as `io.mindroo
 A frame is `{v, run, sid, seq, meta, snapshot}` or `{v, run, sid, seq, meta, delta}`.
 `meta` holds the run's agent, thread, title, status, attempt, times, `max_concurrent`, `max_cost_usd`, `large`, `counts` and `usage`.
 A snapshot holds `phases`, `groups`, `nodes`, `edges`, `omitted` and `log`, and a delta the rows that changed since the frame before it.
+Each row of `edges` is `{"from", "to", "kind": "message", "count"}` with counts only and no message text.
 A snapshot is sent first, every ten seconds, at the run's end, and whenever a row left the graph.
 A graph too large for one event keeps the calls that wait for a person first, then failed, running and queued ones, then the newest completed ones, and counts the rest in `omitted`.
 Room state lists the run as one job, with its IDs only: no title, label or phase is written there, and the jobs of the run's agents are not listed.

@@ -1576,7 +1576,8 @@ Use it when a task needs many agents, the same step over many items, an independ
 Give exactly one of `source` (inline Python), `path` (a file in your workspace), or `name` (a saved workflow, `workflows/<name>.py`).
 The script defines `def main(args):` and returns the final report, a string or a JSON value. MindRoom calls `main`; do not call it yourself.
 
-    from mindroom.workflow import agent, foreach, parallel, spawn, ask_user, shell, tool, phase, log, now, random, run, PartialFailure
+    from mindroom.workflow import (agent, foreach, parallel, spawn, ask_user, shell, tool, phase, log,
+                                   run, send, inbox, state, now, random, PartialFailure)
 
     def main(args):
         phase("Research")                        # the same step over many items, in parallel
@@ -1611,7 +1612,7 @@ The script defines `def main(args):` and returns the final report, a string or a
   With schema the agent is asked again until its answer matches, up to 5 turns; then AgentError with kind "schema",
   or "indeterminate" when one of its turns used a tool. schema and output_path cannot be used together.
   The agent is a fresh copy of you with all your tools and no memory of this conversation: put everything it needs in the prompt.
-  agent="other" runs that configured agent with its own tools. name is only a label; it does not pick an agent.
+  agent="other" runs that configured agent with its own tools. name is only a label and the address for messages; it does not pick an agent.
   model: one of the models below. system: replaces the system prompt. tools, skills, knowledge: lists that narrow a copy of you.
   profile: a subagents/<profile>.md file. minimal=True: a cheap copy with one shell tool. timeout: seconds, then the turn is cancelled.
   output_path: also write the answer to this workspace file. dedicated_worker=True: its own container. resource_profile: a worker size.
@@ -1629,6 +1630,13 @@ The script defines `def main(args):` and returns the final report, a string or a
 - shell(command) runs a command with your shell tool and returns .ok, .exit_code and .output. tool(toolkit, function, **arguments) calls any other tool of yours.
   shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.
 - phase(title) groups the calls that follow; log(text) shows a progress line. run(name, args) calls a saved workflow inside this one.
+- Agents in a run can talk to each other: each automatically has the tools send_peer_message(to, text),
+  read_peer_messages(wait_seconds=0), list_peers(), get_shared_state(key=None), set_shared_state(key, value),
+  and ask_user(question, options=None), addressed by the name you gave them ("*" reaches every unfinished agent,
+  "script" reaches the script).
+  Say in each prompt whom to talk to. Waiting in read_peer_messages(wait_seconds) frees the slot, and
+  messages to a peer that has not started yet are held until it reads. The script joins in with send(to, text),
+  inbox(wait_seconds=0), state.get(key, default=None) and state.set(key, value); agents read and write the same state.
 
 Every agent, tool and shell call is saved with its result. The Python between the calls runs again on every resume,
 so do writes (files, git, HTTP) through shell(), tool() or an agent, never with plain Python.
@@ -1653,8 +1661,7 @@ Agents you can run with agent=: helper, roommate."""
 def test_description_teaches_what_this_release_runs_and_lists_the_configured_models(stack: WorkflowStack) -> None:
     """The offered description names the calls a script has now, how the report arrives, the models and the agents.
 
-    It promises nothing a later release adds: no peers. The agents are those the owner may
-    delegate to and those configured for the room, without the owner itself.
+    The agents are those the owner may delegate to and those configured for the room, without the owner itself.
     """
     config, room_id = stack.context.config, stack.context.room_id
     config.agents["watcher"].delegate_to = ["helper"]

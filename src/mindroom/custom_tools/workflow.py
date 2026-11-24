@@ -133,8 +133,9 @@ The script defines `def main(args):` and returns the final report, a string or a
   read_peer_messages(wait_seconds=0), list_peers(), get_shared_state(key=None), set_shared_state(key, value),
   and ask_user(question, options=None), addressed by the name you gave them ("*" reaches every unfinished agent,
   "script" reaches the script).
-  Say in each prompt whom to talk to. The script joins in with send(to, text), inbox(wait_seconds=0),
-  state.get(key, default=None) and state.set(key, value); agents read and write the same state.
+  Say in each prompt whom to talk to. Waiting in read_peer_messages(wait_seconds) frees the slot, and
+  messages to a peer that has not started yet are held until it reads. The script joins in with send(to, text),
+  inbox(wait_seconds=0), state.get(key, default=None) and state.set(key, value); agents read and write the same state.
 
 Every agent, tool and shell call is saved with its result. The Python between the calls runs again on every resume,
 so do writes (files, git, HTTP) through shell(), tool() or an agent, never with plain Python.
