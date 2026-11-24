@@ -69,7 +69,7 @@ WRITING_FUNCTIONS = {
         "uv_pip_install_package",
     ),
     "script": ("start_script",),
-    "workflow": ("start_workflow", "resume_workflow"),
+    "workflow": ("start_workflow", "resume_workflow", "save_workflow"),
     "claude_agent": ("claude_start_session", "claude_send"),
     "docker": ("build_image", "run_container", "start_container", "exec_in_container"),
 }
