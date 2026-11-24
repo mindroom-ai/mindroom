@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
@@ -3259,7 +3260,7 @@ async def test_an_ad_hoc_team_turn_is_dated_in_the_zone_of_the_agent_whose_bot_r
         )
 
     system, turn = _leader_request_text(team, "writer-model")
-    assert "Timezone: America/Los_Angeles (" in system
+    assert re.search(r"Current date: .+\(America/Los_Angeles, P[DS]T\)\.", system)
     assert ('ts="2026-03-20 08:15 PDT"' in turn) is coalesced
     assert 'ts="2026-03-20 08:16 PDT"' in turn
     assert "[2026-03-20 08:00 PDT] older text" in turn
@@ -3285,7 +3286,7 @@ async def test_a_configured_team_turn_is_dated_in_the_global_zone(
         )
 
     system, turn = _leader_request_text(team, "default")
-    assert "Timezone: UTC (UTC)" in system
+    assert re.search(r"Current date: .+\(UTC, UTC\)\.", system)
     assert 'ts="2026-03-20 15:16 UTC"' in turn
     assert "[2026-03-20 15:00 UTC] older text" in turn
     assert "PDT" not in turn

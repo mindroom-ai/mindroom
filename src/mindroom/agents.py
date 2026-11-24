@@ -111,7 +111,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.skills import RefusedWorkspaceSkill, SkillsToolkit
     from mindroom.tool_system.tool_function import ToolFunction
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, WorkerScope
     from mindroom.turn_model import TurnModel
 
 logger = get_logger(__name__)
@@ -122,13 +122,6 @@ _PROJECTED_WORKER_ASSET_PATH_PREFIXES = (
     ".mindroom-worker-assets/",
 )
 _MAX_WORKSPACE_CONTEXT_FILE_BYTES = 1 << 20
-_WORKSPACE_SKILL_WRITER_FUNCTIONS = frozenset(
-    {
-        ("filesystem", "write_file"),
-        ("filesystem", "edit_file"),
-        ("shell", "run_shell_command"),
-    },
-)
 _NO_OUTPUT_REDIRECT_TOOLKITS = frozenset({"dynamic_tools", "skill_manage"})
 
 
@@ -741,7 +734,7 @@ def _render_tool_execution_environment(
     runtime_paths: constants.RuntimePaths,
     local_tool_names: tuple[str, ...],
     worker_routed_tool_names: tuple[str, ...],
-    has_other_tools: bool = False,
+    has_other_tools: bool,
     worker_scope: WorkerScope | None,
     file_access: FileAccess,
     workdir: Path | None,
@@ -1036,28 +1029,76 @@ def _function_accepts_output_path(function: ToolFunction) -> bool:
     return isinstance(properties, Mapping) and OUTPUT_PATH_ARGUMENT in properties
 
 
+def _is_workspace_writer(function: ToolFunction, tools: ToolRegistry) -> bool:
+    """Return whether ``function`` can write workspace files according to its registered tool metadata."""
+    if function.registered_toolkit is None or (metadata := tools.get(function.registered_toolkit)) is None:
+        return False
+    if metadata.workspace_writers:
+        return function.name in metadata.workspace_writers
+    return metadata.executes_code
+
+
+def _deferred_entry_writes_workspace(
+    entry: EffectiveToolConfig,
+    *,
+    agent_tools: AgentTools,
+    runtime_paths: constants.RuntimePaths,
+    worker_target: ResolvedWorkerTarget,
+    config: Config,
+    narrowed_tools: tuple[str, ...] | None,
+    supports_native_tool_approval: bool,
+) -> bool:
+    """Return whether a CLI-deferred toolkit entry still offers a workspace writer after filters and approval."""
+    metadata = agent_tools.tools.get(entry.name)
+    if metadata is None or (not metadata.workspace_writers and not metadata.executes_code):
+        return False
+    try:
+        functions, writes = agent_tools.functions_for(entry, runtime_paths, worker_target)
+    except (OSError, ValueError, TypeError):
+        return False
+    if not writes or (functions is not None and not functions):
+        return False
+    candidates = metadata.workspace_writers or (functions or ())
+    if not candidates:
+        return True
+    return any(
+        (functions is None or name in functions)
+        and (narrowed_tools is None or persona_allows(narrowed_tools, entry.name, name))
+        and (supports_native_tool_approval or not _approval_may_gate(config, agent_tools.tools, name, entry.name))
+        for name in candidates
+    )
+
+
 def _prompt_tool_capabilities(
     offered: Sequence[_ToolkitEntry],
     deferred_configs: Mapping[str, EffectiveToolConfig],
     *,
+    agent_tools: AgentTools,
+    runtime_paths: constants.RuntimePaths,
+    worker_target: ResolvedWorkerTarget,
     portable_deferred_tools: bool,
     config: Config,
-    tools: ToolRegistry,
     narrowed_tools: tuple[str, ...] | None,
     supports_native_tool_approval: bool,
 ) -> tuple[bool, bool]:
     """Return ``(supports_output_redirect, supports_workspace_skill_authoring)`` for the final offered surface."""
     discoverable = _discoverable_functions(offered, portable_deferred_tools=portable_deferred_tools)
-    cli_skill_manage = (
-        "skill_manage" in deferred_configs
-        and (narrowed_tools is None or persona_allows(narrowed_tools, "skill_manage", "skill_manage"))
-        and (supports_native_tool_approval or not _approval_may_gate(config, tools, "skill_manage", "skill_manage"))
-    )
-    has_skill_manage = cli_skill_manage or any(
+    has_skill_manage = any(
         function.registered_toolkit == "skill_manage" and function.name == "skill_manage" for function in discoverable
     )
     has_workspace_skill_writer = any(
-        (function.registered_toolkit, function.name) in _WORKSPACE_SKILL_WRITER_FUNCTIONS for function in discoverable
+        _is_workspace_writer(function, agent_tools.tools) for function in discoverable
+    ) or any(
+        _deferred_entry_writes_workspace(
+            entry,
+            agent_tools=agent_tools,
+            runtime_paths=runtime_paths,
+            worker_target=worker_target,
+            config=config,
+            narrowed_tools=narrowed_tools,
+            supports_native_tool_approval=supports_native_tool_approval,
+        )
+        for entry in deferred_configs.values()
     )
     supports_output_redirect = any(
         _function_accepts_output_path(function) or function.registered_toolkit == "shell" for function in discoverable
@@ -1349,9 +1390,11 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     supports_output_redirect, supports_workspace_skill_authoring = _prompt_tool_capabilities(
         offered,
         deferred_configs,
+        agent_tools=agent_tools,
+        runtime_paths=runtime_paths,
+        worker_target=agent_runtime.execution.worker_target,
         portable_deferred_tools=portable_deferred_tools,
         config=config,
-        tools=agent_tools.tools,
         narrowed_tools=narrowed_tools,
         supports_native_tool_approval=supports_native_tool_approval,
     )

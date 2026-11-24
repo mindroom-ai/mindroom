@@ -401,7 +401,7 @@ def test_create_agent_includes_matrix_reply_targeting_policy() -> None:
     assert "explicit Matrix mentions" in role
     assert "Plain-text display names are not Matrix mentions" in role
     assert "configured teams run their team workflow" in role
-    assert "wasn't dispatched to you" in role
+    assert "weren't dispatched for it" in role
 
 
 def test_config_round_trips_structured_agent_tool_entries() -> None:
@@ -558,6 +558,7 @@ def test_tool_execution_environment_explains_dedicated_worker_scope(
         runtime_paths=runtime_paths,
         local_tool_names=(),
         worker_routed_tool_names=("shell",),
+        has_other_tools=False,
         worker_scope=worker_scope,
         file_access="workspace",
         workdir=None,
@@ -581,6 +582,7 @@ def test_tool_execution_environment_explains_static_runner_without_persistence_c
         runtime_paths=runtime_paths,
         local_tool_names=(),
         worker_routed_tool_names=("shell",),
+        has_other_tools=False,
         worker_scope="user_agent",
         file_access="workspace",
         workdir=None,
@@ -609,6 +611,7 @@ def test_tool_execution_environment_explains_docker_idle_lifecycle(tmp_path: Pat
         runtime_paths=runtime_paths,
         local_tool_names=(),
         worker_routed_tool_names=("shell",),
+        has_other_tools=False,
         worker_scope="user_agent",
         file_access="workspace",
         workdir=None,
@@ -641,6 +644,7 @@ def test_tool_execution_environment_reports_file_access(
             runtime_paths=_runtime_paths(tmp_path),
             local_tool_names=("gmail", "python"),
             worker_routed_tool_names=worker_routed,
+            has_other_tools=False,
             worker_scope=None,
             file_access=file_access,
             workdir=None,
@@ -711,6 +715,7 @@ def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(t
         runtime_paths=_runtime_paths(tmp_path),
         local_tool_names=("gmail",),
         worker_routed_tool_names=(),
+        has_other_tools=False,
         worker_scope=None,
         file_access="workspace",
         workdir=None,

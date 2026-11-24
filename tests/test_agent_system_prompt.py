@@ -25,10 +25,7 @@ from mindroom.prompts import (
 )
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
-from tests.conftest import (
-    bind_runtime_paths,
-    install_model_providers,
-)
+from tests.conftest import bind_runtime_paths, install_model_providers
 from tests.fakes.scripted_model import ScriptedModel
 from tests.turn_model_helpers import turn_model
 
@@ -40,41 +37,29 @@ if TYPE_CHECKING:
     from mindroom.agent_modes import AgentMode
     from mindroom.tool_system.tool_function import ToolFunction
 
+_LISTEN = {"tools": ["memory"], "listen": {"rooms": ["!lobby:localhost"], "tools": ["memory"]}}
+
 
 def _runtime_paths(tmp_path: Path, process_env: dict[str, str] | None = None) -> RuntimePaths:
     tmp_path.mkdir(parents=True, exist_ok=True)
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("", encoding="utf-8")
-    return resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path / "data",
-        process_env={
-            "MATRIX_HOMESERVER": "http://localhost:8008",
-            "MINDROOM_NAMESPACE": "",
-            **(process_env or {}),
-        },
-    )
+    (config_path := tmp_path / "config.yaml").write_text("", encoding="utf-8")
+    env = {"MATRIX_HOMESERVER": "http://localhost:8008", "MINDROOM_NAMESPACE": "", **(process_env or {})}
+    return resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env=env)
 
 
 def _dummy_knowledge() -> AgentKnowledge:
     return AgentKnowledge(
-        sources=(
-            KnowledgeSource(
-                description=KnowledgeSourceDescription(base_id="docs", description="Docs"),
-                index=MagicMock(),
-            ),
-        ),
+        sources=(KnowledgeSource(KnowledgeSourceDescription(base_id="docs", description="Docs"), MagicMock()),),
     )
 
 
-def _build_agent(
+def _build(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     agent_cfg: dict[str, Any] | None = None,
-    defaults: dict[str, Any] | None = None,
     prompts: dict[str, str] | None = None,
-    tool_approval: ToolApprovalConfig | None = None,
+    approval_matches: tuple[str, ...] = (),
     process_env: dict[str, str] | None = None,
     native_tool_search: bool = False,
     execution_identity: ToolExecutionIdentity | None = None,
@@ -85,563 +70,309 @@ def _build_agent(
     agent_mode: AgentMode = "standard",
     persona: SubagentPersona | None = None,
 ) -> tuple[AgentBuild, RuntimePaths]:
-    runtime_paths = _runtime_paths(tmp_path, process_env=process_env)
+    rp = _runtime_paths(tmp_path, process_env=process_env)
     payload: dict[str, Any] = {
-        "agents": {
-            "assistant": {
-                "display_name": "Assistant",
-                "role": "A helpful assistant.",
-                **(agent_cfg or {}),
-            },
-        },
-        "defaults": {"tools": [], **(defaults or {})},
+        "agents": {"assistant": {"display_name": "Assistant", "role": "A helpful assistant.", **(agent_cfg or {})}},
+        "defaults": {"tools": []},
         "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
         "timezone": "UTC",
     }
     if prompts:
         payload["prompts"] = prompts
-    if tool_approval is not None:
-        payload["tool_approval"] = tool_approval.model_dump(exclude_none=True)
-    config = bind_runtime_paths(Config.model_validate(payload), runtime_paths)
-    install_model_providers(
-        monkeypatch,
-        {
-            "default": ScriptedModel(
-                [],
-                capabilities=Capabilities(native_tool_search=native_tool_search),
-            ),
-        },
-    )
+    if approval_matches:
+        rules = [ApprovalRuleConfig(match=m, action="require_approval") for m in approval_matches]
+        payload["tool_approval"] = ToolApprovalConfig(rules=rules).model_dump(exclude_none=True)
+    config = bind_runtime_paths(Config.model_validate(payload), rp)
+    caps = Capabilities(native_tool_search=native_tool_search)
+    install_model_providers(monkeypatch, {"default": ScriptedModel([], capabilities=caps)})
     build = create_agent(
         "assistant",
         config,
-        runtime_paths,
+        rp,
         execution_identity=execution_identity,
         knowledge=knowledge,
-        model=turn_model(config, runtime_paths, "assistant"),
-        plugins=config_plugins(config, runtime_paths),
+        model=turn_model(config, rp, "assistant"),
+        plugins=config_plugins(config, rp),
         outside_matrix=outside_matrix,
         supports_native_tool_approval=supports_native_tool_approval,
         tool_function_filter=tool_function_filter,
         agent_mode=agent_mode,
         persona=persona,
     )
-    return build, runtime_paths
+    return build, rp
 
 
-def _write_workspace_skill(
-    runtime_paths: RuntimePaths,
-    name: str,
-    description: str = "Test skill.",
-) -> Path:
-    skill_dir = agent_workspace_root_path(runtime_paths.storage_root, "assistant") / "skills" / name
+def _write_skill(rp: RuntimePaths, name: str, description: str = "Test skill.") -> Path:
+    skill_dir = agent_workspace_root_path(rp.storage_root, "assistant") / "skills" / name
     skill_dir.mkdir(parents=True, exist_ok=True)
-    (skill_dir / "SKILL.md").write_text(
-        f"---\nname: {name}\ndescription: {description}\n---\n\nFollow the {name} steps.\n",
-        encoding="utf-8",
-    )
+    content = f"---\nname: {name}\ndescription: {description}\n---\n\nFollow {name}.\n"
+    (skill_dir / "SKILL.md").write_text(content, encoding="utf-8")
     return skill_dir
 
 
-class TestMatrixAutomationFacts:
-    """Dynamic participation and listen facts appear only for enabled Matrix agents."""
+@pytest.mark.parametrize(
+    ("agent_cfg", "expect_participation", "expect_listen"),
+    [
+        ({}, False, False),
+        ({"participation": {}}, True, False),
+        (_LISTEN, False, True),
+        ({"participation": {}, **_LISTEN}, True, True),
+    ],
+)
+def test_matrix_automation_facts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    agent_cfg: dict[str, Any],
+    expect_participation: bool,
+    expect_listen: bool,
+) -> None:
+    """Dynamic participation and listen lines render only when configured on a Matrix agent."""
+    build, _ = _build(tmp_path, monkeypatch, agent_cfg=agent_cfg)
+    role = build.prompt.role or ""
+    assert ("judges unmentioned messages" in role) is expect_participation
+    assert ("silent listening turns" in role) is expect_listen
+    assert "config.yaml" not in role
 
-    def test_participation_and_listen_absent_by_default(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Neither participation nor listening prose appears when both features are unset."""
-        build, _ = _build_agent(tmp_path, monkeypatch)
-        role = build.prompt.role or ""
 
-        assert "judges unmentioned messages" not in role
-        assert "silent listening turns" not in role
-
-    def test_empty_participation_enables_matrix_fact(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """An empty participation block enables the participation dispatch line without leaking config paths."""
-        build, _ = _build_agent(tmp_path, monkeypatch, agent_cfg={"participation": {}})
-        role = build.prompt.role or ""
-
-        assert "In multi-human threads where you already replied, MindRoom judges unmentioned messages" in role
-        assert "silent listening turns" not in role
-        assert "config.yaml" not in role
-
-    def test_listen_enables_matrix_fact(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Configuring listen adds the silent listening fact without leaking config paths."""
-        build, _ = _build_agent(
-            tmp_path,
-            monkeypatch,
-            agent_cfg={"tools": ["memory"], "listen": {"rooms": ["!lobby:localhost"], "tools": ["memory"]}},
-        )
-        role = build.prompt.role or ""
-
-        assert "You also run separate silent listening turns in configured rooms" in role
-        assert "judges unmentioned messages" not in role
-        assert "config.yaml" not in role
-
-    @pytest.mark.parametrize(
-        ("outside_matrix", "channel", "prompts"),
-        [
-            (True, "openai_compat", None),
-            (True, "headless", None),
-            (True, "openai_compat", {"AGENT_IDENTITY_CONTEXT_TEMPLATE": "Custom {display_name} ({matrix_id})."}),
-        ],
-        ids=["openai-compat", "headless", "openai-compat-matrix-override"],
+@pytest.mark.parametrize(
+    ("channel", "prompts", "persona"),
+    [
+        ("openai_compat", None, None),
+        ("headless", None, None),
+        ("openai_compat", {"AGENT_IDENTITY_CONTEXT_TEMPLATE": "Custom {display_name} ({matrix_id})."}, None),
+        (None, None, SubagentPersona(source_kind="profile", source_name="helper", system_prompt="Subagent.")),
+    ],
+)
+def test_matrix_automation_facts_absent_outside_matrix_and_for_personas(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    channel: str | None,
+    prompts: dict[str, str] | None,
+    persona: SubagentPersona | None,
+) -> None:
+    """Non-Matrix runs and personas omit Matrix automation lines while keeping Matrix-override fallback."""
+    identity = (
+        ToolExecutionIdentity(channel, "assistant", "@alice:localhost", None, None, None, "sess-1") if channel else None
     )
-    def test_automation_facts_absent_outside_matrix(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        outside_matrix: bool,
-        channel: str,
-        prompts: dict[str, str] | None,
-    ) -> None:
-        """Non-Matrix runs omit Matrix automation facts while preserving Matrix-override identity fallback."""
-        identity = ToolExecutionIdentity(
-            channel=channel,
-            agent_name="assistant",
-            requester_id="@alice:localhost",
-            room_id=None,
-            thread_id=None,
-            resolved_thread_id=None,
-            session_id="sess-1",
-        )
-        build, _ = _build_agent(
-            tmp_path,
-            monkeypatch,
-            agent_cfg={
-                "tools": ["memory"],
-                "participation": {},
-                "listen": {"rooms": ["!lobby:localhost"], "tools": ["memory"]},
-            },
-            prompts=prompts,
-            outside_matrix=outside_matrix,
-            execution_identity=identity,
-        )
-        role = build.prompt.role or ""
-
-        assert "judges unmentioned messages" not in role
-        assert "silent listening turns" not in role
-        if prompts:
-            assert "Custom Assistant (not available in OpenAI-compatible API)." in role
-
-    def test_automation_facts_absent_for_persona(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Authored subagent personas do not inherit Matrix participation or listening facts."""
-        build, _ = _build_agent(
-            tmp_path,
-            monkeypatch,
-            agent_cfg={
-                "participation": {},
-                "tools": ["memory"],
-                "listen": {"rooms": ["!lobby:localhost"], "tools": ["memory"]},
-            },
-            persona=SubagentPersona(
-                source_kind="profile",
-                source_name="helper",
-                system_prompt="You are a subagent.",
-            ),
-        )
-        role = build.prompt.role or ""
-
-        assert "judges unmentioned messages" not in role
-        assert "silent listening turns" not in role
-
-
-class TestWorkspaceSkillAuthoringGating:
-    """WORKSPACE_SKILL_AUTHORING_PROMPT follows the final offered/discoverable tool surface."""
-
-    @pytest.mark.parametrize(
-        "tools",
-        [
-            [],
-            ["calculator"],
-            [{"filesystem": {"include_tools": ["read_file", "ls", "grep"]}}],
-            [{"filesystem": {"exclude_tools": ["write_file", "edit_file"]}}],
-            [{"shell": {"enable_run_shell_command": False}}],
-        ],
-        ids=["toolless", "non-writer", "fs-read-only-include", "fs-read-only-exclude", "shell-disabled"],
+    build, _ = _build(
+        tmp_path,
+        monkeypatch,
+        agent_cfg={"participation": {}, **_LISTEN},
+        prompts=prompts,
+        outside_matrix=channel is not None,
+        execution_identity=identity,
+        persona=persona,
     )
-    def test_omitted_without_workspace_writer(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        tools: list[Any],
-    ) -> None:
-        """Read-only and tool-less agents omit manual workspace skill authoring instructions."""
-        build, _ = _build_agent(tmp_path, monkeypatch, agent_cfg={"tools": tools})
-        assert WORKSPACE_SKILL_AUTHORING_PROMPT not in build.prompt.instructions
+    role = build.prompt.role or ""
+    assert "judges unmentioned messages" not in role
+    assert "silent listening turns" not in role
+    if prompts:
+        assert "Custom Assistant (not available in OpenAI-compatible API)." in role
 
-    def test_omitted_when_writers_hidden_by_filter_or_approval(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Removing workspace writers via function filters or approval gating omits authoring guidance."""
-        filtered_build, _ = _build_agent(
-            tmp_path / "filtered",
-            monkeypatch,
-            agent_cfg={"tools": ["filesystem"]},
-            tool_function_filter=lambda fn: fn.name not in {"write_file", "edit_file"},
-        )
-        assert WORKSPACE_SKILL_AUTHORING_PROMPT not in filtered_build.prompt.instructions
 
-        gated_build, _ = _build_agent(
-            tmp_path / "gated",
-            monkeypatch,
-            agent_cfg={"tools": ["filesystem"]},
-            tool_approval=ToolApprovalConfig(
-                rules=[
-                    ApprovalRuleConfig(match="write_file", action="require_approval"),
-                    ApprovalRuleConfig(match="edit_file", action="require_approval"),
-                ],
-            ),
-            supports_native_tool_approval=False,
-        )
-        assert WORKSPACE_SKILL_AUTHORING_PROMPT not in gated_build.prompt.instructions
+@pytest.mark.parametrize(
+    ("agent_cfg", "native_search", "mode", "expected"),
+    [
+        ({"tools": []}, False, "standard", False),
+        ({"tools": ["calculator"]}, False, "standard", False),
+        ({"tools": [{"filesystem": {"include_tools": ["read_file", "ls", "grep"]}}]}, False, "standard", False),
+        ({"tools": [{"filesystem": {"exclude_tools": ["write_file", "edit_file"]}}]}, False, "standard", False),
+        ({"tools": [{"python": {"include_tools": ["read_file", "list_files"]}}]}, False, "standard", False),
+        ({"tools": [{"shell": {"enable_run_shell_command": False}}]}, False, "standard", False),
+        ({"tools": [{"shell": {"defer": True, "enable_run_shell_command": False}}]}, False, "minimal", False),
+        ({"tools": ["filesystem"]}, False, "standard", True),
+        ({"tools": ["python"]}, False, "standard", True),
+        ({"tools": ["shell"]}, False, "standard", True),
+        ({"tools": [{"filesystem": {"defer": True}}]}, True, "standard", True),
+        ({"tools": [{"filesystem": {"defer": True}}]}, False, "standard", True),
+        ({"tools": [{"python": {"defer": True}}]}, True, "standard", True),
+        ({"tools": [{"shell": {"defer": True}}]}, False, "minimal", True),
+        ({"tools": ["filesystem", "skill_manage"]}, False, "standard", False),
+        ({"tools": ["filesystem"], "skill_learning": {"enabled": True}}, False, "standard", False),
+        ({"tools": [{"shell": {"defer": True}}, "skill_manage"]}, False, "minimal", False),
+    ],
+)
+def test_workspace_skill_authoring_gating(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    agent_cfg: dict[str, Any],
+    native_search: bool,
+    mode: AgentMode,
+    expected: bool,
+) -> None:
+    """WORKSPACE_SKILL_AUTHORING_PROMPT follows registry workspace writers across eager, deferred, and minimal modes."""
+    build, _ = _build(tmp_path, monkeypatch, agent_cfg=agent_cfg, native_tool_search=native_search, agent_mode=mode)
+    assert (WORKSPACE_SKILL_AUTHORING_PROMPT in build.prompt.instructions) is expected
 
-    @pytest.mark.parametrize(
-        ("tools", "native_tool_search"),
-        [
-            (["filesystem"], False),
-            (["shell"], False),
-            ([{"filesystem": {"defer": True}}], True),
-            ([{"filesystem": {"defer": True}}], False),
-            ([{"shell": {"defer": True}}], True),
-        ],
-        ids=["eager-fs", "eager-shell", "native-deferred-fs", "portable-deferred-fs", "native-deferred-shell"],
+
+@pytest.mark.parametrize(
+    ("tools", "blocked_fn", "approval", "mode", "expected"),
+    [
+        (["filesystem"], {"write_file", "edit_file"}, (), "standard", False),
+        (["filesystem"], set(), ("write_file", "edit_file"), "standard", False),
+        ([{"shell": {"defer": True}}], set(), ("run_shell_command",), "minimal", False),
+        (["filesystem", "skill_manage"], set(), ("skill_manage",), "standard", True),
+        ([{"filesystem": {"defer": True}}], {"tool_search", "call_tool"}, (), "standard", False),
+    ],
+)
+def test_workspace_skill_authoring_filters_approval_and_search(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tools: list[Any],
+    blocked_fn: set[str],
+    approval: tuple[str, ...],
+    mode: AgentMode,
+    expected: bool,
+) -> None:
+    """Function filters, non-resumable approval, and unreachable portable search gate skill authoring accurately."""
+    build, _ = _build(
+        tmp_path,
+        monkeypatch,
+        agent_cfg={"tools": tools},
+        approval_matches=approval,
+        supports_native_tool_approval=not approval,
+        tool_function_filter=(lambda fn: fn.name not in blocked_fn) if blocked_fn else None,
+        agent_mode=mode,
     )
-    def test_included_for_offered_or_discoverable_workspace_writer(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        tools: list[Any],
-        native_tool_search: bool,
-    ) -> None:
-        """Eager or discoverable deferred filesystem/shell writers include workspace skill authoring guidance."""
-        build, _ = _build_agent(
-            tmp_path,
-            monkeypatch,
-            agent_cfg={"tools": tools},
-            native_tool_search=native_tool_search,
-        )
-        assert WORKSPACE_SKILL_AUTHORING_PROMPT in build.prompt.instructions
+    assert (WORKSPACE_SKILL_AUTHORING_PROMPT in build.prompt.instructions) is expected
 
-    @pytest.mark.parametrize(
-        ("agent_cfg", "agent_mode"),
-        [
-            ({"tools": ["filesystem", "skill_manage"]}, "standard"),
-            ({"tools": ["filesystem"], "skill_learning": {"enabled": True}}, "standard"),
-            ({"tools": ["shell", "skill_manage"]}, "minimal"),
-        ],
-        ids=["eager-skill-manage", "skill-learning-enabled", "minimal-cli-deferred-skill-manage"],
+
+@pytest.mark.parametrize(
+    ("tools", "native_search", "use_kb", "hide_search", "expected"),
+    [
+        ([], False, False, False, False),
+        (["skill_manage"], False, False, False, False),
+        ([], False, True, False, False),
+        (["calculator"], False, False, False, True),
+        (["shell"], False, False, False, True),
+        ([{"calculator": {"defer": True}}], True, False, False, True),
+        ([{"calculator": {"defer": True}}], False, False, False, True),
+        ([{"calculator": {"defer": True}}], False, False, True, False),
+    ],
+)
+def test_output_redirect_gating(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tools: list[Any],
+    native_search: bool,
+    use_kb: bool,
+    hide_search: bool,
+    expected: bool,
+) -> None:
+    """OUTPUT_REDIRECT_PROMPT renders only when a discoverable tool accepts mindroom_output_path or is shell."""
+    build, _ = _build(
+        tmp_path,
+        monkeypatch,
+        agent_cfg={"tools": tools},
+        native_tool_search=native_search,
+        knowledge=_dummy_knowledge() if use_kb else None,
+        tool_function_filter=(lambda fn: fn.name not in {"tool_search", "call_tool"}) if hide_search else None,
     )
-    def test_omitted_when_skill_manage_is_offered_or_deferred(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        agent_cfg: dict[str, Any],
-        agent_mode: AgentMode,
-    ) -> None:
-        """Offering skill_manage eagerly, via skill_learning, or via minimal CLI suppresses manual authoring prose."""
-        build, _ = _build_agent(
-            tmp_path,
-            monkeypatch,
-            agent_cfg=agent_cfg,
-            agent_mode=agent_mode,
-        )
-        assert WORKSPACE_SKILL_AUTHORING_PROMPT not in build.prompt.instructions
-
-    def test_included_when_skill_manage_is_hidden_by_approval_but_filesystem_remains(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """When approval hides skill_manage, a surviving filesystem writer still gets manual authoring guidance."""
-        build, _ = _build_agent(
-            tmp_path,
-            monkeypatch,
-            agent_cfg={"tools": ["filesystem", "skill_manage"]},
-            tool_approval=ToolApprovalConfig(
-                rules=[ApprovalRuleConfig(match="skill_manage", action="require_approval")],
-            ),
-            supports_native_tool_approval=False,
-        )
-        assert WORKSPACE_SKILL_AUTHORING_PROMPT in build.prompt.instructions
-
-    def test_omitted_when_portable_deferred_writer_cannot_be_discovered(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A portable-deferred filesystem writer without tool_search/call_tool is not discoverable."""
-        build, _ = _build_agent(
-            tmp_path,
-            monkeypatch,
-            agent_cfg={"tools": [{"filesystem": {"defer": True}}]},
-            native_tool_search=False,
-            tool_function_filter=lambda fn: fn.name not in {"tool_search", "call_tool"},
-        )
-        assert WORKSPACE_SKILL_AUTHORING_PROMPT not in build.prompt.instructions
+    assert (OUTPUT_REDIRECT_PROMPT in build.prompt.instructions) is expected
 
 
-class TestOutputRedirectGating:
-    """OUTPUT_REDIRECT_PROMPT appears only when offered/discoverable tools support mindroom_output_path or shell."""
+def test_tool_execution_environment_modes_and_generated_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Primary-only is compact, mixed worker keeps details, and generated-only tools do not claim no tools."""
+    primary, _ = _build(tmp_path / "primary", monkeypatch, agent_cfg={"tools": ["calculator", "scheduler"]})
+    role = primary.prompt.role or ""
+    assert "## Tool Execution Environment\n- All tools run in the primary MindRoom runtime." in role
+    assert "No tools use a worker runtime." not in role
+    assert "`calculator`" not in role
 
-    def test_omitted_for_toolless_or_non_redirectable_tools(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Tool-less, skill_manage-only, and knowledge-only agents omit output redirect instructions."""
-        toolless, _ = _build_agent(tmp_path / "toolless", monkeypatch, agent_cfg={"tools": []})
-        assert OUTPUT_REDIRECT_PROMPT not in toolless.prompt.instructions
-
-        skill_manage_only, _ = _build_agent(tmp_path / "sm", monkeypatch, agent_cfg={"tools": ["skill_manage"]})
-        assert OUTPUT_REDIRECT_PROMPT not in skill_manage_only.prompt.instructions
-
-        knowledge_only, _ = _build_agent(
-            tmp_path / "kb",
-            monkeypatch,
-            agent_cfg={"tools": []},
-            knowledge=_dummy_knowledge(),
-        )
-        assert OUTPUT_REDIRECT_PROMPT not in knowledge_only.prompt.instructions
-
-    @pytest.mark.parametrize(
-        ("tools", "native_tool_search"),
-        [
-            (["calculator"], False),
-            (["shell"], False),
-            ([{"calculator": {"defer": True}}], True),
-            ([{"calculator": {"defer": True}}], False),
-        ],
-        ids=["eager-calculator", "eager-shell", "native-deferred", "portable-deferred"],
+    mixed, _ = _build(
+        tmp_path / "mixed",
+        monkeypatch,
+        agent_cfg={"tools": ["calculator", "shell"], "worker_tools": ["shell"], "worker_scope": "user_agent"},
+        process_env={"MINDROOM_WORKER_BACKEND": "kubernetes", "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token"},
     )
-    def test_included_when_redirectable_or_shell_offered(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-        tools: list[Any],
-        native_tool_search: bool,
-    ) -> None:
-        """Eager or discoverable deferred tools accepting mindroom_output_path or shell include output redirect."""
-        build, _ = _build_agent(
-            tmp_path,
-            monkeypatch,
-            agent_cfg={"tools": tools},
-            native_tool_search=native_tool_search,
-        )
-        assert OUTPUT_REDIRECT_PROMPT in build.prompt.instructions
+    mixed_role = mixed.prompt.role or ""
+    assert "- Local tools (primary MindRoom runtime): `calculator`." in mixed_role
+    assert "- Worker-routed tools: `shell`." in mixed_role
+    assert "- Worker backend: `kubernetes`." in mixed_role
+    assert "- Execution location is determined per tool; this agent is not sandboxed as a whole." in mixed_role
 
-    def test_omitted_when_portable_deferred_tools_are_not_discoverable(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Unreachable portable-deferred tools do not trigger output redirect instructions."""
-        build, _ = _build_agent(
-            tmp_path,
-            monkeypatch,
-            agent_cfg={"tools": [{"calculator": {"defer": True}}]},
-            native_tool_search=False,
-            tool_function_filter=lambda fn: fn.name not in {"tool_search", "call_tool"},
-        )
-        assert OUTPUT_REDIRECT_PROMPT not in build.prompt.instructions
+    kb_only, _ = _build(tmp_path / "kb", monkeypatch, agent_cfg={"tools": []}, knowledge=_dummy_knowledge())
+    assert "- All tools run in the primary MindRoom runtime." in (kb_only.prompt.role or "")
+
+    _write_skill(_runtime_paths(tmp_path / "skill"), "demo", "Demo skill.")
+    skill_only, _ = _build(tmp_path / "skill", monkeypatch, agent_cfg={"tools": []})
+    assert "- All tools run in the primary MindRoom runtime." in (skill_only.prompt.role or "")
+
+    empty, _ = _build(tmp_path / "empty", monkeypatch, agent_cfg={"tools": []})
+    assert "- No tools are available in this runtime." in (empty.prompt.role or "")
 
 
-class TestToolExecutionEnvironment:
-    """Tool Execution Environment is compact for primary-only and accurate for generated-only tools."""
+def test_skills_deduplication_diagnostics_overrides_and_cache_stability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Skills catalog omits duplicated instructions, diagnostics and overrides work, and cache prefix stays stable."""
+    rp = _runtime_paths(tmp_path / "skills")
+    skill_dir = _write_skill(rp, "release-check", "Verify release notes.")
+    broken = agent_workspace_root_path(rp.storage_root, "assistant") / "skills" / "broken-skill"
+    broken.mkdir(parents=True, exist_ok=True)
+    (broken / "SKILL.md").write_text("---\nname: broken\ndescription: [unterminated\n---\n", encoding="utf-8")
 
-    def test_primary_only_is_compact(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Primary-only tool surfaces emit one concise line without listing every toolkit."""
-        build, _ = _build_agent(tmp_path, monkeypatch, agent_cfg={"tools": ["calculator", "scheduler"]})
-        role = build.prompt.role or ""
+    frozen = datetime(2026, 11, 24, 9, 0, tzinfo=ZoneInfo("UTC"))
+    with patch("mindroom.system_prompt.datetime") as mock_datetime:
+        mock_datetime.now.return_value = frozen
 
-        assert "## Tool Execution Environment\n- All tools run in the primary MindRoom runtime." in role
-        assert "No tools use a worker runtime." not in role
-        assert "`calculator`" not in role
+        def build_skills() -> tuple[AgentBuild, RuntimePaths]:
+            return _build(
+                tmp_path / "skills",
+                monkeypatch,
+                agent_cfg={"tools": ["filesystem"]},
+                approval_matches=("get_skill_script",),
+            )
 
-    def test_mixed_primary_and_worker_keeps_routing_details(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Mixed primary/worker tool surfaces retain explicit routing, backend, and isolation notes."""
-        build, _ = _build_agent(
-            tmp_path,
-            monkeypatch,
-            agent_cfg={"tools": ["calculator", "shell"], "worker_tools": ["shell"], "worker_scope": "user_agent"},
-            process_env={
-                "MINDROOM_WORKER_BACKEND": "kubernetes",
-                "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
-            },
-        )
-        role = build.prompt.role or ""
+        before, _ = build_skills()
+        before_stable, before_turn = render_system_messages(before.prompt)
+        for folder, filename in (("references", "checklist.md"), ("scripts", "check.sh")):
+            (skill_dir / folder).mkdir()
+            (skill_dir / folder / filename).write_text("ok\n", encoding="utf-8")
+        after, _ = build_skills()
+        after_stable, after_turn = render_system_messages(after.prompt)
 
-        assert "- Local tools (primary MindRoom runtime): `calculator`." in role
-        assert "- Worker-routed tools: `shell`." in role
-        assert "- Worker backend: `kubernetes`." in role
-        assert "- Execution location is determined per tool; this agent is not sandboxed as a whole." in role
+    assert SKILLS_TOOL_USAGE_PROMPT in before.prompt.instructions
+    assert before.prompt.skills_block == (
+        "<skills_system>\nAvailable skills (load via skill tools, not callable directly):\n"
+        "<skill>\n  <name>release-check</name>\n  <description>Verify release notes.</description>\n</skill>\n"
+        "</skills_system>"
+    )
+    joined = "\n".join(before.prompt.instructions)
+    assert "These skill functions are not available to you: get_skill_script." in joined
+    assert "Workspace skill `skills/broken-skill/SKILL.md` did not load." in joined
+    assert before_stable.content == after_stable.content
+    assert "checklist.md" not in str(after_stable.content)
+    assert "Current date:" not in str(after_stable.content)
+    assert "Current date: Tuesday, November 24, 2026 (UTC, UTC)." in str(after_turn.content)
+    assert before_turn.content == after_turn.content
 
-    def test_generated_only_tools_do_not_claim_no_tools(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Generated-only tools (knowledge search or skills) report primary runtime instead of no tools."""
-        kb_build, _ = _build_agent(
-            tmp_path / "kb",
-            monkeypatch,
-            agent_cfg={"tools": []},
-            knowledge=_dummy_knowledge(),
-        )
-        assert "No tools are available in this runtime." not in (kb_build.prompt.role or "")
-        assert "- All tools run in the primary MindRoom runtime." in (kb_build.prompt.role or "")
-
-        skill_rp = _runtime_paths(tmp_path / "skill")
-        _write_workspace_skill(skill_rp, "demo", "Demo skill.")
-        skill_build, _ = _build_agent(tmp_path / "skill", monkeypatch, agent_cfg={"tools": []})
-        assert "No tools are available in this runtime." not in (skill_build.prompt.role or "")
-        assert "- All tools run in the primary MindRoom runtime." in (skill_build.prompt.role or "")
-
-        toolless_build, _ = _build_agent(tmp_path / "empty", monkeypatch, agent_cfg={"tools": []})
-        assert "- No tools are available in this runtime." in (toolless_build.prompt.role or "")
-
-
-class TestSkillsDeduplicationAndPromptStability:
-    """Skills instructions are never duplicated, overrides keep working, and prompt cache prefix stays stable."""
-
-    def test_no_duplication_between_skill_usage_prompt_and_catalog(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The skills catalog lists only skill summaries without repeating SKILLS_TOOL_USAGE_PROMPT."""
-        rp = _runtime_paths(tmp_path)
-        _write_workspace_skill(rp, "release-check", "Verify release notes.")
-        build, _ = _build_agent(tmp_path, monkeypatch, agent_cfg={"tools": []})
-
-        assert SKILLS_TOOL_USAGE_PROMPT in build.prompt.instructions
-        skills_block = build.prompt.skills_block or ""
-        assert skills_block == (
-            "<skills_system>\n"
-            "Available skills (load via skill tools, not callable directly):\n"
-            "<skill>\n"
-            "  <name>release-check</name>\n"
-            "  <description>Verify release notes.</description>\n"
-            "</skill>\n"
-            "</skills_system>"
-        )
-        for duplicated in ("What are Skills", "get_skill_instructions", "get_skill_reference", "get_skill_script"):
-            assert duplicated not in skills_block
-
-    def test_hidden_skill_function_and_refused_workspace_skill_diagnostics_remain(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Hidden skill function notices and refused workspace skill diagnostics still render."""
-        rp = _runtime_paths(tmp_path)
-        _write_workspace_skill(rp, "good-skill", "Good skill.")
-        broken = agent_workspace_root_path(rp.storage_root, "assistant") / "skills" / "broken-skill"
-        broken.mkdir(parents=True, exist_ok=True)
-        (broken / "SKILL.md").write_text("---\nname: broken\ndescription: [unterminated\n---\n", encoding="utf-8")
-
-        build, _ = _build_agent(
-            tmp_path,
-            monkeypatch,
-            agent_cfg={"tools": []},
-            tool_approval=ToolApprovalConfig(
-                rules=[ApprovalRuleConfig(match="get_skill_script", action="require_approval")],
-            ),
-        )
-        joined = "\n".join(build.prompt.instructions)
-        assert "These skill functions are not available to you: get_skill_script." in joined
-        assert "Workspace skill `skills/broken-skill/SKILL.md` did not load." in joined
-
-    def test_custom_prompt_overrides_render_cleanly(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """All preserved PROMPT_DEFAULTS keys and placeholders render custom user overrides cleanly."""
-        rp = _runtime_paths(tmp_path)
-        _write_workspace_skill(rp, "release-check", "Verify release notes.")
-        overrides = {
-            "AGENT_IDENTITY_CONTEXT_TEMPLATE": (
-                "Custom {display_name} ({matrix_id}) on {model_provider}/{model_id}.{openai_compat_history_guidance}"
-            ),
-            "SKILLS_TOOL_USAGE_PROMPT": "CUSTOM_SKILLS_USAGE",
-            "WORKSPACE_SKILL_AUTHORING_PROMPT": "CUSTOM_SKILL_AUTHORING",
-            "OUTPUT_REDIRECT_PROMPT": "CUSTOM_OUTPUT_REDIRECT",
-            "INTERACTIVE_QUESTION_PROMPT": "CUSTOM_INTERACTIVE",
-            "HIDDEN_TOOL_CALLS_PROMPT": "CUSTOM_HIDDEN",
-            "DATETIME_CONTEXT_TEMPLATE": "Date={date_str} TZ={timezone_str}/{timezone_abbrev}",
-        }
-        assert set(overrides).issubset(PROMPT_DEFAULTS)
-        build, _ = _build_agent(
-            tmp_path,
-            monkeypatch,
-            agent_cfg={"tools": ["filesystem"], "show_tool_calls": False},
-            prompts=overrides,
-        )
-        stable, turn = render_system_messages(build.prompt)
-        stable_text = str(stable.content)
-        turn_text = str(turn.content)
-
-        assert "Custom Assistant (@mindroom_assistant:localhost) on Anthropic/claude-sonnet-4-6." in stable_text
-        for marker in (
-            "CUSTOM_SKILLS_USAGE",
-            "CUSTOM_SKILL_AUTHORING",
-            "CUSTOM_OUTPUT_REDIRECT",
-            "CUSTOM_INTERACTIVE",
-            "CUSTOM_HIDDEN",
-        ):
-            assert marker in stable_text
-        assert "Date=" in turn_text
-        assert "TZ=UTC/UTC" in turn_text
-
-    def test_adding_skill_support_file_preserves_stable_system_message_and_date_stays_in_turn_message(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Adding skill references/scripts does not mutate system message 1, and date stays in system message 2."""
-        rp = _runtime_paths(tmp_path)
-        skill_dir = _write_workspace_skill(rp, "release-check", "Verify release notes.")
-        frozen = datetime(2026, 11, 24, 9, 0, tzinfo=ZoneInfo("UTC"))
-
-        with patch("mindroom.system_prompt.datetime") as mock_datetime:
-            mock_datetime.now.return_value = frozen
-            before, _ = _build_agent(tmp_path, monkeypatch, agent_cfg={"tools": ["filesystem"]})
-            before_stable, before_turn = render_system_messages(before.prompt)
-
-            refs = skill_dir / "references"
-            refs.mkdir()
-            (refs / "checklist.md").write_text("# Checklist\n", encoding="utf-8")
-            scripts = skill_dir / "scripts"
-            scripts.mkdir()
-            (scripts / "check.sh").write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
-
-            after, _ = _build_agent(tmp_path, monkeypatch, agent_cfg={"tools": ["filesystem"]})
-            after_stable, after_turn = render_system_messages(after.prompt)
-
-        assert before_stable.content == after_stable.content
-        assert "checklist.md" not in str(after_stable.content)
-        assert "check.sh" not in str(after_stable.content)
-        assert "Current date:" not in str(after_stable.content)
-        assert "Current date: Tuesday, November 24, 2026 (UTC, UTC)." in str(after_turn.content)
-        assert before_turn.content == after_turn.content
+    overrides = {
+        "AGENT_IDENTITY_CONTEXT_TEMPLATE": (
+            "Custom {display_name} ({matrix_id}) on {model_provider}/{model_id}.{openai_compat_history_guidance}"
+        ),
+        "SKILLS_TOOL_USAGE_PROMPT": "CUSTOM_SKILLS_USAGE",
+        "WORKSPACE_SKILL_AUTHORING_PROMPT": "CUSTOM_SKILL_AUTHORING",
+        "OUTPUT_REDIRECT_PROMPT": "CUSTOM_OUTPUT_REDIRECT",
+        "INTERACTIVE_QUESTION_PROMPT": "CUSTOM_INTERACTIVE",
+        "HIDDEN_TOOL_CALLS_PROMPT": "CUSTOM_HIDDEN",
+        "DATETIME_CONTEXT_TEMPLATE": "Date={date_str} TZ={timezone_str}/{timezone_abbrev}",
+    }
+    assert set(overrides).issubset(PROMPT_DEFAULTS)
+    _write_skill(_runtime_paths(tmp_path / "overrides"), "release-check", "Verify release notes.")
+    custom, _ = _build(
+        tmp_path / "overrides",
+        monkeypatch,
+        agent_cfg={"tools": ["filesystem"], "show_tool_calls": False},
+        prompts=overrides,
+    )
+    stable_msg, turn_msg = render_system_messages(custom.prompt)
+    stable_text = str(stable_msg.content)
+    assert "Custom Assistant (@mindroom_assistant:localhost) on Anthropic/claude-sonnet-4-6." in stable_text
+    assert all(v in stable_text for k, v in overrides.items() if k.endswith("_PROMPT"))
+    assert "Date=" in str(turn_msg.content)
+    assert "TZ=UTC/UTC" in str(turn_msg.content)
