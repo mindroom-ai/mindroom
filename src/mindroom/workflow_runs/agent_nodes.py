@@ -79,7 +79,7 @@ if TYPE_CHECKING:
     from mindroom.delegation.state import DelegationChild
     from mindroom.llm.runs import RunRecord, ToolExecution
     from mindroom.llm.usage import RunMetrics
-    from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundJobSpec, JobClaim, ToolJobRuntime
+    from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, JobSpec, ToolJobRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.workflow_runs.engine import WorkflowEngine
@@ -202,7 +202,7 @@ def _prepare_turn_spec(
     follow_up: DelegationChild | None,
     correction: str | None,
     previous: DelegationChild | None,
-) -> tuple[DelegationTarget, DelegationChild, BackgroundJobSpec]:
+) -> tuple[DelegationTarget, DelegationChild, JobSpec]:
     """Resolve a fresh or continued child target, authorize it under `workflow`, and build its job spec."""
     config, paths, caller = context.current_config, context.runtime_paths, run.agent_name
     source = session.request if session is not None else node.request
