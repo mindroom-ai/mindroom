@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from mindroom.agent_cli.minimal_agent import minimal_context_documents
 from mindroom.agent_loop.prompt import render_system_messages
 from mindroom.agents import create_agent
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
@@ -77,7 +78,7 @@ def _build(
         "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-4-6"}},
         "timezone": "UTC",
     }
-    if prompts:
+    if prompts is not None:
         payload["prompts"] = prompts
     if approval_matches:
         rules = [ApprovalRuleConfig(match=m, action="require_approval") for m in approval_matches]
@@ -132,6 +133,40 @@ def test_matrix_automation_facts(
     assert ("judges unmentioned messages" in role) is expect_participation
     assert ("silent listening turns" in role) is expect_listen
     assert "config.yaml" not in role
+
+
+@pytest.mark.parametrize(
+    ("template", "expected_snippet"),
+    [
+        pytest.param(
+            "Custom {display_name} ({matrix_id}).",
+            "Custom Assistant (@mindroom_assistant:localhost).",
+            id="custom-template",
+        ),
+        pytest.param("", None, id="empty-override"),
+    ],
+)
+def test_matrix_automation_facts_suppressed_by_explicit_identity_override(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    template: str,
+    expected_snippet: str | None,
+) -> None:
+    """Explicit AGENT_IDENTITY_CONTEXT_TEMPLATE overrides (including empty) suppress default automation lines."""
+    build, _ = _build(
+        tmp_path,
+        monkeypatch,
+        agent_cfg={"participation": {}, **_LISTEN},
+        prompts={"AGENT_IDENTITY_CONTEXT_TEMPLATE": template},
+    )
+    role = build.prompt.role or ""
+    assert "judges unmentioned messages" not in role
+    assert "silent listening turns" not in role
+    if expected_snippet is None:
+        assert "## Your Identity" not in role
+        assert "A helpful assistant." in role
+    else:
+        assert expected_snippet in role
 
 
 @pytest.mark.parametrize(
@@ -303,6 +338,50 @@ def test_tool_execution_environment_modes_and_generated_tools(
 
     empty, _ = _build(tmp_path / "empty", monkeypatch, agent_cfg={"tools": []})
     assert "- No tools are available in this runtime." in (empty.prompt.role or "")
+
+
+@pytest.mark.parametrize(
+    ("tools", "expected_local"),
+    [
+        pytest.param(["calculator", {"shell": {"defer": True}}], "`calculator`", id="eager-local-and-deferred-worker"),
+        pytest.param(
+            [{"calculator": {"defer": True}}, {"shell": {"defer": True}}],
+            "`calculator`",
+            id="deferred-local-and-deferred-worker",
+        ),
+        pytest.param([{"shell": {"defer": True}}], "none", id="deferred-worker-only"),
+    ],
+)
+def test_minimal_mode_deferred_worker_routed_shell_placement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tools: list[Any],
+    expected_local: str,
+) -> None:
+    """Minimal mode role context reports worker routing when a deferred toolkit runs in a worker."""
+    build, _ = _build(
+        tmp_path / "worker",
+        monkeypatch,
+        agent_cfg={"tools": tools, "worker_tools": ["shell"], "worker_scope": "user_agent"},
+        process_env={"MINDROOM_WORKER_BACKEND": "kubernetes", "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token"},
+        agent_mode="minimal",
+    )
+    role = minimal_context_documents(build)["role"]
+    assert "- All tools run in the primary MindRoom runtime." not in role
+    assert f"- Local tools (primary MindRoom runtime): {expected_local}." in role
+    assert "- Worker-routed tools: `shell`." in role
+    assert "- Worker backend: `kubernetes`." in role
+    assert "- Not confined by file_access (only a worker isolates them): `shell`." in role
+
+    local_build, _ = _build(
+        tmp_path / "local",
+        monkeypatch,
+        agent_cfg={"tools": [{"shell": {"defer": True}}]},
+        agent_mode="minimal",
+    )
+    local_role = minimal_context_documents(local_build)["role"]
+    assert "- All tools run in the primary MindRoom runtime." in local_role
+    assert "- Not confined by file_access (only a worker isolates them): `shell`." in local_role
 
 
 def test_skills_deduplication_diagnostics_overrides_and_cache_stability(

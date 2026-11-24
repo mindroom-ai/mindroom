@@ -5041,7 +5041,7 @@ Hidden entries such as `.usage.json`, `.history/`, and `.archive/` are never loa
 
 Agents never need write access to a global skill root to create skills, so the bundled, plugin, and user roots can stay read-only, for example in container or Kubernetes deployments.
 An agent with workspace-rooted file or shell tools can write a skill to `<workspace>/skills/<skill-name>/SKILL.md`, which its file tools address as `skills/<skill-name>/SKILL.md`.
-Such agents are told how in their system prompt through the `WORKSPACE_SKILL_AUTHORING_PROMPT` built-in prompt, which you can change through [Built-In Prompt Overrides](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides).
+Such agents (unless `skill_manage` is offered) are told how in their system prompt through the `WORKSPACE_SKILL_AUTHORING_PROMPT` built-in prompt, which you can change through [Built-In Prompt Overrides](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides).
 A new or edited workspace skill is picked up on the agent's next run without a config change.
 
 Being able to write workspace skills does not make an agent create them.
@@ -10564,6 +10564,9 @@ agents:
 | --- | --- | --- | --- |
 | `timeout_seconds` | number | `30` | From 1 to 120; bounds each call and each shell-output download. `run_shell` always waits up to 120 seconds so the person at the computer has time to decide. |
 
+By default, `defaults.desktop_pairing` is `self_service`, so authorized users can pair their computer with any concrete agent without statically listing `desktop` in `tools` (the tool activates automatically once paired).
+Set `defaults.desktop_pairing: explicit_only` to restrict pairing to agents that explicitly configure `desktop`, or `disabled` to refuse new pairings while still allowing existing pairings to disconnect.
+
 Never put device identity fields in agent YAML for the `desktop` tool; each user pairs their own computer through chat.
 Pairings are already scoped to one requester and one agent, so add `private: {per: user_agent}` only when the agent's whole runtime and state should also be requester-private.
 The tool needs a live Matrix room and runs in the primary agent process, so it is unavailable in [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) runs.
@@ -10584,8 +10587,7 @@ To drive the user's signed-in browser, also configure the [`browser`](https://do
 Only the same requester with the same agent can confirm or use the pairing.
 Until pairing is confirmed, `desktop` calls return a setup-required result while the agent's other tools keep working, and the model cannot register or replace a device itself.
 
-Repeating setup for the same controller keeps saved browser, capture, folder, and shell choices, and keeps app choices unless you supply new app IDs.
-Setup for a different controller starts without saved folders or shell access; after the bridge has started once, see **Change the cloud controller** under [Operations](#operations).
+Repeating setup for the same controller or rotating an existing controller device replaces that entry in place and keeps saved browser, capture, folder, and shell choices (and keeps app choices unless you supply new app IDs). When only one controller is saved, setting up a different controller user replaces it and resets saved local access; when multiple controllers are already saved, `mindroom desktop setup` refuses a brand-new controller user so you do not silently wipe or share existing saved access.
 If the saved session belongs to a different homeserver or Matrix user than the setup command names, setup exits without pairing; pass `--storage-path` for a separate setup or run `mindroom desktop login --replace`.
 The separate `mindroom desktop login` and `mindroom desktop pair` commands remain available for manual recovery.
 
@@ -10780,7 +10782,7 @@ For app-level control of the browser window, or for Safari and other browsers, a
 - **Local allowlists**: Only applications selected locally can be listed, launched, inspected, captured, or controlled, unless full control is live, which covers every app.
   An allowed app can still open a link or document in another app, which the bridge cannot then inspect or control unless that app is also allowlisted.
   Allowlisting a browser exposes whichever window and tab is selected, not one website.
-- **MindRoom is excluded**: MindRoom itself (`chat.mindroom.menubar`) and its desktop helper (`chat.mindroom.desktophelper`) can never be allowlisted or targeted under full control, because their windows grant shell auto-approval, control, and app access.
+- **MindRoom is excluded**: MindRoom's own apps (`chat.mindroom.menubar`, `chat.mindroom.app`) and their helpers (`chat.mindroom.desktophelper`, `chat.mindroom.app.helper*`) can never be allowlisted or targeted under full control, because their windows grant shell auto-approval, control, and app access.
 - **No remote authority**: Cloud configuration, chat messages, and model output cannot enable control or full control, extend a lease, change local allowlists or folders, enable shell commands, or approve one.
 - **Ending control**: **Revoke** in the macOS app or its menu, **Stop Access**, or stopping the terminal bridge ends input; the pointer position never does.
 - **Local audit log**: The bridge logs each completed or rejected command without its parameters, values, or typed text.
@@ -10963,8 +10965,8 @@ Adding `run_shell` to the set adds a chat confirmation before the request is sen
 - **Rotate the local device**: Run `mindroom desktop login --replace`, revoke the old device in your Matrix account settings, then run `!desktop rotate` in the agent chat and follow its pairing command.
   `--replace` does not revoke the old device by itself.
   If a `browser` tool uses the desktop target, update its `device_id` and `device_ed25519` settings to the new device, or its calls fail.
-- **Change the cloud controller**: Once the bridge has started, setup, the macOS app, and `mindroom desktop run` refuse a different controller identity with `Desktop journal belongs to a different controller.`
-  Use `--storage-path` with a new directory for `mindroom desktop login`, `mindroom desktop setup`, and `mindroom desktop run`; the new setup does not carry over pending commands or outcomes, and the macOS app has no migration action.
+- **Add or change cloud controllers**: The v2 command journal (`commands.sqlite3`) and `v: 2` native config isolate command history and allowlists per controller inside one storage directory, so a single bridge can serve multiple paired cloud controllers or rotate an existing controller device without switching `--storage-path`.
+  Use the native helper's `upsert_controller` and `remove_controller` actions (used by MindRoom Chat) to add or remove controllers while keeping existing saved access intact. Run `mindroom desktop setup` (or the legacy macOS menu bar app) to re-pair or rotate an existing controller in place, or to replace a single-controller setup; when multiple controllers are configured, adding another agent requires `upsert_controller` or MindRoom Chat.
 - **Identity mismatch**: A device ID or Ed25519 mismatch is a hard failure; treat it as a rotation or possible substitution and do not bypass it.
 - **Stop**: `Ctrl+C` in the terminal or **Stop Access** in the macOS app stops the bridge and its shell commands.
   An app or browser action already in progress can still finish, so observe local state before retrying it.

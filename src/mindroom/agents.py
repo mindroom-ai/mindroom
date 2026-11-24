@@ -987,6 +987,8 @@ def _render_agent_identity_context(
         model_id=model_id,
         openai_compat_history_guidance="",
     )
+    if "AGENT_IDENTITY_CONTEXT_TEMPLATE" in config.prompts:
+        return identity
     automation_lines = _matrix_automation_lines(agent_config)
     if not automation_lines:
         return identity
@@ -1354,6 +1356,14 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             continue
         if entry is not None:
             entries.append(entry)
+            target_names = (
+                worker_routed_tool_names if agent_tools.runs_in_worker(tool_name, placement) else local_tool_names
+            )
+            target_names.append(tool_name)
+    if not disable_runtime_capabilities:
+        for tool_name in deferred_configs:
+            if config.is_tool_preset(tool_name):
+                continue
             target_names = (
                 worker_routed_tool_names if agent_tools.runs_in_worker(tool_name, placement) else local_tool_names
             )
