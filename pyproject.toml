@@ -610,7 +610,7 @@ build-constraint-dependencies = [
 [tool.ruff]
 target-version = "py313"
 line-length = 120
-extend-exclude = ["tests/workflow_examples"]
+extend-exclude = [ "tests/workflow_examples" ]
 force-exclude = true
 [tool.ruff.lint]
 select = [

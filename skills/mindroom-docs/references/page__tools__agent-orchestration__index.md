@@ -406,6 +406,8 @@ The configured large-output policy can save long text to a file before that limi
 
 ## [`dynamic_workflow`]
 
+`dynamic_workflow` is deprecated in favour of [`workflow`](https://docs.mindroom.chat/tools/workflows/#moving-from-dynamic-workflows).
+
 `dynamic_workflow` lets an agent save a reusable multi-step workflow, publish new revisions, run it, and inspect run records.
 Add it to the `tools:` of each agent that should create and run workflows.
 
