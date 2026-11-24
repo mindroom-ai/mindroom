@@ -34,6 +34,7 @@ from mindroom.delegation.targets import resolve_follow_up_target, resolve_fresh_
 from mindroom.llm.messages import CUT_OFF_TEXT_KEY, is_own_model_message
 from mindroom.llm.runs import RunStatus
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, JobAccessError
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -88,10 +89,6 @@ class AgentNodeError(Exception):
     """An agent turn that did not start: the refusal the script reads."""
 
 
-class AgentNotReadyError(Exception):
-    """An agent turn that cannot be decided yet, such as one for an agent whose bot is still starting."""
-
-
 @dataclass(frozen=True, slots=True)
 class AgentRuntime:
     """What the engine runs agent turns on: the job runtime, and the live configuration to read their runs with."""
@@ -122,7 +119,7 @@ def schema_failure(request: dict[str, object]) -> str | None:
     return None
 
 
-def _first_prompt(node: WorkflowNode) -> str:
+def first_prompt(node: WorkflowNode) -> str:
     """Return what the agent of *node* is sent first: its prompt, and with a schema the instruction to match it."""
     raw = node.request["prompt"] if "prompt" in node.request else node.request.get("message")
     prompt, schema = str(raw), node.request.get("schema")
@@ -237,8 +234,8 @@ async def launch_child(
     known = jobs.retained_job(earlier) if earlier is not None else None
     previous = None if known is None else delegation_child(known)
     # A further turn whose first child is no longer kept starts an agent that never saw the task.
-    prompt = _first_prompt(node) if correction is None else correction
-    prompt = prompt if correction is None or previous is not None else f"{_first_prompt(node)}\n\n{correction}"
+    prompt = first_prompt(node) if correction is None else correction
+    prompt = prompt if correction is None or previous is not None else f"{first_prompt(node)}\n\n{correction}"
     config, paths, caller = context.current_config, context.runtime_paths, run.agent_name
     with tool_runtime_context(context):
         target, previous, tool_name, call_args = await _resolve_child_target(
@@ -265,7 +262,7 @@ async def launch_child(
                 grant="workflow",
             )
         except DelegationPendingError as exc:
-            raise AgentNotReadyError(str(exc)) from exc
+            raise ScriptRuntimeUnavailableError(str(exc)) from exc
         if isinstance(authorized, str):
             raise AgentNodeError(authorized)
         child = prepare_child_turn(
@@ -358,7 +355,7 @@ async def await_child(  # noqa: C901
     The wait is on the saved job ID and starts nothing. *on_waiting* is told when the job starts to wait for a
     person's approval, and with None when it works again; that time is not the turn's. After *timeout* seconds of
     work the job is cancelled, and the wait goes on until it has ended. Without *on_waiting* nothing is waited for:
-    a job whose outcome is not this reader's to take now raises `AgentNotReadyError`.
+    a job whose outcome is not this reader's to take now raises `ScriptRuntimeUnavailableError`.
     """
     assert node.handle is not None
     jobs, job_id = runtime.jobs, node.handle.ref
@@ -391,7 +388,7 @@ async def await_child(  # noqa: C901
             # a job that ended while its requester's access is unresolved is nobody's yet.
             break
         if on_waiting is None:
-            raise AgentNotReadyError(_NOT_READABLE_YET)
+            raise ScriptRuntimeUnavailableError(_NOT_READABLE_YET)
         if (job.status == "awaiting_approval") != waiting:
             waiting = not waiting
             reason = ("user" if job.adapter.get("wait") == "user" else "approval") if waiting else None

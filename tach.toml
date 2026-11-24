@@ -2630,11 +2630,11 @@ from = ["mindroom.workflow_runs.agent_nodes"]
 expose = [
     "EARLIER_TURN",
     "AgentNodeError",
-    "AgentNotReadyError",
     "AgentRuntime",
     "await_child",
     "schema_failure",
     "delegated_request",
+    "first_prompt",
     "load_follow_up_child",
     "launch_child",
 ]

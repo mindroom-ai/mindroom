@@ -42,10 +42,10 @@ from mindroom.tool_jobs.runtime import TERMINAL_STATUSES
 from mindroom.workflow_runs.agent_nodes import (
     EARLIER_TURN,
     AgentNodeError,
-    AgentNotReadyError,
     AgentRuntime,
     await_child,
     delegated_request,
+    first_prompt,
     launch_child,
     load_follow_up_child,
     schema_failure,
@@ -90,7 +90,6 @@ from mindroom.workflow_runs.structured import (
     SCHEMA_TURNS,
     SchemaError,
     extract_json,
-    schema_prompt,
     validation_error,
 )
 
@@ -1628,8 +1627,6 @@ class WorkflowEngine:
         """
         try:
             node = await self._launch_agent(run, node, run.epoch, timeout=timeout, follow_up=follow_up)
-        except AgentNotReadyError as exc:
-            raise ScriptRuntimeUnavailableError(str(exc)) from exc
         except AgentNodeError as exc:
             # Nothing ran. The node is saved already when the job runtime refused the job it names.
             error: dict[str, object] = {"kind": "refused", "message": str(exc)}
@@ -1650,22 +1647,28 @@ class WorkflowEngine:
         await self._restate(run.run_id)
         return _receipt(node)
 
-    async def _launch_agent(self, run: WorkflowRun, node: WorkflowNode, epoch: int, **options: Any) -> WorkflowNode:  # noqa: ANN401
+    async def _launch_agent(
+        self,
+        run: WorkflowRun,
+        node: WorkflowNode,
+        epoch: int,
+        *,
+        timeout: float | None = None,  # noqa: ASYNC109 - seconds of work the turn gets, not a call deadline.
+        turn: int = 1,
+        correction: str | None = None,
+        made: bool = False,
+        follow_up: str | None = None,
+    ) -> WorkflowNode:
         """Authorize and start one turn of an agent node; turn 1 logs the label-vs-agent notice when applicable."""
         context, runtime = self.authorize(run), self.agents()
         if context is None:
-            raise AgentNotReadyError(_OWNER_NOT_READY)
+            raise ScriptRuntimeUnavailableError(_OWNER_NOT_READY)
         if isinstance(context, str) or runtime is None:
             raise AgentNodeError(context if isinstance(context, str) else _NO_AGENTS)
         session = self.store.get_node(run.run_id, node.session_key) if node.session_key else None
         source = session.request if session is not None else node.request
         first_turn = node.kind != "turn" or int(node.request.get("turn", 1)) == 1
-        if (
-            not options.get("turn")
-            and first_turn
-            and not source.get("agent")
-            and node.name in context.current_config.agents
-        ):
+        if turn == 1 and first_turn and not source.get("agent") and node.name in context.current_config.agents:
             await asyncio.to_thread(self.store.append_log, run.run_id, epoch, _NAME_LABELS.format(name=node.name))
         return await launch_child(
             context,
@@ -1674,8 +1677,12 @@ class WorkflowEngine:
             epoch,
             store=self.store,
             jobs=runtime.jobs,
+            timeout=timeout,
+            turn=turn,
+            correction=correction,
+            made=made,
             session=session,
-            **options,
+            follow_up=follow_up,
         )
 
     def _wait_for_agent(self, run: WorkflowRun, node: WorkflowNode, epoch: int) -> None:
@@ -1734,7 +1741,7 @@ class WorkflowEngine:
 
         The turn's usage and its answer are saved before the job's outcome is acknowledged, so a primary that dies
         in between reads the same job again. A run that moved on meanwhile reads the job itself. Without *block*,
-        for a caller that holds the run's lock, a job that cannot be read now raises `AgentNotReadyError`.
+        for a caller that holds the run's lock, a job that cannot be read now raises `ScriptRuntimeUnavailableError`.
 
         An answer that does not match the call's schema starts a further turn of the same agent, which is waited
         for here, unless the run is ending or the turn was the last the agent gets.
@@ -1743,7 +1750,7 @@ class WorkflowEngine:
             node = further
             if not block:
                 # The further turn runs now: its end is the next reader's.
-                raise AgentNotReadyError(_CORRECTING)
+                raise ScriptRuntimeUnavailableError(_CORRECTING)
             task, timed = asyncio.current_task(), f"{_TIMED}{cast('DispatchHandle', node.handle).ref}"
             if task is not None and task.get_name().startswith(_TIMED):
                 # The wait is found by the job it waits for, by the attempt that takes it over.
@@ -1761,11 +1768,11 @@ class WorkflowEngine:
         assert node.handle is not None
         if (runtime := self.agents()) is None:
             # Without a job runtime nobody can read the job, now.
-            raise AgentNotReadyError(_NO_AGENTS)
+            raise ScriptRuntimeUnavailableError(_NO_AGENTS)
         try:
             waits = partial(self._node_waits, node, epoch) if block else None
             (kind, text), usage, claim, continued = await await_child(run, node, runtime, on_waiting=waits)
-        except AgentNotReadyError:
+        except ScriptRuntimeUnavailableError:
             raise
         except Exception as exc:
             logger.exception("workflow_agent_outcome_unreadable", run_id=node.run_id, key=node.key)
@@ -1828,7 +1835,7 @@ class WorkflowEngine:
 
         The turn is authorized as every call of the run is, and gets what the call has left of its working time.
         One that may not start is the node's end, which is returned. While that cannot be decided the turn waits,
-        or raises `AgentNotReadyError` without *block*.
+        or raises `ScriptRuntimeUnavailableError` without *block*.
         """
         saved = self.store.get_node(node.run_id, node.key)
         current = saved.handle if saved is not None and saved.generation == node.generation else None
@@ -1841,9 +1848,16 @@ class WorkflowEngine:
                 ) is not None:
                     stopped: _Outcome = WorkflowNodeState.CANCELLED, None, {"kind": "cancelled", "message": reason}
                     return _unless_proven(node, made, stopped)
-                opts = {"timeout": left, "turn": turn, "correction": correction, "made": made}
-                return await self._launch_agent(run, node, epoch, **opts)
-            except AgentNotReadyError:
+                return await self._launch_agent(
+                    run,
+                    node,
+                    epoch,
+                    timeout=left,
+                    turn=turn,
+                    correction=correction,
+                    made=made,
+                )
+            except ScriptRuntimeUnavailableError:
                 if not block:
                     raise
                 await asyncio.sleep(RECHECK_SECONDS)
@@ -1930,10 +1944,10 @@ class WorkflowEngine:
             await self._settle_agent(run, node, epoch, block=False)
             if not stop:
                 await self._check_budget(self.store.get_run(run.run_id))
-        except AgentNotReadyError as exc:
+        except ScriptRuntimeUnavailableError:
             if not stop:
                 # The lock is not held while access resolves: the script's SDK asks again, and a Stop gets in.
-                raise ScriptRuntimeUnavailableError(str(exc)) from exc
+                raise
             # A Stop waits for nobody's access and for no job runtime: the turn it may not read may have done
             # anything. A handle without the mark that its job was handed over proves nothing either, since the job
             # starts before that mark is saved.
@@ -2006,11 +2020,9 @@ class WorkflowEngine:
             owner = self.store.get_run(run_id).job_id
             job = runtime.jobs.retained_job(owner) if owner is not None else None
             live = job is None or job.status not in _STOPPED_JOB_STATUSES
-        prompt = node.request.get("prompt") if node is not None and live else None
-        if not isinstance(prompt, str) or node is None:
+        if node is None or not live or not isinstance(node.request.get("prompt"), str):
             return None
-        schema = node.request.get("schema")
-        return schema_prompt(prompt, schema) if schema is not None else prompt
+        return first_prompt(node)
 
     async def node(self, attempt: ScriptRunRecord, node_id: str) -> WorkflowNode:
         """Return one node of the attempt's run, for its whole result."""
