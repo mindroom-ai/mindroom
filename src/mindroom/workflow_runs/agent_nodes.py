@@ -214,7 +214,6 @@ async def launch_child(
     store: WorkflowRunStore,
     jobs: ToolJobRuntime,
     timeout: float | None = None,  # noqa: ASYNC109 - the seconds of work the turn gets, not a deadline of this call.
-    queued: bool = False,
     turn: int = 1,
     correction: str | None = None,
     made: bool = False,
@@ -226,8 +225,7 @@ async def launch_child(
     The one launch path: the target is resolved and authorized as a subagent's is, under the `workflow` grant, at
     the depth of the run's owner. The node is saved with the handle of its job before the job is started, once, and
     the handle says so afterwards. The child's task is the node's label; the job is sent the whole prompt. A turn
-    that may not start raises `AgentNodeError` and saves nothing. A *queued* node is saved already, as waiting for a
-    place among its run's working calls, and gets its handle here.
+    that may not start raises `AgentNodeError` and saves nothing.
 
     A call with a `schema` is refused before anything starts when that is no JSON Schema, and its agent is told to
     answer with a value that matches. A further *turn* of the node continues the child of the turn before it with
@@ -316,12 +314,10 @@ async def launch_child(
         links |= {"agent": target.agent_name, "model": child.model_name}
         links |= {"turn": turn, "made": made} if turn > 1 else {}
         node = replace(node, state=WorkflowNodeState.RUNNING, handle=handle, links=links)
-        stamp = partial(store.update_node, run.run_id, node.key, node.generation, epoch)
-        if not queued:
-            node = await asyncio.to_thread(store.put_node, node, epoch, dirty_after=True)
-        elif not await asyncio.to_thread(stamp, state=node.state, handle=handle, links=links):
+        if (saved := await asyncio.to_thread(store.save_dispatched, node, epoch)) is None:
             # The node that waited for its place has an end by now: its run ended.
             raise AgentNodeError(_NODE_ENDED)
+        node = saved
         try:
             # In the owner's context, which the job's task keeps: the child runs in the run's conversation.
             _, claim = await jobs.start(
@@ -338,7 +334,7 @@ async def launch_child(
             raise AgentNodeError(str(exc)) from exc
     await jobs.release_wait(job_id, claim)
     node = replace(node, handle=replace(handle, dispatched=True))
-    await asyncio.to_thread(stamp, handle=node.handle)
+    await asyncio.to_thread(store.update_node, run.run_id, node.key, node.generation, epoch, handle=node.handle)
     if session is not None:
         links = {
             "subagent_id": child.subagent_id,

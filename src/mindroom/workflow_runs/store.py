@@ -261,6 +261,14 @@ class WorkflowRunStore:
                 _forget_after(connection, node.run_id, node.key)
         return node
 
+    def save_dispatched(self, node: WorkflowNode, epoch: int, *, dirty_after: bool = True) -> WorkflowNode | None:
+        """Persist a dispatched *node*: insert when unsaved (`seq == 0`), or update an already-saved generation."""
+        if node.seq == 0:
+            return self.put_node(node, epoch, dirty_after=dirty_after)
+        n = node
+        ok = self.update_node(n.run_id, n.key, n.generation, epoch, state=n.state, handle=n.handle, links=n.links)
+        return n if ok else None
+
     def update_node(
         self,
         run_id: str,

@@ -1187,7 +1187,7 @@ class WorkflowEngine:
         queued = replace(node, state=WorkflowNodeState.QUEUED)
         queued = await asyncio.to_thread(self.store.put_node, queued, run.epoch, dirty_after=dirty_after)
         if not over:
-            self._enqueue_place(run, queued.key, partial(dispatch, queued, queued=True))
+            self._enqueue_place(run, queued.key, partial(dispatch, queued))
         return _receipt(queued)
 
     def _places_for(self, run: WorkflowRun) -> _Places:
@@ -1310,7 +1310,7 @@ class WorkflowEngine:
             if outcome[0] is WorkflowNodeState.COMPLETED:
                 if await self._check_budget(now):
                     return
-                start = partial(self._dispatch_agent, run, node, timeout=None, queued=True)
+                start = partial(self._dispatch_agent, run, node, timeout=None)
                 self._enqueue_place(run, node.key, start)
             else:
                 await self._settle(node, run.epoch, state=outcome[0], error=outcome[2], ignore=True)
@@ -1422,24 +1422,22 @@ class WorkflowEngine:
         *,
         tool_call: tuple[ScriptToolGrant, dict[str, object]],
         same_as: str | None,
-        queued: bool = False,
     ) -> NodeReceipt:
         """Save a tool node with the handle of its call, then run the call as the engine's own task.
 
         With *same_as*, the digest of its earlier result, the call's lane is dirty only if it answers something else;
         without, it ran because a rule said so, and its lane is dirty whatever it answers. The attempt's epoch is
-        the run's here, and the call's task keeps it. A *queued* node is saved already and gets its handle.
+        the run's here, and the call's task keeps it.
         """
         call_id = uuid5(NAMESPACE_OID, f"{run.run_id}:{node.key}:{node.generation}").hex
         # Saved before the dispatch, so a crash after the tool ran reads the broker's receipt for this call.
         handle = DispatchHandle("broker", f"{attempt.run_id}:{call_id}", dispatched=False, same_as=same_as)
         node = replace(node, state=WorkflowNodeState.RUNNING, handle=handle)
-        if queued:
-            if not await self._stamp(node, run.epoch, state=node.state, handle=handle):
-                # The node that waited for its place has an end by now: its run ended.
-                raise SupersededAttemptError(_RUN_ENDED)
-        else:
-            node = await asyncio.to_thread(self.store.put_node, node, run.epoch, dirty_after=same_as is None)
+        saved = await asyncio.to_thread(self.store.save_dispatched, node, run.epoch, dirty_after=same_as is None)
+        if saved is None:
+            # The node that waited for its place has an end by now: its run ended.
+            raise SupersededAttemptError(_RUN_ENDED)
+        node = saved
         call = partial(self._broker_outcome, attempt, node, run.epoch, tool_call, call_id=call_id)
         # The call has its task before anything else may fail: a saved call nobody runs would never end.
         self._spawn(run.run_id, self._run_tool_node(node, run.epoch, call))
@@ -1637,23 +1635,22 @@ class WorkflowEngine:
         node: WorkflowNode,
         *,
         timeout: float | None,  # noqa: ASYNC109 - the seconds of work the turn gets, not a deadline of this call.
-        queued: bool = False,
         follow_up: str | None = None,
     ) -> NodeReceipt:
         """Start the job of an agent node and wait for it as the engine's own task; a refusal is the node's end.
 
         The turn starts in the live context of the run's owner, as an attempt does. While that cannot be answered
-        the request fails as a transport error does, which the script's SDK repeats, and a *queued* node, which is
-        saved already, is tried again.
+        the request fails as a transport error does, which the script's SDK repeats, and an already-saved queued
+        node is tried again.
         """
         try:
-            node = await self._launch_agent(run, node, run.epoch, timeout=timeout, queued=queued, follow_up=follow_up)
+            node = await self._launch_agent(run, node, run.epoch, timeout=timeout, follow_up=follow_up)
         except AgentNotReadyError as exc:
             raise ScriptRuntimeUnavailableError(str(exc)) from exc
         except AgentNodeError as exc:
             # Nothing ran. The node is saved already when the job runtime refused the job it names.
             error: dict[str, object] = {"kind": "refused", "message": str(exc)}
-            if not await self._settle(node, run.epoch, state=WorkflowNodeState.FAILED, error=error) and not queued:
+            if not await self._settle(node, run.epoch, state=WorkflowNodeState.FAILED, error=error) and not node.seq:
                 refused = replace(node, state=WorkflowNodeState.FAILED, error=error, ended_at=utc_timestamp())
                 await asyncio.to_thread(self.store.put_node, refused, run.epoch, dirty_after=True)
             self._leave(run.run_id, node.key)
@@ -1861,7 +1858,7 @@ class WorkflowEngine:
                 ) is not None:
                     stopped: _Outcome = WorkflowNodeState.CANCELLED, None, {"kind": "cancelled", "message": reason}
                     return _unless_proven(node, made, stopped)
-                opts = {"timeout": left, "queued": True, "turn": turn, "correction": correction, "made": made}
+                opts = {"timeout": left, "turn": turn, "correction": correction, "made": made}
                 return await self._launch_agent(run, node, epoch, **opts)
             except AgentNotReadyError:
                 if not block:
