@@ -171,6 +171,40 @@ The hosted instance chart instead mounts provider keys as files under `/etc/secr
 For passwordless agent accounts ([`appservice` mode](https://docs.mindroom.chat/matrix/#agent-users)), set `matrix.managedAccountAuth: appservice` and point `matrix.appserviceToken` at a Secret holding the registration's `as_token`, and leave `matrix.registrationToken` unset (see [Matrix Managed Account Authentication](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#matrix-managed-account-authentication)).
 On the Tuwunel chart, mount the complete registration YAML from a Secret through `tuwunel.appserviceRegistration`, whose `key` is also the mounted filename and must end in `.yaml` or `.yml`, and optionally disable password login with `login_with_password: false` in `tuwunel.settings` (see [Passwordless MindRoom Accounts](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#passwordless-mindroom-accounts)).
 
+### Multi-User Preset
+
+For a ready-to-copy multi-user deployment with dedicated Kubernetes workers, per-user personal agents, Agent Keys (`egressBroker`), and semantic file memory, start from [`values-multi-user.example.yaml`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/values-multi-user.example.yaml) and [`config-multi-user.example.yaml`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/config-multi-user.example.yaml):
+
+1. Create the namespace and required Secrets (`mindroom-secrets` with `MATRIX_REGISTRATION_TOKEN` and `OPENROUTER_API_KEY`; `mindroom-sandbox-proxy` with `MINDROOM_SANDBOX_PROXY_TOKEN`), writing the secret files without trailing newlines (for example `printf '%s'`) rather than passing literals on the command line:
+
+   ```bash
+   kubectl create namespace mindroom
+   kubectl -n mindroom create secret generic mindroom-secrets \
+     --from-file=MATRIX_REGISTRATION_TOKEN=/path/to/registration-token \
+     --from-file=OPENROUTER_API_KEY=/path/to/openrouter-key
+   openssl rand -hex 32 | tr -d '\n' | \
+     kubectl -n mindroom create secret generic mindroom-sandbox-proxy \
+       --from-file=MINDROOM_SANDBOX_PROXY_TOKEN=/dev/stdin
+   ```
+
+2. Copy and customize `cluster/k8s/runtime/config-multi-user.example.yaml` to `config-multi-user.yaml` (set `rooms.lobby.invite_users`) and `cluster/k8s/runtime/values-multi-user.example.yaml` to `values-multi-user.yaml` (set Matrix URL, server name, image tag/digest, and storage class).
+3. Load the config into the `mindroom-config` ConfigMap and install the runtime chart:
+
+   ```bash
+   kubectl -n mindroom create configmap mindroom-config \
+     --from-file=config.yaml=config-multi-user.yaml
+   helm upgrade --install mindroom-runtime ./cluster/k8s/runtime \
+     --namespace mindroom \
+     -f values-multi-user.yaml
+   ```
+
+Because `config.yaml` is mounted via `subPath`, updating the `mindroom-config` ConfigMap does not update in place; run `kubectl -n mindroom rollout restart deployment/mindroom-runtime` after changes.
+For self-service Agent Keys (`egressBroker.enabled: true`), set `MINDROOM_PUBLIC_URL` via `env.extra` to your reachable HTTPS runtime URL, set `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` for Connections portal sign-in from a self-hosted MindRoom Chat, and see [Self-service for users](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#self-service-for-users).
+In-chat key-request cards also require `MINDROOM_COMPUTER_ALLOWED_ORIGINS` and `mindroom_openid_audience` on Tuwunel.
+
+The preset requests `ReadWriteMany` storage so dedicated workers can schedule across nodes.
+Kubernetes cannot upgrade a bound `ReadWriteOnce` PVC to `ReadWriteMany` in place, and `helm upgrade` fails if an existing bound PVC's `accessModes` changes — create a new RWX claim, migrate data, and point `storage.existingClaim` at it (with `storage.create: false`), or keep `ReadWriteOnce` with `workers.kubernetes.colocateWithControlPlaneNode: true` on single-node/RWO clusters.
+
 ### Chart Reference
 
 Each chart's README documents its full values: [runtime](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md), [Tuwunel](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md), [client](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md), and [MatrixRTC](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/matrixrtc/README.md).

@@ -40,6 +40,9 @@ The default values render a self-contained Deployment, Service, ConfigMap, runti
 A real deployment should provide a useful config and Matrix settings.
 The dashboard and API are fully privileged, so the chart gives the primary a generated `MINDROOM_API_KEY`, and the install notes show how to read it.
 
+For a ready-to-copy multi-user deployment (dedicated Kubernetes workers, per-user personal agents, Agent Keys, and semantic file memory), start from [`values-multi-user.example.yaml`](values-multi-user.example.yaml) and its companion [`config-multi-user.example.yaml`](config-multi-user.example.yaml).
+Create the `mindroom-config` ConfigMap from the companion config, update the placeholder Matrix settings and Secrets, and install with `-f values-multi-user.yaml`.
+
 ## Rollout Progress Deadline
 
 Set `progressDeadlineSeconds` to a positive integer to customize the MindRoom Deployment's rollout progress budget, including scheduling, image initialization, and startup probes.
