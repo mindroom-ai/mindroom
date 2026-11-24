@@ -74,7 +74,6 @@ _SCHEMA_WITH_OUTPUT_PATH = "schema and output_path cannot be used together: retu
 _INTERRUPTED = "The agent was stopped before it started a tool call. A resume runs it again."
 _NO_ANSWER = "The agent's turn left no record of how it ended."
 _NODE_ENDED = "The call ended before its agent started."
-_EXCEEDS_CEILING = "The saved session child has permissions outside this run's current ceiling."
 
 # How one agent turn ended: `completed` and its answer, or the kind of its error and what to tell the script.
 type ChildOutcome = tuple[str, str]
@@ -136,39 +135,12 @@ def turn_job_id(run: WorkflowRun, key: str, generation: int, turn: int) -> str:
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
 
-def _subset(
-    names: tuple[str, ...] | None,
-    cap: tuple[str, ...] | None,
-    *,
-    toolkits: bool = False,
-) -> bool:
-    """Return whether *names* fits inside *cap* (where None is unrestricted)."""
-    if cap is None:
-        return True
-    if names is None:
-        return False
-    return all(entry in cap or (toolkits and entry.partition(".")[0] in cap) for entry in names)
-
-
-def _child_fits_cap(child: DelegationChild, run: WorkflowRun) -> bool:
-    """Return whether a saved session *child* fits within *run*'s current persona ceiling."""
-    if not run.persona or child.child_agent_name != run.agent_name:
-        return True
-    cap = SubagentPersona.from_dict(run.persona)
-    persona = child.persona
-    if persona is None:
-        return cap.tools is None and cap.kept_skills is None and cap.kept_knowledge is None
-    return (
-        _subset(persona.tools, cap.tools, toolkits=True)
-        and _subset(persona.kept_skills, cap.kept_skills)
-        and _subset(persona.kept_knowledge, cap.kept_knowledge)
-    )
-
-
-async def follow_up_fits_ceiling(context: ToolRuntimeContext, run: WorkflowRun, subagent_id: str) -> bool:
-    """Return whether continuing *subagent_id* stays within *run*'s current persona ceiling."""
-    if not run.persona:
-        return True
+async def load_follow_up_child(
+    context: ToolRuntimeContext,
+    run: WorkflowRun,
+    subagent_id: str,
+) -> DelegationChild | str | None:
+    """Load the settled child for *subagent_id*, or return the refusal string when continuation is refused."""
     owner = parse_tool_execution_identity_payload(run.execution_identity)
     target = await resolve_follow_up_target(
         {"subagent_id": subagent_id, "message": ""},
@@ -177,10 +149,7 @@ async def follow_up_fits_ceiling(context: ToolRuntimeContext, run: WorkflowRun, 
         runtime_paths=context.runtime_paths,
         depth=run.depth,
     )
-    if isinstance(target, str) or target.previous_child is None:
-        # Let `launch_child` surface any refusal cleanly.
-        return True
-    return _child_fits_cap(target.previous_child, run)
+    return target if isinstance(target, str) else target.previous_child
 
 
 async def _resolve_child_target(
@@ -214,8 +183,6 @@ async def _resolve_child_target(
         )
         if isinstance(target, str):
             raise AgentNodeError(target)
-        if target.previous_child is not None and not _child_fits_cap(target.previous_child, run):
-            raise AgentNodeError(_EXCEEDS_CEILING)
         return target, target.previous_child, CONTINUE_SUBAGENT, call_args
     cap = SubagentPersona.from_dict(run.persona) if run.persona else None
     if cap is not None and arguments.get("agent_name") in (None, caller) and not arguments.get("profile"):

@@ -46,8 +46,8 @@ from mindroom.workflow_runs.agent_nodes import (
     AgentRuntime,
     await_child,
     delegated_request,
-    follow_up_fits_ceiling,
     launch_child,
+    load_follow_up_child,
     schema_failure,
 )
 from mindroom.workflow_runs.faults import hold
@@ -196,6 +196,18 @@ def _both(
         name
         for name in names
         if all(name in side or (toolkits and name.partition(".")[0] in side) for side in (one, other))
+    )
+
+
+def _fits_ceiling(persona: SubagentPersona | None, cap: SubagentPersona) -> bool:
+    """Return whether *persona* stays within *cap*, using the same intersection as `ceiling()`."""
+    tools = None if persona is None else persona.tools
+    skills = None if persona is None else persona.kept_skills
+    knowledge = None if persona is None else persona.kept_knowledge
+    return (
+        _both(tools, cap.tools, toolkits=True) == tools
+        and _both(skills, cap.kept_skills) == skills
+        and _both(knowledge, cap.kept_knowledge) == knowledge
     )
 
 
@@ -1330,8 +1342,15 @@ class WorkflowEngine:
             context = self.authorize(run)
             if context is None:
                 raise ScriptRuntimeUnavailableError(_OWNER_NOT_READY)
-            if not isinstance(context, str) and not await follow_up_fits_ceiling(context, run, prev_sub):
-                can_continue = False
+            if not isinstance(context, str):
+                child = await load_follow_up_child(context, run, prev_sub)
+                if (
+                    child is not None
+                    and not isinstance(child, str)
+                    and child.child_agent_name == run.agent_name
+                    and not _fits_ceiling(child.persona, SubagentPersona.from_dict(run.persona))
+                ):
+                    can_continue = False
         if can_continue:
             return prev_sub, message
         if not completed:

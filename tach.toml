@@ -2633,7 +2633,7 @@ expose = [
     "await_child",
     "schema_failure",
     "delegated_request",
-    "follow_up_fits_ceiling",
+    "load_follow_up_child",
     "launch_child",
 ]
 
