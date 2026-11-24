@@ -143,7 +143,7 @@ class ExplorationAutomation(_ScheduledAutomation):
 
 
 class TraceAuditAutomation(_ScheduledAutomation):
-    """Hourly passive audit of settled sessions for recurring friction and teachable failures."""
+    """Hourly passive audit of settled sessions for recurring tool/run failures (summarized error cards, not full transcripts or error-free workflows)."""
 
     requires_file_memory: ClassVar[bool] = False
 

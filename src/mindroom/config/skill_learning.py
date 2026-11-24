@@ -16,9 +16,12 @@ class SkillLearningConfig(BaseModel):
     trigger: Literal["interval", "friction"] = Field(
         default="interval",
         description=(
-            "How skill reviews are triggered: 'interval' reviews every review_interval model replies, "
-            "'friction' promotes recurring failure clusters detected by the trace_audit automation "
-            "(which audits sessions scoped to the automation's configured room, or personal room for private instances)"
+            "How skill reviews are triggered. 'interval' reviews the full conversation every review_interval model "
+            "replies: higher cost and skill churn, but can learn from successful workflows, user preferences, and "
+            "subtle multi-turn context. 'friction' disables interval reviews and promotes only recurring tool/run "
+            "failure clusters from trace_audit (scoped to the automation's configured room, or personal room for private "
+            "instances): much cheaper with less bloat and catches short-session failures, but only sees summarized "
+            "error patterns and will not learn from error-free workflows or subtle skill misuse"
         ),
     )
     model: str | None = Field(
