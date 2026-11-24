@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 from datetime import UTC, datetime, timedelta
@@ -11,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -23,6 +25,7 @@ from mindroom.llm.usage import MessageMetrics
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.identity import MatrixID
 from mindroom.message_target import MessageTarget
+from mindroom.scheduling import tasks as scheduling_tasks
 from mindroom.scheduling.errors import SchedulingError
 from mindroom.scheduling.executor import execute_scheduled_workflow, send_scheduled_failure_notice
 from mindroom.scheduling.tasks import (
@@ -557,6 +560,52 @@ class TestParseWorkflowSchedule:
         assert isinstance(result, ScheduledWorkflow)
         assert result.cron_schedule is not None
         assert result.cron_schedule.to_cron_string() == "0 9 5 6 1"
+
+    async def test_parse_workflow_schedule_times_out_and_logs_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_config: Config,
+    ) -> None:
+        """Schedule parsing raises SchedulingError and logs an error when complete_prompt stalls."""
+
+        async def slow_complete_prompt(*_args: object, **_kwargs: object) -> object:
+            await asyncio.sleep(5)
+            pytest.fail("should have timed out")
+
+        install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+        monkeypatch.setattr(scheduling_tasks, "complete_prompt", slow_complete_prompt)
+        monkeypatch.setattr(scheduling_tasks, "_SCHEDULE_PARSE_TIMEOUT_SECONDS", 0.05)
+
+        with capture_logs() as logs, pytest.raises(SchedulingError, match="Timed out parsing the schedule request"):
+            await _parse_workflow_schedule(
+                "Daily at 9am check my email",
+                config=mock_config,
+                runtime_paths=runtime_paths_for(mock_config),
+                available_responders=[_mid("general")],
+                timezone="UTC",
+            )
+
+        assert [entry["log_level"] for entry in logs if entry["event"] == "Timed out parsing workflow schedule"] == [
+            "error",
+        ]
+
+        async def provider_timeout(*_args: object, **_kwargs: object) -> object:
+            msg = "upstream read timeout"
+            raise TimeoutError(msg)
+
+        monkeypatch.setattr(scheduling_tasks, "complete_prompt", provider_timeout)
+        monkeypatch.setattr(scheduling_tasks, "_SCHEDULE_PARSE_TIMEOUT_SECONDS", 5.0)
+        with capture_logs() as provider_logs, pytest.raises(SchedulingError, match="Error parsing schedule:"):
+            await _parse_workflow_schedule(
+                "Daily at 9am check my email",
+                config=mock_config,
+                runtime_paths=runtime_paths_for(mock_config),
+                available_responders=[_mid("general")],
+                timezone="UTC",
+            )
+        assert [
+            entry["log_level"] for entry in provider_logs if entry["event"] == "Error parsing workflow schedule"
+        ] == ["error"]
 
 
 @pytest.mark.asyncio

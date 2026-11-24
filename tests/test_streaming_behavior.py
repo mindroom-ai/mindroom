@@ -677,6 +677,7 @@ class TestStreamingBehavior:
             event_id: str,
             new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             delivered_edits.append(
                 build_edit_event_content(event_id=event_id, new_content=new_content, new_text=new_text),
@@ -2267,6 +2268,7 @@ class TestStreamingBehavior:
             _event_id: str,
             new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             edited_contents.append((new_content, new_text))
             return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
@@ -2394,6 +2396,7 @@ class TestStreamingBehavior:
             _client: object,
             room_id: str,
             content: dict[str, object],
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             sent_messages.append((room_id, content))
             return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
@@ -2614,6 +2617,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             edited_texts.append(new_text)
             first_edit_finished.set()
@@ -2741,6 +2745,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             edited_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
@@ -2779,6 +2784,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             if "Preparing isolated worker" in new_text:
                 msg = "edit blew up"
@@ -2834,6 +2840,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             edited_texts.append(new_text)
             if "Preparing isolated worker" in new_text:
@@ -2888,6 +2895,7 @@ class TestStreamingBehavior:
             _client: object,
             _room_id: str,
             content: dict[str, object],
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             return DeliveredMatrixEvent(event_id="$event123", content_sent=dict(content))
 
@@ -2937,6 +2945,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             edited_texts.append(new_text)
             if "Preparing isolated worker" in new_text and "hello" not in new_text and "world" not in new_text:
@@ -2999,6 +3008,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             _new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             await stream_finished.wait()
             edited_statuses.append(_new_content.get(STREAM_STATUS_KEY))
@@ -3044,6 +3054,7 @@ class TestStreamingBehavior:
             _event_id: str,
             new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent | None:
             edited.append((new_text, new_content.get(STREAM_STATUS_KEY)))
             return edit_results.pop(0)
@@ -3086,6 +3097,7 @@ class TestStreamingBehavior:
             _event_id: str,
             new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent | None:
             edited.append((new_text, new_content.get(STREAM_STATUS_KEY)))
             edit_recorded.set()
@@ -3175,6 +3187,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             _new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             streaming.accumulated_text = "hello"
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
@@ -3410,6 +3423,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             nonlocal in_flight, max_in_flight
             in_flight += 1
@@ -3462,7 +3476,12 @@ class TestStreamingBehavior:
         placeholder_sent = asyncio.Event()
         notice_shown = asyncio.Event()
 
-        async def record_send(_client: object, _room_id: str, content: dict[str, object]) -> DeliveredMatrixEvent:
+        async def record_send(
+            _client: object,
+            _room_id: str,
+            content: dict[str, object],
+            **_kwargs: object,
+        ) -> DeliveredMatrixEvent:
             placeholder_sent.set()
             return DeliveredMatrixEvent(event_id="$stream", content_sent=dict(content))
 
@@ -3472,6 +3491,7 @@ class TestStreamingBehavior:
             _event_id: str,
             new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             if "Preparing isolated worker" in new_text:
                 notice_shown.set()
@@ -3761,6 +3781,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             captured_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
@@ -3863,6 +3884,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             captured_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})

@@ -27,7 +27,12 @@ from mindroom.matrix.joined_members import read_joined_members
 from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, has_privileged_creators, user_power_level
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_room_creators, read_state_event
 from mindroom.matrix.state import resolve_room_id
-from mindroom.matrix.state_failures import StateFailure, state_failure
+from mindroom.matrix.state_failures import (
+    StateFailure,
+    is_transient_homeserver_status,
+    response_http_status,
+    state_failure,
+)
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 
 if TYPE_CHECKING:
@@ -902,7 +907,9 @@ async def get_joined_rooms(client: nio.AsyncClient) -> list[str] | None:
     response = await client.joined_rooms()
     if isinstance(response, nio.JoinedRoomsResponse):
         return list(response.rooms)
-    logger.error("matrix_joined_rooms_fetch_failed", error=str(response))
+    http_status = response_http_status(response)
+    log = logger.warning if is_transient_homeserver_status(http_status) else logger.error
+    log("matrix_joined_rooms_fetch_failed", error=str(response), http_status=http_status)
     return None
 
 

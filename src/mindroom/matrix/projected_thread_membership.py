@@ -106,6 +106,8 @@ async def resolve_thread_root_event_id(
     relations: RelationLookup,
     room_id: str,
     event_id: str,
+    *,
+    allow_standalone_root: bool = False,
 ) -> str | None:
     """Resolve one event ID into a canonical thread root when thread membership can prove one."""
     normalized_event_id = event_id.strip()
@@ -117,6 +119,8 @@ async def resolve_thread_root_event_id(
         # Local state only. The homeserver was just asked for this exact
         # event and could not answer; asking it again resolves nothing.
         return await relations.admitted_thread_id(room_id, normalized_event_id)
+    if allow_standalone_root and event_info.can_be_thread_root and event_info.event_type == "m.room.message":
+        return normalized_event_id
 
     resolution = await resolve_event_thread_membership(
         room_id,

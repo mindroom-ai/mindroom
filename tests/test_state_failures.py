@@ -4,13 +4,25 @@ from __future__ import annotations
 
 import re
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
+from mindroom.config.main import Config
+from mindroom.matrix.client_delivery import send_message_outcome
+from mindroom.matrix.client_room_admin import get_joined_rooms
+from mindroom.matrix.client_session import MindRoomAsyncClient, _MatrixTransportShutdownError
+from mindroom.matrix.large_messages import upload_json_sidecar
 from mindroom.matrix.state_failures import StateFailure, state_failure
+from mindroom.message_target import MessageTarget
+from mindroom.streaming import ProgressState, StreamingResponse
+from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from aioresponses import aioresponses
 
 _ROOM_ID = "!room:localhost"
@@ -120,3 +132,103 @@ async def test_state_failure_uses_nio_parsed_http_status(
 
     assert response.http_status == status
     assert state_failure(response) is expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("http_status", "expected_level"),
+    [(502, "warning"), (503, "warning"), (504, "warning"), (500, "error"), (403, "error"), (None, "error")],
+)
+async def test_transient_homeserver_failures_log_warning_with_http_status(
+    http_status: int | None,
+    expected_level: str,
+) -> None:
+    """502/503/504 Matrix errors log warning with http_status; non-transient/unknown statuses stay error."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = "@bot:localhost"
+    client.rooms = {_ROOM_ID: MagicMock(encrypted=False)}
+    client.room_send = AsyncMock(
+        return_value=nio.RoomSendError("unknown error", room_id=_ROOM_ID, http_status=http_status),
+    )
+    client.joined_rooms = AsyncMock(return_value=nio.JoinedRoomsError("unknown error", http_status=http_status))
+    client.upload = AsyncMock(return_value=(nio.UploadError("unknown error", http_status=http_status), None))
+
+    with capture_logs() as logs:
+        await send_message_outcome(client, _ROOM_ID, {"msgtype": "m.text", "body": "hi"})
+        await send_message_outcome(
+            client,
+            _ROOM_ID,
+            {"msgtype": "m.text", "body": "hi"},
+            transient_failure_recoverable=True,
+        )
+        assert await get_joined_rooms(client) is None
+        assert await upload_json_sidecar(client, _ROOM_ID, {"body": "x"}, room_encrypted=False, durable=False) == (
+            None,
+            None,
+        )
+
+    send_logs = [entry for entry in logs if entry["event"] == "matrix_message_send_failed"]
+    assert [(entry["log_level"], entry["http_status"]) for entry in send_logs] == [
+        ("error", http_status),
+        (expected_level, http_status),
+    ]
+    for event in ("matrix_joined_rooms_fetch_failed", "large_message_sidecar_upload_failed"):
+        matching = [entry for entry in logs if entry["event"] == event]
+        assert len(matching) == 1
+        assert matching[0]["log_level"] == expected_level
+        assert matching[0]["http_status"] == http_status
+
+
+@pytest.mark.asyncio
+async def test_shutdown_fenced_delivery_exception_and_non_final_stream_edit_log_warning(
+    tmp_path: Path,
+) -> None:
+    """Shutdown-fenced delivery exceptions and non-final stream edit failures log warning, not error."""
+    client = MindRoomAsyncClient("http://127.0.0.1:9", "@bot:localhost", "BOT", store_path=None)
+    client.begin_process_shutdown_transport_fence()
+    client.rooms = {_ROOM_ID: MagicMock(encrypted=False)}
+    client.room_send = AsyncMock(side_effect=_MatrixTransportShutdownError())  # type: ignore[method-assign]
+
+    with capture_logs() as logs:
+        await send_message_outcome(client, _ROOM_ID, {"msgtype": "m.text", "body": "hi"})
+    exc_logs = [entry for entry in logs if entry["event"] == "matrix_message_delivery_exception"]
+    assert len(exc_logs) == 1
+    assert exc_logs[0]["log_level"] == "warning"
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(Config(), runtime_paths)
+    stream = StreamingResponse(
+        target=MessageTarget.resolve(_ROOM_ID, None, "$src"),
+        config=config,
+        runtime_paths=runtime_paths,
+        progress_write_ahead=AsyncMock(),
+        progress_delivered=AsyncMock(),
+    )
+    stream.event_id = "$msg"
+    edit_client = AsyncMock(spec=nio.AsyncClient)
+    edit_client.user_id = "@bot:localhost"
+    edit_client.rooms = {_ROOM_ID: MagicMock(encrypted=False)}
+    edit_client.room_send = AsyncMock(
+        return_value=nio.RoomSendError("unknown error", room_id=_ROOM_ID, http_status=502),
+    )
+    stream.terminal_edit = AsyncMock(return_value=None)
+    progress = ProgressState(text="x", tool_trace=(), presentation_state=None, placeholder_only=False)
+    with capture_logs() as edit_logs:
+        await stream._send_content(
+            edit_client,
+            content={"msgtype": "m.text", "body": "x"},
+            display_text="x",
+            is_final=False,
+            progress=progress,
+        )
+        await stream._send_content(
+            edit_client,
+            content={"msgtype": "m.text", "body": "x"},
+            display_text="x",
+            is_final=True,
+            progress=progress,
+        )
+    send_edit_logs = [entry for entry in edit_logs if entry["event"] == "matrix_message_send_failed"]
+    assert [(entry["log_level"], entry["http_status"]) for entry in send_edit_logs] == [("warning", 502)]
+    failed_edits = [entry for entry in edit_logs if entry["event"] == "Failed to edit streaming message"]
+    assert [entry["log_level"] for entry in failed_edits] == ["warning", "error"]

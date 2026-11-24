@@ -2819,6 +2819,7 @@ depends_on = [
     "mindroom.event_journal",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.room_history_reads",
+    "mindroom.matrix.state_failures",
     "mindroom.event_journal.matrix_delivery",
     "mindroom.reply_lifecycle",
     "mindroom.reply_presentation",
@@ -4295,6 +4296,7 @@ depends_on = [
 path = "mindroom.matrix.client_delivery"
 depends_on = [
     "mindroom.llm",
+    "mindroom.matrix.client_session",
     "mindroom.matrix.guarded_rooms",
     "mindroom.matrix_identifiers",
     "mindroom.tool_system.events",
@@ -4449,6 +4451,7 @@ path = "mindroom.matrix.client_session"
 depends_on = ["mindroom.constants", "mindroom.failure_text", "mindroom.tls_trust"]
 visibility = [
     "mindroom.bot",
+    "mindroom.matrix.client_delivery",
     "mindroom.cli.doctor",
     "mindroom.desktop.session",
     "mindroom.matrix.appservice",
@@ -7306,6 +7309,7 @@ expose = [
 from = ["mindroom.matrix.client_session"]
 visibility = [
     "mindroom.matrix._owned_session",
+    "mindroom.matrix.client_delivery",
     "mindroom.matrix.typing",
     "mindroom.desktop.session",
     "mindroom.orchestration.runtime",
