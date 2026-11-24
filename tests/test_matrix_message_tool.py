@@ -1690,6 +1690,62 @@ async def test_matrix_message_read_of_a_fork_starts_with_its_parent_up_to_the_fo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("authorized", [True, False], ids=["authorized", "denied-outsider"])
+async def test_matrix_message_read_cross_room_fork_auth_room_id_and_edit_options(*, authorized: bool) -> None:
+    """Cross-room thread reads enforce fork auth, stamp room_id on prefix rows, and omit foreign edit_options."""
+    tool = MatrixMessageTools()
+    source_room_id = "!source:localhost"
+    ctx = _make_context(thread_id=None, requester_id="@user:localhost")
+    target_room = ctx.client.rooms[ctx.room_id]
+    target_room.add_member("@user:localhost", "User", None)
+    if not authorized:
+        target_room.add_member("@outsider:localhost", "Outsider", None)
+    source_room = nio.MatrixRoom(source_room_id, ctx.client.user_id)
+    source_room.members_synced = True
+    source_room.add_member(ctx.client.user_id, "General Agent", None)
+    source_room.add_member("@user:localhost", "User", None)
+    ctx.client.rooms[source_room_id] = source_room
+
+    reference = {FORK_CONTENT_KEY: {"room_id": source_room_id, "thread_id": "$parent", "event_id": "$kept"}}
+    threads = {
+        (source_room_id, "$parent"): [
+            make_visible_message(event_id="$parent", sender="@user:localhost", body="source root"),
+            make_visible_message(event_id="$kept", thread_id="$parent", sender=ctx.client.user_id, body="source bot"),
+            make_visible_message(event_id="$later", thread_id="$parent", sender="@user:localhost", body="after cut"),
+        ],
+        (ctx.room_id, "$fork"): [
+            make_visible_message(event_id="$fork", sender="@user:localhost", content={"body": "forked", **reference}),
+            make_visible_message(event_id="$reply", thread_id="$fork", sender=ctx.client.user_id, body="target bot"),
+        ],
+    }
+
+    async def read(_reader: object, room_id: str, thread_id: str) -> ThreadHistoryResult:
+        return thread_history_result(threads[(room_id, thread_id)], is_full_history=True)
+
+    with (
+        tool_runtime_context(ctx),
+        patch("mindroom.custom_tools.matrix_conversation_operations.complete_thread_history", side_effect=read),
+    ):
+        payload = json.loads(await tool.matrix_message(action="read", thread_id="$fork"))
+
+    assert payload["status"] == "ok"
+    if not authorized:
+        assert [message["event_id"] for message in payload["messages"]] == ["$fork", "$reply"]
+        assert all("room_id" not in message for message in payload["messages"])
+        assert [option["event_id"] for option in payload["edit_options"]] == ["$reply", "$fork"]
+        return
+
+    assert [message["event_id"] for message in payload["messages"]] == ["$parent", "$kept", "$fork", "$reply"]
+    assert [message.get("room_id") for message in payload["messages"]] == [
+        source_room_id,
+        source_room_id,
+        None,
+        None,
+    ]
+    assert [option["event_id"] for option in payload["edit_options"]] == ["$reply", "$fork"]
+
+
+@pytest.mark.asyncio
 async def test_matrix_message_read_preserves_notice_messages() -> None:
     """Thread reads should surface notice msgtypes unchanged."""
     tool = MatrixMessageTools()

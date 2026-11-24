@@ -134,7 +134,11 @@ class _ThreadAttachmentContext:
     room_id: str | None
 
     def records_for(self, message: ResolvedVisibleMessage) -> list[AttachmentRecord]:
-        return attachment_records_for_visible_message(self.storage_path, message, room_id=self.room_id)
+        return attachment_records_for_visible_message(
+            self.storage_path,
+            message,
+            room_id=message.room_id if message.room_id is not None else self.room_id,
+        )
 
 
 def _classify_partial_reply(

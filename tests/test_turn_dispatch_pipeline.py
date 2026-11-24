@@ -2973,6 +2973,78 @@ class TestAgentBot(AgentBotTestBase):
         assert summary.await_args.kwargs["prompt"] is None
         assert summary.await_args.kwargs["prompt_event_ids"] == ("$fork",)
 
+    @pytest.mark.asyncio
+    async def test_prompt_title_for_coalesced_cross_room_fork_keeps_prompt_for_denied_fallback(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A coalesced first turn of a cross-room fork keeps its prompt text and requester so denial can fall back."""
+        config = _runtime_bound_config(
+            Config(agents={"calculator": AgentConfig(display_name="CalculatorAgent")}),
+            tmp_path,
+        )
+        config.defaults.thread_summary_first_threshold = 1
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        room = _matrix_room(room_id="!room:localhost")
+        root = _visible_message(
+            sender="@user:localhost",
+            body="carry on",
+            event_id="$fork",
+            content={
+                "body": "carry on",
+                FORK_CONTENT_KEY: {"room_id": "!other:localhost", "thread_id": "$parent", "event_id": "$point"},
+            },
+        )
+        event = PreparedIngress(
+            sender="@user:localhost",
+            event_id="$next",
+            body="and more",
+            source={"content": {"body": "and more", "msgtype": "m.text"}},
+        )
+        target = MessageTarget.resolve(room_id=room.room_id, thread_id="$fork", reply_to_event_id="$next")
+        dispatch = PreparedDispatch(
+            requester_user_id=event.sender,
+            context=MessageContext(
+                am_i_mentioned=True,
+                is_thread=True,
+                thread_id="$fork",
+                thread_history=[root],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
+            target=target,
+            correlation_id="$next",
+            envelope=_hook_envelope(body="and more", source_event_id="$next", target=target),
+        )
+        plan = DispatchPlan(kind="respond", response_action=ResponseAction(kind="individual"))
+        replace_turn_deps(bot, turn_policy=MagicMock(spec=TurnPolicy, plan_turn=AsyncMock(return_value=plan)))
+
+        with (
+            patch.object(bot._turn_dispatcher, "_prepare_dispatch", new=AsyncMock(return_value=dispatch)),
+            patch.object(bot._turn_dispatcher, "_apply_turn_plan", new=AsyncMock()),
+            patch("mindroom.turns.dispatch.maybe_generate_prompt_summary", new=AsyncMock()) as summary,
+        ):
+            await dispatch_test_turn(
+                bot._turn_dispatcher,
+                room,
+                event,
+                event.sender,
+                handled_turn=TurnRecord.create(
+                    ["$fork", "$next"],
+                    completed=False,
+                    source_event_prompts={"$fork": "carry on", "$next": "and more"},
+                ),
+                coalescing_key=requester_coalescing_key(room.room_id, "$fork", event.sender),
+            )
+            await asyncio.sleep(0)
+
+        summary.assert_awaited_once()
+        assert summary.await_args.kwargs["prompt"] == "carry on\nand more"
+        assert summary.await_args.kwargs["prompt_event_ids"] == ("$fork", "$next")
+        assert summary.await_args.kwargs["requester_id"] == "@user:localhost"
+
 
 @pytest.mark.asyncio
 async def test_cross_room_fork_routing_uses_target_room_participation(tmp_path: Path) -> None:

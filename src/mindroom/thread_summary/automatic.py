@@ -11,7 +11,14 @@ from typing import TYPE_CHECKING
 from mindroom.entity_resolution import current_internal_sender_ids
 from mindroom.logging_config import get_logger
 from mindroom.matrix.conversation_reads import refetched_thread_history, with_delivered_response
-from mindroom.matrix.thread_forks import fork_parent_thread_id
+from mindroom.matrix.thread_fork_access import authorize_cross_room_fork_hop
+from mindroom.matrix.thread_forks import (
+    CrossRoomForkDecision,
+    CrossRoomForkHop,
+    fork_parent_thread_id,
+    fork_root_message,
+    thread_fork_reference,
+)
 from mindroom.requester_identity import is_managed_entity_id
 from mindroom.thread_summary import schedule
 from mindroom.thread_summary.generation import (
@@ -102,12 +109,62 @@ def _publishable_title(title: str, history: Sequence[ResolvedVisibleMessage], th
     return f"{base.removesuffix(_FORKED_TITLE_SUFFIX)}{_FORKED_TITLE_SUFFIX}"
 
 
+async def _read_authorized_parent_summary(
+    history: Sequence[ResolvedVisibleMessage],
+    *,
+    client: nio.AsyncClient,
+    room_id: str,
+    thread_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    conversation_reader: ConversationReader,
+    entity_name: str,
+    membership_index: AgentReplyMembershipIndex,
+    trusted_sender_ids: Collection[str],
+    requester_id: str | None,
+) -> SummaryState | None:
+    """Read the immediate fork parent's summary, enforcing cross-room fork authorization."""
+    root = fork_root_message(history, thread_id, room_id=room_id, default_room_id=room_id)
+    reference = None if root is None else thread_fork_reference(root.content)
+    if root is None or reference is None:
+        return None
+    parent_room_id = reference.resolved_room_id(room_id)
+    if parent_room_id != room_id:
+        decision = await authorize_cross_room_fork_hop(
+            client=client,
+            config=config,
+            runtime_paths=runtime_paths,
+            hop=CrossRoomForkHop(
+                target_room_id=room_id,
+                child_room_id=room_id,
+                parent_room_id=parent_room_id,
+                fork_root=root,
+                fork_point_event_id=reference.event_id,
+            ),
+            requester_id=requester_id,
+            nonblocking=False,
+        )
+        if decision is not CrossRoomForkDecision.ALLOWED:
+            return None
+    return await current_thread_summary(
+        client,
+        parent_room_id,
+        reference.thread_id,
+        config=config,
+        runtime_paths=runtime_paths,
+        conversation_reader=conversation_reader,
+        entity_name=entity_name,
+        membership_index=membership_index,
+        trusted_sender_ids=trusted_sender_ids,
+    )
+
+
 async def _provisional_title(
     prompt_message: ResolvedVisibleMessage | None,
     history: Sequence[ResolvedVisibleMessage],
     thread_id: str,
     *,
-    parent_summary: Callable[[str], Awaitable[SummaryState | None]],
+    parent_summary: Callable[[], Awaitable[SummaryState | None]],
     config: Config,
     runtime_paths: RuntimePaths,
     model_name: str,
@@ -118,8 +175,7 @@ async def _provisional_title(
     A parent's title is copied without a model or a read of ``room_settings``, the room's title model and rules; a
     prompt's is written by the room's model, else ``model_name``.
     """
-    parent_thread_id = fork_parent_thread_id(history, thread_id)
-    parent_state = None if parent_thread_id is None else await parent_summary(parent_thread_id)
+    parent_state = await parent_summary()
     # A parent title over the short-title limits, such as a long pin, is not copied: the fork titles its prompt.
     title = None if parent_state is None else _keepable_title(parent_state.summary, retitle=False)
     if title is None:
@@ -472,6 +528,7 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
     conversation_reader: ConversationReader,
     entity_name: str,
     membership_index: AgentReplyMembershipIndex,
+    requester_id: str | None = None,
 ) -> None:
     """Title a new thread from its first turn's messages without advancing the post-reply schedule.
 
@@ -531,15 +588,18 @@ async def maybe_generate_prompt_summary(  # noqa: PLR0911
                 history,
                 thread_id,
                 parent_summary=partial(
-                    current_thread_summary,
-                    client,
-                    room_id,
+                    _read_authorized_parent_summary,
+                    history,
+                    client=client,
+                    room_id=room_id,
+                    thread_id=thread_id,
                     config=config,
                     runtime_paths=runtime_paths,
                     conversation_reader=conversation_reader,
                     entity_name=entity_name,
                     membership_index=membership_index,
                     trusted_sender_ids=trusted_sender_ids,
+                    requester_id=requester_id,
                 ),
                 config=config,
                 runtime_paths=runtime_paths,

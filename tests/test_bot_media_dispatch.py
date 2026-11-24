@@ -768,7 +768,7 @@ class TestAgentBot(AgentBotTestBase):
                 [current_attachment_id, history_attachment_id],
                 room_id="!test:localhost",
                 thread_id="$thread_root",
-                parent_thread_ids=frozenset(),
+                parent_scopes=frozenset(),
             ),
         ]
         # Only current-turn records convert to inline media; history records
@@ -1029,6 +1029,96 @@ class TestAgentBot(AgentBotTestBase):
 
         assert payload.attachment_ids == ["att_parent", parent_image_id]
         bot.client.download.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_dispatch_payload_inherits_cross_room_fork_attachments_preserving_source_room_id(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """Cross-room parent media registers under its true source room and excludes post-cut/unrelated IDs."""
+        from mindroom.attachments.storage import load_attachment  # noqa: PLC0415
+
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        bot.client = _make_matrix_client_mock()
+        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        bot.client.download = AsyncMock(
+            return_value=nio.MemoryDownloadResponse(
+                body=png_bytes,
+                content_type="image/png",
+                filename="fresh.png",
+            ),
+        )
+        _register_payload_image_attachment(
+            bot.storage_path,
+            attachment_id="att_src_existing",
+            filename="existing.png",
+            room_id="!source:localhost",
+            thread_id="$parent",
+        )
+        _register_payload_image_attachment(
+            bot.storage_path,
+            attachment_id="att_src_after_cut",
+            filename="secret-after-cut.png",
+            room_id="!source:localhost",
+            thread_id="$parent",
+        )
+        _register_payload_image_attachment(
+            bot.storage_path,
+            attachment_id="att_other_room",
+            filename="other.png",
+            room_id="!unrelated:localhost",
+            thread_id="$other",
+        )
+        fresh_image_id = _attachment_id_for_event("$src-image")
+        image_content = {"msgtype": "m.image", "body": "fresh.png", "url": "mxc://localhost/fresh"}
+        thread_history = [
+            make_visible_message(event_id="$parent", body="source question", room_id="!source:localhost"),
+            make_visible_message(
+                event_id="$src-image",
+                thread_id="$parent",
+                content=image_content,
+                room_id="!source:localhost",
+            ),
+            make_visible_message(
+                event_id="$src-answer",
+                thread_id="$parent",
+                content={"body": "source answer", ATTACHMENT_IDS_KEY: ["att_src_existing", "att_other_room"]},
+                room_id="!source:localhost",
+            ),
+            make_visible_message(
+                event_id="$thread",
+                content={
+                    "body": "continue in target",
+                    ATTACHMENT_IDS_KEY: ["att_src_after_cut"],
+                    FORK_CONTENT_KEY: {
+                        "room_id": "!source:localhost",
+                        "thread_id": "$parent",
+                        "event_id": "$src-answer",
+                    },
+                },
+            ),
+        ]
+
+        payload = await bot._inbound_turn_normalizer.build_dispatch_payload_with_attachments(
+            DispatchPayloadWithAttachmentsRequest(
+                room_id="!test:localhost",
+                prompt="compare them",
+                current_attachment_ids=["att_src_after_cut"],
+                thread_id="$thread",
+                media_thread_id="$thread",
+                thread_history=thread_history,
+            ),
+        )
+
+        assert payload.attachment_ids == ["att_src_existing", fresh_image_id]
+        existing_record = load_attachment(bot.storage_path, "att_src_existing")
+        fresh_record = load_attachment(bot.storage_path, fresh_image_id)
+        assert existing_record is not None
+        assert (existing_record.room_id, existing_record.thread_id) == ("!source:localhost", "$parent")
+        assert fresh_record is not None
+        assert (fresh_record.room_id, fresh_record.thread_id) == ("!source:localhost", "$parent")
 
     @pytest.mark.asyncio
     async def test_dispatch_payload_inline_media_empty_when_no_attachments(

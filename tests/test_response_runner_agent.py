@@ -459,7 +459,20 @@ class TestAgentBot(AgentBotTestBase):
         if forked:
             root_content[FORK_CONTENT_KEY] = {"thread_id": "$parent", "event_id": "$fork-point"}
         root = _visible_message(sender="@user:localhost", body="carry on", event_id="$fork", content=root_content)
-        # The locked turn re-reads its thread, so the journal serves the root the note is read from.
+        # The locked turn re-reads its thread, so the journal serves the root and parent prefix.
+        if forked:
+            await seed_thread_history(
+                bot,
+                room_id="!test:localhost",
+                thread_id="$parent",
+                messages=[
+                    _visible_message(sender="@user:localhost", body="parent", event_id="$parent"),
+                    replace(
+                        _visible_message(sender="@user:localhost", body="fork point", event_id="$fork-point"),
+                        thread_id="$parent",
+                    ),
+                ],
+            )
         await seed_thread_history(bot, room_id="!test:localhost", thread_id="$fork", messages=[root])
         mock_ai = AsyncMock(return_value="Handled")
         with patch_response_runner_module(
@@ -495,6 +508,112 @@ class TestAgentBot(AgentBotTestBase):
         )
         assert "thread $parent, forked after message $fork-point" in note.text
         assert (note.cache_policy, note.persist, note.minimal_required) == ("stable", False, True)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("authorized", [True, False], ids=["authorized-cross-room", "denied-cross-room"])
+    async def test_cross_room_fork_context_template_and_parent_display_names(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        *,
+        authorized: bool,
+    ) -> None:
+        """Cross-room fork emits its own template and merges parent display names only when prefix loads."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
+        bot.client = _make_matrix_client_mock()
+        bot.client.user_id = mock_agent_user.user_id
+        unique_room_send_responses(bot.client, prefix="$response")
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+
+        source_room_id = "!source:localhost"
+        source_room = nio.MatrixRoom(source_room_id, mock_agent_user.user_id)
+        source_room.name = "Source Room"
+        source_room.members_synced = True
+        source_room.add_member(mock_agent_user.user_id, "Agent", None)
+        source_room.add_member("@user:localhost", "Alice Source", None)
+        source_room.add_member("@carol:localhost", "Carol Source", None)
+
+        target_room = nio.MatrixRoom("!test:localhost", mock_agent_user.user_id)
+        target_room.members_synced = True
+        target_room.add_member(mock_agent_user.user_id, "Agent", None)
+        target_room.add_member("@user:localhost", "Alice Target", None)
+        if not authorized:
+            target_room.add_member("@outsider:localhost", "Outsider", None)
+        bot.client.rooms = {source_room_id: source_room, "!test:localhost": target_room}
+
+        await seed_thread_history(
+            bot,
+            room_id=source_room_id,
+            thread_id="$parent",
+            messages=[
+                _visible_message(sender="@carol:localhost", body="source root", event_id="$parent"),
+                replace(
+                    _visible_message(sender="@user:localhost", body="source point", event_id="$fork-point"),
+                    thread_id="$parent",
+                ),
+            ],
+        )
+        root = _visible_message(
+            sender="@user:localhost",
+            body="carry on",
+            event_id="$fork",
+            content={
+                "body": "carry on",
+                "msgtype": "m.text",
+                FORK_CONTENT_KEY: {
+                    "room_id": source_room_id,
+                    "thread_id": "$parent",
+                    "event_id": "$fork-point",
+                },
+            },
+        )
+        await seed_thread_history(bot, room_id="!test:localhost", thread_id="$fork", messages=[root])
+
+        mock_ai = AsyncMock(return_value="Handled")
+        with patch_response_runner_module(
+            typing_indicator=_noop_typing_indicator,
+            stream_agent_response=streamed_answer(mock_ai),
+        ):
+            await _respond(
+                bot,
+                replace(
+                    _response_request(
+                        room_id="!test:localhost",
+                        thread_id="$fork",
+                        thread_history=[root],
+                        prompt="carry on",
+                        reply_to_event_id="$fork",
+                        response_envelope=request_envelope(
+                            room_id="!test:localhost",
+                            thread_id="$fork",
+                            reply_to_event_id="$fork",
+                            prompt="carry on",
+                            user_id="@user:localhost",
+                        ),
+                    ),
+                    member_display_names={"@user:localhost": "Alice Target"},
+                ),
+            )
+
+        turn = mock_ai.call_args.args[0]
+        items = [item for item in turn.transient_enrichment_items if item.key == "thread_fork"]
+        if not authorized:
+            assert items == []
+            assert "@carol:localhost" not in turn.member_display_names
+            return
+        (note,) = items
+        assert note.text == config.render_prompt(
+            "CROSS_ROOM_THREAD_FORK_CONTEXT_TEMPLATE",
+            parent_room_id=source_room_id,
+            parent_room_label=f"'Source Room' (room ID {source_room_id})",
+            parent_thread_id="$parent",
+            fork_point_event_id="$fork-point",
+        )
+        assert "including the model" in note.text
+        assert turn.member_display_names["@carol:localhost"] == "Carol Source"
+        assert turn.member_display_names["@user:localhost"] == "Alice Target"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

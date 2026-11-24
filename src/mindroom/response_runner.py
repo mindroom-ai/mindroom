@@ -97,6 +97,7 @@ from mindroom.reply_scope import (
 from mindroom.reply_turn.enrichment import (
     interrupted_attempt_model_prompt,
     matrix_message_target_item,
+    merge_fork_parent_display_names,
     prepare_memory_and_model_context,
     thread_fork_item,
     with_matrix_message_target,
@@ -1102,7 +1103,13 @@ class ResponseRunner:
     ) -> ResponseTurnContext:
         """Build the inputs an agent turn and a team turn share; each adds its own."""
         target = runtime.tool_context.target
-        fork_item = thread_fork_item(thread_history, target.resolved_thread_id, self.deps.runtime.config)
+        fork_item = thread_fork_item(
+            thread_history,
+            target.resolved_thread_id,
+            self.deps.runtime.config,
+            room_id=request.room_id,
+            runtime=self.deps.runtime,
+        )
         if fork_item is not None:
             transient_enrichment_items = (*transient_enrichment_items, fork_item)
         return ResponseTurnContext(
@@ -1118,7 +1125,13 @@ class ResponseRunner:
             current_sender_id=request.response_envelope.origin.speaker_id,
             history_boundary_event_id=request.history_boundary_event_id,
             prompt_source_event_ids=request.prompt_source_event_ids,
-            member_display_names=request.member_display_names,
+            member_display_names=merge_fork_parent_display_names(
+                request.member_display_names,
+                thread_history=thread_history,
+                room_id=request.room_id,
+                thread_id=target.resolved_thread_id,
+                runtime=self.deps.runtime,
+            ),
             transient_enrichment_items=with_matrix_message_target(
                 transient_enrichment_items,
                 matrix_message_target_item(

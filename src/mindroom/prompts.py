@@ -16,6 +16,7 @@ __all__ = [
     "BACKGROUND_JOBS_FOLLOW_UP_PROMPT",
     "CODEX_DEFAULT_INSTRUCTIONS",
     "COMPACTION_SUMMARY_PROMPT",
+    "CROSS_ROOM_THREAD_FORK_CONTEXT_TEMPLATE",
     "CURRENT_MESSAGE_PROMPT_INTRO",
     "DATETIME_CONTEXT_TEMPLATE",
     "DELEGATE_BACKGROUND_JOB_INSTRUCTIONS",
@@ -242,6 +243,12 @@ THREAD_FORK_CONTEXT_TEMPLATE = (
     "This thread is a fork of thread {parent_thread_id}, forked after message {fork_point_event_id}. "
     "Messages up to that one come from the parent thread; its tool calls, tool results and per-thread settings "
     "(except the model) were not carried over."
+)
+CROSS_ROOM_THREAD_FORK_CONTEXT_TEMPLATE = (
+    "This thread is a cross-room fork of thread {parent_thread_id} in room {parent_room_label}, "
+    "forked after message {fork_point_event_id}. Messages up to that one come from the parent thread "
+    "in room {parent_room_id}; its tool calls, tool results and per-thread settings "
+    "(including the model) were not carried over."
 )
 CURRENT_MESSAGE_PROMPT_INTRO = "Current message:\n"
 IN_PROGRESS_PARTIAL_REPLY_HEADER = (
@@ -843,6 +850,9 @@ PROMPT_TEMPLATE_FIELDS = MappingProxyType(
         "ROOM_INSTRUCTIONS_TEMPLATE": frozenset({"instructions"}),
         "ROUTER_AGENT_SELECTION_PROMPT_TEMPLATE": frozenset({"agents_info", "message"}),
         "TEAM_MODE_SELECTION_PROMPT_TEMPLATE": frozenset({"message", "agent_names"}),
+        "CROSS_ROOM_THREAD_FORK_CONTEXT_TEMPLATE": frozenset(
+            {"parent_room_id", "parent_room_label", "parent_thread_id", "fork_point_event_id"},
+        ),
         "THREAD_FORK_CONTEXT_TEMPLATE": frozenset({"parent_thread_id", "fork_point_event_id"}),
         "THREAD_HISTORY_OMITTED_MARKER_TEMPLATE": frozenset({"omitted_count"}),
         "THREAD_SUMMARY_CURRENT_TITLE_TEMPLATE": frozenset({"current_title"}),

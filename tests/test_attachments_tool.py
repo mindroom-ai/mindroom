@@ -264,13 +264,22 @@ async def test_get_attachment_view_returns_image_media(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("room_id", "viewable"), [("!room:localhost", True), ("!other:localhost", False)])
+@pytest.mark.parametrize(
+    ("room_id", "vetted_in_turn", "viewable"),
+    [
+        ("!room:localhost", True, True),
+        ("!other:localhost", True, True),
+        ("!other:localhost", False, False),
+    ],
+    ids=["same-room-fork", "cross-room-fork-vetted", "unvetted-other-room-runtime-id"],
+)
 async def test_get_attachment_view_shows_an_image_the_turn_was_given_from_another_thread_of_its_room(
     tmp_path: Path,
     room_id: str,
+    vetted_in_turn: bool,
     viewable: bool,
 ) -> None:
-    """A forked thread's turn is given its parent's images, so viewing one works; another room's image stays out."""
+    """Vetted fork attachments (same- or cross-room) are viewable; unvetted other-room IDs stay out."""
     image_bytes = base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=",
     )
@@ -286,8 +295,11 @@ async def test_get_attachment_view_shows_an_image_the_turn_was_given_from_anothe
         thread_id="$parent:localhost",
     )
     assert attachment is not None
+    context = _tool_context(tmp_path, attachment_ids=("att_parent",) if vetted_in_turn else ())
+    if not vetted_in_turn:
+        context.runtime_attachment_ids.append("att_parent")
 
-    with tool_runtime_context(_tool_context(tmp_path, attachment_ids=("att_parent",))):
+    with tool_runtime_context(context):
         result = await toolkit_offers(AttachmentTools(), "get_attachment").entrypoint(
             attachment_id="att_parent",
             view=True,
