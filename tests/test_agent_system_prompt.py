@@ -294,28 +294,54 @@ def test_output_redirect_gating(
     hide_search: bool,
     expected: bool,
 ) -> None:
-    """OUTPUT_REDIRECT_PROMPT renders only when a discoverable tool accepts mindroom_output_path or is shell."""
-    build, _ = _build(
-        tmp_path,
+    """Default OUTPUT_REDIRECT_PROMPT is omitted; custom overrides still follow tool gating."""
+    assert OUTPUT_REDIRECT_PROMPT == ""
+    default_build, _ = _build(
+        tmp_path / "default",
         monkeypatch,
         agent_cfg={"tools": tools},
         native_tool_search=native_search,
         knowledge=_dummy_knowledge() if use_kb else None,
         tool_function_filter=(lambda fn: fn.name not in {"tool_search", "call_tool"}) if hide_search else None,
     )
-    assert (OUTPUT_REDIRECT_PROMPT in build.prompt.instructions) is expected
+    assert all(instruction.strip() for instruction in default_build.prompt.instructions)
+    assert "mindroom_output_path" not in "\n".join(default_build.prompt.instructions)
+
+    override = "CUSTOM_OUTPUT_REDIRECT"
+    custom_build, _ = _build(
+        tmp_path / "custom",
+        monkeypatch,
+        agent_cfg={"tools": tools},
+        prompts={"OUTPUT_REDIRECT_PROMPT": override},
+        native_tool_search=native_search,
+        knowledge=_dummy_knowledge() if use_kb else None,
+        tool_function_filter=(lambda fn: fn.name not in {"tool_search", "call_tool"}) if hide_search else None,
+    )
+    assert (override in custom_build.prompt.instructions) is expected
 
 
 def test_tool_execution_environment_modes_and_generated_tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Primary-only is compact, mixed worker keeps details, and generated-only tools do not claim no tools."""
+    """Tool execution environment is omitted when primary-only has no actionable lines and detailed for workers."""
     primary, _ = _build(tmp_path / "primary", monkeypatch, agent_cfg={"tools": ["calculator", "scheduler"]})
     role = primary.prompt.role or ""
-    assert "## Tool Execution Environment\n- All tools run in the primary MindRoom runtime." in role
-    assert "No tools use a worker runtime." not in role
-    assert "`calculator`" not in role
+    assert "## Tool Execution Environment" not in role
+    assert "- All tools run in the primary MindRoom runtime." not in role
+
+    path_only, _ = _build(tmp_path / "path_only", monkeypatch, agent_cfg={"tools": ["filesystem"]})
+    path_role = path_only.prompt.role or ""
+    assert "## Tool Execution Environment" in path_role
+    assert "- All tools run in the primary MindRoom runtime." not in path_role
+    assert "- File access for path tools: `workspace` (agent workspace and attachments only)." in path_role
+
+    unrestricted_shell, _ = _build(
+        tmp_path / "unrestricted_shell",
+        monkeypatch,
+        agent_cfg={"tools": ["shell"], "file_access": "unrestricted"},
+    )
+    assert "## Tool Execution Environment" not in (unrestricted_shell.prompt.role or "")
 
     mixed, _ = _build(
         tmp_path / "mixed",
@@ -327,17 +353,20 @@ def test_tool_execution_environment_modes_and_generated_tools(
     assert "- Local tools (primary MindRoom runtime): `calculator`." in mixed_role
     assert "- Worker-routed tools: `shell`." in mixed_role
     assert "- Worker backend: `kubernetes`." in mixed_role
+    assert (
+        "- Worker state persists across turns for that scope (stopped/scaled down when idle, files kept)." in mixed_role
+    )
     assert "- Execution location is determined per tool; this agent is not sandboxed as a whole." in mixed_role
 
     kb_only, _ = _build(tmp_path / "kb", monkeypatch, agent_cfg={"tools": []}, knowledge=_dummy_knowledge())
-    assert "- All tools run in the primary MindRoom runtime." in (kb_only.prompt.role or "")
+    assert "## Tool Execution Environment" not in (kb_only.prompt.role or "")
 
     _write_skill(_runtime_paths(tmp_path / "skill"), "demo", "Demo skill.")
     skill_only, _ = _build(tmp_path / "skill", monkeypatch, agent_cfg={"tools": []})
-    assert "- All tools run in the primary MindRoom runtime." in (skill_only.prompt.role or "")
+    assert "## Tool Execution Environment" not in (skill_only.prompt.role or "")
 
     empty, _ = _build(tmp_path / "empty", monkeypatch, agent_cfg={"tools": []})
-    assert "- No tools are available in this runtime." in (empty.prompt.role or "")
+    assert "## Tool Execution Environment" not in (empty.prompt.role or "")
 
 
 @pytest.mark.parametrize(
@@ -380,7 +409,8 @@ def test_minimal_mode_deferred_worker_routed_shell_placement(
         agent_mode="minimal",
     )
     local_role = minimal_context_documents(local_build)["role"]
-    assert "- All tools run in the primary MindRoom runtime." in local_role
+    assert "- All tools run in the primary MindRoom runtime." not in local_role
+    assert "- File access for path tools:" not in local_role
     assert "- Not confined by file_access (only a worker isolates them): `shell`." in local_role
 
 

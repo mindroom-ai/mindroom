@@ -22,11 +22,7 @@ if TYPE_CHECKING:
     name="browser",
     display_name="Browser",
     description=(
-        "Control MindRoom's browser: browse websites, fill in forms, and capture screenshots. "
-        "With worker routing, this controls the agent's worker browser. "
-        "If you have chat_ui, your first host browser call in a conversation already shows the user the Computer panel; "
-        "use chat_ui.open_panel(panel='computer') only to show it again. "
-        "The user's local browser requires the separately configured desktop target."
+        "Browse websites, fill forms, and take screenshots (Computer panel via chat_ui.open_panel(panel='computer'))."
     ),
     category=ToolCategory.RESEARCH,
     file_access=ToolFileAccess.AGENT,

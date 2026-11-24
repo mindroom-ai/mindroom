@@ -54,10 +54,12 @@ _GET_SKILL_INSTRUCTIONS_DESCRIPTION = (
     "Load the full instructions for a skill. Use this when you need to follow a skill's guidance."
 )
 _GET_SKILL_REFERENCE_DESCRIPTION = (
-    "Load a reference document from a skill's references. Use this to access detailed documentation."
+    "Load a reference document from a skill's references. Use this to access detailed documentation. "
+    "Omit reference_path to list available references."
 )
 _GET_SKILL_SCRIPT_DESCRIPTION = (
-    "Read a script from a skill. This never runs the script; run it with your shell tool if you have one."
+    "Read a script from a skill. This never runs the script; run it with your shell tool if you have one. "
+    "Omit script_path to list available scripts."
 )
 _PROMPT_HEADER = (
     "<skills_system>",

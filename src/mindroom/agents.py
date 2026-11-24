@@ -16,9 +16,9 @@ from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_loop.build import AgentBuild, AgentSurface
 from mindroom.agent_loop.prompt import (
     MARKDOWN_OUTPUT_FORMAT,
-    MATRIX_MARKDOWN_OUTPUT_FORMAT,
     PromptSpec,
     join_sections,
+    matrix_markdown_output_format,
 )
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import offered_toolkits, toolkit_instructions
@@ -730,12 +730,74 @@ def build_agent_toolkit(  # noqa: C901, PLR0911, PLR0912
     )
 
 
+def _has_path_tools(tool_names: tuple[str, ...], *, tools: ToolRegistry) -> bool:
+    """Return whether any offered tool honors the agent's ``file_access`` setting."""
+    return any(
+        (metadata := tools.get(name)) is not None and metadata.file_access is ToolFileAccess.AGENT
+        for name in tool_names
+    )
+
+
+def _format_tool_list(names: tuple[str, ...]) -> str:
+    return ", ".join(f"`{name}`" for name in names) if names else "none"
+
+
+def _file_access_environment_lines(
+    *,
+    show_file_access: bool,
+    file_access: FileAccess,
+    workdir: Path | None,
+    workspace_root: Path,
+    unconfined_tool_names: tuple[str, ...],
+    primary_only_unconfined_tool_names: tuple[str, ...],
+    shared_directories: tuple[str, ...],
+    pending_shared_directory_invitations: tuple[str, ...],
+) -> list[str]:
+    """Build actionable file-access, workdir, shared-directory, and unconfined-tool lines."""
+    lines: list[str] = []
+    if show_file_access:
+        file_access_description = {
+            "workspace": "agent workspace and attachments only"
+            if workdir is None
+            else "`filesystem`: the workdir and your saved tool outputs, read-only outside the workdir; "
+            "`view_file`: the workdir; other path tools: agent workspace and attachments only",
+            "unrestricted": "any path the tool's process can reach",
+        }[file_access]
+        lines.append(f"- File access for path tools: `{file_access}` ({file_access_description}).")
+    if workdir is not None:
+        # The prompt and the tools name workspace files by relative paths, which the workdir's tools resolve there.
+        lines.append(
+            f"- Workdir: `{workdir}`, where `shell` runs and `filesystem` resolves relative paths; "
+            "code that `python` runs uses this process's current directory, so give it absolute paths. "
+            "Your workspace, which holds your skills, subagent profiles, saved tool outputs, and delegation records, "
+            f"is `{workspace_root}`; name files there by absolute path.",
+        )
+    if shared_directories:
+        lines.append(f"- Shared directories: {', '.join(shared_directories)}.")
+    if pending_shared_directory_invitations:
+        lines.append(
+            "- Pending shared directory invitations; ask your user before accepting or declining: "
+            f"{', '.join(pending_shared_directory_invitations)}.",
+        )
+    if file_access == "workspace":
+        if unconfined_tool_names:
+            lines.append(
+                f"- Not confined by file_access (only a worker isolates them): {_format_tool_list(unconfined_tool_names)}.",
+            )
+        if primary_only_unconfined_tool_names:
+            lines.append(
+                "- Not confined by file_access and unable to run in a worker (trusted primary runtime only): "
+                f"{_format_tool_list(primary_only_unconfined_tool_names)}.",
+            )
+    return lines
+
+
 def _render_tool_execution_environment(
     *,
     runtime_paths: constants.RuntimePaths,
     local_tool_names: tuple[str, ...],
     worker_routed_tool_names: tuple[str, ...],
-    has_other_tools: bool,
+    has_path_tools: bool,
     worker_scope: WorkerScope | None,
     file_access: FileAccess,
     workdir: Path | None,
@@ -746,60 +808,27 @@ def _render_tool_execution_environment(
     pending_shared_directory_invitations: tuple[str, ...],
 ) -> str:
     """Describe effective per-tool execution routing and file access to the model, and where a workdir moves them."""
-
-    def tool_list(names: tuple[str, ...]) -> str:
-        return ", ".join(f"`{name}`" for name in names) if names else "none"
-
-    if not worker_routed_tool_names and not local_tool_names and not has_other_tools:
-        return "## Tool Execution Environment\n- No tools are available in this runtime."
-
-    file_access_description = {
-        "workspace": "agent workspace and attachments only"
-        if workdir is None
-        else "`filesystem`: the workdir and your saved tool outputs, read-only outside the workdir; "
-        "`view_file`: the workdir; other path tools: agent workspace and attachments only",
-        "unrestricted": "any path the tool's process can reach",
-    }[file_access]
-    file_access_lines = [f"- File access for path tools: `{file_access}` ({file_access_description})."]
-    if workdir is not None:
-        # The prompt and the tools name workspace files by relative paths, which the workdir's tools resolve there.
-        file_access_lines.append(
-            f"- Workdir: `{workdir}`, where `shell` runs and `filesystem` resolves relative paths; "
-            "code that `python` runs uses this process's current directory, so give it absolute paths. "
-            "Your workspace, which holds your skills, subagent profiles, saved tool outputs, and delegation records, "
-            f"is `{workspace_root}`; name files there by absolute path.",
-        )
-    if shared_directories:
-        file_access_lines.append(f"- Shared directories: {', '.join(shared_directories)}.")
-    if pending_shared_directory_invitations:
-        file_access_lines.append(
-            "- Pending shared directory invitations; ask your user before accepting or declining: "
-            f"{', '.join(pending_shared_directory_invitations)}.",
-        )
-    if unconfined_tool_names:
-        file_access_lines.append(
-            f"- Not confined by file_access (only a worker isolates them): {tool_list(unconfined_tool_names)}.",
-        )
-    if primary_only_unconfined_tool_names:
-        file_access_lines.append(
-            "- Not confined by file_access and unable to run in a worker (trusted primary runtime only): "
-            f"{tool_list(primary_only_unconfined_tool_names)}.",
-        )
+    file_access_lines = _file_access_environment_lines(
+        show_file_access=bool(worker_routed_tool_names or has_path_tools or workdir is not None or shared_directories),
+        file_access=file_access,
+        workdir=workdir,
+        workspace_root=workspace_root,
+        unconfined_tool_names=unconfined_tool_names,
+        primary_only_unconfined_tool_names=primary_only_unconfined_tool_names,
+        shared_directories=shared_directories,
+        pending_shared_directory_invitations=pending_shared_directory_invitations,
+    )
 
     if not worker_routed_tool_names:
-        return "\n".join(
-            [
-                "## Tool Execution Environment",
-                "- All tools run in the primary MindRoom runtime.",
-                *file_access_lines,
-            ],
-        )
+        if not file_access_lines:
+            return ""
+        return "\n".join(["## Tool Execution Environment", *file_access_lines])
 
     backend = worker_backend_kind(runtime_paths)
     lines = [
         "## Tool Execution Environment",
-        f"- Local tools (primary MindRoom runtime): {tool_list(local_tool_names)}.",
-        f"- Worker-routed tools: {tool_list(worker_routed_tool_names)}.",
+        f"- Local tools (primary MindRoom runtime): {_format_tool_list(local_tool_names)}.",
+        f"- Worker-routed tools: {_format_tool_list(worker_routed_tool_names)}.",
         f"- Worker backend: `{backend.value}`.",
     ]
     if backend is WorkerBackendKind.STATIC_RUNNER:
@@ -814,15 +843,10 @@ def _render_tool_execution_environment(
             "user": "one runtime for this user, shared across this user's agents",
             "user_agent": "one runtime used only by this user-agent pair",
         }[worker_scope]
-        idle_behavior = {
-            WorkerBackendKind.DOCKER: "the container stops",
-            WorkerBackendKind.KUBERNETES: "the deployment scales to zero",
-        }[backend]
         lines.extend(
             (
                 f"- Worker reuse: {scope_description}.",
-                f"- Worker state is reused across turns for that scope. After the configured idle timeout, "
-                f"{idle_behavior}; persisted files and caches remain until an operator deletes that worker state.",
+                "- Worker state persists across turns for that scope (stopped/scaled down when idle, files kept).",
             ),
         )
     lines.extend(file_access_lines)
@@ -1465,7 +1489,6 @@ def _build_agent_role_context(
     disable_runtime_capabilities: bool,
     local_tool_names: tuple[str, ...],
     worker_routed_tool_names: tuple[str, ...],
-    has_other_tools: bool,
     tools: ToolRegistry,
     file_access: FileAccess,
     include_identity: bool,
@@ -1484,7 +1507,7 @@ def _build_agent_role_context(
                 runtime_paths=runtime_paths,
                 local_tool_names=local_tool_names,
                 worker_routed_tool_names=worker_routed_tool_names,
-                has_other_tools=has_other_tools,
+                has_path_tools=_has_path_tools((*local_tool_names, *worker_routed_tool_names), tools=tools),
                 worker_scope=agent_runtime.execution.execution_scope,
                 file_access=file_access,
                 workdir=current_tool_workdir(),
@@ -1567,9 +1590,10 @@ def _skill_usage_instructions(
     ]
     if skills is None or not skills.skills:
         return refusals
-    # The skill usage guidance names every skill function, so name the ones the agent lacks.
+    # Name any skill functions hidden by approval so the agent knows they are unavailable.
+    usage = config.get_prompt("SKILLS_TOOL_USAGE_PROMPT")
     hidden = f"These skill functions are not available to you: {', '.join(sorted(hidden_functions))}."
-    return [config.get_prompt("SKILLS_TOOL_USAGE_PROMPT"), *((hidden,) if hidden_functions else ()), *refusals]
+    return [*((usage,) if usage.strip() else ()), *((hidden,) if hidden_functions else ()), *refusals]
 
 
 def _build_agent_instructions(
@@ -1609,12 +1633,12 @@ def _build_agent_instructions(
     # Beside a workdir the tools resolve relative paths there, so notes on writing into the workspace would misdirect.
     if not disable_runtime_capabilities and current_tool_workdir() is None:
         instructions.extend(
-            config.get_prompt(name)
+            prompt_text
             for name, enabled in (
                 ("OUTPUT_REDIRECT_PROMPT", output_redirect),
                 ("WORKSPACE_SKILL_AUTHORING_PROMPT", skill_authoring),
             )
-            if enabled
+            if enabled and (prompt_text := config.get_prompt(name)).strip()
         )
 
     file_mode_knowledge_instruction = (
@@ -1625,11 +1649,11 @@ def _build_agent_instructions(
     if file_mode_knowledge_instruction is not None:
         instructions.append(file_mode_knowledge_instruction)
 
-    if not agent.show_tool_calls:
-        instructions.append(config.get_prompt("HIDDEN_TOOL_CALLS_PROMPT"))
+    if not agent.show_tool_calls and (prompt_text := config.get_prompt("HIDDEN_TOOL_CALLS_PROMPT")).strip():
+        instructions.append(prompt_text)
 
-    if include_interactive_questions:
-        instructions.append(config.get_prompt("INTERACTIVE_QUESTION_PROMPT"))
+    if include_interactive_questions and (prompt_text := config.get_prompt("INTERACTIVE_QUESTION_PROMPT")).strip():
+        instructions.append(prompt_text)
 
     return instructions
 
@@ -1913,7 +1937,6 @@ def create_agent(
         local_tool_names=tool_assembly.local_tool_names,
         tools=plugins.tools,
         worker_routed_tool_names=tool_assembly.worker_routed_tool_names,
-        has_other_tools=tool_assembly.has_offered_tools,
         file_access=agent.file_access,
         include_identity=persona is None,
     )
@@ -1978,7 +2001,11 @@ def create_agent(
         role=role_context.role,
         instructions=tuple(instructions),
         markdown=agent.markdown,
-        markdown_format=MARKDOWN_OUTPUT_FORMAT if outside_matrix else MATRIX_MARKDOWN_OUTPUT_FORMAT,
+        markdown_format=(
+            MARKDOWN_OUTPUT_FORMAT
+            if outside_matrix
+            else matrix_markdown_output_format(has_tools=tool_assembly.has_offered_tools)
+        ),
         tool_instructions=tool_assembly.instructions,
         turn_context=render_session_context(config, agent.timezone),
         skills_block=None if offered_skills is None else offered_skills.prompt_block(),

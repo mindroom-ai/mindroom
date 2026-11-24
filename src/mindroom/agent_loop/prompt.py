@@ -21,23 +21,26 @@ if TYPE_CHECKING:
 MARKDOWN_OUTPUT_FORMAT = "Your replies are shown as Markdown, so format them with Markdown where it helps the reader."
 MATRIX_MARKDOWN_OUTPUT_FORMAT = (
     f"{MARKDOWN_OUTPUT_FORMAT}\n"
-    "- CommonMark (single newlines break lines), GFM tables, strikethrough, fenced code blocks with a language tag, "
-    "`<details><summary>...</summary>...</details>` collapsibles (put blank lines around inner Markdown), and "
-    "`<span data-mx-spoiler>...</span>` spoilers (never `||spoiler||`, which does not render) are supported.\n"
-    "- For math, use `$inline$` (no spaces just inside `$`) and `$$display$$` on its own line; never use `\\(...\\)` or "
-    "`\\[...\\]`, which do not render as math.\n"
-    "- Link Matrix rooms and threads/messages instead of writing bare `!room_id` or `$event_id` strings: use "
-    "`<https://matrix.to/#/!room_id>` for rooms, and `[title](https://matrix.to/#/!room_id/$event_id)` (custom label) "
-    "or `<https://matrix.to/#/!room_id/$event_id>` (auto-labeled pill) for threads/messages (optional `?via=server` "
-    "for federated rooms; never wrap links in backticks).\n"
-    "- Mermaid fences, GitHub callouts (`> [!NOTE]`), footnotes, and external image URLs (`![](https://...)`) "
-    "are not rendered; link to external URLs instead.\n"
-    "- In MindRoom Chat, while streaming, your text appears live while thoughts and tool calls stay collapsed by "
-    "default (expandable in place); when a reply finishes with earlier text or media before the last tool call and an "
-    "answer after it, everything up through your last tool call (thoughts, tool calls, and earlier output) folds away. "
-    "Write a self-contained final answer after your last tool call (including your conclusion and key details), "
-    "assuming the reader will not open or read anything collapsed above."
+    "- Single newlines break lines; `<details><summary>...</summary>...</details>` needs blank lines around inner "
+    "Markdown; `<span data-mx-spoiler>...</span>` for spoilers (not `||spoiler||`).\n"
+    "- Math: `$inline$` (no inner spaces) and `$$display$$` on its own line (not `\\(...\\)`/`\\[...\\]`).\n"
+    "- Link rooms/messages unbackticked (no bare `!room_id`/`$event_id`): `<https://matrix.to/#/!room_id>`, "
+    "`[label](https://matrix.to/#/!room_id/$event_id)`, or `<https://matrix.to/#/!room_id/$event_id>` (optional "
+    "`?via=server`).\n"
+    "- Unsupported: Mermaid fences, GitHub callouts (`> [!NOTE]`), footnotes, external `![](https://...)` images "
+    "(link instead)."
 )
+MATRIX_TOOL_FOLDING_FORMAT = (
+    "- MindRoom Chat collapses text and tool calls up through your last tool call once your reply finishes; "
+    "write a self-contained final answer after your last tool call."
+)
+
+
+def matrix_markdown_output_format(*, has_tools: bool) -> str:
+    """Return Matrix Markdown formatting rules, adding the tool-folding rule only when tools are offered."""
+    if not has_tools:
+        return MATRIX_MARKDOWN_OUTPUT_FORMAT
+    return f"{MATRIX_MARKDOWN_OUTPUT_FORMAT}\n{MATRIX_TOOL_FOLDING_FORMAT}"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -112,8 +115,10 @@ def render_system_messages(spec: PromptSpec) -> tuple[Message, ...]:
 __all__ = [
     "MARKDOWN_OUTPUT_FORMAT",
     "MATRIX_MARKDOWN_OUTPUT_FORMAT",
+    "MATRIX_TOOL_FOLDING_FORMAT",
     "PromptSpec",
     "join_sections",
+    "matrix_markdown_output_format",
     "render_instructions",
     "render_system_messages",
 ]

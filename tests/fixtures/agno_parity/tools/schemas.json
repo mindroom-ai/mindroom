@@ -4089,8 +4089,8 @@
     ]
   },
   "chat_ui": {
-    "instructions": "chat_ui shows parts of MindRoom Chat to the user. Each function below works on a different thing, and none of them touches the user's own computer or browser. Side panels share one place on the screen, so opening one replaces whichever is open. Each call except read_canvas_state only sends a request into the conversation: success means it was sent, not that the user saw it.\n- open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the browser that browser_control drives with target='host'. The user can watch you on a real website or take over, for example to log in. open_panel(panel='members') shows the Members panel: the people and agents in this room.\n- open_settings(section) opens the user's MindRoom Chat Settings dialog at one section; it changes no setting.",
-    "guidance": "chat_ui shows parts of MindRoom Chat to the user. Each function below works on a different thing, and none of them touches the user's own computer or browser. Side panels share one place on the screen, so opening one replaces whichever is open. Each call except read_canvas_state only sends a request into the conversation: success means it was sent, not that the user saw it.\n- open_panel(panel='computer') shows the Computer panel: a live view of your own worker browser, the browser that browser_control drives with target='host'. The user can watch you on a real website or take over, for example to log in. open_panel(panel='members') shows the Members panel: the people and agents in this room.\n- open_settings(section) opens the user's MindRoom Chat Settings dialog at one section; it changes no setting.",
+    "instructions": "chat_ui shows parts of MindRoom Chat to the user; it never touches the user's own computer or browser. Side panels share one slot (opening one replaces the current panel). UI calls only send a request: success means it was sent, not that the user saw it.",
+    "guidance": "chat_ui shows parts of MindRoom Chat to the user; it never touches the user's own computer or browser. Side panels share one slot (opening one replaces the current panel). UI calls only send a request: success means it was sent, not that the user saw it.",
     "functions": [
       {
         "name": "open_settings",
@@ -5979,8 +5979,8 @@
     ]
   },
   "delegate": {
-    "instructions": "You can run the following configured agents as fresh subagents:\nhelper\n  - Helps with delegated work.\n  - Tools: scheduler\n\nUse run_subagent for a bounded subtask whose result you need before continuing, and continue_subagent for follow-ups in that child's session.\nDelegation is limited to three nested child levels; a follow-up does not add nesting depth.\nIn Matrix, a child tool that requires approval runs only once the user approves it.\nOther runtimes retain their approval restrictions.\nChild records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json and events.jsonl; transcript.md exists only after the child finishes.\nYour workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC.",
-    "guidance": "You can run the following configured agents as fresh subagents:\nhelper\n  - Helps with delegated work.\n  - Tools: scheduler\n\nUse run_subagent for a bounded subtask whose result you need before continuing, and continue_subagent for follow-ups in that child's session.\nDelegation is limited to three nested child levels; a follow-up does not add nesting depth.\nIn Matrix, a child tool that requires approval runs only once the user approves it.\nOther runtimes retain their approval restrictions.\nChild records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json and events.jsonl; transcript.md exists only after the child finishes.\nYour workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC.",
+    "instructions": "Available subagents (`run_subagent` / `continue_subagent`):\nhelper\n  - Helps with delegated work.\n  - Tools: scheduler\n\nMax 3 nested subagent levels (follow-ups do not add depth).",
+    "guidance": "Available subagents (`run_subagent` / `continue_subagent`):\nhelper\n  - Helps with delegated work.\n  - Tools: scheduler\n\nMax 3 nested subagent levels (follow-ups do not add depth).",
     "functions": [
       {
         "name": "run_subagent",
@@ -27887,8 +27887,8 @@
     ]
   },
   "todo": {
-    "instructions": "Use these tools to manage a per-thread work plan with dependencies. Create plans, add tasks, complete items, update priorities, and use templates for repeated workflows. Items are scoped to the current conversation thread.",
-    "guidance": "Use these tools to manage a per-thread work plan with dependencies. Create plans, add tasks, complete items, update priorities, and use templates for repeated workflows. Items are scoped to the current conversation thread.",
+    "instructions": null,
+    "guidance": null,
     "functions": [
       {
         "name": "plan",

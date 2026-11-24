@@ -397,11 +397,12 @@ def test_create_agent_includes_matrix_reply_targeting_policy() -> None:
     assert "MindRoom agent" in role
     assert "Mindroom" not in role
     assert "<conversation>" not in role
-    assert "## Matrix Reply Targeting" in role
-    assert "explicit Matrix mentions" in role
-    assert "Plain-text display names are not Matrix mentions" in role
-    assert "configured teams run their team workflow" in role
-    assert "If asked why an earlier message went unanswered, note you may not have been dispatched for it." in role
+    assert "## Matrix Reply Targeting" not in role
+    assert (
+        "MindRoom only dispatches messages to you via explicit Matrix mentions (not plain-text display names), "
+        "routing, thread continuation, or enabled automations; if an earlier message went unanswered, "
+        "you may not have been dispatched for it."
+    ) in role
 
 
 def test_config_round_trips_structured_agent_tool_entries() -> None:
@@ -487,17 +488,23 @@ def test_get_agent_general() -> None:
 def test_agent_role_describes_local_tool_execution_environment(
     tmp_path: Path,
 ) -> None:
-    """The prompt should identify an entirely local effective tool surface."""
+    """Primary-only non-path tools omit Tool Execution Environment; path tools still report file_access."""
     config = _test_config()
     config.agents["calculator"].include_default_tools = False
     runtime_paths = _runtime_paths(tmp_path)
 
     agent = _create_agent_for_test("calculator", config=_bind_runtime_paths(config, runtime_paths))
 
-    assert "## Tool Execution Environment" in _role(agent)
-    assert "- All tools run in the primary MindRoom runtime." in _role(agent)
-    assert "No tools use a worker runtime." not in _role(agent)
+    assert "## Tool Execution Environment" not in _role(agent)
+    assert "- All tools run in the primary MindRoom runtime." not in _role(agent)
     assert "Worker backend:" not in _role(agent)
+
+    config.agents["general"].tools = ["filesystem"]
+    config.agents["general"].include_default_tools = False
+    fs_agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
+    assert "## Tool Execution Environment" in _role(fs_agent)
+    assert "- All tools run in the primary MindRoom runtime." not in _role(fs_agent)
+    assert "- File access for path tools: `workspace` (agent workspace and attachments only)." in _role(fs_agent)
 
 
 @patch("mindroom.agents.get_tool_by_name")
@@ -527,9 +534,8 @@ def test_agent_role_describes_mixed_dedicated_worker_routing(
     assert "Worker-routed tools: `shell`." in _role(agent)
     assert "Worker backend: `kubernetes`." in _role(agent)
     assert "Worker reuse: one runtime used only by this user-agent pair." in _role(agent)
-    assert "Worker state is reused across turns for that scope." in _role(agent)
-    assert "After the configured idle timeout, the deployment scales to zero" in _role(agent)
-    assert "persisted files and caches remain until an operator deletes that worker state." in _role(agent)
+    expected_idle = "- Worker state persists across turns for that scope (stopped/scaled down when idle, files kept)."
+    assert expected_idle in _role(agent)
     assert "Execution location is determined per tool; this agent is not sandboxed as a whole." in _role(agent)
 
 
@@ -558,7 +564,7 @@ def test_tool_execution_environment_explains_dedicated_worker_scope(
         runtime_paths=runtime_paths,
         local_tool_names=(),
         worker_routed_tool_names=("shell",),
-        has_other_tools=False,
+        has_path_tools=False,
         worker_scope=worker_scope,
         file_access="workspace",
         workdir=None,
@@ -570,8 +576,9 @@ def test_tool_execution_environment_explains_dedicated_worker_scope(
     )
 
     assert f"Worker reuse: {expected_reuse}." in rendered
-    assert "Worker state is reused across turns for that scope." in rendered
-    assert "After the configured idle timeout, the deployment scales to zero" in rendered
+    assert (
+        "- Worker state persists across turns for that scope (stopped/scaled down when idle, files kept)." in rendered
+    )
 
 
 def test_tool_execution_environment_explains_static_runner_without_persistence_claim(tmp_path: Path) -> None:
@@ -582,7 +589,7 @@ def test_tool_execution_environment_explains_static_runner_without_persistence_c
         runtime_paths=runtime_paths,
         local_tool_names=(),
         worker_routed_tool_names=("shell",),
-        has_other_tools=False,
+        has_path_tools=False,
         worker_scope="user_agent",
         file_access="workspace",
         workdir=None,
@@ -596,7 +603,7 @@ def test_tool_execution_environment_explains_static_runner_without_persistence_c
     assert "Worker backend: `static_runner`." in rendered
     assert "requests use the configured static runner" in rendered
     assert "no per-user or per-agent worker state boundary is selected" in rendered
-    assert "persisted files and caches" not in rendered
+    assert "Worker state persists across turns" not in rendered
 
 
 def test_tool_execution_environment_explains_docker_idle_lifecycle(tmp_path: Path) -> None:
@@ -611,7 +618,7 @@ def test_tool_execution_environment_explains_docker_idle_lifecycle(tmp_path: Pat
         runtime_paths=runtime_paths,
         local_tool_names=(),
         worker_routed_tool_names=("shell",),
-        has_other_tools=False,
+        has_path_tools=False,
         worker_scope="user_agent",
         file_access="workspace",
         workdir=None,
@@ -622,8 +629,9 @@ def test_tool_execution_environment_explains_docker_idle_lifecycle(tmp_path: Pat
         pending_shared_directory_invitations=(),
     )
 
-    assert "After the configured idle timeout, the container stops" in rendered
-    assert "persisted files and caches remain until an operator deletes that worker state." in rendered
+    assert (
+        "- Worker state persists across turns for that scope (stopped/scaled down when idle, files kept)." in rendered
+    )
 
 
 @pytest.mark.parametrize(
@@ -644,7 +652,7 @@ def test_tool_execution_environment_reports_file_access(
             runtime_paths=_runtime_paths(tmp_path),
             local_tool_names=("gmail", "python"),
             worker_routed_tool_names=worker_routed,
-            has_other_tools=False,
+            has_path_tools=True,
             worker_scope=None,
             file_access=file_access,
             workdir=None,
@@ -655,11 +663,14 @@ def test_tool_execution_environment_reports_file_access(
             pending_shared_directory_invitations=(),
         )
         assert expected in rendered
-        assert "- Not confined by file_access (only a worker isolates them): `python`, `shell`." in rendered
-        assert (
-            "- Not confined by file_access and unable to run in a worker (trusted primary runtime only): `duckdb`."
-            in rendered
-        )
+        if file_access == "workspace":
+            assert "- Not confined by file_access (only a worker isolates them): `python`, `shell`." in rendered
+            assert (
+                "- Not confined by file_access and unable to run in a worker (trusted primary runtime only): `duckdb`."
+                in rendered
+            )
+        else:
+            assert "Not confined by file_access" not in rendered
 
 
 def test_agent_role_lists_the_shared_directories_the_agent_reaches(
@@ -715,7 +726,7 @@ def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(t
         runtime_paths=_runtime_paths(tmp_path),
         local_tool_names=("gmail",),
         worker_routed_tool_names=(),
-        has_other_tools=False,
+        has_path_tools=True,
         worker_scope=None,
         file_access="workspace",
         workdir=None,
@@ -739,7 +750,7 @@ def test_agent_role_omits_tool_that_failed_to_build(
     agent = _create_agent_for_test("calculator", config=config)
 
     assert agent.spec.toolkits == ()
-    assert "No tools are available in this runtime." in _role(agent)
+    assert "## Tool Execution Environment" not in _role(agent)
     assert "Worker backend:" not in _role(agent)
 
 
@@ -766,8 +777,8 @@ def test_agent_role_keeps_direct_toolkit_local_when_worker_routing_is_requested(
     agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
 
     assert [tool.name for tool in agent.spec.toolkits] == [tool_name]
-    assert "- All tools run in the primary MindRoom runtime." in _role(agent)
-    assert "No tools use a worker runtime." not in _role(agent)
+    assert "## Tool Execution Environment" not in _role(agent)
+    assert "Worker-routed tools:" not in _role(agent)
     assert "Worker backend:" not in _role(agent)
 
 
@@ -3517,8 +3528,8 @@ def test_agent_context_section_states_files_are_preloaded(
 
     agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
-    assert "headed by the path of the file it was read from" in _role(agent)
-    assert "Do not re-read a file" in _role(agent)
+    assert "Preloaded every turn by path" in _role(agent)
+    assert "do not re-read unless editing or marked truncated" in _role(agent)
 
 
 def test_agent_missing_context_file_is_ignored(tmp_path: Path) -> None:

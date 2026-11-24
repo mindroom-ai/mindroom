@@ -408,7 +408,8 @@ async def test_default_base_dir_is_the_workspace(tmp_path: Path, monkeypatch: py
 
     assert _last_tool_result(provider.requests[1]).splitlines()[-1] == str(storage / "agents" / "coder" / "workspace")
     system = _sent(provider.requests[0], "system")
-    assert "MINDROOM_AGENT_WORKSPACE" in system
+    assert "agent workspace and attachments only" in system
+    assert "Workdir:" not in system
     assert "skills/<skill-name>/" in system
 
 

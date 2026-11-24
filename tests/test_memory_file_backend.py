@@ -1732,7 +1732,7 @@ async def test_file_backend_build_memory_prompt_parts_splits_entrypoint_from_tur
 
     prompt_parts = await build_memory_prompt_parts("deployment runbook", "general", config)
 
-    assert "[File memory entrypoint (agent)]" in prompt_parts.session_preamble
+    assert f"[File memory: `{workspace / 'MEMORY.md'}`]" in prompt_parts.session_preamble
     assert "Project uses FastAPI." in prompt_parts.session_preamble
     assert "Deployment runbook lives in docs/deploy.md" in prompt_parts.transient_turn_context
     assert "Project uses FastAPI." not in prompt_parts.transient_turn_context
@@ -1810,7 +1810,7 @@ async def test_file_backend_entrypoint_preamble_announces_automatic_preload(
         config,
     )
 
-    assert "is inlined below automatically every turn" in prompt_parts.session_preamble
+    assert "Preloaded every turn; do not re-read unless editing or marked truncated." in prompt_parts.session_preamble
     assert str(memory_path) in prompt_parts.session_preamble
     assert "prompt limit" not in prompt_parts.session_preamble
 
@@ -2399,7 +2399,7 @@ async def test_file_backend_skips_non_regular_memory_entries(storage_path: Path,
 
     prompt_parts = await build_memory_prompt_parts("anything", "general", config)
 
-    assert "[File memory entrypoint (agent)]" not in prompt_parts.session_preamble
+    assert "[File memory:" not in prompt_parts.session_preamble
     assert await list_all_agent_memories("general", config) == []
 
 
