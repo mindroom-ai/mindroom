@@ -32,10 +32,11 @@ MATRIX_MARKDOWN_OUTPUT_FORMAT = (
     "for federated rooms; never wrap links in backticks).\n"
     "- Mermaid fences, GitHub callouts (`> [!NOTE]`), footnotes, and external image URLs (`![](https://...)`) "
     "are not rendered; link to external URLs instead.\n"
-    "- As you work, your text streams live while thoughts and tool calls stay collapsed by default (expandable in "
-    "place); once your turn finishes, everything up through your last tool call (thoughts, tool calls, and any earlier "
-    "text) is automatically folded away. Write a self-contained final answer after your last tool call (including your "
-    "conclusion and key details), assuming the user will not open or read the folded work above."
+    "- During streaming, your text appears live while thoughts and tool calls stay collapsed by default (expandable in "
+    "place); when a reply finishes with a final answer after tool calls, everything up through your last tool call "
+    "(thoughts, tool calls, and any earlier text) folds away in MindRoom Chat. Write a self-contained final answer "
+    "after your last tool call (including your conclusion and key details), assuming the reader will not open or read "
+    "the collapsed work above."
 )
 
 
