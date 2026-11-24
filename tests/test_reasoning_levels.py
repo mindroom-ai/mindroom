@@ -10,7 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom.config.main import Config, ConfigRuntimeValidationError
-from mindroom.config.models import ModelConfig, ModelTable, ReasoningConfig
+from mindroom.config.models import ModelConfig, ModelTable, ReasoningConfig, unsupported_level_message
 from mindroom.constants import resolve_runtime_paths
 from mindroom.providers.reasoning import apply_reasoning_level
 from mindroom.thread_summary.generation import _summary_provider
@@ -142,8 +142,89 @@ def test_a_model_reference_at_a_level_passes_every_model_reference_check(runtime
         return {"models": {"default": _sol()}, "agents": {"code": {"display_name": "Code", "model": model}}}
 
     assert Config.validate_with_runtime(data("default@high"), runtime_paths).agents["code"].model == "default@high"
-    with pytest.raises(ConfigRuntimeValidationError, match="default@xhigh"):
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match=r"agents\.code\.model: unsupported level 'xhigh' for default; supported: low, medium, high",
+    ):
         Config.validate_with_runtime(data("default@xhigh"), runtime_paths)
+
+
+def test_unsupported_level_message_names_the_supported_levels() -> None:
+    models = _config(sol=_sol(), plain={"provider": "openai", "id": "gpt-6"}).models
+
+    assert (
+        unsupported_level_message(models, "sol@xhigh")
+        == "unsupported level 'xhigh' for sol; supported: low, medium, high"
+    )
+    assert unsupported_level_message(models, "plain@high") == "unsupported level 'high' for plain; supported: none"
+    for ok_or_unknown in ("sol@high", "sol", "nope@high", "missing", "@high", None):
+        assert unsupported_level_message(models, ok_or_unknown) is None
+
+
+def test_runtime_validation_distinguishes_an_unsupported_level_from_an_unknown_model(
+    runtime_paths: RuntimePaths,
+) -> None:
+    def data(model: str) -> dict[str, Any]:
+        return {
+            "models": {"default": _sol(), "plain": {"provider": "openai", "id": "gpt-6"}},
+            "agents": {"code": {"display_name": "Code", "model": model}},
+        }
+
+    with pytest.raises(
+        ConfigRuntimeValidationError,
+        match=r"^agents\.code\.model: unsupported level 'high' for plain; supported: none$",
+    ):
+        Config.validate_with_runtime(data("plain@high"), runtime_paths)
+    with pytest.raises(ConfigRuntimeValidationError, match=r"^Unknown model for agents\.code\.model: 'nope@high'\."):
+        Config.validate_with_runtime(data("nope@high"), runtime_paths)
+
+
+@pytest.mark.parametrize(
+    ("extra", "field"),
+    [
+        ({"budgets": {"fallback_model": "sol@xhigh", "monthly_limit_usd": 1}}, "budgets fallback_model"),
+        ({"defaults": {"cheap_model": "sol@xhigh"}}, r"defaults\.cheap_model"),
+        ({"memory": {"auto_flush": {"extractor": {"model": "sol@xhigh"}}}}, r"memory\.auto_flush\.extractor\.model"),
+        (
+            {
+                "calls": {
+                    "profiles": {
+                        "p": {
+                            "backend": "cascaded",
+                            "model": "sol@xhigh",
+                            "stt": {"model": "s", "credentials_service": "svc"},
+                            "tts": {"model": "t", "credentials_service": "svc"},
+                        },
+                    },
+                },
+            },
+            r"calls\.profiles\.p\.model",
+        ),
+        (
+            {
+                "calls": {
+                    "profiles": {
+                        "p": {
+                            "backend": "live",
+                            "model": "rt",
+                            "credentials_service": "svc",
+                            "voice": "alloy",
+                            "agent_model": "sol@xhigh",
+                        },
+                    },
+                },
+            },
+            r"calls\.profiles\.p\.agent_model",
+        ),
+    ],
+    ids=["budgets-fallback", "defaults-cheap", "memory-extractor", "calls-cascaded", "calls-live"],
+)
+def test_config_field_validators_name_supported_levels(extra: dict[str, Any], field: str) -> None:
+    with pytest.raises(
+        ValidationError,
+        match=rf"{field}: unsupported level 'xhigh' for sol; supported: low, medium, high",
+    ):
+        Config.model_validate({"models": {"sol": _sol()}, **extra})
 
 
 # --- Applying a level to a route ----------------------------------------------------------------------------

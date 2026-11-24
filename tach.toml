@@ -2791,6 +2791,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.custom_tools.thread_model"
 depends_on = [
+    "mindroom.config.models",
     "mindroom.thread_models",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.tool_function",
@@ -5619,6 +5620,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.commands.model_commands"
 depends_on = [
+    "mindroom.config.models",
     "mindroom.model_selection_scope",
     "mindroom.model_selection",
     "mindroom.thread_models",
@@ -5628,6 +5630,7 @@ depends_on = [
 path = "mindroom.commands.room_model_commands"
 depends_on = [
     "mindroom.commands.model_commands",
+    "mindroom.config.models",
     "mindroom.matrix.client_room_admin",
     "mindroom.room_settings",
 ]
@@ -5723,6 +5726,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.scheduling.tasks"
 depends_on = [
+    "mindroom.config.models",
     "mindroom.helper_usage",
     "mindroom.constants",
     "mindroom.entity_resolution",
@@ -8579,6 +8583,7 @@ visibility = ["mindroom.providers.claude_code", "mindroom.providers.gemini", "mi
 [[modules]]
 path = "mindroom.providers.registry"
 depends_on = [
+    "mindroom.config.models",
     "mindroom.llm",
     "mindroom.providers.anthropic.messages",
     "mindroom.providers.anthropic.settings",
@@ -8715,6 +8720,7 @@ depends_on = ["mindroom.constants"]
 path = "mindroom.delegation.lifecycle"
 depends_on = [
     "mindroom.agent_cli.session",
+    "mindroom.config.models",
     "mindroom.agent_loop",
     "mindroom.ai_run_metadata",
     "mindroom.constants",

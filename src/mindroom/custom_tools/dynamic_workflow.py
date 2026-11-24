@@ -19,7 +19,7 @@ from mindroom.approval.tool_approval import tool_may_require_approval, toolkit_a
 from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.budgets.monitor import budget_model
-from mindroom.config.models import split_model_reference
+from mindroom.config.models import split_model_reference, unsupported_level_message
 from mindroom.config.resolution import authored_tool_entries
 from mindroom.config.tool_aliases import canonical_tool_names
 from mindroom.custom_tools.dynamic_workflow_context import (
@@ -893,7 +893,12 @@ def _resolve_participant_model_name(
     model_ref = raw_model.strip()
     if (model_name := _configured_model_name(context, model_ref)) is not None:
         return _canonical_model_ref(context, model_name)
-    msg = f"Dynamic Workflow participant model '{model_ref}' is not allowlisted in config.models."
+    reason = unsupported_level_message(context.config.models, model_ref)
+    msg = (
+        f"Dynamic Workflow participant model: {reason}."
+        if reason
+        else f"Dynamic Workflow participant model '{model_ref}' is not allowlisted in config.models."
+    )
     raise DynamicWorkflowError(msg)
 
 

@@ -6,6 +6,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.authorization import addressable_responder_names
+from mindroom.config.models import unsupported_level_message
 from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.thread_models import (
     THREAD_MODEL_STORAGE_ERROR,
@@ -126,11 +127,12 @@ class ThreadModelTools(Toolkit):
         # later turns, and this turn cannot continue on one added since.
         current = context.current_config
         switchable = context.config.models.keys() & current.models.keys()
-        if model_name not in switchable:
+        if model_name not in context.config.models or model_name not in current.models:
+            reason = unsupported_level_message(current.models, model_name)
             return self._payload(
                 "error",
                 action="switch",
-                message=f"Unknown model '{model_name}'.",
+                message=f"{reason}." if reason else f"Unknown model '{model_name}'.",
                 available_models=sorted(switchable),
             )
         entity_names = self._addressable_entities(context)

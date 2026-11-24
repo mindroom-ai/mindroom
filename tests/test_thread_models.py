@@ -1768,6 +1768,27 @@ async def test_a_next_turn_switch_measures_the_budget_as_later_turns_will(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_thread_model_tool_switches_a_reasoning_level_and_rejects_an_unsupported_one(tmp_path: Path) -> None:
+    """``switch_thread_model`` accepts ``name@level`` and names supported levels when the level is unsupported."""
+    context = _make_tool_context(tmp_path)
+    context.config.models["sol"] = ModelConfig(
+        provider="openai",
+        id="sol-model",
+        reasoning={"levels": ["low", "high"], "default": "low"},
+    )
+
+    with tool_runtime_context(context):
+        switched = json.loads(await ThreadModelTools().switch_thread_model("sol@high"))
+        rejected = json.loads(await ThreadModelTools().switch_thread_model("sol@xhigh"))
+
+    assert switched["status"] == "ok"
+    assert switched["model"] == "sol@high"
+    assert _stored_model(context.runtime_paths, THREAD_ID) == "sol@high"
+    assert rejected["status"] == "error"
+    assert rejected["message"] == "unsupported level 'xhigh' for sol; supported: low, high."
+
+
+@pytest.mark.asyncio
 async def test_thread_model_tool_reports_stale_override_as_inactive(tmp_path: Path) -> None:
     """An override naming a removed model must not be reported as active."""
     context = _make_tool_context(tmp_path)

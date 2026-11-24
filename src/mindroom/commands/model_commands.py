@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.authorization import addressable_responder_names
+from mindroom.config.models import unsupported_level_message
 from mindroom.model_selection import ModelSelectionRequest, model_selection_result, parse_model_selection
 from mindroom.model_selection_scope import ModelPickerScope, validate_model_picker_scope
 from mindroom.thread_models import (
@@ -47,7 +48,8 @@ def _apply_model_selection(
             text, removed = _clear_thread_model(config, runtime_paths, thread_id, entity_names)
             return text, None, removed
         if request.model not in config.models:
-            error = f"Unknown model `{request.model}`. Refresh the model picker."
+            reason = unsupported_level_message(config.models, request.model) or f"Unknown model `{request.model}`"
+            error = f"{reason}. Refresh the model picker."
             return f"❌ {error}", error, False
         text = _set_thread_model(
             request.model,
@@ -219,7 +221,8 @@ def handle_model_command(
     if thread_id is None:
         return _THREAD_REQUIRED_MESSAGE, None
     if not named_model and requested.lower() not in _RESET_ARGUMENTS:
-        return f"❌ Unknown model `{requested}`. Available models:\n{available_models_text(config)}", None
+        reason = unsupported_level_message(config.models, requested) or f"Unknown model `{requested}`"
+        return f"❌ {reason}. Available models:\n{available_models_text(config)}", None
     request = ModelSelectionRequest(
         client.user_id,
         client.device_id or "",
