@@ -9911,7 +9911,6 @@ depends_on = [
     "mindroom.delegation.state",
     "mindroom.history.interrupted_replay",
     "mindroom.history.run_checkpoint",
-    "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.events",
     "mindroom.tool_system.output_files",

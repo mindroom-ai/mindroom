@@ -33,7 +33,6 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-_SUPERSEDED_REASON = "Superseded after a restart."
 _INTERRUPTED_APPROVAL_REASON = "The runtime stopped while this call waited for its approval, so it did not run."
 
 
@@ -187,13 +186,6 @@ def end_tool_call_approval(job: BackgroundJob) -> BackgroundOutcome | None:
         # The approval is the job's first phase, so unlike other interrupted work its call has no effects to check.
         return BackgroundOutcome("interrupted", _INTERRUPTED_APPROVAL_REASON)
     return None
-
-
-async def supersede_job_approvals(job: BackgroundJob) -> None:
-    """Close the cards a job still has open from a turn that a restart ended, which goes on in a turn that asks anew."""
-    manager = approval_manager.get_approval_store()
-    if manager is not None:
-        await manager.settle_pending_background_approvals(tool_job_run_id(job.job_id), reason=_SUPERSEDED_REASON)
 
 
 async def prune_job_approvals(jobs: Iterable[BackgroundJob]) -> None:

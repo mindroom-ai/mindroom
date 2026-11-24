@@ -24,13 +24,11 @@ from mindroom.delegation.sessions import SubagentSessionError
 from mindroom.delegation.state import (
     APPROVAL_TOOLKITS_KEY,
     CONTINUE_SUBAGENT,
-    RESTART_INTERRUPTION_REASON,
     SPENT_RUNS_KEY,
     interrupted_by_restart,
 )
 from mindroom.history.interrupted_replay import render_stopped_attempt
 from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT, is_recovered_run
-from mindroom.tool_jobs.approvals import supersede_job_approvals
 from mindroom.tool_jobs.runtime import waited_for_approval, waited_for_user
 from mindroom.tool_system.events import format_tool_completed_event
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
@@ -75,8 +73,7 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
 
     Only the call of a workflow run is kept from a wait for approvals (`waited_for_approval`), and no restart cut
     that short. Its turn is still paused when the stop left it so: the job then resumes that same turn, asking about
-    its calls on the cards they have, with the decisions those hold. A turn the stop settled instead goes on as a
-    follow-up, as above, after the cards it left open are closed: it asks again for what it still needs.
+    its calls on the cards they have, with the decisions those hold.
     """
     context = require_tool_runtime_context()
     config, runtime_paths, owner = context.current_config, context.runtime_paths, job.owner
@@ -223,16 +220,13 @@ async def _sent_or_resumed(
 ) -> tuple[str, tuple[RunRecord, Sequence[Sequence[str]]] | None, RunRecord | None] | str:
     """Return what the job's next turn is sent, or the paused turn it resumes and its task, or why it does neither.
 
-    A paused turn comes with the owners of its calls, which the job saved when it asked about them. A job that
-    waited for approvals and whose turn was settled has cards open that no turn waits for any more: they are closed.
+    A paused turn comes with the owners of its calls, which the job saved when it asked about them.
     """
     if child.status == "paused":
         owners, run = job.adapter.get(APPROVAL_TOOLKITS_KEY), await paused_for_approval(child, config, runtime_paths)
         return (
             "its paused turn cannot be resumed" if owners is None or run is None else (child.task, (run, owners), run)
         )
-    if waited_for_approval(job):
-        await supersede_job_approvals(job)
     run = await read_child_run(child, config, runtime_paths)
     prompt = _continuation_prompt(job, child, run, config)
     if prompt is None:
@@ -290,34 +284,24 @@ def _continuation_prompt(
         # The call of a workflow run goes on only on proof that its turn called no tool, which no run is not.
         return sent if child.workflow_run_id is None else None
     if not is_recovered_run(run):
-        # The turn of a workflow run's agent that waited for approvals was settled as it stood: the calls it asked
-        # about never ran, and it goes on while no other call of it is left without an end.
-        results = [tool.result for tool in run.tools or ()]
-        waited = child.workflow_run_id is not None and RESTART_INTERRUPTION_REASON in results and None not in results
-        if not waited:
-            return None if run.tools else sent
+        return None if run.tools else sent
     # The prompt of a workflow run's call is sent whole: what it asks for may stand at its end.
     clip = len(sent) > _MAX_TASK_CHARACTERS and child.workflow_run_id is None
     task = f"{sent[:_MAX_TASK_CHARACTERS]}…" if clip else sent
     note = config.get_prompt("SUBAGENT_RESTART_CONTINUATION_PROMPT")
-    of_run = child.workflow_run_id is not None
-    account = _calls_account(run, of_run=of_run) if run.tools else ""
+    account = _calls_account(run) if run.tools else ""
     parts = (note, f"<interrupted_task>\n{task}\n</interrupted_task>", account)
     return "\n\n".join(part for part in parts if part)
 
 
-def _calls_account(run: RunRecord, *, of_run: bool) -> str:
+def _calls_account(run: RunRecord) -> str:
     """Render the cut-short run's calls as the bounded account a replayed reply's prompt gets of its stopped attempt.
 
     The child's history replays the recovered run like any other turn, so its limits may leave the run's calls out;
-    the account names each call from its preview either way, and which ones were cut short. Only the turn of a
-    workflow run's agent (*of_run*) goes on from a wait for approvals, whose calls it leaves out.
+    the account names each call from its preview either way, and which ones were cut short.
     """
     finished, cut_short = [], []
     for tool in run.tools or ():
-        if of_run and tool.result == RESTART_INTERRUPTION_REASON:
-            # A call that still waited for its approval never ran: the turn that goes on asks for it again.
-            continue
         entry = replace(format_tool_completed_event(tool.call), call=None)
         (cut_short if tool.result == INTERRUPTED_CALL_RESULT else finished).append(entry)
     return render_stopped_attempt(partial_text="", completed_tools=finished, interrupted_tools=cut_short)

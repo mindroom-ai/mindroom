@@ -19,13 +19,13 @@ from mindroom.approval import manager as approval_manager
 from mindroom.delegation import continuation, recovery
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.recovery import read_child_run
-from mindroom.delegation.state import RESTART_INTERRUPTION_REASON, child_card_id
+from mindroom.delegation.state import child_card_id
 from mindroom.event_journal import ApprovalDecisionMetadata, CallKey, tool_job_run_id
 from mindroom.event_journal.opening import event_journal_sqlite_path
 from mindroom.llm.runs import RunRecord, RunStatus, ToolExecution
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.models import WorkflowNodeState
-from tests.fakes.scripted_model import Await, answer, calls, tool_call, usage
+from tests.fakes.scripted_model import answer, calls, tool_call, usage
 from tests.tool_job_helpers import (
     _JOB_CARD_PRINCIPAL,
     FakeApprovalTransport,
@@ -280,49 +280,6 @@ async def test_agent_that_waits_for_a_person_in_another_way_ends_at_the_restart_
 
 
 @pytest.mark.asyncio
-async def test_unloadable_paused_run_continues_with_a_follow_up_turn_and_one_new_card(
-    gated: WorkflowStack,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A paused turn that cannot be resumed had not run its gated call: the agent goes on and asks for it again."""
-    cards: _Cards = gated.cards  # type: ignore[attr-defined]
-    gated.child_script(calls(tool_call("append", "c1", line="a")), calls(tool_call("append", "c2", line="b")))
-    await gated.submit("@0", "agent", _PROMPT)
-    await gated.until(lambda: cards.asked == ["c1"])
-    await cards.decide("c1")
-    await gated.until(lambda: cards.asked == ["c1", "c2"])
-    await gated.until(lambda: _node(gated).state is WorkflowNodeState.WAITING)
-    job_id = gated.node_job("@0").job_id
-
-    async def unloadable(*_args: object, **_options: object) -> None:
-        return None
-
-    monkeypatch.setattr(recovery, "paused_for_approval", unloadable)
-    await gated.kill()
-    thinking = asyncio.Event()
-    model = gated.child_script([Await(thinking.wait), *calls(tool_call("append", "c3", line="b"))], answer("sent"))
-    await gated.continue_agents()
-    assert await gated.recover() == [gated.run_id]
-    waiting = asyncio.ensure_future(gated.result("@0", "agent", _PROMPT))
-    await gated.until(lambda: len(model.requests) == 1)
-    # The agent works again, in a new turn: its job and its call no longer read as waiting for a person.
-    await gated.until(lambda: _node(gated).state is WorkflowNodeState.RUNNING)
-    assert gated.node_job("@0").status == "running"
-    thinking.set()
-    await gated.until(lambda: cards.posted == ["c1", "c2", "c3"])
-
-    # The card of the turn that is over is closed, and the agent was told what that turn had finished.
-    saved = cards.saved()
-    assert (saved["c2"][1], saved["c3"][1], gated.counting_tool.lines) == ("denied", None, ["a"])
-    sent = str([message.content for message in model.requests[0].messages if message.role == "user"][-1])
-    assert ("Write a, then b and c" in sent, "line=a" in sent, "line=b" in sent) == (True, True, False), sent
-    await cards.decide("c3")
-
-    assert await waiting == "sent"
-    assert (_node(gated).generation, gated.node_job("@0").job_id, gated.counting_tool.lines) == (1, job_id, ["a", "b"])
-
-
-@pytest.mark.asyncio
 async def test_child_with_a_started_unrecorded_call_is_indeterminate(
     gated: WorkflowStack,
     monkeypatch: pytest.MonkeyPatch,
@@ -369,15 +326,3 @@ async def test_ordinary_subagent_approval_wait_at_a_restart_is_unchanged(gated: 
     assert run is not None
     assert (ended.status, run.status, gated.jobs.awaiting_continuation()) == ("interrupted", RunStatus.error, ())
     assert (await cards.decision("c2"), await cards.decision("c3")) == ("denied", "denied")
-
-
-@pytest.mark.parametrize(("of_run", "listed"), [(True, False), (False, True)])
-def test_only_a_workflow_agents_account_leaves_out_the_calls_that_waited(of_run: bool, listed: bool) -> None:
-    """An ordinary subagent's account of its cut-short run names every call, as it did before workflows."""
-    waited = ToolExecution(tool_call_id="c2", tool_name="append", result=RESTART_INTERRUPTION_REASON, is_error=True)
-    done = ToolExecution(tool_call_id="c1", tool_name="text", result="xxx")
-    run = RunRecord(run_id="run-1", session_id="session-1", status=RunStatus.error, tools=[done, waited])
-
-    account = continuation._calls_account(run, {}, of_run=of_run)
-
-    assert ("`text` tool" in account, "`append` tool" in account) == (True, listed)
