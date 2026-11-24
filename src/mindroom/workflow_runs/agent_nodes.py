@@ -185,18 +185,20 @@ async def load_follow_up_child(
     return None if isinstance(target, str) else target.previous_child
 
 
-async def _resolve_child_target(
+def _prepare_turn_spec(
     context: ToolRuntimeContext,
     run: WorkflowRun,
     node: WorkflowNode,
     owner: ToolExecutionIdentity,
+    job_runtime: ToolJobRuntime,
     *,
     prompt: str,
+    job_id: str,
     session: WorkflowNode | None,
     follow_up: DelegationChild | None,
     correction: str | None,
     previous: DelegationChild | None,
-) -> tuple[DelegationTarget, DelegationChild | None, str, dict[str, object]]:
+) -> tuple[DelegationTarget, DelegationChild, BackgroundJobSpec]:
     config, paths, caller = context.current_config, context.runtime_paths, run.agent_name
     source = session.request if session is not None else node.request
     arguments = {_RENAMED.get(name, name): value for name, value in source.items() if name in _OPTIONS}
@@ -206,46 +208,28 @@ async def _resolve_child_target(
         call_args: dict[str, object] = {"subagent_id": follow_up.subagent_id, "message": prompt}
         if OUTPUT_PATH_ARGUMENT in arguments:
             call_args[OUTPUT_PATH_ARGUMENT] = arguments[OUTPUT_PATH_ARGUMENT]
-        return (
-            DelegationTarget(follow_up.child_agent_name, prompt, previous_child=follow_up),
-            follow_up,
-            CONTINUE_SUBAGENT,
-            call_args,
+        target = DelegationTarget(follow_up.child_agent_name, prompt, previous_child=follow_up)
+        previous, tool_name = follow_up, CONTINUE_SUBAGENT
+    else:
+        cap = SubagentPersona.from_dict(run.persona) if run.persona else None
+        if cap is not None and arguments.get("agent_name") in (None, caller) and not arguments.get("profile"):
+            arguments["system_prompt"] = arguments.get("system_prompt") or cap.system_prompt
+        if not arguments.get("system_prompt") and _NARROWING & arguments.keys():
+            raise AgentNodeError(_NARROWS_WITH_SYSTEM)
+        resolved = resolve_fresh_target(
+            arguments,
+            caller_name=caller,
+            config=config,
+            runtime_paths=paths,
+            depth=run.depth,
+            workspace_root=lambda: (
+                resolve_agent_runtime(caller, config, paths, execution_identity=owner).workspace.root
+            ),
+            cap=cap,
         )
-    cap = SubagentPersona.from_dict(run.persona) if run.persona else None
-    if cap is not None and arguments.get("agent_name") in (None, caller) and not arguments.get("profile"):
-        arguments["system_prompt"] = arguments.get("system_prompt") or cap.system_prompt
-    if not arguments.get("system_prompt") and _NARROWING & arguments.keys():
-        raise AgentNodeError(_NARROWS_WITH_SYSTEM)
-    target = resolve_fresh_target(
-        arguments,
-        caller_name=caller,
-        config=config,
-        runtime_paths=paths,
-        depth=run.depth,
-        workspace_root=lambda: resolve_agent_runtime(caller, config, paths, execution_identity=owner).workspace.root,
-        cap=cap,
-    )
-    if isinstance(target, str):
-        raise AgentNodeError(target)
-    return target, previous, RUN_SUBAGENT, arguments
-
-
-def _prepare_turn_spec(
-    context: ToolRuntimeContext,
-    run: WorkflowRun,
-    node: WorkflowNode,
-    owner: ToolExecutionIdentity,
-    job_runtime: ToolJobRuntime,
-    *,
-    target: DelegationTarget,
-    previous: DelegationChild | None,
-    tool_name: str,
-    call_args: dict[str, object],
-    prompt: str,
-    job_id: str,
-) -> tuple[DelegationChild, BackgroundJobSpec]:
-    config, paths, caller = context.current_config, context.runtime_paths, run.agent_name
+        if isinstance(resolved, str):
+            raise AgentNodeError(resolved)
+        target, tool_name, call_args = resolved, RUN_SUBAGENT, arguments
     try:
         authorized = authorize_delegation(
             caller,
@@ -296,7 +280,7 @@ def _prepare_turn_spec(
     )
     if isinstance(spec, str):
         raise AgentNodeError(spec)
-    return child, spec
+    return target, child, spec
 
 
 async def launch_child(
@@ -335,29 +319,18 @@ async def launch_child(
 
     job_id = turn_job_id(run, node.key, node.generation, turn)
     with tool_runtime_context(context):
-        target, previous, tool_name, call_args = await _resolve_child_target(
-            context,
-            run,
-            node,
-            owner,
-            prompt=prompt,
-            session=session,
-            follow_up=follow_up,
-            correction=correction,
-            previous=previous,
-        )
-        child, spec = _prepare_turn_spec(
+        target, child, spec = _prepare_turn_spec(
             context,
             run,
             node,
             owner,
             job_runtime,
-            target=target,
-            previous=previous,
-            tool_name=tool_name,
-            call_args=call_args,
             prompt=prompt,
             job_id=job_id,
+            session=session,
+            follow_up=follow_up,
+            correction=correction,
+            previous=previous,
         )
         handle = DispatchHandle(
             "job",
