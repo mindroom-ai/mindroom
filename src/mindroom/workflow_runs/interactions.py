@@ -303,8 +303,10 @@ class RunInteractions:
             await wait_for_change(condition, remaining)
 
     async def wait_inbox(self, run: WorkflowRun, node: WorkflowNode, epoch: int, wait_seconds: float) -> None:
-        """Wait for a script's `inbox()` message call and settle its node when mail arrives or the deadline expires."""
-        wait_seconds = valid_wait_seconds(wait_seconds)
+        """Wait for a script's `inbox()` message call and settle its node when mail arrives or the deadline expires.
+
+        `script_op` already validated *wait_seconds*; raising here would leave the node waiting in a background task.
+        """
         reader = NodeRef("script", 1, "script")
         op_id = f"{node.key}:{node.generation}"
         read_fn = partial(read_call, self.live.store, run.run_id, op_id=op_id, reader=reader, names=("script",))

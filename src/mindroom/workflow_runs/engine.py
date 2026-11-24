@@ -112,7 +112,7 @@ class WorkflowEngine:
             self.live,
             self.dispatch,
             cancel=lambda *a, **kw: self.cancel(*a, **kw),
-            settle=self.settle,
+            settle=lambda *a, **kw: self.settle(*a, **kw),
         )
         self.calls = ScriptCalls(
             self.live,
