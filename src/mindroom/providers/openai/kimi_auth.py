@@ -13,7 +13,7 @@ from mindroom.providers.openai.cli_login import borrow_under_lock, post_token_re
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-__all__ = ["KIMI_BASE_URL", "KimiAuthError", "borrow_kimi_token"]
+__all__ = ["KIMI_BASE_URL", "KimiAuthError", "borrow_kimi_token", "kimi_login_status"]
 
 KIMI_BASE_URL = "https://api.kimi.com/coding/v1"
 _KIMI_REFRESH_URL = "https://auth.kimi.com/api/oauth/token"
@@ -24,6 +24,24 @@ _KIMI_CREDENTIALS_RELATIVE_PATH = Path("credentials") / "kimi-code.json"
 
 class KimiAuthError(CliLoginError):
     """Raised when the local Kimi Code CLI OAuth state cannot provide a usable token."""
+
+
+def kimi_login_status(*, kimi_home: str | Path | None) -> bool:
+    """Return whether Kimi Code credentials hold a usable or refreshable OAuth token, without refreshing."""
+    credentials_path = _kimi_home_path(kimi_home=kimi_home) / _KIMI_CREDENTIALS_RELATIVE_PATH
+    if not credentials_path.is_file():
+        return False
+    try:
+        with credentials_path.open(encoding="utf-8") as credentials_file:
+            credentials = json.load(credentials_file)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    if not isinstance(credentials, dict):
+        return False
+    has_usable_access = bool(credentials.get("access_token")) and _usable_access_token(credentials) is not None
+    refresh_token = credentials.get("refresh_token")
+    has_refresh = isinstance(refresh_token, str) and bool(refresh_token.strip())
+    return has_usable_access or has_refresh
 
 
 def borrow_kimi_token(*, kimi_home: str | Path | None) -> str:

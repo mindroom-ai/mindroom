@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from contextlib import suppress
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import click
@@ -23,26 +24,44 @@ def section(title: str) -> Group:
     return Group(NewLine(), Rule(f"[bold]{title}[/bold]", align="left", style="green"))
 
 
-def select[Value: str](message: str, choices: Sequence[tuple[Value, str]]) -> Value:
+@dataclass(frozen=True, slots=True)
+class Separator:
+    """Visual divider in `select()` choices; rendered by questionary and skipped in piped prompts."""
+
+    title: str = ""
+
+
+def select[Value: str](message: str, choices: Sequence[tuple[Value, str] | Separator]) -> Value:
     """Return the value of the `(value, title)` choice picked with the arrow keys, or typed by value when piped.
 
-    The first choice is the default; questionary would mark any other default as picked next to the pointer.
+    The first selectable choice is the default; questionary would mark any other default as picked next to the pointer.
     """
+    selectable = [entry for entry in choices if not isinstance(entry, Separator)]
     _discard_typeahead()
     if _arrow_keys_work():
         import questionary  # noqa: PLC0415  # lazy: prompt_toolkit loads only for prompts
 
+        questionary_choices: list[questionary.Choice | questionary.Separator] = [
+            questionary.Separator(f"── {entry.title} ──" if entry.title else None)
+            if isinstance(entry, Separator)
+            else questionary.Choice(entry[1], value=entry[0])
+            for entry in choices
+        ]
         picked = _ask(
             questionary.select(
                 message,
-                choices=[questionary.Choice(title, value=value) for value, title in choices],
+                choices=questionary_choices,
                 # The pointed choice gets the green of the setup headers; questionary leaves it unstyled.
                 style=questionary.Style([("pointer", "fg:ansigreen bold"), ("highlighted", "fg:ansigreen bold")]),
             ),
         )
     else:
-        picked = typer.prompt(message, default=choices[0][0], type=click.Choice([value for value, _ in choices]))
-    return next(value for value, _ in choices if value == picked)
+        picked = typer.prompt(
+            message,
+            default=selectable[0][0],
+            type=click.Choice([value for value, _ in selectable]),
+        )
+    return next(value for value, _ in selectable if value == picked)
 
 
 def secret(message: str) -> str:
