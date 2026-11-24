@@ -1007,7 +1007,12 @@ class WorkflowEngine:
             else:
                 node = replace(node, result=sent)
         elif kind == "inbox":
-            wait_seconds = max(0.0, float(request.args.get("wait_seconds") or 0))
+            raw_wait = request.args.get("wait_seconds")
+            wait_seconds = (
+                max(0.0, float(raw_wait))
+                if isinstance(raw_wait, int | float) and not isinstance(raw_wait, bool)
+                else 0.0
+            )
             reader = NodeRef(key="script", generation=1, name="script")
             immediate = await asyncio.to_thread(
                 read_call,

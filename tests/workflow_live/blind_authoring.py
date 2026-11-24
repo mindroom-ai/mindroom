@@ -29,7 +29,7 @@ from mindroom.constants import RuntimePaths
 from mindroom.custom_tools.workflow import WorkflowTools
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, TurnCompleted
-from mindroom.providers.registry import create_model_provider
+from mindroom.providers.registry import build_model_provider
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.workflow_live.kill_after_write import Deployment, LiveError, add_send_options, say, until
 
@@ -112,7 +112,7 @@ async def _author_script(
     task: AuthoringTask,
 ) -> str:
     turn_model = resolve_turn_model(config, runtime_paths, ModelScope(entity=None, explicit=model_name), None)
-    provider = create_model_provider(config, runtime_paths, turn_model.model_name)
+    provider = build_model_provider(config, runtime_paths, turn_model.model_name)
     user_prompt = (
         f"Tool description for `start_workflow`:\n\n{description}\n\n"
         f"Task:\n{task.prompt}\n\n"
