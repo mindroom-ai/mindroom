@@ -32,7 +32,7 @@ from mindroom.trace_audit.models import (
     Incident,
     sanitize_target_skill,
 )
-from mindroom.trace_audit.signals import SHELL_TOOLS, classify_tool_execution, first_human_text
+from mindroom.trace_audit.signals import SHELL_TOOLS, classify_tool_execution, triggering_human_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -114,7 +114,7 @@ def _failure_entries(window: list[AuditedRun]) -> tuple[int, tuple[FailureSequen
 
 def _build_snippets(trigger: AuditedRun) -> tuple[EvidenceSnippet, ...]:
     pairs = [
-        ("user_ask", first_human_text(trigger.messages)),
+        ("user_ask", triggering_human_text(trigger.messages)),
         ("assistant_reply", trigger.content),
         ("run_error", trigger.error or ""),
     ]

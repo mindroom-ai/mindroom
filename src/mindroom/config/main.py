@@ -1779,16 +1779,23 @@ class Config(BaseModel):
                         f"Agent {agent_name!r} automation {automation.name!r} uses unknown model {automation.model!r}",
                     )
                     raise ValueError(msg)
-            if (
-                agent.skill_learning.enabled
-                and agent.skill_learning.trigger == "friction"
-                and not any(entry.name == "trace_audit" for entry in agent_automations(self, agent_name))
-            ):
-                msg = (
-                    f"Agent {agent_name!r} sets skill_learning.trigger: 'friction', "
-                    "which requires 'trace_audit' in its effective automations"
+            if agent.skill_learning.enabled and agent.skill_learning.trigger == "friction":
+                trace_entry = next(
+                    (entry for entry in agent_automations(self, agent_name) if entry.name == "trace_audit"),
+                    None,
                 )
-                raise ValueError(msg)
+                if trace_entry is None:
+                    msg = (
+                        f"Agent {agent_name!r} sets skill_learning.trigger: 'friction', "
+                        "which requires 'trace_audit' in its effective automations"
+                    )
+                    raise ValueError(msg)
+                if agent.private is None and trace_entry.room is None and not agent.rooms:
+                    msg = (
+                        f"Agent {agent_name!r} sets skill_learning.trigger: 'friction', "
+                        "which requires 'trace_audit.room' or at least one room in 'agent.rooms'"
+                    )
+                    raise ValueError(msg)
         return self
 
     def knowledge_graph_agents(self) -> list[str]:

@@ -312,11 +312,13 @@ def test_trace_audit_config_defaults_and_friction_trigger_validation() -> None:
         *,
         defaults: list[str] | None = None,
         automations: list[str] | None = None,
+        rooms: list[str] | None = None,
         skill_learning: SkillLearningConfig | None = None,
     ) -> Config:
         agent = AgentConfig(
             display_name="Mind",
             memory_backend="mem0",
+            rooms=rooms or [],
             automations=automations,
             skill_learning=skill_learning or SkillLearningConfig(),
         )
@@ -331,6 +333,7 @@ def test_trace_audit_config_defaults_and_friction_trigger_validation() -> None:
     assert _cfg(skill_learning=SkillLearningConfig(enabled=True)).agents["mind"].skill_learning.trigger == "interval"
     ta_cfg = _cfg(
         automations=["trace_audit"],
+        rooms=[ROOM],
         skill_learning=SkillLearningConfig(enabled=True, trigger="friction"),
     )
     (entry,) = ta_cfg.resolve_agent("mind").automations
@@ -351,6 +354,7 @@ def test_trace_audit_config_defaults_and_friction_trigger_validation() -> None:
 
     inherited = _cfg(
         defaults=["trace_audit"],
+        rooms=[ROOM],
         skill_learning=SkillLearningConfig(enabled=True, trigger="friction"),
     )
     assert [a.name for a in inherited.resolve_agent("mind").automations] == ["trace_audit"]
@@ -366,6 +370,7 @@ def test_trace_audit_config_defaults_and_friction_trigger_validation() -> None:
             _cfg(
                 defaults=defaults,
                 automations=agent_auto,
+                rooms=[ROOM],
                 skill_learning=SkillLearningConfig(enabled=True, trigger="friction"),
             )
 
@@ -378,6 +383,77 @@ def test_trace_audit_config_defaults_and_friction_trigger_validation() -> None:
     assert "personal room" in room_desc
     assert "configured room" in trigger_desc
     assert "personal room" in trigger_desc
+
+
+def test_trace_audit_friction_target_room_validation(tmp_path: Path) -> None:
+    """Shared friction-mode agents need trace_audit.room or agent.rooms; private agents use personal rooms."""
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    friction = SkillLearningConfig(enabled=True, trigger="friction")
+
+    # Shared agent with rooms=[] and no trace_audit.room fails validation (direct or inherited from defaults).
+    for defaults, automations in ((None, ["trace_audit"]), (["trace_audit"], None)):
+        with pytest.raises(ValidationError, match=r"trace_audit\.room.*agent\.rooms"):
+            Config(
+                defaults={"automations": defaults} if defaults is not None else {},
+                agents={
+                    "mind": AgentConfig(
+                        display_name="Mind",
+                        memory_backend="mem0",
+                        rooms=[],
+                        automations=automations,
+                        skill_learning=friction,
+                    ),
+                },
+                router=RouterConfig(model="default"),
+            )
+
+    models = {"default": {"provider": "openai", "id": "gpt-test"}}
+
+    # Shared agent with rooms=[] and explicit trace_audit.room naming a valid room succeeds.
+    explicit_room_cfg = Config.validate_with_runtime(
+        {
+            "models": models,
+            "rooms": {"lobby": {}},
+            "agents": {
+                "mind": {
+                    "display_name": "Mind",
+                    "memory_backend": "mem0",
+                    "rooms": [],
+                    "automations": [{"name": "trace_audit", "room": "lobby"}],
+                    "skill_learning": {"enabled": True, "trigger": "friction"},
+                },
+            },
+            "router": {"model": "default"},
+        },
+        paths,
+    )
+    (explicit_entry,) = explicit_room_cfg.resolve_agent("mind").automations
+    assert isinstance(explicit_entry, TraceAuditAutomation)
+    assert explicit_entry.room == "lobby"
+
+    # Private agent with rooms=[] remains valid because it uses its personal rooms.
+    private_cfg = Config.validate_with_runtime(
+        {
+            "models": models,
+            "rooms": {"lobby": {}},
+            "personal_rooms": {"agent": "mind", "onboarding_rooms": ["lobby"]},
+            "agents": {
+                "mind": {
+                    "display_name": "Mind",
+                    "memory_backend": "mem0",
+                    "rooms": [],
+                    "private": {"per": "user_agent"},
+                    "automations": ["trace_audit"],
+                    "skill_learning": {"enabled": True, "trigger": "friction"},
+                },
+            },
+            "router": {"model": "default"},
+        },
+        paths,
+    )
+    (private_entry,) = private_cfg.resolve_agent("mind").automations
+    assert isinstance(private_entry, TraceAuditAutomation)
+    assert private_entry.room is None
 
 
 def test_response_skill_review_skips_capture_and_counting_in_friction_mode(tmp_path: Path) -> None:

@@ -39,7 +39,7 @@ from mindroom.trace_audit import (
     make_llm_audit_judge,
     run_audit_pass,
 )
-from mindroom.trace_audit.signals import extract_human_text, first_human_text
+from mindroom.trace_audit.signals import extract_human_text, triggering_human_text
 from mindroom.trace_audit.source import load_removed_run_ids
 from mindroom.usage.storage import USAGE_KINDS
 
@@ -362,7 +362,7 @@ def test_detect_session_incidents_material_friction_windows_and_human_text() -> 
     )
     assert extract_human_text(wrapped) == "Run the test suite"
     assert (
-        first_human_text(
+        triggering_human_text(
             (
                 RunMessageRecord(ord=0, role="user", content="hist", from_history=True),
                 RunMessageRecord(ord=1, role="user", content="synth", is_synthetic=True),
@@ -371,6 +371,25 @@ def test_detect_session_incidents_material_friction_windows_and_human_text() -> 
         )
         == "Run the test suite"
     )
+
+
+def test_evidence_card_selects_triggering_human_prompt_over_preceding_context() -> None:
+    """EvidenceCard captures the triggering user message rather than preceding unseen thread context."""
+    run = _run(
+        "r_trigger_prompt",
+        status="ERROR",
+        error="pytest failed",
+        messages=(
+            RunMessageRecord(ord=0, role="user", content="Lunch is at noon"),
+            RunMessageRecord(ord=1, role="user", content="Run the test suite"),
+        ),
+    )
+    sess = _session((run,))
+    card = build_evidence_card(detect_session_incidents(sess, now=NOW)[0], sess)
+
+    assert "user_ask: Run the test suite" in card.rendered
+    assert "Lunch is at noon" not in card.rendered
+    assert any(s.label == "user_ask" and s.text == "Run the test suite" for s in card.snippets)
 
 
 def test_source_read_only_exclusions_and_symlink_refusal(tmp_path: Path) -> None:
@@ -806,9 +825,54 @@ def test_evidence_card_shell_recovery_requires_matching_command() -> None:
     assert [e.recovered for e in non_shell_card.failure_sequence] == [True, True]
 
 
+async def _run_pass_with_optional_cancel(
+    *,
+    db_path: Path,
+    state_path: Path,
+    now: float,
+    settings: TraceAuditSettings,
+    cancel_on_call: int | None,
+    completed_runs: list[str],
+) -> tuple[list[str], AuditPassResult | None]:
+    started: list[str] = []
+    cancel_ready, never_set = asyncio.Event(), asyncio.Event()
+
+    async def _judge(card: EvidenceCard) -> AuditFinding:
+        started.append(card.run_id)
+        if cancel_on_call is not None and len(started) == cancel_on_call:
+            cancel_ready.set()
+            await never_set.wait()
+        completed_runs.append(card.run_id)
+        return _finding(
+            category="verification_gap",
+            remedy="verify_outcome",
+            root_cause="Missing check.",
+            proposed_rule="Check output.",
+        )
+
+    task = asyncio.create_task(
+        run_audit_pass(
+            db_path=db_path,
+            storage_name="assistant",
+            state_path=state_path,
+            scope_key="agent:assistant",
+            judge_fn=_judge,
+            now=now,
+            settings=settings,
+        ),
+    )
+    if cancel_on_call is None:
+        return started, await task
+    await cancel_ready.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    return started, None
+
+
 @pytest.mark.asyncio
 async def test_pipeline_cancellation_preserves_completed_findings_and_resumes(tmp_path: Path) -> None:
-    """Cancelling Stage 2 mid-batch persists finished findings without advancing cursors so the next pass resumes."""
+    """Cancelling Stage 2 mid-batch persists finished findings and advances cursors for completed cards."""
     db_path, state_path = tmp_path / "cancel.db", tmp_path / "state.json"
     s1, s2 = "!roomA:example.com:$s1", "!roomA:example.com:$s2"
     _seed_v8_db(
@@ -824,66 +888,30 @@ async def test_pipeline_cancellation_preserves_completed_findings_and_resumes(tm
             _db_run("r3", s2, 1, NOW - 2500, status="ERROR", error="fail 3"),
         ],
     )
-
-    second_started = asyncio.Event()
-    never_set = asyncio.Event()
-    pass1_calls: list[str] = []
-
-    async def slow_on_second_judge(card: EvidenceCard) -> AuditFinding:
-        pass1_calls.append(card.run_id)
-        if len(pass1_calls) == 2:
-            second_started.set()
-            await never_set.wait()
-        return _finding(
-            category="verification_gap",
-            remedy="verify_outcome",
-            root_cause="Missing check.",
-            proposed_rule="Check output.",
-        )
-
     settings = TraceAuditSettings(max_audits_per_run=5, min_cluster_sessions=2, audit_concurrency=1)
-    task = asyncio.create_task(
-        run_audit_pass(
-            db_path=db_path,
-            storage_name="assistant",
-            state_path=state_path,
-            scope_key="agent:assistant",
-            judge_fn=slow_on_second_judge,
-            now=NOW,
-            settings=settings,
-        ),
+    first_completed: list[str] = []
+    pass1_calls, _ = await _run_pass_with_optional_cancel(
+        db_path=db_path,
+        state_path=state_path,
+        now=NOW,
+        settings=settings,
+        cancel_on_call=2,
+        completed_runs=first_completed,
     )
-    await second_started.wait()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
     assert pass1_calls == ["r1", "r2"]
-    assert state_path.exists()
     saved_mid = json.loads(state_path.read_text(encoding="utf-8"))
     assert [f["run_id"] for f in saved_mid["findings"]] == ["r1"]
-    assert saved_mid["session_cursors"] == {}
+    assert saved_mid["session_cursors"] == {s1: 1, s2: 0}
 
-    pass2_calls: list[str] = []
-
-    async def resume_judge(card: EvidenceCard) -> AuditFinding:
-        pass2_calls.append(card.run_id)
-        return _finding(
-            category="verification_gap",
-            remedy="verify_outcome",
-            root_cause="Missing check.",
-            proposed_rule="Check output.",
-        )
-
-    res2 = await run_audit_pass(
+    pass2_calls, res2 = await _run_pass_with_optional_cancel(
         db_path=db_path,
-        storage_name="assistant",
         state_path=state_path,
-        scope_key="agent:assistant",
-        judge_fn=resume_judge,
         now=NOW + 60,
         settings=settings,
+        cancel_on_call=None,
+        completed_runs=first_completed,
     )
+    assert res2 is not None
     assert pass2_calls == ["r2", "r3"]
     assert (res2.incidents_audited, {f.run_id for f in res2.findings}) == (2, {"r2", "r3"})
     assert len(res2.actionable_clusters) == 1
@@ -891,3 +919,46 @@ async def test_pipeline_cancellation_preserves_completed_findings_and_resumes(tm
     saved_after = json.loads(state_path.read_text(encoding="utf-8"))
     assert {f["run_id"] for f in saved_after["findings"]} == {"r1", "r2", "r3"}
     assert saved_after["session_cursors"] == {s1: 2, s2: 1}
+
+    # Cursor advancement prevents re-auditing completed runs even after max_stored_findings evicts them.
+    evict_db, evict_state = tmp_path / "cancel_evict.db", tmp_path / "cancel_evict_state.json"
+    evict_sids = [f"!roomA:example.com:$ev{i}" for i in range(1, 6)]
+    _seed_v8_db(
+        evict_db,
+        "assistant",
+        sessions=[
+            {"session_id": sid, "created_at": NOW - 5000 + i * 100, "updated_at": NOW - 4500 + i * 100}
+            for i, sid in enumerate(evict_sids, start=1)
+        ],
+        runs=[
+            _db_run(f"e{i}", sid, 1, NOW - 5000 + i * 100, status="ERROR", error=f"evict fail {i}")
+            for i, sid in enumerate(evict_sids, start=1)
+        ],
+    )
+    evict_settings = TraceAuditSettings(
+        max_audits_per_run=5,
+        min_cluster_sessions=2,
+        audit_concurrency=1,
+        max_stored_findings=2,
+    )
+    completed_runs: list[str] = []
+    started_per_tick: list[list[str]] = []
+    for tick, cancel_on in enumerate((3, 3, None)):
+        started, res = await _run_pass_with_optional_cancel(
+            db_path=evict_db,
+            state_path=evict_state,
+            now=NOW + tick * 60,
+            settings=evict_settings,
+            cancel_on_call=cancel_on,
+            completed_runs=completed_runs,
+        )
+        started_per_tick.append(started)
+        if cancel_on is None:
+            assert res is not None
+            assert res.incidents_audited == 1
+
+    assert started_per_tick == [["e1", "e2", "e3"], ["e3", "e4", "e5"], ["e5"]]
+    assert completed_runs == ["e1", "e2", "e3", "e4", "e5"]
+    evict_saved = json.loads(evict_state.read_text(encoding="utf-8"))
+    assert len(evict_saved["findings"]) == 2
+    assert evict_saved["session_cursors"] == dict.fromkeys(evict_sids, 1)

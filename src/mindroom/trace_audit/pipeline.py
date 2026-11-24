@@ -82,6 +82,27 @@ def _prune_state(state: _AuditState, *, now: float, settings: TraceAuditSettings
     state.cooldowns = {k: ts for k, ts in state.cooldowns.items() if ts >= cooldown_cutoff}
 
 
+def _advance_cursors(state: _AuditState, max_seq: dict[str, int], deferred_min_seq: dict[str, int]) -> None:
+    for sid, seq in max_seq.items():
+        state.session_cursors[sid] = (
+            max(state.session_cursors.get(sid, 0), deferred_min_seq[sid] - 1) if sid in deferred_min_seq else seq
+        )
+
+
+def _deferred_min_seq_on_cancel(
+    candidates: list[tuple[Incident, AuditedSession]],
+    completed: list[FindingRecord],
+) -> dict[str, int]:
+    completed_ids = {record.run_id for record in completed}
+    deferred: dict[str, int] = {}
+    for inc, _ in candidates:
+        if inc.run_id not in completed_ids:
+            prev = deferred.get(inc.session_id)
+            if prev is None or inc.run_seq < prev:
+                deferred[inc.session_id] = inc.run_seq
+    return deferred
+
+
 def _effective_scope(scope_key: str, room_id: str | None) -> str:
     return f"{scope_key}::{room_id}" if room_id and room_id not in scope_key else scope_key
 
@@ -314,7 +335,7 @@ async def run_audit_pass(
         state.findings = [f for f in state.findings if f.run_id not in removed_ids]
     already_audited = {f.run_id for f in state.findings}
     candidates = [pair for pair in candidates if pair[0].run_id not in already_audited]
-    completed_findings: list[FindingRecord] = []
+    completed: list[FindingRecord] = []
     if judge_fn is not None:
         try:
             new_findings, deferred_min_seq = await _audit_selected(
@@ -323,22 +344,19 @@ async def run_audit_pass(
                 scope_key=scope_key,
                 cfg=cfg,
                 allowed_room_id=allowed_room_id,
-                completed=completed_findings,
+                completed=completed,
             )
         except asyncio.CancelledError:
-            if completed_findings:
-                state.findings.extend(completed_findings)
+            if completed:
+                state.findings.extend(completed)
+                _advance_cursors(state, max_seq, _deferred_min_seq_on_cancel(candidates, completed))
                 _prune_state(state, now=current_ts, settings=cfg)
                 _save_state(state_path, state)
             raise
-    else:
-        new_findings, deferred_min_seq = [], {}
-    if judge_fn is not None:
         state.findings.extend(new_findings)
-        for sid, seq in max_seq.items():
-            state.session_cursors[sid] = (
-                max(state.session_cursors.get(sid, 0), deferred_min_seq[sid] - 1) if sid in deferred_min_seq else seq
-            )
+        _advance_cursors(state, max_seq, deferred_min_seq)
+    else:
+        new_findings = []
     _prune_state(state, now=current_ts, settings=cfg)
     for key, delta in (
         ("passes", 1),

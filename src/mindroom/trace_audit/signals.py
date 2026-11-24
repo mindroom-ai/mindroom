@@ -81,9 +81,9 @@ def extract_human_text(raw: str) -> str:
     return "\n".join(body for body in bodies if body).strip()
 
 
-def first_human_text(messages: tuple[RunMessageRecord, ...]) -> str:
+def triggering_human_text(messages: tuple[RunMessageRecord, ...]) -> str:
     """Return the triggering human prompt text from a run's stored messages."""
-    for msg in messages:
+    for msg in reversed(messages):
         if (
             msg.role == "user"
             and not msg.is_synthetic
