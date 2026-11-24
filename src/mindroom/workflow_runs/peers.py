@@ -17,7 +17,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable
 
 MAX_PEER_BYTES = 1024 * 1024
-DEADLOCK_NOTE = "Every agent is waiting for a message and nobody is left to send one."
 
 _LIVE = frozenset(state.value for state in LIVE_NODE_STATES)
 _UNREACHABLE = "'{name}' has finished and will not read this. Use spawn() to keep an agent you want to talk to."
@@ -161,7 +160,8 @@ def read_call(
     reader: NodeRef,
     names: Collection[str],
     record_empty: bool = True,
-) -> list[dict[str, object]] | None:
+    empty_note: str | None = None,
+) -> dict[str, object] | None:
     """Read unread messages for *reader* in one transaction keyed by *op_id*, or None if empty and `not record_empty`."""
     r_key, r_gen = reader.cursor_key
 
@@ -175,16 +175,11 @@ def read_call(
                 "ON CONFLICT(run_id, reader_key, reader_generation) DO UPDATE SET seq = excluded.seq"
             )
             conn.execute(q, (run_id, r_key, r_gen, int(matched[-1]["seq"])))
-        return [{"from": r["sender_name"], "text": r["text"], "sent_at": r["created_at"]} for r in matched]
+        msgs = [{"from": r["sender_name"], "text": r["text"], "sent_at": r["created_at"]} for r in matched]
+        return {"messages": msgs, **({"note": empty_note} if not msgs and empty_note else {})}
 
     saved = _once(store, run_id, op_id, _effect)
-    return None if saved is _SKIP else cast("list[dict[str, object]]", saved)
-
-
-def has_unread(store: WorkflowRunStore, run_id: str, *, reader: NodeRef, names: Collection[str]) -> bool:
-    """Return whether *reader* has any unread, non-withdrawn message waiting in *run_id*."""
-    with store.read_connection() as conn:
-        return bool(_unread_rows(conn, run_id, reader, names))
+    return None if saved is _SKIP else cast("dict[str, object]", saved)
 
 
 def get_state(store: WorkflowRunStore, run_id: str, *, op_id: str, key: str | None = None) -> dict[str, object]:
@@ -280,8 +275,9 @@ def session_turn_message(
     name = session.name or str(session.request.get("name") or "")
     reader = NodeRef(turn_key, turn_gen, name or f"n{session.seq}", session.key, session.generation)
     names = (name, "*") if name else ("*",)
-    new_msgs = read_call(store, run_id, op_id=f"session_inbox:{turn_key}:{turn_gen}", reader=reader, names=names)
-    mail = [*prior, *(new_msgs or ())]
+    res = read_call(store, run_id, op_id=f"session_inbox:{turn_key}:{turn_gen}", reader=reader, names=names)
+    new_msgs = cast("list[dict[str, object]]", res["messages"]) if res is not None else ()
+    mail = [*prior, *new_msgs]
     return format_session_message(message, mail), mail
 
 

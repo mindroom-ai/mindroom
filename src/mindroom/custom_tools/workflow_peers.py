@@ -74,16 +74,15 @@ class WorkflowPeerTools(Toolkit):
     async def read_peer_messages(self, wait_seconds: float = 0) -> str:
         """Return unread messages as `{"messages": [{"from", "text", "sent_at"}], "note"?: ...}`.
 
-        Waiting (`wait_seconds > 0`, no ceiling) releases your concurrency slot and may return early with
-        `"messages": []` and `"note"` if nobody is left to send a message.
+        Waiting (`wait_seconds > 0`, no ceiling) releases your concurrency slot and returns on the first message,
+        or with `"messages": []` and `"note": "No message arrived within <N> s."` when `wait_seconds` elapses.
         """
         if isinstance(wait_seconds, bool) or wait_seconds < 0:
             msg = "wait_seconds must be a non-negative number."
             raise WorkflowRunStoreError(msg)
         engine, run_id, node, ref, op_id = _bind("read_peer_messages", {"wait_seconds": wait_seconds})
         names = (node.name, "*") if node.name else ("*",)
-        msgs, note = await engine.wait_for_messages(run_id, ref, float(wait_seconds), op_id=op_id, names=names)
-        return json.dumps({"messages": msgs, **({"note": note} if note is not None else {})})
+        return json.dumps(await engine.wait_for_messages(run_id, ref, float(wait_seconds), op_id=op_id, names=names))
 
     async def list_peers(self) -> str:
         """Return the name, status and label of every current agent and session in this workflow run."""

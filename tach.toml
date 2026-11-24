@@ -2648,7 +2648,6 @@ depends_on = [
 [[interfaces]]
 from = ["mindroom.workflow_runs.peers"]
 expose = [
-    "DEADLOCK_NOTE",
     "MAX_PEER_BYTES",
     "NodeRef",
     "PeerTooLargeError",
@@ -2657,7 +2656,6 @@ expose = [
     "all_state",
     "format_session_message",
     "get_state",
-    "has_unread",
     "list_peers",
     "message_edges",
     "peer_op_id",

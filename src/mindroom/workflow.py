@@ -153,20 +153,6 @@ class _Local(threading.local):
 
 _local = _Local()
 _lanes_cond = threading.Condition()
-_runnable_lock = threading.Lock()
-_runnable_seq, _runnable_count = 0, 0
-
-
-def _runnable_change(delta: int, *, reset: bool = False) -> None:
-    global _runnable_seq, _runnable_count
-    with _runnable_lock:
-        _runnable_seq += 1
-        _runnable_count = max(0, delta if reset else _runnable_count + delta)
-
-
-def _runnable_header() -> str:
-    with _runnable_lock:
-        return f"{_runnable_seq}:{_runnable_count}"
 
 
 def _current_lane() -> _Lane:
@@ -205,7 +191,6 @@ class _Gateway:
             headers = {
                 "Authorization": f"Bearer {self._token}",
                 "Content-Type": "application/json",
-                "X-Workflow-Runnable": _runnable_header(),
                 **({"X-Workflow-State": state} if state is not None else {}),
             }
             request = urllib.request.Request(  # noqa: S310 - the launcher sets the gateway URL.
@@ -305,25 +290,21 @@ def _call(
     gateway = _gateway()
     node_key = _next_key() if key is None else key
     receipt = gateway.submit(node_key, kind, args, {k: value for k, value in meta.items() if value is not None})
-    _runnable_change(-1)
-    try:
-        node_id = str(receipt["id"])
-        # A call that waits for a person or peer is no active lane of its fan-out: the next lane starts in its place,
-        # and the call takes a place again before it goes on.
-        owner, waiting = _local.lanes, False
-        while receipt["state"] not in _SETTLED_STATES or waiting:
-            if owner is not None and waiting != (receipt["state"] == "waiting"):
-                waiting = not waiting
-                _local.parked = waiting
-                (owner.park if waiting else owner.unpark)()
-            if receipt["state"] not in _SETTLED_STATES:
-                receipt = gateway.poll(node_id, state=str(receipt["state"]))
-        if receipt["state"] == "completed":
-            return gateway.result(node_id) if receipt.get("result_ref") else receipt.get("result")
-        errs = {"agent": AgentError, "turn": AgentError, "session": AgentError, "tool": ToolError}
-        raise _failure(receipt, errs.get(kind, WorkflowError))
-    finally:
-        _runnable_change(1)
+    node_id = str(receipt["id"])
+    # A call that waits for a person or peer is no active lane of its fan-out: the next lane starts in its place,
+    # and the call takes a place again before it goes on.
+    owner, waiting = _local.lanes, False
+    while receipt["state"] not in _SETTLED_STATES or waiting:
+        if owner is not None and waiting != (receipt["state"] == "waiting"):
+            waiting = not waiting
+            _local.parked = waiting
+            (owner.park if waiting else owner.unpark)()
+        if receipt["state"] not in _SETTLED_STATES:
+            receipt = gateway.poll(node_id, state=str(receipt["state"]))
+    if receipt["state"] == "completed":
+        return gateway.result(node_id) if receipt.get("result_ref") else receipt.get("result")
+    errs = {"agent": AgentError, "turn": AgentError, "session": AgentError, "tool": ToolError}
+    raise _failure(receipt, errs.get(kind, WorkflowError))
 
 
 def _failure(receipt: dict[str, object], error_type: type[WorkflowError]) -> WorkflowError:
@@ -525,8 +506,6 @@ def _fan_out(
     active = min(len(calls), max_concurrent or _MAX_ACTIVE_LANES, _MAX_ACTIVE_LANES)
     lanes = _Lanes(threading.Semaphore(active), [None] * len(calls), _local.lanes, len(calls), len(calls))
     threads: list[threading.Thread] = []
-    started = 0
-    _runnable_change(len(calls) - 1)
     try:
         for position, call in enumerate(calls):
             # Waits for a lane to end, or to wait for a person/peer, so 1,000 items are never 1,000 threads at work.
@@ -537,7 +516,6 @@ def _fan_out(
             with _lanes_cond:
                 lanes.unstarted -= 1
                 lanes.working += 1
-            started += 1
             work = (position, call, _Lane(members[position], phase=lane.phase))
             threads.append(threading.Thread(target=lanes.run, args=work, daemon=True))
             threads[-1].start()
@@ -545,7 +523,6 @@ def _fan_out(
             thread.join()
     finally:
         lanes.restore_parent()
-        _runnable_change(1 - (len(calls) - started))
     if lanes.stopped:
         raise lanes.stopped[0]
     if lanes.errors:
@@ -617,7 +594,6 @@ class _Lanes:
                 report: dict[str, object] = {"type": type(error).__name__, "message": str(error)[:_ERROR_BYTES]}
                 _gateway().submit(_next_key(), "error", report, {"phase": lane.phase} if lane.phase else {})
         finally:
-            _runnable_change(-1)
             was_parked, _local.parked = _local.parked, False
             self.park(finished=True, was_parked=was_parked)
 
@@ -697,14 +673,14 @@ def send(to: str, text: str) -> dict[str, object]:
     return cast("dict[str, object]", _call("send", {"to": str(to), "text": str(text)}))
 
 
-def inbox(wait_seconds: float = 0) -> list[dict[str, object]]:
-    """Return messages sent to "script" as [{from, text, sent_at}]; waiting can end early with [] on deadlock."""
+def inbox(wait_seconds: float = 0) -> dict[str, object]:
+    """Return unread messages sent to "script" as {"messages": [{"from", "text", "sent_at"}], "note"?: ...}."""
     _current_lane()
     wait = float(wait_seconds)
     if not math.isfinite(wait) or wait < 0:
         msg = "wait_seconds must be a finite non-negative number."
         raise WorkflowError(msg)
-    return cast("list[dict[str, object]]", _call("inbox", {"wait_seconds": wait}))
+    return cast("dict[str, object]", _call("inbox", {"wait_seconds": wait}))
 
 
 class state:  # noqa: N801 - public SDK namespace matching the spec (`state.get` / `state.set`).
@@ -787,11 +763,9 @@ def run_workflow(source_path: str) -> None:
             raise WorkflowError(_NO_MAIN)  # noqa: TRY301 - reported like any failure of the script.
         args = gateway.run_info()["args"]
         _local.lane = _Lane("")
-        _runnable_change(1, reset=True)
         try:
             result = main(args)
         finally:
-            _runnable_change(-1)
             _local.lane = None
         gateway.finish(result=result)
     except Exception:

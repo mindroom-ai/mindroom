@@ -26,11 +26,9 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from mindroom.workflow_runs import agent_nodes, peers
 from mindroom.workflow_runs import engine as engine_module
-from mindroom.workflow_runs.answers import answer_question
 from mindroom.workflow_runs.graph import graph_rows
-from mindroom.workflow_runs.models import TERMINAL_RUN_STATES, WorkflowNode, WorkflowNodeState, WorkflowRunState
+from mindroom.workflow_runs.models import TERMINAL_RUN_STATES, WorkflowNodeState, WorkflowRunState
 from mindroom.workflow_runs.peers import (
-    DEADLOCK_NOTE,
     NodeRef,
     PeerTooLargeError,
     PeerUnreachableError,
@@ -160,7 +158,9 @@ async def test_message_to_a_name_nobody_has_yet_is_held_and_delivered_when_it_st
 
     await stack.submit("/0:p1@0", "agent", {"prompt": "fe", "name": "frontend"}, meta={"name": "frontend"})
     frontend = _ref(stack, "/0:p1@0")
-    messages = peers.read_call(stack.store, stack.run_id, op_id="op-2", reader=frontend, names=("frontend", "*"))
+    got = peers.read_call(stack.store, stack.run_id, op_id="op-2", reader=frontend, names=("frontend", "*"))
+    assert got is not None
+    messages = got["messages"]
     assert [m["text"] for m in messages] == ["contract v1"]
     assert messages[0]["from"] == "backend"
     assert "sent_at" in messages[0]
@@ -194,9 +194,10 @@ async def test_a_retried_tool_call_sends_once_and_reads_the_same_messages(stack:
     read_op1 = peer_op_id(b.key, b.generation, "mrun-2", "call-2", "read_peer_messages", {"wait_seconds": 0})
     read_op2 = peer_op_id(b.key, b.generation, "mrun-2", "call-3", "read_peer_messages", {"wait_seconds": 0})
     first_read = peers.read_call(stack.store, stack.run_id, op_id=read_op1, reader=b, names=("b", "*"))
+    assert first_read is not None
     assert peers.read_call(stack.store, stack.run_id, op_id=read_op1, reader=b, names=("b", "*")) == first_read
-    assert peers.read_call(stack.store, stack.run_id, op_id=read_op2, reader=b, names=("b", "*")) == []
-    assert [m["text"] for m in first_read] == ["hello"]
+    assert peers.read_call(stack.store, stack.run_id, op_id=read_op2, reader=b, names=("b", "*")) == {"messages": []}
+    assert [m["text"] for m in first_read["messages"]] == ["hello"]
 
     hold.set()
     await stack.result("/0:p0@0", "agent", {"prompt": "a", "name": "a"}, meta={"name": "a"})
@@ -217,7 +218,7 @@ async def test_script_send_is_not_repeated_on_resume_and_inbox_replays(stack: Wo
         == "worker done"
     )
     msgs = await stack.result("@2", "inbox", {"wait_seconds": 0})
-    assert [m["text"] for m in msgs] == ["ping from worker"]
+    assert [m["text"] for m in msgs["messages"]] == ["ping from worker"]
     assert len(peers.all_messages(stack.store, stack.run_id)) == 2
 
     await stack.finish_attempt(result="done")
@@ -295,41 +296,87 @@ async def test_waiting_reader_frees_the_only_slot_for_its_sender(
 
 
 @pytest.mark.asyncio
-async def test_everyone_waiting_returns_with_the_note_instead_of_hanging(stack: WorkflowStack) -> None:
-    """When every unfinished agent waits on peer and runnable==0, all waiters return [] with the deadlock note."""
+async def test_waiting_reader_returns_timeout_note_and_retries_persist_it(stack: WorkflowStack) -> None:
+    """A reader whose sender never sends returns the timeout note at wait_seconds (fake clock), persisted under op_id."""
     seen_tool_results: list[dict[str, Any]] = []
-
-    both_submitted = asyncio.Event()
 
     def _handle(request: ModelRequest) -> list[ScriptStep]:
         outs = _tool_outputs(request)
         if not outs:
-            name = _user_texts(request)[0]
-            return [Await(both_submitted.wait), *calls(tool_call("read_peer_messages", f"r-{name}", wait_seconds=600))]
+            return calls(tool_call("read_peer_messages", "r-timeout", wait_seconds=30))
         seen_tool_results.extend(outs)
-        return answer("unblocked")
+        return answer("timed-out")
 
     _route_agents(stack, _handle)
-    await stack.submit("/0:p0@0", "agent", {"prompt": "a", "name": "a"}, meta={"name": "a"})
-    await stack.submit("/0:p1@0", "agent", {"prompt": "b", "name": "b"}, meta={"name": "b"})
-    both_submitted.set()
-    await stack.until(lambda: stack.run_id in stack.engine._deadlock_since)
-    # Before the 2s grace elapses, neither waiter has deadlocked; advancing the fake clock past 2s unblocks both.
-    stack.now += 1.0
-    await asyncio.sleep(0.05)
-    assert not seen_tool_results
-    stack.now += 1.5
-
-    res_a, res_b = await asyncio.wait_for(
-        asyncio.gather(
-            stack.result("/0:p0@0", "agent", {"prompt": "a", "name": "a"}, meta={"name": "a"}),
-            stack.result("/0:p1@0", "agent", {"prompt": "b", "name": "b"}, meta={"name": "b"}),
-        ),
-        timeout=SETTLE_TIMEOUT_SECONDS,
+    receipt = await stack.submit("@0", "agent", {"prompt": "wait", "name": "reader"}, meta={"name": "reader"})
+    await stack.until(
+        lambda: (n := stack.store.get_node(stack.run_id, "@0")) is not None and n.waiting_on == "peer",
     )
-    assert (res_a, res_b) == ("unblocked", "unblocked")
-    assert len(seen_tool_results) == 2
-    assert all(r == {"messages": [], "note": DEADLOCK_NOTE} for r in seen_tool_results)
+    # Before wait_seconds elapses, no deadlock notice fires; advancing fake clock past 30s ends the wait with the note.
+    stack.now += 10.0
+    async with stack.engine._condition(stack.run_id):
+        stack.engine._condition(stack.run_id).notify_all()
+    await asyncio.sleep(0.02)
+    assert not seen_tool_results
+
+    stack.now += 25.0
+    async with stack.engine._condition(stack.run_id):
+        stack.engine._condition(stack.run_id).notify_all()
+    await stack.until(
+        lambda: (n := stack.store.get_node(stack.run_id, "@0")) is not None and n.state is WorkflowNodeState.COMPLETED,
+    )
+    assert receipt.id == "n1"
+    assert seen_tool_results == [{"messages": [], "note": "No message arrived within 30 s."}]
+
+    # Retrying an identical timed-out wait op_id returns the exact persisted outcome including note (Astra round 2 Medium).
+    reader = _ref(stack, "@0")
+    retry_op = peer_op_id(
+        reader.key,
+        reader.generation,
+        "mrun-retry",
+        "call-retry",
+        "read_peer_messages",
+        {"wait_seconds": 15},
+    )
+    wait_task = asyncio.create_task(
+        stack.engine.wait_for_messages(
+            stack.run_id,
+            reader,
+            15.0,
+            op_id=retry_op,
+            names=("reader", "*"),
+            holds_slot=False,
+        ),
+    )
+    await asyncio.sleep(0.02)
+    stack.now += 20.0
+    async with stack.engine._condition(stack.run_id):
+        stack.engine._condition(stack.run_id).notify_all()
+    first = await asyncio.wait_for(wait_task, timeout=SETTLE_TIMEOUT_SECONDS)
+    expected = {"messages": [], "note": "No message arrived within 15 s."}
+    assert first == expected
+    replayed = await stack.engine.wait_for_messages(
+        stack.run_id,
+        reader,
+        15.0,
+        op_id=retry_op,
+        names=("reader", "*"),
+        holds_slot=False,
+    )
+    assert replayed == expected
+
+    # Script inbox(wait_seconds=12) also returns the timeout note when no message arrives.
+    inbox_receipt = await stack.submit("@1", "inbox", {"wait_seconds": 12})
+    assert inbox_receipt.state is WorkflowNodeState.WAITING
+    stack.now += 15.0
+    async with stack.engine._condition(stack.run_id):
+        stack.engine._condition(stack.run_id).notify_all()
+    await stack.until(
+        lambda: (n := stack.store.get_node(stack.run_id, "@1")) is not None and n.state is WorkflowNodeState.COMPLETED,
+    )
+    inbox_node = stack.store.get_node(stack.run_id, "@1")
+    assert inbox_node is not None
+    assert inbox_node.result == {"messages": [], "note": "No message arrived within 12 s."}
 
 
 @pytest.mark.asyncio
@@ -399,20 +446,16 @@ async def test_two_agents_sharing_a_name_each_get_a_copy_and_star_reaches_all_un
         "delivered": 2,
         "held": False,
     }
-    assert [
-        m["text"] for m in peers.read_call(stack.store, stack.run_id, op_id="rd1", reader=r1, names=("reviewer", "*"))
-    ] == [
-        "check diff",
-        "all hands",
-    ]
-    assert [
-        m["text"] for m in peers.read_call(stack.store, stack.run_id, op_id="rd2", reader=r2, names=("reviewer", "*"))
-    ] == [
-        "check diff",
-        "all hands",
-    ]
+    rd1 = peers.read_call(stack.store, stack.run_id, op_id="rd1", reader=r1, names=("reviewer", "*"))
+    rd2 = peers.read_call(stack.store, stack.run_id, op_id="rd2", reader=r2, names=("reviewer", "*"))
+    assert rd1 is not None
+    assert rd2 is not None
+    assert [m["text"] for m in rd1["messages"]] == ["check diff", "all hands"]
+    assert [m["text"] for m in rd2["messages"]] == ["check diff", "all hands"]
     # Sender does not receive its own broadcast.
-    assert peers.read_call(stack.store, stack.run_id, op_id="rd3", reader=lead, names=("lead", "*")) == []
+    assert peers.read_call(stack.store, stack.run_id, op_id="rd3", reader=lead, names=("lead", "*")) == {
+        "messages": [],
+    }
 
     hold.set()
     for key, name in (("/0:p0@0", "reviewer"), ("/0:p1@0", "reviewer"), ("/0:p2@0", "lead")):
@@ -838,63 +881,6 @@ async def test_real_sdk_script_sends_after_agent_finishes_no_false_deadlock(
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Local workflow runs are Linux only.")
 @pytest.mark.asyncio
-async def test_lone_agent_after_child_ask_user_gets_deadlock_note(local_stack: LocalWorkflowStack) -> None:
-    """Astra blocker 2: a lone agent calling ask_user then read_peer_messages still receives the deadlock note."""
-    seen: list[dict[str, Any]] = []
-
-    def _handle(req: ModelRequest) -> list[ScriptStep]:
-        tools = [m.content for m in req.messages if m.role == "tool" and isinstance(m.content, str)]
-        if len(tools) == 0:
-            return calls(tool_call("ask_user", "q1", question="Continue?"))
-        if len(tools) == 1:
-            assert tools[0] == "yes"
-            return calls(tool_call("read_peer_messages", "r1", wait_seconds=3))
-        seen.append(json.loads(tools[1]))
-        return answer("done")
-
-    _route_agents(local_stack, _handle)
-    script = "from mindroom.workflow import agent\ndef main(args):\n    return agent('solo', name='solo')\n"
-    run = await local_stack.start(source=script)
-
-    def _open_ask() -> WorkflowNode | None:
-        return next(
-            (
-                n
-                for n in local_stack.store.nodes(run.run_id)
-                if n.kind == "ask" and n.state is WorkflowNodeState.WAITING and "event_id" in n.links
-            ),
-            None,
-        )
-
-    await asyncio.wait_for(local_stack.until(_open_ask), timeout=SETTLE_TIMEOUT_SECONDS)
-    ask = _open_ask()
-    assert ask is not None
-    assert (
-        await answer_question(
-            local_stack.engine,
-            run_id=run.run_id,
-            node_id=f"n{ask.seq}",
-            sender=local_stack.context.requester_id,
-            room_id=local_stack.context.room_id,
-            thread_id=local_stack.context.thread_id,
-            card_event_id=ask.links["event_id"],
-            option=None,
-            text="yes",
-        )
-        == "accepted"
-    )
-    await asyncio.wait_for(
-        local_stack.until(lambda: local_stack.store.get_run(run.run_id).state in TERMINAL_RUN_STATES),
-        timeout=SETTLE_TIMEOUT_SECONDS,
-    )
-    ended = local_stack.store.get_run(run.run_id)
-    assert ended.state is WorkflowRunState.COMPLETED, ended.error
-    assert len(seen) == 1
-    assert seen[0].get("note") == DEADLOCK_NOTE, seen
-
-
-@pytest.mark.skipif(sys.platform != "linux", reason="Local workflow runs are Linux only.")
-@pytest.mark.asyncio
 async def test_nested_foreach_reader_releases_outer_slot_for_sender(local_stack: LocalWorkflowStack) -> None:
     """Astra blocker 3: a nested foreach whose reader parks on peer releases the outer max_concurrent=1 slot."""
     got: list[dict[str, Any]] = []
@@ -1052,8 +1038,8 @@ async def test_star_broadcast_freezes_recipients_at_send_time(stack: WorkflowSta
     )
     assert live_msgs is not None
     assert later_msgs is not None
-    assert [m["text"] for m in live_msgs] == ["freeze-check"]
-    assert [m["text"] for m in later_msgs] == ["for-later"]
+    assert [m["text"] for m in live_msgs["messages"]] == ["freeze-check"]
+    assert [m["text"] for m in later_msgs["messages"]] == ["for-later"]
 
     send_node = stack.store.get_node(stack.run_id, "@5")
     live_node = stack.store.get_node(stack.run_id, "/0:p1@0")

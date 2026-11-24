@@ -67,10 +67,8 @@ from mindroom.workflow_runs.models import (
 )
 from mindroom.workflow_runs.notices import RETRY_SECONDS
 from mindroom.workflow_runs.peers import (
-    DEADLOCK_NOTE,
     NodeRef,
     format_session_message,
-    has_unread,
     read_call,
     script_op,
     session_turn_message,
@@ -230,8 +228,6 @@ _STOPPING = "The agent this call replaces is stopping. Try again in a moment."
 _RATE_WAIT_SECONDS = 1.0
 # How long after its report a script's exit is looked for, before the script runtime's own pass finds it.
 _EXIT_POLL_SECONDS = (0.05, 0.2, 0.5, 1.0, 2.0, 5.0)
-# How long all peer-deadlock conditions must hold continuously without a node change before returning the note.
-DEADLOCK_GRACE_SECONDS = 2.0
 
 type _Outcome = tuple[WorkflowNodeState, object, dict[str, object] | None]
 
@@ -259,15 +255,6 @@ class _Places:
     limit: int
     working: set[str] = field(default_factory=set)
     queued: deque[tuple[str, Callable[[], Awaitable[object]]]] = field(default_factory=deque)
-
-
-@dataclass(slots=True, eq=False)
-class _PeerWaiter:
-    """One active wait for peer messages."""
-
-    key: str
-    reader: NodeRef
-    names: tuple[str, ...]
 
 
 # What the saved owner of a run has now in the run's conversation: its live context once access is confirmed,
@@ -315,12 +302,6 @@ class WorkflowEngine:
         # Which calls of each run work now and which wait for a place, counted here and not from the saved nodes: a
         # node that an ended attempt left running holds no place until the attempt that reaches it waits for it.
         self._places: dict[str, _Places] = {}
-        self._peer_waiters: dict[str, set[_PeerWaiter]] = {}
-        # Newest `X-Workflow-Runnable: <counter>:<runnable>` report per script attempt ID.
-        self._runnable: dict[str, tuple[int, int]] = {}
-        self._last_node_change: dict[str, float] = {}
-        self._deadlock_since: dict[str, float] = {}
-        self._deadlock_wave: dict[str, set[str]] = {}
         self._attending: Counter[str | None] = Counter()
         self._inline_runs: dict[str, str] = {}
         self._closed = False
@@ -794,32 +775,17 @@ class WorkflowEngine:
         sha256 = hashlib.sha256(raw).hexdigest()
         return await asyncio.to_thread(self.store.put_source, run.run_id, run.attempt, run.epoch, name, raw, sha256)
 
-    async def submit_node(
-        self,
-        attempt: ScriptRunRecord,
-        request: NodeRequest,
-        *,
-        runnable: str | None = None,
-    ) -> NodeReceipt:
+    async def submit_node(self, attempt: ScriptRunRecord, request: NodeRequest) -> NodeReceipt:
         """Save and dispatch one call of the attempt's script, or return the receipt of the node its key has."""
         run = await self._current_run(attempt)
         # The engine owns a call from its insert to its dispatch, so a caller that goes away strands no running node.
-        return await asyncio.shield(self._spawn(_ADMISSIONS, self._admit(run, attempt, request, runnable=runnable)))
+        return await asyncio.shield(self._spawn(_ADMISSIONS, self._admit(run, attempt, request)))
 
-    async def _admit(
-        self,
-        asked: WorkflowRun,
-        attempt: ScriptRunRecord,
-        request: NodeRequest,
-        *,
-        runnable: str | None = None,
-    ) -> NodeReceipt:
+    async def _admit(self, asked: WorkflowRun, attempt: ScriptRunRecord, request: NodeRequest) -> NodeReceipt:
         # Held from the lookup to the dispatch: two requests with one key cannot both find it free, and the run
-        # cannot end in between. Recording `runnable` after admitting ensures the submitted node is visible first.
+        # cannot end in between.
         async with (condition := self._condition(asked.run_id)):
             receipt = await self._admit_gated(self.store.get_run(asked.run_id), asked.epoch, attempt, request)
-            self._touch_node(asked.run_id)
-            self._record_runnable(attempt, runnable)
             condition.notify_all()
             return receipt
 
@@ -1199,7 +1165,6 @@ class WorkflowEngine:
             settle = partial(self.store.settle_node, run_id, key, generation, run.epoch)
             if not await asyncio.to_thread(partial(settle, state=WorkflowNodeState.COMPLETED, result=answer)):
                 return False
-            self._touch_node(run_id)
             await self._restate(run_id)
             condition.notify_all()
         # Without the lock, which no send to the room holds up for long.
@@ -1299,7 +1264,6 @@ class WorkflowEngine:
         async with self._condition(run_id):
             if (places := self._places.get(run_id)) is not None:
                 places.working.discard(key)
-            self._touch_node(run_id)
             with suppress(WorkflowRunNotFoundError):
                 await self._check_budget(self.store.get_run(run_id))
 
@@ -1539,96 +1503,8 @@ class WorkflowEngine:
         send_call = partial(send_peer_message, self.store, run_id, op_id=op_id, sender=sender)
         result = await asyncio.to_thread(send_call, to=to, text=text)
         async with (condition := self._condition(run_id)):
-            self._touch_node(run_id)
             condition.notify_all()
         return result
-
-    def _touch_node(self, run_id: str) -> None:
-        self._last_node_change[run_id] = self._clock()
-        self._deadlock_since.pop(run_id, None)
-
-    def _record_runnable(self, attempt: ScriptRunRecord, header: str | None) -> bool:
-        raw_seq, sep, raw_count = (header or "").partition(":")
-        if not attempt.workflow_run_id or not sep or not raw_seq.isdecimal() or not raw_count.isdecimal():
-            return False
-        counter, count = int(raw_seq), int(raw_count)
-        prev = self._runnable.get(attempt.run_id)
-        if prev is not None and counter <= prev[0]:
-            return False
-        self._runnable[attempt.run_id] = (counter, count)
-        if count > 0:
-            self._deadlock_since.pop(attempt.workflow_run_id, None)
-        return count == 0
-
-    async def record_runnable(self, attempt: ScriptRunRecord, header: str | None) -> None:
-        """Record the SDK's `X-Workflow-Runnable` report if newer and wake waiters when runnable hits 0."""
-        if header and attempt.workflow_run_id:
-            async with (condition := self._condition(attempt.workflow_run_id)):
-                if self._record_runnable(attempt, header):
-                    condition.notify_all()
-
-    def _deadlock_wait(self, run_id: str) -> float | None:
-        waiters, places = self._peer_waiters.get(run_id), self._places.get(run_id)
-        if (
-            waiters
-            and run_id not in self._stopping
-            and not self._closed
-            and not (places and (places.working or places.queued))
-        ):
-            with suppress(WorkflowRunNotFoundError):
-                run = self.store.get_run(run_id)
-                report = self._runnable.get(run.script_run_id or "")
-                keys = {w.key for w in waiters}
-                live = [n for n in self.store.nodes(run_id, light=True) if n.state in LIVE_NODE_STATES]
-                if (
-                    run.state not in TERMINAL_RUN_STATES
-                    and (report is None or report[1] == 0)
-                    and live
-                    and all(
-                        n.key in keys and n.state is WorkflowNodeState.WAITING and n.waiting_on == "peer" for n in live
-                    )
-                    and not any(has_unread(self.store, run_id, reader=w.reader, names=w.names) for w in waiters)
-                ):
-                    now = self._clock()
-                    since = max(self._deadlock_since.setdefault(run_id, now), self._last_node_change.get(run_id, 0.0))
-                    return max(0.0, DEADLOCK_GRACE_SECONDS - (now - since))
-        self._deadlock_since.pop(run_id, None)
-        return None
-
-    async def _poll_peer_wait(
-        self,
-        condition: asyncio.Condition,
-        run_id: str,
-        key: str,
-        read_fn: Callable[[bool], list[dict[str, object]] | None],
-        deadline: float,
-    ) -> tuple[list[dict[str, object]], str | None]:
-        while True:
-            if (found := await asyncio.to_thread(read_fn, False)) is not None:
-                return found, None
-            wave = self._deadlock_wave.get(run_id)
-            grace = 0.0 if wave is not None and key in wave else self._deadlock_wait(run_id)
-            if grace == 0.0:
-                if wave is None or key not in wave:
-                    wave = self._deadlock_wave.setdefault(run_id, set())
-                    wave.update(w.key for w in self._peer_waiters.get(run_id, ()))
-                    self._deadlock_since.pop(run_id, None)
-                    condition.notify_all()
-                wave.discard(key)
-                if not wave:
-                    self._deadlock_wave.pop(run_id, None)
-                await asyncio.to_thread(read_fn, True)
-                return [], DEADLOCK_NOTE
-            if run_id in self._stopping or self.store.get_run(run_id).state in TERMINAL_RUN_STATES:
-                return [], None
-            remaining = deadline - asyncio.get_running_loop().time()
-            if remaining <= 0:
-                return (await asyncio.to_thread(read_fn, True) or []), None
-            sleep = (
-                min(remaining, RECHECK_SECONDS) if grace is None else min(remaining, max(grace, 0.01), RECHECK_SECONDS)
-            )
-            with suppress(TimeoutError):
-                await asyncio.wait_for(condition.wait(), sleep)
 
     async def _stamp_peer(
         self,
@@ -1643,11 +1519,8 @@ class WorkflowEngine:
                 upd = partial(self.store.update_node, run_id, key, gen, cur.epoch, state=state, waiting_on=waiting_on)
                 await asyncio.to_thread(upd)
 
-    def _drop_waiter(self, run_id: str, waiter: _PeerWaiter) -> None:
-        if (ws := self._peer_waiters.get(run_id)) is not None:
-            ws.discard(waiter)
-            if not ws:
-                self._peer_waiters.pop(run_id, None)
+    def _run_ended(self, run_id: str) -> bool:
+        return run_id in self._stopping or self.store.get_run(run_id).state in TERMINAL_RUN_STATES
 
     async def wait_for_messages(
         self,
@@ -1657,55 +1530,68 @@ class WorkflowEngine:
         *,
         op_id: str,
         names: tuple[str, ...],
-        node_key: str | None = None,
-        node_generation: int | None = None,
         holds_slot: bool = True,
-    ) -> tuple[list[dict[str, object]], str | None]:
+    ) -> dict[str, object]:
         """Read unread messages, or wait on *run_id*'s condition without holding a concurrency slot."""
-        read_fn = lambda rec: read_call(self.store, run_id, op_id=op_id, reader=reader, names=names, record_empty=rec)  # noqa: E731
-        if (immediate := await asyncio.to_thread(read_fn, wait_seconds <= 0)) is not None:
-            return immediate, None
-        key = reader.key if node_key is None else node_key
-        gen = reader.generation if node_generation is None else node_generation
-        waiter, released, cancelled = _PeerWaiter(key, reader, tuple(names)), False, False
-        condition, deadline = self._condition(run_id), asyncio.get_running_loop().time() + wait_seconds
+        read_fn = partial(read_call, self.store, run_id, op_id=op_id, reader=reader, names=names)
+        key, gen, released, cancelled = reader.key, reader.generation, False, False
+        condition, deadline = self._condition(run_id), self._clock() + wait_seconds
         try:
             async with condition:
-                if (again := await asyncio.to_thread(read_fn, False)) is not None:
-                    return again, None
-                if run_id in self._stopping or self.store.get_run(run_id).state in TERMINAL_RUN_STATES:
-                    return [], None
+                if (found := await asyncio.to_thread(read_fn, record_empty=wait_seconds <= 0)) is not None:
+                    return found
+                if self._run_ended(run_id):
+                    return {"messages": []}
                 if holds_slot:
                     await self._stamp_peer(run_id, key, gen, WorkflowNodeState.WAITING, "peer")
                     self._leave(run_id, key)
                     released = True
-                self._peer_waiters.setdefault(run_id, set()).add(waiter)
-                condition.notify_all()
-                result = await self._poll_peer_wait(condition, run_id, key, read_fn, deadline)
-                self._drop_waiter(run_id, waiter)
+                    condition.notify_all()
+                result = await self._await_peer_mail(condition, run_id, read_fn, wait_seconds, deadline)
                 if released:
-                    await self._stamp_peer(run_id, key, gen, WorkflowNodeState.QUEUED, None)
+                    await self._stamp_peer(run_id, key, gen, WorkflowNodeState.QUEUED)
                     condition.notify_all()
                 return result
         except asyncio.CancelledError:
             cancelled = True
             raise
         finally:
-            self._drop_waiter(run_id, waiter)
             if released and not cancelled:
                 await self._reacquire_place(run_id, key)
                 async with condition:
-                    await self._stamp_peer(run_id, key, gen, WorkflowNodeState.RUNNING, None)
+                    await self._stamp_peer(run_id, key, gen, WorkflowNodeState.RUNNING)
                     condition.notify_all()
+
+    async def _await_peer_mail(
+        self,
+        condition: asyncio.Condition,
+        run_id: str,
+        read_fn: Callable[..., dict[str, object] | None],
+        wait_seconds: float,
+        deadline: float,
+    ) -> dict[str, object]:
+        while True:
+            if (found := await asyncio.to_thread(read_fn, record_empty=False)) is not None:
+                return found
+            if self._run_ended(run_id):
+                return {"messages": []}
+            if (remaining := deadline - self._clock()) <= 0:
+                note = f"No message arrived within {wait_seconds:g} s."
+                return await asyncio.to_thread(read_fn, record_empty=True, empty_note=note) or {
+                    "messages": [],
+                    "note": note,
+                }
+            with suppress(TimeoutError):
+                await asyncio.wait_for(condition.wait(), min(remaining, RECHECK_SECONDS))
 
     async def _wait_inbox(self, run: WorkflowRun, node: WorkflowNode, epoch: int, wait_seconds: float) -> None:
         reader = NodeRef("script", 1, "script")
         op_id = f"{node.key}:{node.generation}"
         wait = partial(self.wait_for_messages, run.run_id, reader, wait_seconds, op_id=op_id, names=("script",))
-        msgs, _ = await wait(node_key=node.key, node_generation=node.generation, holds_slot=False)
+        outcome = await wait(holds_slot=False)
         settle = partial(self.store.settle_node, run.run_id, node.key, node.generation, epoch)
         with suppress(SupersededAttemptError):
-            await asyncio.to_thread(partial(settle, state=WorkflowNodeState.COMPLETED, result=msgs))
+            await asyncio.to_thread(partial(settle, state=WorkflowNodeState.COMPLETED, result=outcome))
         await self._notify(run.run_id)
 
     async def _prepare_turn(
@@ -2237,7 +2123,6 @@ class WorkflowEngine:
     async def _notify(self, run_id: str) -> None:
         """Wake the run's waiters after a call of it changed, and show whether the run waits for a person now."""
         async with (condition := self._condition(run_id)):
-            self._touch_node(run_id)
             await self._restate(run_id)
             condition.notify_all()
 
@@ -2454,10 +2339,6 @@ class WorkflowEngine:
                 def forget(written: asyncio.Future[WorkflowRun]) -> None:
                     if not written.cancelled() and written.exception() is None:
                         self._launched.pop(attempt, None)
-                        self._runnable.pop(attempt, None)
-                        self._last_node_change.pop(run.run_id, None)
-                        self._deadlock_since.pop(run.run_id, None)
-                        self._deadlock_wave.pop(run.run_id, None)
 
                 write = partial(self.store.update_run, run.run_id, run.epoch, **changes)
                 end = asyncio.ensure_future(asyncio.to_thread(write))
