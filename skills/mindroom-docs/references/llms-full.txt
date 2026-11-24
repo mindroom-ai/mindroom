@@ -3379,10 +3379,12 @@ Edits, reactions, and redactions belong to the same thread as the message they t
 
 ## Forked Threads
 
-A client can fork a thread: the new thread's root carries an `io.mindroom.fork` reference with the parent thread's ID and the last parent message the fork includes.
+A client can fork a thread within the same room or into another room: the new thread's root carries an `io.mindroom.fork` reference with `thread_id`, `event_id` (the last parent message the fork includes), and an optional `room_id` naming the immediate parent's room when crossing rooms.
 Agents in the fork, and `matrix_message` reads of it, see the parent's messages up to that fork point, then the fork's own messages, and a parent message after the fork point is never included.
-An agent that answered in the parent counts as a participant of the fork.
-Agents in the fork can use the attachments of the threads it forks from.
+For same-room forks, an agent that answered in the parent counts as a participant of the fork and the fork inherits the parent's per-thread model overrides; for cross-room forks, participation, multi-human detection, reply mode, and default models follow the target room instead.
+Cross-room parent reads (agent turns, `matrix_message` reads, and provisional titles) fail closed: neither room may be a contact room, the reading agent, the current requester, the fork-root author, and every human joined or invited to the target room must currently be joined to the parent room, the target room must not have `world_readable` history visibility, and encrypted parent rooms cannot cross into unencrypted target rooms.
+When a cross-room hop is denied, agents omit the parent's messages, title, and attachments while still answering normally in the target thread.
+Agents in an authorized fork can use the attachments carried by its parent prefix up to the fork point.
 An edit of a fork's root must keep `io.mindroom.fork` in its `m.new_content`, or agents treat the fork as a plain thread from then on.
 Only the conversation is inherited: tags and other per-thread state stay on the parent, and the fork starts with its own session runs and no compaction summaries from the parent.
 Moving a fork to another room copies only the fork's own messages.
@@ -6582,7 +6584,7 @@ Earlier attachments appear in the conversation history as annotations, and the a
 [attachments: att_def456 (image, "house.jpg")]
 ```
 
-Attachment IDs are scoped to their room and thread, so an ID from one conversation cannot be used in another, except that a [forked thread](https://docs.mindroom.chat/configuration/threads/#forked-threads) can use its parent's.
+Attachment IDs are scoped to their room and thread, so an ID from one conversation cannot be used in another, except that an authorized [forked thread](https://docs.mindroom.chat/configuration/threads/#forked-threads) (same-room or cross-room) can use attachments carried by its parent prefix up to the fork point, while each attachment stays registered under its original room and thread.
 Within a conversation, an authorized response can open files uploaded by any participant.
 When a message's file is replaced by an edit, later turns use the new file under a new attachment ID.
 
@@ -10563,6 +10565,9 @@ agents:
 | --- | --- | --- | --- |
 | `timeout_seconds` | number | `30` | From 1 to 120; bounds each call and each shell-output download. `run_shell` always waits up to 120 seconds so the person at the computer has time to decide. |
 
+By default, `defaults.desktop_pairing` is `self_service`, so authorized users can pair their computer with any concrete agent without statically listing `desktop` in `tools` (the tool activates automatically once paired).
+Set `defaults.desktop_pairing: explicit_only` to restrict pairing to agents that explicitly configure `desktop`, or `disabled` to refuse new pairings while still allowing existing pairings to disconnect.
+
 Never put device identity fields in agent YAML for the `desktop` tool; each user pairs their own computer through chat.
 Pairings are already scoped to one requester and one agent, so add `private: {per: user_agent}` only when the agent's whole runtime and state should also be requester-private.
 The tool needs a live Matrix room and runs in the primary agent process, so it is unavailable in [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) runs.
@@ -10583,8 +10588,7 @@ To drive the user's signed-in browser, also configure the [`browser`](https://do
 Only the same requester with the same agent can confirm or use the pairing.
 Until pairing is confirmed, `desktop` calls return a setup-required result while the agent's other tools keep working, and the model cannot register or replace a device itself.
 
-Repeating setup for the same controller keeps saved browser, capture, folder, and shell choices, and keeps app choices unless you supply new app IDs.
-Setup for a different controller starts without saved folders or shell access; after the bridge has started once, see **Change the cloud controller** under [Operations](#operations).
+Repeating setup for the same controller or rotating an existing controller device replaces that entry in place and keeps saved browser, capture, folder, and shell choices (and keeps app choices unless you supply new app IDs). When only one controller is saved, setting up a different controller user replaces it and resets saved local access; when multiple controllers are already saved, `mindroom desktop setup` refuses a brand-new controller user so you do not silently wipe or share existing saved access.
 If the saved session belongs to a different homeserver or Matrix user than the setup command names, setup exits without pairing; pass `--storage-path` for a separate setup or run `mindroom desktop login --replace`.
 The separate `mindroom desktop login` and `mindroom desktop pair` commands remain available for manual recovery.
 
@@ -10779,7 +10783,7 @@ For app-level control of the browser window, or for Safari and other browsers, a
 - **Local allowlists**: Only applications selected locally can be listed, launched, inspected, captured, or controlled, unless full control is live, which covers every app.
   An allowed app can still open a link or document in another app, which the bridge cannot then inspect or control unless that app is also allowlisted.
   Allowlisting a browser exposes whichever window and tab is selected, not one website.
-- **MindRoom is excluded**: MindRoom itself (`chat.mindroom.menubar`) and its desktop helper (`chat.mindroom.desktophelper`) can never be allowlisted or targeted under full control, because their windows grant shell auto-approval, control, and app access.
+- **MindRoom is excluded**: MindRoom's own apps (`chat.mindroom.menubar`, `chat.mindroom.app`) and their helpers (`chat.mindroom.desktophelper`, `chat.mindroom.app.helper*`) can never be allowlisted or targeted under full control, because their windows grant shell auto-approval, control, and app access.
 - **No remote authority**: Cloud configuration, chat messages, and model output cannot enable control or full control, extend a lease, change local allowlists or folders, enable shell commands, or approve one.
 - **Ending control**: **Revoke** in the macOS app or its menu, **Stop Access**, or stopping the terminal bridge ends input; the pointer position never does.
 - **Local audit log**: The bridge logs each completed or rejected command without its parameters, values, or typed text.
@@ -10962,8 +10966,8 @@ Adding `run_shell` to the set adds a chat confirmation before the request is sen
 - **Rotate the local device**: Run `mindroom desktop login --replace`, revoke the old device in your Matrix account settings, then run `!desktop rotate` in the agent chat and follow its pairing command.
   `--replace` does not revoke the old device by itself.
   If a `browser` tool uses the desktop target, update its `device_id` and `device_ed25519` settings to the new device, or its calls fail.
-- **Change the cloud controller**: Once the bridge has started, setup, the macOS app, and `mindroom desktop run` refuse a different controller identity with `Desktop journal belongs to a different controller.`
-  Use `--storage-path` with a new directory for `mindroom desktop login`, `mindroom desktop setup`, and `mindroom desktop run`; the new setup does not carry over pending commands or outcomes, and the macOS app has no migration action.
+- **Add or change cloud controllers**: The v2 command journal (`commands.sqlite3`) and `v: 2` native config isolate command history and allowlists per controller inside one storage directory, so a single bridge can serve multiple paired cloud controllers or rotate an existing controller device without switching `--storage-path`.
+  Use the native helper's `upsert_controller` and `remove_controller` actions (used by MindRoom Chat) to add or remove controllers while keeping existing saved access intact. Run `mindroom desktop setup` (or the legacy macOS menu bar app) to re-pair or rotate an existing controller in place, or to replace a single-controller setup; when multiple controllers are configured, adding another agent requires `upsert_controller` or MindRoom Chat.
 - **Identity mismatch**: A device ID or Ed25519 mismatch is a hard failure; treat it as a rotation or possible substitution and do not bypass it.
 - **Stop**: `Ctrl+C` in the terminal or **Stop Access** in the macOS app stops the bridge and its shell commands.
   An app or browser action already in progress can still finish, so observe local state before retrying it.

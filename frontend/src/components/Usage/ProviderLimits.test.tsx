@@ -55,7 +55,9 @@ describe("ProviderLimits", () => {
     expect(within(section).getByText("Codex")).toBeInTheDocument();
     expect(within(section).getByText("ChatGPT Pro")).toBeInTheDocument();
     expect(within(section).getByText("OpenRouter")).toBeInTheDocument();
-    expect(within(section).getByText("$31.60 / $50.00 left")).toBeInTheDocument();
+    expect(
+      within(section).getByText("$31.60 / $50.00 left"),
+    ).toBeInTheDocument();
     expect(within(section).getByText("~$18.40 · 7d")).toBeInTheDocument();
     expect(within(section).getByText("Anthropic")).toBeInTheDocument();
     expect(within(section).getByText("Pay-as-you-go")).toBeInTheDocument();
@@ -165,7 +167,8 @@ describe("ProviderLimits", () => {
       ...(contractFixture as ProviderUsageSnapshot),
       accounts: [
         {
-          ...(contractFixture.accounts[0] as ProviderUsageSnapshot["accounts"][number]),
+          ...(contractFixture
+            .accounts[0] as ProviderUsageSnapshot["accounts"][number]),
           windows: [
             {
               id: "five_hour",
@@ -199,7 +202,10 @@ describe("ProviderLimits", () => {
     );
     expect(vi.mocked(fetch)).toHaveBeenLastCalledWith(
       "/api/usage/provider-limits?refresh=true",
-      expect.objectContaining({ cache: "no-store", credentials: "same-origin" }),
+      expect.objectContaining({
+        cache: "no-store",
+        credentials: "same-origin",
+      }),
     );
   });
 
@@ -208,7 +214,8 @@ describe("ProviderLimits", () => {
       ...(contractFixture as ProviderUsageSnapshot),
       accounts: [
         {
-          ...(contractFixture.accounts[0] as ProviderUsageSnapshot["accounts"][number]),
+          ...(contractFixture
+            .accounts[0] as ProviderUsageSnapshot["accounts"][number]),
           windows: [
             {
               id: "five_hour",

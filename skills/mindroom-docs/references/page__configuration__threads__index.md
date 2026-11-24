@@ -114,10 +114,12 @@ Edits, reactions, and redactions belong to the same thread as the message they t
 
 ## Forked Threads
 
-A client can fork a thread: the new thread's root carries an `io.mindroom.fork` reference with the parent thread's ID and the last parent message the fork includes.
+A client can fork a thread within the same room or into another room: the new thread's root carries an `io.mindroom.fork` reference with `thread_id`, `event_id` (the last parent message the fork includes), and an optional `room_id` naming the immediate parent's room when crossing rooms.
 Agents in the fork, and `matrix_message` reads of it, see the parent's messages up to that fork point, then the fork's own messages, and a parent message after the fork point is never included.
-An agent that answered in the parent counts as a participant of the fork.
-Agents in the fork can use the attachments of the threads it forks from.
+For same-room forks, an agent that answered in the parent counts as a participant of the fork and the fork inherits the parent's per-thread model overrides; for cross-room forks, participation, multi-human detection, reply mode, and default models follow the target room instead.
+Cross-room parent reads (agent turns, `matrix_message` reads, and provisional titles) fail closed: neither room may be a contact room, the reading agent, the current requester, the fork-root author, and every human joined or invited to the target room must currently be joined to the parent room, the target room must not have `world_readable` history visibility, and encrypted parent rooms cannot cross into unencrypted target rooms.
+When a cross-room hop is denied, agents omit the parent's messages, title, and attachments while still answering normally in the target thread.
+Agents in an authorized fork can use the attachments carried by its parent prefix up to the fork point.
 An edit of a fork's root must keep `io.mindroom.fork` in its `m.new_content`, or agents treat the fork as a plain thread from then on.
 Only the conversation is inherited: tags and other per-thread state stay on the parent, and the fork starts with its own session runs and no compaction summaries from the parent.
 Moving a fork to another room copies only the fork's own messages.
