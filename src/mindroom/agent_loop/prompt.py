@@ -23,7 +23,7 @@ MATRIX_MARKDOWN_OUTPUT_FORMAT = (
     f"{MARKDOWN_OUTPUT_FORMAT}\n"
     "- CommonMark (single newlines break lines), GFM tables, strikethrough, fenced code blocks with a language tag, "
     "and `<details><summary>...</summary>...</details>` collapsibles are supported.\n"
-    "- For math, use `$inline$` (no space touching `$`) and `$$display$$` on its own line; never use `\\(...\\)` or "
+    "- For math, use `$inline$` (no spaces just inside `$`) and `$$display$$` on its own line; never use `\\(...\\)` or "
     "`\\[...\\]`, which do not render as math.\n"
     "- Mermaid fences, GitHub callouts (`> [!NOTE]`), footnotes, and external image URLs (`![](https://...)`) "
     "are not rendered; link to external URLs instead."
