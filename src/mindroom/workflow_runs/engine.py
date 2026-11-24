@@ -629,8 +629,7 @@ class WorkflowEngine:
                         break
                     # The saved run decides: a wake only shortens the wait, since a writer cancelled at its commit
                     # sends none.
-                    with suppress(TimeoutError):
-                        await asyncio.wait_for(condition.wait(), RECHECK_SECONDS)
+                    await _wait_for_change(condition)
             if launch is None or run.state in TERMINAL_RUN_STATES:
                 return run
             if (await launch()).state is WorkflowRunState.STARTING:
@@ -1053,22 +1052,20 @@ class WorkflowEngine:
             async with condition:
                 cur = await asyncio.to_thread(self.store.get_node, run_id, ask_key)
                 run = await asyncio.to_thread(self.store.get_run, run_id)
-                if cur is None or cur.state is WorkflowNodeState.CANCELLED or self._run_ended(run_id):
+                ended = run_id in self._stopping or run.state in TERMINAL_RUN_STATES
+                if cur is None or cur.state is WorkflowNodeState.CANCELLED or ended:
                     raise WorkflowRunStoreError(_NOT_ANSWERED)
                 if cur.state is WorkflowNodeState.COMPLETED:
                     return str(cur.result)
-                post = (run, cur) if "event_id" not in cur.links else None
-                if post is None:
-                    with suppress(TimeoutError):
-                        await asyncio.wait_for(condition.wait(), RECHECK_SECONDS)
-            if post is not None:
-                posted = False
-                with suppress(ScriptRuntimeUnavailableError, SupersededAttemptError):
-                    posted = "event_id" in (await self._asked(post[0], post[1], post[0].epoch)).links
-                if not posted:
-                    async with condition:
-                        with suppress(TimeoutError):
-                            await asyncio.wait_for(condition.wait(), RECHECK_SECONDS)
+                if "event_id" in cur.links:
+                    await _wait_for_change(condition)
+                    continue
+            posted = False
+            with suppress(ScriptRuntimeUnavailableError, SupersededAttemptError):
+                posted = "event_id" in (await self._asked(run, cur, run.epoch)).links
+            if not posted:
+                async with condition:
+                    await _wait_for_change(condition)
 
     async def ask_child_question(
         self,
@@ -1116,27 +1113,26 @@ class WorkflowEngine:
             await self._restate(run_id)
             condition.notify_all()
         runtime, job_id = self.agents(), parent.links.get("job_id")
-        jobs = runtime.jobs if runtime and isinstance(job_id, str) and runtime.jobs.retained_job(job_id) else None
+        wait_job = (
+            (runtime.jobs, job_id)
+            if runtime is not None and isinstance(job_id, str) and runtime.jobs.retained_job(job_id)
+            else None
+        )
         try:
-            if jobs is None or not isinstance(job_id, str):
-                answer = await self._wait_child_question(run_id, ask_key)
-            else:
-                await jobs.save_adapter(job_id, wait="user")
-                try:
-                    async with jobs.human_decision_wait(job_id):
-                        answer = await self._wait_child_question(run_id, ask_key)
-                except Exception:
-                    await jobs.save_adapter(job_id, wait=None)
-                    raise
-                # Cleared only on normal return (not CancelledError), so shutdown keeps wait="user" for recovery.
-                await jobs.save_adapter(job_id, wait=None)
+            if wait_job is None:
+                return await self._wait_child_question(run_id, ask_key)
+            jobs, jid = wait_job
+            await jobs.save_adapter(jid, wait="user")
+            async with jobs.human_decision_wait(jid):
+                return await self._wait_child_question(run_id, ask_key)
         except asyncio.CancelledError:
             cancelled = True
             raise
-        else:
-            return answer
         finally:
             if not cancelled:
+                # Cleared only on normal/error exit (not CancelledError), so shutdown keeps wait="user" for recovery.
+                if wait_job is not None:
+                    await wait_job[0].save_adapter(wait_job[1], wait=None)
                 await self._reacquire_place(run_id, parent.key)
 
     async def answer(self, run_id: str, key: str, generation: int, answer: str) -> bool:
@@ -1234,8 +1230,7 @@ class WorkflowEngine:
                     and not self._closed
                     and not self._run_ended(run_id)
                 ):
-                    with suppress(TimeoutError):
-                        await asyncio.wait_for(condition.wait(), RECHECK_SECONDS)
+                    await _wait_for_change(condition)
                 if cur is places and not self._closed and not self._run_ended(run_id):
                     places.working.add(key)
             finally:
@@ -1476,19 +1471,6 @@ class WorkflowEngine:
             condition.notify_all()
         return result
 
-    async def _stamp_peer(
-        self,
-        run_id: str,
-        key: str,
-        gen: int,
-        state: WorkflowNodeState,
-        waiting_on: str | None = None,
-    ) -> None:
-        with suppress(WorkflowRunNotFoundError, SupersededAttemptError):
-            if (cur := self.store.get_run(run_id)).state not in TERMINAL_RUN_STATES:
-                upd = partial(self.store.update_node, run_id, key, gen, cur.epoch, state=state, waiting_on=waiting_on)
-                await asyncio.to_thread(upd)
-
     def _run_ended(self, run_id: str) -> bool:
         return run_id in self._stopping or self.store.get_run(run_id).state in TERMINAL_RUN_STATES
 
@@ -1500,37 +1482,45 @@ class WorkflowEngine:
         *,
         op_id: str,
         names: tuple[str, ...],
-        holds_slot: bool = True,
     ) -> dict[str, object]:
         """Read unread messages, or wait on *run_id*'s condition without holding a concurrency slot."""
         read_fn = partial(read_call, self.store, run_id, op_id=op_id, reader=reader, names=names)
-        key, gen, released, cancelled = reader.key, reader.generation, False, False
-        condition, deadline = self._condition(run_id), self._clock() + wait_seconds
+        condition, deadline, cancelled = self._condition(run_id), self._clock() + wait_seconds, False
+        async with condition:
+            if (found := await asyncio.to_thread(read_fn, record_empty=wait_seconds <= 0)) is not None:
+                return found
+            if self._run_ended(run_id):
+                return {"messages": []}
+            node = self.store.get_node(run_id, reader.key)
+            same = node if node is not None and node.generation == reader.generation else None
+
+            async def stamp_state(state: WorkflowNodeState, waiting_on: str | None = None) -> None:
+                if same is None:
+                    return
+                with suppress(WorkflowRunNotFoundError):
+                    if (cur := self.store.get_run(run_id)).state not in TERMINAL_RUN_STATES:
+                        await self._stamp(same, cur.epoch, ignore=True, state=state, waiting_on=waiting_on)
+
+            await stamp_state(WorkflowNodeState.WAITING, "peer")
+            self._drop_slot(run_id, reader.key)
+            await self._restate(run_id)
+            condition.notify_all()
         try:
             async with condition:
-                if (found := await asyncio.to_thread(read_fn, record_empty=wait_seconds <= 0)) is not None:
-                    return found
-                if self._run_ended(run_id):
-                    return {"messages": []}
-                if holds_slot:
-                    await self._stamp_peer(run_id, key, gen, WorkflowNodeState.WAITING, "peer")
-                    self._drop_slot(run_id, key)
-                    released = True
-                    condition.notify_all()
                 result = await self._await_peer_mail(condition, run_id, read_fn, wait_seconds, deadline)
-                if released:
-                    await self._stamp_peer(run_id, key, gen, WorkflowNodeState.QUEUED)
-                    condition.notify_all()
-                return result
+                await stamp_state(WorkflowNodeState.QUEUED)
+                await self._restate(run_id)
+                condition.notify_all()
         except asyncio.CancelledError:
             cancelled = True
             raise
+        else:
+            return result
         finally:
-            if released and not cancelled:
-                await self._reacquire_place(run_id, key)
-                async with condition:
-                    await self._stamp_peer(run_id, key, gen, WorkflowNodeState.RUNNING)
-                    condition.notify_all()
+            if not cancelled:
+                await self._reacquire_place(run_id, reader.key)
+                await stamp_state(WorkflowNodeState.RUNNING)
+                await self._notify(run_id)
 
     async def _await_peer_mail(
         self,
@@ -1547,18 +1537,16 @@ class WorkflowEngine:
                 return {"messages": []}
             if (remaining := deadline - self._clock()) <= 0:
                 note = f"No message arrived within {wait_seconds:g} s."
-                return await asyncio.to_thread(read_fn, record_empty=True, empty_note=note) or {
-                    "messages": [],
-                    "note": note,
-                }
-            with suppress(TimeoutError):
-                await asyncio.wait_for(condition.wait(), min(remaining, RECHECK_SECONDS))
+                return cast("dict[str, object]", await asyncio.to_thread(read_fn, record_empty=True, empty_note=note))
+            await _wait_for_change(condition, remaining)
 
     async def _wait_inbox(self, run: WorkflowRun, node: WorkflowNode, epoch: int, wait_seconds: float) -> None:
         reader = NodeRef("script", 1, "script")
         op_id = f"{node.key}:{node.generation}"
-        wait = partial(self.wait_for_messages, run.run_id, reader, wait_seconds, op_id=op_id, names=("script",))
-        outcome = await wait(holds_slot=False)
+        read_fn = partial(read_call, self.store, run.run_id, op_id=op_id, reader=reader, names=("script",))
+        condition, deadline = self._condition(run.run_id), self._clock() + wait_seconds
+        async with condition:
+            outcome = await self._await_peer_mail(condition, run.run_id, read_fn, wait_seconds, deadline)
         await self._settle(node, epoch, state=WorkflowNodeState.COMPLETED, result=outcome, ignore=True)
         await self._notify(run.run_id)
 
@@ -2004,8 +1992,7 @@ class WorkflowEngine:
                 )
                 if node.state not in LIVE_NODE_STATES or waiting_changed or remaining <= 0:
                     return _receipt(node)
-                with suppress(TimeoutError):
-                    await asyncio.wait_for(condition.wait(), min(remaining, RECHECK_SECONDS))
+                await _wait_for_change(condition, remaining)
 
     def node_prompt(self, run_id: str, key: str | None, generation: int | None) -> str | None:
         """Return the prompt of the agent call that is *generation* of the node at *key*, while it waits for its agent.
@@ -2411,6 +2398,12 @@ def _value(args: dict[str, object]) -> object:
         return secrets.SystemRandom().random()
     msg = f"A value call is now or random, not {args.get('op')!r}."
     raise WorkflowRunStoreError(msg)
+
+
+async def _wait_for_change(condition: asyncio.Condition, remaining: float | None = None) -> None:
+    timeout = RECHECK_SECONDS if remaining is None else min(remaining, RECHECK_SECONDS)
+    with suppress(TimeoutError):
+        await asyncio.wait_for(condition.wait(), timeout)
 
 
 def _receipt(node: WorkflowNode) -> NodeReceipt:

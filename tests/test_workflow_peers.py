@@ -363,7 +363,6 @@ async def test_waiting_reader_returns_timeout_note_and_retries_persist_it(stack:
             15.0,
             op_id=retry_op,
             names=("reader", "*"),
-            holds_slot=False,
         ),
     )
     await asyncio.sleep(0.02)
@@ -379,7 +378,6 @@ async def test_waiting_reader_returns_timeout_note_and_retries_persist_it(stack:
         15.0,
         op_id=retry_op,
         names=("reader", "*"),
-        holds_slot=False,
     )
     assert replayed == expected
 
