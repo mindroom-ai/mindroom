@@ -62,6 +62,7 @@ from mindroom.workers.models import (
     WorkerHandle,
     WorkerLaunchConfig,
     WorkerMaintenanceResult,
+    WorkerSandboxConfig,
     WorkerSpec,
     WorkerSshEndpoint,
     WorkerStatus,
@@ -79,6 +80,7 @@ from .kubernetes_config import (
     KubernetesWorkerBackendConfig,
     kubernetes_backend_cleanup_signature,
     kubernetes_backend_config_signature,
+    sandbox_mount_dir_runtime_class_refusal,
 )
 
 if TYPE_CHECKING:
@@ -381,7 +383,7 @@ class KubernetesWorkerBackend:
         auth_secret_applied = False
         try:
             if existing is None and pinned_worker_kind(worker_key) is not None:
-                self._prepare_pinned_state(worker_key, state_subpath, launch)
+                self._prepare_pinned_state(worker_key, state_subpath, launch, sandbox=spec.sandbox)
             # kubelet resolves the read-only mirror subPath when the pod starts, so the
             # primary validates and creates the worker's credential directories first.
             get_runtime_credentials_manager(self.runtime_paths).for_worker(worker_key)
@@ -403,6 +405,7 @@ class KubernetesWorkerBackend:
                     private_agent_names=spec.private_agent_names,
                     state_scope_worker_key=spec.state_scope_worker_key,
                     resource_profile=spec.resource_profile,
+                    sandbox=spec.sandbox,
                     recreate=replacing_stale_worker,
                 )
                 startup_triggered = should_restart or recreated
@@ -637,7 +640,14 @@ class KubernetesWorkerBackend:
             msg = f"Failed to retire Kubernetes worker '{worker_log_id(worker_key)}': {exc}"
             raise WorkerBackendError(msg) from exc
 
-    def _prepare_pinned_state(self, worker_key: str, state_subpath: str, launch: WorkerLaunchConfig) -> None:
+    def _prepare_pinned_state(
+        self,
+        worker_key: str,
+        state_subpath: str,
+        launch: WorkerLaunchConfig,
+        *,
+        sandbox: WorkerSandboxConfig | None = None,
+    ) -> None:
         """Finish an interrupted retirement, then record ownership before provisioning credentials."""
         prefix, _, name = state_subpath.rpartition("/")
         with open_worker_state_root(
@@ -663,6 +673,7 @@ class KubernetesWorkerBackend:
                 worker_key=worker_key,
                 state_subpath=state_subpath,
                 launch=launch,
+                sandbox=sandbox,
             )
 
     def _require_retirement_deployment(self, worker_id: str, worker_key: str, state_subpath: str) -> None:
@@ -912,6 +923,7 @@ class KubernetesWorkerBackend:
             )
             return False
         try:
+            sandbox = resources.parse_sandbox_annotation(annotations)
             return self._resources.deployment_template_drifted(
                 deployment,
                 worker_key=handle.worker_key,
@@ -921,6 +933,7 @@ class KubernetesWorkerBackend:
                 private_agent_names=private_agent_names,
                 state_scope_worker_key=state_scope_worker_key,
                 resource_profile=resource_profile,
+                sandbox=sandbox,
             )
         except WorkerBackendError:
             logger.warning(
@@ -957,6 +970,7 @@ class KubernetesWorkerBackend:
                 private_agent_names=resources.parse_private_agent_names_annotation(annotations),
                 state_scope_worker_key=resources.parse_state_scope_worker_key_annotation(annotations),
                 resource_profile=resources.parse_resource_profile_annotation(annotations),
+                sandbox=resources.parse_sandbox_annotation(annotations),
             )
         except WorkerBackendError:
             logger.warning(
@@ -1041,6 +1055,12 @@ class KubernetesWorkerBackend:
         *,
         create_shared: bool,
     ) -> tuple[ScopedWorkspaceMount, ...]:
+        if (
+            spec.sandbox is not None
+            and spec.sandbox.mount_dir is not None
+            and self.config.runtime_class_name is not None
+        ):
+            raise WorkerBackendError(sandbox_mount_dir_runtime_class_refusal(self.config.runtime_class_name))
         return plan_scoped_workspace_mounts(
             worker_key=resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key),
             local_shared_storage_root=self._resources.storage_root,
@@ -1048,6 +1068,7 @@ class KubernetesWorkerBackend:
             private_agent_names=spec.private_agent_names,
             resolved_agent_policies=launch.agent_policies,
             create_shared=create_shared,
+            sandbox=spec.sandbox,
         )
 
     def _plan_shared_directory_mounts(
@@ -1055,6 +1076,8 @@ class KubernetesWorkerBackend:
         spec: WorkerSpec,
         launch: WorkerLaunchConfig,
     ) -> tuple[SharedDirectoryMount, ...]:
+        if spec.sandbox is not None:
+            return ()
         return self._resources.plan_shared_directory_mounts(
             spec.worker_key,
             state_scope_worker_key=spec.state_scope_worker_key,
@@ -1071,10 +1094,15 @@ class KubernetesWorkerBackend:
         entry = self._cached_ready_worker(spec.worker_key, spec=spec, launch=launch, now=now)
         if entry is None:
             return None
-        # Only user workers and workers whose plan mounted nothing can gain a workspace while running.
+        # User workers and unmounted workers can gain a workspace while running, and mounted sandbox workers
+        # must re-verify mount_dir existence and inode on cache hits.
         state_scope_worker_key = resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key)
-        may_gain_workspace = not entry.workspace_mounts or resolved_worker_key_scope(state_scope_worker_key) == "user"
-        if may_gain_workspace and entry.workspace_mounts != self._plan_workspace_mounts(
+        recheck_workspace_mounts = (
+            not entry.workspace_mounts
+            or resolved_worker_key_scope(state_scope_worker_key) == "user"
+            or (spec.sandbox is not None and spec.sandbox.mount_dir is not None)
+        )
+        if recheck_workspace_mounts and entry.workspace_mounts != self._plan_workspace_mounts(
             spec,
             launch,
             create_shared=False,

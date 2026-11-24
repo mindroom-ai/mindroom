@@ -31,6 +31,7 @@ def build_request_execution_env(
     request_workspace: Path | None,
     prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
     execution_env: dict[str, str],
+    sandbox: bool = False,
 ) -> dict[str, str]:
     """Apply request env overlays in the security-sensitive canonical order and return the trusted hook overlay.
 
@@ -46,9 +47,15 @@ def build_request_execution_env(
     if request_workspace is None:
         execution_env.update(_worker_owned_env(prepared))
         return {}
-    protected_env = _workspace_home_contract_env(workspace=request_workspace.expanduser().resolve(), prepared=prepared)
+    protected_env = _workspace_home_contract_env(
+        workspace=request_workspace.expanduser().resolve(),
+        prepared=prepared,
+        sandbox=sandbox,
+    )
     # The hook is sourced with MindRoom's workspace-home defaults already in place.
     execution_env.update(protected_env)
+    if sandbox:
+        return {}
     if prepared is None:
         protected_env |= _existing_worker_runtime_env(execution_env)
     overlay = _workspace_env_overlay(
@@ -68,9 +75,15 @@ def _workspace_home_contract_env(
     *,
     workspace: Path,
     prepared: sandbox_worker_prep.PreparedWorkerRequest | None,
+    sandbox: bool = False,
 ) -> dict[str, str]:
     """Build the env contract for an already-resolved worker workspace."""
-    return constants.workspace_home_identity_env(workspace) | _worker_owned_env(prepared)
+    home_root = prepared.paths.root.expanduser().resolve() if sandbox and prepared is not None else workspace
+    return (
+        constants.workspace_home_identity_env(home_root)
+        | {"MINDROOM_AGENT_WORKSPACE": str(workspace)}
+        | _worker_owned_env(prepared)
+    )
 
 
 def _worker_owned_env(prepared: sandbox_worker_prep.PreparedWorkerRequest | None) -> dict[str, str]:

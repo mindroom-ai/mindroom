@@ -174,15 +174,19 @@ def payloads(monkeypatch: pytest.MonkeyPatch, current_static_runner: None) -> li
 def dedicated_routing(monkeypatch: pytest.MonkeyPatch) -> None:
     """Route calls to a dedicated worker whose key is the target's own or, for unscoped targets, its unscoped one."""
 
-    def worker_route(*, worker_target: ResolvedWorkerTarget | None, **_kwargs: object) -> tuple[WorkerRoute, None]:
+    def worker_route(
+        *,
+        worker_target: ResolvedWorkerTarget | None,
+        **_kwargs: object,
+    ) -> tuple[WorkerRoute, None, None]:
         assert worker_target is not None
         route = WorkerRoute(
             protocol=WORKER_PROTOCOL_VERSION,
             worker_key=worker_target.worker_key or resolve_unscoped_worker_key("code"),
         )
-        return route, None
+        return route, None, None
 
-    monkeypatch.setattr(sandbox_proxy_module, "worker_route", worker_route)
+    monkeypatch.setattr(sandbox_proxy_module, "_worker_route_with_sandbox", worker_route)
 
 
 def _call(
@@ -303,13 +307,17 @@ async def test_subagent_worker_shell_call_signs_its_normal_worker_key(
 ) -> None:
     """A call routed to a subagent's own worker carries the normal worker's key, the scope the broker serves."""
 
-    def worker_route(**_kwargs: object) -> tuple[WorkerRoute, None]:
-        return WorkerRoute(
-            protocol=WORKER_PROTOCOL_VERSION,
-            worker_key=subagent_worker_key(resolve_unscoped_worker_key("code"), "e" * 32),
-        ), None
+    def worker_route(**_kwargs: object) -> tuple[WorkerRoute, None, None]:
+        return (
+            WorkerRoute(
+                protocol=WORKER_PROTOCOL_VERSION,
+                worker_key=subagent_worker_key(resolve_unscoped_worker_key("code"), "e" * 32),
+            ),
+            None,
+            None,
+        )
 
-    monkeypatch.setattr(sandbox_proxy_module, "worker_route", worker_route)
+    monkeypatch.setattr(sandbox_proxy_module, "_worker_route_with_sandbox", worker_route)
     config = _config(*_KEYS_AGENT_TOOLS)
     manager = CredentialsManager(runtime_paths.storage_root / "credentials")
     target = resolve_worker_target(None, "code", _identity())

@@ -53,7 +53,8 @@ def minimal_system_message(
     if named_workers:
         guidance.append(
             "Named workers: `mindroom-agent workers run NAME -- COMMAND` runs a command in a separate worker of its "
-            "own on the same workspace; `mindroom-agent tools describe shell.run_shell_command` explains them.",
+            "own on the same workspace (add `--sandbox` or `--mount-dir DIR [--mount-read-only]` to isolate it); "
+            "`mindroom-agent tools describe shell.run_shell_command` explains them.",
         )
     return "\n".join(
         part.strip()

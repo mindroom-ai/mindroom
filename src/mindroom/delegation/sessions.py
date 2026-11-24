@@ -147,7 +147,7 @@ def subagent_recovery_lock(subagent_id: str, runtime_paths: RuntimePaths) -> Ite
     path = _path(subagent_id, runtime_paths)
     # A job stopped before its child first claimed liveness may recover a handle no turn has created yet.
     create_directory_durable(path.parent, mode=0o700)
-    with path.with_suffix(".active.lock").open("a") as lock:
+    with path.with_suffix(".active.lock").open("a+") as lock:
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -164,7 +164,7 @@ async def subagent_liveness(child: DelegationChild, runtime_paths: RuntimePaths)
     """Hold an OS-released liveness claim from reservation through child settlement."""
     path = _path(child.subagent_id, runtime_paths)
     create_directory_durable(path.parent, mode=0o700)
-    with path.with_suffix(".active.lock").open("a") as lock:
+    with path.with_suffix(".active.lock").open("a+") as lock:
         while True:
             try:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)

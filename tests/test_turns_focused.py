@@ -9557,3 +9557,39 @@ async def test_voice_ingress_honors_mid_turn_steer_and_queue(
     [request] = harness.runner.requests
     if not replayed_checkpoint:
         assert request.mid_turn_mode is expected_mode
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("marker", "expected_submission_id"),
+    [({"id": "sub-1", "more": False}, "sub-1"), (None, None), ({"id": "", "more": False}, None)],
+)
+async def test_voice_ingress_forwards_submission_id_to_lane_slot(
+    config: Config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    marker: object,
+    expected_submission_id: str | None,
+) -> None:
+    """VoiceIngress.admit forwards the raw audio event's submission_id onto its unsettled lane slot."""
+    harness = _build_harness(config, tmp_path)
+    room = _room_with_members(config, "general")
+    event = _thread_upload_event("m.audio", event_id="$voice-sub:localhost", origin_server_ts=1_000_000)
+    if marker is not None:
+        event.source["content"][constants.SUBMISSION_CONTENT_KEY] = marker
+    release = asyncio.Event()
+    transcript = PreparedIngress(sender=_SENDER, event_id=event.event_id, body="hi", source=event.source)
+
+    async def delayed_prepare(*_args: object, **_kwargs: object) -> _VoiceNormalizationResult:
+        await release.wait()
+        return _VoiceNormalizationResult(event=transcript)
+
+    monkeypatch.setattr(InboundTurnNormalizer, "prepare_voice_event", delayed_prepare)
+    await harness.ingress.handle_media_event(room, event)
+
+    [slot] = harness.gate.lanes.unsettled_slots()
+    assert slot.delivery is not None
+    assert slot.delivery.source_event_id == event.event_id
+    assert slot.delivery.submission_id == expected_submission_id
+    release.set()
+    await harness.gate.drain_all()

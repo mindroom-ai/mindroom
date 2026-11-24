@@ -93,6 +93,7 @@ class IngressTicket:
         ready_task: asyncio.Task[ReadyPendingEvent | None],
         *,
         source_event_id: str,
+        submission_id: str | None = None,
     ) -> None:
         """Hand a readiness task to the gate through this lane slot, its lane holding the claim until readiness ends."""
         claim, self.claim = self.claim, None
@@ -103,6 +104,7 @@ class IngressTicket:
                 ready_task=ready_task,
                 claim=claim,
                 source_event_id=source_event_id,
+                submission_id=submission_id,
             )
         except BaseException:
             ready_task.cancel()

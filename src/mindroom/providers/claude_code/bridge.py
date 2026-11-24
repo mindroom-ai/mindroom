@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -16,6 +14,7 @@ from mindroom import __version__
 from mindroom.llm.errors import ProviderError
 from mindroom.logging_config import get_logger
 from mindroom.providers.claude_code.prompt import canonical_arguments
+from mindroom.providers.claude_code.tool_naming import SERVER_NAME, TOOL_PREFIX, offered_name
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -24,15 +23,9 @@ if TYPE_CHECKING:
 
     from mindroom.llm.provider import ToolSpec
 
-__all__ = ["SERVER_NAME", "TOOL_PREFIX", "ToolBridge", "tool_names"]
+__all__ = ["ToolBridge", "tool_names"]
 
 logger = get_logger(__name__)
-SERVER_NAME = "mindroom"
-# Claude Code names an MCP tool ``mcp__<server>__<tool>`` and takes at most 64 characters of letters, digits, ``_``
-# and ``-``.
-TOOL_PREFIX = f"mcp__{SERVER_NAME}__"
-_NAME_LIMIT = 64 - len(TOOL_PREFIX)
-_HASH_LENGTH = 10
 # The request metadata Claude Code sends with an MCP tool call: the id of the ``tool_use`` block that made the call.
 _TOOL_USE_ID_META = "claudecode/toolUseId"
 # How long a tool call waits for the model message that made it, which Claude Code sends before the call.
@@ -42,19 +35,11 @@ _DESCRIPTION_LIMIT = 2048
 _CUT_DESCRIPTIONS: set[str] = set()
 
 
-def _short_name(name: str) -> str:
-    """Return the name Claude Code is offered ``name`` under: itself, or a cut and hashed one when it cannot take it."""
-    if len(name) <= _NAME_LIMIT and re.fullmatch(r"[a-zA-Z0-9_-]+", name):
-        return name
-    digest = hashlib.sha256(name.encode()).hexdigest()[:_HASH_LENGTH]
-    return f"{re.sub(r'[^a-zA-Z0-9_-]', '_', name)[: _NAME_LIMIT - _HASH_LENGTH - 1]}_{digest}"
-
-
 def tool_names(tools: Sequence[ToolSpec], provider: str) -> dict[str, str]:
     """Return the offered tools' names by the name Claude Code calls each with; two may not share one."""
     names: dict[str, str] = {}
     for tool in tools:
-        short = _short_name(tool.name)
+        short = offered_name(tool.name)
         if short in names:
             msg = f"Claude Code would call the tools {names[short]} and {tool.name} by one name, {short}."
             raise ProviderError(msg, provider=provider)

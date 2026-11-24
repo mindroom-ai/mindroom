@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from mindroom.coalescing.batch import PendingEvent, requester_coalescing_key
 from mindroom.coalescing.gate import ReadyPendingEvent
 from mindroom.coalescing.ingress_lanes import IngressRetryError
+from mindroom.coalescing.policy import submission_marker_from_source
 from mindroom.constants import VOICE_RAW_AUDIO_FALLBACK_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
@@ -97,6 +98,7 @@ class VoiceIngress:
         if prepared is not None:
             voice_target = voice_target.with_thread_root(prepared.thread_id)
         admission_key = requester_coalescing_key(room.room_id, coalescing_thread_id, facts.lane_requester_id)
+        marker = submission_marker_from_source(event.source)
 
         ready_task = asyncio.create_task(
             self._ready_voice_event(
@@ -110,7 +112,12 @@ class VoiceIngress:
             ),
             name=f"voice_ready:{room.room_id}:{event.event_id}",
         )
-        ticket.admit_ready(admission_key, ready_task, source_event_id=event.event_id)
+        ticket.admit_ready(
+            admission_key,
+            ready_task,
+            source_event_id=event.event_id,
+            submission_id=marker.submission_id if marker is not None else None,
+        )
         return TurnDispatchOutcome.DEFERRED
 
     async def _ready_voice_event(
