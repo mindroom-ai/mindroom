@@ -215,7 +215,7 @@ def verify_provider_api_key(
     url, headers = check.request(api_key)
     try:
         response = httpx.get(url, headers=headers, timeout=timeout_seconds, follow_redirects=False)
-    except httpx.HTTPError:
+    except (httpx.HTTPError, ImportError, OSError):
         return KeyCheckResult(status="inconclusive", detail="Could not reach provider.")
     if 200 <= response.status_code < 300:
         return KeyCheckResult(status="valid")
@@ -436,7 +436,7 @@ def _probe_ollama(runtime_paths: RuntimePaths, *, timeout_seconds: float) -> Det
         ) as client:
             response = client.get(f"{host}/api/tags")
             payload = response.json() if response.status_code == 200 else None
-    except (httpx.HTTPError, OSError, ValueError):
+    except (httpx.HTTPError, ImportError, OSError, ValueError):
         return None
     if (parsed := _parse_ollama_models(payload)) is None:
         return None

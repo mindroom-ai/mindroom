@@ -446,6 +446,14 @@ class TestLiveApiKeyVerification:
         with patch.object(setup_detection.httpx, "get", side_effect=httpx.ConnectError("offline")):
             assert verify_provider_api_key("openai", sample_key).status == "inconclusive"
 
+        # Missing optional proxy backend (e.g. socksio with ALL_PROXY) or unreadable SSL_CERT_FILE fail open.
+        for exc in (
+            ImportError("Using SOCKS proxy, but the 'socksio' package is not installed."),
+            FileNotFoundError("missing CA"),
+        ):
+            with patch.object(setup_detection.httpx, "get", side_effect=exc):
+                assert verify_provider_api_key("openai", sample_key).status == "inconclusive"
+
         assert verify_provider_api_key("unknown_provider", sample_key).status == "inconclusive"
 
         # Non-ASCII (smart quote, zero-width space) and control chars are rejected before HTTP without echoing.
