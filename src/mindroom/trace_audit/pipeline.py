@@ -26,7 +26,7 @@ from mindroom.trace_audit.models import (
     TraceAuditSettings,
 )
 from mindroom.trace_audit.signals import detect_session_incidents
-from mindroom.trace_audit.source import load_audited_sessions
+from mindroom.trace_audit.source import load_audited_sessions, load_removed_run_ids
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -310,7 +310,8 @@ async def run_audit_pass(
     effective_since = since_ts if since_ts is not None else current_ts - cfg.window_days * _SECONDS_PER_DAY
     cursor_snapshot = dict(state.session_cursors)
 
-    def _load_and_scan() -> tuple[int, int, dict[str, int], list[tuple[Incident, AuditedSession]]]:
+    def _load_and_scan() -> tuple[int, int, dict[str, int], list[tuple[Incident, AuditedSession]], frozenset[str]]:
+        removed_ids = load_removed_run_ids(db_path, storage_name)
         sessions = load_audited_sessions(
             db_path,
             storage_name,
@@ -320,15 +321,20 @@ async def run_audit_pass(
             allowed_room_id=allowed_room_id,
             contact_session_check=contact_session_check,
         )
-        return _scan_sessions(
+        scanned_s, scanned_r, max_s, cands = _scan_sessions(
             sessions,
             cursor_snapshot,
             now=current_ts,
             scope_key=scope_key,
             cfg=cfg,
         )
+        return scanned_s, scanned_r, max_s, cands, removed_ids
 
-    scanned_sessions, scanned_runs, max_seq, candidates = await asyncio.to_thread(_load_and_scan)
+    scanned_sessions, scanned_runs, max_seq, candidates, removed_ids = await asyncio.to_thread(_load_and_scan)
+    if removed_ids:
+        state.findings = [f for f in state.findings if f.run_id not in removed_ids]
+    already_audited = {f.run_id for f in state.findings}
+    candidates = [pair for pair in candidates if pair[0].run_id not in already_audited]
     new_findings, deferred_min_seq, clean_audited = (
         await _audit_selected(
             candidates,

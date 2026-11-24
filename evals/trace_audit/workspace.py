@@ -44,6 +44,9 @@ def prepare_scratch_skills(skills_dir: Path | None, scratch: Path) -> dict[str, 
     """Reset ``scratch`` safely, copy ``skills_dir`` without following symlinks, and return initial skill text."""
     if skills_dir is not None:
         ensure_disjoint_skills_dir(skills_dir, scratch)
+    if scratch.is_symlink() or scratch.parent.is_symlink():
+        msg = f"Refusing symlinked scratch path: {scratch}"
+        raise ValueError(msg)
     scratch.parent.mkdir(parents=True, exist_ok=True)
     scratch.parent.chmod(0o700)
     if scratch.exists():
@@ -102,14 +105,29 @@ def prepare_isolated_runtime(
     scratch_skills.mkdir(parents=True, exist_ok=True)
     scratch_skills.chmod(0o700)
 
+    source_tracking = resolve_runtime_paths(config_path=config_path).storage_root / "tracking"
     default_tracking = config_path.parent / "mindroom_data" / "tracking"
-    roster_src = roster_path if roster_path is not None else default_tracking / "personal_agents.json"
-    if roster_path is not None and not roster_src.is_file():
-        msg = f"--roster-path not found: {roster_src}"
-        raise ValueError(msg)
+    if roster_path is not None:
+        roster_src = roster_path
+        if not roster_src.is_file():
+            msg = f"--roster-path not found: {roster_src}"
+            raise ValueError(msg)
+    else:
+        roster_src = next(
+            (
+                p
+                for p in (source_tracking / "personal_agents.json", default_tracking / "personal_agents.json")
+                if p.is_file() and not p.is_symlink()
+            ),
+            default_tracking / "personal_agents.json",
+        )
     tracking_dst = scratch_storage / "tracking"
     _copy_private_tracking_file(roster_src, tracking_dst / "personal_agents.json")
-    for contacts_src in (roster_src.parent / "contacts.json", default_tracking / "contacts.json"):
+    for contacts_src in (
+        roster_src.parent / "contacts.json",
+        source_tracking / "contacts.json",
+        default_tracking / "contacts.json",
+    ):
         if contacts_src.is_file() and not contacts_src.is_symlink():
             _copy_private_tracking_file(contacts_src, tracking_dst / "contacts.json")
             break

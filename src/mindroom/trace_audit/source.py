@@ -356,6 +356,20 @@ def load_audited_sessions(
     return sessions
 
 
+def load_removed_run_ids(db_path: Path, storage_name: str) -> frozenset[str]:
+    """Return run IDs recorded in ``_log_removed`` strictly read-only."""
+    if not db_path.exists():
+        return frozenset()
+    names = TableNames(storage_name)
+    with _open_read_only(db_path) as conn:
+        if names.log_removed not in table_names(conn):
+            return frozenset()
+        return frozenset(
+            str(rid)
+            for (rid,) in conn.execute(f"SELECT run_id FROM {quote_identifier(names.log_removed)}")  # noqa: S608
+        )
+
+
 def load_usage_rows(
     db_path: Path,
     storage_name: str,

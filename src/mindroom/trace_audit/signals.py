@@ -163,6 +163,44 @@ def _parse_shell_command(tool_args: dict[str, Any]) -> tuple[list[str], bool]:
     return _strip_env(tokens[: ops[0]]), False
 
 
+_ALLOWED_GIT_SUBS = frozenset(
+    {
+        "add",
+        "apply",
+        "bisect",
+        "branch",
+        "checkout",
+        "cherry-pick",
+        "clean",
+        "clone",
+        "commit",
+        "diff",
+        "fetch",
+        "grep",
+        "init",
+        "log",
+        "merge",
+        "mv",
+        "pull",
+        "push",
+        "rebase",
+        "remote",
+        "reset",
+        "restore",
+        "rev-parse",
+        "revert",
+        "rm",
+        "show",
+        "stash",
+        "status",
+        "submodule",
+        "switch",
+        "tag",
+        "worktree",
+    },
+)
+
+
 def _git_subcommand(tokens: list[str]) -> str | None:
     idx = 1
     while idx < len(tokens):
@@ -172,7 +210,8 @@ def _git_subcommand(tokens: list[str]) -> str | None:
         elif tok.startswith("-"):
             idx += 1
         else:
-            return tok.lower() if _IDENT_RE.match(tok.lower()) else None
+            sub = tok.lower()
+            return sub if sub in _ALLOWED_GIT_SUBS else None
     return None
 
 
