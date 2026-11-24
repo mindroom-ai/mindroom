@@ -434,6 +434,25 @@ async def saved_jobs(journal: EventJournalStore) -> list[BackgroundJob]:
     return jobs
 
 
+def workflow_job_standing(runtime_paths: RuntimePaths, job_id: str) -> str:
+    """Return what the job runtime knows of *job_id*, or `unknown` while no runtime exists."""
+    runtime = get_background_runtime(runtime_paths)
+    return "unknown" if runtime is None else runtime.job_standing(job_id)
+
+
+def workflow_job_admission(runtime_paths: RuntimePaths, job_id: str) -> asyncio.Lock:
+    """Return the lock a delivery of *job_id* holds while its job is admitted."""
+    runtime = get_background_runtime(runtime_paths)
+    assert runtime is not None
+    return runtime.admission(job_id)
+
+
+def undelivered_workflow_jobs(runtime_paths: RuntimePaths) -> frozenset[str] | None:
+    """Return job IDs whose terminal outcome is unsaved, or None while no runtime exists."""
+    runtime = get_background_runtime(runtime_paths)
+    return None if runtime is None else runtime.undelivered_jobs()
+
+
 def get_background_runtime(runtime_paths: RuntimePaths) -> ToolJobRuntime | None:
     """Find the managed Matrix runtime for one storage root, if present."""
     return instance.runtime if (instance := tool_job_instance(runtime_paths)) is not None else None
@@ -827,6 +846,43 @@ class ToolJobRuntime:
         if self._grant(entry.job) == "allowed":
             entry.cancel = spec.cancel
             entry.task = asyncio.create_task(self._run(entry, spec.operation), name=f"tool-job:{entry.job.job_id}")
+
+    def _job_delivered(self, job: BackgroundJob) -> bool:
+        return job.status in TERMINAL_STATUSES and self.outcome_saved(job.job_id)
+
+    def job_standing(self, job_id: str) -> str:
+        """Return what this runtime knows of *job_id*: `absent`, `stopped`, `ended`, or `held`."""
+        job = self.retained_job(job_id)
+        if job is None:
+            return "absent"
+        if self._job_delivered(job):
+            return "stopped" if job.status in ("cancelled", "denied") else "ended"
+        return "held"
+
+    def undelivered_jobs(self) -> frozenset[str]:
+        """Return the job IDs whose terminal outcome has not been saved yet."""
+        return frozenset(job.job_id for job in self.retained_jobs() if not self._job_delivered(job))
+
+    async def start_spec(
+        self,
+        job_id: str,
+        spec: JobSpec,
+        *,
+        owner: ToolExecutionIdentity,
+        depth: int,
+    ) -> tuple[BackgroundJob, JobClaim | None]:
+        """Start a prepared *spec* as *job_id* for *owner* at *depth*, passing the live adapter reference."""
+        return await self.start(
+            job_id,
+            tool_name=spec.tool_name,
+            depth=depth,
+            kind=spec.kind,
+            toolkit_name=spec.toolkit_name,
+            adapter=spec.adapter,
+            owner=owner,
+            operation=spec.operation,
+            cancel=spec.cancel,
+        )
 
     async def start(
         self,

@@ -306,16 +306,7 @@ async def launch_child(
         node = saved
         try:
             # In the owner's context, which the job's task keeps: the child runs in the run's conversation.
-            _, claim = await jobs.start(
-                job_id,
-                tool_name=spec.tool_name,
-                depth=run.depth,
-                kind=spec.kind,
-                adapter=spec.adapter,
-                owner=owner,
-                operation=spec.operation,
-                cancel=spec.cancel,
-            )
+            _, claim = await jobs.start_spec(job_id, spec, owner=owner, depth=run.depth)
         except JobAccessError as exc:
             raise AgentNodeError(str(exc)) from exc
     await jobs.release_wait(job_id, claim)

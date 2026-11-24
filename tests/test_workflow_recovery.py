@@ -24,8 +24,6 @@ from mindroom import authorization
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.custom_tools import workflow as workflow_tool_module
-from mindroom.custom_tools.workflow import workflow_job_standing
 from mindroom.delegation.lifecycle import accessed_entities
 from mindroom.orchestration import tool_job_runtime as coordinator_module
 from mindroom.orchestration import workflow_runtime
@@ -42,6 +40,8 @@ from mindroom.script_runs.reasons import (
     RUNTIME_SHUTDOWN,
     WORKFLOW_TOOL_REMOVED,
 )
+from mindroom.tool_jobs import runtime as job_runtime_module
+from mindroom.tool_jobs.runtime import workflow_job_standing
 from mindroom.tool_system.worker_routing import (
     parse_tool_execution_identity_payload,
     serialize_tool_execution_identity,
@@ -1187,7 +1187,7 @@ async def test_pass_without_a_job_runtime_decides_nothing_about_the_run_of_a_job
     intent = stack.reserve(SCRIPT, origin_job_id=never, job_id=never)
     await _started(stack)
     await stack.restart(kill=True)
-    monkeypatch.setattr(workflow_tool_module, "get_background_runtime", lambda _paths: None)
+    monkeypatch.setattr(job_runtime_module, "get_background_runtime", lambda _paths: None)
 
     assert await stack.recover() == []
 

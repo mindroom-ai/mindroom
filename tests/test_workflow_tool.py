@@ -22,7 +22,6 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import apply_tool_approval_capability
 from mindroom.config.agent import AgentConfig
 from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
-from mindroom.custom_tools import workflow as workflow_tool_module
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
 from mindroom.custom_tools.workflow import WorkflowTools
 from mindroom.delegation import lifecycle
@@ -39,6 +38,7 @@ from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.script_runs import manager as manager_module
 from mindroom.script_runs.manager import ScriptRunManagerError
 from mindroom.script_runs.models import ScriptRunState
+from mindroom.tool_jobs import runtime as job_runtime_module
 from mindroom.tool_jobs.execution import assembled_job_tools
 from mindroom.tool_jobs.publication import _job_state
 from mindroom.tool_jobs.resources import execution_resources
@@ -1256,15 +1256,17 @@ def test_job_standing_says_what_the_job_runtime_knows(
     runtime = SimpleNamespace(
         retained_job=lambda job_id: job if job_id == "job-1" else None,
         outcome_saved=lambda _job_id: saved[0],
+        _job_delivered=lambda j: job_runtime_module.ToolJobRuntime._job_delivered(runtime, j),  # type: ignore[arg-type]
+        job_standing=lambda job_id: job_runtime_module.ToolJobRuntime.job_standing(runtime, job_id),  # type: ignore[arg-type]
     )
-    monkeypatch.setattr(workflow_tool_module, "get_background_runtime", lambda _paths: runtime)
+    monkeypatch.setattr(job_runtime_module, "get_background_runtime", lambda _paths: runtime)
 
-    assert workflow_tool_module.workflow_job_standing(paths, "job-1") == standing
+    assert job_runtime_module.workflow_job_standing(paths, "job-1") == standing
     saved[0] = False
-    assert workflow_tool_module.workflow_job_standing(paths, "job-1") == "held"
-    assert workflow_tool_module.workflow_job_standing(paths, "job-2") == "absent"
-    monkeypatch.setattr(workflow_tool_module, "get_background_runtime", lambda _paths: None)
-    assert workflow_tool_module.workflow_job_standing(paths, "job-1") == "unknown"
+    assert job_runtime_module.workflow_job_standing(paths, "job-1") == "held"
+    assert job_runtime_module.workflow_job_standing(paths, "job-2") == "absent"
+    monkeypatch.setattr(job_runtime_module, "get_background_runtime", lambda _paths: None)
+    assert job_runtime_module.workflow_job_standing(paths, "job-1") == "unknown"
 
 
 @pytest.mark.asyncio

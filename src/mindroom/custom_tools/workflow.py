@@ -23,12 +23,12 @@ from mindroom.script_runs.manager import workflow_placement
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
 from mindroom.tool_jobs.runtime import (
-    TERMINAL_STATUSES,
     BackgroundOutcome,
     JobSpec,
     ManagedJobToolkit,
     call_job_id,
     get_background_runtime,
+    workflow_job_standing,
 )
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.authoring import Toolkit
@@ -722,17 +722,7 @@ async def handle_workflow_control(
             job = await _resume_job(workflows, context, arguments, limits, job_id, jobs)
             # In the owner's context, which the job's task keeps, as the job of a call's resume has it.
             with tool_runtime_context(context):
-                _, claim = await jobs.start(
-                    job_id,
-                    tool_name=job.tool_name,
-                    depth=run.depth,
-                    kind=job.kind,
-                    toolkit_name=job.toolkit_name,
-                    adapter=job.adapter,
-                    owner=context.execution_identity,
-                    operation=job.operation,
-                    cancel=job.cancel,
-                )
+                _, claim = await jobs.start_spec(job_id, job, owner=context.execution_identity, depth=run.depth)
             # Nobody waits for this job, so nobody keeps its outcome: its report is a follow-up in the thread.
             await jobs.release_wait(job_id, claim)
     except ValueError:
@@ -832,43 +822,6 @@ async def continued_workflow_job(job: BackgroundJob) -> JobSpec | BackgroundOutc
         return await _workflow_job_outcome(engine, run)
     limits = workflow_limits(context, run.agent_name)
     return _run_job(engine, run, job.job_id, context, limits, resume=job.adapter.get("resume"))
-
-
-def workflow_job_standing(runtime_paths: RuntimePaths, job_id: str) -> str:
-    """Return what the job runtime knows of a run's job now: read when its run is judged, never ahead of that.
-
-    `unknown` while there is no job runtime to ask, `absent` when it holds no such job, `stopped` for a saved Stop
-    or denial, `ended` for any other saved terminal outcome, and `held` for any other known job (unfinished or whose
-    end is not saved yet, since a restart would find it unfinished and deliver its report again).
-    """
-    runtime = get_background_runtime(runtime_paths)
-    if runtime is None:
-        return "unknown"
-    job = runtime.retained_job(job_id)
-    if job is None:
-        return "absent"
-    if job.status in TERMINAL_STATUSES and runtime.outcome_saved(job_id):
-        return "stopped" if job.status in ("cancelled", "denied") else "ended"
-    return "held"
-
-
-def workflow_job_admission(runtime_paths: RuntimePaths, job_id: str) -> asyncio.Lock:
-    """Return the lock a delivery of the call with *job_id* holds while its job is admitted."""
-    return cast("ToolJobRuntime", get_background_runtime(runtime_paths)).admission(job_id)
-
-
-def undelivered_workflow_jobs(runtime_paths: RuntimePaths) -> frozenset[str] | None:
-    """Return the jobs whose end the journal does not hold yet, so their runs' reports are still theirs to deliver.
-
-    None while there is no job runtime to ask.
-    """
-    runtime = get_background_runtime(runtime_paths)
-    if runtime is None:
-        return None
-    held = runtime.retained_jobs()
-    return frozenset(
-        job.job_id for job in held if job.status not in TERMINAL_STATUSES or not runtime.outcome_saved(job.job_id)
-    )
 
 
 def workflow_limits(context: ToolRuntimeContext, agent_name: str) -> WorkflowLimits:

@@ -41,7 +41,7 @@ from mindroom.config.main import Config
 from mindroom.config.memory import MemoryConfig
 from mindroom.config.models import DefaultsConfig, ModelConfig, ModelPricing
 from mindroom.constants import RuntimePaths
-from mindroom.custom_tools.workflow import WorkflowTools, workflow_job_admission, workflow_job_standing
+from mindroom.custom_tools.workflow import WorkflowTools
 from mindroom.message_target import MessageTarget
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.providers.identity import model_identity
@@ -60,7 +60,7 @@ from mindroom.session_storage import store as session_store
 from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.results import read_result_payload
-from mindroom.tool_jobs.runtime import register_background_runtime
+from mindroom.tool_jobs.runtime import register_background_runtime, workflow_job_admission, workflow_job_standing
 from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import tool_runtime_context
