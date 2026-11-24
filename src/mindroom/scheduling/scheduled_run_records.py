@@ -18,6 +18,7 @@ from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     build_tool_execution_identity,
 )
+from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -279,7 +280,7 @@ async def record_silent_schedule_result_if_needed(
     response_text: str,
 ) -> None:
     """Persist the final result only when the response is a silent schedule."""
-    if envelope.source_kind != SILENT_SCHEDULE_SOURCE_KIND:
+    if envelope.source_kind != SILENT_SCHEDULE_SOURCE_KIND or envelope.origin.intent is TurnIntent.JOB_FOLLOW_UP:
         return
     result: Literal["reported", "no_report", "suppressed"] = "reported"
     if suppression_reason == "silent_no_report":
@@ -309,7 +310,7 @@ async def record_silent_schedule_started_if_needed(
     runtime_paths: RuntimePaths,
 ) -> None:
     """Create an idempotent start receipt only for a silent schedule."""
-    if envelope.source_kind != SILENT_SCHEDULE_SOURCE_KIND:
+    if envelope.source_kind != SILENT_SCHEDULE_SOURCE_KIND or envelope.origin.intent is TurnIntent.JOB_FOLLOW_UP:
         return
     await run_blocking_until_complete(
         partial(

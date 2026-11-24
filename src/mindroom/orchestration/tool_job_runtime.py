@@ -108,7 +108,7 @@ def _continues(job: BackgroundJob) -> bool:
 def _follow_up_candidates(jobs: Iterable[BackgroundJob]) -> dict[ConversationKey, tuple[BackgroundJob, ...]]:
     """Group the ended top-level jobs a follow-up or held-jobs notice may report by conversation, before access checks.
 
-    A silent schedule's work waits for its next silent run, which opens with the note instead.
+    A silent schedule's work is grouped separately so it gets a silent follow-up.
     """
     groups: dict[ConversationKey, list[BackgroundJob]] = {}
     for job in jobs:
@@ -119,14 +119,13 @@ def _follow_up_candidates(jobs: Iterable[BackgroundJob]) -> dict[ConversationKey
             and not is_workflow_node_job(job)
             and job.owner.room_id is not None
             and job.owner.requester_id is not None
-            and job.source_kind != SILENT_SCHEDULE_SOURCE_KIND
         ):
             key = ConversationKey(
                 recipient=job.owner.recipient,
                 room_id=job.owner.room_id,
                 thread_id=job.owner.resolved_thread_id,
                 requester_id=job.owner.requester_id,
-                silent=False,
+                silent=job.source_kind == SILENT_SCHEDULE_SOURCE_KIND,
             )
             groups.setdefault(key, []).append(job)
     return {key: tuple(groups[key]) for key in sorted(groups, key=_key_order)}
@@ -184,8 +183,8 @@ async def _post_held_notice(
     return delivered is not None
 
 
-def _key_order(key: ConversationKey) -> tuple[str, str, str, str]:
-    return (key.recipient, key.room_id, key.thread_id or "", key.requester_id)
+def _key_order(key: ConversationKey) -> tuple[str, str, str, str, bool]:
+    return (key.recipient, key.room_id, key.thread_id or "", key.requester_id, key.silent)
 
 
 @dataclass
@@ -579,7 +578,7 @@ class ToolJobRuntimeCoordinator:
             # Jobs an admitted follow-up or a sent notice already reports need no access check again.
             candidates, held = follow_up_jobs(group), held_jobs(group)
             known = {next_follow_up_id(key, candidates)} if candidates else set()
-            known |= {held_notice(key, held)[0]} if held else set()
+            known |= {held_notice(key, held)[0]} if held and not key.silent else set()
             if not known or known <= self._admitted_follow_ups | self._sent_notices.keys():
                 due |= known
                 continue
@@ -598,7 +597,7 @@ class ToolJobRuntimeCoordinator:
                     await bot.admit_job_follow_up(key, follow_up_id)
                     self._admitted_follow_ups.add(follow_up_id)
                 due.add(follow_up_id)
-            elif (held := held_jobs(ended)) and bot.client is not None:
+            elif not key.silent and (held := held_jobs(ended)) and bot.client is not None:
                 notice_id, text = held_notice(key, held)
                 if notice_id in self._sent_notices or await _post_held_notice(
                     bot.client,
