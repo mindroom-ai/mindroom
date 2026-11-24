@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 import pytest_asyncio
 
+from mindroom import workflow as workflow_sdk
 from mindroom.agents import create_agent
 from mindroom.api.script_gateway import serve_listener
 from mindroom.approval import manager as approval_manager
@@ -1568,3 +1569,39 @@ async def test_workflow_peers_respects_tool_approval_policy_pause_approve_deny(
             if not cards.decision.done():
                 cards.decision.cancel()
             await gated.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_wait", [float("nan"), float("inf"), float("-inf"), -1.0])
+async def test_non_finite_peer_wait_seconds_is_refused_and_records_nothing(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+    bad_wait: float,
+) -> None:
+    """Non-finite or negative peer wait times are refused before touching the store or event loop timers."""
+    reader = NodeRef("@0", 1, "reader")
+    with pytest.raises(WorkflowRunStoreError, match="finite"):
+        await asyncio.wait_for(
+            stack.engine.ask.wait_for_messages(
+                stack.run_id,
+                reader,
+                bad_wait,
+                op_id="bad-wait-op",
+                names=("reader", "*"),
+            ),
+            timeout=0.5,
+        )
+    with closing(sqlite3.connect(stack.store.database_path)) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM workflow_peer_calls WHERE run_id = ?",
+            (stack.run_id,),
+        ).fetchone() == (0,)
+        assert conn.execute("SELECT COUNT(*) FROM workflow_cursors WHERE run_id = ?", (stack.run_id,)).fetchone() == (
+            0,
+        )
+    # SDK inbox() also rejects bool (as well as non-finite values) inside a lane.
+    monkeypatch.setattr(workflow_sdk._local, "lane", workflow_sdk._Lane(path=""))
+    with pytest.raises(workflow_sdk.WorkflowError, match="finite"):
+        workflow_sdk.inbox(True)
+    with pytest.raises(workflow_sdk.WorkflowError, match="finite"):
+        workflow_sdk.inbox(bad_wait)

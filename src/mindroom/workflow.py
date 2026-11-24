@@ -676,8 +676,7 @@ def send(to: str, text: str) -> dict[str, object]:
 def inbox(wait_seconds: float = 0) -> dict[str, object]:
     """Return only unread mail sent to "script" (advancing the cursor) as {messages, note?}; waits end on mail or after wait_seconds with note. Prefer short waits (10 to 30 s) in a bounded loop."""
     _current_lane()
-    wait = float(wait_seconds)
-    if not math.isfinite(wait) or wait < 0:
+    if isinstance(wait_seconds, bool) or not math.isfinite(wait := float(wait_seconds)) or wait < 0:
         msg = "wait_seconds must be a finite non-negative number."
         raise WorkflowError(msg)
     return cast("dict[str, object]", _call("inbox", {"wait_seconds": wait}))

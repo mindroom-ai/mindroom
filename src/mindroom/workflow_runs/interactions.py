@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from contextlib import suppress
 from dataclasses import replace
 from functools import partial
@@ -251,6 +252,9 @@ class RunInteractions:
         names: tuple[str, ...],
     ) -> dict[str, object]:
         """Read unread messages, or wait on *run_id*'s condition without holding a concurrency slot."""
+        if isinstance(wait_seconds, bool) or not math.isfinite(wait_seconds) or wait_seconds < 0:
+            msg = "wait_seconds must be a finite non-negative number."
+            raise WorkflowRunStoreError(msg)
         read_fn = partial(read_call, self.store, run_id, op_id=op_id, reader=reader, names=names)
         condition, deadline, cancelled = self.live.condition(run_id), self.live.clock() + wait_seconds, False
         async with condition:
