@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import re
-from typing import TYPE_CHECKING
+from collections import deque
+from typing import TYPE_CHECKING, Any, cast
 
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError as InvalidSchemaError
@@ -16,9 +17,7 @@ from referencing.jsonschema import DRAFT202012
 from mindroom.json_utils import has_only_finite_numbers
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
-    from referencing import Resource
+    from collections.abc import Iterable, Mapping
 
 # How many turns an agent gets to answer with a value that matches: its first, and four corrections.
 SCHEMA_TURNS = 5
@@ -34,17 +33,18 @@ class SchemaError(ValueError):
     """A schema that is no JSON Schema, or an answer that holds no JSON value."""
 
 
-def _at(path: object, message: str) -> str:
-    where = "/".join(str(part) for part in path)  # type: ignore[attr-defined]
+def _at(path: Iterable[object], message: str) -> str:
+    where = "/".join(str(part) for part in path)
     return f"{where}: {message}" if where else message
 
 
-def _references(resource: Resource[object]) -> Iterator[str]:
-    """Yield each reference in *resource* and its Draft 2020-12 subresources."""
-    if isinstance(resource.contents, dict):
-        yield from (resource.contents[name] for name in _REFERENCES if isinstance(resource.contents.get(name), str))
-    for subresource in resource.subresources():
-        yield from _references(subresource)
+def _check_draft_schema(schema: object) -> Mapping[str, Any] | bool:
+    try:
+        Draft202012Validator.check_schema(cast("Mapping[str, Any] | bool", schema))
+    except InvalidSchemaError as exc:
+        reason = _at(exc.absolute_path or ("schema",), exc.message)
+        raise SchemaError(_INVALID.format(reason=reason)) from exc
+    return cast("Mapping[str, Any] | bool", schema)
 
 
 def check_schema(schema: object) -> None:
@@ -53,20 +53,32 @@ def check_schema(schema: object) -> None:
     A schema reaches only what it holds itself: a reference that leaves it, to a URL or a file, is refused and
     never fetched, and so is one that names nothing in it.
     """
-    try:
-        Draft202012Validator.check_schema(schema)
-    except InvalidSchemaError as exc:
-        reason = _at(exc.absolute_path or ("schema",), exc.message)
-        raise SchemaError(_INVALID.format(reason=reason)) from exc
-    resource = DRAFT202012.create_resource(schema)
-    resolver = _NOTHING_ELSE.with_resource("", resource).resolver()
-    for reference in _references(resource):
-        try:
-            inside = reference.startswith("#") and resolver.lookup(reference)
-        except (Unresolvable, LookupError, ValueError, TypeError):
-            raise SchemaError(_INVALID.format(reason=f"reference {reference!r} does not resolve")) from None
-        if not inside:
-            raise SchemaError(_INVALID.format(reason=f"reference {reference!r} is not inside the schema"))
+    root_schema = _check_draft_schema(schema)
+    root = DRAFT202012.create_resource(root_schema)
+    root_resolver = _NOTHING_ELSE.with_resource("", root).resolver()
+    pending: deque[tuple[object, Any, bool]] = deque([(root_schema, root_resolver, False)])
+    seen: set[tuple[int, str, tuple[str, ...]]] = set()
+    while pending:
+        contents, resolver, check_target = pending.popleft()
+        scope = (id(contents), resolver._base_uri, tuple(dict.fromkeys(uri for uri, _ in resolver.dynamic_scope())))
+        if scope in seen:
+            continue
+        seen.add(scope)
+        checked = _check_draft_schema(contents) if check_target else cast("Mapping[str, Any] | bool", contents)
+        if isinstance(checked, dict):
+            for name in _REFERENCES:
+                reference = checked.get(name)
+                if not isinstance(reference, str):
+                    continue
+                if not reference.startswith("#"):
+                    raise SchemaError(_INVALID.format(reason=f"reference {reference!r} is not inside the schema"))
+                try:
+                    resolved = resolver.lookup(reference)
+                except (Unresolvable, LookupError, ValueError, TypeError):
+                    raise SchemaError(_INVALID.format(reason=f"reference {reference!r} does not resolve")) from None
+                pending.append((resolved.contents, resolved.resolver, True))
+        resource = DRAFT202012.create_resource(checked)
+        pending.extend((sub.contents, resolver.in_subresource(sub), False) for sub in resource.subresources())
 
 
 def schema_prompt(prompt: str, schema: object) -> str:
@@ -95,7 +107,9 @@ def validation_error(value: object, schema: object) -> str | None:
     or one that never ends. Nothing is fetched for it.
     """
     try:
-        error = best_match(Draft202012Validator(schema, registry=_NOTHING_ELSE).iter_errors(value))
+        error = best_match(
+            Draft202012Validator(cast("Mapping[str, Any] | bool", schema), registry=_NOTHING_ELSE).iter_errors(value),
+        )
     except Exception as exc:
         msg = f"schema cannot be applied: {type(exc).__name__}: {str(exc).strip()[:200]}"
         raise SchemaError(msg) from exc

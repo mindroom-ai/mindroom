@@ -488,3 +488,90 @@ async def test_fenced_json_with_embedded_code_fences_in_string(stack: WorkflowSt
 
     assert result == obj
     assert len(model.requests) == 1
+
+
+def test_check_schema_follows_resolved_targets_and_terminates_on_cycles() -> None:
+    """Preflight follows internal $ref targets outside Draft 2020-12 keywords, with cycle detection."""
+    # Valid recursive schema under OpenAPI-style components/schemas terminates and passes.
+    recursive = {
+        "$ref": "#/components/schemas/Node",
+        "components": {
+            "schemas": {
+                "Node": {
+                    "type": "object",
+                    "properties": {
+                        "next": {"$ref": "#/components/schemas/Node"},
+                        "$ref": {"type": "string"},
+                    },
+                    "const": {"$ref": "https://example.com/not-a-ref"},
+                    "x-annotation": {"$ref": "#/components/schemas/Missing"},
+                },
+                "Unused": {"$ref": "#/components/schemas/AlsoMissing"},
+            },
+        },
+    }
+    check_schema(recursive)
+
+    # Dangling internal ref inside a resolved components/schemas target is rejected.
+    dangling = {
+        "$ref": "#/components/schemas/Answer",
+        "components": {"schemas": {"Answer": {"$ref": "#/components/schemas/Missing"}}},
+    }
+    with pytest.raises(SchemaError) as missing:
+        check_schema(dangling)
+    assert str(missing.value) == (
+        "schema is not valid JSON Schema: reference '#/components/schemas/Missing' does not resolve."
+    )
+
+    # External ref inside a resolved components/schemas target is rejected.
+    external = {
+        "$ref": "#/components/schemas/Answer",
+        "components": {"schemas": {"Answer": {"$ref": "https://example.com/external.json"}}},
+    }
+    with pytest.raises(SchemaError) as outside:
+        check_schema(external)
+    assert str(outside.value) == (
+        "schema is not valid JSON Schema: reference 'https://example.com/external.json' is not inside the schema."
+    )
+
+    # Invalid JSON Schema target under components/schemas is rejected at preflight.
+    invalid_target = {
+        "$ref": "#/components/schemas/Answer",
+        "components": {"schemas": {"Answer": {"type": "bool"}}},
+    }
+    with pytest.raises(SchemaError) as bad_target:
+        check_schema(invalid_target)
+    assert str(bad_target.value).startswith("schema is not valid JSON Schema: type: 'bool' is not valid")
+
+    # Non-schema primitive target under components/schemas is rejected at preflight.
+    primitive_target = {
+        "$ref": "#/components/schemas/Answer",
+        "components": {"schemas": {"Answer": "not-a-schema"}},
+    }
+    with pytest.raises(SchemaError) as bad_primitive:
+        check_schema(primitive_target)
+    assert str(bad_primitive.value).startswith("schema is not valid JSON Schema: schema: 'not-a-schema' is not of type")
+
+
+@pytest.mark.asyncio
+async def test_dangling_ref_inside_components_schema_fails_at_admission_with_zero_jobs_and_requests(
+    stack: WorkflowStack,
+) -> None:
+    """An OpenAPI-style $ref whose target has a dangling $ref fails at admission before any job or model call."""
+    model = stack.child_script(answer(_GOOD, _TEN_CENTS))
+    bad = {
+        "$ref": "#/components/schemas/Answer",
+        "components": {"schemas": {"Answer": {"$ref": "#/components/schemas/Missing"}}},
+    }
+
+    receipt = await stack.submit("@0", "agent", {"prompt": "Check.", "schema": bad})
+    node = stack.store.get_node(stack.run_id, "@0")
+
+    expected = "schema is not valid JSON Schema: reference '#/components/schemas/Missing' does not resolve."
+    assert receipt.state == "failed"
+    assert receipt.error == {"kind": "schema", "message": expected}
+    assert node is not None
+    assert (node.state, node.handle) == (WorkflowNodeState.FAILED, None)
+    assert stack.jobs.retained_jobs() == ()
+    assert model.requests == []
+    assert run_usage(stack.store, stack.run_id)["cost_usd"] == 0
