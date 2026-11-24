@@ -248,12 +248,13 @@ class _Places:
     """The places among one run's working calls: at most `limit` agent and tool calls of the run work at one time.
 
     A call holds its place from its start to its end (except while waiting on peer messages or a child ask_user).
-    Calls waiting for a place wait in `queued` (waking waiters jump to the front).
+    Waking waiters take freed places before `queued` calls.
     """
 
     limit: int
     working: set[str] = field(default_factory=set)
     queued: deque[tuple[str, Callable[[], Awaitable[object]]]] = field(default_factory=deque)
+    waking: int = 0
 
 
 # What the saved owner of a run has now in the run's conversation: its live context once access is confirmed,
@@ -1111,7 +1112,7 @@ class WorkflowEngine:
                 ask_node = await asyncio.to_thread(self.store.put_node, ask_node, run.epoch, dirty_after=False)
             if ask_node.state is WorkflowNodeState.COMPLETED:
                 return str(ask_node.result)
-            self._leave(run_id, parent.key)
+            self._drop_slot(run_id, parent.key)
             await self._restate(run_id)
             condition.notify_all()
         runtime, job_id = self.agents(), parent.links.get("job_id")
@@ -1174,7 +1175,7 @@ class WorkflowEngine:
         order the calls came. The caller holds the run's lock.
         """
         over, places = await self._check_budget(run), self._places_for(run)
-        if not over and len(places.working) < places.limit:
+        if not over and not places.waking and len(places.working) < places.limit:
             places.working.add(node.key)
             try:
                 return await dispatch(node)
@@ -1182,36 +1183,42 @@ class WorkflowEngine:
                 # A call whose node names its work by now keeps its place, for the wait that settles it.
                 saved = self.store.get_node(run.run_id, node.key)
                 if saved is None or saved.generation != node.generation or saved.handle is None:
-                    self._leave(run.run_id, node.key)
+                    self._drop_slot(run.run_id, node.key)
                 raise
         queued = replace(node, state=WorkflowNodeState.QUEUED)
         queued = await asyncio.to_thread(self.store.put_node, queued, run.epoch, dirty_after=dirty_after)
         if not over:
-            self._enqueue_place(run, queued.key, partial(dispatch, queued))
+            places.queued.append((queued.key, partial(dispatch, queued)))
+            self._drop_slot(run.run_id, None)
         return _receipt(queued)
 
     def _places_for(self, run: WorkflowRun) -> _Places:
         return self._places.setdefault(run.run_id, _Places(max(1, run.max_concurrent)))
 
-    def _enqueue_place(self, run: WorkflowRun, key: str, start: Callable[[], Awaitable[object]]) -> None:
-        """Queue *start* for *key* and start any queued call a free place now admits. The caller holds the run's lock."""
-        self._places_for(run).queued.append((key, start))
-        self._leave(run.run_id, None)
-
-    def _leave(self, run_id: str, key: str | None) -> None:
-        """Give up the place of the call at *key*, then start queued calls while places remain."""
+    def _drop_slot(self, run_id: str, key: str | None) -> None:
+        """Give up the place of *key*, then start queued calls while places remain and nobody is waking."""
         places = self._places.get(run_id)
         if places is None:
             return
         places.working.discard(key or "")
-        while places.queued and len(places.working) < places.limit and not self._closed:
+        while not places.waking and places.queued and len(places.working) < places.limit and not self._closed:
             queued, start = places.queued.popleft()
             places.working.add(queued)
             self._spawn(run_id, self._start_queued(run_id, queued, start))
 
+    async def _release_slot(self, run_id: str, key: str) -> None:
+        """Release *key*, enforce budget before pumping queued work, restate the run, and wake waiters."""
+        async with (condition := self._condition(run_id)):
+            if (places := self._places.get(run_id)) is not None:
+                places.working.discard(key)
+            with suppress(WorkflowRunNotFoundError):
+                await self._check_budget(self.store.get_run(run_id))
+            self._drop_slot(run_id, None)
+            await self._restate(run_id)
+            condition.notify_all()
+
     async def _reacquire_place(self, run_id: str, key: str) -> None:
         """Take a concurrency place back for *key* before a peer or child-question wait returns."""
-        granted = False
         async with (condition := self._condition(run_id)):
             if self._closed or self._run_ended(run_id):
                 return
@@ -1219,33 +1226,21 @@ class WorkflowEngine:
             if key in places.working or len(places.working) < places.limit:
                 places.working.add(key)
                 return
-
-            async def wake() -> None:
-                nonlocal granted
-                granted = True
-                condition.notify_all()
-
-            entry = (key, wake)
-            places.queued.appendleft(entry)
+            places.waking += 1
             try:
-                while not granted and not self._closed and not self._run_ended(run_id):
-                    await condition.wait()
-            except BaseException:
-                if granted:
-                    self._leave(run_id, key)
-                raise
+                while (
+                    (cur := self._places.get(run_id)) is places
+                    and len(places.working) >= places.limit
+                    and not self._closed
+                    and not self._run_ended(run_id)
+                ):
+                    with suppress(TimeoutError):
+                        await asyncio.wait_for(condition.wait(), RECHECK_SECONDS)
+                if cur is places and not self._closed and not self._run_ended(run_id):
+                    places.working.add(key)
             finally:
-                if not granted and (cur := self._places.get(run_id)) is not None:
-                    with suppress(ValueError):
-                        cur.queued.remove(entry)
-
-    async def _finish_call(self, run_id: str, key: str) -> None:
-        """Release *key* and stop at the cost limit if reached; the caller's `_leave` starts queued work otherwise."""
-        async with self._condition(run_id):
-            if (places := self._places.get(run_id)) is not None:
-                places.working.discard(key)
-            with suppress(WorkflowRunNotFoundError):
-                await self._check_budget(self.store.get_run(run_id))
+                places.waking -= 1
+                self._drop_slot(run_id, None)
 
     async def _start_queued(self, run_id: str, key: str, start: Callable[[], Awaitable[object]]) -> None:
         """Start a call that waited for a place, under the run's lock, again while its agent cannot be decided yet."""
@@ -1267,11 +1262,11 @@ class WorkflowEngine:
                     await asyncio.sleep(RECHECK_SECONDS)
         except SupersededAttemptError:
             # The run moved on: what it left queued is the next attempt's to run.
-            self._leave(run_id, key)
+            self._drop_slot(run_id, key)
         except BaseException:
             node = self.store.get_node(run_id, key)
             if node is None or node.handle is None:
-                self._leave(run_id, key)
+                self._drop_slot(run_id, key)
             raise
         await self._notify(run_id)
 
@@ -1310,8 +1305,8 @@ class WorkflowEngine:
             if outcome[0] is WorkflowNodeState.COMPLETED:
                 if await self._check_budget(now):
                     return
-                start = partial(self._dispatch_agent, run, node, timeout=None)
-                self._enqueue_place(run, node.key, start)
+                self._places_for(run).queued.append((node.key, partial(self._dispatch_agent, run, node, timeout=None)))
+                self._drop_slot(run.run_id, None)
             else:
                 await self._settle(node, run.epoch, state=outcome[0], error=outcome[2], ignore=True)
         await self._notify(run.run_id)
@@ -1519,7 +1514,7 @@ class WorkflowEngine:
                     return {"messages": []}
                 if holds_slot:
                     await self._stamp_peer(run_id, key, gen, WorkflowNodeState.WAITING, "peer")
-                    self._leave(run_id, key)
+                    self._drop_slot(run_id, key)
                     released = True
                     condition.notify_all()
                 result = await self._await_peer_mail(condition, run_id, read_fn, wait_seconds, deadline)
@@ -1653,7 +1648,7 @@ class WorkflowEngine:
             if not await self._settle(node, run.epoch, state=WorkflowNodeState.FAILED, error=error) and not node.seq:
                 refused = replace(node, state=WorkflowNodeState.FAILED, error=error, ended_at=utc_timestamp())
                 await asyncio.to_thread(self.store.put_node, refused, run.epoch, dirty_after=True)
-            self._leave(run.run_id, node.key)
+            self._drop_slot(run.run_id, node.key)
             return _receipt(cast("WorkflowNode", self.store.get_node(run.run_id, node.key)))
         except BaseException:
             # The start failed in some other way, or the request was cancelled. A node that names its job already
@@ -1718,10 +1713,10 @@ class WorkflowEngine:
         """Wait for the job of an agent node and settle the node as its turn ended, then wake the run's waiters."""
         try:
             await self._settle_agent(run, node, epoch)
-            await self._finish_call(node.run_id, node.key)
-        finally:
-            self._leave(node.run_id, node.key)
-        await self._notify(node.run_id)
+            await self._release_slot(node.run_id, node.key)
+        except BaseException:
+            self._drop_slot(node.run_id, node.key)
+            raise
 
     def _budget_exceeded(self, run: WorkflowRun) -> str | None:
         """Return the stop reason when *run* or any ancestor has reached its `max_cost_usd`, else None."""
@@ -1742,7 +1737,7 @@ class WorkflowEngine:
             return False
         if (places := self._places.get(run.run_id)) is not None:
             places.queued.clear()
-        if (places is None or not places.working) and run.run_id not in self._stopping:
+        if (places is None or (not places.working and not places.waking)) and run.run_id not in self._stopping:
             self.cancel_as_task(run.run_id, reason=reason, state=WorkflowRunState.INTERRUPTED, epoch=run.epoch)
         return True
 
@@ -2180,10 +2175,10 @@ class WorkflowEngine:
             # A run that moved on meanwhile reads the call's receipt itself.
             with suppress(SupersededAttemptError):
                 await asyncio.to_thread(self._settle_broker, node, epoch, outcome)
-            await self._finish_call(node.run_id, node.key)
-        finally:
-            self._leave(node.run_id, node.key)
-        await self._notify(node.run_id)
+            await self._release_slot(node.run_id, node.key)
+        except BaseException:
+            self._drop_slot(node.run_id, node.key)
+            raise
 
     async def _watch_time(self, run_id: str, epoch: int, hours: float) -> None:
         """Save the working time the attempt that began with *epoch* uses, and stop it when none is left."""
