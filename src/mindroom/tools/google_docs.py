@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     name="google_docs",
     file_access=ToolFileAccess.NONE,
     display_name="Google Docs",
-    description="Create, read, and edit documents through the connected user's Google Docs",
+    description="Create, read, edit, and format documents through the connected user's Google Docs",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.OAUTH,
@@ -55,6 +55,14 @@ if TYPE_CHECKING:
             default=True,
             description="Allow inserting and replacing text in Google Docs.",
         ),
+        ConfigField(
+            name="format_document",
+            label="Format Documents",
+            type="boolean",
+            required=False,
+            default=False,
+            description="Allow revision-checked formatting in one named document tab.",
+        ),
     ],
     managed_init_args=(
         ToolManagedInitArg.RUNTIME_PATHS,
@@ -73,6 +81,7 @@ if TYPE_CHECKING:
         "google_docs_get_document",
         "google_docs_insert_text",
         "google_docs_replace_text",
+        "google_docs_format_document",
     ),
 )
 def google_docs_tools() -> type[GoogleDocsTools]:

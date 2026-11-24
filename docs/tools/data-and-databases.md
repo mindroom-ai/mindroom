@@ -313,9 +313,12 @@ tool_approval:
 | `google_docs_get_document(document_id)` | Returns the full document structure and content, including every tab, paragraph, style, table, and list. |
 | `google_docs_insert_text(document_id, text, index=None, tab_id=None)` | Inserts text at a body index (1 is the first position), or appends to the end of the tab when `index` is omitted. |
 | `google_docs_replace_text(document_id, find_text, replace_text, match_case=False, tab_ids=None)` | Replaces every match across all tabs or the listed tabs and reports the count. |
+| `google_docs_format_document(document_id, tab_id, expected_revision_id, operations)` | Atomically formats ranges in one tab with paragraph styles, text styles, native lists, or hyperlinks only when the document is still at the revision read by the caller. |
 
 Each `document_id` accepts either a document ID or a full Google Docs URL.
 Every successful call returns the document's edit URL.
+`google_docs_format_document()` accepts only `paragraph_style`, `text_style`, `native_list`, `remove_native_list`, and `hyperlink` operations, and it applies the call's immutable `tab_id` to every operation.
+Read the document immediately before formatting it, then use its `revisionId` as `expected_revision_id`; Docs rejects the full batch if another edit changes the document first.
 If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link.
 Before public production use, the Docs scope needs Google verification; see [Production Verification Follow-up](../deployment/google-services-oauth.md#production-verification-follow-up).
 
@@ -324,6 +327,7 @@ Before public production use, the Docs scope needs Google verification; see [Pro
 | `create_document` | `boolean` | `true` | Enable document creation. |
 | `read_document` | `boolean` | `true` | Enable structure and content reads. |
 | `edit_document` | `boolean` | `true` | Enable text insertion and replacement. |
+| `format_document` | `boolean` | `false` | Enable revision-checked formatting operations. |
 
 ## [`google_sheets`]
 

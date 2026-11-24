@@ -350,6 +350,101 @@ def test_google_docs_replace_text_can_target_selected_tabs(tmp_path: Path) -> No
     assert result["update"]["replies"][0]["replaceAllText"]["occurrencesChanged"] == 2
 
 
+def test_google_docs_format_document_scopes_supported_operations_to_one_tab_and_revision(tmp_path: Path) -> None:
+    tool, service = _connected_tool(tmp_path)
+
+    result = json.loads(
+        tool.google_docs_format_document(
+            "document-id",
+            "tab-2",
+            "revision-1",
+            [
+                {
+                    "type": "paragraph_style",
+                    "start_index": 1,
+                    "end_index": 8,
+                    "style": {"namedStyleType": "HEADING_1"},
+                    "fields": ["namedStyleType"],
+                },
+                {
+                    "type": "text_style",
+                    "start_index": 1,
+                    "end_index": 8,
+                    "style": {"bold": True},
+                    "fields": ["bold"],
+                },
+                {
+                    "type": "native_list",
+                    "start_index": 9,
+                    "end_index": 18,
+                    "bullet_preset": "BULLET_DISC_CIRCLE_SQUARE",
+                },
+                {
+                    "type": "hyperlink",
+                    "start_index": 1,
+                    "end_index": 8,
+                    "url": "https://example.test/plan",
+                },
+            ],
+        ),
+    )
+
+    assert service.documents_resource.batch_update_calls == [
+        {
+            "documentId": "document-id",
+            "body": {
+                "requests": [
+                    {
+                        "updateParagraphStyle": {
+                            "range": {"startIndex": 1, "endIndex": 8, "tabId": "tab-2"},
+                            "paragraphStyle": {"namedStyleType": "HEADING_1"},
+                            "fields": "namedStyleType",
+                        },
+                    },
+                    {
+                        "updateTextStyle": {
+                            "range": {"startIndex": 1, "endIndex": 8, "tabId": "tab-2"},
+                            "textStyle": {"bold": True},
+                            "fields": "bold",
+                        },
+                    },
+                    {
+                        "createParagraphBullets": {
+                            "range": {"startIndex": 9, "endIndex": 18, "tabId": "tab-2"},
+                            "bulletPreset": "BULLET_DISC_CIRCLE_SQUARE",
+                        },
+                    },
+                    {
+                        "updateTextStyle": {
+                            "range": {"startIndex": 1, "endIndex": 8, "tabId": "tab-2"},
+                            "textStyle": {"link": {"url": "https://example.test/plan"}},
+                            "fields": "link",
+                        },
+                    },
+                ],
+                "writeControl": {"requiredRevisionId": "revision-1"},
+            },
+        },
+    ]
+    assert result["tabId"] == "tab-2"
+
+
+def test_google_docs_format_document_rejects_unsupported_operations(tmp_path: Path) -> None:
+    tool, service = _connected_tool(tmp_path)
+
+    result = json.loads(
+        tool.google_docs_format_document(
+            "document-id",
+            "tab-2",
+            "revision-1",
+            [{"type": "delete_content", "start_index": 1, "end_index": 8}],
+        ),
+    )
+
+    assert result == {"error": "Google Docs formatting operation type is not supported"}
+    assert service.documents_resource.batch_update_calls == []
+
+
 def test_google_docs_config_flags_control_registered_functions(tmp_path: Path) -> None:
     tool = GoogleDocsTools(
         runtime_paths=_runtime_paths(tmp_path),
@@ -359,9 +454,10 @@ def test_google_docs_config_flags_control_registered_functions(tmp_path: Path) -
         create_document=False,
         read_document=True,
         edit_document=False,
+        format_document=True,
     )
 
-    assert set(tool.functions) == {"google_docs_get_document"}
+    assert set(tool.functions) == {"google_docs_format_document", "google_docs_get_document"}
 
 
 def test_google_docs_agent_config_accepts_inline_operation_flags() -> None:
@@ -375,6 +471,7 @@ def test_google_docs_agent_config_accepts_inline_operation_flags() -> None:
                             "create_document": True,
                             "read_document": True,
                             "edit_document": False,
+                            "format_document": True,
                         },
                     },
                 ],
@@ -388,6 +485,7 @@ def test_google_docs_agent_config_accepts_inline_operation_flags() -> None:
         "create_document": True,
         "read_document": True,
         "edit_document": False,
+        "format_document": True,
     }
 
 
