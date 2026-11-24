@@ -388,16 +388,20 @@ def test_create_agent_includes_openai_compat_guidance_only_when_requested() -> N
 
 
 def test_create_agent_includes_matrix_reply_targeting_policy() -> None:
-    """Agents should understand when the dispatcher requires explicit Matrix mentions."""
+    """Agents should understand how Matrix messages and reply targeting work."""
     config = _test_config()
 
     agent = _create_agent_for_test("general", config)
+    role = _role(agent)
 
-    assert "## Matrix Reply Targeting" in _role(agent)
-    assert "explicit Matrix mention" in _role(agent)
-    assert "multi-agent, multi-team, or multi-human" in _role(agent)
-    assert "not dispatched" in _role(agent)
-    assert "natural-language addressing" in _role(agent)
+    assert "MindRoom agent" in role
+    assert "Mindroom" not in role
+    assert "<conversation>" not in role
+    assert "## Matrix Reply Targeting" in role
+    assert "explicit Matrix mentions" in role
+    assert "Plain-text display names are not Matrix mentions" in role
+    assert "configured teams run their team workflow" in role
+    assert "If asked why an earlier message went unanswered, note you may not have been dispatched for it." in role
 
 
 def test_config_round_trips_structured_agent_tool_entries() -> None:
@@ -491,8 +495,8 @@ def test_agent_role_describes_local_tool_execution_environment(
     agent = _create_agent_for_test("calculator", config=_bind_runtime_paths(config, runtime_paths))
 
     assert "## Tool Execution Environment" in _role(agent)
-    assert "All available tools run in the primary MindRoom runtime: `calculator`." in _role(agent)
-    assert "No tools use a worker runtime." in _role(agent)
+    assert "- All tools run in the primary MindRoom runtime." in _role(agent)
+    assert "No tools use a worker runtime." not in _role(agent)
     assert "Worker backend:" not in _role(agent)
 
 
@@ -554,6 +558,7 @@ def test_tool_execution_environment_explains_dedicated_worker_scope(
         runtime_paths=runtime_paths,
         local_tool_names=(),
         worker_routed_tool_names=("shell",),
+        has_other_tools=False,
         worker_scope=worker_scope,
         file_access="workspace",
         workdir=None,
@@ -577,6 +582,7 @@ def test_tool_execution_environment_explains_static_runner_without_persistence_c
         runtime_paths=runtime_paths,
         local_tool_names=(),
         worker_routed_tool_names=("shell",),
+        has_other_tools=False,
         worker_scope="user_agent",
         file_access="workspace",
         workdir=None,
@@ -605,6 +611,7 @@ def test_tool_execution_environment_explains_docker_idle_lifecycle(tmp_path: Pat
         runtime_paths=runtime_paths,
         local_tool_names=(),
         worker_routed_tool_names=("shell",),
+        has_other_tools=False,
         worker_scope="user_agent",
         file_access="workspace",
         workdir=None,
@@ -637,6 +644,7 @@ def test_tool_execution_environment_reports_file_access(
             runtime_paths=_runtime_paths(tmp_path),
             local_tool_names=("gmail", "python"),
             worker_routed_tool_names=worker_routed,
+            has_other_tools=False,
             worker_scope=None,
             file_access=file_access,
             workdir=None,
@@ -707,6 +715,7 @@ def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(t
         runtime_paths=_runtime_paths(tmp_path),
         local_tool_names=("gmail",),
         worker_routed_tool_names=(),
+        has_other_tools=False,
         worker_scope=None,
         file_access="workspace",
         workdir=None,
@@ -757,8 +766,8 @@ def test_agent_role_keeps_direct_toolkit_local_when_worker_routing_is_requested(
     agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
 
     assert [tool.name for tool in agent.spec.toolkits] == [tool_name]
-    assert f"All available tools run in the primary MindRoom runtime: `{tool_name}`." in _role(agent)
-    assert "No tools use a worker runtime." in _role(agent)
+    assert "- All tools run in the primary MindRoom runtime." in _role(agent)
+    assert "No tools use a worker runtime." not in _role(agent)
     assert "Worker backend:" not in _role(agent)
 
 
@@ -4744,10 +4753,11 @@ def test_file_mode_agent_instructions_list_workspace_knowledge_path(tmp_path: Pa
 
 @pytest.mark.parametrize("memory_backend", ["file", "mem0"])
 def test_workspace_agent_instructions_include_skill_authoring_guidance(tmp_path: Path, memory_backend: str) -> None:
-    """Every agent works in its own workspace, so each learns it can author skills there, whatever its memory."""
+    """An agent with workspace file tools learns how to author workspace skills, whatever its memory backend."""
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(_test_config(), runtime_paths)
     config.agents["general"].memory_backend = memory_backend
+    config.agents["general"].tools = ["filesystem"]
 
     agent = _create_agent_for_test("general", config)
 
