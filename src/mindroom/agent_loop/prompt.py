@@ -31,7 +31,11 @@ MATRIX_MARKDOWN_OUTPUT_FORMAT = (
     "or `<https://matrix.to/#/!room_id/$event_id>` (auto-labeled pill) for threads/messages (optional `?via=server` "
     "for federated rooms; never wrap links in backticks).\n"
     "- Mermaid fences, GitHub callouts (`> [!NOTE]`), footnotes, and external image URLs (`![](https://...)`) "
-    "are not rendered; link to external URLs instead."
+    "are not rendered; link to external URLs instead.\n"
+    "- As you work, your text streams live while thoughts and tool calls stay collapsed by default (expandable in "
+    "place); once your turn finishes, everything up through your last tool call (thoughts, tool calls, and any earlier "
+    "text) is automatically folded away. Write a self-contained final answer after your last tool call (including your "
+    "conclusion and key details), assuming the user will not open or read the folded work above."
 )
 
 
