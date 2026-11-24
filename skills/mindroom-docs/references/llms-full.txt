@@ -10781,7 +10781,7 @@ Every successful call returns the document's edit URL.
 `google_docs_format_document()` accepts only `paragraph_style`, `text_style`, `native_list`, `remove_native_list`, and `hyperlink` operations, and it applies the call's immutable `tab_id` to every operation.
 Style operations use a style object and explicit dotted field paths; an empty style resets the listed fields, and `hyperlink` sets a link.
 `paragraph_style` and `text_style` use `style` and `fields`, `native_list` uses `bullet_preset`, `remove_native_list` uses only its range, and `hyperlink` uses `url`.
-Put `native_list` operations after every operation whose indexes came from the preceding read, in descending start-index order when several list operations are needed, because Docs can remove leading tabs and shift later indexes.
+Put `native_list` operations after every operation whose indexes came from the preceding read, in descending start-index order when several list operations are needed, because Docs can remove leading tab characters and shift later indexes.
 Read the document immediately before formatting it, then use its `revisionId` as `expected_revision_id`; Docs rejects the full batch if another edit changes the document first.
 If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link.
 Before public production use, the Docs scope needs Google verification; see [Production Verification Follow-up](https://docs.mindroom.chat/deployment/google-services-oauth/#production-verification-follow-up).
