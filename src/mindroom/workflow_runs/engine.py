@@ -7,15 +7,13 @@ import hashlib
 import json
 import secrets
 import time
-from collections import Counter, deque
+from collections import Counter
 from contextlib import suppress
-from contextvars import copy_context
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import NAMESPACE_OID, uuid5
-from weakref import WeakValueDictionary
 
 from mindroom.background_tasks import (
     run_blocking_until_complete,
@@ -50,6 +48,7 @@ from mindroom.workflow_runs.agent_nodes import (
     load_follow_up_child,
     schema_failure,
 )
+from mindroom.workflow_runs.coordination import RunCoordinator, receipt, wait_for_change
 from mindroom.workflow_runs.faults import hold
 from mindroom.workflow_runs.graph import node_label
 from mindroom.workflow_runs.limits import (
@@ -66,7 +65,6 @@ from mindroom.workflow_runs.models import (
     RECHECK_SECONDS,
     SERVED_RUN_STATES,
     TERMINAL_RUN_STATES,
-    UNSETTLED_NODE_STATES,
     DispatchHandle,
     NodeReceipt,
     WorkflowNode,
@@ -110,7 +108,7 @@ from mindroom.workflow_runs.structured import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     import nio
 
@@ -169,20 +167,6 @@ _RATE_WAIT_SECONDS = 1.0
 _EXIT_POLL_SECONDS = (0.05, 0.2, 0.5, 1.0, 2.0, 5.0)
 
 
-@dataclass(slots=True)
-class _Places:
-    """The places among one run's working calls: at most `limit` agent and tool calls of the run work at one time.
-
-    A call holds its place from its start to its end (except while waiting on peer messages or a child ask_user).
-    Waking waiters take freed places before `queued` calls.
-    """
-
-    limit: int
-    working: set[str] = field(default_factory=set)
-    queued: deque[tuple[str, Callable[[], Awaitable[object]]]] = field(default_factory=deque)
-    waking: int = 0
-
-
 @dataclass(frozen=True, slots=True)
 class _TurnContext:
     """Resolved session, live sibling turns, earlier turns, last completed turn, and digest for one `turn` call."""
@@ -212,7 +196,7 @@ class WorkflowEngine:
         self.store = store
         self.scripts = scripts
         self.broker = broker
-        self._clock = clock
+        self.live = RunCoordinator(store, scripts, clock, self.cancel_as_task)
         # What the saved owner of a run may start an attempt with now; set by the runtime that knows the live bots.
         self.owner_access: Callable[[WorkflowRun], ResumeAccess] = lambda _run: "pending"
         # Live workflow limits for an authorized owner context; read only where limits are used.
@@ -229,19 +213,8 @@ class WorkflowEngine:
         self._launched: dict[str, int] = {}
         # The runs whose wait for an attempt was logged as refused, so the tries that follow say nothing.
         self._refused: set[str] = set()
-        # The runs that are ending and wait, without their lock, for their agents to stop: they take no call.
-        self._stopping: set[str] = set()
-        # When each running run's working time was last charged, by the engine's clock.
-        self._charged: dict[str, float] = {}
-        # One per run with a waiter or a launch in progress: polls and `wait` sleep on it, a launch holds its lock.
-        self._changed: WeakValueDictionary[str, asyncio.Condition] = WeakValueDictionary()
-        self._tasks: dict[str, set[asyncio.Task[Any]]] = {}
-        # Which calls of each run work now and which wait for a place, counted here and not from the saved nodes: a
-        # node that an ended attempt left running holds no place until the attempt that reaches it waits for it.
-        self._places: dict[str, _Places] = {}
         self._attending: Counter[str | None] = Counter()
         self._inline_runs: dict[str, str] = {}
-        self._closed = False
 
     def authorize(self, run: WorkflowRun, grant: ScriptToolGrant | None = None) -> ToolRuntimeContext | str | None:
         """Say whether *run* may act now: its owner's live context, why not, or None while that cannot be said yet.
@@ -311,9 +284,9 @@ class WorkflowEngine:
         as it is, for whoever launches it to try again, while `admit` cannot answer, when the script runtime refuses
         a replay, and when a script runtime that is still starting refuses an attempt of a job's run.
         """
-        if self._closed:
+        if self.live.closed:
             return self.store.get_run(run_id)
-        launch = self._spawn(_ADMISSIONS, self._launch(run_id, caller, limits, owner, epoch))
+        launch = self.live.spawn(_ADMISSIONS, self._launch(run_id, caller, limits, owner, epoch))
         try:
             return await asyncio.shield(launch)
         except asyncio.CancelledError:
@@ -333,12 +306,12 @@ class WorkflowEngine:
     ) -> WorkflowRun:
         # Held until the run names the attempt: the new process's first request waits instead of being refused, and
         # a stop finds either no attempt or the one it has to end.
-        async with self._condition(run_id):
+        async with self.live.condition(run_id):
             run = self.store.get_run(run_id)
             # A reserved run gets one attempt from one launch; a run that was launched or has ended gets none, a
             # stopping engine starts none, and neither does a launcher whose run moved on to another owner.
             moved = owner not in (None, run.owner) or epoch not in (None, run.epoch)
-            waits = run.state is WorkflowRunState.STARTING and not self._closed and not moved
+            waits = run.state is WorkflowRunState.STARTING and not self.live.closed and not moved
             admitted = self.admit(run, caller, limits) if waits else None
             if admitted is None:
                 return run
@@ -370,7 +343,7 @@ class WorkflowEngine:
     async def _begin(self, run: WorkflowRun, attempt: ScriptRunRecord, hours: float) -> WorkflowRun:
         """Name the started *attempt* as the next one of *run*; the caller holds the run's lock."""
         # Before the run reads `running`, so whoever sees that state sees its time counted from here.
-        self._charged[run.run_id] = self._clock()
+        self.live.charged[run.run_id] = self.live.clock()
         begin = partial(
             self.store.update_run,
             run.run_id,
@@ -388,10 +361,10 @@ class WorkflowEngine:
             launched = self.store.get_run(run.run_id)
             await self.scripts.revoke(attempt.run_id, reason=launched.error or launched.state.value)
             await self.scripts.reconcile_durable(run_id=attempt.run_id)
-            self._charged.pop(run.run_id, None)
+            self.live.charged.pop(run.run_id, None)
         else:
             self._launched[attempt.run_id] = launched.epoch
-            self._spawn(run.run_id, self._watch_time(run.run_id, launched.epoch, hours))
+            self.live.spawn(run.run_id, self._watch_time(run.run_id, launched.epoch, hours))
         return launched
 
     async def cancel(
@@ -409,12 +382,12 @@ class WorkflowEngine:
         invocation's is stopped, and with *epoch* only that attempt: a run that a resume took since is left. A stop
         wins against a launch: when the run got an attempt before the stop's write, that attempt is stopped too.
         """
-        async with self._condition(run_id):
+        async with self.live.condition(run_id):
             run = self.store.get_run(run_id)
         while run.state not in TERMINAL_RUN_STATES and owner in (None, run.owner) and epoch in (None, run.epoch):
             outcome: tuple[WorkflowRunState, str | None] = (state, reason)
             # Before anything of the run is stopped: the place a stopped call gives up starts no queued one.
-            self._places.pop(run_id, None)
+            self.live.places.pop(run_id, None)
             # A run that waits for its next attempt has no process: how its last one ended says nothing about this stop.
             if run.script_run_id is not None and run.state is not WorkflowRunState.STARTING:
                 await self.scripts.revoke(run.script_run_id, reason=reason)
@@ -433,7 +406,7 @@ class WorkflowEngine:
             if error is not None and not isinstance(error, WorkflowRunNotFoundError):
                 logger.error("workflow_run_stop_failed", run_id=run_id, exc_info=error)
 
-        task = self._spawn(run_id, self.cancel(run_id, **how))
+        task = self.live.spawn(run_id, self.cancel(run_id, **how))
         task.add_done_callback(failed)
         return task
 
@@ -535,7 +508,7 @@ class WorkflowEngine:
             finished_at=None,
         )
         try:
-            async with self._condition(run_id):
+            async with self.live.condition(run_id):
                 # Waited for also by a caller that is cancelled here, so the run it finds says whether it took it.
                 reopened = await run_blocking_until_complete(take)
         except SupersededAttemptError:
@@ -555,7 +528,7 @@ class WorkflowEngine:
         *launch*, again after a moment when that started none. A run that another invocation took is not waited
         for: its report is that one's.
         """
-        condition = self._condition(run_id)
+        condition = self.live.condition(run_id)
         while True:
             async with condition:
                 while True:
@@ -566,7 +539,7 @@ class WorkflowEngine:
                         break
                     # The saved run decides: a wake only shortens the wait, since a writer cancelled at its commit
                     # sends none.
-                    await _wait_for_change(condition)
+                    await wait_for_change(condition)
             if launch is None or run.state in TERMINAL_RUN_STATES:
                 return run
             if (await launch()).state is WorkflowRunState.STARTING:
@@ -597,7 +570,7 @@ class WorkflowEngine:
             if not reserving.cancelled() and not reserving.exception():
                 self._inline_runs[origin] = reserving.result().run_id
             self._attending -= Counter({origin: 1})
-            stopping = self._closed or context.orchestrator is None or not context.orchestrator.running
+            stopping = self.live.closed or context.orchestrator is None or not context.orchestrator.running
             if not self._attending[origin] and (run_id := self._inline_runs.pop(origin, None)) and not stopping:
                 # A run that ended is left as it ended.
                 await run_coroutine_until_complete(self.cancel(run_id, reason=_ABANDONED, owner=origin))
@@ -629,9 +602,9 @@ class WorkflowEngine:
 
     async def close(self) -> None:
         """Stop the engine's own tasks and start no more; what was starting or unsettled stays for the next start."""
-        self._closed = True
-        tasks = [task for run_tasks in self._tasks.values() for task in run_tasks]
-        self._tasks.clear()
+        self.live.closed = True
+        tasks = [task for run_tasks in self.live.tasks.values() for task in run_tasks]
+        self.live.tasks.clear()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -689,12 +662,12 @@ class WorkflowEngine:
         """Save and dispatch one call of the attempt's script, or return the receipt of the node its key has."""
         run = await self._current_run(attempt)
         # The engine owns a call from its insert to its dispatch, so a caller that goes away strands no running node.
-        return await asyncio.shield(self._spawn(_ADMISSIONS, self._admit(run, attempt, request)))
+        return await asyncio.shield(self.live.spawn(_ADMISSIONS, self._admit(run, attempt, request)))
 
     async def _admit(self, asked: WorkflowRun, attempt: ScriptRunRecord, request: NodeRequest) -> NodeReceipt:
         # Held from the lookup to the dispatch: two requests with one key cannot both find it free, and the run
         # cannot end in between.
-        async with (condition := self._condition(asked.run_id)):
+        async with (condition := self.live.condition(asked.run_id)):
             receipt = await self._admit_gated(self.store.get_run(asked.run_id), asked.epoch, attempt, request)
             condition.notify_all()
             return receipt
@@ -707,7 +680,7 @@ class WorkflowEngine:
         request: NodeRequest,
     ) -> NodeReceipt:
         """Decide and save one call for the attempt that began with *epoch*, which every write here names."""
-        if run.epoch != epoch or run.state not in SERVED_RUN_STATES or run.run_id in self._stopping:
+        if run.epoch != epoch or run.state not in SERVED_RUN_STATES or run.run_id in self.live.stopping:
             # Before anything is kept for the attempt: one that the run left behind leaves nothing behind here.
             msg = f"Run {run.run_id} takes no more calls from attempt {attempt.run_id}."
             raise SupersededAttemptError(msg)
@@ -733,7 +706,7 @@ class WorkflowEngine:
         if saved is None:
             return None, None, None
         if saved.attempt == run.attempt and not saved.stale:
-            return saved, None, _receipt(await self._asked(run, saved, epoch))
+            return saved, None, receipt(await self._asked(run, saved, epoch))
         live, handle = False, None
         if saved.state in LIVE_NODE_STATES:
             live, handle = await self._reconcile(run, saved, epoch), saved.handle
@@ -776,16 +749,16 @@ class WorkflowEngine:
             stamp["phase"] = phase
         if regrouped := members != saved.members:
             stamp["members"] = members
-        await self._stamp(saved, epoch, dirty_after=regrouped, **stamp)
+        await self.live.stamp(saved, epoch, dirty_after=regrouped, **stamp)
         if action == "raise_indeterminate":
-            return replace(_receipt(saved), state=WorkflowNodeState.FAILED)
+            return replace(receipt(saved), state=WorkflowNodeState.FAILED)
         if action == "attach":
             if saved.kind == "ask":
                 await self._asked(run, saved, epoch)
             else:
                 self._wait_for_agent(run, saved, epoch)
-            await self._restate(run.run_id)
-        return replace(_receipt(saved), cached=action == "hit")
+            await self.live.restate(run.run_id)
+        return replace(receipt(saved), cached=action == "hit")
 
     async def _dispatch_new(
         self,
@@ -831,7 +804,7 @@ class WorkflowEngine:
         )
         if (error := self._new_call_error(run, node, grant, delegated, turn_ctx)) is not None:
             failed = replace(node, state=WorkflowNodeState.FAILED, error=error, ended_at=node.started_at)
-            return _receipt(await asyncio.to_thread(self.store.put_node, failed, epoch, dirty_after=True))
+            return receipt(await asyncio.to_thread(self.store.put_node, failed, epoch, dirty_after=True))
         if saved is not None and shown in ("agent", "turn", "send"):
             await asyncio.to_thread(withdraw_unread, self.store, run.run_id, key, saved.generation)
         if shown in ("agent", "turn"):
@@ -852,7 +825,7 @@ class WorkflowEngine:
                 follow_up, prompt = await self._prepare_turn(run, turn_ctx, saved, turn_msg)
                 node = replace(node, request={**asked, "prompt": prompt, "effective_message": turn_msg})
             dispatch = partial(self._dispatch_agent, run, timeout=_timeout(meta), follow_up=follow_up)
-            return await self._enter(run, node, dispatch)
+            return await self.live.enter(run, node, dispatch)
         if grant is not None:
             cached = meta.get("cached") is not False
             same_as = (
@@ -861,7 +834,7 @@ class WorkflowEngine:
                 else None
             )
             start = partial(self._dispatch_tool, run, attempt, tool_call=(grant, arguments), same_as=same_as)
-            return await self._enter(run, node, start, dirty_after=same_as is None)
+            return await self.live.enter(run, node, start, dirty_after=same_as is None)
         return await self._save_immediate(run, epoch, node, request)
 
     async def _save_immediate(
@@ -875,7 +848,7 @@ class WorkflowEngine:
         kind = request.kind
         if kind == "ask":
             self._validate_question_options(request.args.get("options"))
-            over = await self._check_budget(run)
+            over = await self.live.check_budget(run)
             ask_node = replace(
                 node,
                 state=WorkflowNodeState.QUEUED if over else WorkflowNodeState.WAITING,
@@ -884,8 +857,8 @@ class WorkflowEngine:
             )
             ask_node = await asyncio.to_thread(self.store.put_node, ask_node, epoch, dirty_after=True)
             if ask_node.state is WorkflowNodeState.WAITING:
-                await self._restate(run.run_id)
-            return _receipt(await self._asked(run, ask_node, epoch))
+                await self.live.restate(run.run_id)
+            return receipt(await self._asked(run, ask_node, epoch))
         if kind in ("send", "inbox", "state"):
             try:
                 call = partial(script_op, self.store, run.run_id, node.key, node.generation, kind, request.args)
@@ -896,8 +869,8 @@ class WorkflowEngine:
                 if not done:
                     waiting = replace(node, state=WorkflowNodeState.WAITING, waiting_on="peer", ended_at=None)
                     wait_node = await asyncio.to_thread(self.store.put_node, waiting, epoch, dirty_after=True)
-                    self._spawn(run.run_id, self._wait_inbox(run, wait_node, epoch, float(value)))
-                    return _receipt(wait_node)
+                    self.live.spawn(run.run_id, self._wait_inbox(run, wait_node, epoch, float(value)))
+                    return receipt(wait_node)
                 node = replace(node, result=value)
         elif kind == "value":
             node = replace(node, result=_value(request.args))
@@ -908,7 +881,7 @@ class WorkflowEngine:
             msg = f"This MindRoom cannot run a '{kind}' call in a workflow yet."
             raise WorkflowRunStoreError(msg)
         done_node = replace(node, ended_at=node.started_at)
-        return _receipt(await asyncio.to_thread(self.store.put_node, done_node, epoch, dirty_after=True))
+        return receipt(await asyncio.to_thread(self.store.put_node, done_node, epoch, dirty_after=True))
 
     def _new_call_error(
         self,
@@ -956,7 +929,7 @@ class WorkflowEngine:
         if event_id is None:
             raise ScriptRuntimeUnavailableError(_NOT_ASKED)
         links = {**node.links, "event_id": event_id}
-        await self._stamp(node, epoch, links=links)
+        await self.live.stamp(node, epoch, links=links)
         return replace(node, links=links)
 
     async def _close_card(
@@ -987,7 +960,7 @@ class WorkflowEngine:
             return ids
 
         for run_id in await asyncio.to_thread(live_tree, root):
-            async with self._condition(run_id):
+            async with self.live.condition(run_id):
                 with suppress(WorkflowRunNotFoundError):
                     run = self.store.get_run(run_id)
                     if run.state in TERMINAL_RUN_STATES:
@@ -1007,25 +980,25 @@ class WorkflowEngine:
             raise WorkflowRunStoreError(_TOO_MANY_OPTIONS)
 
     async def _wait_child_question(self, run_id: str, ask_key: str) -> str:
-        condition = self._condition(run_id)
+        condition = self.live.condition(run_id)
         while True:
             async with condition:
                 cur = await asyncio.to_thread(self.store.get_node, run_id, ask_key)
                 run = await asyncio.to_thread(self.store.get_run, run_id)
-                ended = run_id in self._stopping or run.state in TERMINAL_RUN_STATES
+                ended = run_id in self.live.stopping or run.state in TERMINAL_RUN_STATES
                 if cur is None or cur.state is WorkflowNodeState.CANCELLED or ended:
                     raise WorkflowRunStoreError(_NOT_ANSWERED)
                 if cur.state is WorkflowNodeState.COMPLETED:
                     return str(cur.result)
                 if "event_id" in cur.links:
-                    await _wait_for_change(condition)
+                    await wait_for_change(condition)
                     continue
             posted = False
             with suppress(ScriptRuntimeUnavailableError, SupersededAttemptError):
                 posted = "event_id" in (await self._asked(run, cur, run.epoch)).links
             if not posted:
                 async with condition:
-                    await _wait_for_change(condition)
+                    await wait_for_change(condition)
 
     async def ask_child_question(
         self,
@@ -1038,14 +1011,14 @@ class WorkflowEngine:
         self._validate_question_options(options)
         ask_key = f"{parent.key}?{parent.generation}:{result_digest([question, options])[:12]}"
         req: dict[str, object] = {"question": question, "options": options}
-        condition, cancelled = self._condition(run_id), False
+        condition, cancelled = self.live.condition(run_id), False
         async with condition:
             run, saved = self.store.get_run(run_id), self.store.get_node(run_id, ask_key)
             if saved is not None and saved.state in (WorkflowNodeState.COMPLETED, WorkflowNodeState.WAITING):
                 if saved.attempt != run.attempt or saved.stale:
-                    await self._stamp(saved, run.epoch, ignore=True, attempt=run.attempt, stale=False)
+                    await self.live.stamp(saved, run.epoch, ignore=True, attempt=run.attempt, stale=False)
                 ask_node = saved
-            elif run.state in TERMINAL_RUN_STATES or run_id in self._stopping:
+            elif run.state in TERMINAL_RUN_STATES or run_id in self.live.stopping:
                 raise WorkflowRunStoreError(_NOT_ANSWERED)
             else:
                 gen = 1 if saved is None else saved.generation + 1
@@ -1068,8 +1041,8 @@ class WorkflowEngine:
                 ask_node = await asyncio.to_thread(self.store.put_node, ask_node, run.epoch, dirty_after=False)
             if ask_node.state is WorkflowNodeState.COMPLETED:
                 return str(ask_node.result)
-            self._drop_slot(run_id, parent.key)
-            await self._restate(run_id)
+            self.live.drop_slot(run_id, parent.key)
+            await self.live.restate(run_id)
             condition.notify_all()
         runtime, job_id = self.agents(), parent.links.get("job_id")
         wait_job = (
@@ -1092,7 +1065,7 @@ class WorkflowEngine:
                 # Cleared only on normal/error exit (not CancelledError), so shutdown keeps wait="user" for recovery.
                 if wait_job is not None:
                     await wait_job[0].save_adapter(wait_job[1], wait=None)
-                await self._reacquire_place(run_id, parent.key)
+                await self.live.reacquire_place(run_id, parent.key)
 
     async def answer(self, run_id: str, key: str, generation: int, answer: str) -> bool:
         """Complete the question at *key* with a person's *answer*; false when that generation no longer waits.
@@ -1100,7 +1073,7 @@ class WorkflowEngine:
         The answer is saved under the run's lock and epoch, as every write of the run is, also while no attempt
         runs: the next attempt reads it back and does not ask again.
         """
-        async with (condition := self._condition(run_id)):
+        async with (condition := self.live.condition(run_id)):
             run, node = self.store.get_run(run_id), self.store.get_node(run_id, key)
             waits = node is not None and (node.state, node.waiting_on) == (WorkflowNodeState.WAITING, "user")
             # An answer is an act of the run, to a card somebody was shown: both are checked as they are now.
@@ -1108,121 +1081,13 @@ class WorkflowEngine:
             asked = waits and "event_id" in node.links and context is not None and not isinstance(context, str)
             if run.state in TERMINAL_RUN_STATES or node is None or node.generation != generation or not asked:
                 return False
-            if not await self._settle(node, run.epoch, state=WorkflowNodeState.COMPLETED, result=answer):
+            if not await self.live.settle(node, run.epoch, state=WorkflowNodeState.COMPLETED, result=answer):
                 return False
-            await self._restate(run_id)
+            await self.live.restate(run_id)
             condition.notify_all()
         # Without the lock, which no send to the room holds up for long.
         await self._close_card(run, node, "answered", answer, RETRY_SECONDS)
         return True
-
-    async def _enter(
-        self,
-        run: WorkflowRun,
-        node: WorkflowNode,
-        dispatch: Callable[..., Awaitable[NodeReceipt]],
-        *,
-        dirty_after: bool = True,
-    ) -> NodeReceipt:
-        """Start a call that works, an agent's or a tool's, if its run has a place for it, or save it as queued.
-
-        A queued call has started nothing and names nothing that could have: it starts when a place is free, in the
-        order the calls came. The caller holds the run's lock.
-        """
-        over, places = await self._check_budget(run), self._places_for(run)
-        if not over and not places.waking and len(places.working) < places.limit:
-            places.working.add(node.key)
-            try:
-                return await dispatch(node)
-            except BaseException:
-                # A call whose node names its work by now keeps its place, for the wait that settles it.
-                saved = self.store.get_node(run.run_id, node.key)
-                if saved is None or saved.generation != node.generation or saved.handle is None:
-                    self._drop_slot(run.run_id, node.key)
-                raise
-        queued = replace(node, state=WorkflowNodeState.QUEUED)
-        queued = await asyncio.to_thread(self.store.put_node, queued, run.epoch, dirty_after=dirty_after)
-        if not over:
-            places.queued.append((queued.key, partial(dispatch, queued)))
-            self._drop_slot(run.run_id, None)
-        return _receipt(queued)
-
-    def _places_for(self, run: WorkflowRun) -> _Places:
-        return self._places.setdefault(run.run_id, _Places(max(1, run.max_concurrent)))
-
-    def _drop_slot(self, run_id: str, key: str | None) -> None:
-        """Give up the place of *key*, then start queued calls while places remain and nobody is waking."""
-        places = self._places.get(run_id)
-        if places is None:
-            return
-        places.working.discard(key or "")
-        while not places.waking and places.queued and len(places.working) < places.limit and not self._closed:
-            queued, start = places.queued.popleft()
-            places.working.add(queued)
-            self._spawn(run_id, self._start_queued(run_id, queued, start))
-
-    async def _release_slot(self, run_id: str, key: str) -> None:
-        """Release *key*, enforce budget before pumping queued work, restate the run, and wake waiters."""
-        async with (condition := self._condition(run_id)):
-            if (places := self._places.get(run_id)) is not None:
-                places.working.discard(key)
-            with suppress(WorkflowRunNotFoundError):
-                await self._check_budget(self.store.get_run(run_id))
-            self._drop_slot(run_id, None)
-            await self._restate(run_id)
-            condition.notify_all()
-
-    async def _reacquire_place(self, run_id: str, key: str) -> None:
-        """Take a concurrency place back for *key* before a peer or child-question wait returns."""
-        async with (condition := self._condition(run_id)):
-            if self._closed or self._run_ended(run_id):
-                return
-            places = self._places_for(self.store.get_run(run_id))
-            if key in places.working or len(places.working) < places.limit:
-                places.working.add(key)
-                return
-            places.waking += 1
-            try:
-                while (
-                    (cur := self._places.get(run_id)) is places
-                    and len(places.working) >= places.limit
-                    and not self._closed
-                    and not self._run_ended(run_id)
-                ):
-                    await _wait_for_change(condition)
-                if cur is places and not self._closed and not self._run_ended(run_id):
-                    places.working.add(key)
-            finally:
-                places.waking -= 1
-                self._drop_slot(run_id, None)
-
-    async def _start_queued(self, run_id: str, key: str, start: Callable[[], Awaitable[object]]) -> None:
-        """Start a call that waited for a place, under the run's lock, again while its agent cannot be decided yet."""
-        try:
-            while True:
-                try:
-                    async with self._condition(run_id):
-                        places = self._places.get(run_id)
-                        if places is None or run_id in self._stopping:
-                            return
-                        places.working.discard(key)
-                        if await self._check_budget(self.store.get_run(run_id)):
-                            return
-                        places.working.add(key)
-                        await start()
-                    break
-                except ScriptRuntimeUnavailableError:
-                    # The bot of the call's agent is still starting, or its owner's access is not known yet.
-                    await asyncio.sleep(RECHECK_SECONDS)
-        except SupersededAttemptError:
-            # The run moved on: what it left queued is the next attempt's to run.
-            self._drop_slot(run_id, key)
-        except BaseException:
-            node = self.store.get_node(run_id, key)
-            if node is None or node.handle is None:
-                self._drop_slot(run_id, key)
-            raise
-        await self._notify(run_id)
 
     async def _ask_gate(
         self,
@@ -1238,10 +1103,10 @@ class WorkflowEngine:
         """
         queued = replace(node, state=WorkflowNodeState.QUEUED)
         node = await asyncio.to_thread(self.store.put_node, queued, run.epoch, dirty_after=True)
-        if not await self._check_budget(run):
+        if not await self.live.check_budget(run):
             gate = partial(self._broker_outcome, attempt, node, run.epoch, tool_call, gate_only=True)
-            self._spawn(run.run_id, self._start_gated(run, node, gate))
-        return _receipt(node)
+            self.live.spawn(run.run_id, self._start_gated(run, node, gate))
+        return receipt(node)
 
     async def _start_gated(
         self,
@@ -1251,19 +1116,21 @@ class WorkflowEngine:
     ) -> None:
         """Start the agent of a call the broker let pass, in its turn among the run's calls; a refusal is its end."""
         outcome = await gate()
-        async with self._condition(run.run_id):
+        async with self.live.condition(run.run_id):
             now = await asyncio.to_thread(self.store.get_run, run.run_id)
-            if now.epoch != run.epoch or run.run_id in self._stopping:
+            if now.epoch != run.epoch or run.run_id in self.live.stopping:
                 # The run ended while the gate was open: its end settled the call, and nothing of it starts now.
                 return
             if outcome[0] is WorkflowNodeState.COMPLETED:
-                if await self._check_budget(now):
+                if await self.live.check_budget(now):
                     return
-                self._places_for(run).queued.append((node.key, partial(self._dispatch_agent, run, node, timeout=None)))
-                self._drop_slot(run.run_id, None)
+                self.live.places_for(run).queued.append(
+                    (node.key, partial(self._dispatch_agent, run, node, timeout=None)),
+                )
+                self.live.drop_slot(run.run_id, None)
             else:
-                await self._settle(node, run.epoch, state=outcome[0], error=outcome[2], ignore=True)
-        await self._notify(run.run_id)
+                await self.live.settle(node, run.epoch, state=outcome[0], error=outcome[2], ignore=True)
+        await self.live.notify(run.run_id)
 
     async def nest(self, child: WorkflowRun) -> None:
         """Show the nested run *child* in the run it is in, as a group under the call that started it.
@@ -1338,10 +1205,10 @@ class WorkflowEngine:
         node = saved
         call = partial(self._broker_outcome, attempt, node, run.epoch, tool_call)
         # The call has its task before anything else may fail: a saved call nobody runs would never end.
-        self._spawn(run.run_id, self._run_tool_node(node, run.epoch, call))
+        self.live.spawn(run.run_id, self._run_tool_node(node, run.epoch, call))
         # A run that waited for a person works again from here.
-        await self._restate(run.run_id)
-        return _receipt(node)
+        await self.live.restate(run.run_id)
+        return receipt(node)
 
     def _turn_context(self, run: WorkflowRun, key: str, args: dict[str, object]) -> _TurnContext:
         """Resolve a `turn` call's session, its earlier turns in this attempt, and its lineage-hashed digest."""
@@ -1374,12 +1241,9 @@ class WorkflowEngine:
         """Send one peer message in a single transaction and wake any waiters of *run_id*."""
         send_call = partial(send_peer_message, self.store, run_id, op_id=op_id, sender=sender)
         result = await asyncio.to_thread(send_call, to=to, text=text)
-        async with (condition := self._condition(run_id)):
+        async with (condition := self.live.condition(run_id)):
             condition.notify_all()
         return result
-
-    def _run_ended(self, run_id: str) -> bool:
-        return run_id in self._stopping or self.store.get_run(run_id).state in TERMINAL_RUN_STATES
 
     async def wait_for_messages(
         self,
@@ -1392,11 +1256,11 @@ class WorkflowEngine:
     ) -> dict[str, object]:
         """Read unread messages, or wait on *run_id*'s condition without holding a concurrency slot."""
         read_fn = partial(read_call, self.store, run_id, op_id=op_id, reader=reader, names=names)
-        condition, deadline, cancelled = self._condition(run_id), self._clock() + wait_seconds, False
+        condition, deadline, cancelled = self.live.condition(run_id), self.live.clock() + wait_seconds, False
         async with condition:
             if (found := await asyncio.to_thread(read_fn, record_empty=wait_seconds <= 0)) is not None:
                 return found
-            if self._run_ended(run_id):
+            if self.live.run_ended(run_id):
                 return {"messages": []}
             node = self.store.get_node(run_id, reader.key)
             same = node if node is not None and node.generation == reader.generation else None
@@ -1406,17 +1270,17 @@ class WorkflowEngine:
                     return
                 with suppress(WorkflowRunNotFoundError):
                     if (cur := self.store.get_run(run_id)).state not in TERMINAL_RUN_STATES:
-                        await self._stamp(same, cur.epoch, ignore=True, state=state, waiting_on=waiting_on)
+                        await self.live.stamp(same, cur.epoch, ignore=True, state=state, waiting_on=waiting_on)
 
             await stamp_state(WorkflowNodeState.WAITING, "peer")
-            self._drop_slot(run_id, reader.key)
-            await self._restate(run_id)
+            self.live.drop_slot(run_id, reader.key)
+            await self.live.restate(run_id)
             condition.notify_all()
         try:
             async with condition:
                 result = await self._await_peer_mail(condition, run_id, read_fn, wait_seconds, deadline)
                 await stamp_state(WorkflowNodeState.QUEUED)
-                await self._restate(run_id)
+                await self.live.restate(run_id)
                 condition.notify_all()
         except asyncio.CancelledError:
             cancelled = True
@@ -1425,9 +1289,9 @@ class WorkflowEngine:
             return result
         finally:
             if not cancelled:
-                await self._reacquire_place(run_id, reader.key)
+                await self.live.reacquire_place(run_id, reader.key)
                 await stamp_state(WorkflowNodeState.RUNNING)
-                await self._notify(run_id)
+                await self.live.notify(run_id)
 
     async def _await_peer_mail(
         self,
@@ -1440,22 +1304,22 @@ class WorkflowEngine:
         while True:
             if (found := await asyncio.to_thread(read_fn, record_empty=False)) is not None:
                 return found
-            if self._run_ended(run_id):
+            if self.live.run_ended(run_id):
                 return {"messages": []}
-            if (remaining := deadline - self._clock()) <= 0:
+            if (remaining := deadline - self.live.clock()) <= 0:
                 note = f"No message arrived within {wait_seconds:g} s."
                 return cast("dict[str, object]", await asyncio.to_thread(read_fn, record_empty=True, empty_note=note))
-            await _wait_for_change(condition, remaining)
+            await wait_for_change(condition, remaining)
 
     async def _wait_inbox(self, run: WorkflowRun, node: WorkflowNode, epoch: int, wait_seconds: float) -> None:
         reader = NodeRef("script", 1, "script")
         op_id = f"{node.key}:{node.generation}"
         read_fn = partial(read_call, self.store, run.run_id, op_id=op_id, reader=reader, names=("script",))
-        condition, deadline = self._condition(run.run_id), self._clock() + wait_seconds
+        condition, deadline = self.live.condition(run.run_id), self.live.clock() + wait_seconds
         async with condition:
             outcome = await self._await_peer_mail(condition, run.run_id, read_fn, wait_seconds, deadline)
-        await self._settle(node, epoch, state=WorkflowNodeState.COMPLETED, result=outcome, ignore=True)
-        await self._notify(run.run_id)
+        await self.live.settle(node, epoch, state=WorkflowNodeState.COMPLETED, result=outcome, ignore=True)
+        await self.live.notify(run.run_id)
 
     async def _prepare_turn(
         self,
@@ -1521,11 +1385,14 @@ class WorkflowEngine:
         except AgentNodeError as exc:
             # Nothing ran. The node is saved already when the job runtime refused the job it names.
             error: dict[str, object] = {"kind": "refused", "message": str(exc)}
-            if not await self._settle(node, run.epoch, state=WorkflowNodeState.FAILED, error=error) and not node.seq:
+            if (
+                not await self.live.settle(node, run.epoch, state=WorkflowNodeState.FAILED, error=error)
+                and not node.seq
+            ):
                 refused = replace(node, state=WorkflowNodeState.FAILED, error=error, ended_at=utc_timestamp())
                 await asyncio.to_thread(self.store.put_node, refused, run.epoch, dirty_after=True)
-            self._drop_slot(run.run_id, node.key)
-            return _receipt(cast("WorkflowNode", self.store.get_node(run.run_id, node.key)))
+            self.live.drop_slot(run.run_id, node.key)
+            return receipt(cast("WorkflowNode", self.store.get_node(run.run_id, node.key)))
         except BaseException:
             # The start failed in some other way, or the request was cancelled. A node that names its job already
             # is settled from that job, which ran nothing if it never started; the request itself fails, and the
@@ -1535,8 +1402,8 @@ class WorkflowEngine:
                 self._wait_for_agent(run, saved, run.epoch)
             raise
         self._wait_for_agent(run, node, run.epoch)
-        await self._restate(run.run_id)
-        return _receipt(node)
+        await self.live.restate(run.run_id)
+        return receipt(node)
 
     async def _launch_agent(
         self,
@@ -1583,15 +1450,15 @@ class WorkflowEngine:
         on time between two attempts as well. What it reads then it cannot save, and leaves to the next wait.
         """
         assert node.handle is not None
-        if self._closed:
+        if self.live.closed:
             # A closed engine starts nothing: the job stays as it is, for the next start to continue or to read.
             return
         name = f"{_TIMED}{node.handle.ref}"
-        for stale in [task for task in self._tasks.get(run.run_id, ()) if task.get_name() == name]:
+        for stale in [task for task in self.live.tasks.get(run.run_id, ()) if task.get_name() == name]:
             stale.cancel()
         # An agent that an earlier attempt started holds a place (including while waiting on approval), over the limit if it must.
-        self._places_for(run).working.add(node.key)
-        task = self._spawn(run.run_id, self._run_agent_node(run, node, epoch))
+        self.live.places_for(run).working.add(node.key)
+        task = self.live.spawn(run.run_id, self._run_agent_node(run, node, epoch))
         if node.handle.work_until is not None or node.handle.work_left is not None:
             task.set_name(name)
 
@@ -1599,22 +1466,10 @@ class WorkflowEngine:
         """Wait for the job of an agent node and settle the node as its turn ended, then wake the run's waiters."""
         try:
             await self._settle_agent(run, node, epoch)
-            await self._release_slot(node.run_id, node.key)
+            await self.live.release_slot(node.run_id, node.key)
         except BaseException:
-            self._drop_slot(node.run_id, node.key)
+            self.live.drop_slot(node.run_id, node.key)
             raise
-
-    async def _check_budget(self, run: WorkflowRun) -> bool:
-        """Return whether *run* or an ancestor reached its cost limit; drop queued work and stop once idle."""
-        if run.state not in SERVED_RUN_STATES or (run.max_cost_usd is None and run.parent_run_id is None):
-            return False
-        if (reason := await asyncio.to_thread(budget_exceeded, self.store, run)) is None:
-            return False
-        if (places := self._places.get(run.run_id)) is not None:
-            places.queued.clear()
-        if (places is None or (not places.working and not places.waking)) and run.run_id not in self._stopping:
-            self.cancel_as_task(run.run_id, reason=reason, state=WorkflowRunState.INTERRUPTED, epoch=run.epoch)
-        return True
 
     async def _settle_agent(self, run: WorkflowRun, node: WorkflowNode, epoch: int, *, block: bool = True) -> None:
         """Settle an agent node from its job, once that has ended, for the attempt that began with *epoch*.
@@ -1661,7 +1516,7 @@ class WorkflowEngine:
         # A further turn of the node is an entry of its own, and the node keeps whether any turn started a tool call.
         turn = int(node.links.get("turn", 1))
         made = bool(node.links.get("made")) or any(used.get("tool_calls") for _, _, used in usage)
-        stopping = node.run_id in self._stopping
+        stopping = node.run_id in self.live.stopping
         outcome: Outcome | str | WorkflowNode
         further = None
         try:
@@ -1677,7 +1532,7 @@ class WorkflowEngine:
                     further = outcome
                 else:
                     state, result, error = outcome
-                    await self._settle(node, epoch, state=state, result=result, error=error)
+                    await self.live.settle(node, epoch, state=state, result=result, error=error)
                 if claim is not None:
                     await runtime.jobs.acknowledge_wait(node.handle.ref, claim)
         finally:
@@ -1753,8 +1608,8 @@ class WorkflowEngine:
         if left is not None and node.handle is not None:
             until = None if on else time.time() + left
             changes["handle"] = replace(node.handle, work_left=left if on else None, work_until=until)
-        await self._stamp(node, epoch, ignore=True, **changes)
-        await self._notify(node.run_id)
+        await self.live.stamp(node, epoch, ignore=True, **changes)
+        await self.live.notify(node.run_id)
 
     async def _reconcile(  # noqa: C901
         self,
@@ -1774,7 +1629,7 @@ class WorkflowEngine:
             # A question outlives its attempt and not its run: nothing of it ran, and its card says it is closed.
             if stop:
                 error = {"kind": "cancelled", "message": _NOT_ANSWERED}
-                await self._settle(node, epoch, state=WorkflowNodeState.CANCELLED, error=error)
+                await self.live.settle(node, epoch, state=WorkflowNodeState.CANCELLED, error=error)
                 await self._close_card(run, node, "cancelled")
             return not stop
         if node.handle is None or node.handle.kind == "run":
@@ -1785,7 +1640,7 @@ class WorkflowEngine:
             error = {"kind": "cancelled", "message": _RUN_ENDED} if stop else INTERRUPTED
             if node.handle is not None:
                 await self.cancel(node.handle.ref, reason=_RUN_ENDED)
-            await self._settle(node, epoch, state=end, error=error)
+            await self.live.settle(node, epoch, state=end, error=error)
             return False
         if node.handle.kind != "job":
             await asyncio.to_thread(self.settle_from_handle, node, epoch)
@@ -1809,7 +1664,7 @@ class WorkflowEngine:
         try:
             await self._settle_agent(run, node, epoch, block=False)
             if not stop:
-                await self._check_budget(self.store.get_run(run.run_id))
+                await self.live.check_budget(self.store.get_run(run.run_id))
         except ScriptRuntimeUnavailableError:
             if not stop:
                 # The lock is not held while access resolves: the script's SDK asks again, and a Stop gets in.
@@ -1818,36 +1673,7 @@ class WorkflowEngine:
             # anything. A handle without the mark that its job was handed over proves nothing either, since the job
             # starts before that mark is saved.
             state, _, error = indeterminate(node)
-            await self._settle(node, epoch, state=state, error=error)
-        return False
-
-    async def _restate(self, run_id: str) -> None:
-        """Show the run as waiting while a call of it waits for a person and none runs, and as running otherwise.
-
-        Time spent waiting is no working time, so the change charges what the run used up to it. The caller holds
-        the run's lock. The clock and the time of the last charge are read and written here, on the loop: the
-        thread that looks at the run is handed both.
-        """
-        now = self._clock()
-        if await asyncio.to_thread(self._restated, run_id, (self._charged.get(run_id, now), now)):
-            self._charged[run_id] = now
-
-    def _restated(self, run_id: str, span: tuple[float, float]) -> bool:
-        """Save the state the run has now and what it used in *span*; return whether its state changed."""
-        with suppress(SupersededAttemptError, WorkflowRunStoreError):
-            run = self.store.get_run(run_id)
-            if run.state in SERVED_RUN_STATES:
-                states = self.store.node_states(run_id)
-                places = self._places.get(run_id)
-                blocked = places is not None and len(places.working) >= places.limit
-                # A queued call behind full approval-held slots cannot start until a person acts.
-                working = states & UNSETTLED_NODE_STATES - ({WorkflowNodeState.QUEUED} if blocked else set())
-                waits = WorkflowNodeState.WAITING in states and not working
-                state = WorkflowRunState.WAITING if waits else WorkflowRunState.RUNNING
-                if state is not run.state:
-                    changes = {"state": state, **self._time_left(run, span)}
-                    self.store.update_run(run_id, run.epoch, when=SERVED_RUN_STATES, **changes)
-                    return True
+            await self.live.settle(node, epoch, state=state, error=error)
         return False
 
     async def node_receipt(
@@ -1864,15 +1690,15 @@ class WorkflowEngine:
         while True:
             # Asked again after each wait: the end of the attempt ends its calls too, and those are not its to read.
             run = await self._current_run(attempt)
-            async with (condition := self._condition(run.run_id)):
+            async with (condition := self.live.condition(run.run_id)):
                 node = self._node(run.run_id, node_id)
                 remaining = deadline - loop.time()
                 waiting_changed = known_state is not None and (
                     (node.state is WorkflowNodeState.WAITING) != (known_state == WorkflowNodeState.WAITING)
                 )
                 if node.state not in LIVE_NODE_STATES or waiting_changed or remaining <= 0:
-                    return _receipt(node)
-                await _wait_for_change(condition, remaining)
+                    return receipt(node)
+                await wait_for_change(condition, remaining)
 
     def node_prompt(self, run_id: str, key: str | None, generation: int | None) -> str | None:
         """Return the prompt of the agent call that is *generation* of the node at *key*, while it waits for its agent.
@@ -1908,7 +1734,7 @@ class WorkflowEngine:
         run = await self._current_run(attempt)
         report = partial(self.store.update_run, run.run_id, run.epoch, when=SERVED_RUN_STATES)
         await asyncio.to_thread(report, result=result, error=error, finished_at=utc_timestamp())
-        self._spawn(run.run_id, self._observe_exit(run.run_id, attempt.run_id))
+        self.live.spawn(run.run_id, self._observe_exit(run.run_id, attempt.run_id))
 
     def settle_from_handle(self, node: WorkflowNode, epoch: int) -> WorkflowNodeState:
         """Settle a node an ended attempt left unsettled from the broker receipt its handle names; return its state.
@@ -1939,49 +1765,12 @@ class WorkflowEngine:
         settle(state=state, result=result, error=error, dirty_after=changed(node, outcome))
         return state
 
-    async def _stamp(self, node: WorkflowNode, epoch: int, *, ignore: bool = False, **changes: object) -> bool:
-        return await self._fenced(self.store.update_node, node, epoch, ignore, **changes)
-
-    async def _settle(self, node: WorkflowNode, epoch: int, *, ignore: bool = False, **changes: object) -> bool:
-        return await self._fenced(self.store.settle_node, node, epoch, ignore, **changes)
-
-    async def _fenced(self, op: Callable[..., bool], n: WorkflowNode, epoch: int, ignore: bool, **kw: object) -> bool:
-        try:
-            return await asyncio.to_thread(op, n.run_id, n.key, n.generation, epoch, **kw)
-        except SupersededAttemptError:
-            if not ignore:
-                raise
-            return False
-
-    def _condition(self, run_id: str) -> asyncio.Condition:
-        condition = self._changed.get(run_id)
-        if condition is None:
-            condition = self._changed[run_id] = asyncio.Condition()
-        return condition
-
-    async def _notify(self, run_id: str) -> None:
-        """Wake the run's waiters after a call of it changed, and show whether the run waits for a person now."""
-        async with (condition := self._condition(run_id)):
-            await self._restate(run_id)
-            condition.notify_all()
-
-    def _spawn[T](self, owner: str, work: Coroutine[None, None, T]) -> asyncio.Task[T]:
-        """Start *work* as the engine's own task, stopped when the run *owner* ends or the engine closes."""
-        tasks = self._tasks.setdefault(owner, set())
-        # In no script's tool call, whatever starts it: a task started as a tool call ends is not inside that call.
-        context = copy_context()
-        context.run(CALLING_NODE.set, None)
-        task = asyncio.create_task(work, name=f"workflow:{owner}", context=context)
-        tasks.add(task)
-        task.add_done_callback(tasks.discard)
-        return task
-
     async def _current_run(self, attempt: ScriptRunRecord) -> WorkflowRun:
         """Return the run *attempt* is the current attempt of."""
         if attempt.workflow_run_id is None:
             msg = f"{attempt.run_id} is not a workflow attempt."
             raise LookupError(msg)
-        async with self._condition(attempt.workflow_run_id):
+        async with self.live.condition(attempt.workflow_run_id):
             run = self.store.get_run(attempt.workflow_run_id)
         if run.epoch != self._launched.get(attempt.run_id):
             msg = f"Attempt {attempt.run_id} is no longer the attempt of {run.run_id}."
@@ -2039,9 +1828,9 @@ class WorkflowEngine:
             # A run that moved on meanwhile reads the call's receipt itself.
             with suppress(SupersededAttemptError):
                 await asyncio.to_thread(self._settle_broker, node, epoch, outcome)
-            await self._release_slot(node.run_id, node.key)
+            await self.live.release_slot(node.run_id, node.key)
         except BaseException:
-            self._drop_slot(node.run_id, node.key)
+            self.live.drop_slot(node.run_id, node.key)
             raise
 
     async def _watch_time(self, run_id: str, epoch: int, hours: float) -> None:
@@ -2052,9 +1841,9 @@ class WorkflowEngine:
                 await asyncio.sleep(min(_CHARGE_SECONDS, left))
                 # Under the run's lock, as a change of the run's state charges it: the time left is read and written
                 # by one of them at a time, so neither takes the same time off twice or writes back an older time.
-                async with self._condition(run_id):
+                async with self.live.condition(run_id):
                     run = self.store.get_run(run_id)
-                    if charge := self._time_left(run):
+                    if charge := self.live.time_left(run):
                         run = await asyncio.to_thread(self.store.update_run, run_id, epoch, **charge)
                 left = run.runtime_seconds_left
             if left is not None:
@@ -2062,23 +1851,6 @@ class WorkflowEngine:
                 await self.settle(self.store.get_run(run_id), replay=True)
                 out_of_time = _OUT_OF_TIME.format(hours=hours)
                 await self.cancel(run_id, reason=out_of_time, state=WorkflowRunState.INTERRUPTED, epoch=epoch)
-
-    def _time_left(self, run: WorkflowRun, span: tuple[float, float] | None = None) -> dict[str, object]:
-        """Return, as a change to save, the working time *run* has left after what it used since the last charge.
-
-        Only a running run uses any, up to where its script ended: time spent waiting for a person, starting or
-        ended is not charged, and neither is the time until somebody looked at a script that had ended. Off the
-        loop, *span* is the time of the last charge and now, which the caller read there and records itself.
-        """
-        since, now = span or (None, self._clock())
-        if since is None:
-            since, self._charged[run.run_id] = self._charged.get(run.run_id, now), now
-        if run.state is not WorkflowRunState.RUNNING or run.runtime_seconds_left is None:
-            return {}
-        with suppress(ScriptRunNotFoundError):
-            if ended := self.scripts.store.get_run(run.script_run_id or "").finished_at:
-                now -= (datetime.now(UTC) - datetime.fromisoformat(ended)).total_seconds()
-        return {"runtime_seconds_left": max(0.0, run.runtime_seconds_left - max(0.0, now - since))}
 
     async def _observe_exit(self, run_id: str, script_run_id: str) -> None:
         """End the run soon after its script reported: look for the exit instead of waiting for the next pass."""
@@ -2098,14 +1870,14 @@ class WorkflowEngine:
         The run is marked under its lock, so it takes no call from then on, and the lock is not held for the wait.
         The end of a job says what its turn did, which `_end_run` reads then; one deadline is for all the jobs.
         """
-        async with self._condition(run.run_id):
+        async with self.live.condition(run.run_id):
             current = self.store.get_run(run.run_id)
             if current.epoch != run.epoch or current.state in TERMINAL_RUN_STATES:
                 return
-            self._stopping.add(run.run_id)
+            self.live.stopping.add(run.run_id)
             # Before any call of the run is stopped: the place it gives up starts no call that waited for one.
-            self._places.pop(run.run_id, None)
-            self._condition(run.run_id).notify_all()
+            self.live.places.pop(run.run_id, None)
+            self.live.condition(run.run_id).notify_all()
             nodes = await asyncio.to_thread(self.store.nodes, run.run_id, include_stale=True, light=True)
         deadline = asyncio.get_running_loop().time() + _STOP_SECONDS
         handles = [node.handle for node in nodes if node.state in LIVE_NODE_STATES and node.handle is not None]
@@ -2131,7 +1903,7 @@ class WorkflowEngine:
         ended. With the state `starting` only the run's attempt is over. A run that has ended, or that moved on
         from the epoch *run* has, is returned as it is: what was decided about *run* says nothing about it.
         """
-        condition = self._condition(run.run_id)
+        condition = self.live.condition(run.run_id)
         try:
             if state in TERMINAL_RUN_STATES:
                 # Without the lock, which the wait for the run's agents must not hold.
@@ -2143,8 +1915,8 @@ class WorkflowEngine:
                     return current
                 ended = state in TERMINAL_RUN_STATES
                 # Before any call of the run is stopped: the place it gives up starts no call that waited for one.
-                self._places.pop(run.run_id, None)
-                mine = self._tasks.get(run.run_id, set()) if not ended else self._tasks.pop(run.run_id, set())
+                self.live.places.pop(run.run_id, None)
+                mine = self.live.tasks.get(run.run_id, set()) if not ended else self.live.tasks.pop(run.run_id, set())
                 # The wait for a timed agent outlives the attempt: it stops the turn on time while no attempt waits.
                 kept = () if ended else [task for task in mine if task.get_name().startswith(_TIMED)]
                 tasks = mine - {asyncio.current_task(), *kept}
@@ -2170,7 +1942,7 @@ class WorkflowEngine:
                     # What the completed script no longer reaches leaves the run's current view.
                     await asyncio.to_thread(self.store.mark_stale, run.run_id, run.epoch)
                 at = current.finished_at or utc_timestamp()
-                changes = {"state": state, "error": error, "finished_at": at, **self._time_left(current), **changes}
+                changes = {"state": state, "error": error, "finished_at": at, **self.live.time_left(current), **changes}
                 attempt = current.script_run_id or ""
 
                 def forget(written: asyncio.Future[WorkflowRun]) -> None:
@@ -2181,13 +1953,13 @@ class WorkflowEngine:
                 # What is kept per attempt goes with the write: a task cancelled at the commit leaves none of it behind.
                 end.add_done_callback(forget)
                 ended = await asyncio.shield(end)
-                self._charged.pop(run.run_id, None)
+                self.live.charged.pop(run.run_id, None)
                 self._refused.discard(run.run_id)
                 condition.notify_all()
                 if ended.state in TERMINAL_RUN_STATES and ended.parent_run_id is not None:
                     await self._settle_group(ended)
         finally:
-            self._stopping.discard(run.run_id)
+            self.live.stopping.discard(run.run_id)
         return ended
 
     async def _settle_group(self, child: WorkflowRun) -> None:
@@ -2270,26 +2042,6 @@ def _value(args: dict[str, object]) -> object:
         return secrets.SystemRandom().random()
     msg = f"A value call is now or random, not {args.get('op')!r}."
     raise WorkflowRunStoreError(msg)
-
-
-async def _wait_for_change(condition: asyncio.Condition, remaining: float | None = None) -> None:
-    timeout = RECHECK_SECONDS if remaining is None else min(remaining, RECHECK_SECONDS)
-    with suppress(TimeoutError):
-        await asyncio.wait_for(condition.wait(), timeout)
-
-
-def _receipt(node: WorkflowNode) -> NodeReceipt:
-    """Return what the script is told about *node*; a result too large for the row is named, not inlined."""
-    node_id = f"n{node.seq}"
-    spilled = node.result_file is not None
-    return NodeReceipt(
-        id=node_id,
-        state=node.state,
-        cached=False,
-        result=None if spilled else node.result,
-        error=node.error,
-        result_ref=f"results/{node_id}" if spilled else None,
-    )
 
 
 def _broker_call_id(node: WorkflowNode) -> str:

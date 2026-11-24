@@ -380,7 +380,7 @@ async def test_correction_that_ends_without_an_answer_keeps_what_the_first_turn_
         await stack.until(lambda: len(model.requests) == 3)
         await stack.jobs.request_cancel(second)
     # The wait for the node's agent has ended: with the node's end, or with the primary's.
-    await stack.until(lambda: not stack.engine._tasks.get(stack.run_id))
+    await stack.until(lambda: not stack.engine.live.tasks.get(stack.run_id))
     await stack.end_attempt(ScriptRunState.FAILED)
     await stack.resume(stack.run_id)
 

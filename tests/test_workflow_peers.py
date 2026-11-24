@@ -332,14 +332,14 @@ async def test_waiting_reader_returns_timeout_note_and_retries_persist_it(stack:
     )
     # Before wait_seconds elapses, no deadlock notice fires; advancing fake clock past 30s ends the wait with the note.
     stack.now += 10.0
-    async with stack.engine._condition(stack.run_id):
-        stack.engine._condition(stack.run_id).notify_all()
+    async with stack.engine.live.condition(stack.run_id):
+        stack.engine.live.condition(stack.run_id).notify_all()
     await asyncio.sleep(0.02)
     assert not seen_tool_results
 
     stack.now += 25.0
-    async with stack.engine._condition(stack.run_id):
-        stack.engine._condition(stack.run_id).notify_all()
+    async with stack.engine.live.condition(stack.run_id):
+        stack.engine.live.condition(stack.run_id).notify_all()
     await stack.until(
         lambda: (n := stack.store.get_node(stack.run_id, "@0")) is not None and n.state is WorkflowNodeState.COMPLETED,
     )
@@ -367,8 +367,8 @@ async def test_waiting_reader_returns_timeout_note_and_retries_persist_it(stack:
     )
     await asyncio.sleep(0.02)
     stack.now += 20.0
-    async with stack.engine._condition(stack.run_id):
-        stack.engine._condition(stack.run_id).notify_all()
+    async with stack.engine.live.condition(stack.run_id):
+        stack.engine.live.condition(stack.run_id).notify_all()
     first = await asyncio.wait_for(wait_task, timeout=SETTLE_TIMEOUT_SECONDS)
     expected = {"messages": [], "note": "No message arrived within 15 s."}
     assert first == expected
@@ -385,8 +385,8 @@ async def test_waiting_reader_returns_timeout_note_and_retries_persist_it(stack:
     inbox_receipt = await stack.submit("@1", "inbox", {"wait_seconds": 12})
     assert inbox_receipt.state is WorkflowNodeState.WAITING
     stack.now += 15.0
-    async with stack.engine._condition(stack.run_id):
-        stack.engine._condition(stack.run_id).notify_all()
+    async with stack.engine.live.condition(stack.run_id):
+        stack.engine.live.condition(stack.run_id).notify_all()
     await stack.until(
         lambda: (n := stack.store.get_node(stack.run_id, "@1")) is not None and n.state is WorkflowNodeState.COMPLETED,
     )

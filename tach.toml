@@ -2698,12 +2698,31 @@ expose = [
 ]
 
 [[modules]]
+path = "mindroom.workflow_runs.coordination"
+depends_on = [
+    "mindroom.workflow_runs.limits",
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.replay",
+    "mindroom.workflow_runs.store",
+]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.coordination"]
+expose = [
+    "Places",
+    "RunCoordinator",
+    "receipt",
+    "wait_for_change",
+]
+
+[[modules]]
 path = "mindroom.workflow_runs.engine"
 depends_on = [
     "mindroom.delegation.personas",
     "mindroom.delegation.state",
     "mindroom.tool_jobs.runtime",
     "mindroom.workflow_runs.agent_nodes",
+    "mindroom.workflow_runs.coordination",
     "mindroom.workflow_runs.faults",
     "mindroom.workflow_runs.graph",
     "mindroom.workflow_runs.limits",

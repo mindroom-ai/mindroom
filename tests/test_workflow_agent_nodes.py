@@ -281,7 +281,7 @@ async def test_outcome_that_the_node_could_not_take_is_given_back_to_its_job(
     await stack.submit("@0", "agent", _PROMPT)
     job_id = stack.node_job("@0").job_id
     await wait_for_status(stack.jobs, job_id, "completed")
-    await stack.until(lambda: not stack.engine._tasks.get(stack.run_id))
+    await stack.until(lambda: not stack.engine.live.tasks.get(stack.run_id))
 
     waited = await stack.jobs.wait(job_id, owner=stack.context.execution_identity, depth=0)
 
@@ -317,7 +317,7 @@ async def test_agent_whose_record_cannot_be_read_after_it_wrote_is_not_run_again
         WorkflowNodeState.INDETERMINATE,
         None,
     )
-    await stack.until(lambda: not stack.engine._tasks.get(stack.run_id))
+    await stack.until(lambda: not stack.engine.live.tasks.get(stack.run_id))
     waited = await stack.jobs.wait(stack.node_job("@0").job_id, owner=stack.context.execution_identity, depth=0)
     assert (waited.claim is not None, waited.job.consumed) == (True, read == "finds nothing")
     await stack.jobs.release_wait(waited.job.job_id, waited.claim)
@@ -357,7 +357,7 @@ async def test_edited_prompt_at_the_same_key_starts_a_new_job_and_stops_the_old_
     # Nothing waits for the old job under the run's lock: the call is asked again, as the script's SDK does.
     with pytest.raises(ScriptRuntimeUnavailableError, match="is stopping"):
         await stack.submit("@0", "agent", {"prompt": "new"})
-    assert not stack.engine._condition(stack.run_id).locked()
+    assert not stack.engine.live.condition(stack.run_id).locked()
     await wait_for_status(stack.jobs, old, "cancelled")
     assert await stack.result("@0", "agent", {"prompt": "new"}) == "new answer"
     gate.set()
@@ -509,7 +509,7 @@ async def test_a_stop_waits_for_all_its_agents_together_and_not_under_the_runs_l
         asked.append(job_id)
 
     monkeypatch.setattr(stack.jobs, "request_cancel", ignored)
-    lock, clock = stack.engine._condition(stack.run_id), asyncio.get_running_loop().time
+    lock, clock = stack.engine.live.condition(stack.run_id), asyncio.get_running_loop().time
     began = clock()
 
     stop = asyncio.create_task(stack.engine.cancel(stack.run_id, reason="Stopped."))
@@ -664,7 +664,7 @@ async def test_a_stop_of_several_agents_says_of_each_what_its_own_turn_did(
     await asyncio.wait_for(wrote.wait(), 5)
     for key in ("@1", "@2"):
         await stack.submit(key, "agent", {"prompt": f"Task {key}"})
-    lock, cancel, locked = stack.engine._condition(stack.run_id), stack.jobs.request_cancel, []
+    lock, cancel, locked = stack.engine.live.condition(stack.run_id), stack.jobs.request_cancel, []
 
     async def recorded(job_id: str) -> None:
         locked.append(lock.locked())
@@ -1229,7 +1229,7 @@ async def test_engine_that_closes_while_an_agent_starts_begins_no_wait_for_it(
 
     with pytest.raises(asyncio.CancelledError):
         await request
-    assert not any(stack.engine._tasks.values())
+    assert not any(stack.engine.live.tasks.values())
     assert (_node(stack).state, stack.node_job("@0").status) == (WorkflowNodeState.RUNNING, "running")
 
 

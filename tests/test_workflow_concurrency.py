@@ -273,7 +273,7 @@ async def test_cancel_starts_no_queued_node(stack: WorkflowStack) -> None:
     assert _states(stack)[1:] == [_CANCELLED, _CANCELLED]
     assert stack.store.get_run(stack.run_id).state is WorkflowRunState.CANCELLED
     # An ended run keeps no count of working calls behind.
-    assert stack.engine._places == {}
+    assert stack.engine.live.places == {}
 
 
 @pytest.mark.asyncio
@@ -308,7 +308,7 @@ async def test_queued_agent_whose_node_ended_meanwhile_starts_nothing(stack: Wor
     gate.set()
 
     assert (await _settled(stack, first)).result == "done"
-    await stack.until(lambda: stack.engine._places[stack.run_id].working == set())
+    await stack.until(lambda: stack.engine.live.places[stack.run_id].working == set())
     assert (len(stack.models["watcher"].requests), _states(stack)[1]) == (1, _CANCELLED)
     assert len(stack.jobs.retained_jobs()) == 1
 
@@ -327,7 +327,7 @@ async def test_queued_tool_call_whose_node_ended_meanwhile_runs_nothing(stack: W
     written.set()
 
     assert (await _settled(stack, first)).result == "appended"
-    await stack.until(lambda: stack.engine._places[stack.run_id].working == set())
+    await stack.until(lambda: stack.engine.live.places[stack.run_id].working == set())
     assert (stack.counting_tool.lines, _states(stack)[1]) == (["a"], _CANCELLED)
 
 
@@ -342,7 +342,7 @@ async def test_attempt_that_failed_starts_no_queued_call_and_keeps_no_places(sta
 
     await stack.finish_attempt(error="KeyError: 'x'")
 
-    assert (stack.counting_tool.lines, stack.engine._places) == (["a"], {})
+    assert (stack.counting_tool.lines, stack.engine.live.places) == (["a"], {})
     assert stack.store.get_run(stack.run_id).state is WorkflowRunState.FAILED
 
 

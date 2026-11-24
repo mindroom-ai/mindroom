@@ -1045,8 +1045,11 @@ class WorkflowStack:
         """
         if kill:
             # A dead process starts nothing more, whatever its stopping tasks would make room for.
-            self.engine._closed = True
-            tasks = [*self.broker._tasks.values(), *(task for owned in self.engine._tasks.values() for task in owned)]
+            self.engine.live.closed = True
+            tasks = [
+                *self.broker._tasks.values(),
+                *(task for owned in self.engine.live.tasks.values() for task in owned),
+            ]
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -1074,8 +1077,8 @@ class WorkflowStack:
         saved = self.tmp_path / "killed"
         for path in durable:
             _copy_saved(path, saved / path.name)
-        self.engine._closed = True
-        tasks = [*self.broker._tasks.values(), *(task for owned in self.engine._tasks.values() for task in owned)]
+        self.engine.live.closed = True
+        tasks = [*self.broker._tasks.values(), *(task for owned in self.engine.live.tasks.values() for task in owned)]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)

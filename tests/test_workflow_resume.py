@@ -718,7 +718,7 @@ async def test_working_time_is_read_and_charged_on_the_event_loop_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The clock and the time of the last charge are the loop's: the look at the run in a thread is handed both."""
-    seen, clock = set(), timed.engine._clock
+    seen, clock = set(), timed.engine.live.clock
 
     def read() -> float:
         seen.add(threading.current_thread())
@@ -729,8 +729,8 @@ async def test_working_time_is_read_and_charged_on_the_event_loop_only(
             seen.add(threading.current_thread())
             super().__setitem__(run_id, at)
 
-    monkeypatch.setattr(timed.engine, "_clock", read)
-    monkeypatch.setattr(timed.engine, "_charged", Charged(timed.engine._charged))
+    monkeypatch.setattr(timed.engine.live, "clock", read)
+    monkeypatch.setattr(timed.engine.live, "charged", Charged(timed.engine.live.charged))
     timed.now += 600
     timed.resolver.hold_approvals = asyncio.Event()
     await timed.submit("@0", "tool", _A)

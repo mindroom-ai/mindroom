@@ -142,7 +142,7 @@ async def test_call_whose_start_was_under_way_when_the_limit_was_reached_does_no
 ) -> None:
     """A queued call that got its place just before the limit was reached starts nothing and ends the run if idle."""
     gate = await _over_the_limit(stack)
-    places = stack.engine._places[stack.run_id]
+    places = stack.engine.live.places[stack.run_id]
     started = False
 
     async def start() -> None:
@@ -150,7 +150,7 @@ async def test_call_whose_start_was_under_way_when_the_limit_was_reached_does_no
         started = True
 
     places.working.add("@2")
-    await stack.engine._start_queued(stack.run_id, "@2", start)
+    await stack.engine.live.start_queued(stack.run_id, "@2", start)
 
     assert (started, "@2" in places.working, len(stack.models["watcher"].requests)) == (False, False, 2)
     gate.set()
@@ -227,7 +227,7 @@ async def test_further_turn_that_a_call_finds_due_stops_at_the_limit(stack: Work
     ask = {"prompt": "Does it hold?", "schema": {"type": "object", "required": ["ok"]}}
     await stack.submit("@0", "agent", ask)
     await stack.until(lambda: len(model.requests) == 1)
-    for waiting in stack.engine._tasks.pop(stack.run_id):
+    for waiting in stack.engine.live.tasks.pop(stack.run_id):
         waiting.cancel()
     await stack.scripts.end(stack.attempt.run_id, ScriptRunState.INTERRUPTED, reason=PLUGIN_TOOLS_CHANGED)
     assert await stack.maintain() == [stack.run_id]

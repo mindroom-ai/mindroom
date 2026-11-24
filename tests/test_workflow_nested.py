@@ -166,7 +166,7 @@ async def test_a_run_s_own_call_cannot_cancel_it_or_a_run_around_it(stack: Workf
 
 def _lock_at_each_stop(stack: WorkflowStack, parent: str, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, bool]]:
     """Return a list that gets, for each stop of a run that still runs, whether the lock of *parent* is held then."""
-    lock, cancel, locked = stack.engine._condition(parent), stack.engine.cancel, []
+    lock, cancel, locked = stack.engine.live.condition(parent), stack.engine.cancel, []
 
     async def recorded(run_id: str, **how: Any) -> WorkflowRun:  # noqa: ANN401 - as the engine's `cancel`.
         if stack.store.get_run(run_id).state is WorkflowRunState.RUNNING:
@@ -660,12 +660,12 @@ async def test_gate_that_answers_just_after_its_run_ended_queues_no_agent(gated:
     run, node = gated.store.get_run(gated.run_id), gated.store.get_node(gated.run_id, "@0")
     await gated.engine.cancel(run.run_id, reason="Stopped.")
     assert node is not None
-    assert run.run_id not in gated.engine._places
+    assert run.run_id not in gated.engine.live.places
 
     async def passed() -> Any:  # noqa: ANN401
         return SimpleNamespace(state=ScriptCallState.COMPLETED, grant=None, result=None, metadata=None)
 
     await gated.engine._start_gated(run, node, passed)
 
-    assert run.run_id not in gated.engine._places
+    assert run.run_id not in gated.engine.live.places
     assert _agent_jobs(gated) == 0
