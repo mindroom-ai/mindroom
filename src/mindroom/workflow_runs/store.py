@@ -331,6 +331,14 @@ class WorkflowRunStore:
         where = "run_id = ?" if include_stale else "run_id = ? AND stale = 0"
         return self._select_nodes(where, (run_id,), _LIGHT_COLUMNS if light else "*")
 
+    def unposted_questions(self, run_id: str) -> list[WorkflowNode]:
+        """Return every waiting, non-stale question of *run_id* whose card has no `event_id` yet."""
+        where = (
+            "run_id = ? AND kind = 'ask' AND state = 'waiting' AND stale = 0 "
+            "AND json_type(links_json, '$.event_id') IS NULL"
+        )
+        return self._select_nodes(where, (run_id,))
+
     def session_turns(self, run_id: str, session_key: str) -> list[WorkflowNode]:
         """Return every `turn` node of *session_key* in *run_id* (stale included), in submission order."""
         return self._select_nodes("run_id = ? AND kind = 'turn' AND session_key = ?", (run_id, session_key))

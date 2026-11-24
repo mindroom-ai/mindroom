@@ -1073,14 +1073,30 @@ class WorkflowEngine:
         if (client := self.poster(run)) is not None:
             await show_question(client, run, node, status, answer, retries)
 
-    async def ask_again(self, run_id: str) -> None:
-        """Post the card of each question of a run that waits without one: a card that could not be sent then."""
-        async with self._condition(run_id):
-            run = self.store.get_run(run_id)
-            for light in self.store.nodes(run_id, light=True) if run.state not in TERMINAL_RUN_STATES else ():
-                node = self.store.get_node(run_id, light.key) if light.kind == "ask" else None
-                with suppress(ScriptRuntimeUnavailableError, SupersededAttemptError):
-                    await self._asked(run, node or light, run.epoch)
+    async def retry_question_cards(self, root: str) -> None:
+        """Post any unposted waiting question cards across *root* and its live descendants."""
+
+        def live_tree(run_id: str) -> list[str]:
+            try:
+                run = self.store.get_run(run_id)
+            except WorkflowRunNotFoundError:
+                return []
+            if run.state in TERMINAL_RUN_STATES:
+                return []
+            ids = [run_id]
+            for child in self.store.child_runs(run_id):
+                ids.extend(live_tree(child.run_id))
+            return ids
+
+        for run_id in await asyncio.to_thread(live_tree, root):
+            async with self._condition(run_id):
+                with suppress(WorkflowRunNotFoundError):
+                    run = self.store.get_run(run_id)
+                    if run.state in TERMINAL_RUN_STATES:
+                        continue
+                    for node in await asyncio.to_thread(self.store.unposted_questions, run_id):
+                        with suppress(ScriptRuntimeUnavailableError, SupersededAttemptError):
+                            await self._asked(run, node, run.epoch)
 
     @staticmethod
     def _validate_question_options(options: object) -> None:

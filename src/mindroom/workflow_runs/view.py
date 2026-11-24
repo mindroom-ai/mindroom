@@ -34,7 +34,6 @@ from mindroom.workflow_runs.graph import (
 from mindroom.workflow_runs.models import (
     TERMINAL_RUN_STATES,
     UNSETTLED_NODE_STATES,
-    WorkflowNodeState,
     WorkflowRunState,
 )
 from mindroom.workflow_runs.notices import notice, notice_fits, send_notice
@@ -62,11 +61,6 @@ _LARGE = "Large run: {agents} agents, about ${projected:.2f} projected."
 _ERROR_CHARS = 200
 
 type _Built = tuple[WorkflowRun, list[WorkflowNode], dict[str, Any], Graph]
-
-
-def _unasked(node: WorkflowNode) -> bool:
-    """Return whether *node* is a question that waits and whose card could not be posted yet."""
-    return node.kind == "ask" and node.state is WorkflowNodeState.WAITING and "event_id" not in node.links
 
 
 def card_content(run: WorkflowRun, meta: dict[str, Any], phases: list[str]) -> dict[str, Any]:
@@ -215,7 +209,7 @@ class RunViews:
             # Else the run may not act now, or nobody can post for it: its next view tries again.
             self._publish_frame(run, account, meta, graph)
             shown = await self._card(run, meta, graph, client)
-            await self._ask_pending(run_id)
+            await self.engine.retry_question_cards(run_id)
         else:
             self._stop_frame(run_id)
         if run.state not in TERMINAL_RUN_STATES:
@@ -226,25 +220,6 @@ class RunViews:
             # Nothing writes to an ended run again, so its card is sent again from here until it says the end.
             tries = self._unsent[run_id] = self._unsent.get(run_id, 0) + 1
             self._due[run_id] = time.monotonic() + min(_REFRESH_SECONDS * 2 ** min(tries, 10), _CARD_SECONDS)
-
-    async def _ask_pending(self, run_id: str) -> None:
-        """Retry unposted question cards for *run_id* and its descendants."""
-        for waiting_id in await asyncio.to_thread(self._unasked_runs, run_id):
-            await self.engine.ask_again(waiting_id)
-
-    def _unasked_runs(self, run_id: str) -> list[str]:
-        """Return every live run in *run_id*'s tree that has a waiting question with no card yet."""
-        store = self.engine.store
-        try:
-            run = store.get_run(run_id)
-        except WorkflowRunNotFoundError:
-            return []
-        if run.state in TERMINAL_RUN_STATES:
-            return []
-        pending = [run_id] if any(_unasked(node) for node in store.nodes(run_id, light=True)) else []
-        for child in store.child_runs(run_id):
-            pending.extend(self._unasked_runs(child.run_id))
-        return pending
 
     def _publish_frame(self, run: WorkflowRun, account: str, meta: dict[str, Any], graph: Graph) -> None:
         """Queue *run*'s frame on *account*, or stop any open stream if live frames are off."""
