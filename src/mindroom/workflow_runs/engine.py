@@ -23,7 +23,7 @@ from mindroom.script_runs.models import (
     utc_timestamp,
 )
 from mindroom.script_runs.store import ScriptRunNotFoundError
-from mindroom.workflow_runs.agent_dispatch import AgentDispatcher
+from mindroom.workflow_runs.agent_nodes import AgentRuntime, node_prompt
 from mindroom.workflow_runs.coordination import ADMISSIONS, RunCoordinator, wait_for_change
 from mindroom.workflow_runs.dispatch import NodeDispatcher
 from mindroom.workflow_runs.endings import RunEndings, run_outcome
@@ -56,7 +56,6 @@ if TYPE_CHECKING:
     from mindroom.script_runs.manager import ScriptResourceProfileName, ScriptRunManager
     from mindroom.script_runs.models import ScriptRunRecord, ScriptToolGrant
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-    from mindroom.workflow_runs.agent_nodes import AgentRuntime
     from mindroom.workflow_runs.store import WorkflowRunStore
 
 logger = get_logger(__name__)
@@ -89,11 +88,10 @@ class WorkflowEngine:
         self.scripts = scripts
         self.live = RunCoordinator(store, scripts, clock, self.cancel_as_task)
         self.ask = RunInteractions(self.live, self.authorize)
-        self.agent_dispatch = AgentDispatcher(self.live, self.authorize)
         self.dispatch = NodeDispatcher(
+            self,
             self.live,
             broker,
-            self.agent_dispatch,
             close_card=self.ask.close_card,
             cancel=lambda *a, **kw: self.cancel(*a, **kw),
         )
@@ -115,9 +113,9 @@ class WorkflowEngine:
             settle=lambda *a, **kw: self.settle(*a, **kw),
         )
         self.calls = ScriptCalls(
+            self,
             self.live,
             self.ask,
-            self.agent_dispatch,
             self.dispatch,
             authorize=self.authorize,
             observe_exit=self.endings.observe_exit,
@@ -131,6 +129,10 @@ class WorkflowEngine:
     @agents.setter
     def agents(self, provider: Callable[[], AgentRuntime | None]) -> None:
         self.live.agents = provider
+
+    def node_prompt(self, run_id: str, key: str | None, generation: int | None) -> str | None:
+        """Return the initial prompt for a live agent node generation, or None once ended/stopped."""
+        return node_prompt(self, run_id, key, generation)
 
     def authorize(self, run: WorkflowRun, grant: ScriptToolGrant | None = None) -> ToolRuntimeContext | str | None:
         """Say whether *run* may act now: its owner's live context, why not, or None while that cannot be said yet.

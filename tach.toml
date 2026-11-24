@@ -2580,7 +2580,7 @@ expose = [
 [[modules]]
 path = "mindroom.workflow_runs.structured"
 depends_on = ["mindroom.json_utils"]
-visibility = ["mindroom.workflow_runs.agent_dispatch", "mindroom.workflow_runs.agent_nodes"]
+visibility = ["mindroom.workflow_runs.agent_nodes"]
 
 [[interfaces]]
 from = ["mindroom.workflow_runs.structured"]
@@ -2640,8 +2640,10 @@ depends_on = [
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.runtime_context",
     "mindroom.tool_system.worker_routing",
+    "mindroom.workflow_runs.limits",
     "mindroom.workflow_runs.models",
     "mindroom.workflow_runs.replay",
+    "mindroom.workflow_runs.store",
     "mindroom.workflow_runs.structured",
 ]
 
@@ -2651,11 +2653,16 @@ expose = [
     "AgentNodeError",
     "AgentRuntime",
     "await_child",
-    "schema_failure",
     "delegated_request",
+    "dispatch_agent",
     "first_prompt",
-    "load_follow_up_child",
     "launch_child",
+    "load_follow_up_child",
+    "node_prompt",
+    "node_waits",
+    "schema_failure",
+    "settle_agent",
+    "wait_for_agent",
     "works",
 ]
 
@@ -2743,21 +2750,6 @@ from = ["mindroom.workflow_runs.interactions"]
 expose = ["RunInteractions"]
 
 [[modules]]
-path = "mindroom.workflow_runs.agent_dispatch"
-depends_on = [
-    "mindroom.workflow_runs.agent_nodes",
-    "mindroom.workflow_runs.limits",
-    "mindroom.workflow_runs.models",
-    "mindroom.workflow_runs.replay",
-    "mindroom.workflow_runs.store",
-    "mindroom.workflow_runs.structured",
-]
-
-[[interfaces]]
-from = ["mindroom.workflow_runs.agent_dispatch"]
-expose = ["AgentDispatcher"]
-
-[[modules]]
 path = "mindroom.workflow_runs.dispatch"
 depends_on = [
     "mindroom.workflow_runs.agent_nodes",
@@ -2810,7 +2802,7 @@ expose = ["ScriptCalls"]
 path = "mindroom.workflow_runs.engine"
 depends_on = [
     "mindroom.delegation.personas",
-    "mindroom.workflow_runs.agent_dispatch",
+    "mindroom.workflow_runs.agent_nodes",
     "mindroom.workflow_runs.coordination",
     "mindroom.workflow_runs.dispatch",
     "mindroom.workflow_runs.endings",

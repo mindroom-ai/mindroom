@@ -850,7 +850,7 @@ def workflow_call_prompt(child: DelegationChild) -> str | None:
     context = get_tool_runtime_context()
     if child.workflow_run_id is None or context is None or context.orchestrator is None:
         return None
-    return context.orchestrator.workflow_engine.agent_dispatch.node_prompt(
+    return context.orchestrator.workflow_engine.node_prompt(
         child.workflow_run_id,
         child.workflow_node_key,
         child.workflow_generation,

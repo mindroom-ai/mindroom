@@ -16,8 +16,10 @@ from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
 from mindroom.script_runs.models import ScriptToolGrant, utc_timestamp
 from mindroom.workflow_runs.agent_nodes import (
     delegated_request,
+    dispatch_agent,
     load_follow_up_child,
     schema_failure,
+    wait_for_agent,
 )
 from mindroom.workflow_runs.coordination import ADMISSIONS, wait_for_change
 from mindroom.workflow_runs.graph import node_label
@@ -52,10 +54,10 @@ if TYPE_CHECKING:
     from mindroom.delegation.state import DelegationChild
     from mindroom.script_runs.models import ScriptRunRecord
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
-    from mindroom.workflow_runs.agent_dispatch import AgentDispatcher
     from mindroom.workflow_runs.agent_nodes import AgentRuntime
     from mindroom.workflow_runs.coordination import RunCoordinator
     from mindroom.workflow_runs.dispatch import NodeDispatcher
+    from mindroom.workflow_runs.engine import WorkflowEngine
     from mindroom.workflow_runs.interactions import RunInteractions
     from mindroom.workflow_runs.models import NodeReceipt, NodeRequest
 
@@ -126,17 +128,17 @@ class ScriptCalls:
 
     def __init__(
         self,
+        engine: WorkflowEngine,
         live: RunCoordinator,
         ask: RunInteractions,
-        agent_dispatch: AgentDispatcher,
         dispatch: NodeDispatcher,
         *,
         authorize: Callable[..., ToolRuntimeContext | str | None],
         observe_exit: Callable[[str, str], Coroutine[None, None, None]],
     ) -> None:
+        self._engine = engine
         self.live = live
         self.ask = ask
-        self.agent_dispatch = agent_dispatch
         self.dispatch = dispatch
         self._authorize = authorize
         self._observe_exit = observe_exit
@@ -296,7 +298,7 @@ class ScriptCalls:
             if saved.kind == "ask":
                 await self.ask.asked(run, saved, epoch)
             else:
-                self.agent_dispatch.wait_for_agent(run, saved, epoch)
+                wait_for_agent(self._engine, run, saved, epoch)
             await self.live.restate(run.run_id)
         return replace(receipt(saved), cached=action == "hit")
 
@@ -364,7 +366,7 @@ class ScriptCalls:
                 turn_msg = await asyncio.to_thread(mail, prev_turn=turn_ctx.prev)
                 follow_up, prompt = await self._prepare_turn(run, turn_ctx, saved, turn_msg)
                 node = replace(node, request={**asked, "prompt": prompt, "effective_message": turn_msg})
-            dispatch = partial(self.agent_dispatch.dispatch_agent, run, timeout=_timeout(meta), follow_up=follow_up)
+            dispatch = partial(dispatch_agent, self._engine, run, timeout=_timeout(meta), follow_up=follow_up)
             return await self.live.enter(run, node, dispatch)
         if grant is not None:
             cached = meta.get("cached") is not False

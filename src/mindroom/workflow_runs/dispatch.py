@@ -16,7 +16,7 @@ from mindroom.script_runs.store import (
     ScriptRunNotFoundError,
     ScriptRunStoreError,
 )
-from mindroom.workflow_runs.agent_nodes import works
+from mindroom.workflow_runs.agent_nodes import dispatch_agent, node_waits, settle_agent, works
 from mindroom.workflow_runs.faults import hold
 from mindroom.workflow_runs.models import (
     DispatchHandle,
@@ -45,8 +45,8 @@ if TYPE_CHECKING:
 
     from mindroom.script_runs.broker import ScriptToolBroker
     from mindroom.script_runs.models import ScriptRunRecord, ScriptToolGrant
-    from mindroom.workflow_runs.agent_dispatch import AgentDispatcher
     from mindroom.workflow_runs.coordination import RunCoordinator
+    from mindroom.workflow_runs.engine import WorkflowEngine
     from mindroom.workflow_runs.models import NodeReceipt
 
 _NOT_CONTINUED_YET = "The agent of this call has not been continued yet after a restart. Try again in a moment."
@@ -64,16 +64,16 @@ class NodeDispatcher:
 
     def __init__(
         self,
+        engine: WorkflowEngine,
         live: RunCoordinator,
         broker: ScriptToolBroker,
-        agent_dispatch: AgentDispatcher,
         *,
         close_card: Callable[..., Awaitable[None]],
         cancel: Callable[..., Awaitable[WorkflowRun]],
     ) -> None:
+        self._engine = engine
         self.live = live
         self.broker = broker
-        self.agent_dispatch = agent_dispatch
         self._close_card = close_card
         self._cancel = cancel
 
@@ -113,7 +113,7 @@ class NodeDispatcher:
                 if await self.live.check_budget(now):
                     return
                 self.live.places_for(run).queued.append(
-                    (node.key, partial(self.agent_dispatch.dispatch_agent, run, node, timeout=None)),
+                    (node.key, partial(dispatch_agent, self._engine, run, node, timeout=None)),
                 )
                 self.live.drop_slot(run.run_id, None)
             else:
@@ -162,7 +162,7 @@ class NodeDispatcher:
     ) -> Outcome:
         """Run one broker call for *node* within the rate limit and return its node outcome."""
         cid = _broker_call_id(node)
-        waits = partial(self.agent_dispatch.node_waits, node, epoch, gate_only=gate_only)
+        waits = partial(node_waits, self._engine, node, epoch, gate_only=gate_only)
         call = partial(
             self.broker.execute_for_workflow,
             attempt,
@@ -280,7 +280,7 @@ class NodeDispatcher:
                 return True
             await runtime.jobs.request_cancel(job_id)
         try:
-            await self.agent_dispatch.settle_agent(run, node, epoch, block=False)
+            await settle_agent(self._engine, run, node, epoch, block=False)
             if not stop:
                 await self.live.check_budget(self.live.store.get_run(run.run_id))
         except ScriptRuntimeUnavailableError:
