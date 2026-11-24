@@ -8,6 +8,7 @@ import socket
 import sqlite3
 import sys
 from contextlib import closing
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -17,10 +18,20 @@ import pytest_asyncio
 from mindroom.agents import create_agent
 from mindroom.api.script_gateway import serve_listener
 from mindroom.custom_tools.workflow import WorkflowTools
-from mindroom.delegation.lifecycle import _CHILD_RUN, ChildRunObservation, prepare_child_turn
+from mindroom.custom_tools.workflow_peers import WorkflowPeerTools
+from mindroom.delegation.lifecycle import (
+    _CHILD_RUN,
+    ChildRunObservation,
+    child_run_context,
+    prepare_child_turn,
+    start_child_turn,
+)
+from mindroom.delegation.state import DelegationChild, child_execution_identity
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import TurnCompleted
 from mindroom.orchestration import tool_job_runtime as coordinator_module
+from mindroom.tool_jobs.execution import wait_mode
+from mindroom.tool_jobs.runtime import JobAccessError
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.turn_model import ModelScope, resolve_turn_model
@@ -34,10 +45,11 @@ from mindroom.workflow_runs.peers import (
     PeerUnreachableError,
     peer_op_id,
 )
-from mindroom.workflow_runs.store import WorkflowRunNotFoundError, WorkflowRunStore
+from mindroom.workflow_runs.store import WorkflowRunNotFoundError, WorkflowRunStore, WorkflowRunStoreError
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, bound_worker_launch_config
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.test_workflow_local_integration import LocalWorkflowStack
+from tests.tool_job_helpers import toolkit_job_tools
 from tests.workflow_helpers import NodeFailed, WorkflowStack, set_run, workflow_stack
 from tests.workflow_live import blind_authoring
 from tests.workflow_live.kill_after_write import Deployment
@@ -1247,3 +1259,150 @@ async def test_session_turn_rerun_re_reads_explicitly_read_mail_from_predecessor
     await stack.result("@1", "send", {"to": "coder", "text": "draft 1"})
     assert await stack.result("@2", "turn", {"session": "@0", "turn": 1, "message": "turn-1"}) == "t1-ok"
     assert "draft 1" in explicit_reads[-1]
+
+
+@pytest.mark.asyncio
+async def test_workflow_peers_authorized_under_live_tool_job_runtime(stack: WorkflowStack) -> None:
+    """Live path: workflow_peers calls succeed when ToolJobRuntime enforces coordinator._authorize_execution."""
+    assert stack.coordinator is not None
+    assert stack.context.config.background_tool_jobs.enabled
+    stack.jobs.authorize_execution = stack.coordinator._authorize_execution
+
+    raw_outputs: dict[str, list[str]] = {"backend": [], "frontend": []}
+
+    def _handle(req: ModelRequest) -> list[ScriptStep]:
+        prompt = _user_texts(req)[0]
+        tool_msgs = [m.content for m in req.messages if m.role == "tool" and isinstance(m.content, str)]
+        role = "backend" if "backend-role" in prompt else "frontend"
+        if role == "backend":
+            if len(tool_msgs) == 0:
+                return calls(
+                    tool_call("list_peers", "lp1"),
+                    tool_call("set_shared_state", "st1", key="contract", value={"v": 1}),
+                )
+            if len(tool_msgs) == 2:
+                return calls(tool_call("send_peer_message", "s1", to="frontend", text="hello-fe"))
+            raw_outputs["backend"] = list(tool_msgs)
+            return answer("backend-done")
+        if len(tool_msgs) == 0:
+            return calls(tool_call("read_peer_messages", "r1", wait_seconds=5))
+        if len(tool_msgs) == 1:
+            return calls(tool_call("get_shared_state", "g1", key="contract"))
+        raw_outputs["frontend"] = list(tool_msgs)
+        return answer("frontend-done")
+
+    _route_agents(stack, _handle)
+    await stack.submit("/0:p0@0", "agent", {"prompt": "backend-role", "name": "backend"}, meta={"name": "backend"})
+    await stack.submit("/0:p1@0", "agent", {"prompt": "frontend-role", "name": "frontend"}, meta={"name": "frontend"})
+    assert (
+        await stack.result("/0:p0@0", "agent", {"prompt": "backend-role", "name": "backend"}, meta={"name": "backend"})
+        == "backend-done"
+    )
+    assert (
+        await stack.result(
+            "/0:p1@0",
+            "agent",
+            {"prompt": "frontend-role", "name": "frontend"},
+            meta={"name": "frontend"},
+        )
+        == "frontend-done"
+    )
+    for role, outputs in raw_outputs.items():
+        assert outputs, f"{role} produced no tool outputs"
+        for out in outputs:
+            assert "Tool execution is no longer authorized" not in out, f"{role} got unauthorized: {out}"
+    fe_msgs = json.loads(raw_outputs["frontend"][0])
+    assert [m["text"] for m in fe_msgs["messages"]] == ["hello-fe"]
+    fe_state = json.loads(raw_outputs["frontend"][1])
+    assert fe_state == {"key": "contract", "found": True, "value": {"v": 1}}
+
+
+async def _start_workflow_child(
+    stack: WorkflowStack,
+    *,
+    run_id: str,
+    node_key: str,
+    parent_run_id: str,
+) -> DelegationChild:
+    config, paths, parent_owner = stack.context.config, stack.context.runtime_paths, stack.context.execution_identity
+    child = prepare_child_turn(
+        "watcher",
+        "watcher",
+        f"{run_id}:{node_key}",
+        owner=parent_owner,
+        config=config,
+        runtime_paths=paths,
+        depth=0,
+        budget_monitor=None,
+        model=None,
+        agent_mode="standard",
+        previous=None,
+        persona=None,
+    )
+    child.workflow_run_id, child.workflow_node_key, child.workflow_generation = run_id, node_key, 1
+    await start_child_turn(
+        child,
+        parent_run_id=parent_run_id,
+        config=config,
+        runtime_paths=paths,
+        caller_execution_identity=parent_owner,
+    )
+    return child
+
+
+@pytest.mark.asyncio
+async def test_workflow_peers_refuses_caller_outside_bound_run(stack: WorkflowStack) -> None:
+    """Security: a peer toolkit bound to one run/node refuses callers outside it or from another run."""
+    assert stack.coordinator is not None
+    config, paths = stack.context.config, stack.context.runtime_paths
+    child_a = await _start_workflow_child(stack, run_id=stack.run_id, node_key="@0", parent_run_id="parent-a")
+    child_b = await _start_workflow_child(
+        stack,
+        run_id=f"{stack.run_id}-other",
+        node_key="@0",
+        parent_run_id="parent-b",
+    )
+    child_sibling = await _start_workflow_child(stack, run_id=stack.run_id, node_key="@1", parent_run_id="parent-s")
+    owner_a, owner_b, owner_s = (
+        child_execution_identity(child_a),
+        child_execution_identity(child_b),
+        child_execution_identity(child_sibling),
+    )
+
+    with tool_runtime_context(stack.context):
+        async with child_run_context(child_a, config=config, runtime_paths=paths):
+            peer_tools = WorkflowPeerTools.build(enabled=True)
+            assert peer_tools is not None
+            tools = toolkit_job_tools(peer_tools, authored_name="workflow_peers")
+            job_tool = tools["send_peer_message"]
+            assert wait_mode(job_tool, depth=0, context=stack.context) == "native"
+            stack.coordinator._authorize_execution(owner_a, job_tool)
+            stack.coordinator._authorize_execution(owner_a, tools["ask_user"])
+            with pytest.raises(JobAccessError, match="no longer authorized"):
+                stack.coordinator._authorize_execution(replace(owner_a, session_id="other-session"), job_tool)
+
+        # Outside any workflow run: refused by both coordinator and toolkit itself.
+        with pytest.raises(JobAccessError, match="no longer authorized"):
+            stack.coordinator._authorize_execution(owner_a, job_tool)
+        with pytest.raises(WorkflowRunStoreError, match="inside a workflow run"):
+            await peer_tools.get_shared_state("contract")
+
+        # Inside a different workflow run or different node: refused by both coordinator and toolkit itself.
+        for wrong_child, wrong_owner in ((child_b, owner_b), (child_sibling, owner_s)):
+            async with child_run_context(wrong_child, config=config, runtime_paths=paths):
+                with pytest.raises(JobAccessError, match="no longer authorized"):
+                    stack.coordinator._authorize_execution(wrong_owner, job_tool)
+                with pytest.raises(WorkflowRunStoreError, match="bound workflow node"):
+                    await peer_tools.set_shared_state("contract", {"stolen": True})
+                with pytest.raises(WorkflowRunStoreError, match="bound workflow node"):
+                    await peer_tools.send_peer_message("frontend", "spoofed")
+
+        # Revoking the caller's workflow tool still revokes peer execution.
+        original_tools = list(config.agents["watcher"].tools)
+        try:
+            config.agents["watcher"].tools = [t for t in original_tools if getattr(t, "name", t) != "workflow"]
+            async with child_run_context(child_a, config=config, runtime_paths=paths):
+                with pytest.raises(JobAccessError, match="no longer authorized"):
+                    stack.coordinator._authorize_execution(owner_a, job_tool)
+        finally:
+            config.agents["watcher"].tools = original_tools

@@ -22,6 +22,7 @@ from mindroom.active_runs import pause_current_active_run
 from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.custom_tools.job import JobTools
+from mindroom.custom_tools.workflow_peers import WorkflowPeerTools
 from mindroom.failure_text import failure_text
 from mindroom.llm.runs import denial_note_for
 from mindroom.logging_config import get_logger
@@ -133,7 +134,7 @@ def approval_can_run_as_job(function: ToolFunction, toolkit: AnyToolkit) -> bool
     """Whether a function of ``toolkit`` without a gate of its own can ask a rule's approval as its call's job."""
     return not (
         # A toolkit that prepares its calls' jobs is asked only once the call has its approval, as any call is.
-        isinstance(toolkit, JobTools | ManagedJobToolkit)
+        isinstance(toolkit, JobTools | WorkflowPeerTools | ManagedJobToolkit)
         or function.controls_run
         # A connection opened for one run must finish its calls inside that run.
         or requires_connect(toolkit)
@@ -156,7 +157,7 @@ def wait_mode(tool: JobTool, *, depth: int, context: ToolRuntimeContext) -> Tool
     ``context`` is the turn's tool context, whose configuration decides whether the call's toolkit is excluded.
     """
     if (
-        isinstance(tool.toolkit, JobTools)
+        isinstance(tool.toolkit, JobTools | WorkflowPeerTools)
         or _is_background_job_excluded(tool, context)
         # A connection opened for one run must finish its calls inside that run.
         or requires_connect(tool.toolkit)

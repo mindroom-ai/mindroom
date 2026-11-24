@@ -2811,6 +2811,7 @@ depends_on = [
 path = "mindroom.custom_tools.workflow_peers"
 depends_on = [
     "mindroom.delegation.lifecycle",
+    "mindroom.delegation.state",
     "mindroom.tool_system.authoring",
     "mindroom.tool_system.invocation",
     "mindroom.tool_system.runtime_context",
@@ -9869,6 +9870,7 @@ depends_on = [
     "mindroom.tool_jobs.publication",
     "mindroom.custom_tools.job",
     "mindroom.custom_tools.workflow",
+    "mindroom.custom_tools.workflow_peers",
     "mindroom.delegation.background",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.recovery",
@@ -9933,6 +9935,7 @@ depends_on = [
     "mindroom.active_runs",
     "mindroom.agent_loop",
     "mindroom.custom_tools.job",
+    "mindroom.custom_tools.workflow_peers",
     "mindroom.failure_text",
     "mindroom.llm",
     "mindroom.reply_scope",

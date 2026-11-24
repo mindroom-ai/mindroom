@@ -16,6 +16,7 @@ from mindroom.contacts.parties import remote_target
 from mindroom.contacts.turns import contact_room
 from mindroom.custom_tools.job import JobTools
 from mindroom.custom_tools.workflow import continued_workflow_job, stopped_workflow_job
+from mindroom.custom_tools.workflow_peers import WorkflowPeerTools
 from mindroom.delegation.background import delegation_child, reconcile_delegation
 from mindroom.delegation.continuation import continued_subagent_job
 from mindroom.delegation.lifecycle import (
@@ -364,19 +365,23 @@ class ToolJobRuntimeCoordinator:
         if isinstance(tool.toolkit, JobTools):
             return  # Every action checks its exact stored owner through the runtime.
 
-        origin = function_provenance(tool, arguments)
         config = self.config_provider()
         edges = active_delegation_edges(owner)
-        if not locally_allowed(
-            config,
-            owner,
-            tools=config_plugins(config, self.runtime_paths).tools,
-            tool_name=tool.function.name,
-            toolkit_name=tool.toolkit_name,
-            origin=origin,
-            depth=len(edges),
-            authority=dict(tool.authority),
-        ):
+        if isinstance(tool.toolkit, WorkflowPeerTools):
+            # Runtime-attached to a workflow child; authorize by its bound run and node instead of config tools.
+            allowed = tool.toolkit.matches_caller(owner)
+        else:
+            allowed = locally_allowed(
+                config,
+                owner,
+                tools=config_plugins(config, self.runtime_paths).tools,
+                tool_name=tool.function.name,
+                toolkit_name=tool.toolkit_name,
+                origin=function_provenance(tool, arguments),
+                depth=len(edges),
+                authority=dict(tool.authority),
+            )
+        if not allowed:
             msg = "Tool execution is no longer authorized for this caller."
             raise JobAccessError(msg)
         root = edges[0][0] if edges else owner.agent_name
