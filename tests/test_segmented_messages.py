@@ -560,3 +560,63 @@ def test_segment_without_room_for_its_trace_drops_its_markers() -> None:
     assert "io.mindroom.tool_trace" not in replacement
     assert "🔧" not in replacement["body"]
     assert replacement["body"].startswith("Done.")
+
+
+@pytest.mark.parametrize("edit", [False, True])
+def test_split_reply_preserves_footnote_definitions_in_later_segments(*, edit: bool) -> None:
+    """Splitting a reply across events must not hide ``[^1]: Source`` in a later segment's ``formatted_body``."""
+    filler = "\n\n".join(
+        f"## Section {index}\n\nParagraph {index} with detailed prose to exceed one Matrix event budget."
+        for index in range(350)
+    )
+    body = f"Key claim[^1] and reference[^2].\n\n{filler}\n\n[^1]: Source\n\n[^2]: https://example.com"
+    message = build_message_content(body)
+    content = build_matrix_edit_content(event_id="$placeholder", new_content=message) if edit else message
+
+    segmented = segment_matrix_content(content, room_encrypted=False, continuation_thread_id="$thread")
+
+    assert segmented is not None
+    assert segmented.continuations
+    first_visible = segmented.first["m.new_content"] if edit else segmented.first
+    parts = [first_visible, *segmented.continuations]
+    assert "".join(part["body"] for part in parts) == body
+    assert "[^1]" in first_visible["body"]
+    assert "[^1]: Source" not in first_visible["body"]
+    assert "[^1]" in first_visible["formatted_body"]
+    assert 'class="footnote-ref"' not in first_visible["formatted_body"]
+
+    last_formatted = parts[-1]["formatted_body"]
+    assert "[^1]: Source" in last_formatted
+    assert "[^2]: https://example.com" in last_formatted
+
+
+def test_unsplit_short_reply_with_large_tool_trace_keeps_rendered_footnotes() -> None:
+    """A reply that stays in a single segment after trimming tool previews still renders HTML footnotes."""
+    names = [f"tool_{index}" for index in range(40)]
+    body = (
+        "Answer[^1].\n\n"
+        + "\n\n".join(f"🔧 `{name}` [{index}]" for index, name in enumerate(names, start=1))
+        + "\n\n[^1]: Handbook"
+    )
+    events = [
+        {"type": "tool_call_completed", "tool_name": name, "args_preview": "a" * 150, "result_preview": "r" * 500}
+        for name in names
+    ]
+    content = build_matrix_edit_content(
+        event_id="$placeholder",
+        new_content=build_message_content(
+            body,
+            extra_content={"io.mindroom.tool_trace": {"version": 2, "events": events}},
+        ),
+    )
+
+    segmented = segment_matrix_content(content, room_encrypted=True)
+
+    assert segmented is not None
+    assert segmented.continuations == ()
+    formatted = segmented.first["m.new_content"]["formatted_body"]
+    assert '<sup class="footnote-ref"><a href="#fn1" id="fnref1">[1]</a></sup>' in formatted
+    assert (
+        '<li id="fn1" class="footnote-item"><p>Handbook <a href="#fnref1" class="footnote-backref">↩︎</a></p>'
+        in formatted
+    )

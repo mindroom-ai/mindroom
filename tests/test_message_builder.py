@@ -354,3 +354,17 @@ def test_footnote_sanitizer_strips_arbitrary_ids_and_classes(raw_html: str, expe
 def test_opens_with_markdown_block_handles_footnotes(markdown: str, expected: bool) -> None:
     """Footnote definitions open a line-start block; paragraphs opening with a reference do not."""
     assert opens_with_markdown_block(markdown) is expected
+
+
+def test_markdown_to_html_with_footnotes_disabled_preserves_definitions_and_links() -> None:
+    """Disabling footnotes keeps footnote definitions visible without breaking CommonMark link references."""
+    html = markdown_to_html(
+        "Claim[^1].\n\n[^1]: Source\n\n[^2]: https://example.com\n\n[docs]: https://docs.example.com\n\nSee [docs].",
+        enable_footnotes=False,
+    )
+    assert html == (
+        "<p>Claim[^1].</p>\n"
+        "<p>[^1]: Source</p>\n"
+        "<p>[^2]: https://example.com</p>\n"
+        '<p>See <a href="https://docs.example.com">docs</a>.</p>\n'
+    )

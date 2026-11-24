@@ -8,7 +8,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from markdown_it import MarkdownIt
-from markdown_it.rules_block import StateBlock, heading, html_block
+from markdown_it.rules_block import StateBlock, heading, html_block, reference
 from markdown_it.token import Token
 from mdit_py_plugins.dollarmath import dollarmath_plugin
 from mdit_py_plugins.footnote import footnote_plugin
@@ -514,7 +514,20 @@ def _decline_line_at_end_of_input(rule: Callable[[StateBlock, int, int, bool], b
     return guarded_rule
 
 
-def _build_markdown_renderer() -> MarkdownIt:
+def _decline_footnote_definition_as_reference(
+    state: StateBlock,
+    start_line: int,
+    end_line: int,
+    silent: bool,
+) -> bool:
+    """Keep footnote definitions visible instead of letting CommonMark consume ``[^1]: Source`` as a link reference."""
+    pos = state.bMarks[start_line] + state.tShift[start_line]
+    if pos >= len(state.src) or state.src.startswith("[^", pos):
+        return False
+    return reference(state, start_line, end_line, silent)
+
+
+def _build_markdown_renderer(*, enable_footnotes: bool = True) -> MarkdownIt:
     renderer = MarkdownIt("commonmark", {"breaks": True, "highlight": _highlight})
     renderer.enable("table")
     renderer.enable("strikethrough")
@@ -538,19 +551,23 @@ def _build_markdown_renderer() -> MarkdownIt:
     )
     renderer.add_render_rule("math_inline", _render_preserved_math_inline)
     renderer.add_render_rule("math_block", _render_preserved_math_block)
-    renderer.use(
-        footnote_plugin,
-        inline=False,
-        move_to_end=True,
-        always_match_refs=False,
-    )
+    if enable_footnotes:
+        renderer.use(
+            footnote_plugin,
+            inline=False,
+            move_to_end=True,
+            always_match_refs=False,
+        )
+    else:
+        renderer.block.ruler.at("reference", _decline_footnote_definition_as_reference)
     return renderer
 
 
 _MARKDOWN_RENDERER = _build_markdown_renderer()
+_MARKDOWN_RENDERER_WITHOUT_FOOTNOTES = _build_markdown_renderer(enable_footnotes=False)
 
 
-def markdown_to_html(text: str) -> str:
+def markdown_to_html(text: str, *, enable_footnotes: bool = True) -> str:
     """Convert markdown text to HTML for Matrix formatted messages.
 
     Uses markdown-it-py with ``breaks=True`` (replaces ``nl2br`` — newlines
@@ -561,7 +578,8 @@ def markdown_to_html(text: str) -> str:
     normalized_input = _normalize_input_line_endings(text)
     escaped_text = _escape_html_block_openers(normalized_input)
     normalized_text = _normalize_supported_block_html_boundaries(escaped_text)
-    html_text: str = _MARKDOWN_RENDERER.render(normalized_text)
+    renderer = _MARKDOWN_RENDERER if enable_footnotes else _MARKDOWN_RENDERER_WITHOUT_FOOTNOTES
+    html_text: str = renderer.render(normalized_text)
     return _sanitize_formatted_body_html(html_text)
 
 

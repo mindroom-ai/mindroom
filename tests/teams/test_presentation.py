@@ -13,6 +13,7 @@ import pytest
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.llm.events import ReportedCall, TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
+from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.redaction import redact_sensitive_text
 from mindroom.response_turn import PausedAttempt
 from mindroom.teams.attempt import TeamAttempt
@@ -578,3 +579,63 @@ def test_the_recorded_text_is_the_document_without_tool_markers(show_tool_calls:
         "**GeneralAgent**: Looking.\n\nFour seats.\n\nFive now.\n\n\n**Team Consensus**:\n\nChecking.\n\nDone."
     )
     assert ("🔧" in presentation.render_body(finished=True)) is show_tool_calls
+
+
+def test_multi_member_footnotes_are_namespaced_without_touching_code() -> None:
+    """Two members and a consensus using ``[^1]`` each keep their own footnote, leaving code spans and fences intact."""
+    parts = render_team_member_slots(
+        ["alice", "bob"],
+        display_names_by_id={"alice": "Alice", "bob": "Bob"},
+        per_member={
+            "alice": (
+                "Policy[^1] and inline `[^1]` plus \\[^1].\n\n"
+                "```markdown\n"
+                "Demo[^1]\n\n"
+                "[^1]: Code example\n"
+                "```\n\n"
+                "[^1]: Handbook"
+            ),
+            "bob": "Budget[^1] and pending[^2].\n\n[^1]: Grant",
+        },
+        consensus="Summary[^1].\n\n[^1]: Combined",
+        finished=True,
+    )
+    body = "\n\n".join(parts)
+    html = markdown_to_html(body)
+
+    assert "```markdown\nDemo[^1]\n\n[^1]: Code example\n```" in body
+    assert "<code>[^1]</code>" in html
+    assert "plus [^1]." in html
+    assert "pending[^2]." in html
+    assert '<sup class="footnote-ref"><a href="#fn1" id="fnref1">[1]</a></sup>' in html
+    assert '<sup class="footnote-ref"><a href="#fn2" id="fnref2">[2]</a></sup>' in html
+    assert '<sup class="footnote-ref"><a href="#fn3" id="fnref3">[3]</a></sup>' in html
+    assert '<li id="fn1" class="footnote-item"><p>Handbook <a href="#fnref1" class="footnote-backref">↩︎</a></p>' in html
+    assert '<li id="fn2" class="footnote-item"><p>Grant <a href="#fnref2" class="footnote-backref">↩︎</a></p>' in html
+    assert '<li id="fn3" class="footnote-item"><p>Combined <a href="#fnref3" class="footnote-backref">↩︎</a></p>' in html
+
+
+def test_single_member_footnotes_stay_unprefixed_and_undefined_refs_are_not_hijacked() -> None:
+    """A lone slot keeps raw labels; when another slot has only an undefined ``[^1]``, it stays literal."""
+    [single] = render_team_member_slots(
+        ["alice"],
+        display_names_by_id={"alice": "Alice"},
+        per_member={"alice": "Policy[^1].\n\n[^1]: Handbook"},
+        consensus="",
+        finished=False,
+    )
+    assert single == "**Alice**: Policy[^1].\n\n[^1]: Handbook"
+
+    parts = render_team_member_slots(
+        ["alice", "bob"],
+        display_names_by_id={"alice": "Alice", "bob": "Bob"},
+        per_member={
+            "alice": "Policy[^1].\n\n[^1]: Handbook",
+            "bob": "Still streaming[^1].",
+        },
+        consensus="",
+        finished=False,
+    )
+    html = markdown_to_html("\n\n".join(parts))
+    assert "Still streaming[^1]." in html
+    assert '<li id="fn1" class="footnote-item"><p>Handbook <a href="#fnref1" class="footnote-backref">↩︎</a></p>' in html
