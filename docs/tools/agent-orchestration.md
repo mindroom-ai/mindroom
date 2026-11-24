@@ -263,7 +263,7 @@ These files are audit exports that MindRoom never reads, so editing or deleting 
 
 Background jobs are on by default; set the root option `background_tool_jobs.enabled: false` and restart to turn them off.
 Hot reload saves a changed `enabled` or `exclude_toolkits` setting and reports that a restart is required; `approval_wait_timeout` applies to calls made after the reload.
-With the option off, tools run as they always do, without the generic `background_after` argument or the `job` function, and every shell command stops at its `timeout`.
+With the option off, tools run as they always do, without the generic `background_after` argument or the `job` function; shell calls with `timeout` <= 120 stop inline at `timeout`, while untimed calls or calls with `timeout` > 120 move to the background after 120 seconds with a live log and stop automatically when `timeout` expires or when the turn ends.
 Turning the option off leaves unfinished jobs untouched; after it is turned back on and MindRoom restarts, they are handled as after any restart.
 An approval that needed a job fails when it resumes while the option is off.
 
@@ -291,8 +291,8 @@ The generic runtime adds no `background_after`, creates no job, and does not rel
 A tool's own argument named `background_after` remains its native argument.
 Adding `delegate` excludes both fresh subagent calls and follow-up turns, while existing jobs and their child approvals retain their accepted execution owner.
 
-A shell command that runs as a job has no time limit unless the call sets `timeout`: `background_after` decides how long the reply waits, 120 seconds when the call leaves it unset, the command appears in the jobs bar and `!jobs`, and cancelling its job stops the command as its `timeout` would.
-A shell call that runs outside any job, such as during a voice call, in a [contact turn](../agent-contacts.md#contact-turns), in a minimal-mode agent's own reply, or with `shell` in `exclude_toolkits`, stops after its `timeout`, 120 seconds by default.
+A shell command that runs as a top-level job has no time limit unless the call sets `timeout`: `background_after` decides how long the reply waits, 120 seconds when the call leaves it unset, the command appears in the jobs bar and `!jobs`, and cancelling its job stops the command as its `timeout` would.
+A shell call inside a turn without a managed shell job—including subagent calls (standard or minimal), a minimal-mode agent's own reply, or turns with `shell` in `exclude_toolkits` or background jobs off—waits at most 120 seconds in the foreground: values of `timeout` <= 120 stop inline, while omitted `timeout` or values > 120 move the command to the background with a live `.mindroom/shell/` log and stop it automatically when `timeout` expires or when the turn ends (calls outside any turn scope still stop after `timeout`, 120 seconds by default).
 A command that never exits, such as a server, keeps its job running until it is cancelled; start it detached (`nohup cmd > server.log 2>&1 &`) to keep it running after its call.
 Tools that run long in a [worker](../deployment/sandbox-proxy.md) are not limited by the worker's request timeouts while they run as a job, except browser calls: a `browser` call stops after its own 120-second limit, and a `browser_mcp` call after the worker's request timeouts, 120 seconds by default.
 

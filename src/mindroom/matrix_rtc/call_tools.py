@@ -31,7 +31,12 @@ from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.agents import create_agent
 from mindroom.approval.tool_approval import tool_may_require_approval
-from mindroom.background_tasks import drain_tasks, run_blocking_until_complete, wait_for_future_until_complete
+from mindroom.background_tasks import (
+    drain_tasks,
+    run_blocking_until_complete,
+    run_coroutine_until_complete,
+    wait_for_future_until_complete,
+)
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context, record_helper_usage
 from mindroom.history.interrupted_replay import (
@@ -56,6 +61,7 @@ from mindroom.session_ids import create_session_id
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.types import ConversationSession
+from mindroom.shell.background_scope import ShellBackgroundScope, bind_shell_background_scope
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system.agent_tools import room_turn_offers
 from mindroom.tool_system.invocation import CallResult, ToolCallContext, client_tool_result, run_tool_call
@@ -656,6 +662,7 @@ async def build_call_tools(
                     agent_name=agent_name,
                     authorize_operation=authorize_operation,
                     usage_owner=usage_owner,
+                    shell_scope=connections.shell_scope,
                     connect=functools.partial(connections.connect, toolkit),
                 ),
             )
@@ -676,6 +683,7 @@ class _CallConnections:
     Opening one only once a tool needs it leaves nothing to close when the call never starts.
     """
 
+    shell_scope: ShellBackgroundScope = field(default_factory=ShellBackgroundScope, init=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _connected: list[AdaptedToolkit] = field(default_factory=list, init=False)
     _closes: list[ToolkitClose] = field(default_factory=list, init=False)
@@ -693,10 +701,13 @@ class _CallConnections:
             self._connected.append(toolkit)
 
     async def close(self) -> None:
-        """Close what the call's tools connected once the call ends."""
-        async with self._lock:
-            self._closed = True
-            await close_toolkits(self._closes)
+        """Stop any backgrounded shell processes and close what the call's tools connected once the call ends."""
+        try:
+            await run_coroutine_until_complete(self.shell_scope.close())
+        finally:
+            async with self._lock:
+                self._closed = True
+                await close_toolkits(self._closes)
 
 
 async def _run_call_agent(
@@ -1032,6 +1043,7 @@ def _wrap_tool_function(
     agent_name: str,
     authorize_operation: _CallAuthorizationGuard,
     usage_owner: HelperUsageOwner,
+    shell_scope: ShellBackgroundScope,
     connect: Callable[[], Awaitable[None]],
 ) -> RawFunctionTool:
     """Wrap one of the build's functions as a livekit raw function tool that runs under the build's policy.
@@ -1053,7 +1065,11 @@ def _wrap_tool_function(
             logger.info("call_tool_executing", tool=function.name, agent=agent_name, room_id=context.room_id)
             try:
                 await connect()
-                with tool_runtime_context(context), helper_usage_owner_context(usage_owner):
+                with (
+                    tool_runtime_context(context),
+                    helper_usage_owner_context(usage_owner),
+                    bind_shell_background_scope(shell_scope),
+                ):
                     result = await run_tool_call(function, raw_arguments, call_context, middleware=middleware)
             except Exception as error:
                 result = CallResult("failed", error=error)

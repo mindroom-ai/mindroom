@@ -50,6 +50,7 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 from mindroom.requester_identity import is_access_checked_requester_id
+from mindroom.shell.background_scope import shell_background_scope
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_system.progress import cap_report, report_tool_progress
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -487,11 +488,12 @@ async def child_run_context(
         # The operator's current setting decides, not the snapshot the parent's response started with.
         placement = child_placement(child, live_delegation_config(config), runtime_paths)
         # The child's run collects what its subagents cost, a resumed run too, which has no turn of its own.
-        with (
-            dedicated_worker_placement(child.session_id, placement),
-            receiving_subagent_cost(observation.subagent_cost),
-        ):
-            yield observation
+        async with shell_background_scope():
+            with (
+                dedicated_worker_placement(child.session_id, placement),
+                receiving_subagent_cost(observation.subagent_cost),
+            ):
+                yield observation
     except BaseException as error:
         cancelled = isinstance(error, asyncio.CancelledError)
         reason = "Delegation cancelled." if cancelled else redact_sensitive_text(failure_text(error))

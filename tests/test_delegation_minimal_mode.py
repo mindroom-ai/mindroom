@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -39,7 +41,7 @@ from mindroom.tool_system.agno_toolkits import toolkit_function
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context
-from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
 from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
     agent_cli_api,
@@ -51,7 +53,7 @@ from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a py
 )
 from tests.test_delegation_direct_audit import _identity
 from tests.test_mode_commands import _CLI_DEPLOYMENT_ENV
-from tests.tool_job_helpers import JOB_TEST_TIMEOUT, admit_delegation_spec, tool_job_runtime
+from tests.tool_job_helpers import JOB_TEST_TIMEOUT, admit_delegation_spec, tool_job_runtime, wait_for_status
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -982,3 +984,133 @@ async def test_child_snapshot_without_mode_continues_in_standard_mode(
 
     assert "bash" not in offered_tools(child.requests[1])
     assert "run_shell_command" in offered_tools(child.requests[1])
+
+
+def _extract_background_pid_and_log(messages: list[object]) -> tuple[int, str]:
+    text = "\n".join(str(message) for message in messages)
+    pid_match = re.search(r"moved to the background \(PID (\d+)\)\.", text)
+    log_match = re.search(r"Log: (\S+) \(receives ongoing", text)
+    assert pid_match is not None, text
+    assert log_match is not None, text
+    return int(pid_match.group(1)), log_match.group(1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
+async def test_minimal_child_auto_backgrounds_untimed_bash_and_cleans_up_on_finish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A minimal child backgrounds a slow Bash call, keeps running next Bash calls, and stops it when the child ends."""
+    monkeypatch.setattr("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2)
+    config = _config(helper_tools=["shell"])
+    config.defaults.allow_shell_without_worker = True
+    paths = _paths(tmp_path, {})
+    entity_ids(config, paths)
+    live_pid: list[int] = []
+
+    async def check_still_running() -> None:
+        pid, _ = _extract_background_pid_and_log(child.requests[1].messages)
+        os.kill(pid, 0)
+        live_pid.append(pid)
+
+    child = ScriptedModel(
+        [
+            calls(tool_call("bash", "slow-call", command="echo started; sleep 5")),
+            [Await(check_still_running), *calls(tool_call("bash", "fast-call", command="echo next-step"))],
+            answer("Child done"),
+        ],
+    )
+    ScriptedAgents({"helper": child}).install(monkeypatch)
+    toolkit = DelegateTools(
+        "leader",
+        paths,
+        config,
+        _workspace(tmp_path, "leader"),
+        execution_identity=_identity(),
+    )
+
+    with tool_runtime_context(_live_context(config, paths)):
+        result = await toolkit.run_subagent(task="Run slow work", agent_name="helper", minimal=True)
+
+    assert "Child done" in result
+    pid, rel_log = _extract_background_pid_and_log(child.requests[1].messages)
+    assert live_pid == [pid]
+    assert "next-step" in str(child.requests[2].messages[-1])
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    log_path = _workspace(tmp_path, "helper") / rel_log
+    assert "[MindRoom: stopped when turn ended]" in log_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
+async def test_minimal_child_job_cancellation_stops_auto_backgrounded_bash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelling a delegated minimal child job stops its auto-backgrounded Bash process group."""
+    monkeypatch.setattr("mindroom.shell.execution._DEFAULT_RUN_TIMEOUT_SECONDS", 0.2)
+    config = _config(helper_tools=["shell"])
+    config.defaults.allow_shell_without_worker = True
+    paths = _paths(tmp_path, {})
+    entity_ids(config, paths)
+    backgrounded = asyncio.Event()
+
+    async def wait_for_cancel() -> None:
+        backgrounded.set()
+        await asyncio.Event().wait()
+
+    child = ScriptedModel(
+        [
+            calls(tool_call("bash", "slow-call", command="sleep 10")),
+            [Await(wait_for_cancel)],
+        ],
+    )
+    ScriptedAgents({"helper": child}).install(monkeypatch)
+    owner = _identity()
+    child_turn = prepare_child_turn(
+        "leader",
+        "helper",
+        "Run slow work",
+        owner=owner,
+        config=config,
+        runtime_paths=paths,
+        depth=0,
+        budget_monitor=None,
+        model=None,
+        agent_mode="minimal",
+        previous=None,
+        persona=None,
+    )
+    runtime = await tool_job_runtime(tmp_path)
+    try:
+        with tool_runtime_context(_live_context(config, paths)):
+            spec = delegation_call_job(
+                child_turn,
+                job_id=child_turn.delegation_id,
+                runtime=runtime,
+                owner=owner,
+                parent_run_id=None,
+                tool_name="run_subagent",
+                arguments={"agent_name": "helper", "task": "Run slow work", "minimal": True},
+                run_child=ai.run_delegated_child_response,
+                config=config,
+                runtime_paths=paths,
+                refresh_scheduler=None,
+            )
+            assert isinstance(spec, JobSpec), spec
+            _job, claim = await admit_delegation_spec(runtime, child_turn, spec, owner=owner)
+            await runtime.release_wait(child_turn.delegation_id, claim)
+            await asyncio.wait_for(backgrounded.wait(), JOB_TEST_TIMEOUT)
+            pid, rel_log = _extract_background_pid_and_log(child.requests[1].messages)
+            os.kill(pid, 0)
+            await runtime.request_cancel(child_turn.delegation_id)
+            await wait_for_status(runtime, child_turn.delegation_id, "cancelled")
+    finally:
+        await runtime.shutdown()
+
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+    log_path = _workspace(tmp_path, "helper") / rel_log
+    assert "[MindRoom: stopped when turn ended]" in log_path.read_text(encoding="utf-8")

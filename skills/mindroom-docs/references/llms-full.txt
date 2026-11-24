@@ -9792,10 +9792,10 @@ Run such a script as a [background job](https://docs.mindroom.chat/tools/agent-o
 
 CLI calls follow the agent's existing approval rules and interactive questions, and an approval applies to the exact tool and arguments shown.
 Each Bash command starts a fresh shell: workspace files persist, but shell variables and directory changes do not carry over.
-A minimal-mode Bash command stops after its `timeout`, 120 seconds by default, with its output so far, while one inside a background job, such as a minimal subagent that a standard agent's own `delegate` call started with background jobs enabled, has no default limit.
-In a reply, start longer work detached (`nohup cmd > out.log 2>&1 &`) and read its log in later commands.
+By default a minimal-mode Bash command (including in a minimal subagent) waits at most 120 seconds in the foreground: values of `timeout` <= 120 stop the command inline with its output so far, while an omitted `timeout` or value > 120 moves the command to the background after 120 seconds with a live `.mindroom/shell/` log and stops it automatically when `timeout` expires or when the turn ends.
+To keep work running past the end of the turn, start it detached (`nohup cmd > out.log 2>&1 &`) and read its log in later commands.
 Shell commands can run in parallel, and each keeps its own calls and media.
-A command can submit new calls only while it is running or its earlier calls are finishing; later calls, including those from background commands whose Bash call has returned, are rejected rather than queued.
+A command can submit new `mindroom-agent` calls only while its Bash call is running or its earlier calls are finishing; when a Bash command moves to the background, any already-admitted `mindroom-agent` calls still settle before the Bash call returns, and no new CLI calls are admitted after handoff (later submissions are rejected rather than queued).
 A command's `timeout` stops the command, not the calls it started: its Bash call returns once they finish, including a call that waits for an approval.
 `calls wait` on earlier receipts works until the response and its background jobs end.
 
@@ -11060,8 +11060,10 @@ The command runs in the agent's workspace, or in its workdir, and the result hol
 With `mindroom_output_path`, the complete output is saved to that file instead, and the receipt includes `exit_code` whenever the command exits non-zero or is killed, such as by the OOM killer, even when no file is saved; a command stopped at its `timeout` reports the stop instead.
 A successful command saves its stdout alone, and when it also printed to stderr, the receipt gives its size as `stderr_bytes`; add `2>&1` to the command to save that text too.
 
-A command still running after `timeout` seconds is stopped together with the processes it started, and the tool returns its output so far after `Stopped after <timeout>s.`; a stopped command saves no `mindroom_output_path` file.
-Without `timeout`, a call that runs as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) has no time limit, even while the reply waits for it, and any other command stops after 120 seconds.
+By default a shell call waits at most 120 seconds in the foreground.
+A command with `timeout` <= 120 that is still running after `timeout` seconds is stopped together with the processes it started, and the tool returns its output so far after `Stopped after <timeout>s.`.
+When `timeout` is omitted or > 120 and the command is still running after 120 seconds, a call that runs as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) (with `background_after` unset) returns a job handle while the command continues until completion, its `timeout`, or job cancellation; any other turn-scoped call (including subagent calls, minimal-mode turns, and turns with background jobs off) moves the command to the background, streams ongoing stdout and stderr into a bounded live log file under `.mindroom/shell/` ending with the exit status, returns its PID, log path, and wait/stop commands, and stops the process group automatically when `timeout` (if set) expires or when the turn ends.
+A managed top-level job still saves `mindroom_output_path` when it completes; a command stopped at its timeout or backgrounded in the current turn saves no file.
 While a job's command runs, `job(action="list")` shows the last lines of its output, and cancelling the job stops the command.
 A command that exits non-zero still returned its result, so its job ends `completed`; its summary in `job(action="list")`, the first 500 characters of that result, includes the `Exit code <code>` line, or, with `mindroom_output_path`, is the receipt with its `exit_code`.
 A process started with `nohup cmd > out.log 2>&1 &` keeps running after its command ends on its own, but not after a stop; only a process started in its own session, such as with `setsid`, survives a stop.
@@ -16314,7 +16316,7 @@ These files are audit exports that MindRoom never reads, so editing or deleting 
 
 Background jobs are on by default; set the root option `background_tool_jobs.enabled: false` and restart to turn them off.
 Hot reload saves a changed `enabled` or `exclude_toolkits` setting and reports that a restart is required; `approval_wait_timeout` applies to calls made after the reload.
-With the option off, tools run as they always do, without the generic `background_after` argument or the `job` function, and every shell command stops at its `timeout`.
+With the option off, tools run as they always do, without the generic `background_after` argument or the `job` function; shell calls with `timeout` <= 120 stop inline at `timeout`, while untimed calls or calls with `timeout` > 120 move to the background after 120 seconds with a live log and stop automatically when `timeout` expires or when the turn ends.
 Turning the option off leaves unfinished jobs untouched; after it is turned back on and MindRoom restarts, they are handled as after any restart.
 An approval that needed a job fails when it resumes while the option is off.
 
@@ -16342,8 +16344,8 @@ The generic runtime adds no `background_after`, creates no job, and does not rel
 A tool's own argument named `background_after` remains its native argument.
 Adding `delegate` excludes both fresh subagent calls and follow-up turns, while existing jobs and their child approvals retain their accepted execution owner.
 
-A shell command that runs as a job has no time limit unless the call sets `timeout`: `background_after` decides how long the reply waits, 120 seconds when the call leaves it unset, the command appears in the jobs bar and `!jobs`, and cancelling its job stops the command as its `timeout` would.
-A shell call that runs outside any job, such as during a voice call, in a [contact turn](https://docs.mindroom.chat/agent-contacts/#contact-turns), in a minimal-mode agent's own reply, or with `shell` in `exclude_toolkits`, stops after its `timeout`, 120 seconds by default.
+A shell command that runs as a top-level job has no time limit unless the call sets `timeout`: `background_after` decides how long the reply waits, 120 seconds when the call leaves it unset, the command appears in the jobs bar and `!jobs`, and cancelling its job stops the command as its `timeout` would.
+A shell call inside a turn without a managed shell job—including subagent calls (standard or minimal), a minimal-mode agent's own reply, or turns with `shell` in `exclude_toolkits` or background jobs off—waits at most 120 seconds in the foreground: values of `timeout` <= 120 stop inline, while omitted `timeout` or values > 120 move the command to the background with a live `.mindroom/shell/` log and stop it automatically when `timeout` expires or when the turn ends (calls outside any turn scope still stop after `timeout`, 120 seconds by default).
 A command that never exits, such as a server, keeps its job running until it is cancelled; start it detached (`nohup cmd > server.log 2>&1 &`) to keep it running after its call.
 Tools that run long in a [worker](https://docs.mindroom.chat/deployment/sandbox-proxy/) are not limited by the worker's request timeouts while they run as a job, except browser calls: a `browser` call stops after its own 120-second limit, and a `browser_mcp` call after the worker's request timeouts, 120 seconds by default.
 
@@ -24520,7 +24522,7 @@ Do not put upstream API tokens in `extra_env_passthrough` or `.mindroom/worker-e
 Stopping a response also stops its in-flight worker calls, such as `run_shell_command` and `run_python_code`.
 With [background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) enabled, a call that continues as a job stops when its job is cancelled instead.
 Tools that run inside the runner process itself, such as `file` under the runner's `inprocess` execution mode, and persistent browser actions finish before the stop takes effect.
-A shell command stops at its `timeout`; without one, a background job's command runs until it ends or the job is cancelled, and any other command stops after 120 seconds.
+By default a shell call waits at most 120 seconds in the foreground: calls with `timeout` <= 120 stop inline; a top-level background job runs on until completion, its `timeout`, or job cancellation; and any other turn-scoped call (including subagents and minimal-mode turns) moves to the background on the worker with a live `.mindroom/shell/` log and stops automatically when `timeout` expires or when the turn ends.
 A runner or worker restart stops running commands; see the [shell tool](https://docs.mindroom.chat/tools/execution-and-coding/#shell).
 
 ## Browsers in workers
@@ -24570,7 +24572,7 @@ Unsupported resources or oversized results produce a tool error.
 | `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tools to route when no `worker_tools` list is set | `*` for `all` or an unset mode with a proxy URL, otherwise empty |
 | `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Let worker-default tools run locally when `static_runner` routing is requested without a proxy URL | `false` |
 | `MINDROOM_STATIC_RUNNER_AGENT_STORAGE` | `true` when the `static_runner` mounts the agents' storage; see [Filesystem isolation and agent data](#filesystem-isolation-and-agent-data) | `false` |
-| `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | Time limit for a proxy call that is not a background job, and for every `browser_mcp` call; a `run_shell_command` call waits at least its `timeout` plus 30 seconds, a `browser` call at least 150 seconds, and a `trafilatura` `crawl_website` or `extract_batch` call at least 210 seconds | `120` |
+| `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | Time limit for a proxy call that is not an unscoped background job, and for every `browser_mcp` call; an auto-backgrounding `run_shell_command` call waits at most 150 seconds (`min(timeout, 120) + 30`), an unscoped `run_shell_command` call waits at least its `timeout` plus 30 seconds, a `browser` call at least 150 seconds, and a `trafilatura` `crawl_website` or `extract_batch` call at least 210 seconds | `120` |
 | `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Largest attachment saved into a worker workspace with `get_attachment(..., mindroom_output_path=...)`, and largest Atlassian `confluence_download_attachment` download; values above the 64 MiB attachment limit have no effect | `67108864` (64 MiB) |
 | `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime | `60` |
 | `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON` | JSON mapping tool selectors to credential services | `{}` |
@@ -24608,7 +24610,7 @@ To deploy that backend without Helm, see [Worker settings](https://docs.mindroom
 | `MINDROOM_SANDBOX_RUNNER_MODE` | Set to `true` to run as a sandbox runner | `false` |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Runner bearer token; dedicated workers receive their derived token automatically | _(required)_ |
 | `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` | `inprocess`, `subprocess` (a fresh process per call), or `forkserver` (a fresh forked process per call from a warm template) | `inprocess`; dedicated workers use `forkserver` |
-| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Per-call timeout for `subprocess` and `forkserver` execution, except for a background job's call, which has none; a `run_shell_command` call gets at least its `timeout` plus 30 seconds, a `trafilatura` `crawl_website` or `extract_batch` call at least 210 seconds, and, job or not, a `browser` call in a dedicated worker that keeps a [browser session](#browsers-in-workers) or runs Worker Computer at least 150 seconds; it also limits every `browser_mcp` call in a dedicated worker, job or not | `120` |
+| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Per-call timeout for `subprocess` and `forkserver` execution, except for an unscoped background job's call, which has none; a scoped auto-backgrounding `run_shell_command` call gets at least `min(timeout, 120) + 30` seconds (bounded even inside a subagent job), an unscoped `run_shell_command` call gets at least its `timeout` plus 30 seconds, a `trafilatura` `crawl_website` or `extract_batch` call at least 210 seconds, and, job or not, a `browser` call in a dedicated worker that keeps a [browser session](#browsers-in-workers) or runs Worker Computer at least 150 seconds; it also limits every `browser_mcp` call in a dedicated worker, job or not | `120` |
 | `MINDROOM_STORAGE_PATH` | Writable directory for the tool registry and worker-local caches, such as `/app/workspace/.mindroom`; startup fails if it is not writable | `mindroom_data` next to the config |
 | `MINDROOM_CONFIG_PATH` | Config used for requests that carry no [live config snapshot](#live-config-snapshots) | _(optional)_ |
 

@@ -16,6 +16,7 @@ import functools
 import itertools
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -28,6 +29,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
+from mindroom.shell.background_scope import (
+    BackgroundLogFile,
+    BackgroundLogPolicy,
+    ShellBackgroundScope,
+    StopReason,
+    current_shell_background_scope,
+    format_log_trailer,
+    open_background_log,
+)
 from mindroom.shell.output_capture import (
     CapturedShellStream,
     ShellOutputCapture,
@@ -46,6 +56,7 @@ _SHELL_REQUEST_GRACE_SECONDS = 30.0
 
 _STALE_RECORD_SECONDS = 600  # 10 minutes
 MAX_BACKGROUNDED = 16
+_MAX_TOTAL_BACKGROUNDED = 128
 _MAX_OUTPUT_LINES = 10_000
 _MAX_OUTPUT_BYTES = 50 * 1024
 _STREAM_READ_CHUNK_BYTES = 65536
@@ -94,10 +105,17 @@ class _OutputBuffer:
     # The number of this buffer's latest append, so a reader can tell new output from a full buffer that rotated to
     # the same size, and which stream printed last.
     last_append: int = 0
+    _log_file: BackgroundLogFile | None = field(default=None, repr=False)
+
+    def attach_log_file(self, log_file: BackgroundLogFile) -> None:
+        """Forward every subsequent appended chunk to *log_file* before buffer truncation."""
+        self._log_file = log_file
 
     def append(self, text: str) -> None:
         if not text:
             return
+        if self._log_file is not None:
+            self._log_file.write(text)
         self.last_append = next(_APPEND_SEQUENCE)
         newline_count = text.count("\n")
         self.newlines += newline_count
@@ -235,7 +253,15 @@ class ProcessRecord:
     return_code: int | None = None
     output_capture: ShellOutputCapture | None = None
     output_receipt: str | None = None
+    max_runtime_seconds: float | None = None
+    _log_file: BackgroundLogFile | None = field(default=None, repr=False)
+    _stop_reason: StopReason | None = field(default=None, repr=False)
     _monitor_task: asyncio.Task[None] | None = field(default=None, repr=False)
+
+    @property
+    def _log_path(self) -> str | None:
+        """Path of the live background log file, if one is attached."""
+        return str(self._log_file.path) if self._log_file is not None else None
 
 
 def _progress_lines(buffer: _OutputBuffer) -> str:
@@ -299,6 +325,11 @@ class ShellRunResult:
     execution_error: bool = False
 
 
+def default_run_timeout_seconds() -> float:
+    """Return the current foreground wait / auto-background threshold in seconds."""
+    return float(_DEFAULT_RUN_TIMEOUT_SECONDS)
+
+
 def shell_call_timeout(timeout: float | None) -> float | None:
     """Return when a shell call's command is stopped: its own timeout, none for a job's call, else the default."""
     if timeout is not None:
@@ -317,10 +348,17 @@ def shell_job_wait_seconds(registered_toolkit: str | None, function_name: str) -
     return None
 
 
-def shell_request_budget_seconds(tool_name: str, function_name: str, kwargs: Mapping[str, Any]) -> float:
+def shell_request_budget_seconds(
+    tool_name: str,
+    function_name: str,
+    kwargs: Mapping[str, Any],
+    *,
+    auto_background: bool = False,
+) -> float:
     """Return how long one worker request outside a job may take for this shell call, or 0 when it has no foreground wait.
 
     Callers give a job's call no budget, as `shell_call_timeout` gives its command no limit.
+    With ``auto_background``, foreground waiting is capped at the default auto-background wait.
     """
     if tool_name != "shell" or function_name != SHELL_FUNCTION:
         return 0.0
@@ -329,10 +367,12 @@ def shell_request_budget_seconds(tool_name: str, function_name: str, kwargs: Map
         timeout = _DEFAULT_RUN_TIMEOUT_SECONDS if raw_timeout is None else max(0.0, float(raw_timeout))
     except (TypeError, ValueError):
         timeout = _DEFAULT_RUN_TIMEOUT_SECONDS
+    if auto_background:
+        timeout = min(timeout, float(_DEFAULT_RUN_TIMEOUT_SECONDS))
     return timeout + _SHELL_REQUEST_GRACE_SECONDS
 
 
-async def run_command(
+async def run_command(  # noqa: C901, PLR0911, PLR0912, PLR0915
     registry: dict[str, ProcessRecord],
     *,
     namespace: str,
@@ -352,6 +392,8 @@ async def run_command(
     kill_group_after_exit: bool = False,
     register_finished: bool = False,
     launch_failure_exits: bool = False,
+    max_runtime_seconds: float | None = None,
+    background_log: BackgroundLogPolicy | None = None,
 ) -> ShellRunResult:
     """Run one shell command; return output, an error message, or a background handle.
 
@@ -386,25 +428,135 @@ async def run_command(
         handle_reservations.add(handle)
 
     try:
-        return await _run_command_after_reservation(
-            registry,
-            namespace=namespace,
-            argv=argv,
-            env=env,
-            cwd=cwd,
-            tail=tail,
-            timeout=timeout,
-            on_timeout=on_timeout,
-            on_progress=on_progress,
-            handle=handle,
-            output_destination=output_destination,
-            output_capture=output_capture,
-            stdin=stdin,
-            stderr=stderr,
-            kill_group_after_exit=kill_group_after_exit,
-            register_finished=register_finished,
-            launch_failure_exits=launch_failure_exits,
+        capture = output_capture
+        try:
+            if capture is None and output_destination is not None:
+                capture = ShellOutputCapture(output_destination)
+            started_at = time.monotonic()
+        except asyncio.CancelledError:
+            if capture is not None:
+                capture.close()
+            raise
+        except Exception as exc:
+            if capture is not None:
+                capture.close()
+            return ShellRunResult(message=f"Error: {exc}", execution_error=True)
+        try:
+            process = await _start_command(argv, env, cwd, stdin=stdin, stderr=stderr)
+        except asyncio.CancelledError:
+            if capture is not None:
+                capture.close()
+            raise
+        except Exception as exc:
+            try:
+                exited = _launch_failure(argv, env, cwd, exc, capture) if launch_failure_exits else None
+                return exited or ShellRunResult(message=f"Error: {exc}", execution_error=True)
+            finally:
+                if capture is not None:
+                    capture.close()
+
+        stdout_buf = _OutputBuffer()
+        stderr_buf = _OutputBuffer()
+        stdout_reader = asyncio.create_task(
+            _read_stream(process.stdout, stdout_buf, capture.stdout if capture else None),
         )
+        stderr_reader = asyncio.create_task(
+            _read_stream(process.stderr, stderr_buf, capture.stderr if capture else None),
+        )
+
+        try:
+            try:
+                await _await_process_exit(
+                    process,
+                    timeout_seconds=timeout,
+                    on_poll=_OutputProgress(on_progress, stdout_buf, stderr_buf).poll
+                    if on_progress is not None
+                    else None,
+                )
+            except TimeoutError:
+                assert timeout is not None
+                if on_timeout == "kill":
+                    return await _stop_timed_out_process(
+                        process,
+                        stdout_buf=stdout_buf,
+                        stderr_buf=stderr_buf,
+                        stdout_reader=stdout_reader,
+                        stderr_reader=stderr_reader,
+                        output_capture=capture,
+                        tail=tail,
+                        timeout=timeout,
+                    )
+                return await _background_process(
+                    registry,
+                    namespace=namespace,
+                    argv=argv,
+                    process=process,
+                    stdout_buf=stdout_buf,
+                    stderr_buf=stderr_buf,
+                    tail=tail,
+                    timeout=timeout,
+                    requested_handle=handle,
+                    stdout_reader=stdout_reader,
+                    stderr_reader=stderr_reader,
+                    output_capture=capture,
+                    started_at=started_at,
+                    max_runtime_seconds=max_runtime_seconds,
+                    background_log=background_log,
+                )
+
+            if kill_group_after_exit:
+                _kill_process_group(process.pid)
+            await _await_reader_tasks_with_grace(
+                stdout_reader,
+                stderr_reader,
+                grace_seconds=_POST_EXIT_READER_GRACE_SECONDS,
+            )
+        except asyncio.CancelledError:
+            if process.returncode is None:
+                await _terminate_process_group(process)
+            if kill_group_after_exit:
+                _kill_process_group(process.pid)
+            await _cancel_pending_tasks(stdout_reader, stderr_reader)
+            if capture is not None:
+                capture.close()
+            raise
+
+        return_code = process.returncode
+        assert return_code is not None
+        finished_handle = None
+        if register_finished:
+            finished_handle = handle or _unused_handle(registry)
+            registry[finished_handle] = ProcessRecord(
+                namespace=namespace,
+                handle=finished_handle,
+                pid=process.pid,
+                args=argv,
+                process=process,
+                stdout_buf=stdout_buf,
+                stderr_buf=stderr_buf,
+                tail=tail,
+                finished=True,
+                finished_at=time.monotonic(),
+                return_code=return_code,
+                output_capture=capture,
+            )
+        if capture is not None:
+            capture.incomplete = stdout_reader.cancelled() or stderr_reader.cancelled()
+            try:
+                return ShellRunResult(
+                    message=capture.publish(return_code),
+                    handle=finished_handle,
+                    output_file_handled=True,
+                )
+            finally:
+                capture.close()
+        if return_code:
+            # A failure keeps its whole stderr, which explains it.
+            errors = stderr_buf.render() if stderr_buf else None
+            message = format_shell_completion(stdout_buf.render(tail=tail), errors, return_code=return_code)
+        else:
+            message = _success_message(stdout_buf, stderr_buf, tail)
+        return ShellRunResult(message=message, handle=finished_handle)
     finally:
         if handle is not None and handle_reservations is not None:
             handle_reservations.discard(handle)
@@ -609,150 +761,6 @@ async def stream_command(
             process.stdin.close()
 
 
-async def _run_command_after_reservation(  # noqa: C901, PLR0912, PLR0915
-    registry: dict[str, ProcessRecord],
-    *,
-    namespace: str,
-    argv: list[str],
-    env: dict[str, str],
-    cwd: str | None,
-    tail: int,
-    timeout: float | None,  # noqa: ASYNC109
-    on_timeout: Literal["background", "kill"],
-    on_progress: Callable[[str], None] | None,
-    handle: str | None,
-    output_destination: ShellOutputDestination | None,
-    output_capture: ShellOutputCapture | None,
-    stdin: int | None,
-    stderr: int,
-    kill_group_after_exit: bool,
-    register_finished: bool,
-    launch_failure_exits: bool,
-) -> ShellRunResult:
-    """Spawn one command after any caller-supplied handle is reserved."""
-    capture = output_capture
-    try:
-        if capture is None and output_destination is not None:
-            capture = ShellOutputCapture(output_destination)
-        started_at = time.monotonic()
-    except asyncio.CancelledError:
-        if capture is not None:
-            capture.close()
-        raise
-    except Exception as exc:
-        if capture is not None:
-            capture.close()
-        return ShellRunResult(message=f"Error: {exc}", execution_error=True)
-    try:
-        process = await _start_command(argv, env, cwd, stdin=stdin, stderr=stderr)
-    except asyncio.CancelledError:
-        if capture is not None:
-            capture.close()
-        raise
-    except Exception as exc:
-        try:
-            exited = _launch_failure(argv, env, cwd, exc, capture) if launch_failure_exits else None
-            return exited or ShellRunResult(message=f"Error: {exc}", execution_error=True)
-        finally:
-            if capture is not None:
-                capture.close()
-
-    stdout_buf = _OutputBuffer()
-    stderr_buf = _OutputBuffer()
-    stdout_reader = asyncio.create_task(_read_stream(process.stdout, stdout_buf, capture.stdout if capture else None))
-    stderr_reader = asyncio.create_task(_read_stream(process.stderr, stderr_buf, capture.stderr if capture else None))
-
-    try:
-        try:
-            await _await_process_exit(
-                process,
-                timeout_seconds=timeout,
-                on_poll=_OutputProgress(on_progress, stdout_buf, stderr_buf).poll if on_progress is not None else None,
-            )
-        except TimeoutError:
-            assert timeout is not None
-            if on_timeout == "kill":
-                return await _stop_timed_out_process(
-                    process,
-                    stdout_buf=stdout_buf,
-                    stderr_buf=stderr_buf,
-                    stdout_reader=stdout_reader,
-                    stderr_reader=stderr_reader,
-                    output_capture=capture,
-                    tail=tail,
-                    timeout=timeout,
-                )
-            return await _background_process(
-                registry,
-                namespace=namespace,
-                argv=argv,
-                process=process,
-                stdout_buf=stdout_buf,
-                stderr_buf=stderr_buf,
-                tail=tail,
-                timeout=timeout,
-                requested_handle=handle,
-                stdout_reader=stdout_reader,
-                stderr_reader=stderr_reader,
-                output_capture=capture,
-                started_at=started_at,
-            )
-
-        if kill_group_after_exit:
-            _kill_process_group(process.pid)
-        await _await_reader_tasks_with_grace(
-            stdout_reader,
-            stderr_reader,
-            grace_seconds=_POST_EXIT_READER_GRACE_SECONDS,
-        )
-    except asyncio.CancelledError:
-        if process.returncode is None:
-            await _terminate_process_group(process)
-        if kill_group_after_exit:
-            _kill_process_group(process.pid)
-        await _cancel_pending_tasks(stdout_reader, stderr_reader)
-        if capture is not None:
-            capture.close()
-        raise
-
-    return_code = process.returncode
-    assert return_code is not None
-    finished_handle = None
-    if register_finished:
-        finished_handle = handle or _unused_handle(registry)
-        registry[finished_handle] = ProcessRecord(
-            namespace=namespace,
-            handle=finished_handle,
-            pid=process.pid,
-            args=argv,
-            process=process,
-            stdout_buf=stdout_buf,
-            stderr_buf=stderr_buf,
-            tail=tail,
-            finished=True,
-            finished_at=time.monotonic(),
-            return_code=return_code,
-            output_capture=capture,
-        )
-    if capture is not None:
-        capture.incomplete = stdout_reader.cancelled() or stderr_reader.cancelled()
-        try:
-            return ShellRunResult(
-                message=capture.publish(return_code),
-                handle=finished_handle,
-                output_file_handled=True,
-            )
-        finally:
-            capture.close()
-    if return_code:
-        # A failure keeps its whole stderr, which explains it.
-        errors = stderr_buf.render() if stderr_buf else None
-        message = format_shell_completion(stdout_buf.render(tail=tail), errors, return_code=return_code)
-    else:
-        message = _success_message(stdout_buf, stderr_buf, tail)
-    return ShellRunResult(message=message, handle=finished_handle)
-
-
 def _success_message(stdout_buf: _OutputBuffer, stderr_buf: _OutputBuffer, tail: int) -> str:
     """Return a success's stdout, then its stderr, both tailed, after the notice of anything either left out."""
     output_notice, output = stdout_buf.render_parts(tail=tail)
@@ -797,6 +805,115 @@ def _unused_handle(registry: dict[str, ProcessRecord]) -> str:
     return handle
 
 
+def _seed_background_log(
+    log_file: BackgroundLogFile,
+    stdout_buf: _OutputBuffer,
+    stderr_buf: _OutputBuffer,
+) -> None:
+    """Write buffered foreground stdout and stderr into a newly opened background log file."""
+    prev_ended_newline = True
+    for buf, stream in ((stdout_buf, ""), (stderr_buf, "stderr")):
+        raw = buf.text()
+        if not raw:
+            continue
+        if not prev_ended_newline:
+            log_file.write("\n")
+        notice, _ = buf.render_parts(tail=None, stream=stream)
+        log_file.write(f"{notice}\n{raw}" if notice else raw)
+        prev_ended_newline = raw.endswith("\n")
+
+
+def _format_auto_background_message(
+    *,
+    pid: int,
+    timeout: float,
+    log_path: Path,
+    display_root: str | None,
+    max_runtime_seconds: float | None,
+    no_output_path: str | None,
+    stdout_buf: _OutputBuffer,
+    stderr_buf: _OutputBuffer,
+    tail: int,
+) -> str:
+    """Format the tool response returned when a shell command moves to the background."""
+    shown = str(log_path)
+    if display_root is not None:
+        with contextlib.suppress(ValueError):
+            shown = str(log_path.relative_to(Path(display_root)))
+    display_path = shlex.quote(shown)
+    lifetime_line = (
+        f"It will be stopped after {max_runtime_seconds:g}s total, or automatically when this turn ends."
+        if max_runtime_seconds is not None
+        else "It is stopped automatically when this turn ends."
+    )
+    lines = [
+        f"Still running after {timeout:g}s; moved to the background (PID {pid}).",
+        f"Log: {display_path} (receives ongoing stdout+stderr and ends with the exit status).",
+        f"Wait: end=$((SECONDS+110)); while ((SECONDS<end)) && kill -0 {pid} 2>/dev/null; do sleep 2; done",
+        f"Stop: kill -- -{pid}",
+        lifetime_line,
+    ]
+    if no_output_path is not None:
+        lines.append(f"No output file was saved to {no_output_path} because the command is still running.")
+    if stdout := stdout_buf.render(tail=tail):
+        lines += ["Output:", stdout]
+    if stderr_buf:
+        lines += ["Stderr:", stderr_buf.render()]
+    return "\n".join(lines)
+
+
+def _background_rejection(
+    registry: dict[str, ProcessRecord],
+    *,
+    namespace: str,
+    handle: str,
+    active_scope: ShellBackgroundScope | None,
+) -> str | None:
+    if active_scope is not None and active_scope.records is registry and active_scope.closed:
+        return "Error: Shell turn already ended."
+    active = [r for r in registry.values() if not r.finished]
+    for count, limit in (
+        (sum(1 for r in active if r.namespace == namespace), MAX_BACKGROUNDED),
+        (len(active), _MAX_TOTAL_BACKGROUNDED),
+    ):
+        if count >= limit:
+            return (
+                f"Error: Too many backgrounded processes ({count}/{limit}). "
+                "Kill or wait for existing ones before running more."
+            )
+    if handle in registry:
+        return f"Error: Shell handle '{handle}' is already registered."
+    return None
+
+
+def _prepare_background_log(
+    policy: BackgroundLogPolicy,
+    *,
+    pid: int,
+    handle: str,
+    registry: dict[str, ProcessRecord],
+    stdout_buf: _OutputBuffer,
+    stderr_buf: _OutputBuffer,
+) -> BackgroundLogFile:
+    active_paths = {
+        record._log_path
+        for record in registry.values()
+        if record._log_path is not None
+        and (not record.finished or (record._log_file is not None and not record._log_file.closed))
+    }
+    log_file = open_background_log(policy, pid=pid, handle=handle, active_paths=active_paths)
+    try:
+        _seed_background_log(log_file, stdout_buf, stderr_buf)
+    except OSError:
+        log_file.finish()
+        with contextlib.suppress(OSError):
+            log_file.path.unlink()
+        raise
+    stdout_buf.attach_log_file(log_file)
+    stderr_buf.attach_log_file(log_file)
+    return log_file
+
+
 async def _background_process(
     registry: dict[str, ProcessRecord],
     *,
@@ -812,24 +929,37 @@ async def _background_process(
     stderr_reader: asyncio.Task[None],
     output_capture: ShellOutputCapture | None,
     started_at: float,
+    max_runtime_seconds: float | None = None,
+    background_log: BackgroundLogPolicy | None = None,
 ) -> ShellRunResult:
-    active = sum(1 for record in registry.values() if not record.finished)
-    if active >= MAX_BACKGROUNDED:
+    had_capture = output_capture is not None
+    active_scope = current_shell_background_scope()
+    handle = requested_handle or _unused_handle(registry)
+    log_file: BackgroundLogFile | None = None
+    record_capture, output_path_notice = output_capture, None
+    rejection = _background_rejection(registry, namespace=namespace, handle=handle, active_scope=active_scope)
+    if rejection is None and background_log is not None:
+        try:
+            log_file = _prepare_background_log(
+                background_log,
+                pid=process.pid,
+                handle=handle,
+                registry=registry,
+                stdout_buf=stdout_buf,
+                stderr_buf=stderr_buf,
+            )
+        except OSError as exc:
+            rejection = f"Error: Failed to open background shell log: {exc}"
+        else:
+            if output_capture is not None:
+                output_path_notice = output_capture.destination.path
+                output_capture.close()
+                record_capture = None
+    if rejection is not None:
         await _discard_unregistered_process(process, stdout_reader, stderr_reader)
         if output_capture is not None:
             output_capture.close()
-        return ShellRunResult(
-            message=(
-                f"Error: Too many backgrounded processes ({active}/{MAX_BACKGROUNDED}). "
-                "Kill or wait for existing ones before running more."
-            ),
-        )
-    handle = requested_handle or f"shell:{uuid.uuid4().hex[:8]}"
-    if handle in registry:
-        await _discard_unregistered_process(process, stdout_reader, stderr_reader)
-        if output_capture is not None:
-            output_capture.close()
-        return ShellRunResult(message=f"Error: Shell handle '{handle}' is already registered.")
+        return ShellRunResult(message=rejection, output_file_handled=had_capture)
     record = ProcessRecord(
         namespace=namespace,
         handle=handle,
@@ -839,12 +969,12 @@ async def _background_process(
         stdout_buf=stdout_buf,
         stderr_buf=stderr_buf,
         tail=tail,
-        output_capture=output_capture,
+        output_capture=record_capture,
         started_at=started_at,
+        max_runtime_seconds=max_runtime_seconds,
+        _log_file=log_file,
     )
-    monitor_task = asyncio.create_task(
-        _monitor_process(registry, handle, process, stdout_reader, stderr_reader),
-    )
+    monitor_task = asyncio.create_task(_monitor_process(registry, record, stdout_reader, stderr_reader))
     record._monitor_task = monitor_task
     registry[handle] = record
     try:
@@ -852,17 +982,32 @@ async def _background_process(
     except asyncio.CancelledError:
         registry.pop(handle, None)
         monitor_task.cancel()
-        if process.returncode is None:
-            await _terminate_process_group(process)
+        await _terminate_process_group(process)
         await _cancel_pending_tasks(stdout_reader, stderr_reader)
+        if log_file is not None:
+            log_file.finish()
         with contextlib.suppress(asyncio.CancelledError):
             await monitor_task
         raise
-    return ShellRunResult(
-        message=f"Command timed out after {timeout}s. Still running (PID {process.pid}).\nHandle: {handle}",
-        handle=handle,
-        output_file_handled=output_capture is not None,
+    if active_scope is not None and active_scope.records is registry and active_scope.closed:
+        discard_background_record(registry, handle)
+        return ShellRunResult(message="Error: Shell turn already ended.", output_file_handled=had_capture)
+    message = (
+        _format_auto_background_message(
+            pid=process.pid,
+            timeout=timeout,
+            log_path=log_file.path,
+            display_root=background_log.display_root,
+            max_runtime_seconds=max_runtime_seconds,
+            no_output_path=output_path_notice,
+            stdout_buf=stdout_buf,
+            stderr_buf=stderr_buf,
+            tail=tail,
+        )
+        if background_log is not None and log_file is not None
+        else f"Command timed out after {timeout}s. Still running (PID {process.pid}).\nHandle: {handle}"
     )
+    return ShellRunResult(message=message, handle=handle, output_file_handled=had_capture)
 
 
 async def _discard_unregistered_process(
@@ -870,8 +1015,7 @@ async def _discard_unregistered_process(
     stdout_reader: asyncio.Task[None],
     stderr_reader: asyncio.Task[None],
 ) -> None:
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(process.pid, signal.SIGKILL)
+    _kill_process_group(process.pid)
     await _cancel_pending_tasks(stdout_reader, stderr_reader)
 
 
@@ -933,28 +1077,79 @@ def signal_record(record: ProcessRecord, *, force: bool = False) -> bool:
     return True
 
 
+async def close_background_records(records: dict[str, ProcessRecord]) -> None:
+    """Terminate unfinished records owned by a closing shell background scope and flush their trailers."""
+    entries = list(records.values())
+    if not entries:
+        return
+    try:
+        to_stop = [r for r in entries if not r.finished and r.process.returncode is None]
+        for record in to_stop:
+            record._stop_reason = record._stop_reason or "scope_ended"
+        if to_stop:
+            await asyncio.gather(
+                *(_terminate_process_group(r.process, whole_group=True) for r in to_stop),
+                return_exceptions=True,
+            )
+        monitors = [r._monitor_task for r in entries if r._monitor_task is not None and not r._monitor_task.done()]
+        if monitors:
+            await asyncio.gather(*monitors, return_exceptions=True)
+    finally:
+        for record in entries:
+            _kill_record(record, stop_reason="scope_ended")
+        records.clear()
+
+
 def kill_all_records(registry: dict[str, ProcessRecord]) -> None:
     """Kill every unfinished process group in *registry* and clear it."""
     for record in registry.values():
-        _kill_record(record)
+        _kill_record(record, stop_reason="stopped")
     registry.clear()
+
+
+def kill_namespace_records(registry: dict[str, ProcessRecord], namespace: str) -> int:
+    """Stop and remove every record in *namespace*, returning how many records were removed."""
+    handles = [handle for handle, record in registry.items() if record.namespace == namespace]
+    for handle in handles:
+        _kill_record(registry.pop(handle), stop_reason="scope_ended")
+    return len(handles)
 
 
 def discard_background_record(registry: dict[str, ProcessRecord], handle: str) -> None:
     """Kill and drop one just-registered background record whose handle is undeliverable."""
     record = registry.pop(handle, None)
     if record is not None:
-        _kill_record(record)
+        _kill_record(record, stop_reason="stopped")
 
 
-def _kill_record(record: ProcessRecord) -> None:
+def _kill_record(
+    record: ProcessRecord,
+    *,
+    stop_reason: StopReason | None = None,
+) -> None:
     if record.output_capture is not None:
         record.output_capture.close()
+    was_running = not record.finished
+    if was_running:
+        if stop_reason is not None and record._stop_reason is None:
+            record._stop_reason = stop_reason
+        _kill_process_group(record.pid)
+        record.finished = True
+        record.finished_at = time.monotonic()
+        record.return_code = record.process.returncode
+    if record._log_file is not None and not record._log_file.closed:
+        if stop_reason is not None and was_running:
+            record._log_file.finish(
+                format_log_trailer(
+                    record.process.returncode,
+                    stop_reason=record._stop_reason,
+                    max_runtime_seconds=record.max_runtime_seconds,
+                ),
+            )
+        else:
+            record._log_file.finish()
     if record._monitor_task is not None:
         record._monitor_task.cancel()
-    if not record.finished:
-        with contextlib.suppress(ProcessLookupError, PermissionError):
-            os.killpg(record.pid, signal.SIGKILL)
 
 
 def _sweep_stale_records(registry: dict[str, ProcessRecord]) -> None:
@@ -1290,37 +1485,62 @@ async def _terminate_process_group(
 
 async def _monitor_process(
     registry: dict[str, ProcessRecord],
-    handle: str,
-    process: asyncio.subprocess.Process,
+    record: ProcessRecord,
     stdout_reader: asyncio.Task[None],
     stderr_reader: asyncio.Task[None],
 ) -> None:
-    """Wait for a backgrounded process to exit and update its record."""
+    """Wait for a backgrounded process to exit (or hit max_runtime_seconds) and update its record."""
+    handle = record.handle
+    process = record.process
+    log_file = record._log_file
+    natural_exit = False
     try:
-        await _await_process_exit(process)
-    finally:
-        record = registry.get(handle)
-        capture = record.output_capture if record is not None else None
+        timeout_seconds = (
+            None
+            if record.max_runtime_seconds is None
+            else max(0.0, record.started_at + record.max_runtime_seconds - time.monotonic())
+        )
         try:
-            if capture is not None and not capture.closed:
-                # Group cleanup can create EOF by killing a writer. Decide
-                # completeness before that EOF can look like normal completion.
-                _done, pending = await asyncio.wait([stdout_reader, stderr_reader], timeout=2.0)
-                capture.incomplete |= bool(pending)
-        finally:
-            with contextlib.suppress(ProcessLookupError, PermissionError):
-                os.killpg(process.pid, signal.SIGKILL)
-        await asyncio.wait([stdout_reader, stderr_reader], timeout=2.0)
-        await _cancel_pending_tasks(stdout_reader, stderr_reader)
-        record = registry.get(handle)
-        if record is not None:
-            capture = record.output_capture
-            if capture is not None and not capture.closed:
-                capture.incomplete |= stdout_reader.cancelled() or stderr_reader.cancelled()
-                try:
-                    record.output_receipt = capture.publish(process.returncode)
-                finally:
-                    capture.close()
+            await _await_process_exit(process, timeout_seconds=timeout_seconds)
+            natural_exit = record._stop_reason is None and process.returncode is not None and process.returncode >= 0
+        except TimeoutError:
+            if record._stop_reason is None:
+                record._stop_reason = "timeout"
+            await _terminate_process_group(process, whole_group=True)
+    finally:
+        try:
+            live_record = registry.get(handle)
+            capture = live_record.output_capture if live_record is not None else None
+            try:
+                if capture is not None and not capture.closed:
+                    # Group cleanup can create EOF by killing a writer. Decide
+                    # completeness before that EOF can look like normal completion.
+                    _done, pending = await asyncio.wait([stdout_reader, stderr_reader], timeout=2.0)
+                    capture.incomplete |= bool(pending)
+            finally:
+                if not natural_exit or log_file is None:
+                    _kill_process_group(process.pid)
+            drain_timeout = _POST_EXIT_READER_GRACE_SECONDS if log_file is not None else 2.0
+            await asyncio.wait([stdout_reader, stderr_reader], timeout=drain_timeout)
+            await _cancel_pending_tasks(stdout_reader, stderr_reader)
+            live_record = registry.get(handle)
+            if live_record is not None:
+                capture = live_record.output_capture
+                if capture is not None and not capture.closed:
+                    capture.incomplete |= stdout_reader.cancelled() or stderr_reader.cancelled()
+                    try:
+                        live_record.output_receipt = capture.publish(process.returncode)
+                    finally:
+                        capture.close()
             record.finished = True
             record.finished_at = time.monotonic()
             record.return_code = process.returncode
+        finally:
+            if log_file is not None and not log_file.closed:
+                log_file.finish(
+                    format_log_trailer(
+                        process.returncode,
+                        stop_reason=record._stop_reason,
+                        max_runtime_seconds=record.max_runtime_seconds,
+                    ),
+                )

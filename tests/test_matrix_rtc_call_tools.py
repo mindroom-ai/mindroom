@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import threading
+import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -56,6 +59,7 @@ from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.session_storage.store import ConversationStore
+from mindroom.shell.background_scope import ShellBackgroundScope
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
@@ -86,7 +90,6 @@ from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-    from pathlib import Path
 
     from mindroom.constants import RuntimePaths
     from mindroom.history.interrupted_replay import InterruptedReplaySnapshot
@@ -245,6 +248,7 @@ def _wrap(function: Function, *, middleware: tuple[ToolMiddleware, ...] = ()):  
         agent_name=AGENT,
         authorize_operation=_authorized_call_operation,
         usage_owner=_USAGE_OWNER,
+        shell_scope=ShellBackgroundScope(),
         connect=_unconnected,
     )
 
@@ -346,6 +350,7 @@ async def test_realtime_call_tool_does_not_run_after_authorization_is_revoked() 
         agent_name=AGENT,
         authorize_operation=denied_operation,
         usage_owner=_USAGE_OWNER,
+        shell_scope=ShellBackgroundScope(),
         connect=_unconnected,
     )
 
@@ -2406,3 +2411,70 @@ def test_an_interrupted_voice_reply_drops_the_tools_its_fold_summarized() -> Non
 
     assert state.run_metadata["source"] == "voice"
     assert [tool.tool_call_id for tool in state.completed_tools] == ["after"]
+
+
+@pytest.mark.asyncio
+async def test_realtime_call_tools_bind_shell_background_scope_and_close_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Realtime call tools run inside a ShellBackgroundScope that tooling.close() stops alongside toolkits."""
+    from mindroom.shell.background_scope import (  # noqa: PLC0415
+        BackgroundLogPolicy,
+        ShellBackgroundScope,
+        current_shell_background_scope,
+    )
+    from mindroom.shell.execution import run_command  # noqa: PLC0415
+
+    log: list[str] = []
+    observed: dict[str, Any] = {}
+
+    async def run_bg() -> str:
+        scope = current_shell_background_scope()
+        assert isinstance(scope, ShellBackgroundScope)
+        result = await run_command(
+            scope.records,
+            namespace=f"shell-scope:{scope.scope_id}",
+            argv=["bash", "-c", "echo voice-start; sleep 30"],
+            env=dict(os.environ),
+            cwd=str(tmp_path),
+            tail=10,
+            timeout=0.15,
+            on_timeout="background",
+            background_log=BackgroundLogPolicy(log_dir=str(tmp_path / "logs")),
+        )
+        assert result.handle is not None
+        record = scope.records[result.handle]
+        observed["scope"] = scope
+        observed["pid"] = record.pid
+        observed["log_path"] = record._log_path
+        return result.message
+
+    build = _connected_build(log, runner=("run_bg", run_bg))
+    tooling = await _call_tools_over(build, tmp_path, monkeypatch)
+    tools = dict(zip(_tool_names(tooling.tools), tooling.tools, strict=True))
+
+    output = await tools["run_bg"]({})
+    assert "Still running" in output
+    scope = observed["scope"]
+    pid = observed["pid"]
+    os.kill(pid, 0)
+    assert not scope.closed
+    assert len(scope.records) == 1
+
+    assert tooling.close is not None
+    await tooling.close()
+
+    assert scope.closed
+    assert scope.records == {}
+    assert log == ["runner connect", "runner close"]
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        await asyncio.sleep(0.02)
+    else:
+        pytest.fail(f"Process {pid} remained alive after tooling.close()")
+    assert "[MindRoom: stopped when turn ended]" in Path(observed["log_path"]).read_text(encoding="utf-8")

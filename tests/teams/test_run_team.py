@@ -1091,3 +1091,77 @@ async def test_the_leader_reads_an_ollama_member_s_answer_without_its_thinking(
     [member] = store.members
     assert (member.content, member.messages[-1].reasoning_content) == ("Five is prime.", "Five has two divisors.")
     assert [body["stream"] for body in sent] == [True]
+
+
+async def test_run_prepared_team_binds_and_closes_shell_background_scope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    from mindroom.shell.background_scope import ShellBackgroundScope, current_shell_background_scope  # noqa: PLC0415
+    from mindroom.teams import envelope as team_envelope  # noqa: PLC0415
+
+    seen_scopes: list[ShellBackgroundScope] = []
+    inner_closed: list[bool] = []
+
+    async def fake_start(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        try:
+            for item in ("ev1", "ev2"):
+                scope = current_shell_background_scope()
+                assert isinstance(scope, ShellBackgroundScope)
+                seen_scopes.append(scope)
+                yield item
+        finally:
+            inner_closed.append(True)
+
+    monkeypatch.setattr(team_envelope, "scope_run_storage", lambda _ctx: None)
+    monkeypatch.setattr(team_envelope, "_leader_run", lambda *_a, **_kw: SimpleNamespace(start=fake_start))
+    prepared = SimpleNamespace(run_input=lambda _m: None, run_metadata={})
+
+    def start_stream() -> AsyncIterator[object]:
+        seen_scopes.clear()
+        inner_closed.clear()
+        return team_envelope.run_prepared_team(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            prepared,  # type: ignore[arg-type]
+            config=SimpleNamespace(),  # type: ignore[arg-type]
+            runtime_paths=SimpleNamespace(),  # type: ignore[arg-type]
+            scope_context=SimpleNamespace(),  # type: ignore[arg-type]
+            user_id="@alice:example.org",
+        )
+
+    # Normal completion binds one scope during iteration and closes it when exhausted.
+    events = [event async for event in start_stream()]
+    assert events == ["ev1", "ev2"]
+    assert len(seen_scopes) == 2
+    assert seen_scopes[0] is seen_scopes[1]
+    assert seen_scopes[0].closed
+    assert inner_closed == [True]
+
+    # Early close also closes both the inner stream and the ShellBackgroundScope.
+    early_stream = start_stream()
+    first = await anext(early_stream)
+    assert first == "ev1"
+    assert len(seen_scopes) == 1
+    assert not seen_scopes[0].closed
+    await early_stream.aclose()  # type: ignore[attr-defined]
+    assert inner_closed == [True]
+    assert seen_scopes[0].closed
+
+    # Cross-task pull and close (as Starlette/Uvicorn streaming does) never raises a ContextVar token mismatch.
+    cross_task_stream = start_stream()
+    first_cross = await asyncio.create_task(anext(cross_task_stream))
+    assert first_cross == "ev1"
+    assert len(seen_scopes) == 1
+    assert not seen_scopes[0].closed
+
+    async def _drain_and_close() -> str:
+        second = await anext(cross_task_stream)
+        await cross_task_stream.aclose()  # type: ignore[attr-defined]
+        return str(second)
+
+    assert await asyncio.create_task(_drain_and_close()) == "ev2"
+    assert len(seen_scopes) == 2
+    assert seen_scopes[0] is seen_scopes[1]
+    assert inner_closed == [True]
+    assert seen_scopes[0].closed

@@ -74,7 +74,7 @@ def _stream(client: TestClient, **request: Any) -> list[dict[str, Any]]:  # noqa
 
 
 def _result(result: object) -> dict[str, Any]:
-    return {"ok": True, "result": result, "error": None, "failure_kind": None}
+    return {"ok": True, "result": result, "error": None, "failure_kind": None, "shell_backgrounded": False}
 
 
 def test_a_call_streams_its_progress_and_keepalives_before_its_result(

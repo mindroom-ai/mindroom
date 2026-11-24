@@ -162,6 +162,7 @@ SANDBOX_RUNNER_API_ROOT = "/api/sandbox-runner"
 _API_ROUTES = {
     "script-run": "scripts/run",
     "execute-cancel": "execute/cancel",
+    "shell-scope-kill": "execute/shell-scope/kill",
 }
 
 
@@ -185,6 +186,7 @@ def worker_api_endpoint(
         "script-run",
         "scripts",
         "execute-cancel",
+        "shell-scope-kill",
     ],
 ) -> str:
     """Return the API endpoint for one worker operation."""
