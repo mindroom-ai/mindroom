@@ -38,6 +38,8 @@ Guidelines:
 
 def guidance_retry_stream(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
     """Stream ``request``, resending it once with the malformed-call guidance after a malformed tool call."""
+    if request.overrides.caller_retries:
+        return inner.stream(request)
     retried = False
 
     def with_guidance(error: ProviderError) -> Retry | None:

@@ -91,6 +91,7 @@ def resolve_history_execution_plan(
         unavailable_reason=unavailable_reason,
         compaction_fallback_model_name=compaction_config.fallback_model,
         compaction_fallback_summary_input_budget_tokens=fallback_summary_input_budget_tokens,
+        compaction_context_window=compaction_context_window,
     )
 
 

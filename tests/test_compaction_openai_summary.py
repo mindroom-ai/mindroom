@@ -17,7 +17,6 @@ from mindroom.history.summary_call import (
     is_summary_timeout,
 )
 from mindroom.llm.errors import (
-    MALFORMED_TOOL_CALL,
     TRANSPORT_TIMEOUT,
     ModelSafeguardRefusal,
     ProviderError,
@@ -26,15 +25,16 @@ from mindroom.llm.errors import (
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import ModelRequest, TurnCompleted, UsageReported, complete
 from mindroom.providers.openai.build import build_provider
+from mindroom.providers.pipeline.wrapped import Retry, WrappedProvider, attempts
 from tests.fakes.scripted_model import Await, ScriptedModel, usage
 from tests.providers.golden_support import encoded_response, httpx2_transport, pipeline_provider, streamed_reply
 from tests.providers.openai_family_support import provider_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
-    from mindroom.llm.provider import ModelProvider
+    from mindroom.llm.provider import ModelProvider, StreamEvent
     from mindroom.llm.usage import MessageMetrics
 
 pytestmark = pytest.mark.asyncio
@@ -311,24 +311,39 @@ async def test_summary_persists_multi_attempt_reported_usage_when_retry_ends_in_
     first_usage = usage(10, 4)
     second_usage = usage(20, 6)
 
-    async def raise_malformed() -> None:
-        msg = "malformed"
-        raise ProviderError(msg, provider="Synthetic", code=MALFORMED_TOOL_CALL)
+    async def raise_transient() -> None:
+        msg = "transient"
+        raise ProviderUnavailable(msg, provider="Synthetic")
 
-    model = pipeline_provider(
-        ScriptedModel(
-            [
-                [UsageReported(first_usage, final=False), Await(raise_malformed)],
+    def retry_once(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        retried = False
+
+        def reissue(error: ProviderError) -> Retry | None:
+            nonlocal retried
+            if retried or not isinstance(error, ProviderUnavailable):
+                return None
+            retried = True
+            return Retry(request)
+
+        return attempts(inner, request, reissue)
+
+    model = WrappedProvider(
+        pipeline_provider(
+            ScriptedModel(
                 [
-                    UsageReported(second_usage),
-                    TurnCompleted(
-                        message=Message(role="assistant", metrics=second_usage),
-                        stop_reason="content_filter",
-                        raw_stop_reason="RECITATION",
-                    ),
+                    [UsageReported(first_usage, final=False), Await(raise_transient)],
+                    [
+                        UsageReported(second_usage),
+                        TurnCompleted(
+                            message=Message(role="assistant", metrics=second_usage),
+                            stop_reason="content_filter",
+                            raw_stop_reason="RECITATION",
+                        ),
+                    ],
                 ],
-            ],
+            ),
         ),
+        retry_once,
     )
     recorded: list[MessageMetrics] = []
 

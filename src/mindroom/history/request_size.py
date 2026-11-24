@@ -9,7 +9,7 @@ the route estimates the whole request (``ModelProvider.request_tokens``).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from mindroom.history.native import with_native_history
@@ -59,6 +59,8 @@ class RequestSize:
 
     tokens: int
     reported: bool
+    anchor_index: int | None = field(default=None, compare=False)
+    answered_at: float | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,7 +76,13 @@ class RequestSizer:
         if anchor is None:
             return RequestSize(self.model.request_tokens(request), reported=False)
         index, reported = anchor
-        return RequestSize(reported + self.model.request_tokens(request, start=index), reported=True)
+        created_at = request.messages[index].created_at
+        return RequestSize(
+            reported + self.model.request_tokens(request, start=index),
+            reported=True,
+            anchor_index=index,
+            answered_at=float(created_at) if created_at is not None else None,
+        )
 
     def _anchor(self, request: ModelRequest) -> tuple[int, int] | None:
         """Return the index and reported size of the latest answer whose request ``request`` extends.
