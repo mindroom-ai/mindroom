@@ -158,7 +158,7 @@ async def test_call_that_the_engine_cannot_answer_yet_is_503(
         msg = "Try again in a moment."
         raise ScriptRuntimeUnavailableError(msg)
 
-    monkeypatch.setattr(stack.engine, "submit_node", not_yet)
+    monkeypatch.setattr(stack.engine.calls, "submit_node", not_yet)
 
     answer = await client.post("nodes", json=_NODE)
 

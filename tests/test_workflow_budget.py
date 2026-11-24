@@ -568,7 +568,7 @@ async def test_resuming_nested_launch_with_boolean_instead_of_int_starts_new_chi
     assert active.run_id != old_child.run_id
 
     stack.run_id = active.run_id
-    info = await stack.engine.run_info(stack.attempt)
+    info = await stack.engine.calls.run_info(stack.attempt)
     assert info["args"] == {"enabled": True}
     assert info["args"]["enabled"] is True
     await stack.finish_attempt(result="checked args")

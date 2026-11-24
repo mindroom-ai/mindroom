@@ -249,7 +249,7 @@ async def test_inherited_attempt_is_refused_before_anything_recovers(stack: Work
     await stack.restart(kill=True)
 
     with pytest.raises(SupersededAttemptError):
-        await stack.engine.submit_node(old, NodeRequest("@0", "tool", _A, {}))
+        await stack.engine.calls.submit_node(old, NodeRequest("@0", "tool", _A, {}))
     async with stack.http(token) as client:
         answers = [
             await client.get("run"),
@@ -306,7 +306,7 @@ async def test_restart_keeps_the_job_running_and_delivers_one_report(stack: Work
 async def test_restart_after_finish_was_stored_delivers_it_without_a_new_attempt(stack: WorkflowStack) -> None:
     """The script had reported: the run ends with that report, and its job delivers it once."""
     handle = await _started(stack)
-    await stack.engine.finish(stack.attempt, result="reported before the kill", error=None)
+    await stack.engine.calls.finish(stack.attempt, result="reported before the kill", error=None)
 
     await stack.restart(kill=True)
     assert await stack.recover() == []
@@ -1546,7 +1546,7 @@ async def test_attempt_asked_for_in_the_runs_own_conversation_needs_the_owners_l
 async def test_pass_keeps_an_old_report_until_its_job_has_delivered_it(stack: WorkflowStack) -> None:
     """A report that was stored before a long stop is older than the retention, and still the job's to deliver."""
     handle = await _started(stack)
-    await stack.engine.finish(stack.attempt, result="the report", error=None)
+    await stack.engine.calls.finish(stack.attempt, result="the report", error=None)
     set_run(stack.store, stack.run_id, finished_at="2026-01-01T00:00:00Z")
     await stack.restart(kill=True)
     await stack._retire_attempts(RUNTIME_RESTARTED)

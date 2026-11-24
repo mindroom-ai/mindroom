@@ -295,8 +295,8 @@ async def test_two_asks_at_once_on_one_session_are_refused_and_two_sessions_run_
 
     gate_a.set()
     gate_b.set()
-    assert (await stack.engine.node_receipt(stack.attempt, receipt_a.id, wait=5.0)).result == "from_a"
-    assert (await stack.engine.node_receipt(stack.attempt, receipt_b.id, wait=5.0)).result == "from_b"
+    assert (await stack.engine.calls.node_receipt(stack.attempt, receipt_a.id, wait=5.0)).result == "from_a"
+    assert (await stack.engine.calls.node_receipt(stack.attempt, receipt_b.id, wait=5.0)).result == "from_b"
 
 
 @pytest.mark.asyncio

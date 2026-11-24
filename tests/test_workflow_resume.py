@@ -406,11 +406,11 @@ async def test_old_attempt_is_refused_after_resume(stack: WorkflowStack) -> None
     await stack.engine.reopen(stack.run_id, stack.context)
     with pytest.raises(SupersededAttemptError):
         # The run is ready for its next attempt and names none: the old one gets no call in.
-        await stack.engine.submit_node(old, NodeRequest("@0", "tool", _A, {}))
+        await stack.engine.calls.submit_node(old, NodeRequest("@0", "tool", _A, {}))
     await stack.engine.launch(stack.run_id, stack.context)
 
     with pytest.raises(SupersededAttemptError):
-        await stack.engine.submit_node(old, NodeRequest("@0", "tool", _A, {}))
+        await stack.engine.calls.submit_node(old, NodeRequest("@0", "tool", _A, {}))
     assert stack.counting_tool.calls == 0
 
 
@@ -875,10 +875,10 @@ async def test_report_held_across_a_takeover_is_refused_and_the_next_attempts_re
     """A report is written with the epoch its attempt began with: the attempt that follows keeps its own."""
     old = stack.attempt
     held = HeldWrite(stack.store, "update_run", monkeypatch, when=lambda *_args, **changes: "result" in changes)
-    late = asyncio.create_task(stack.engine.finish(old, result="the first report", error=None))
+    late = asyncio.create_task(stack.engine.calls.finish(old, result="the first report", error=None))
     await held.reached()
     await _replayed(stack)
-    await stack.engine.finish(stack.attempt, result="the second report", error=None)
+    await stack.engine.calls.finish(stack.attempt, result="the second report", error=None)
 
     await held.release()
     with pytest.raises(SupersededAttemptError):
@@ -903,7 +903,7 @@ async def test_call_and_stop_of_an_attempt_that_the_run_moved_on_from_reach_no_l
     current = stack.store.get_run(stack.run_id)
 
     with pytest.raises(SupersededAttemptError):
-        await stack.engine._admit(asked, old, NodeRequest("@0", "tool", _A, {}))
+        await stack.engine.calls._admit(asked, old, NodeRequest("@0", "tool", _A, {}))
     out_of_time = {"reason": "Out of time.", "state": WorkflowRunState.INTERRUPTED, "epoch": asked.epoch}
     stopped = await stack.engine.cancel(stack.run_id, **out_of_time)
 

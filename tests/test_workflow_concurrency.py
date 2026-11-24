@@ -75,7 +75,7 @@ def _append(line: str) -> dict[str, object]:
 
 async def _settled(stack: WorkflowStack, receipt: NodeReceipt) -> NodeReceipt:
     while receipt.state not in ("completed", "failed", "cancelled", "indeterminate"):
-        receipt = await stack.engine.node_receipt(stack.attempt, receipt.id, wait=5)
+        receipt = await stack.engine.calls.node_receipt(stack.attempt, receipt.id, wait=5)
     return receipt
 
 

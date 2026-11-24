@@ -357,7 +357,7 @@ async def test_script_tool_approval_shows_the_node_and_the_run_waiting(gated: Wo
 
     node = _node(gated)
     assert (node.state, node.waiting_on, gated.counting_tool.lines) == (WorkflowNodeState.WAITING, "approval", [])
-    assert (await gated.engine.node_receipt(gated.attempt, receipt.id, wait=0)).state == "waiting"
+    assert (await gated.engine.calls.node_receipt(gated.attempt, receipt.id, wait=0)).state == "waiting"
     gated.resolver.hold_approvals.set()
 
     assert await gated.result("@0", "tool", _APPEND) == "appended"

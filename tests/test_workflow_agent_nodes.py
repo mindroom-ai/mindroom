@@ -714,7 +714,7 @@ async def test_cancelling_one_node_job_fails_only_that_node(stack: WorkflowStack
     await stack.jobs.cancel(stack.node_job("@0").job_id, owner=stack.context.execution_identity, depth=0)
 
     while receipt.state == "running":
-        receipt = await stack.engine.node_receipt(stack.attempt, receipt.id, wait=5)
+        receipt = await stack.engine.calls.node_receipt(stack.attempt, receipt.id, wait=5)
 
     assert (receipt.state, receipt.error and receipt.error["kind"]) == ("cancelled", "cancelled")
     assert stack.store.get_run(stack.run_id).state is WorkflowRunState.RUNNING
@@ -758,7 +758,7 @@ async def test_timeout_counts_the_work_before_and_after_an_approval_and_not_the_
     cards.decision.set_result(BackgroundApprovalDecision("approved", None))
 
     while receipt.state in ("running", "waiting"):
-        receipt = await gated.engine.node_receipt(gated.attempt, receipt.id, wait=10)
+        receipt = await gated.engine.calls.node_receipt(gated.attempt, receipt.id, wait=10)
 
     assert (receipt.error["kind"] if receipt.error else receipt.state) == kind
 
@@ -806,7 +806,7 @@ async def test_approval_wait_does_not_exhaust_schema_correction_working_time(
     release_correction.set()
 
     while receipt.state in ("running", "waiting"):
-        receipt = await gated.engine.node_receipt(gated.attempt, receipt.id, wait=10)
+        receipt = await gated.engine.calls.node_receipt(gated.attempt, receipt.id, wait=10)
 
     assert (receipt.state, receipt.result) == ("completed", {"ok": True})
 
@@ -1352,7 +1352,7 @@ async def test_child_that_needs_approval_waits_and_resumes(gated: WorkflowStack)
 
     node = _node(gated)
     assert (node.state, node.waiting_on, gated.counting_tool.lines) == (WorkflowNodeState.WAITING, "approval", [])
-    waiting = await gated.engine.node_receipt(gated.attempt, receipt.id, wait=0)
+    waiting = await gated.engine.calls.node_receipt(gated.attempt, receipt.id, wait=0)
     assert waiting.state == "waiting"
     cards.decision.set_result(BackgroundApprovalDecision("approved", None))
 

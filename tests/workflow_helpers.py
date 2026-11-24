@@ -893,7 +893,7 @@ class WorkflowStack:
         meta: dict[str, object] | None = None,
     ) -> NodeReceipt:
         """Submit one node as the attempt's script would."""
-        return await self.engine.submit_node(self.attempt, NodeRequest(key, kind, args, meta or {}))
+        return await self.engine.calls.submit_node(self.attempt, NodeRequest(key, kind, args, meta or {}))
 
     async def result(
         self,
@@ -905,7 +905,7 @@ class WorkflowStack:
         """Submit one node, wait until it settles, and return its result or raise `NodeFailed`."""
         receipt = await self.submit(key, kind, args, meta)
         while receipt.state not in _SETTLED_STATES:
-            receipt = await self.engine.node_receipt(self.attempt, receipt.id, wait=SETTLE_TIMEOUT_SECONDS)
+            receipt = await self.engine.calls.node_receipt(self.attempt, receipt.id, wait=SETTLE_TIMEOUT_SECONDS)
         if receipt.state != "completed":
             raise NodeFailed(receipt)
         return receipt.result
@@ -1029,7 +1029,7 @@ class WorkflowStack:
 
     async def finish_attempt(self, result: object = None, error: str | None = None) -> None:
         """Let the attempt's script report and exit, as `main` returning or raising does."""
-        await self.engine.finish(self.attempt, result=result, error=error)
+        await self.engine.calls.finish(self.attempt, result=result, error=error)
         await self.end_attempt(ScriptRunState.EXITED if error is None else ScriptRunState.FAILED)
 
     async def collect(self, job: BackgroundJob) -> object:

@@ -36,6 +36,10 @@ if TYPE_CHECKING:
     from mindroom.workflow_runs.store import WorkflowRunStore
 
 
+# The owner of the tasks that admit calls: they outlive their requests, and a run's end waits for them, not stops them.
+ADMISSIONS = "admissions"
+
+
 @dataclass(slots=True)
 class Places:
     """The places among one run's working calls: at most `limit` agent and tool calls of the run work at one time.

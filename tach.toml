@@ -2709,6 +2709,7 @@ depends_on = [
 [[interfaces]]
 from = ["mindroom.workflow_runs.coordination"]
 expose = [
+    "ADMISSIONS",
     "Places",
     "RunCoordinator",
     "receipt",
@@ -2787,23 +2788,38 @@ expose = [
 ]
 
 [[modules]]
-path = "mindroom.workflow_runs.engine"
+path = "mindroom.workflow_runs.script_calls"
 depends_on = [
-    "mindroom.delegation.personas",
     "mindroom.delegation.state",
     "mindroom.workflow_runs.agent_dispatch",
     "mindroom.workflow_runs.agent_nodes",
     "mindroom.workflow_runs.coordination",
-    "mindroom.workflow_runs.dispatch",
-    "mindroom.workflow_runs.endings",
     "mindroom.workflow_runs.graph",
-    "mindroom.workflow_runs.interactions",
     "mindroom.workflow_runs.limits",
     "mindroom.workflow_runs.models",
     "mindroom.workflow_runs.peers",
-    "mindroom.workflow_runs.recovery",
-    "mindroom.workflow_runs.saved",
     "mindroom.workflow_runs.replay",
+    "mindroom.workflow_runs.saved",
+    "mindroom.workflow_runs.store",
+]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.script_calls"]
+expose = ["ScriptCalls"]
+
+[[modules]]
+path = "mindroom.workflow_runs.engine"
+depends_on = [
+    "mindroom.delegation.personas",
+    "mindroom.workflow_runs.agent_dispatch",
+    "mindroom.workflow_runs.coordination",
+    "mindroom.workflow_runs.dispatch",
+    "mindroom.workflow_runs.endings",
+    "mindroom.workflow_runs.interactions",
+    "mindroom.workflow_runs.limits",
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.recovery",
+    "mindroom.workflow_runs.script_calls",
     "mindroom.workflow_runs.store",
 ]
 
