@@ -33,7 +33,7 @@ from mindroom.workflow_runs.peers import (
     PeerUnreachableError,
     peer_op_id,
 )
-from mindroom.workflow_runs.store import WorkflowRunNotFoundError
+from mindroom.workflow_runs.store import WorkflowRunNotFoundError, WorkflowRunStore
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, bound_worker_launch_config
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.test_workflow_local_integration import LocalWorkflowStack
@@ -308,12 +308,7 @@ async def test_everyone_waiting_returns_with_the_note_instead_of_hanging(stack: 
     await stack.submit("/0:p0@0", "agent", {"prompt": "a", "name": "a"}, meta={"name": "a"})
     await stack.submit("/0:p1@0", "agent", {"prompt": "b", "name": "b"}, meta={"name": "b"})
     both_submitted.set()
-    await stack.until(
-        lambda: all(
-            (n := stack.store.get_node(stack.run_id, k)) is not None and n.waiting_on == "peer"
-            for k in ("/0:p0@0", "/0:p1@0")
-        ),
-    )
+    await stack.until(lambda: stack.run_id in stack.engine._deadlock_since)
     # Before the 2s grace elapses, neither waiter has deadlocked; advancing the fake clock past 2s unblocks both.
     stack.now += 1.0
     await asyncio.sleep(0.05)
@@ -928,3 +923,119 @@ async def test_nested_foreach_reader_releases_outer_slot_for_sender(local_stack:
     assert len(got) == 1
     assert "note" not in got[0]
     assert [m["text"] for m in got[0]["messages"]] == ["go"]
+
+
+@pytest.mark.asyncio
+async def test_opening_pre_peer_v1_store_adds_peer_tables_idempotently(tmp_path: Path) -> None:
+    """Astra blocker 1: opening a v1 store created without the 4 peer tables creates them so graph/send work."""
+    db_path = tmp_path / "legacy.sqlite3"
+    # Create a real store, then drop the 4 peer tables while keeping workflow_schema version=1.
+    WorkflowRunStore(db_path)
+    with closing(sqlite3.connect(db_path)) as conn:
+        for table in ("workflow_messages", "workflow_cursors", "workflow_state", "workflow_peer_calls"):
+            conn.execute(f"DROP TABLE {table}")
+        conn.commit()
+    reopened = WorkflowRunStore(db_path)
+    assert peers.message_edges(reopened, "wf-missing", []) == []
+    with closing(sqlite3.connect(db_path)) as conn:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert {"workflow_messages", "workflow_cursors", "workflow_state", "workflow_peer_calls"} <= tables
+
+
+@pytest.mark.asyncio
+async def test_session_turn_rerun_preserves_consumed_between_turn_mail(stack: WorkflowStack) -> None:
+    """Astra blocker 4: rerunning turn 2 keeps the between-turn mail batch and replays it in later transcripts."""
+    prompts_seen: list[str] = []
+
+    def _handle(req: ModelRequest) -> list[ScriptStep]:
+        prompts_seen.append(_user_texts(req)[-1])
+        return answer(f"reply-{len(prompts_seen)}")
+
+    _route_agents(stack, _handle)
+    await stack.result("@0", "session", {"name": "coder"}, meta={"name": "coder"})
+    assert await stack.result("@1", "turn", {"session": "@0", "turn": 1, "message": "one"}) == "reply-1"
+    await stack.result("@2", "send", {"to": "coder", "text": "use format v2"})
+    assert await stack.result("@3", "turn", {"session": "@0", "turn": 2, "message": "two"}) == "reply-2"
+    assert "use format v2" in prompts_seen[-1]
+
+    # Finish attempt 1, then resume with only turn 2 in rerun.
+    turn2_node = stack.store.get_node(stack.run_id, "@3")
+    assert turn2_node is not None
+    await stack.finish_attempt(result="done-1")
+    await stack.resume(stack.run_id, rerun=[f"n{turn2_node.seq}"])
+
+    await stack.result("@0", "session", {"name": "coder"}, meta={"name": "coder"})
+    assert await stack.result("@1", "turn", {"session": "@0", "turn": 1, "message": "one"}) == "reply-1"
+    await stack.result("@2", "send", {"to": "coder", "text": "use format v2"})
+    assert await stack.result("@3", "turn", {"session": "@0", "turn": 2, "message": "two"}) == "reply-3"
+    assert "use format v2" in prompts_seen[-1]
+    assert "Earlier conversation:" in prompts_seen[-1]
+
+
+@pytest.mark.asyncio
+async def test_star_broadcast_freezes_recipients_at_send_time(stack: WorkflowStack) -> None:
+    """Astra Medium: '*' delivers and draws edges only to peers live at send time, never finished or later peers."""
+    gate_live = asyncio.Event()
+    gate_later = asyncio.Event()
+
+    def _handle(req: ModelRequest) -> list[ScriptStep]:
+        p = _user_texts(req)[0]
+        if p == "done":
+            return answer("done-ok")
+        if p == "live":
+            return [Await(gate_live.wait), *answer("live-ok")]
+        return [Await(gate_later.wait), *answer("later-ok")]
+
+    _route_agents(stack, _handle)
+    assert (
+        await stack.result("/0:p0@0", "agent", {"prompt": "done", "name": "done"}, meta={"name": "done"}) == "done-ok"
+    )
+    await stack.submit("/0:p1@0", "agent", {"prompt": "live", "name": "live"}, meta={"name": "live"})
+    await stack.until(lambda: stack.store.get_node(stack.run_id, "/0:p1@0") is not None)
+
+    sender = NodeRef(key="@send", generation=1, name="script")
+    # Put a real send node so message_edges has a sender id.
+    receipt = await stack.result("@5", "send", {"to": "*", "text": "freeze-check"})
+    assert receipt == {"delivered": 1, "held": False}
+    # Also test held named delivery still works alongside frozen '*'.
+    assert peers.send(stack.store, stack.run_id, op_id="named-hold", sender=sender, to="later", text="for-later") == {
+        "delivered": 0,
+        "held": True,
+    }
+
+    # Start 'later' AFTER the '*' broadcast.
+    await stack.submit("/0:p2@0", "agent", {"prompt": "later", "name": "later"}, meta={"name": "later"})
+    await stack.until(lambda: stack.store.get_node(stack.run_id, "/0:p2@0") is not None)
+
+    live_msgs = peers.read_call(
+        stack.store,
+        stack.run_id,
+        op_id="r-live",
+        reader=_ref(stack, "/0:p1@0"),
+        names=("live", "*"),
+    )
+    later_msgs = peers.read_call(
+        stack.store,
+        stack.run_id,
+        op_id="r-later",
+        reader=_ref(stack, "/0:p2@0"),
+        names=("later", "*"),
+    )
+    assert live_msgs is not None
+    assert later_msgs is not None
+    assert [m["text"] for m in live_msgs] == ["freeze-check"]
+    assert [m["text"] for m in later_msgs] == ["for-later"]
+
+    send_node = stack.store.get_node(stack.run_id, "@5")
+    live_node = stack.store.get_node(stack.run_id, "/0:p1@0")
+    assert send_node is not None
+    assert live_node is not None
+    edges = peers.message_edges(stack.store, stack.run_id, stack.store.nodes(stack.run_id))
+    assert [(f, t, c) for f, t, c in edges if f == f"n{send_node.seq}"] == [
+        (f"n{send_node.seq}", f"n{live_node.seq}", 1),
+    ]
+
+    gate_live.set()
+    gate_later.set()
+    await stack.result("/0:p1@0", "agent", {"prompt": "live", "name": "live"}, meta={"name": "live"})
+    await stack.result("/0:p2@0", "agent", {"prompt": "later", "name": "later"}, meta={"name": "later"})

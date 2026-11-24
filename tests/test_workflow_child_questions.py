@@ -248,3 +248,33 @@ async def test_cancelling_run_closes_open_child_question_card(stack: WorkflowSta
     cards = stack.room.carried(WORKFLOW_QUESTION_CONTENT_KEY)
     assert cards[-1]["status"] == "cancelled"
     assert json.loads(json.dumps(cards[-1]))["question_id"] == cards[0]["question_id"]
+
+
+@pytest.mark.asyncio
+async def test_rerun_agent_with_new_generation_asks_user_again(stack: WorkflowStack) -> None:
+    """Opus N1: rerunning an agent (generation 2) asks the user again instead of reusing generation 1's answer."""
+
+    def _handle(req: ModelRequest) -> list[ScriptStep]:
+        tools = [m.content for m in req.messages if m.role == "tool" and isinstance(m.content, str)]
+        if not tools:
+            return calls(tool_call("ask_user", "q1", question="Which branch?"))
+        return answer(f"branch:{tools[0]}")
+
+    stack.models["watcher"] = _RoutingModel(_handle)
+    await stack.submit("@0", "agent", {"prompt": "x"}, meta={"name": "worker"})
+    await stack.until(lambda: bool(_open_ask_nodes(stack)))
+    assert await _answer_open(stack, text="main") == "accepted"
+    assert await stack.result("@0", "agent", {"prompt": "x"}, meta={"name": "worker"}) == "branch:main"
+    assert len(_card_posts(stack)) == 1
+
+    # Finish attempt 1 and resume with rerun=["n1"] -> generation 2 must post a new question card.
+    node = stack.store.get_node(stack.run_id, "@0")
+    assert node is not None
+    await stack.finish_attempt(result="done-1")
+    await stack.resume(stack.run_id, rerun=[f"n{node.seq}"])
+
+    await stack.submit("@0", "agent", {"prompt": "x"}, meta={"name": "worker"})
+    await stack.until(lambda: bool(_open_ask_nodes(stack)))
+    assert len(_card_posts(stack)) == 2
+    assert await _answer_open(stack, text="release") == "accepted"
+    assert await stack.result("@0", "agent", {"prompt": "x"}, meta={"name": "worker"}) == "branch:release"

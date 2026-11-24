@@ -69,6 +69,7 @@ from mindroom.workflow_runs.notices import RETRY_SECONDS
 from mindroom.workflow_runs.peers import (
     DEADLOCK_NOTE,
     NodeRef,
+    format_session_message,
     has_unread,
     read_call,
     script_op,
@@ -966,8 +967,18 @@ class WorkflowEngine:
             follow_up = None
             if shown == "turn" and session is not None:
                 raw_message = str(asked["message"])
-                turn_message = (
-                    await asyncio.to_thread(
+                lineage_key = result_digest(
+                    [(session.digest, session.generation), *((t.key, t.digest, t.generation) for t in earlier)],
+                )
+                prior_mail = (
+                    cast("list[dict[str, object]]", saved.request["peer_mail"])
+                    if saved is not None
+                    and saved.request.get("peer_mail_lineage") == lineage_key
+                    and isinstance(saved.request.get("peer_mail"), list)
+                    else None
+                )
+                if any(turn.state is WorkflowNodeState.COMPLETED for turn in earlier):
+                    turn_message, turn_mail = await asyncio.to_thread(
                         session_turn_message,
                         self.store,
                         run.run_id,
@@ -975,10 +986,10 @@ class WorkflowEngine:
                         key,
                         generation,
                         raw_message,
+                        saved_mail=prior_mail,
                     )
-                    if any(turn.state is WorkflowNodeState.COMPLETED for turn in earlier)
-                    else raw_message
-                )
+                else:
+                    turn_message, turn_mail = raw_message, []
                 follow_up, prompt = await self._prepare_turn(
                     run,
                     session,
@@ -987,7 +998,10 @@ class WorkflowEngine:
                     saved,
                     turn_message,
                 )
-                node = replace(node, request={**asked, "prompt": prompt})
+                node = replace(
+                    node,
+                    request={**asked, "prompt": prompt, "peer_mail": turn_mail, "peer_mail_lineage": lineage_key},
+                )
             dispatch = partial(self._dispatch_agent, run, timeout=_timeout(meta), follow_up=follow_up)
             start = partial(self._enter, run, node, dispatch)
             return await (self._ask_gate(run, attempt, node, (grant, arguments)) if grant is not None else start())
@@ -1175,7 +1189,7 @@ class WorkflowEngine:
     ) -> str:
         """Post (or reattach to) an agent's own question card, release its slot while waiting, and return the answer."""
         self._validate_question_options(options)
-        ask_key = f"{parent.key}?{result_digest([question, options])[:12]}"
+        ask_key = f"{parent.key}?{parent.generation}:{result_digest([question, options])[:12]}"
         request: dict[str, object] = {"question": question, "options": options}
         condition, released, cancelled = self._condition(run_id), False, False
         async with condition:
@@ -1851,7 +1865,12 @@ class WorkflowEngine:
             return None, message
         history = [
             (
-                str(turn.request["message"]),
+                format_session_message(
+                    str(turn.request["message"]),
+                    cast("list[dict[str, object]]", turn.request["peer_mail"])
+                    if isinstance(turn.request.get("peer_mail"), list)
+                    else (),
+                ),
                 res
                 if isinstance(res := await asyncio.to_thread(self.store.whole_result, turn), str)
                 else json.dumps(res),

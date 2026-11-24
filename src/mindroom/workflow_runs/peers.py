@@ -101,7 +101,6 @@ def _once(
 
 
 def _self_keys(connection: sqlite3.Connection, run_id: str, ref: NodeRef) -> set[str]:
-    """Return the keys belonging to *ref* itself (and all turns of its session, when reading/sending as a session)."""
     keys = {ref.key}
     if ref.reader_key is not None:
         keys.add(ref.reader_key)
@@ -125,14 +124,31 @@ def _unread_rows(
         (run_id, reader_key, reader_gen),
     ).fetchone()
     cursor = 0 if row is None else int(row["seq"])
-    self_keys = _self_keys(connection, run_id, reader)
-    name_set = frozenset(names)
+    self_keys, name_set = _self_keys(connection, run_id, reader), frozenset(names)
     rows = connection.execute(
-        "SELECT seq, sender_key, sender_name, recipient_name, text, created_at "
+        "SELECT seq, sender_key, sender_name, recipient_name, recipient_keys_json, text, created_at "
         "FROM workflow_messages WHERE run_id = ? AND seq > ? AND withdrawn = 0 ORDER BY seq ASC",
         (run_id, cursor),
     ).fetchall()
-    return [r for r in rows if r["recipient_name"] in name_set and r["sender_key"] not in self_keys]
+    return [
+        r
+        for r in rows
+        if r["recipient_name"] in name_set
+        and r["sender_key"] not in self_keys
+        and (
+            r["recipient_name"] != "*"
+            or r["recipient_keys_json"] is None
+            or reader_key in json.loads(r["recipient_keys_json"])
+        )
+    ]
+
+
+def _all_state_rows(connection: sqlite3.Connection, run_id: str) -> dict[str, object]:
+    rows = connection.execute(
+        "SELECT key, value_json FROM workflow_state WHERE run_id = ? ORDER BY key ASC",
+        (run_id,),
+    ).fetchall()
+    return {row["key"]: json.loads(row["value_json"]) for row in rows}
 
 
 def send(
@@ -144,7 +160,7 @@ def send(
     to: str,
     text: str,
 ) -> dict[str, object]:
-    """Send one message in one transaction keyed by *op_id*; return `{delivered, held}`."""
+    """Send one message in one transaction keyed by *op_id*; freeze `*` recipients at send time."""
     if not to:
         msg = "Recipient 'to' must be a non-empty peer name, '*', or 'script'."
         raise WorkflowRunStoreError(msg)
@@ -152,6 +168,7 @@ def send(
 
     def _effect(connection: sqlite3.Connection) -> dict[str, object]:
         self_keys = _self_keys(connection, run_id, sender)
+        frozen_json: str | None = None
         if to == "script":
             delivered, held = 1, False
         else:
@@ -162,10 +179,11 @@ def send(
             ).fetchall()
             if to == "*":
                 live = [
-                    r
+                    r["key"]
                     for r in rows
                     if r["key"] not in self_keys and (r["kind"] == "session" or r["state"] in _LIVE_VALUES)
                 ]
+                frozen_json = json.dumps(live, separators=(",", ":"))
                 delivered, held = len(live), not live
             else:
                 sessions = [r for r in rows if r["kind"] == "session" and r["name"] == to]
@@ -183,9 +201,19 @@ def send(
         )
         connection.execute(
             "INSERT INTO workflow_messages "
-            "(run_id, seq, sender_key, sender_generation, sender_name, recipient_name, text, withdrawn, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)",
-            (run_id, seq, sender.key, sender.generation, sender.name, to, text, datetime.now(UTC).isoformat()),
+            "(run_id, seq, sender_key, sender_generation, sender_name, recipient_name, recipient_keys_json, text, withdrawn, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)",
+            (
+                run_id,
+                seq,
+                sender.key,
+                sender.generation,
+                sender.name,
+                to,
+                frozen_json,
+                text,
+                datetime.now(UTC).isoformat(),
+            ),
         )
         return {"delivered": delivered, "held": held}
 
@@ -227,22 +255,12 @@ def has_unread(store: WorkflowRunStore, run_id: str, *, reader: NodeRef, names: 
         return bool(_unread_rows(connection, run_id, reader, names))
 
 
-def get_state(
-    store: WorkflowRunStore,
-    run_id: str,
-    *,
-    op_id: str,
-    key: str | None = None,
-) -> dict[str, object]:
+def get_state(store: WorkflowRunStore, run_id: str, *, op_id: str, key: str | None = None) -> dict[str, object]:
     """Read one key (`{found, value}`) or all shared-state keys (`{k: v}`) in one transaction keyed by *op_id*."""
 
     def _effect(connection: sqlite3.Connection) -> dict[str, object]:
         if key is None:
-            rows = connection.execute(
-                "SELECT key, value_json FROM workflow_state WHERE run_id = ? ORDER BY key ASC",
-                (run_id,),
-            ).fetchall()
-            return {row["key"]: json.loads(row["value_json"]) for row in rows}
+            return _all_state_rows(connection, run_id)
         row = connection.execute(
             "SELECT value_json FROM workflow_state WHERE run_id = ? AND key = ?",
             (run_id, key),
@@ -311,8 +329,7 @@ def script_op(
             record_empty=wait_seconds <= 0,
         )
         return (True, immediate) if immediate is not None else (False, wait_seconds)
-    op = args.get("op")
-    state_key = str(args.get("key") or "")
+    op, state_key = args.get("op"), str(args.get("key") or "")
     if op == "get":
         return True, get_state(store, run_id, op_id=op_id, key=state_key)
     if op == "set":
@@ -321,7 +338,7 @@ def script_op(
     raise WorkflowRunStoreError(msg)
 
 
-def format_session_message(message: str, msgs: list[dict[str, object]]) -> str:
+def format_session_message(message: str, msgs: Collection[dict[str, object]]) -> str:
     """Prepend between-turn peer *msgs* to a session turn *message*."""
     if not msgs:
         return message
@@ -336,8 +353,10 @@ def session_turn_message(
     turn_key: str,
     turn_generation: int,
     message: str,
-) -> str:
-    """Drain unread peer messages queued for *session* and prepend them to *message*."""
+    *,
+    saved_mail: list[dict[str, object]] | None = None,
+) -> tuple[str, list[dict[str, object]]]:
+    """Drain unread mail queued for *session*, merge with any *saved_mail* from a prior generation, and format."""
     session_name = session.name or str(session.request.get("name") or "")
     reader = NodeRef(
         key=turn_key,
@@ -346,16 +365,16 @@ def session_turn_message(
         reader_key=session.key,
         reader_generation=session.generation,
     )
-    names = (session_name, "*") if session_name else ("*",)
-    msgs = read_call(
+    new_msgs = read_call(
         store,
         run_id,
         op_id=f"session_inbox:{turn_key}:{turn_generation}",
         reader=reader,
-        names=names,
+        names=(session_name, "*") if session_name else ("*",),
         record_empty=True,
     )
-    return format_session_message(message, msgs or [])
+    mail = [*(saved_mail or ()), *(new_msgs or ())]
+    return format_session_message(message, mail), mail
 
 
 def withdraw_unread(store: WorkflowRunStore, run_id: str, sender_key: str, old_generation: int) -> int:
@@ -377,7 +396,15 @@ def withdraw_unread(store: WorkflowRunStore, run_id: str, sender_key: str, old_g
                   )
                   AND (
                     (workflow_messages.recipient_name = 'script' AND c.reader_key = 'script')
-                    OR (workflow_messages.recipient_name = '*' AND c.reader_key != 'script')
+                    OR (
+                      workflow_messages.recipient_name = '*' AND c.reader_key != 'script'
+                      AND (
+                        workflow_messages.recipient_keys_json IS NULL
+                        OR EXISTS (
+                          SELECT 1 FROM json_each(workflow_messages.recipient_keys_json) WHERE value = c.reader_key
+                        )
+                      )
+                    )
                     OR EXISTS (
                       SELECT 1 FROM workflow_nodes n
                       WHERE n.run_id = c.run_id AND n.key = c.reader_key AND n.name = workflow_messages.recipient_name
@@ -394,58 +421,55 @@ def list_peers(store: WorkflowRunStore, run_id: str) -> list[dict[str, object]]:
     """Return `name`, `status` and `label` of every current agent and session in *run_id*."""
     nodes = store.nodes(run_id, light=True)
     latest_turn = {n.session_key: n for n in nodes if n.kind == "turn" and n.session_key}
-    peers_list: list[dict[str, object]] = []
-    for node in nodes:
-        if node.kind == "agent":
-            peers_list.append(
-                {"id": f"n{node.seq}", "name": node.name, "status": node.state.value, "label": node.label},
-            )
-        elif node.kind == "session":
-            turn = latest_turn.get(node.key)
+    out: list[dict[str, object]] = []
+    for n in nodes:
+        if n.kind == "agent":
+            out.append({"id": f"n{n.seq}", "name": n.name, "status": n.state.value, "label": n.label})
+        elif n.kind == "session":
+            turn = latest_turn.get(n.key)
             status = turn.state.value if turn is not None and turn.state in LIVE_NODE_STATES else "idle"
-            peers_list.append(
-                {"id": f"n{node.seq}", "name": node.name, "status": status, "label": node.label, "session": True},
-            )
-    return peers_list
+            out.append({"id": f"n{n.seq}", "name": n.name, "status": status, "label": n.label, "session": True})
+    return out
 
 
 def message_edges(store: WorkflowRunStore, run_id: str, nodes: Iterable[WorkflowNode]) -> list[tuple[str, str, int]]:
     """Aggregate non-withdrawn messages into `(from_id, to_id, count)` graph edges (counts only, never text)."""
-    current = [node for node in nodes if not node.stale]
-    ids = {node.key: f"n{node.seq}" for node in current}
-    peers_by_name: dict[str, list[str]] = {}
-    all_peer_ids: list[str] = []
-    session_of = {node.key: node.session_key for node in current if node.session_key}
-    for node in current:
-        if node.kind in ("agent", "session"):
-            nid = ids[node.key]
-            all_peer_ids.append(nid)
-            if node.name:
-                peers_by_name.setdefault(node.name, []).append(nid)
+    current = [n for n in nodes if not n.stale]
+    ids = {n.key: f"n{n.seq}" for n in current}
+    session_of = {n.key: n.session_key for n in current if n.session_key}
+    by_name: dict[str, list[str]] = {}
+    for n in current:
+        if n.kind in ("agent", "session") and n.name:
+            by_name.setdefault(n.name, []).append(ids[n.key])
     with store.read_connection() as connection:
         rows = connection.execute(
-            "SELECT sender_key, recipient_name FROM workflow_messages WHERE run_id = ? AND withdrawn = 0",
+            "SELECT sender_key, recipient_name, recipient_keys_json FROM workflow_messages "
+            "WHERE run_id = ? AND withdrawn = 0",
             (run_id,),
         ).fetchall()
     counts: Counter[tuple[str, str]] = Counter()
     for row in rows:
         sender_key = row["sender_key"]
-        from_id = ids.get(sender_key)
-        if from_id is None:
+        if (from_id := ids.get(sender_key)) is None:
             continue
         self_ids = {from_id} | ({ids[sess]} if (sess := session_of.get(sender_key)) and sess in ids else set())
-        pool = all_peer_ids if row["recipient_name"] == "*" else peers_by_name.get(row["recipient_name"], ())
+        frozen = row["recipient_keys_json"]
+        pool = (
+            [ids[k] for k in json.loads(frozen) if k in ids]
+            if frozen is not None
+            else by_name.get(row["recipient_name"], ())
+        )
         for to_id in pool:
             if to_id not in self_ids:
                 counts[(from_id, to_id)] += 1
-    return [(sender, receiver, count) for (sender, receiver), count in sorted(counts.items())]
+    return [(s, r, c) for (s, r), c in sorted(counts.items())]
 
 
 def all_messages(store: WorkflowRunStore, run_id: str) -> list[dict[str, Any]]:
     """Return the full, uncapped message history of *run_id* (for owner-checked `get_workflow(messages=True)`)."""
     with store.read_connection() as connection:
         rows = connection.execute(
-            "SELECT seq, sender_key, sender_generation, sender_name, recipient_name, text, withdrawn, created_at "
+            "SELECT seq, sender_key, sender_name, recipient_name, text, withdrawn, created_at "
             "FROM workflow_messages WHERE run_id = ? ORDER BY seq ASC",
             (run_id,),
         ).fetchall()
@@ -466,8 +490,4 @@ def all_messages(store: WorkflowRunStore, run_id: str) -> list[dict[str, Any]]:
 def all_state(store: WorkflowRunStore, run_id: str) -> dict[str, object]:
     """Return all full, uncapped shared-state values of *run_id* (for owner-checked `get_workflow(messages=True)`)."""
     with store.read_connection() as connection:
-        rows = connection.execute(
-            "SELECT key, value_json FROM workflow_state WHERE run_id = ? ORDER BY key ASC",
-            (run_id,),
-        ).fetchall()
-    return {row["key"]: json.loads(row["value_json"]) for row in rows}
+        return _all_state_rows(connection, run_id)

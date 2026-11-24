@@ -573,10 +573,12 @@ class WorkflowRunStore:
             if version > len(_MIGRATIONS):
                 msg = f"Workflow store is from a newer MindRoom (schema {version})."
                 raise WorkflowRunStoreError(msg)
-            pending = _MIGRATIONS[version:]
-            for migration in pending:
+            # Always apply the folded CREATE IF NOT EXISTS statements so a v1 store from an earlier branch build
+            # picks up newly added tables without migration numbering, then run any later migrations in order.
+            _create_schema(connection)
+            for migration in _MIGRATIONS[max(version, 1) :]:
                 migration(connection)
-            if pending:
+            if version < len(_MIGRATIONS):
                 connection.execute("DELETE FROM workflow_schema")
                 connection.execute("INSERT INTO workflow_schema (version) VALUES (?)", (len(_MIGRATIONS),))
 
@@ -783,7 +785,7 @@ def _create_schema(connection: sqlite3.Connection) -> None:
 
 _SCHEMA_STATEMENTS = (
     """
-    CREATE TABLE workflow_runs (
+    CREATE TABLE IF NOT EXISTS workflow_runs (
         run_id TEXT PRIMARY KEY, origin_job_id TEXT UNIQUE, reservation_digest TEXT NOT NULL,
         parent_run_id TEXT, parent_node_key TEXT, depth INTEGER NOT NULL,
         epoch INTEGER NOT NULL, owner TEXT, claims_json TEXT NOT NULL,
@@ -796,10 +798,10 @@ _SCHEMA_STATEMENTS = (
         created_at TEXT NOT NULL, finished_at TEXT
     )
     """,
-    "CREATE INDEX workflow_runs_script_run_idx ON workflow_runs(script_run_id)",
-    "CREATE INDEX workflow_runs_parent_run_idx ON workflow_runs(parent_run_id)",
+    "CREATE INDEX IF NOT EXISTS workflow_runs_script_run_idx ON workflow_runs(script_run_id)",
+    "CREATE INDEX IF NOT EXISTS workflow_runs_parent_run_idx ON workflow_runs(parent_run_id)",
     """
-    CREATE TABLE workflow_nodes (
+    CREATE TABLE IF NOT EXISTS workflow_nodes (
         run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
         key TEXT NOT NULL, seq INTEGER NOT NULL, kind TEXT NOT NULL, lane TEXT NOT NULL, idx INTEGER NOT NULL,
         digest TEXT NOT NULL, request_json TEXT NOT NULL, generation INTEGER NOT NULL, attempt INTEGER NOT NULL,
@@ -811,7 +813,7 @@ _SCHEMA_STATEMENTS = (
     )
     """,
     """
-    CREATE TABLE workflow_usage (
+    CREATE TABLE IF NOT EXISTS workflow_usage (
         run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
         key TEXT NOT NULL, generation INTEGER NOT NULL, turn TEXT NOT NULL, attempt INTEGER NOT NULL,
         usage_json TEXT NOT NULL,
@@ -819,16 +821,16 @@ _SCHEMA_STATEMENTS = (
     )
     """,
     """
-    CREATE TABLE workflow_log (
+    CREATE TABLE IF NOT EXISTS workflow_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
         created_at TEXT NOT NULL, text TEXT NOT NULL
     )
     """,
-    "CREATE INDEX workflow_log_run_idx ON workflow_log(run_id, id)",
+    "CREATE INDEX IF NOT EXISTS workflow_log_run_idx ON workflow_log(run_id, id)",
     # The tool calls of agents that reserved runs inside their runs, each with the run it got.
     """
-    CREATE TABLE workflow_calls (
+    CREATE TABLE IF NOT EXISTS workflow_calls (
         run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
         key TEXT NOT NULL, generation INTEGER NOT NULL, call_id TEXT NOT NULL, child_run_id TEXT NOT NULL,
         PRIMARY KEY (run_id, key, generation, call_id, child_run_id)
@@ -836,7 +838,7 @@ _SCHEMA_STATEMENTS = (
     """,
     # Saved workflow files snapshotted once per attempt for SDK run(name).
     """
-    CREATE TABLE workflow_sources (
+    CREATE TABLE IF NOT EXISTS workflow_sources (
         run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
         attempt INTEGER NOT NULL,
         name TEXT NOT NULL,
@@ -846,13 +848,14 @@ _SCHEMA_STATEMENTS = (
     )
     """,
     """
-    CREATE TABLE workflow_messages (
+    CREATE TABLE IF NOT EXISTS workflow_messages (
         run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
         seq INTEGER NOT NULL,
         sender_key TEXT NOT NULL,
         sender_generation INTEGER NOT NULL,
         sender_name TEXT NOT NULL,
         recipient_name TEXT NOT NULL,
+        recipient_keys_json TEXT,
         text TEXT NOT NULL,
         withdrawn INTEGER NOT NULL,
         created_at TEXT NOT NULL,
@@ -860,7 +863,7 @@ _SCHEMA_STATEMENTS = (
     )
     """,
     """
-    CREATE TABLE workflow_cursors (
+    CREATE TABLE IF NOT EXISTS workflow_cursors (
         run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
         reader_key TEXT NOT NULL,
         reader_generation INTEGER NOT NULL,
@@ -869,7 +872,7 @@ _SCHEMA_STATEMENTS = (
     )
     """,
     """
-    CREATE TABLE workflow_state (
+    CREATE TABLE IF NOT EXISTS workflow_state (
         run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
         key TEXT NOT NULL,
         value_json TEXT NOT NULL,
@@ -879,7 +882,7 @@ _SCHEMA_STATEMENTS = (
     )
     """,
     """
-    CREATE TABLE workflow_peer_calls (
+    CREATE TABLE IF NOT EXISTS workflow_peer_calls (
         run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
         op_id TEXT NOT NULL,
         result_json TEXT NOT NULL,
