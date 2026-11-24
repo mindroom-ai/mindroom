@@ -68,7 +68,7 @@ from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import ResponsesStream
 from mindroom.providers.pipeline import retry as retry_stage
-from mindroom.providers.pipeline.media import FALLBACK_MARKER
+from mindroom.providers.pipeline.media import ANSWERED_AUDIO_MARKER, FALLBACK_MARKER
 from mindroom.redaction import redact_sensitive_data
 from mindroom.token_counting.counts import count
 from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, RequestParts
@@ -1020,6 +1020,41 @@ async def test_a_chat_route_sends_audio_and_file_attachments_inline(tmp_path: Pa
         },
         {"type": "file", "file": {"filename": "report.pdf", "file_data": f"data:application/pdf;base64,{pdf}"}},
     ]
+
+
+@pytest.mark.asyncio
+async def test_openrouter_chat_sends_voice_audio_only_before_an_assistant_message(tmp_path: Path) -> None:
+    """Request 1 carries ``input_audio``; requests 2 and 3 carry a byte-identical text note without audio."""
+    voice_path = tmp_path / "att_voice.wav"
+    voice_path.write_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt synthetic")
+    voice = Message(
+        role="user",
+        content="🎤 Check the tests.",
+        audio=[Audio(id="att_voice", filepath=str(voice_path), mime_type="audio/wav")],
+    )
+    call_1 = Message(
+        role="assistant",
+        tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "run", "arguments": "{}"}}],
+    )
+    tool_1 = Message(role="tool", tool_call_id="call_1", content="ok")
+    call_2 = Message(
+        role="assistant",
+        tool_calls=[{"id": "call_2", "type": "function", "function": {"name": "run", "arguments": "{}"}}],
+    )
+    tool_2 = Message(role="tool", tool_call_id="call_2", content="ok")
+    config = {"provider": "openrouter", "id": "google/gemini-4-neon", "api_key": "test-key"}
+    built = _Built(tmp_path, config, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
+
+    await _turn(built, ModelRequest(messages=[voice]))
+    await _turn(built, ModelRequest(messages=[voice, call_1, tool_1]))
+    await _turn(built, ModelRequest(messages=[voice, call_1, tool_1, call_2, tool_2]))
+
+    first, second, third = (built.body(i)["messages"][0] for i in range(3))
+    assert any(part.get("type") == "input_audio" for part in first["content"])
+    assert isinstance(second["content"], str)
+    assert ANSWERED_AUDIO_MARKER in second["content"]
+    assert "audio (att_voice)" in second["content"]
+    assert json.dumps(second, sort_keys=True) == json.dumps(third, sort_keys=True)
 
 
 @pytest.mark.asyncio
