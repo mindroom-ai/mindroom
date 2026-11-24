@@ -46,8 +46,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.logging_config import get_logger
+from mindroom.shell.background_scope import BackgroundLogPolicy
 from mindroom.shell.execution import (
-    BackgroundLogPolicy,
     ProcessRecord,
     ShellRunResult,
     check_command,
@@ -273,9 +273,7 @@ async def _handle_connection(
             )
         elif op == "kill_namespace":
             killed = kill_namespace_records(registry, namespace=str(payload["namespace"]))
-            writer.write(json.dumps({"killed": killed}).encode("utf-8") + b"\n")
-            await writer.drain()
-            return
+            result = ShellRunResult(message=f"Killed {killed}.")
         else:
             result = ShellRunResult(message=f"Error: Unknown shell supervisor operation '{op}'.")
         writer.write(json.dumps(asdict(result)).encode("utf-8") + b"\n")
@@ -411,22 +409,9 @@ def kill_command_via_supervisor(socket_path: str, *, namespace: str, handle: str
     )
 
 
-def _kill_namespace_via_supervisor(socket_path: str, *, namespace: str) -> int:
-    """Kill every background process in *namespace* through the supervisor, returning how many were removed."""
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
-            conn.settimeout(_SYNC_REQUEST_TIMEOUT_SECONDS)
-            conn.connect(socket_path)
-            conn.sendall(json.dumps({"op": "kill_namespace", "namespace": namespace}).encode("utf-8") + b"\n")
-            line = _recv_line(conn)
-    except OSError:
-        return 0
-    try:
-        payload = json.loads(line)
-    except ValueError:
-        return 0
-    killed = payload.get("killed") if isinstance(payload, dict) else None
-    return killed if isinstance(killed, int) and not isinstance(killed, bool) else 0
+def _kill_namespace_via_supervisor(socket_path: str, *, namespace: str) -> None:
+    """Kill every background process in *namespace* through the supervisor."""
+    _sync_supervisor_request(socket_path, {"op": "kill_namespace", "namespace": namespace})
 
 
 def _progress_text(line: bytes) -> str | None:
@@ -551,16 +536,15 @@ class _ShellSupervisorManager:
                 self._supervisor = supervisor
             return supervisor.socket_path
 
-    def kill_namespace(self, namespace: str) -> int:
+    def kill_namespace(self, namespace: str) -> None:
         """Kill every process in *namespace* if a supervisor is already running; never spawn one."""
         with self._lock:
             supervisor = self._supervisor
             socket_path = (
                 supervisor.socket_path if supervisor is not None and supervisor.process.poll() is None else None
             )
-        if socket_path is None:
-            return 0
-        return _kill_namespace_via_supervisor(socket_path, namespace=namespace)
+        if socket_path is not None:
+            _kill_namespace_via_supervisor(socket_path, namespace=namespace)
 
     def shutdown(self) -> None:
         """Terminate the supervisor process and clear cached state."""
@@ -633,13 +617,12 @@ def ensure_shell_supervisor() -> str:
     return manager.ensure()
 
 
-def kill_shell_supervisor_namespace(namespace: str) -> int:
+def kill_shell_supervisor_namespace(namespace: str) -> None:
     """Kill every process in *namespace* in the running supervisor without spawning one."""
     with _manager_lock:
         manager = _manager
-    if manager is None:
-        return 0
-    return manager.kill_namespace(namespace)
+    if manager is not None:
+        manager.kill_namespace(namespace)
 
 
 if __name__ == "__main__":

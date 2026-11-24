@@ -45,7 +45,7 @@ from mindroom.workers.protocol import (
 
 if TYPE_CHECKING:
     from mindroom.credentials.manager import CredentialsManager
-    from mindroom.shell.execution import ShellBackgroundScope
+    from mindroom.shell.background_scope import ShellBackgroundScope
     from mindroom.tool_system.runtime_context import CallOutputStream
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
     from mindroom.workers.backend import WorkerBackend
@@ -539,28 +539,6 @@ def _track_shell_scope_remote(
     return kill_url
 
 
-def _finish_shell_scope_remote(
-    shell_scope: ShellBackgroundScope | None,
-    tracked_kill_url: str | None,
-    *,
-    maybe_backgrounded: bool,
-    worker_handle: WorkerHandle | None,
-    worker_manager: WorkerBackend,
-) -> None:
-    if shell_scope is None or tracked_kill_url is None:
-        return
-    acquire_lease = (
-        functools.partial(acquire_worker_in_flight, worker_manager, worker_handle.worker_key)
-        if worker_handle is not None
-        else None
-    )
-    shell_scope.track_remote_end(
-        tracked_kill_url,
-        backgrounded=maybe_backgrounded,
-        acquire_lease=acquire_lease,
-    )
-
-
 def _stream_execute_response(
     client: _WorkerProxyClient,
     *,
@@ -614,7 +592,6 @@ def execute_worker_proxy_request(
         msg = f"{SANDBOX_RUNTIME_ENV_BY_KEY['proxy_url']} must be set when sandbox proxying is enabled."
         raise RuntimeError(msg)
 
-    shell_scope_id = shell_scope.scope_id if shell_scope is not None else request.shell_scope_id
     in_flight_release: Callable[[], None] | None = None
     tracked_kill_url: str | None = None
     # Treat any failed or cancelled /execute as possibly backgrounded; only a decoded shell_backgrounded=False skips kill.
@@ -636,8 +613,8 @@ def execute_worker_proxy_request(
             with client_factory(timeout=config.proxy_timeout_seconds) as client:
                 run_as_job = job_owns_execution()
                 sent: dict[str, object] = {"run_as_job": run_as_job}
-                if shell_scope_id is not None:
-                    sent["shell_scope_id"] = shell_scope_id
+                if shell_scope is not None:
+                    sent["shell_scope_id"] = shell_scope.scope_id
                 sent.update(
                     _arm_cancellation_and_stdin(
                         cancellation,
@@ -666,7 +643,7 @@ def execute_worker_proxy_request(
                 payload = request.model_copy(update=sent).model_dump(mode="json")
                 # A scoped call auto-backgrounds at 120s even inside a subagent job, so only unscoped job calls are unbounded.
                 deadline = (
-                    None if (run_as_job and shell_scope_id is None) else time.monotonic() + config.proxy_timeout_seconds
+                    None if (run_as_job and shell_scope is None) else time.monotonic() + config.proxy_timeout_seconds
                 )
                 # The read timeout spans worker preparation before the first line and every gap between keep-alives.
                 timeout = httpx.Timeout(
@@ -714,16 +691,16 @@ def execute_worker_proxy_request(
         )
         maybe_backgrounded = answer.shell_backgrounded
     finally:
+        lease_adopted = False
         try:
-            _finish_shell_scope_remote(
-                shell_scope,
-                tracked_kill_url,
-                maybe_backgrounded=maybe_backgrounded,
-                worker_handle=worker_handle,
-                worker_manager=worker_manager,
-            )
+            if shell_scope is not None and tracked_kill_url is not None:
+                lease_adopted = shell_scope.track_remote_end(
+                    tracked_kill_url,
+                    backgrounded=maybe_backgrounded,
+                    release_lease=in_flight_release,
+                )
         finally:
-            if in_flight_release is not None:
+            if in_flight_release is not None and not lease_adopted:
                 in_flight_release()
     if worker_handle is not None:
         worker_manager.touch_worker(worker_handle.worker_key)

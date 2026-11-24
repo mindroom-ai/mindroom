@@ -1118,16 +1118,20 @@ async def test_run_prepared_team_binds_and_closes_shell_background_scope(
     monkeypatch.setattr(team_envelope, "_leader_run", lambda *_a, **_kw: SimpleNamespace(start=fake_start))
     prepared = SimpleNamespace(run_input=lambda _m: None, run_metadata={})
 
+    def start_stream() -> AsyncIterator[object]:
+        seen_scopes.clear()
+        inner_closed.clear()
+        return team_envelope.run_prepared_team(
+            SimpleNamespace(),  # type: ignore[arg-type]
+            prepared,  # type: ignore[arg-type]
+            config=SimpleNamespace(),  # type: ignore[arg-type]
+            runtime_paths=SimpleNamespace(),  # type: ignore[arg-type]
+            scope_context=SimpleNamespace(),  # type: ignore[arg-type]
+            user_id="@alice:example.org",
+        )
+
     # Normal completion binds one scope during iteration and closes it when exhausted.
-    stream = team_envelope.run_prepared_team(
-        SimpleNamespace(),  # type: ignore[arg-type]
-        prepared,  # type: ignore[arg-type]
-        config=SimpleNamespace(),  # type: ignore[arg-type]
-        runtime_paths=SimpleNamespace(),  # type: ignore[arg-type]
-        scope_context=SimpleNamespace(),  # type: ignore[arg-type]
-        user_id="@alice:example.org",
-    )
-    events = [event async for event in stream]
+    events = [event async for event in start_stream()]
     assert events == ["ev1", "ev2"]
     assert len(seen_scopes) == 2
     assert seen_scopes[0] is seen_scopes[1]
@@ -1135,16 +1139,7 @@ async def test_run_prepared_team_binds_and_closes_shell_background_scope(
     assert inner_closed == [True]
 
     # Early close also closes both the inner stream and the ShellBackgroundScope.
-    seen_scopes.clear()
-    inner_closed.clear()
-    early_stream = team_envelope.run_prepared_team(
-        SimpleNamespace(),  # type: ignore[arg-type]
-        prepared,  # type: ignore[arg-type]
-        config=SimpleNamespace(),  # type: ignore[arg-type]
-        runtime_paths=SimpleNamespace(),  # type: ignore[arg-type]
-        scope_context=SimpleNamespace(),  # type: ignore[arg-type]
-        user_id="@alice:example.org",
-    )
+    early_stream = start_stream()
     first = await anext(early_stream)
     assert first == "ev1"
     assert len(seen_scopes) == 1
@@ -1154,16 +1149,7 @@ async def test_run_prepared_team_binds_and_closes_shell_background_scope(
     assert seen_scopes[0].closed
 
     # Cross-task pull and close (as Starlette/Uvicorn streaming does) never raises a ContextVar token mismatch.
-    seen_scopes.clear()
-    inner_closed.clear()
-    cross_task_stream = team_envelope.run_prepared_team(
-        SimpleNamespace(),  # type: ignore[arg-type]
-        prepared,  # type: ignore[arg-type]
-        config=SimpleNamespace(),  # type: ignore[arg-type]
-        runtime_paths=SimpleNamespace(),  # type: ignore[arg-type]
-        scope_context=SimpleNamespace(),  # type: ignore[arg-type]
-        user_id="@alice:example.org",
-    )
+    cross_task_stream = start_stream()
     first_cross = await asyncio.create_task(anext(cross_task_stream))
     assert first_cross == "ev1"
     assert len(seen_scopes) == 1

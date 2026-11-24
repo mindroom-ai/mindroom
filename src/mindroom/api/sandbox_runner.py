@@ -70,10 +70,11 @@ from mindroom.runtime_env_policy import (
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.script_runs.models import script_run_id_from_worker_key
 from mindroom.shell import supervisor as shell_supervisor
+from mindroom.shell.background_scope import ShellBackgroundScope, bind_shell_background_scope
 from mindroom.shell.execution import (
     CommandStdin,
-    ShellBackgroundScope,
-    bind_shell_background_scope,
+    kill_all_records,
+    kill_namespace_records,
     shell_request_budget_seconds,
     stream_command,
 )
@@ -155,6 +156,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
+    from mindroom.shell.execution import ProcessRecord
     from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.worker_computer.protocol import BrowserSession
     from mindroom.workers.backends.local import LocalWorkerStatePaths
@@ -1218,56 +1220,28 @@ async def _execute_prepared_request_inprocess(
     )
 
 
-_inprocess_shell_scopes: dict[str, ShellBackgroundScope] = {}
-_inprocess_shell_scope_refs: dict[str, int] = {}
+_inprocess_shell_records: dict[str, ProcessRecord] = {}
 
 
-async def close_inprocess_shell_scopes() -> None:
-    """Stop every in-process auto-backgrounded shell scope on runner shutdown."""
-    scopes = list(_inprocess_shell_scopes.values())
-    _inprocess_shell_scopes.clear()
-    _inprocess_shell_scope_refs.clear()
-    if scopes:
-        await asyncio.gather(*(scope.close() for scope in scopes), return_exceptions=True)
+def close_inprocess_shell_scopes() -> None:
+    """Stop every in-process auto-backgrounded shell process on runner shutdown."""
+    kill_all_records(_inprocess_shell_records)
 
 
 async def _execute_request_inprocess(call: _ExecuteCall) -> ExecuteResponse:
     prepared_request = _prepare_execute_request(call)
     scope_id = prepared_request.request.shell_scope_id
-    if scope_id is None:
-        return await _execute_prepared_request_inprocess(
+    scope = ShellBackgroundScope(scope_id=scope_id, records=_inprocess_shell_records) if scope_id is not None else None
+    with bind_shell_background_scope(scope) if scope is not None else nullcontext():
+        response = await _execute_prepared_request_inprocess(
             prepared_request.request,
             prepared_request.runtime_paths,
             call.route.config,
             call.tools,
             credentials_manager=get_runtime_credentials_manager(call.route.runtime_paths),
         )
-    scope = _inprocess_shell_scopes.get(scope_id)
-    if scope is None or scope.closed:
-        scope = ShellBackgroundScope(scope_id=scope_id)
-        _inprocess_shell_scopes[scope_id] = scope
-    _inprocess_shell_scope_refs[scope_id] = _inprocess_shell_scope_refs.get(scope_id, 0) + 1
-    before_handles = set(scope.records)
-    before_had = scope.had_backgrounded
-    try:
-        with bind_shell_background_scope(scope):
-            response = await _execute_prepared_request_inprocess(
-                prepared_request.request,
-                prepared_request.runtime_paths,
-                call.route.config,
-                call.tools,
-                credentials_manager=get_runtime_credentials_manager(call.route.runtime_paths),
-            )
-    finally:
-        remaining = _inprocess_shell_scope_refs.get(scope_id, 1) - 1
-        if remaining <= 0:
-            _inprocess_shell_scope_refs.pop(scope_id, None)
-            if not scope.records and _inprocess_shell_scopes.get(scope_id) is scope:
-                _inprocess_shell_scopes.pop(scope_id, None)
-        else:
-            _inprocess_shell_scope_refs[scope_id] = remaining
-    if bool(set(scope.records) - before_handles) or (not before_had and scope.had_backgrounded):
-        response = response.model_copy(update={"shell_backgrounded": True})
+    if scope is not None and scope.had_backgrounded:
+        return response.model_copy(update={"shell_backgrounded": True})
     return response
 
 
@@ -2176,16 +2150,10 @@ async def kill_shell_scope(payload: KillShellScopeRequest) -> KillShellScopeResp
     """Stop every auto-backgrounded shell process owned by one turn scope."""
     if (failure := _protocol_failure(payload.protocol)) is not None:
         return failure
-    killed = 0
-    scope = _inprocess_shell_scopes.pop(payload.shell_scope_id, None)
-    if scope is not None:
-        killed += len(scope.records)
-        await scope.close()
-    killed += await asyncio.to_thread(
-        shell_supervisor.kill_shell_supervisor_namespace,
-        f"shell-scope:{payload.shell_scope_id}",
-    )
-    return KillShellScopeResponse(killed=killed)
+    namespace = f"shell-scope:{payload.shell_scope_id}"
+    kill_namespace_records(_inprocess_shell_records, namespace)
+    await asyncio.to_thread(shell_supervisor.kill_shell_supervisor_namespace, namespace)
+    return KillShellScopeResponse()
 
 
 @router.post("/execute/{request_id}/stdin")

@@ -218,6 +218,6 @@ class KillShellScopeRequest(_WireModel):
 
 
 class KillShellScopeResponse(_WireModel):
-    """How many scoped shell processes were stopped."""
+    """Acknowledgment that scoped shell processes were stopped."""
 
-    killed: int = 0
+    ok: bool = True

@@ -92,7 +92,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         if eager_setup is not None:
             eager_setup.cancel()
-        await close_inprocess_shell_scopes()
+        close_inprocess_shell_scopes()
         await close_worker_terminals(app)
         await stop_worker_ssh(app)
         await close_worker_services(app)

@@ -18,17 +18,22 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths, workspace_home_identity_env
-from mindroom.shell.background_scope import format_auto_background_message, open_background_log
+from mindroom.shell.background_scope import (
+    BackgroundLogPolicy,
+    ShellBackgroundScope,
+    open_background_log,
+    shell_background_scope,
+)
 from mindroom.shell.execution import (
     _MAX_OUTPUT_BYTES,
-    BackgroundLogPolicy,
     ProcessRecord,
+    _background_rejection,
+    _format_auto_background_message,
     _OutputBuffer,
     _OutputProgress,
     _progress_lines,
     kill_namespace_records,
     run_command,
-    shell_background_scope,
     shell_request_budget_seconds,
 )
 from mindroom.tool_jobs.control import JobControl, job_control_context
@@ -1113,7 +1118,7 @@ async def test_scoped_auto_background_untimed_streams_log_and_exits_cleanly(tmp_
     stdout_buf.append("before-out\n")
     stderr_buf = _OutputBuffer()
     stderr_buf.append("before-err\n")
-    preview = format_auto_background_message(
+    preview = _format_auto_background_message(
         pid=4242,
         timeout=0.2,
         log_path=workspace / ".mindroom" / "shell" / "4242-deadbeef.log",
@@ -1226,7 +1231,7 @@ async def test_background_log_size_cap_writes_truncation_notice_and_exit_trailer
             background_log=BackgroundLogPolicy(log_dir=str(log_dir), max_bytes=120),
         )
         assert result.handle is not None
-        log_path = Path(registry[result.handle].log_path or "")
+        log_path = Path(registry[result.handle]._log_path or "")
         log_text = await _wait_for_log_marker(log_path, "[MindRoom: exited with code 0]")
         assert "[Log truncated at 120 bytes limit; command output continues without being logged.]" in log_text
         assert log_text.count("[Log truncated") == 1
@@ -1274,72 +1279,34 @@ async def test_background_log_rejects_symlink_directories(tmp_path: Path, symlin
             assert list(outside.iterdir()) == []
 
 
-@pytest.mark.asyncio
-async def test_kill_namespace_records_and_per_namespace_limit_are_isolated(tmp_path: Path) -> None:
-    """Namespace caps and kill_namespace_records affect only their own namespace."""
-    registry: dict[str, ProcessRecord] = {}
-    log_dir = tmp_path / "logs"
-    policy = BackgroundLogPolicy(log_dir=str(log_dir))
-    try:
-        with patch("mindroom.shell.execution.MAX_BACKGROUNDED", 1):
-            first = await run_command(
-                registry,
-                namespace="ns-a",
-                argv=["bash", "-c", "sleep 10"],
-                env=dict(os.environ),
-                cwd=str(tmp_path),
-                tail=10,
-                timeout=0.15,
-                on_timeout="background",
-                background_log=policy,
-            )
-            rejected = await run_command(
-                registry,
-                namespace="ns-a",
-                argv=["bash", "-c", "sleep 10"],
-                env=dict(os.environ),
-                cwd=str(tmp_path),
-                tail=10,
-                timeout=0.15,
-                on_timeout="background",
-                background_log=policy,
-            )
-            other = await run_command(
-                registry,
-                namespace="ns-b",
-                argv=["bash", "-c", "sleep 10"],
-                env=dict(os.environ),
-                cwd=str(tmp_path),
-                tail=10,
-                timeout=0.15,
-                on_timeout="background",
-                background_log=policy,
-            )
-        assert first.handle is not None
-        assert other.handle is not None
-        assert "Too many backgrounded processes (1/1)" in rejected.message
-        first_pid = registry[first.handle].pid
-        first_log = Path(registry[first.handle].log_path or "")
-        other_pid = registry[other.handle].pid
-
-        removed = kill_namespace_records(registry, "ns-a")
-        assert removed == 1
-        assert first.handle not in registry
-        assert other.handle in registry
-        assert "[MindRoom: stopped when turn ended]" in first_log.read_text(encoding="utf-8")
-        os.kill(other_pid, 0)
-        deadline = time.monotonic() + 2.0
-        while time.monotonic() < deadline:
-            try:
-                os.kill(first_pid, 0)
-            except ProcessLookupError:
-                break
-            await asyncio.sleep(0.02)
-        else:
-            pytest.fail(f"Process {first_pid} still alive after kill_namespace_records")
-    finally:
-        kill_namespace_records(registry, "ns-a")
-        kill_namespace_records(registry, "ns-b")
+def test_background_rejection_enforces_per_namespace_and_total_caps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """_background_rejection enforces closed scope, per-namespace cap, total cap, and duplicate handles."""
+    record = ProcessRecord(
+        namespace="ns-a",
+        handle="shell:11111111",
+        pid=1234,
+        args=["sleep", "10"],
+        process=SimpleNamespace(pid=1234, returncode=None),  # type: ignore[arg-type]
+    )
+    registry = {record.handle: record}
+    closed_scope = ShellBackgroundScope(records=registry, closed=True)
+    assert _background_rejection(registry, namespace="ns-a", handle="shell:22222222", active_scope=closed_scope) == (
+        "Error: Shell turn already ended."
+    )
+    monkeypatch.setattr("mindroom.shell.execution.MAX_BACKGROUNDED", 1)
+    assert _background_rejection(registry, namespace="ns-a", handle="shell:22222222", active_scope=None) == (
+        "Error: Too many backgrounded processes (1/1). Kill or wait for existing ones before running more."
+    )
+    assert _background_rejection(registry, namespace="ns-b", handle="shell:22222222", active_scope=None) is None
+    monkeypatch.setattr("mindroom.shell.execution._MAX_TOTAL_BACKGROUNDED", 1)
+    assert _background_rejection(registry, namespace="ns-b", handle="shell:22222222", active_scope=None) == (
+        "Error: Too many backgrounded processes (1/1). Kill or wait for existing ones before running more."
+    )
+    monkeypatch.setattr("mindroom.shell.execution.MAX_BACKGROUNDED", 4)
+    monkeypatch.setattr("mindroom.shell.execution._MAX_TOTAL_BACKGROUNDED", 4)
+    assert _background_rejection(registry, namespace="ns-a", handle=record.handle, active_scope=None) == (
+        f"Error: Shell handle '{record.handle}' is already registered."
+    )
 
 
 def test_shell_request_budget_caps_auto_background_wait() -> None:
@@ -1369,15 +1336,15 @@ def test_background_log_dir_ownership_checks_leaf_only(
         return SimpleNamespace(st_uid=os.geteuid() + 1) if st.st_ino == parent_ino else st
 
     monkeypatch.setattr(os, "fstat", fake_fstat)
-    opened_fd = bg_module._open_log_dir_fd(leaf_shell)
-    os.close(opened_fd)
+    with bg_module._open_log_dir(leaf_shell):
+        pass
     monkeypatch.undo()
 
     owned_dir = tmp_path / "foreign"
     owned_dir.mkdir()
     monkeypatch.setattr(os, "geteuid", lambda: owned_dir.stat().st_uid + 1)
-    with pytest.raises(PermissionError, match="not owned by the current user"):
-        bg_module._open_log_dir_fd(owned_dir)
+    with pytest.raises(PermissionError, match="not owned by the current user"), bg_module._open_log_dir(owned_dir):
+        pass
 
 
 @pytest.mark.asyncio
@@ -1403,11 +1370,8 @@ async def test_background_log_sweep_filters_generated_names_and_kill_all_trailer
         recent = log_dir / f"{2000 + idx}-{idx:08x}.log"
         recent.write_text("live", encoding="utf-8")
         recent_files.append(recent)
-    dir_fd = bg_module._open_log_dir_fd(log_dir)
-    try:
+    with bg_module._open_log_dir(log_dir) as dir_fd:
         bg_module._sweep_old_log_files(dir_fd, active_names=set())
-    finally:
-        os.close(dir_fd)
     assert not expired.exists()
     assert not old_evict.exists()
     assert unrelated.exists()
@@ -1428,7 +1392,7 @@ async def test_background_log_sweep_filters_generated_names_and_kill_all_trailer
         background_log=policy,
     )
     assert result.handle is not None
-    log_path = Path(registry[result.handle].log_path or "")
+    log_path = Path(registry[result.handle]._log_path or "")
     kill_all_records(registry)
     assert "[MindRoom: stopped]" in log_path.read_text(encoding="utf-8")
 
@@ -1454,7 +1418,7 @@ async def test_auto_backgrounded_natural_exit_preserves_detached_nohup_child(tmp
                 assert record.return_code == 0
                 detached_pid = int(detached_pid_file.read_text(encoding="utf-8").strip())
                 os.kill(detached_pid, 0)
-                log_text = Path(record.log_path or "").read_text(encoding="utf-8")
+                log_text = Path(record._log_path or "").read_text(encoding="utf-8")
                 assert "[MindRoom: exited with code 0]" in log_text
         # Still alive after the scope closes cleanly because the parent command already exited naturally.
         os.kill(detached_pid, 0)

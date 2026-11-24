@@ -61,7 +61,7 @@ from mindroom.hooks import HookRegistry
 from mindroom.llm.media import Image
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_env_policy import VENDOR_TELEMETRY_ENV_VALUES
-from mindroom.shell.execution import ShellBackgroundScope, bind_shell_background_scope, shell_background_scope
+from mindroom.shell.background_scope import ShellBackgroundScope, bind_shell_background_scope, shell_background_scope
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.agno_toolkits import (
@@ -8222,7 +8222,7 @@ async def test_proxy_shell_scope_fires_remote_kill_only_when_backgrounded_or_in_
 
     def bg_responder(url: str, _payload: dict[str, Any]) -> object:
         if url.endswith("/execute/shell-scope/kill"):
-            return {"killed": 1}
+            return {"ok": True}
         return {"ok": True, "result": "Still running", "shell_backgrounded": True}
 
     monkeypatch.setattr(
@@ -8253,7 +8253,7 @@ async def test_proxy_shell_scope_fires_remote_kill_only_when_backgrounded_or_in_
 
     def blocking_responder(url: str, _payload: dict[str, Any]) -> object:
         if url.endswith("/execute/shell-scope/kill"):
-            return {"killed": 1}
+            return {"ok": True}
         entered.set()
         release.wait(timeout=5.0)
         return {"ok": True, "result": "done", "shell_backgrounded": False}
@@ -8350,7 +8350,7 @@ async def test_proxy_shell_scope_kills_remote_scope_after_execute_exception(
 
     def failing_responder(url: str, _payload: dict[str, Any]) -> object:
         if url.endswith("/execute/shell-scope/kill"):
-            return {"killed": 1}
+            return {"ok": True}
         msg = "connection dropped mid-stream"
         raise httpx.ReadError(msg)
 
@@ -8418,7 +8418,7 @@ async def test_proxy_shell_scope_holds_worker_in_flight_lease_until_scope_closes
             manager.touched.clear()
             touch_workers_in_flight(manager)
             touch_during_kill.extend(manager.touched)
-            return {"killed": 1}
+            return {"ok": True}
         return {"ok": True, "result": "Still running", "shell_backgrounded": True}
 
     async with shell_background_scope() as scope:

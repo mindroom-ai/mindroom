@@ -24,8 +24,8 @@ from mindroom.script_runs import shim as script_run_shim
 from mindroom.script_runs.wire import ScriptWorkerError
 from mindroom.shell import execution as shell_execution_module
 from mindroom.shell import supervisor as shell_supervisor
+from mindroom.shell.background_scope import BackgroundLogPolicy
 from mindroom.shell.execution import (
-    BackgroundLogPolicy,
     ShellRunResult,
     run_command,
     shell_request_budget_seconds,
@@ -308,8 +308,7 @@ async def test_monitor_records_exit_when_process_group_cleanup_is_not_permitted(
 
     await shell_execution_module._monitor_process(
         registry,
-        handle,
-        process,
+        record,
         stdout_reader,
         stderr_reader,
     )
@@ -1407,12 +1406,13 @@ async def test_supervisor_background_log_kill_namespace_and_per_namespace_cap(
         assert "Log: .mindroom/shell/" in first.message
         assert "Too many backgrounded processes (1/1)" in rejected.message
         first_pid = registry[first.handle].pid
-        first_log = Path(registry[first.handle].log_path or "")
+        first_log = Path(registry[first.handle]._log_path or "")
         other_pid = registry[other.handle].pid
 
         try:
-            killed = await asyncio.to_thread(_kill_namespace_via_supervisor, socket_path, namespace="shell-scope:a")
-            assert killed == 1
+            await asyncio.to_thread(_kill_namespace_via_supervisor, socket_path, namespace="shell-scope:a")
+            assert first.handle not in registry
+            assert other.handle in registry
             await _assert_pid_dead(first_pid)
             assert "[MindRoom: stopped when turn ended]" in first_log.read_text(encoding="utf-8")
             os.kill(other_pid, 0)
@@ -1422,13 +1422,13 @@ async def test_supervisor_background_log_kill_namespace_and_per_namespace_cap(
 
 
 def test_kill_shell_supervisor_namespace_never_spawns_supervisor(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Killing a namespace returns 0 without spawning when no supervisor is running."""
+    """Killing a namespace is a no-op without spawning when no supervisor is running."""
     spawned: list[bool] = []
     monkeypatch.setattr(_ShellSupervisorManager, "_spawn", lambda _self: spawned.append(True))
     monkeypatch.setattr(shell_supervisor, "_manager", None)
 
-    assert kill_shell_supervisor_namespace("shell-scope:missing") == 0
-    assert _ShellSupervisorManager().kill_namespace("shell-scope:missing") == 0
+    kill_shell_supervisor_namespace("shell-scope:missing")
+    _ShellSupervisorManager().kill_namespace("shell-scope:missing")
     assert spawned == []
 
 

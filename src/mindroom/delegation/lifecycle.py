@@ -49,7 +49,7 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 from mindroom.requester_identity import is_access_checked_requester_id
-from mindroom.shell.execution import shell_background_scope
+from mindroom.shell.background_scope import shell_background_scope
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_system.progress import cap_report, report_tool_progress
 from mindroom.tool_system.registry import builtin_tool_registry

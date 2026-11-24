@@ -2447,7 +2447,7 @@ async def test_realtime_call_tools_bind_shell_background_scope_and_close_it(
         record = scope.records[result.handle]
         observed["scope"] = scope
         observed["pid"] = record.pid
-        observed["log_path"] = record.log_path
+        observed["log_path"] = record._log_path
         return result.message
 
     build = _connected_build(log, runner=("run_bg", run_bg))

@@ -25,7 +25,7 @@ from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import JOB_ENDED_REASON, REPLY_STOPPED_REASON, ToolJobSnapshotUpdate
 from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
-from mindroom.shell.execution import bind_shell_background_scope
+from mindroom.shell.background_scope import bind_shell_background_scope
 from mindroom.tool_jobs.background_after import validate_wait_seconds
 from mindroom.tool_jobs.control import (
     JobControl,

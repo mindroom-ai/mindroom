@@ -30,7 +30,7 @@ from mindroom.llm.errors import ProviderError
 from mindroom.llm.runs import RunStatus
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.shell.execution import current_shell_background_scope
+from mindroom.shell.background_scope import current_shell_background_scope
 from mindroom.tool_jobs import execution, results
 from mindroom.tool_jobs.consumption import (
     ConsumptionOwner,

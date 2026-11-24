@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content, with_prior_usage
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.config.resolution import entity_timezone
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
@@ -60,11 +61,7 @@ from mindroom.response_turn import (
     stream_with_llm_request_log_context,
 )
 from mindroom.run_storage import bind_turn_session, scope_run_storage
-from mindroom.shell.background_scope import (
-    ShellBackgroundScope,
-    bind_shell_background_scope,
-    close_shell_background_scope_shielded,
-)
+from mindroom.shell.background_scope import ShellBackgroundScope, bind_shell_background_scope
 from mindroom.teams.attempt import TeamAttempt
 from mindroom.teams.leader import LeaderRun
 from mindroom.teams.members import (
@@ -316,7 +313,7 @@ def run_prepared_team(
                 async for event in stream:
                     yield event
         finally:
-            await close_shell_background_scope_shielded(scope)
+            await run_coroutine_until_complete(scope.close())
 
     return events()
 

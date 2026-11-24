@@ -7,7 +7,6 @@ import contextlib
 import logging
 import os
 import re
-import shlex
 import signal
 import stat
 import threading
@@ -16,10 +15,13 @@ import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, BinaryIO, Literal, Protocol
+from typing import TYPE_CHECKING, BinaryIO, Literal
+
+from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.path_confinement import open_directory_within_root, open_regular_file_at
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine, Iterable, Iterator
+    from collections.abc import AsyncIterator, Callable, Iterator
 
     from mindroom.shell.execution import ProcessRecord
 
@@ -32,14 +34,6 @@ _LOG_RECENT_PROTECT_SECONDS = 5 * 60
 _BACKGROUND_LOG_NAME_RE = re.compile(r"^\d+-(?:[0-9a-f]{8}|[0-9a-f]{32})\.log$")
 
 StopReason = Literal["timeout", "scope_ended", "stopped"]
-
-
-class _LogOutputBuffer(Protocol):
-    @property
-    def chunks(self) -> Iterable[str]: ...
-    def __len__(self) -> int: ...
-    def render(self, *, tail: int | None = None) -> str: ...
-    def render_parts(self, *, tail: int | None = None, stream: str = "") -> tuple[str, str]: ...
 
 
 @dataclass(frozen=True)
@@ -131,24 +125,6 @@ class BackgroundLogFile:
 
 
 @dataclass
-class LogSinkRef:
-    """Mutable indirection letting stream readers attach to a lazily opened log file."""
-
-    sink: BackgroundLogFile | None = None
-
-
-_local_records_closer: Callable[[dict[str, ProcessRecord]], Coroutine[object, object, None]] | None = None
-
-
-def register_local_records_closer(
-    closer: Callable[[dict[str, ProcessRecord]], Coroutine[object, object, None]],
-) -> None:
-    """Register the async handler that terminates local ProcessRecord entries when a scope closes."""
-    global _local_records_closer
-    _local_records_closer = closer
-
-
-@dataclass
 class _RemoteScopeEndpoint:
     cleanup: Callable[[], None]
     in_flight: int = 0
@@ -156,17 +132,11 @@ class _RemoteScopeEndpoint:
     release_lease: Callable[[], None] | None = None
 
 
-def _run_remote_cleanup(
-    cleanup: Callable[[], None],
-    release_lease: Callable[[], None] | None = None,
-) -> None:
+def _run_remote_cleanup(cleanup: Callable[[], None]) -> None:
     try:
         cleanup()
     except Exception:
         _logger.warning("Remote shell background scope cleanup failed", exc_info=True)
-    finally:
-        if release_lease is not None:
-            release_lease()
 
 
 @dataclass
@@ -195,14 +165,15 @@ class ShellBackgroundScope:
         endpoint_key: str,
         *,
         backgrounded: bool,
-        acquire_lease: Callable[[], Callable[[], None]] | None = None,
-    ) -> None:
-        """Record completion of a remote shell request; hold one worker lease or fire late cleanup if closed."""
+        release_lease: Callable[[], None] | None = None,
+    ) -> bool:
+        """Record completion of a remote shell request; adopt *release_lease* or fire late cleanup if closed."""
         late_cleanup: Callable[[], None] | None = None
+        adopted = False
         with self._remote_lock:
             entry = self._remote_endpoints.get(endpoint_key)
             if entry is None:
-                return
+                return False
             entry.in_flight = max(0, entry.in_flight - 1)
             if backgrounded:
                 self.had_backgrounded = True
@@ -210,17 +181,14 @@ class ShellBackgroundScope:
                     late_cleanup = entry.cleanup
                 else:
                     entry.needs_kill = True
-                    if acquire_lease is not None and entry.release_lease is None:
-                        entry.release_lease = acquire_lease()
+                    if release_lease is not None and entry.release_lease is None:
+                        entry.release_lease = release_lease
+                        adopted = True
             if self.closed and entry.in_flight == 0:
                 self._remote_endpoints.pop(endpoint_key, None)
         if late_cleanup is not None:
             _run_remote_cleanup(late_cleanup)
-
-    async def _close_local_records(self) -> None:
-        if not self.records or _local_records_closer is None:
-            return
-        await _local_records_closer(self.records)
+        return adopted
 
     async def close(self) -> None:
         """Stop unfinished local and remote processes in this scope, flush log trailers, and release leases."""
@@ -237,13 +205,13 @@ class ShellBackgroundScope:
                 entry.needs_kill = False
                 entry.release_lease = None
         try:
-            await self._close_local_records()
+            if self.records:
+                from mindroom.shell.execution import close_background_records  # noqa: PLC0415
+
+                await close_background_records(self.records)
             if remote_cleanups:
                 await asyncio.gather(
-                    *(
-                        asyncio.to_thread(_run_remote_cleanup, cleanup, release_lease)
-                        for cleanup, release_lease in remote_cleanups
-                    ),
+                    *(asyncio.to_thread(_run_remote_cleanup, cleanup) for cleanup, _ in remote_cleanups),
                     return_exceptions=True,
                 )
         finally:
@@ -273,52 +241,37 @@ def bind_shell_background_scope(scope: ShellBackgroundScope | None) -> Iterator[
         _SHELL_BACKGROUND_SCOPE.reset(token)
 
 
-async def close_shell_background_scope_shielded(scope: ShellBackgroundScope) -> None:
-    """Close *scope* completely even if cancellation arrives mid-cleanup, re-raising any cancellation after."""
-    close_task = asyncio.create_task(scope.close())
-    cancelled: asyncio.CancelledError | None = None
-    while not close_task.done():
-        try:
-            await asyncio.shield(close_task)
-        except asyncio.CancelledError as exc:
-            cancelled = exc
-    await close_task
-    if cancelled is not None:
-        raise cancelled
-
-
 @contextlib.asynccontextmanager
-async def shell_background_scope() -> AsyncIterator[ShellBackgroundScope]:
-    """Create, bind, and close a fresh turn-scoped shell background owner."""
+async def shell_background_scope(*, reuse_bound: bool = False) -> AsyncIterator[ShellBackgroundScope]:
+    """Create, bind, and close a fresh turn-scoped shell background owner, or reuse the active one."""
+    if reuse_bound and (existing := current_shell_background_scope()) is not None:
+        yield existing
+        return
     scope = ShellBackgroundScope()
     try:
         with bind_shell_background_scope(scope):
             yield scope
     finally:
-        await close_shell_background_scope_shielded(scope)
+        await run_coroutine_until_complete(scope.close())
 
 
-def _open_log_dir_fd(log_dir: Path) -> int:
-    root, parts = (
-        (log_dir.parent.parent, (".mindroom", log_dir.name))
+@contextlib.contextmanager
+def _open_log_dir(log_dir: Path) -> Iterator[int]:
+    root, relative_dir = (
+        (log_dir.parent.parent, Path(".mindroom", log_dir.name))
         if log_dir.parent.name == ".mindroom"
-        else (log_dir.parent, (log_dir.name,))
+        else (log_dir.parent, Path(log_dir.name))
     )
     root.mkdir(parents=True, exist_ok=True)
-    current_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
-    for idx, part in enumerate(parts):
-        try:
-            with contextlib.suppress(FileExistsError):
-                os.mkdir(part, 0o700, dir_fd=current_fd)
-            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current_fd)
-        finally:
-            os.close(current_fd)
-        if idx == len(parts) - 1 and os.fstat(next_fd).st_uid != os.geteuid():
-            os.close(next_fd)
-            msg = f"Shell log directory is not owned by the current user: {log_dir}"
-            raise PermissionError(msg)
-        current_fd = next_fd
-    return current_fd
+    root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        with open_directory_within_root(root_fd, relative_dir, create=True, mode=0o700) as dir_fd:
+            if os.fstat(dir_fd).st_uid != os.geteuid():
+                msg = f"Shell log directory is not owned by the current user: {log_dir}"
+                raise PermissionError(msg)
+            yield dir_fd
+    finally:
+        os.close(root_fd)
 
 
 def _sweep_old_log_files(dir_fd: int, *, active_names: set[str]) -> None:
@@ -369,10 +322,8 @@ def open_background_log(
     log_dir = Path(policy.log_dir)
     filename = f"{pid}-{handle.removeprefix('shell:')}.log"
     log_path = log_dir / filename
-    dir_fd = _open_log_dir_fd(log_dir)
-    try:
-        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW
-        file_fd = os.open(filename, flags, 0o600, dir_fd=dir_fd)
+    with _open_log_dir(log_dir) as dir_fd:
+        file_fd = open_regular_file_at(dir_fd, filename, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         try:
             stream = os.fdopen(file_fd, "wb")
         except BaseException:
@@ -380,66 +331,7 @@ def open_background_log(
             raise
         active_names = {Path(path).name for path in active_paths if Path(path).parent == log_dir} | {filename}
         _sweep_old_log_files(dir_fd, active_names=active_names)
-    finally:
-        os.close(dir_fd)
     return BackgroundLogFile(path=log_path, file=stream, max_bytes=policy.max_bytes)
-
-
-def seed_background_log(
-    log_file: BackgroundLogFile,
-    stdout_buf: _LogOutputBuffer,
-    stderr_buf: _LogOutputBuffer,
-) -> None:
-    """Write buffered foreground stdout and stderr into a newly opened background log file."""
-    prev_ended_newline = True
-    for buf, stream in ((stdout_buf, ""), (stderr_buf, "stderr")):
-        raw = "".join(buf.chunks)
-        if not raw:
-            continue
-        if not prev_ended_newline:
-            log_file.write("\n")
-        notice, _ = buf.render_parts(tail=None, stream=stream)
-        log_file.write(f"{notice}\n{raw}" if notice else raw)
-        prev_ended_newline = raw.endswith("\n")
-
-
-def format_auto_background_message(
-    *,
-    pid: int,
-    timeout: float,
-    log_path: Path,
-    display_root: str | None,
-    max_runtime_seconds: float | None,
-    no_output_path: str | None,
-    stdout_buf: _LogOutputBuffer,
-    stderr_buf: _LogOutputBuffer,
-    tail: int,
-) -> str:
-    """Format the tool response returned when a shell command moves to the background."""
-    shown = str(log_path)
-    if display_root is not None:
-        with contextlib.suppress(ValueError):
-            shown = str(log_path.relative_to(Path(display_root)))
-    display_path = shlex.quote(shown)
-    lifetime_line = (
-        f"It will be stopped after {max_runtime_seconds:g}s total, or automatically when this turn ends."
-        if max_runtime_seconds is not None
-        else "It is stopped automatically when this turn ends."
-    )
-    lines = [
-        f"Still running after {timeout:g}s; moved to the background (PID {pid}).",
-        f"Log: {display_path} (receives ongoing stdout+stderr and ends with the exit status).",
-        f"Wait: end=$((SECONDS+110)); while ((SECONDS<end)) && kill -0 {pid} 2>/dev/null; do sleep 2; done",
-        f"Stop: kill -- -{pid}",
-        lifetime_line,
-    ]
-    if no_output_path is not None:
-        lines.append(f"No output file was saved to {no_output_path} because the command is still running.")
-    if stdout := stdout_buf.render(tail=tail):
-        lines += ["Output:", stdout]
-    if stderr_buf:
-        lines += ["Stderr:", stderr_buf.render()]
-    return "\n".join(lines)
 
 
 def format_log_trailer(

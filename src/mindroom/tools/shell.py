@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import inspect
 import json
 import os
@@ -22,9 +23,8 @@ from mindroom.constants import (
 )
 from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.shell.background_scope import BackgroundLogPolicy, current_shell_background_scope
 from mindroom.shell.execution import (
-    BackgroundLogPolicy,
-    current_shell_background_scope,
     default_run_timeout_seconds,
     run_command,
     shell_call_timeout,
@@ -647,48 +647,34 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             )
             scope = current_shell_background_scope()
             wait_limit = default_run_timeout_seconds()
-            auto_background = scope is not None and (timeout is None or timeout > wait_limit)
-            namespace = f"shell-scope:{scope.scope_id}" if auto_background and scope is not None else _SHELL_NAMESPACE
-            run_timeout = wait_limit if auto_background else shell_call_timeout(timeout)
-            on_timeout: Literal["background", "kill"] = "background" if auto_background else "kill"
-            max_runtime_seconds = timeout if auto_background else None
-            background_log = self._background_log_policy() if auto_background else None
-            if self._supervisor_socket is not None:
-                result = await run_command_via_supervisor(
-                    self._supervisor_socket,
-                    namespace=namespace,
-                    argv=argv,
-                    env=subprocess_env,
-                    cwd=cwd,
-                    tail=tail,
-                    timeout=run_timeout,
-                    on_timeout=on_timeout,
-                    on_progress=report_tool_progress,
-                    output_destination=output_destination,
-                    launch_failure_exits=worker is not None,
-                    max_runtime_seconds=max_runtime_seconds,
-                    background_log=background_log,
-                )
-            else:
-                result = await run_command(
-                    scope.records if auto_background and scope is not None else {},
-                    namespace=namespace,
-                    argv=argv,
-                    env=subprocess_env,
-                    cwd=cwd,
+            bg_scope = scope if scope is not None and (timeout is None or timeout > wait_limit) else None
+            on_timeout: Literal["background", "kill"] = "background" if bg_scope is not None else "kill"
+            runner = (
+                functools.partial(run_command_via_supervisor, self._supervisor_socket)
+                if self._supervisor_socket is not None
+                else functools.partial(
+                    run_command,
+                    bg_scope.records if bg_scope is not None else {},
                     # Never the terminal MindRoom runs in, where a prompting command would wait forever.
                     stdin=subprocess.DEVNULL,
-                    tail=tail,
-                    timeout=run_timeout,
-                    on_timeout=on_timeout,
-                    on_progress=report_tool_progress,
-                    output_destination=output_destination,
-                    launch_failure_exits=worker is not None,
-                    max_runtime_seconds=max_runtime_seconds,
-                    background_log=background_log,
                 )
-            if auto_background and scope is not None and result.handle is not None:
-                scope.had_backgrounded = True
+            )
+            result = await runner(
+                namespace=f"shell-scope:{bg_scope.scope_id}" if bg_scope is not None else _SHELL_NAMESPACE,
+                argv=argv,
+                env=subprocess_env,
+                cwd=cwd,
+                tail=tail,
+                timeout=wait_limit if bg_scope is not None else shell_call_timeout(timeout),
+                on_timeout=on_timeout,
+                on_progress=report_tool_progress,
+                output_destination=output_destination,
+                launch_failure_exits=worker is not None,
+                max_runtime_seconds=timeout if bg_scope is not None else None,
+                background_log=self._background_log_policy() if bg_scope is not None else None,
+            )
+            if bg_scope is not None and result.handle is not None:
+                bg_scope.had_backgrounded = True
             if worker is not None and result.execution_error:
                 raise ValueError(result.message)
             return ToolOutputFileHandled(result.message) if result.output_file_handled else result.message
