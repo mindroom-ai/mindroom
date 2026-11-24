@@ -77,10 +77,8 @@ def _clean_secret(value: object) -> str | None:
 
 
 def _anthropic_env_headers(runtime_paths: RuntimePaths) -> tuple[bool, list[tuple[str, str]]]:
-    """Parse ``ANTHROPIC_CUSTOM_HEADERS`` (``Name: Value`` lines); return ``(unreadable, pairs)``."""
-    raw_env = get_secret_from_env("ANTHROPIC_CUSTOM_HEADERS", runtime_paths=runtime_paths)
-    if raw_env is None:
-        raw_env = runtime_paths.env_value("ANTHROPIC_CUSTOM_HEADERS")
+    """Parse process-env ``ANTHROPIC_CUSTOM_HEADERS`` (``Name: Value`` lines); return ``(unreadable, pairs)``."""
+    raw_env = runtime_paths.process_env.get("ANTHROPIC_CUSTOM_HEADERS")
     if not isinstance(raw_env, str) or not raw_env.strip():
         return False, []
     if ENV_PLACEHOLDER_PATTERN.fullmatch(raw_env.strip()):
@@ -246,7 +244,7 @@ def _resolve_anthropic_credential(
     if has_own_key:
         return ("token", own_key, "") if own_key is not None else ("none", None, "")
     shared_key = _clean_secret(get_api_key_for_provider("anthropic", runtime_paths=runtime_paths))
-    env_auth_token = _clean_secret(get_secret_from_env("ANTHROPIC_AUTH_TOKEN", runtime_paths=runtime_paths))
+    env_auth_token = _clean_secret(runtime_paths.process_env.get("ANTHROPIC_AUTH_TOKEN"))
     if shared_key and env_auth_token and shared_key != env_auth_token:
         return "opaque", None, "anthropic-env-key-and-auth-token"
     token = env_auth_token or shared_key

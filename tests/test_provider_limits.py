@@ -1211,6 +1211,129 @@ async def test_openrouter_anthropic_custom_headers_and_env_auth_token_never_leak
 
 
 @pytest.mark.asyncio
+async def test_openrouter_anthropic_sdk_env_overrides_ignore_dotenv_and_secret_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ANTHROPIC_CUSTOM_HEADERS and ANTHROPIC_AUTH_TOKEN take effect only from process_env, not .env or *_FILE."""
+    seen_auth: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        auth = request.headers.get("authorization", "")
+        seen_auth.append(auth)
+        if auth in {"Bearer sk-or-real", "Bearer sk-or-model", "Bearer proc-gw", "Bearer tok-proc-env"}:
+            return httpx.Response(
+                200,
+                json={"data": {"limit": 20.0, "limit_remaining": 15.0, "limit_reset": "monthly"}},
+            )
+        return httpx.Response(500)
+
+    _mock_httpx(monkeypatch, _handler)
+    monkeypatch.setattr(provider_limits, "collect_admin_usage", lambda **_kw: _empty_report())
+    config = Config(
+        models={
+            "or_claude": ModelConfig(
+                provider="anthropic",
+                id="anthropic/claude-sonnet-4-6",
+                extra_kwargs={"base_url": "https://openrouter.ai/api"},
+            ),
+        },
+    )
+    config_with_key = Config(
+        models={
+            "or_claude": ModelConfig(
+                provider="anthropic",
+                id="anthropic/claude-sonnet-4-6",
+                extra_kwargs={"base_url": "https://openrouter.ai/api", "api_key": "sk-or-model"},
+            ),
+        },
+    )
+
+    async def _probe(
+        name: str,
+        *,
+        cfg: Config = config,
+        process_env: dict[str, str],
+        dotenv_text: str | None = None,
+    ) -> tuple[list[str], ProviderLimitAccount]:
+        seen_auth.clear()
+        case_dir = tmp_path / name
+        case_dir.mkdir(parents=True, exist_ok=True)
+        if dotenv_text is not None:
+            (case_dir / ".env").write_text(dotenv_text, encoding="utf-8")
+        paths = resolve_primary_runtime_paths(
+            config_path=case_dir / "config.yaml",
+            storage_path=case_dir / "storage",
+            process_env=process_env,
+        )
+        if dotenv_text is not None:
+            assert paths.env_file_values
+        snap = await get_provider_usage_snapshot(config=cfg, runtime_paths=paths, now=FIXED_NOW)
+        return list(seen_auth), snap.accounts[0]
+
+    headers_file = tmp_path / "custom_headers.txt"
+    headers_file.write_text("X-Api-Key: file-gw\n", encoding="utf-8")
+    auth_token_file = tmp_path / "auth_token.txt"
+    auth_token_file.write_text("tok-file-gw\n", encoding="utf-8")
+
+    # .env ANTHROPIC_CUSTOM_HEADERS and ANTHROPIC_AUTH_TOKEN are ignored; ANTHROPIC_API_KEY still probes.
+    auth, acct = await _probe(
+        "dotenv",
+        process_env={},
+        dotenv_text=(
+            "ANTHROPIC_API_KEY=sk-or-real\n"
+            "ANTHROPIC_CUSTOM_HEADERS=X-Api-Key: other-gw\n"
+            "ANTHROPIC_AUTH_TOKEN=tok-other-gw\n"
+        ),
+    )
+    assert auth == ["Bearer sk-or-real"]
+    assert acct.id == "openrouter:1"
+
+    # *_FILE variants in process_env are ignored; ANTHROPIC_API_KEY still probes.
+    auth, acct = await _probe(
+        "files",
+        process_env={
+            "ANTHROPIC_API_KEY": "sk-or-real",
+            "ANTHROPIC_CUSTOM_HEADERS_FILE": str(headers_file),
+            "ANTHROPIC_AUTH_TOKEN_FILE": str(auth_token_file),
+        },
+    )
+    assert auth == ["Bearer sk-or-real"]
+    assert acct.id == "openrouter:1"
+
+    # Without ANTHROPIC_API_KEY, .env / *_FILE ANTHROPIC_AUTH_TOKEN must not be sent to OpenRouter.
+    auth, acct = await _probe(
+        "dotenv-token-only",
+        process_env={"ANTHROPIC_AUTH_TOKEN_FILE": str(auth_token_file)},
+        dotenv_text="ANTHROPIC_AUTH_TOKEN=tok-other-gw\n",
+    )
+    assert auth == []
+    assert acct.unavailable_reason == "not_signed_in"
+
+    # Explicit model api_key is not overridden by .env ANTHROPIC_CUSTOM_HEADERS or *_FILE.
+    auth, acct = await _probe(
+        "model-key",
+        cfg=config_with_key,
+        process_env={"ANTHROPIC_CUSTOM_HEADERS_FILE": str(headers_file)},
+        dotenv_text="ANTHROPIC_CUSTOM_HEADERS=X-Api-Key: other-gw\n",
+    )
+    assert auth == ["Bearer sk-or-model"]
+    assert acct.id == "openrouter:1"
+
+    # Values present in runtime_paths.process_env still take effect as before.
+    auth, acct = await _probe(
+        "proc-headers",
+        process_env={"ANTHROPIC_API_KEY": "sk-or-real", "ANTHROPIC_CUSTOM_HEADERS": "X-Api-Key: proc-gw"},
+    )
+    assert auth == ["Bearer proc-gw"]
+    assert acct.id == "openrouter:1"
+
+    auth, acct = await _probe("proc-token", process_env={"ANTHROPIC_AUTH_TOKEN": "tok-proc-env"})
+    assert auth == ["Bearer tok-proc-env"]
+    assert acct.id == "openrouter:1"
+
+
+@pytest.mark.asyncio
 async def test_google_vertex_distinct_project_ids_group_separately_with_opaque_ids(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
