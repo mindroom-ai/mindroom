@@ -641,6 +641,7 @@ Matrix sync callback
 | `authorization.py` | Sender and per-agent authorization checks |
 | `room_agent_access.py` | The room access check the worker Computer and plugin routes share, and each admitted agent's workspace root and file and terminal access for one caller in one room |
 | `api/agent_profiles.py` | `GET /api/rooms/{room_id}/agents/{agent_user_id}/profile`: an agent's role, the model it runs in the room, and a catalog of the toolkits its config gives its Matrix turns there (registry names, descriptions, categories; no toolkit is built), for Chat's agent card |
+| `api/room_triggers.py` | `GET`/`PATCH`/`DELETE /api/rooms/{room_id}/triggers`: client-session room-scoped trigger listing (with cross-room watch redaction and allowlisted fields) plus strict owner-only enable/disable and delete |
 | `api/workspace_files.py` | Chat clients' `/api/rooms/{room_id}` routes to the workspaces of a room's agents: list them, read and change their files, follow changes |
 | `workspace_files/operations.py` | The file operations behind those routes, confined to the workspace without following links out, and the credentials they hide (`is_hidden`) |
 | `workspace_files/watch.py` | One scanner per workspace that feeds its change streams the changed paths, scanning without following links |
@@ -707,6 +708,7 @@ Matrix sync callback
 | `reactive_triggers/triage.py` | Strictly tool-less, fail-closed cheap triage over untrusted event payloads via the `judgment` subsystem (`llm`, `typesafe`, and `openai_decisions`) |
 | `reactive_triggers/dispatch.py` | Owner-scoped Matrix wake-agent delivery: re-checks policy, owner authorization, room membership, and `include_bots` target self-loop guards at fire time, formats `<untrusted_event_data>` payloads, and stamps owner and loop-guard metadata |
 | `reactive_triggers/external_sources.py` | Verification, payload normalization (including canonical `allowed_repos` casing), subscriber authorization, and SQLite fan-out for shared `github` (HMAC-SHA256), generic `hmac` (HMAC-SHA256), and `ed25519` event sources served at `POST /api/event-sources/{source_id}` |
+| `reactive_triggers/management.py` | Shared owner-checking, re-enable cursor/checkpoint refresh, enable/disable, and delete helpers across webhook and reactive trigger stores |
 | `reactive_triggers/service.py` | `ReactiveTriggerService` runtime coordinator: room message `SupervisedLoop` poller (with opt-in `include_bots` internal-entity watching and target self-loop prevention), live `com.mindroom.thread.tags` observer, startup/reload room reconciliation, and async triage/delivery drainer with retry backoff |
 | `custom_tools/triggers.py` | Local-only unified `triggers(action=...)` toolkit (`watch_room`, `watch_thread`, `subscribe_event`, `create`, `list`, `update`, `set_enabled`, `delete`, `rotate_key`, `history`, `test`) managing reactive triggers, dry-run testing, firing history, and direct signed webhooks |
 | `tools/triggers.py` | Tool-catalog registration and discovery metadata for the unified `triggers` toolkit (`external_trigger_manager` alias declared in `config/tool_aliases.py`) |

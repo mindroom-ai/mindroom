@@ -2119,6 +2119,7 @@ depends_on = [
 path = "mindroom.api.main"
 depends_on = [
     "mindroom.api.agent_profiles",
+    "mindroom.api.room_triggers",
     "mindroom.api.agent_terminals",
     "mindroom.api.app_state",
     "mindroom.api.auth_user",
@@ -2187,6 +2188,20 @@ depends_on = [
     "mindroom.tool_system.metadata",
     "mindroom.tool_system.plugins",
     "mindroom.turn_model",
+]
+
+[[modules]]
+path = "mindroom.api.room_triggers"
+depends_on = [
+    "mindroom.api.app_state",
+    "mindroom.api.config_lifecycle",
+    "mindroom.matrix.state",
+    "mindroom.plugin_http",
+    "mindroom.reactive_triggers.management",
+    "mindroom.reactive_triggers.models",
+    "mindroom.reactive_triggers.store",
+    "mindroom.room_steward",
+    "mindroom.thread_tags",
 ]
 
 [[modules]]
@@ -10942,6 +10957,13 @@ depends_on = [
 ]
 
 [[modules]]
+path = "mindroom.reactive_triggers.management"
+depends_on = [
+    "mindroom.reactive_triggers.models",
+    "mindroom.thread_tags",
+]
+
+[[modules]]
 path = "mindroom.reactive_triggers.matching"
 depends_on = [
     "mindroom.constants",
@@ -11000,6 +11022,7 @@ depends_on = [
     "mindroom.matrix.room_reconciliation",
     "mindroom.matrix.state",
     "mindroom.reactive_triggers.external_sources",
+    "mindroom.reactive_triggers.management",
     "mindroom.reactive_triggers.matching",
     "mindroom.reactive_triggers.models",
     "mindroom.reactive_triggers.store",
