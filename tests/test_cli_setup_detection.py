@@ -29,7 +29,7 @@ from mindroom.cli.setup_detection import (
     run_inline_cli_login,
     verify_provider_api_key,
 )
-from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
+from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, OPENAI_BASE_URL_DEFAULT
 from tests.conftest import load_config_yaml
 
 if TYPE_CHECKING:
@@ -348,9 +348,20 @@ class TestProviderDetection:
         assert detected_embed == DetectedProvider("ollama", False, "running (no chat models pulled)")
         assert calls == [("http://localhost:11434/api/tags", False)]
 
-        # Explicit non-loopback custom OLLAMA_HOST with 0 models -> trust_env=True, no models pulled.
+        # Port-only OLLAMA_HOST=:11435 normalizes to http://127.0.0.1:11435 with trust_env=False (matching Ollama SDK).
         calls.clear()
         empty_resp = httpx.Response(200, json={"models": []})
+        port_only_rt = _runtime(tmp_path, env={"OLLAMA_HOST": ":11435"})
+        with patch.object(setup_detection.httpx, "Client", side_effect=_mock_ollama_client(empty_resp, calls)):
+            assert detect_single_provider("ollama", port_only_rt) == DetectedProvider(
+                "ollama",
+                False,
+                "running (no models pulled)",
+            )
+        assert calls == [("http://127.0.0.1:11435/api/tags", False)]
+
+        # Explicit non-loopback custom OLLAMA_HOST with 0 models -> trust_env=True, no models pulled.
+        calls.clear()
         remote_rt = _runtime(tmp_path, env={"OLLAMA_HOST": "http://ollama.lan:11434/"})
         with patch.object(setup_detection.httpx, "Client", side_effect=_mock_ollama_client(empty_resp, calls)):
             assert detect_single_provider("ollama", remote_rt) == DetectedProvider(
@@ -396,7 +407,11 @@ class TestProviderDetection:
             snapshot = detect_available_providers(rt)
 
         assert snapshot.both_claude_and_codex_ready() is True
-        assert snapshot.ready_presets() == ("claude_code", "codex", "openai")
+        assert [preset for preset, info in snapshot.providers.items() if info.ready] == [
+            "claude_code",
+            "codex",
+            "openai",
+        ]
         summary = snapshot.summary_line()
         assert summary is not None
         assert "Claude (Claude Pro)" in summary
@@ -421,6 +436,10 @@ class TestLiveApiKeyVerification:
         assert res.status == "rejected"
         assert sample_key not in res.detail
 
+        with patch.object(setup_detection.httpx, "get", return_value=httpx.Response(403)):
+            forbidden_res = verify_provider_api_key("openai", sample_key)
+        assert forbidden_res == KeyCheckResult(status="inconclusive", detail="HTTP 403")
+
         with patch.object(setup_detection.httpx, "get", return_value=httpx.Response(503)):
             assert verify_provider_api_key("openrouter", sample_key).status == "inconclusive"
 
@@ -436,6 +455,13 @@ class TestLiveApiKeyVerification:
                 assert bad_res.status == "rejected"
                 assert "invalid characters" in bad_res.detail
                 assert bad_key not in bad_res.detail
+
+        # Stock provider base URL (even with trailing slash) still runs live verification.
+        stock_rt = _runtime(tmp_path, env={"OPENAI_BASE_URL": f"{OPENAI_BASE_URL_DEFAULT}/"})
+        with patch.object(setup_detection.httpx, "get", return_value=httpx.Response(200)) as stock_get:
+            stock_res = verify_provider_api_key("openai", sample_key, runtime_paths=stock_rt)
+        assert stock_res == KeyCheckResult(status="valid")
+        assert stock_get.call_count == 1
 
         # Custom provider endpoint env var skips stock key check with zero HTTP calls.
         custom_rt = _runtime(tmp_path, env={"OPENAI_BASE_URL": "https://gateway.internal/v1"})
@@ -634,6 +660,7 @@ class TestInlineCliLogin:
     ) -> None:
         """`run_inline_cli_login` scrubs Claude overrides and forwards only `CODEX_HOME` (never the rest of `.env`)."""
         bin_dir = tmp_path / "bin"
+        monkeypatch.setenv("PATH", str(bin_dir))
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-scrub-me")
         claude_bin = _write_fake_cli(
             bin_dir,
@@ -644,9 +671,14 @@ class TestInlineCliLogin:
                 "assert 'ANTHROPIC_API_KEY' not in os.environ\n"
             ),
         )
-        custom_codex_home = str(tmp_path / "custom-codex")
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setenv("MINDROOM_API_KEY", "shell-key")
+        monkeypatch.delenv("DOTENV_ONLY_SENTINEL", raising=False)
+        expanded_codex_home = fake_home / "work-codex"
         (tmp_path / ".env").write_text(
-            f"CODEX_HOME={custom_codex_home}\nMINDROOM_API_KEY=secret-from-dotenv\n",
+            "CODEX_HOME=~/work-codex\nMINDROOM_API_KEY=env-file-key\nDOTENV_ONLY_SENTINEL=secret-from-dotenv\n",
             encoding="utf-8",
         )
         rt = constants_module.resolve_primary_runtime_paths(config_path=tmp_path / "config.yaml", process_env={})
@@ -656,14 +688,38 @@ class TestInlineCliLogin:
             (
                 "import os, sys\n"
                 "assert sys.argv[1:] == ['login']\n"
-                f"assert os.environ.get('CODEX_HOME') == {custom_codex_home!r}\n"
-                "assert 'MINDROOM_API_KEY' not in os.environ\n"
+                f"assert os.environ.get('CODEX_HOME') == {str(expanded_codex_home)!r}\n"
+                "assert os.environ.get('MINDROOM_API_KEY') == 'shell-key'\n"
+                "assert 'DOTENV_ONLY_SENTINEL' not in os.environ\n"
             ),
         )
 
         assert run_inline_cli_login("claude_code", str(claude_bin), runtime_paths=rt) is True
         assert run_inline_cli_login("codex", str(codex_bin), runtime_paths=rt) is True
         assert run_inline_cli_login("kimi", str(codex_bin), runtime_paths=rt) is False
+
+        # Detection uses the same expanded CODEX_HOME (and CODEX_HOME_FILE) as runtime and inline login.
+        expanded_codex_home.mkdir()
+        (expanded_codex_home / "auth.json").write_text(
+            json.dumps(
+                {
+                    "auth_mode": "chatgpt",
+                    "tokens": {"access_token": _make_jwt({"exp": int(time.time()) + 3600})},
+                },
+            ),
+            encoding="utf-8",
+        )
+        expected_codex = DetectedProvider("codex", True, "signed in", cli_path=str(codex_bin))
+        assert detect_single_provider("codex", rt) == expected_codex
+
+        codex_home_file = tmp_path / "codex-home-file"
+        codex_home_file.write_text("~/work-codex\n", encoding="utf-8")
+        rt_file = constants_module.resolve_primary_runtime_paths(
+            config_path=tmp_path / "file-cfg" / "config.yaml",
+            process_env={"CODEX_HOME_FILE": str(codex_home_file)},
+        )
+        assert run_inline_cli_login("codex", str(codex_bin), runtime_paths=rt_file) is True
+        assert detect_single_provider("codex", rt_file) == expected_codex
 
     def test_inline_login_accept_marks_ready_and_decline_shows_hint(
         self,
@@ -855,6 +911,20 @@ class TestInteractiveConfigInit:
         )
         assert res_piped.exit_code == 0, res_piped.output
         assert load_config_yaml(t_piped).models["default"].provider == "codex"
+
+        t_existing_env = tmp_path / "piped_existing_env" / "config.yaml"
+        t_existing_env.parent.mkdir(parents=True)
+        existing_env = t_existing_env.parent / ".env"
+        original_env = "KEEP_ME=preserve-existing-dotenv\nMINDROOM_API_KEY=existing-dashboard-key\n"
+        existing_env.write_text(original_env, encoding="utf-8")
+        res_existing_env = runner.invoke(
+            app,
+            ["config", "init", "--path", str(t_existing_env), "--matrix-server", "self-hosted"],
+            input="codex\nn\n",
+        )
+        assert res_existing_env.exit_code == 0, res_existing_env.output
+        assert load_config_yaml(t_existing_env).models["default"].provider == "codex"
+        assert existing_env.read_text(encoding="utf-8") == original_env
 
         t_no_input = tmp_path / "no_input" / "config.yaml"
         res_no_input = runner.invoke(

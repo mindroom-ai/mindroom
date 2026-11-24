@@ -19,7 +19,15 @@ import httpx
 
 from mindroom import constants
 from mindroom.credentials.environment import get_secret_from_env
-from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
+from mindroom.model_defaults import (
+    ANTHROPIC_BASE_URL_DEFAULT,
+    CEREBRAS_HOST_DEFAULT,
+    DEEPSEEK_BASE_URL_DEFAULT,
+    GROQ_HOST_DEFAULT,
+    OLLAMA_HOST_DEFAULT,
+    OPENAI_BASE_URL_DEFAULT,
+    OPENROUTER_BASE_URL_DEFAULT,
+)
 from mindroom.providers.claude_code.launcher import SCRUB_NAMES, SCRUB_PREFIXES
 from mindroom.providers.key_checks import PROVIDER_KEY_CHECKS, provider_endpoint_variables
 from mindroom.providers.openai.codex_auth import codex_login_status
@@ -80,6 +88,14 @@ _INLINE_LOGIN_SPECS: dict[str, tuple[str, tuple[str, ...]]] = {
     "codex": ("codex login", ("login",)),
     "claude_code": ("claude auth login", ("auth", "login")),
 }
+_STOCK_PROVIDER_BASE_URLS: dict[str, str] = {
+    "anthropic": ANTHROPIC_BASE_URL_DEFAULT,
+    "openai": OPENAI_BASE_URL_DEFAULT,
+    "openrouter": OPENROUTER_BASE_URL_DEFAULT,
+    "deepseek": DEEPSEEK_BASE_URL_DEFAULT,
+    "cerebras": CEREBRAS_HOST_DEFAULT,
+    "groq": GROQ_HOST_DEFAULT,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,10 +136,6 @@ class DetectionSnapshot:
     def get(self, preset: str) -> DetectedProvider | None:
         """Return the detected entry for ``preset``, if any."""
         return self.providers.get(preset)
-
-    def ready_presets(self) -> tuple[str, ...]:
-        """Return preset names that are ready to answer immediately."""
-        return tuple(preset for preset, info in self.providers.items() if info.ready)
 
     def both_claude_and_codex_ready(self) -> bool:
         """Return whether both Claude subscription and Codex ChatGPT logins are ready."""
@@ -191,7 +203,7 @@ def verify_provider_api_key(
     if (
         runtime_paths is not None
         and (env_key := constants.env_key_for_provider(preset))
-        and (endpoint_vars := provider_endpoint_variables(env_key, runtime_paths))
+        and (endpoint_vars := _custom_endpoint_variables(preset, env_key, runtime_paths))
     ):
         return KeyCheckResult(
             status="inconclusive",
@@ -207,7 +219,7 @@ def verify_provider_api_key(
         return KeyCheckResult(status="inconclusive", detail="Could not reach provider.")
     if 200 <= response.status_code < 300:
         return KeyCheckResult(status="valid")
-    status: KeyCheckStatus = "rejected" if response.status_code in {401, 403} else "inconclusive"
+    status: KeyCheckStatus = "rejected" if response.status_code == 401 else "inconclusive"
     return KeyCheckResult(status=status, detail=f"HTTP {response.status_code}")
 
 
@@ -225,11 +237,7 @@ def run_inline_cli_login(preset: str, cli_path: str, *, runtime_paths: RuntimePa
     env: dict[str, str] | None = None
     if preset == "claude_code":
         env = _scrubbed_claude_env()
-    elif (
-        preset == "codex"
-        and runtime_paths is not None
-        and (codex_home := (runtime_paths.env_value("CODEX_HOME") or "").strip())
-    ):
+    elif preset == "codex" and runtime_paths is not None and (codex_home := _resolved_codex_home(runtime_paths)):
         env = {**os.environ, "CODEX_HOME": codex_home}
     try:
         return subprocess.run([cli_path, *spec[1]], env=env, check=False).returncode == 0
@@ -285,8 +293,27 @@ def _format_claude_subscription(raw_subscription: object) -> str | None:
     return None
 
 
+def _custom_endpoint_variables(preset: str, env_key: str, runtime_paths: RuntimePaths) -> list[str]:
+    stock_url = _STOCK_PROVIDER_BASE_URLS.get(preset)
+    normalized_stock = stock_url.rstrip("/") if stock_url is not None else None
+    return [
+        name
+        for name in provider_endpoint_variables(env_key, runtime_paths)
+        if normalized_stock is None
+        or (value := get_secret_from_env(name, runtime_paths)) is None
+        or value.strip().rstrip("/") != normalized_stock
+    ]
+
+
+def _resolved_codex_home(runtime_paths: RuntimePaths) -> str | None:
+    raw = get_secret_from_env("CODEX_HOME", runtime_paths)
+    if not raw or not (cleaned := raw.strip()):
+        return None
+    return str(Path(cleaned).expanduser())
+
+
 def _probe_codex(runtime_paths: RuntimePaths) -> DetectedProvider | None:
-    codex_home = (runtime_paths.env_value("CODEX_HOME") or "").strip() or None
+    codex_home = _resolved_codex_home(runtime_paths)
     cli_path = _resolve_cli_path("codex")
     status = codex_login_status(codex_home=codex_home)
     if status.signed_in:
@@ -345,6 +372,8 @@ def _is_loopback_host(hostname: str | None) -> bool:
 
 def _normalize_ollama_host(raw_host: str) -> tuple[str, str] | None:
     """Normalize an Ollama host matching Ollama SDK defaults (`http://` and default port when omitted)."""
+    if raw_host.startswith(":"):
+        raw_host = f"127.0.0.1{raw_host}"
     default_port = urlsplit(OLLAMA_HOST_DEFAULT).port or 11434
     scheme, sep, hostport = raw_host.partition("://")
     if not sep:

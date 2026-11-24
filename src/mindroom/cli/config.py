@@ -611,12 +611,14 @@ def config_init(
             raise typer.Exit(0)
 
     selected_matrix_server, explicit_preset = _parse_config_init_flags(matrix_server, provider=provider)
-    replace_env_file = False if print_config else _should_replace_env_file(env_path, force=force, no_input=no_input)
-    # When overwriting `.env`, detect/check against process env only so keys about to be wiped do not skip prompts.
-    detection_runtime = replace(runtime_paths, env_file_values={}) if replace_env_file else runtime_paths
     can_prompt = explicit_preset is None and not print_config and not no_input
     interactive_wizard = can_prompt and terminal_is_interactive()
+    replace_env_file = False
+    detection_runtime = runtime_paths
     if interactive_wizard:
+        replace_env_file = _should_replace_env_file(env_path, force=force, no_input=no_input)
+        # When overwriting `.env`, detect/check against process env only so keys about to be wiped do not skip prompts.
+        detection_runtime = replace(runtime_paths, env_file_values={}) if replace_env_file else runtime_paths
         console.print(section("Model provider"))
         selection, provider_api_key = _resolve_interactive_setup(
             detection_runtime,
@@ -640,6 +642,9 @@ def config_init(
         )
         console.print(_yaml_syntax(content, line_numbers=False, word_wrap=False), soft_wrap=True)
         return
+
+    if not interactive_wizard:
+        replace_env_file = _should_replace_env_file(env_path, force=force, no_input=no_input)
 
     env_changed = _write_starter_setup(
         runtime_paths,
