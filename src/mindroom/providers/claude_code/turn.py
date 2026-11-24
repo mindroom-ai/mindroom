@@ -57,6 +57,8 @@ _COUNTERS = {
     "cache_read_input_tokens": "cacheReadInputTokens",
     "output_tokens": "outputTokens",
 }
+# How many consecutive model messages in one step may call unoffered tools before MindRoom stops the turn.
+_MAX_UNOFFERED_ROUNDS = 3
 
 
 class ResultsOutrun(ProviderUnavailable):
@@ -73,7 +75,8 @@ class _Step:
 
     ``usage`` sums the model messages that ended and ``current`` is the usage of the one still streaming. ``seen``
     holds each model message's id with whether it streams, ``streaming`` the id of the one that streams now, ``ended``
-    why it ended, and ``spoke`` the id of the one whose text came last. ``error`` is a failed request's kind.
+    why it ended, and ``spoke`` the id of the one whose text came last. ``error`` is a failed request's kind, and
+    ``unoffered_rounds`` counts model messages with unoffered tool calls, grouped by ``unoffered_message``.
     """
 
     text: list[str] = field(default_factory=list)
@@ -87,6 +90,8 @@ class _Step:
     spoke: str | None = None
     error: str | None = None
     stop_reason: StopReason | None = None
+    unoffered_rounds: int = 0
+    unoffered_message: str | None = None
 
     def _reported(self) -> list[ModelEvent]:
         partial = add_usage(self.usage, None if self.current is None else _metrics(self.current))
@@ -120,7 +125,9 @@ class _Step:
         elif isinstance(message, UserMessage):
             # Claude Code says which tool results it took before its model goes on with them.
             blocks = message.content if isinstance(message.content, list) else []
-            session.bridge.unconfirmed -= {block.tool_use_id for block in blocks if isinstance(block, ToolResultBlock)}
+            confirmed = {block.tool_use_id for block in blocks if isinstance(block, ToolResultBlock)}
+            session.bridge.unconfirmed -= confirmed
+            session.bridge.ignored -= confirmed
         elif not session.inventoried:
             # Nothing a process says counts before it said that it runs with exactly MindRoom's tools.
             msg = "Claude Code did not start its turn with exactly MindRoom's tools, so the turn was stopped."
@@ -190,9 +197,18 @@ class _Step:
                 return self._think(piece["thinking"])
         return []
 
-    def _keep_call(self, block: ToolUseBlock, session: LiveSession) -> None:
-        if (call := _tool_call(block, session)) is not None:
-            self.calls.append(call)
+    def _keep_call(self, block: ToolUseBlock, session: LiveSession) -> bool:
+        if (call := _tool_call(block, session)) is None:
+            return False
+        self.calls.append(call)
+        return True
+
+    def _unstreamed_block(self, block: object, message_id: str | None) -> list[ModelEvent]:
+        if isinstance(block, TextBlock) and block.text:
+            return self._say(block.text, message_id)
+        if isinstance(block, ThinkingBlock) and block.thinking:
+            return self._think(block.thinking)
+        return []
 
     def _assistant(self, message: AssistantMessage, session: LiveSession) -> list[ModelEvent]:
         """Keep a complete block's tool call; a message that did not stream also gives its text and its usage."""
@@ -205,15 +221,18 @@ class _Step:
             if message.usage is not None:
                 self._count(message.usage, session)
         events: list[ModelEvent] = []
+        unoffered = False
         for block in message.content:
             if isinstance(block, ToolUseBlock):
-                self._keep_call(block, session)
-            elif self.seen[message.message_id]:
-                continue
-            elif isinstance(block, TextBlock) and block.text:
-                events += self._say(block.text, message.message_id)
-            elif isinstance(block, ThinkingBlock) and block.thinking:
-                events += self._think(block.thinking)
+                unoffered |= not self._keep_call(block, session)
+            elif not self.seen[message.message_id]:
+                events += self._unstreamed_block(block, message.message_id)
+        if unoffered and (message.message_id is None or message.message_id != self.unoffered_message):
+            self.unoffered_message = message.message_id
+            self.unoffered_rounds += 1
+            if self.unoffered_rounds > _MAX_UNOFFERED_ROUNDS:
+                msg = "Claude repeatedly called tools MindRoom did not offer."
+                raise ProviderError(msg, provider=session.provider)
         if self.calls and self.streaming is None:
             # No end of a model message follows calls that did not stream, so which call is its last is not known.
             msg = "Claude Code did not stream the model message that called MindRoom's tools."
@@ -227,6 +246,7 @@ def _tool_call(block: ToolUseBlock, session: LiveSession) -> dict[str, Any] | No
     name = session.bridge.names.get(short) if block.name.startswith(TOOL_PREFIX) else None
     if name is None:
         # The process has only MindRoom's tools, so Claude Code answers this call with an error the model can correct.
+        session.bridge.ignore(block.id)
         logger.warning("claude_code_unoffered_tool_called", tool=block.name)
         return None
     if not session.bridge.made(block.id, short, block.input):

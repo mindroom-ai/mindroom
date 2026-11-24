@@ -61,7 +61,8 @@ class ToolBridge:
     """The tool calls of one Claude Code process, by call id: each waits for the result MindRoom's loop produces.
 
     A call is in ``calls`` until Claude Code was handed its result, then its id is ``unconfirmed`` until Claude Code
-    said it took the result, and ``spent`` for good. ``failure`` says why the process can no longer be trusted.
+    said it took the result, and ``spent`` for good. ``ignored`` holds ids of unoffered calls whose refusal Claude Code
+    may emit itself. ``failure`` says why the process can no longer be trusted.
     """
 
     names: dict[str, str]
@@ -69,6 +70,7 @@ class ToolBridge:
     calls: dict[str, _Call] = field(default_factory=dict)
     unconfirmed: set[str] = field(default_factory=set)
     spent: set[str] = field(default_factory=set)
+    ignored: set[str] = field(default_factory=set)
     failure: str | None = None
 
     def _call(self, tool_use_id: str) -> _Call:
@@ -77,9 +79,14 @@ class ToolBridge:
             self.calls[tool_use_id] = _Call(loop.create_future(), loop.create_future())
         return self.calls[tool_use_id]
 
+    def ignore(self, tool_use_id: str) -> None:
+        """Record an unoffered call id whose refusal Claude Code may emit."""
+        if tool_use_id not in self.calls and tool_use_id not in self.spent:
+            self.ignored.add(tool_use_id)
+
     def made(self, tool_use_id: str, name: str, arguments: object) -> bool:
         """Keep a tool call the model wrote, which Claude Code then brings to the tool server; False for a used id."""
-        if tool_use_id in self.spent or (call := self._call(tool_use_id)).made.done():
+        if tool_use_id in self.spent or tool_use_id in self.ignored or (call := self._call(tool_use_id)).made.done():
             return False
         call.made.set_result((name, canonical_arguments(arguments)))
         return True

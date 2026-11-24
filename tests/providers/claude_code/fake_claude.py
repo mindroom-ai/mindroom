@@ -28,9 +28,10 @@ starts its block, and ``complete_only`` sends the message whole, without streami
 tools. A tool with ``"mcp": {"name": ..., "input": ...}`` reaches the tool server as that other call, and one with
 ``"hidden": true`` reaches it without the model having made it. ``abandon`` starts each tool call and goes on
 without its result, ``cancel`` also cancels it, and ``repeat`` calls the tool of that id once more after the
-message's calls returned. A tool with ``"denied": true`` never reaches the tool server, one with ``"unused": true``
-reaches it and its result is dropped, and one with ``raw_name``
-is written under that name as it is. A step with ``after_file`` starts once that file exists.
+message's calls returned. A tool with ``"denied": true`` never reaches the tool server, one with ``"unknown": true``
+is refused with an error tool result without reaching the tool server, one with ``"unused": true`` reaches it and its
+result is dropped, and one with ``raw_name`` is written under that name as it is. A step with ``after_file`` starts
+once that file exists.
 """
 # ruff: noqa: D102
 
@@ -246,7 +247,8 @@ class FakeClaude:
 
     def refuse_call(self, call: dict[str, Any]) -> None:
         """Answer a call to a tool the process does not have with an error, as Claude Code does."""
-        text = f"<tool_use_error>Error: No such tool available: {call['raw_name']}</tool_use_error>"
+        name = call.get("raw_name") or f"mcp__mindroom__{call['name']}"
+        text = f"<tool_use_error>Error: No such tool available: {name}</tool_use_error>"
         self.results[call["id"]] = text
         answer = {"type": "tool_result", "tool_use_id": call["id"], "content": text, "is_error": True}
         self.emit("user", message={"role": "user", "content": [answer]}, parent_tool_use_id=None)

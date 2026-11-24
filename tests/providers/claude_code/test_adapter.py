@@ -1426,10 +1426,21 @@ async def test_an_unusable_call_fails_before_any_call_is_handed_over(
     assert len(cli.events("exit")) == 1
 
 
-@pytest.mark.parametrize("name", ["Bash", "lookup"], ids=["another tool", "an offered tool without its prefix"])
-async def test_a_call_to_a_tool_mindroom_did_not_offer_is_left_to_claude_code(tmp_path: Path, name: str) -> None:
+@pytest.mark.parametrize(
+    ("tool", "expected"),
+    [
+        pytest.param({"raw_name": "Bash"}, "Bash", id="another tool"),
+        pytest.param({"raw_name": "lookup"}, "lookup", id="an offered tool without its prefix"),
+        pytest.param({"name": "nonexistent"}, "mcp__mindroom__nonexistent", id="a prefixed unoffered tool"),
+    ],
+)
+async def test_a_call_to_a_tool_mindroom_did_not_offer_is_left_to_claude_code(
+    tmp_path: Path,
+    tool: dict[str, Any],
+    expected: str,
+) -> None:
     """Claude Code answers such a call with an error itself, so the model can correct it and the turn goes on."""
-    steps = [{"tools": [{"id": "toolu_x", "raw_name": name, "input": {}, "unknown": True}]}, {"text": "Saw {toolu_x}"}]
+    steps = [{"tools": [{"id": "toolu_x", **tool, "input": {}, "unknown": True}]}, {"text": "Saw {toolu_x}"}]
     cli = fake_cli(tmp_path, {"turns": [steps]})
     events: list[StreamEvent] = []
     request = ModelRequest(messages=[user("Look up the markers.")], tools=[LOOKUP])
@@ -1439,8 +1450,54 @@ async def test_a_call_to_a_tool_mindroom_did_not_offer_is_left_to_claude_code(tm
     assert not any(isinstance(event, ToolCallReady) for event in events)
     completed = [event for event in events if isinstance(event, TurnCompleted)]
     assert len(completed) == 1
-    assert completed[0].message.content == f"Saw <tool_use_error>Error: No such tool available: {name}</tool_use_error>"
+    assert (
+        completed[0].message.content
+        == f"Saw <tool_use_error>Error: No such tool available: {expected}</tool_use_error>"
+    )
     assert completed[0].message.tool_calls in (None, [])
+
+
+async def test_a_mixed_batch_continues_the_parked_process_after_an_unoffered_call_refusal(tmp_path: Path) -> None:
+    """A refusal queued for an unoffered call before a parked offered call does not break continuation."""
+    turn = [
+        {"tools": [{"id": "toolu_x", "raw_name": "lookup", "input": {}, "unknown": True}, call("toolu_a", "a")]},
+        {"text": "{toolu_x}|{toolu_a}"},
+    ]
+    cli = fake_cli(tmp_path, {"turns": [turn]})
+    provider = cli.provider()
+    messages = [user("Look up a.")]
+
+    asked = await complete(provider, ModelRequest(messages=messages, tools=[LOOKUP]))
+    [parked] = SESSIONS.resting.values()
+    async with asyncio.timeout(10):
+        while parked.process.messages.empty():  # noqa: ASYNC110 - wait for the subprocess to queue the refusal
+            await asyncio.sleep(0.01)
+
+    messages += [asked.message, result("toolu_a", "LILAC-HERON")]
+    answer = await complete(provider, ModelRequest(messages=messages, tools=[LOOKUP]))
+
+    assert [made["id"] for made in asked.message.tool_calls or ()] == ["toolu_a"]
+    assert len(cli.events("spawn")) == 1
+    assert answer.content == "<tool_use_error>Error: No such tool available: lookup</tool_use_error>|LILAC-HERON"
+    assert not parked.bridge.ignored
+
+
+async def test_repeated_unoffered_tool_calls_fail_after_the_round_limit(tmp_path: Path) -> None:
+    """Consecutive unoffered-only model messages stop once they pass the round limit."""
+    unoffered = [{"tools": [{"id": f"toolu_x{i}", "raw_name": "Bash", "input": {}, "unknown": True}]} for i in range(4)]
+    steps = [*unoffered, {"text": "never"}]
+    cli = fake_cli(tmp_path, {"turns": [steps]})
+    events: list[StreamEvent] = []
+    request = ModelRequest(messages=[user("Look up the markers.")], tools=[LOOKUP])
+
+    with pytest.raises(ProviderError, match="did not offer") as raised:
+        await asyncio.wait_for(drain_into(events, cli.provider(), request), 10)
+    await _closed()
+
+    assert not raised.value.retryable
+    assert not any(isinstance(event, ToolCallReady | TurnCompleted) for event in events)
+    assert SESSIONS.live == set()
+    assert len(cli.events("exit")) == 1
 
 
 # --- which process a request may continue or close --------------------------------------------------------------------
