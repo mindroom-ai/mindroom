@@ -74,7 +74,7 @@ def _recovery_lock(state_root: Path, *, timeout_seconds: float) -> Iterator[None
     """
     state_root.mkdir(parents=True, exist_ok=True)
     with open_directory_within_root(state_root) as directory:
-        descriptor = open_regular_file_at(directory, _RECOVERY_LOCK, os.O_RDONLY | os.O_CREAT)
+        descriptor = open_regular_file_at(directory, _RECOVERY_LOCK, os.O_RDWR | os.O_CREAT)
     try:
         if not wait_for_exclusive_lock(descriptor, timeout_seconds=timeout_seconds):
             msg = f"Session recovery lock stayed held for {timeout_seconds:g} seconds: {state_root / _RECOVERY_LOCK}"

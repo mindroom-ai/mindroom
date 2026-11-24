@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict, replace
@@ -39,7 +40,12 @@ from mindroom.delegation.background import delegation_child
 from mindroom.delegation.job_approvals import request_child_approvals
 from mindroom.delegation.lifecycle import prepare_child_turn
 from mindroom.delegation.recovery import read_child_run
-from mindroom.delegation.sessions import SUBAGENT_BUSY, load_retained_subagent_turn, subagent_recovery_lock
+from mindroom.delegation.sessions import (
+    SUBAGENT_BUSY,
+    load_retained_subagent_turn,
+    subagent_liveness,
+    subagent_recovery_lock,
+)
 from mindroom.delegation.state import RESTART_INTERRUPTION_REASON, DelegationState, child_card_id
 from mindroom.event_journal import JOB_ENDED_REASON, BackgroundApprovalDecision, tool_job_run_id
 from mindroom.llm.messages import Message
@@ -1585,3 +1591,17 @@ async def test_a_follow_up_waits_until_the_earlier_turns_job_has_ended(
     finally:
         release.set()
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_subagent_lock_descriptors_are_read_write(tmp_path: Path, flock_access_modes: list[int]) -> None:
+    """The shared liveness lock and the exclusive recovery lock work on NFS only on read-write descriptors."""
+    paths = _runtime_paths(tmp_path)
+    _config, _owner, child = _prepared_child(paths)
+
+    async with subagent_liveness(child, paths):
+        pass
+    assert flock_access_modes == [os.O_RDWR]
+    with subagent_recovery_lock(child.subagent_id, paths) as acquired:
+        assert acquired
+    assert flock_access_modes == [os.O_RDWR] * 2
