@@ -2,7 +2,7 @@
 
 ## Problem & Intent
 
-MindRoom's existing `skill_learning` triggers blindly every `review_interval` (default 10) model replies using an in-memory counter. On 30 days of real production data (`harry`, 233 active sessions, 732 runs, 8,299 tool calls):
+MindRoom's existing `skill_learning` triggers blindly every `review_interval` (default 10) model replies using an in-memory counter. On 30 days of real production data (a personal-assistant agent, 233 active sessions, 732 runs, 8,299 tool calls):
 - `skill_learning` ran **115 reviews** across only **33 sessions** (31.3M input tokens, 103 skill history edits), with **37 reviews (32%)** firing on zero-friction sessions.
 - Meanwhile, **62 sessions** had concrete friction (53 with repeated same-tool errors), and `skill_learning` **missed 44 of 62 (71%)** and **39 of 53 repeat-error sessions (74%)** because short threads never reached 10 replies, failed runs do not count, and restarts wipe in-memory counts.
 - Only 36 tool calls set `tool_call_error=True`; 208+ additional failures returned `tool_call_error=False` with non-zero shell exit codes, JSON `status: "error"`, or anchored `Error:`/`Traceback` messages.

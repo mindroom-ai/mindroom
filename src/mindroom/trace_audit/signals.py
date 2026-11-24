@@ -30,7 +30,9 @@ _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _IDENT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _SENT_BY_YOU_RE = re.compile(r"""<msg\b[^>]*\bsent_by_you=(["'])true\1[^>]*><!\[CDATA\[.*?\]\]></msg>""", re.DOTALL)
 _LEADING_MENTION_RE = re.compile(r"^@[\w.-]+(?::[\w.-]+)?[,:\s]+")
-_CORRECTION_STOP_RE = re.compile(r"^stop(?:\s|[.,!?:;]|$)")
+_CORRECTION_RE = re.compile(
+    r"^(?:stop(?:\s|[.,!?:;]|$)|no,|wrong|incorrect|you didn't|you did not|you forgot|don't |do not |remember to|nee,|verkeerd|niet zo)",
+)
 
 _MAX_JSON_ERROR_CHARS = 65_536
 _WINDOW_SECONDS = 86_400.0
@@ -60,105 +62,26 @@ _BENIGN_EXIT_1_BINS = frozenset(
     {"grep", "rg", "ag", "ack", "diff", "cmp", "test", "[", "[[", "pgrep", "which", "command"},
 )
 _BENIGN_GIT_SUBS = frozenset({"diff", "grep"})
-_ALLOWLISTED_BINS = _BENIGN_EXIT_1_BINS | frozenset(
-    {
-        "awk",
-        "bun",
-        "cargo",
-        "cat",
-        "chmod",
-        "chown",
-        "cp",
-        "curl",
-        "docker",
-        "find",
-        "gh",
-        "git",
-        "head",
-        "jq",
-        "just",
-        "kubectl",
-        "ls",
-        "make",
-        "mkdir",
-        "mv",
-        "mypy",
-        "nix",
-        "node",
-        "npm",
-        "pip",
-        "pytest",
-        "python",
-        "python3",
-        "rm",
-        "rsync",
-        "ruff",
-        "scp",
-        "sed",
-        "ssh",
-        "systemctl",
-        "tail",
-        "tar",
-        "uv",
-    },
-)
-_SUBCOMMAND_BINS = frozenset({"git", "docker", "kubectl", "nix", "systemctl", "gh"})
 _GIT_VALUE_FLAGS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"})
+_PREAMBLE_BINS = frozenset({"cd", "set", "export", "unset", "umask"})
 _SHELL_OPS = frozenset({";", "&&", "||", "|", "&", "\n"})
-_CORRECTION_CUES = (
-    "no,",
-    "wrong",
-    "incorrect",
-    "you didn't",
-    "you did not",
-    "you forgot",
-    "stop ",
-    "don't ",
-    "do not ",
-    "remember to",
-    "nee,",
-    "verkeerd",
-    "niet zo",
-)
-_DIAGNOSTIC_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("timeout", ("timed out", "timeout", "deadline exceeded", "stopped after ")),
-    ("rate_limit", ("rate limit", "too many requests", "429", "quota exceeded", "throttl")),
-    (
-        "permission",
-        ("permission denied", "access denied", "forbidden", "unauthorized", "401", "403", "eacces", "eperm"),
-    ),
-    (
-        "not_found",
+_DIAGNOSTIC_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = tuple(
+    (family, tuple(raw.split("|")))
+    for family, raw in (
+        ("timeout", "timed out|timeout|deadline exceeded|stopped after "),
+        ("rate_limit", "rate limit|too many requests|429|quota exceeded|throttl"),
+        ("permission", "permission denied|access denied|forbidden|unauthorized|401|403|eacces|eperm"),
         (
-            "no such file",
-            "not found",
-            "does not exist",
-            "enoent",
-            "404",
-            "command not found",
-            "cannot find",
-            "modulenotfounderror",
-            "filenotfounderror",
+            "not_found",
+            "no such file|not found|does not exist|enoent|404|command not found|cannot find|modulenotfounderror|filenotfounderror",
         ),
-    ),
-    (
-        "syntax",
         (
-            "syntaxerror",
-            "syntax error",
-            "invalid syntax",
-            "parse error",
-            "jsondecodeerror",
-            "unexpected token",
-            "unrecognized arguments",
-            "invalid argument",
+            "syntax",
+            "syntaxerror|syntax error|invalid syntax|parse error|jsondecodeerror|unexpected token|unrecognized arguments|invalid argument",
         ),
-    ),
-    (
-        "connection",
-        ("connection refused", "connection reset", "could not resolve", "econnrefused", "502", "503", "504"),
-    ),
-    ("conflict", ("already exists", "merge conflict", "non-fast-forward", "409", "database is locked")),
+        ("connection", "connection refused|connection reset|could not resolve|econnrefused|502|503|504"),
+        ("conflict", "already exists|merge conflict|non-fast-forward|409|database is locked"),
+    )
 )
 
 
@@ -187,16 +110,6 @@ def first_human_text(messages: tuple[RunMessageRecord, ...]) -> str:
     return ""
 
 
-def _tokenize_shell(cmd: str) -> list[str] | None:
-    try:
-        lexer = shlex.shlex(cmd, posix=True, punctuation_chars=";&|\n")
-        lexer.whitespace = " \t\r"
-        lexer.whitespace_split = True
-        return list(lexer)
-    except ValueError:
-        return None
-
-
 def _strip_env(seq: list[str]) -> list[str]:
     idx = 0
     while idx < len(seq) and ((seq[idx] == "env" and idx + 1 < len(seq)) or _ENV_ASSIGN_RE.match(seq[idx])):
@@ -205,18 +118,21 @@ def _strip_env(seq: list[str]) -> list[str]:
 
 
 def _shell_tokens(raw: object) -> list[str] | None:
-    if isinstance(raw, str):
-        return _tokenize_shell(raw)
     if isinstance(raw, list) and raw and all(isinstance(item, str) for item in raw):
         if len(raw) == 1:
-            return _tokenize_shell(raw[0])
-        if raw[0].rsplit("/", 1)[-1] in {"sh", "bash", "zsh"} and len(raw) >= 3 and raw[1] in {"-c", "-lc"}:
-            return _tokenize_shell(raw[2])
-        return list(raw)
-    return None
-
-
-_PREAMBLE_BINS = frozenset({"cd", "set", "export", "unset", "umask"})
+            raw = raw[0]
+        elif raw[0].rsplit("/", 1)[-1] in {"sh", "bash", "zsh"} and len(raw) >= 3 and raw[1] in {"-c", "-lc"}:
+            raw = raw[2]
+        else:
+            return list(raw)
+    if not isinstance(raw, str):
+        return None
+    try:
+        lexer = shlex.shlex(raw, posix=True, punctuation_chars=";&|\n")
+        lexer.whitespace, lexer.whitespace_split = " \t\r", True
+        return list(lexer)
+    except ValueError:
+        return None
 
 
 def _parse_shell_command(tool_args: dict[str, Any]) -> tuple[list[str], bool]:
@@ -231,8 +147,6 @@ def _parse_shell_command(tool_args: dict[str, Any]) -> tuple[list[str], bool]:
         head, tail = _strip_env(tokens[: ops[0]]), _strip_env(tokens[ops[0] + 1 :])
         if head and head[0] == "cd" and tail:
             return tail, True
-    # Split on command separators and skip leading setup preambles (cd/set/export/unset) for operation extraction,
-    # while keeping is_simple_command=False so compound scripts are never treated as benign single-command exit-1.
     start = 0
     for op_idx in (*ops, len(tokens)):
         seg = _strip_env(tokens[start:op_idx])
@@ -259,13 +173,9 @@ def _extract_operation(tool_name: str, tool_args: dict[str, Any]) -> str:
     if tool_name.rsplit(".", 1)[-1] in _SHELL_TOOLS:
         seg, _ = _parse_shell_command(tool_args)
         binary = seg[0].rsplit("/", 1)[-1] if seg else ""
-        if binary not in _ALLOWLISTED_BINS:
-            return ""
         if binary == "git":
             return f"git:{sub}" if (sub := _git_subcommand(seg)) else "git"
-        if binary in _SUBCOMMAND_BINS and len(seg) >= 2 and _IDENT_RE.match(seg[1].lower()):
-            return f"{binary}:{seg[1].lower()}"
-        return binary
+        return binary if _IDENT_RE.match(binary) else ""
     for key in ("action", "operation", "method"):
         val = tool_args.get(key)
         if isinstance(val, str) and _IDENT_RE.match(val.lower()):
@@ -390,7 +300,7 @@ def _find_user_correction(runs: tuple[AuditedRun, ...], idx: int) -> str | None:
         ):
             return None
         norm = _LEADING_MENTION_RE.sub("", cleaned).replace("\u2019", "'").strip().lower()
-        return text if (_CORRECTION_STOP_RE.match(norm) or any(norm.startswith(c) for c in _CORRECTION_CUES)) else None
+        return text if _CORRECTION_RE.match(norm) else None
     return None
 
 
@@ -482,8 +392,6 @@ def _evaluate_run_incident(
             window_run_ids=(run.run_id,),
             reasons=("clean_sample",),
             is_clean_sample=True,
-            failures=(),
-            correction_text=None,
         )
 
     prev = [
@@ -519,7 +427,6 @@ def _evaluate_run_incident(
         created_at=run.created_at,
         window_run_ids=tuple(item.run_id for item in window),
         reasons=(*material, *weak),
-        is_clean_sample=False,
         failures=tuple(window_failures),
         correction_text=correction,
     )
@@ -539,18 +446,20 @@ def detect_session_incidents(
     """Detect Stage 1 friction incidents and deterministic clean-run samples for one settled session."""
     if not session.runs or now - session.last_updated_at < min_idle_seconds:
         return []
-    incidents: list[Incident] = []
-    for idx, run in enumerate(session.runs):
-        if run.seq <= after_seq or run.status not in _TERMINAL_STATUSES:
-            continue
-        incident = _evaluate_run_incident(
-            session,
-            idx,
-            median_tools=median_tools,
-            baseline_run_count=baseline_run_count,
-            sample_rate=sample_rate,
-            sample_salt=sample_salt,
+    return [
+        incident
+        for idx, run in enumerate(session.runs)
+        if run.seq > after_seq
+        and run.status in _TERMINAL_STATUSES
+        and (
+            incident := _evaluate_run_incident(
+                session,
+                idx,
+                median_tools=median_tools,
+                baseline_run_count=baseline_run_count,
+                sample_rate=sample_rate,
+                sample_salt=sample_salt,
+            )
         )
-        if incident is not None:
-            incidents.append(incident)
-    return incidents
+        is not None
+    ]

@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from mindroom.trace_audit.auditor import audit_evidence_card, build_evidence_card, make_llm_audit_judge
+from mindroom.trace_audit.auditor import (
+    audit_evidence_card,
+    build_evidence_card,
+    complete_tool_free_structured,
+    make_llm_audit_judge,
+)
 from mindroom.trace_audit.models import (
     AuditCategory,
     AuditedRun,
@@ -55,6 +60,7 @@ __all__ = [
     "audit_evidence_card",
     "build_evidence_card",
     "classify_tool_execution",
+    "complete_tool_free_structured",
     "detect_session_incidents",
     "latest_run_timestamp",
     "load_audited_sessions",

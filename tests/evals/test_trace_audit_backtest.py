@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from typing import TYPE_CHECKING, Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -23,7 +23,8 @@ from mindroom.budgets.pricing import model_prices
 from mindroom.config.main import load_config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.history.types import HistoryScope
-from mindroom.llm.messages import model_provenance
+from mindroom.llm.messages import Message, model_provenance
+from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, StreamEvent, TurnCompleted, UsageReported
 from mindroom.llm.usage import HelperUsage, MessageMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.schema import TableNames, create_log_schema, quote_identifier
 from mindroom.skill_learning.reviewer import ReviewOutcome
@@ -31,9 +32,11 @@ from mindroom.trace_audit.models import AuditFinding, AuditJudgeFn, EvidenceCard
 from mindroom.trace_audit.source import load_audited_sessions
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import AsyncIterator, Callable, Sequence
     from pathlib import Path
 
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.skill_learning.tools import ReviewProgress
 
 NOW = 1_750_000_000.0
@@ -637,7 +640,9 @@ async def test_full_backtest_end_to_end_room_isolation_diffs_and_privacy(tmp_pat
     ) == (0o600, 0o600)
 
     report = (out_dir / "report.md").read_text(encoding="utf-8")
-    assert all(s not in report for s in (private_msg, private_arg, "uv run pytest", "python-testing"))
+    assert (out_dir.stat().st_mode & 0o777) == 0o700
+    assert "**Dataset:** `dataset`" in report
+    assert all(s not in report for s in (private_msg, private_arg, "uv run pytest", "python-testing", "harry"))
     assert "Blinded Judge Evaluation" in report
     assert "Cost Breakdown" in report
 
@@ -659,18 +664,26 @@ async def test_judge_provider_wiring_invalid_response_and_empty_db(tmp_path: Pat
         placebo_unrelated_skill="X",
     )
 
-    async def fake_complete_prompt(
-        _provider: object,
-        _prompt: str,
-        **_kw: object,
-    ) -> HelperResult[BlindedJudgeResponse]:
-        return HelperResult(content="not-json", usage=_helper_usage("Anthropic", "claude-judge", inp=1_000, out=100))
+    captured_requests: list[ModelRequest] = []
+
+    class _BadJudgeProvider:
+        identity = ModelIdentity(provider="anthropic", id="claude-judge")
+        capabilities = Capabilities(structured_output="native")
+
+        async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+            captured_requests.append(request)
+            usage_m = MessageMetrics(tokens=TokenCounts(input_tokens=1_000, output_tokens=100, total_tokens=1_100))
+            yield UsageReported(usage_m)
+            yield TurnCompleted(
+                message=Message(role="assistant", content="not-json", metrics=usage_m),
+                stop_reason="end",
+            )
 
     cache_path = tmp_path / "err_cache.json"
-    with (
-        patch("evals.trace_audit.judge.provider_registry.build_model_provider", return_value=object()) as build_mock,
-        patch("evals.trace_audit.judge.complete_prompt", side_effect=fake_complete_prompt),
-    ):
+    with patch(
+        "evals.trace_audit.judge.provider_registry.build_model_provider",
+        return_value=_BadJudgeProvider(),
+    ) as build_mock:
         res = await evaluate_blinded_cases(
             [case],
             config=config,
@@ -681,6 +694,10 @@ async def test_judge_provider_wiring_invalid_response_and_empty_db(tmp_path: Pat
             prices=model_prices(config),
         )
     assert build_mock.call_count == 1
+    assert len(captured_requests) == 1
+    assert captured_requests[0].tool_choice == "none"
+    assert captured_requests[0].tools == ()
+    assert captured_requests[0].output_schema is None
     assert (res["total_evaluated"], res["judge_errors"], res["cache_misses"]) == (0, 1, 1)
     assert not cache_path.exists()
 
@@ -700,3 +717,204 @@ async def test_judge_provider_wiring_invalid_response_and_empty_db(tmp_path: Pat
     )
     assert (art["split"]["train_sessions"], art["judge"]["total_evaluated"]) == (0, 0)
     assert (out_dir / "report.md").is_file()
+
+
+def _seed_isolation_fixtures(tmp_path: Path) -> tuple[Path, Path, str]:
+    cfg_path = tmp_path / "config.yaml"
+    cfg_text = (
+        "models:\n"
+        "  audit_m:\n"
+        "    provider: openai\n"
+        "    id: gpt-audit\n"
+        "    context_window: 128000\n"
+        "  judge_m:\n"
+        "    provider: anthropic\n"
+        "    id: claude-judge\n"
+        "    context_window: 200000\n"
+        "router:\n"
+        "  model: audit_m\n"
+        "debug:\n"
+        "  log_llm_requests: true\n"
+        "  llm_request_log_dir: /tmp/should-never-be-written\n"
+        "agents:\n"
+        "  secret_agent_name:\n"
+        "    display_name: Secret\n"
+        "    model: audit_m\n"
+        "    rooms: []\n"
+    )
+    cfg_path.write_text(cfg_text, encoding="utf-8")
+    db_path = tmp_path / "agent.db"
+    s_train, s_straddle, s_hold = f"{ROOM_A}:$t1", f"{ROOM_A}:$straddle", f"{ROOM_A}:$h1"
+    cutoff_approx = NOW - 10 * DAY
+    _seed_v8_db(
+        db_path,
+        "secret_agent_name",
+        sessions=[
+            (s_train, NOW - 25 * DAY, NOW - 25 * DAY),
+            (s_straddle, cutoff_approx - 500, cutoff_approx + 500),
+            (s_hold, NOW - 2 * DAY, NOW),
+        ],
+        runs=[
+            {"run_id": "t_ok", "session_id": s_train, "seq": 1, "created_at": NOW - 25 * DAY},
+            {"run_id": "straddle_run", "session_id": s_straddle, "seq": 1, "created_at": cutoff_approx - 50},
+            {"run_id": "h_ok", "session_id": s_hold, "seq": 1, "created_at": NOW},
+        ],
+        tools=[
+            ("t_ok", 0, _fail_tool("pytest a.py", "t0")),
+            ("t_ok", 1, _fail_tool("pytest b.py", "t1")),
+            ("straddle_run", 0, _fail_tool("pytest c.py", "s0")),
+            ("straddle_run", 1, _fail_tool("pytest d.py", "s1")),
+        ],
+    )
+    conn = sqlite3.connect(db_path)
+    try:
+        names = TableNames("secret_agent_name")
+        conn.execute(
+            f"UPDATE {quote_identifier(names.log_runs)} SET updated_at = ? WHERE run_id = 'straddle_run'",  # noqa: S608
+            (int(cutoff_approx + 5_000),),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return cfg_path, db_path, cfg_text
+
+
+@pytest.mark.asyncio
+async def test_backtest_rejects_overlapping_skills_dir_and_same_model_cli(tmp_path: Path) -> None:
+    """Overlapping --skills-dir never deletes scratch files, and same audit/judge model is rejected without flag."""
+    cfg_path, db_path, _ = _seed_isolation_fixtures(tmp_path)
+    out_overlap = tmp_path / "out_overlap"
+    scratch = out_overlap / "scratch_skills" / "skills"
+    keep_file = scratch / "keep.txt"
+    keep_file.parent.mkdir(parents=True)
+    keep_file.write_text("do-not-delete", encoding="utf-8")
+    for bad_skills in (out_overlap, out_overlap / "scratch_skills", scratch, scratch / "nested"):
+        bad_skills.mkdir(parents=True, exist_ok=True)
+        with pytest.raises(ValueError, match="overlap"):
+            await run_backtest(
+                BacktestOptions(
+                    db_path=db_path,
+                    config_path=cfg_path,
+                    agent_name="secret_agent_name",
+                    out_dir=out_overlap,
+                    skills_dir=bad_skills,
+                    dry_run=True,
+                ),
+            )
+    assert keep_file.read_text(encoding="utf-8") == "do-not-delete"
+
+    with pytest.raises(SystemExit):
+        await run_cli(
+            [
+                "--db",
+                str(db_path),
+                "--config",
+                str(cfg_path),
+                "--agent",
+                "secret_agent_name",
+                "--out",
+                str(tmp_path / "same_out"),
+                "--audit-model",
+                "audit_m",
+                "--judge-model",
+                "audit_m",
+            ],
+        )
+
+
+@pytest.mark.asyncio
+async def test_backtest_isolation_symlinks_config_copy_roster_label_and_cutoff_leakage(tmp_path: Path) -> None:
+    """Backtest skips symlinks, copies config with disabled request logging, supports --roster-path/--label, and blocks straddle leaks."""
+    cfg_path, db_path, cfg_text = _seed_isolation_fixtures(tmp_path)
+    outside_secret = tmp_path / "outside_secret.txt"
+    outside_secret.write_text("TOP_SECRET", encoding="utf-8")
+    outside_dir = tmp_path / "outside_dir"
+    outside_dir.mkdir()
+    (outside_dir / "SKILL.md").write_text("---\nname: evil\ndescription: Evil\n---\n", encoding="utf-8")
+
+    skills_dir = tmp_path / "skills_src"
+    (skills_dir / "good-skill").mkdir(parents=True)
+    (skills_dir / "good-skill" / "SKILL.md").write_text(
+        "---\nname: good-skill\ndescription: Good\n---\n1. Check.\n",
+        encoding="utf-8",
+    )
+    (skills_dir / "good-skill" / "secret_link.txt").symlink_to(outside_secret)
+    (skills_dir / "evil-link").symlink_to(outside_dir)
+
+    roster_file = tmp_path / "custom_roster.json"
+    roster_file.write_text('{"entries": [], "created": []}', encoding="utf-8")
+
+    seen_train_runs: list[str] = []
+    seen_debug: list[tuple[bool, str | None]] = []
+    seen_config_paths: list[Path] = []
+
+    def audit_factory(_sink: Callable[[HelperUsage], object]) -> AuditJudgeFn:
+        async def _audit(card: EvidenceCard) -> AuditFinding:
+            seen_train_runs.append(card.run_id)
+            return AuditFinding(
+                verdict="actionable",
+                teachable=True,
+                category="tool_misuse",
+                remedy="validate_input",
+                root_cause="Bad args.",
+                proposed_rule="Check args.",
+            )
+
+        return _audit
+
+    async def capture_learner(
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        **_kw: object,
+    ) -> ReviewOutcome:
+        seen_debug.append((config.debug.log_llm_requests, config.debug.llm_request_log_dir))
+        seen_config_paths.append(runtime_paths.config_path)
+        return ReviewOutcome(
+            changed_skills={},
+            model_name="audit_m",
+            provider="openai",
+            model_id="gpt-audit",
+            input_tokens=0,
+            output_tokens=0,
+            model_requests=0,
+            tool_calls=0,
+        )
+
+    out_iso = tmp_path / "out_iso"
+    await run_backtest(
+        BacktestOptions(
+            db_path=db_path,
+            config_path=cfg_path,
+            agent_name="secret_agent_name",
+            out_dir=out_iso,
+            skills_dir=skills_dir,
+            roster_path=roster_file,
+            label="cohort-alpha",
+            audit_model="audit_m",
+            judge_model="audit_m",
+            allow_same_model=True,
+            min_cluster_sessions=1,
+            dry_run=False,
+        ),
+        audit_judge_factory=audit_factory,
+        learner_fn=capture_learner,
+        blinded_complete_fn=AsyncMock(),
+    )
+
+    assert (out_iso.stat().st_mode & 0o777) == 0o700
+    assert (out_iso / "_runtime" / "config.yaml").is_file()
+    roster_dst = out_iso / "_runtime" / "tracking" / "personal_agents.json"
+    assert roster_dst.read_text(encoding="utf-8") == '{"entries": [], "created": []}'
+    assert cfg_path.read_text(encoding="utf-8") == cfg_text
+    assert seen_debug == [(False, None)]
+    assert seen_config_paths == [(out_iso / "_runtime" / "config.yaml").resolve()]
+    assert (out_iso / "scratch_skills" / "skills" / "good-skill" / "SKILL.md").is_file()
+    assert not (out_iso / "scratch_skills" / "skills" / "good-skill" / "secret_link.txt").exists()
+    assert not (out_iso / "scratch_skills" / "skills" / "evil-link").exists()
+    assert "t_ok" in seen_train_runs
+    assert "straddle_run" not in seen_train_runs
+
+    report = (out_iso / "report.md").read_text(encoding="utf-8")
+    assert "**Dataset:** `cohort-alpha`" in report
+    assert "secret_agent_name" not in report

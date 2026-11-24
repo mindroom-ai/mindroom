@@ -127,9 +127,9 @@
 
 ---
 
-### Task 4: Real-Data Backtest on Offline Snapshots (`harry.db`, `stuurman.db`) & Refinement
+### Task 4: Real-Data Backtest on Offline Snapshots (`agent-a.db`, `agent-b.db`) & Refinement
 
-- [ ] **Step 1:** Run `--dry-run` backtest against `~/.cache/trace-auditor-backtest/harry.db` and `stuurman.db` (strictly offline copies, output to `~/.cache/trace-auditor-backtest/out-*/`, never committed to git).
+- [ ] **Step 1:** Run `--dry-run` backtest against `~/.cache/trace-auditor-backtest/agent-a.db` and `agent-b.db` (strictly offline copies for `<agent>`, output to `~/.cache/trace-auditor-backtest/out-*/`, never committed to git).
 - [ ] **Step 2:** Run full chronological backtest (`20d` train → `10d` holdout) with cheap audit model (`gemini_flash` / `gpt5mini` / `deepseek_v4_1_flash_1017`) and separate-family judge model (`sonnet` or `gpt5mini`), inspecting precision, recall, cost vs historical `skill_learning`, candidate skill diffs in scratch, and held-out direct-hit rate vs placebo control.
 - [ ] **Step 3:** Fix any threshold/signal bugs discovered by the real-data backtest (with synthetic unit tests — zero private data in repo!) and re-run to confirm.
 - [ ] **Step 4:** Parallel Opus + Astra full-diff review, address real findings, run full verification gates, push PR, score with `scoring-pull-requests`, and present the concrete backtest numbers + PR to Bas.

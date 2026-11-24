@@ -17,7 +17,8 @@ class SkillLearningConfig(BaseModel):
         default="interval",
         description=(
             "How skill reviews are triggered: 'interval' reviews every review_interval model replies, "
-            "'friction' promotes recurring failure clusters detected by the trace_audit automation"
+            "'friction' promotes recurring failure clusters detected by the trace_audit automation "
+            "(which audits sessions scoped to the automation's configured room, or personal room for private instances)"
         ),
     )
     model: str | None = Field(

@@ -256,7 +256,9 @@ class SkillReviewRunner:
         settings = config.agents[agent_name].skill_learning
         if not settings.enabled:
             return None
-        session_id = cluster.session_ids[-1] if cluster.session_ids else f"trace_audit:{cluster.cluster_key}"
+        session_id = cluster.latest_session_id or (
+            cluster.session_ids[-1] if cluster.session_ids else f"trace_audit:{cluster.cluster_key}"
+        )
         scope = _ReviewScope(agent_name, session_id, identity)
         log_fields = {
             key: value

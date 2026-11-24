@@ -95,9 +95,16 @@ def _cluster_key(scope: str, finding: AuditFinding, *, tool_name: str, operation
     return f"non_tool|{scope}|{finding.category}|{finding.remedy}|{finding.target_skill or ''}"
 
 
-def _build_clusters(findings: list[FindingRecord], *, min_cluster_sessions: int) -> list[FailureCluster]:
+def _build_clusters(
+    findings: list[FindingRecord],
+    *,
+    min_cluster_sessions: int,
+    allowed_scope: str | None = None,
+) -> list[FailureCluster]:
     grouped: dict[str, list[FindingRecord]] = defaultdict(list)
     for item in findings:
+        if allowed_scope is not None and item.scope_key != allowed_scope:
+            continue
         if item.verdict in _ACTIONABLE_VERDICTS and item.teachable:
             grouped[item.cluster_key].append(item)
     clusters: list[FailureCluster] = []
@@ -126,6 +133,7 @@ def _build_clusters(findings: list[FindingRecord], *, min_cluster_sessions: int)
                 ],
                 has_verified_fix=any(i.has_verified_fix for i in group),
                 latest_created_at=latest.created_at,
+                latest_session_id=latest.session_id,
             ),
         )
     clusters.sort(key=lambda c: (-c.distinct_sessions, -c.occurrence_count, -c.latest_created_at, c.cluster_key))
@@ -175,10 +183,16 @@ async def _audit_selected(
     judge_fn: AuditJudgeFn,
     scope_key: str,
     cfg: TraceAuditSettings,
+    allowed_room_id: str | None = None,
 ) -> tuple[list[FindingRecord], dict[str, int], int]:
     friction = [pair for pair in candidates if not pair[0].is_clean_sample]
     clean = [pair for pair in candidates if pair[0].is_clean_sample]
-    selected_clean = clean[: min(cfg.max_clean_samples_per_run, cfg.max_audits_per_run)]
+    clean_cap = (
+        min(cfg.max_clean_samples_per_run, max(0, cfg.max_audits_per_run - 1))
+        if friction
+        else min(cfg.max_clean_samples_per_run, cfg.max_audits_per_run)
+    )
+    selected_clean = clean[:clean_cap]
     friction_cap = max(0, cfg.max_audits_per_run - len(selected_clean))
     selected = [*friction[:friction_cap], *selected_clean]
     deferred_min_seq: dict[str, int] = {}
@@ -198,7 +212,7 @@ async def _audit_selected(
             else ("", "", "", "")
         )
         tool_name, operation, kind, family = sig
-        eff_scope = _effective_scope(scope_key, session.room_id)
+        eff_scope = _effective_scope(scope_key, session.room_id or allowed_room_id)
         return FindingRecord(
             cluster_key=_cluster_key(eff_scope, finding, tool_name=tool_name, operation=operation, kind=kind),
             scope_key=eff_scope,
@@ -275,24 +289,36 @@ async def run_audit_pass(
     state = _load_state(state_path)
     _prune_state(state, now=current_ts, settings=cfg)
 
-    sessions = load_audited_sessions(
-        db_path,
-        storage_name,
-        since_ts=since_ts,
-        until_ts=until_ts,
-        excluded_sessions=excluded_sessions,
-        allowed_room_id=allowed_room_id,
-        contact_session_check=contact_session_check,
-    )
-    scanned_sessions, scanned_runs, max_seq, candidates = _scan_sessions(
-        sessions,
-        state.session_cursors,
-        now=current_ts,
-        scope_key=scope_key,
-        cfg=cfg,
-    )
+    effective_since = since_ts if since_ts is not None else current_ts - cfg.window_days * _SECONDS_PER_DAY
+    cursor_snapshot = dict(state.session_cursors)
+
+    def _load_and_scan() -> tuple[int, int, dict[str, int], list[tuple[Incident, AuditedSession]]]:
+        sessions = load_audited_sessions(
+            db_path,
+            storage_name,
+            since_ts=effective_since,
+            until_ts=until_ts,
+            excluded_sessions=excluded_sessions,
+            allowed_room_id=allowed_room_id,
+            contact_session_check=contact_session_check,
+        )
+        return _scan_sessions(
+            sessions,
+            cursor_snapshot,
+            now=current_ts,
+            scope_key=scope_key,
+            cfg=cfg,
+        )
+
+    scanned_sessions, scanned_runs, max_seq, candidates = await asyncio.to_thread(_load_and_scan)
     new_findings, deferred_min_seq, clean_audited = (
-        await _audit_selected(candidates, judge_fn=judge_fn, scope_key=scope_key, cfg=cfg)
+        await _audit_selected(
+            candidates,
+            judge_fn=judge_fn,
+            scope_key=scope_key,
+            cfg=cfg,
+            allowed_room_id=allowed_room_id,
+        )
         if judge_fn is not None
         else ([], {}, 0)
     )
@@ -313,7 +339,12 @@ async def run_audit_pass(
     ):
         state.metrics[key] += delta
 
-    actionable = _build_clusters(state.findings, min_cluster_sessions=cfg.min_cluster_sessions)
+    allowed_scope = _effective_scope(scope_key, allowed_room_id) if allowed_room_id is not None else None
+    actionable = _build_clusters(
+        state.findings,
+        min_cluster_sessions=cfg.min_cluster_sessions,
+        allowed_scope=allowed_scope,
+    )
     promoted, nomination_results = await _promote_clusters(
         actionable,
         state=state,

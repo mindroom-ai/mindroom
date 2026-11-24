@@ -11046,7 +11046,10 @@ depends_on = [
 path = "mindroom.trace_audit.auditor"
 depends_on = [
     "mindroom.agent_loop.helper",
+    "mindroom.agent_loop.prompt",
+    "mindroom.agent_loop.structured",
     "mindroom.helper_usage",
+    "mindroom.llm",
     "mindroom.providers.registry",
     "mindroom.trace_audit.models",
     "mindroom.trace_audit.signals",

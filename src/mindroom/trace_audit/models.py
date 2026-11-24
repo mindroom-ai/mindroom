@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -45,10 +46,19 @@ type AuditRemedy = Literal[
 
 MAX_ROOT_CAUSE_CHARS = 240
 MAX_PROPOSED_RULE_CHARS = 280
+_TARGET_SKILL_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 
 def _clip_line(value: str, limit: int) -> str:
     return " ".join(value.split())[:limit]
+
+
+def sanitize_target_skill(value: str | None) -> str | None:
+    """Allow only valid skill-name slugs, coercing empty or invalid values to ``None``."""
+    if value is None:
+        return None
+    cleaned = value.strip()
+    return cleaned if _TARGET_SKILL_RE.match(cleaned) else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,7 +216,7 @@ class AuditFinding(BaseModel):
     @field_validator("target_skill")
     @classmethod
     def _normalize_target_skill(cls, value: str | None) -> str | None:
-        return cleaned if value is not None and (cleaned := value.strip()) else None
+        return sanitize_target_skill(value)
 
 
 class FindingRecord(BaseModel, frozen=True):
@@ -230,6 +240,11 @@ class FindingRecord(BaseModel, frozen=True):
     has_verified_fix: bool = False
     target_skill: str | None = None
 
+    @field_validator("target_skill")
+    @classmethod
+    def _normalize_target_skill(cls, value: str | None) -> str | None:
+        return sanitize_target_skill(value)
+
 
 @dataclass(frozen=True, slots=True)
 class FailureCluster:
@@ -251,6 +266,7 @@ class FailureCluster:
     proposed_rules: tuple[str, ...]
     has_verified_fix: bool
     latest_created_at: float
+    latest_session_id: str
 
 
 @dataclass(frozen=True, slots=True)

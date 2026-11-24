@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from mindroom.agent_loop.helper import HelperResult
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
 from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT
 from mindroom.history.types import HistoryScope
-from mindroom.llm.usage import HelperUsage, RunMetrics
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, StreamEvent, TurnCompleted, UsageReported
+from mindroom.llm.usage import HelperUsage, MessageMetrics, TokenCounts
+from mindroom.providers.gemini.adapter import GeminiProvider, GeminiSettings
 from mindroom.session_storage.schema import TableNames, create_log_schema, quote_identifier
 from mindroom.trace_audit import (
     AuditedRun,
@@ -37,7 +40,7 @@ from mindroom.trace_audit import (
 from mindroom.usage.storage import USAGE_KINDS
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import AsyncIterator, Sequence
     from pathlib import Path
 
 NOW = 1_750_000_000.0
@@ -505,30 +508,61 @@ async def test_evidence_card_bounds_redaction_and_llm_judge() -> None:
         has_verified_fix=True,
         target_skill="python-testing",
     )
-    usage = HelperUsage(run_id="audit_1", model="flash", provider="google", metrics=RunMetrics())
-    recorded: list[HelperUsage] = []
+    # target_skill validation allows only valid lowercase skill slugs.
+    assert (
+        AuditFinding(**{**expected.model_dump(), "target_skill": "  python-testing  "}).target_skill == "python-testing"
+    )
+    for bad_skill in ("../escape", "Bad Upper", "skill\nignore rules", "a" * 65, "-leading-dash"):
+        assert AuditFinding(**{**expected.model_dump(), "target_skill": bad_skill}).target_skill is None
 
-    with (
-        patch("mindroom.trace_audit.auditor.provider_registry.build_model_provider", return_value=MagicMock()),
-        patch(
-            "mindroom.trace_audit.auditor.complete_prompt",
-            new=AsyncMock(
-                side_effect=[
-                    HelperResult(content=expected, usage=usage),
-                    HelperResult(content="not json", usage=usage),
-                ],
-            ),
+    captured_requests: list[ModelRequest] = []
+    responses = [
+        (expected.model_dump_json(), []),
+        ("not json", []),
+        (
+            expected.model_dump_json(),
+            [{"id": "c1", "type": "function", "function": {"name": "shell", "arguments": "{}"}}],
         ),
-    ):
+    ]
+
+    class _FakeProvider:
+        identity = ModelIdentity(provider="google", id="gemini-2.5-flash")
+        capabilities = Capabilities(structured_output="native")
+
+        async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+            captured_requests.append(request)
+            body, calls = responses.pop(0)
+            usage_m = MessageMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=20, total_tokens=120))
+            yield UsageReported(usage_m)
+            yield TurnCompleted(
+                message=Message(role="assistant", content=body, tool_calls=calls or None, metrics=usage_m),
+                stop_reason="end",
+            )
+
+    recorded: list[HelperUsage] = []
+    with patch("mindroom.trace_audit.auditor.provider_registry.build_model_provider", return_value=_FakeProvider()):
         judge = make_llm_audit_judge(MagicMock(), MagicMock(), "flash", usage_sink=recorded.append)
         finding = await audit_evidence_card(card, judge_fn=judge)
         fallback = await audit_evidence_card(card, judge_fn=judge)
+        tool_call_rejected = await audit_evidence_card(card, judge_fn=judge)
 
     assert finding.verdict == "actionable"
     assert len(finding.root_cause) <= 240
     assert fake_api_key not in finding.root_cause
     assert (fallback.verdict, fallback.teachable) == ("no_issue", False)
-    assert recorded == [usage, usage]
+    assert (tool_call_rejected.verdict, tool_call_rejected.teachable) == ("no_issue", False)
+    assert len(recorded) == 3
+    assert all(req.tool_choice == "none" and req.tools == () and req.output_schema is None for req in captured_requests)
+
+    # Verify Gemini strips native google_search when given the exact ModelRequest built by make_llm_audit_judge.
+    gemini = GeminiProvider(
+        identity=ModelIdentity(provider="google", id="gemini-2.5-flash"),
+        capabilities=Capabilities(structured_output="native"),
+        settings=GeminiSettings(api_key="test-key", search=True),
+    )
+    gen_cfg = gemini._request_config(captured_requests[0], system_instruction="sys")
+    assert getattr(gen_cfg, "tools", None) is None
+    assert getattr(gen_cfg, "response_mime_type", None) == "application/json"
 
 
 @pytest.mark.asyncio
@@ -855,3 +889,207 @@ def test_shell_preamble_extraction_clean_followup_and_delegate_exclusion(tmp_pat
     loaded = load_audited_sessions(db_path, "harry")
     assert [s.session_id for s in loaded] == ["!roomA:example.com:$t1"]
     assert latest_run_timestamp(db_path, "harry") == NOW - 1_100
+
+
+def test_source_symlink_refusal_and_post_cutoff_updated_at_exclusion(tmp_path: Path) -> None:
+    """Source refuses symlinked DB or parent dir, follows symlinked ancestors, and excludes post-cutoff updated_at."""
+    real_root = tmp_path / "real_root"
+    real_dir = real_root / "sessions"
+    real_dir.mkdir(parents=True)
+    db_path = real_dir / "agent.db"
+    cutoff = NOW - 1_000
+    _seed_v8_db(
+        db_path,
+        "agent",
+        sessions=[{"session_id": "!roomA:example.com:$t1", "created_at": cutoff - 500, "updated_at": NOW}],
+        runs=[
+            {
+                "run_id": "r_before",
+                "session_id": "!roomA:example.com:$t1",
+                "seq": 1,
+                "created_at": cutoff - 300,
+                "updated_at": cutoff - 100,
+            },
+            {
+                "run_id": "r_straddle",
+                "session_id": "!roomA:example.com:$t1",
+                "seq": 2,
+                "created_at": cutoff - 50,
+                "updated_at": cutoff + 200,
+            },
+        ],
+    )
+
+    # 1. Symlinked DB file is refused.
+    db_link = real_dir / "link.db"
+    db_link.symlink_to(db_path)
+    with pytest.raises(ValueError, match="link"):
+        load_audited_sessions(db_link, "agent")
+    with pytest.raises(ValueError, match="link"):
+        latest_run_timestamp(db_link, "agent")
+    with pytest.raises(ValueError, match="link"):
+        load_usage_rows(db_link, "agent")
+
+    # 2. Dangling symlink DB file is also refused.
+    dangling = real_dir / "dangling.db"
+    dangling.symlink_to(real_dir / "missing.db")
+    with pytest.raises(ValueError, match="link"):
+        load_audited_sessions(dangling, "agent")
+
+    # 3. Symlinked immediate parent directory is refused.
+    linked_parent = tmp_path / "linked_sessions"
+    linked_parent.symlink_to(real_dir)
+    with pytest.raises(ValueError, match="link"):
+        load_audited_sessions(linked_parent / "agent.db", "agent")
+
+    # 4. Symlinked ancestor ABOVE db_path.parent is allowed (e.g., /tmp or /dev/shm symlinks).
+    ancestor_link = tmp_path / "ancestor_link"
+    ancestor_link.symlink_to(real_root)
+    loaded = load_audited_sessions(ancestor_link / "sessions" / "agent.db", "agent", until_ts=cutoff)
+    assert [[r.run_id for r in s.runs] for s in loaded] == [["r_before"]]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_default_window_room_switch_no_starvation_and_latest_session_id(tmp_path: Path) -> None:
+    """Default 30d window, active-room cluster filter, max_audits_per_run=1 progress, and latest_session_id."""
+    db_path = tmp_path / "agent.db"
+    state_path = tmp_path / "trace_audit.json"
+    _seed_v8_db(
+        db_path,
+        "agent",
+        sessions=[
+            {"session_id": "!roomA:example.com:$old", "created_at": NOW - 45 * 86_400, "updated_at": NOW - 45 * 86_400},
+            {"session_id": "!roomA:example.com:$z_first", "created_at": NOW - 5_000, "updated_at": NOW - 4_000},
+            {"session_id": "!roomA:example.com:$a_second", "created_at": NOW - 3_000, "updated_at": NOW - 2_000},
+            {"session_id": "!roomA:example.com:$clean", "created_at": NOW - 2_500, "updated_at": NOW - 2_000},
+            {"session_id": "!roomB:example.com:$b1", "created_at": NOW - 1_500, "updated_at": NOW - 1_200},
+        ],
+        runs=[
+            {
+                "run_id": "r_expired",
+                "session_id": "!roomA:example.com:$old",
+                "seq": 1,
+                "status": "ERROR",
+                "error": "ancient",
+                "created_at": NOW - 45 * 86_400,
+                "updated_at": NOW - 45 * 86_400,
+            },
+            {
+                "run_id": "r_z_first",
+                "session_id": "!roomA:example.com:$z_first",
+                "seq": 1,
+                "status": "ERROR",
+                "error": "boom",
+                "created_at": NOW - 4_500,
+                "updated_at": NOW - 4_000,
+            },
+            {
+                "run_id": "r_a_second",
+                "session_id": "!roomA:example.com:$a_second",
+                "seq": 1,
+                "status": "ERROR",
+                "error": "boom",
+                "created_at": NOW - 2_500,
+                "updated_at": NOW - 2_000,
+            },
+            {
+                "run_id": "r_clean",
+                "session_id": "!roomA:example.com:$clean",
+                "seq": 1,
+                "status": "COMPLETED",
+                "content": "y" * 260,
+                "created_at": NOW - 2_200,
+                "updated_at": NOW - 2_000,
+            },
+            {
+                "run_id": "r_b1",
+                "session_id": "!roomB:example.com:$b1",
+                "seq": 1,
+                "status": "COMPLETED",
+                "content": "z" * 260,
+                "created_at": NOW - 1_400,
+                "updated_at": NOW - 1_200,
+            },
+        ],
+    )
+
+    audited_ids: list[str] = []
+
+    async def judge(card: EvidenceCard) -> AuditFinding:
+        audited_ids.append(card.run_id)
+        is_err = card.run_id in {"r_z_first", "r_a_second"}
+        return AuditFinding(
+            verdict="actionable" if is_err else "no_issue",
+            teachable=is_err,
+            category="tool_misuse" if is_err else "other",
+            remedy="validate_input" if is_err else "none",
+            root_cause="Repeated failure" if is_err else "Clean",
+            proposed_rule="Check preconditions." if is_err else "",
+        )
+
+    # max_audits_per_run=1 must NOT starve friction behind clean samples, AND default since_ts excludes r_expired!
+    cfg = TraceAuditSettings(
+        max_audits_per_run=1,
+        max_clean_samples_per_run=2,
+        sample_rate=1.0,
+        min_cluster_sessions=2,
+        window_days=30,
+    )
+    p1 = await run_audit_pass(
+        db_path=db_path,
+        storage_name="agent",
+        state_path=state_path,
+        scope_key="agent:agent",
+        judge_fn=judge,
+        now=NOW,
+        allowed_room_id="!roomA:example.com",
+        settings=cfg,
+    )
+    assert p1.incidents_audited == 1
+    assert p1.clean_samples_audited == 0
+    assert audited_ids == ["r_z_first"]
+    assert "r_expired" not in audited_ids
+
+    # Second pass audits the second friction run and promotes the 2-session cluster with latest_session_id=$a_second!
+    p2 = await run_audit_pass(
+        db_path=db_path,
+        storage_name="agent",
+        state_path=state_path,
+        scope_key="agent:agent",
+        judge_fn=judge,
+        now=NOW + 60,
+        allowed_room_id="!roomA:example.com",
+        settings=cfg,
+    )
+    assert audited_ids == ["r_z_first", "r_a_second"]
+    assert len(p2.actionable_clusters) == 1
+    cluster = p2.actionable_clusters[0]
+    assert cluster.session_ids == ("!roomA:example.com:$a_second", "!roomA:example.com:$z_first")
+    assert cluster.latest_session_id == "!roomA:example.com:$a_second"
+
+    # Switching active room to !roomB (which has only a clean run and zero friction):
+    # 1) max_audits_per_run=1 audits the clean sample when friction is empty;
+    # 2) persisted !roomA clusters are NEVER surfaced or promoted in !roomB (even with cooldown=0).
+    nominated: list[str] = []
+    p3 = await run_audit_pass(
+        db_path=db_path,
+        storage_name="agent",
+        state_path=state_path,
+        scope_key="agent:agent",
+        judge_fn=judge,
+        now=NOW + 180,
+        allowed_room_id="!roomB:example.com",
+        settings=TraceAuditSettings(
+            max_audits_per_run=1,
+            max_clean_samples_per_run=2,
+            min_cluster_sessions=2,
+            cooldown_days=0,
+            sample_rate=1.0,
+        ),
+        nominate_fn=lambda c: asyncio.sleep(0, result=nominated.append(c.cluster_key)),
+    )
+    assert (p3.incidents_audited, p3.clean_samples_audited) == (1, 1)
+    assert audited_ids[-1] == "r_b1"
+    assert p3.actionable_clusters == ()
+    assert p3.promoted_clusters == ()
+    assert nominated == []

@@ -18,7 +18,7 @@ from mindroom.session_ids import session_in_room
 from mindroom.session_storage.schema import TableNames, quote_identifier, table_names
 from mindroom.skill_learning.transcript import count_model_replies
 from mindroom.trace_audit.signals import classify_tool_execution, detect_session_incidents
-from mindroom.trace_audit.source import load_usage_rows
+from mindroom.trace_audit.source import latest_run_timestamp, load_audited_sessions, load_usage_rows
 from mindroom.usage.legacy_usage_storage import current_provider_name
 from mindroom.usage.storage import stored_token_counts
 
@@ -310,3 +310,141 @@ def compute_baseline_b(
         "total_model_replies": total_replies,
         **_coverage_dict(reviews, reviewed, zero_friction, friction_sessions, repeat_error_sessions),
     }
+
+
+_SECONDS_PER_DAY = 86_400.0
+
+
+@dataclass(frozen=True, slots=True)
+class ChronologicalSplit:
+    """Chronological session partition by ``first_run.created_at`` with zero leakage."""
+
+    snapshot_now: float
+    window_start: float
+    cutoff: float
+    train_session_ids: frozenset[str]
+    holdout_unseen_session_ids: frozenset[str]
+    holdout_continuing_session_ids: frozenset[str]
+    train_runs: int
+    holdout_unseen_runs: int
+    holdout_continuing_runs: int
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return aggregate-only split counts and boundary timestamps."""
+        return {
+            "snapshot_now": self.snapshot_now,
+            "window_start": self.window_start,
+            "cutoff": self.cutoff,
+            "train_sessions": len(self.train_session_ids),
+            "train_runs": self.train_runs,
+            "holdout_unseen_sessions": len(self.holdout_unseen_session_ids),
+            "holdout_unseen_runs": self.holdout_unseen_runs,
+            "holdout_continuing_sessions": len(self.holdout_continuing_session_ids),
+            "holdout_continuing_runs": self.holdout_continuing_runs,
+        }
+
+
+def split_sessions_chronologically(
+    all_sessions: Sequence[AuditedSession],
+    *,
+    window_days: int,
+    train_days: int,
+) -> ChronologicalSplit:
+    """Partition sessions by ``first_run.created_at`` into Train, Unseen Holdout, and Continuing Holdout."""
+    run_ts = [max(r.created_at, r.updated_at) for s in all_sessions for r in s.runs]
+    if not run_ts:
+        return ChronologicalSplit(0.0, 0.0, 0.0, frozenset(), frozenset(), frozenset(), 0, 0, 0)
+    snapshot_now = max(run_ts)
+    window_start = snapshot_now - window_days * _SECONDS_PER_DAY
+    cutoff = snapshot_now - (window_days - train_days) * _SECONDS_PER_DAY
+    train_sids, unseen_sids, cont_sids = set(), set(), set()
+    train_runs = unseen_runs = cont_runs = 0
+    for s in all_sessions:
+        first_ts = min(s.created_at, *(r.created_at for r in s.runs)) if s.runs else s.created_at
+        tr = sum(window_start <= r.created_at and max(r.created_at, r.updated_at) <= cutoff for r in s.runs)
+        ho = sum(
+            cutoff < r.created_at <= snapshot_now and max(r.created_at, r.updated_at) <= snapshot_now for r in s.runs
+        )
+        if tr:
+            train_sids.add(s.session_id)
+            train_runs += tr
+        if ho:
+            if cutoff < first_ts <= snapshot_now:
+                unseen_sids.add(s.session_id)
+                unseen_runs += ho
+            else:
+                cont_sids.add(s.session_id)
+                cont_runs += ho
+    return ChronologicalSplit(
+        snapshot_now,
+        window_start,
+        cutoff,
+        frozenset(train_sids),
+        frozenset(unseen_sids),
+        frozenset(cont_sids),
+        train_runs,
+        unseen_runs,
+        cont_runs,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class WindowBaselines:
+    """Loaded window sessions, chronological split, Stage 1 breakdown, and Baselines A & B."""
+
+    sessions: list[AuditedSession]
+    split: ChronologicalSplit
+    stage1_now: float
+    stage1: Stage1Breakdown
+    baseline_a: dict[str, Any]
+    baseline_b: dict[str, Any]
+
+
+def evaluate_window_baselines(
+    *,
+    db_path: Path,
+    agent_name: str,
+    prices: Mapping[tuple[str, str], PricedModel],
+    window_days: int,
+    train_days: int,
+    review_interval: int,
+    min_idle_seconds: int = 600,
+    allowed_room_id: str | None = None,
+) -> WindowBaselines:
+    """Load the evaluation window strictly read-only and compute chronological split, Stage 1, and Baselines A & B."""
+    snapshot_now = latest_run_timestamp(db_path, agent_name)
+    window_start = snapshot_now - window_days * _SECONDS_PER_DAY if snapshot_now > 0 else 0.0
+    sessions = (
+        load_audited_sessions(
+            db_path,
+            agent_name,
+            since_ts=window_start,
+            until_ts=snapshot_now,
+            allowed_room_id=allowed_room_id,
+        )
+        if snapshot_now > 0
+        else []
+    )
+    split = split_sessions_chronologically(sessions, window_days=window_days, train_days=train_days)
+    stage1_now = max(split.snapshot_now, *(s.last_updated_at for s in sessions)) + min_idle_seconds if sessions else 0.0
+    stage1 = compute_stage1_breakdown(sessions, now=stage1_now, min_idle_seconds=min_idle_seconds)
+    base_a = compute_baseline_a(
+        db_path,
+        agent_name,
+        prices=prices,
+        sessions=sessions,
+        friction_sessions=stage1.friction_sessions,
+        repeat_error_sessions=stage1.repeat_error_sessions,
+        since_ts=split.window_start if split.snapshot_now > 0 else None,
+        until_ts=split.snapshot_now if split.snapshot_now > 0 else None,
+        allowed_room_id=allowed_room_id,
+    )
+    base_b = compute_baseline_b(
+        db_path,
+        agent_name,
+        sessions=sessions,
+        friction_sessions=stage1.friction_sessions,
+        repeat_error_sessions=stage1.repeat_error_sessions,
+        review_interval=review_interval,
+    )
+    return WindowBaselines(sessions, split, stage1_now, stage1, base_a, base_b)

@@ -47,7 +47,7 @@ def _format_report_notice(clusters: Sequence[FailureCluster]) -> str:
 
 
 async def _run_trace_audit(ctx: AutomationContext, entry: TraceAuditAutomation, db_path: Path) -> Done | None:
-    """Execute one passive trace-audit pass on the event loop."""
+    """Execute one passive trace-audit pass with off-loop SQLite/Stage-1 scanning."""
     model_name = _resolve_audit_model(ctx, entry)
     judge_fn = make_llm_audit_judge(
         ctx.config,

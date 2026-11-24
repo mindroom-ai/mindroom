@@ -149,6 +149,13 @@ class TraceAuditAutomation(_ScheduledAutomation):
 
     name: Literal["trace_audit"] = Field(default="trace_audit", description="Built-in automation name")
     cron: str = Field(default="0 * * * *", description="When to check, in the agent's timezone")
+    room: str | None = Field(
+        default=None,
+        description=(
+            "Room key or Matrix room ID whose settled sessions trace_audit audits and where notices are posted; "
+            "defaults to the agent's first configured room (or personal room for private instances)"
+        ),
+    )
     min_idle_seconds: int = Field(default=600, ge=0, le=86_400, description="Idle seconds before a session is audited")
     sample_rate: float = Field(default=0.02, ge=0.0, le=1.0, description="Fraction of clean runs sampled per pass")
     max_audits_per_run: int = Field(default=12, ge=1, le=100, description="Max evidence cards audited per pass")

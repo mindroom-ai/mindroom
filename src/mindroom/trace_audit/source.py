@@ -6,6 +6,7 @@ import json
 import sqlite3
 from collections import defaultdict
 from contextlib import contextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from mindroom.automations.steps import is_automation_hook_source
@@ -19,7 +20,6 @@ from mindroom.trace_audit.models import AuditedRun, AuditedSession, RunMessageRe
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from collections.abc import Set as AbstractSet
-    from pathlib import Path
 
 _WORKFLOW_MARKER = ":dynamic_workflow:"
 _OWN_THREAD_KEY = "mindroom_own_thread_message"
@@ -27,10 +27,24 @@ _COMPACTION_KEY = "mindroom_compaction_summary"
 _CHUNK_SIZE = 500
 
 
+def _validated_db_path(db_path: Path) -> Path:
+    """Refuse symlinks at ``db_path`` or its immediate parent while following ancestors above ``db_path.parent``."""
+    path = db_path if db_path.is_absolute() else Path.cwd() / db_path
+    if path.parent.is_symlink() or path.is_symlink():
+        msg = f"Refusing to open {db_path}: the conversation database or its directory is a link"
+        raise ValueError(msg)
+    return path.parent.parent.resolve() / path.parent.name / path.name
+
+
 @contextmanager
 def _open_read_only(db_path: Path) -> Iterator[sqlite3.Connection]:
-    connection = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=5.0)
+    expected = _validated_db_path(db_path)
+    connection = sqlite3.connect(f"{expected.as_uri()}?mode=ro", uri=True, timeout=5.0)
     try:
+        (opened,) = connection.execute("SELECT file FROM pragma_database_list WHERE name = 'main'").fetchone()
+        if opened != str(expected):
+            msg = f"Refusing to open {db_path}: SQLite opened {opened} instead"
+            raise ValueError(msg)
         connection.execute("PRAGMA query_only = ON")
         yield connection
     finally:
@@ -223,19 +237,30 @@ def _read_terminal_runs(
     by_session: dict[str, list[tuple[str, str, str, int, float, float, dict[str, Any], dict[str, Any]]]] = defaultdict(
         list,
     )
+    clauses = [
+        "kind = 'agent'",
+        "parent_run_id IS NULL",
+        "status IN ('COMPLETED', 'ERROR', 'CANCELLED')",
+    ]
+    params: list[Any] = []
+    if since_ts is not None:
+        clauses.append("COALESCE(created_at, 0) >= ?")
+        params.append(since_ts)
+    if until_ts is not None:
+        clauses.append("COALESCE(created_at, 0) <= ?")
+        params.append(until_ts)
+        clauses.append("COALESCE(updated_at, created_at, 0) <= ?")
+        params.append(until_ts)
     query = (
         f"SELECT run_id, session_id, status, seq, created_at, updated_at, metadata, record "  # noqa: S608
         f"FROM {quote_identifier(names.log_runs)} "
-        "WHERE kind = 'agent' AND parent_run_id IS NULL "
-        "AND status IN ('COMPLETED', 'ERROR', 'CANCELLED') ORDER BY session_id, seq"
+        f"WHERE {' AND '.join(clauses)} ORDER BY session_id, seq"
     )
-    for rid, sid, status, seq, created_at, updated_at, raw_meta, raw_record in connection.execute(query):
+    for rid, sid, status, seq, created_at, updated_at, raw_meta, raw_record in connection.execute(query, params):
         sid_s, rid_s = str(sid), str(rid)
         if sid_s not in valid_sessions or rid_s in removed_ids:
             continue
         created = float(created_at or 0.0)
-        if (since_ts is not None and created < since_ts) or (until_ts is not None and created > until_ts):
-            continue
         meta = _json_dict(raw_meta)
         hook_source = meta.get(HOOK_SOURCE_RUN_METADATA_KEY)
         if isinstance(hook_source, str) and is_automation_hook_source(hook_source):
@@ -247,6 +272,7 @@ def _read_terminal_runs(
 
 def latest_run_timestamp(db_path: Path, storage_name: str) -> float:
     """Return the latest terminal top-level agent run timestamp in the database, or ``0.0`` if empty."""
+    _validated_db_path(db_path)
     if not db_path.exists():
         return 0.0
     names = TableNames(storage_name)
@@ -271,6 +297,7 @@ def load_audited_sessions(
     contact_session_check: Callable[[str], bool] | None = None,
 ) -> list[AuditedSession]:
     """Load terminal top-level agent runs per session from a v8 SQLite database strictly read-only."""
+    _validated_db_path(db_path)
     if not db_path.exists():
         return []
     names = TableNames(storage_name)
@@ -338,6 +365,7 @@ def load_usage_rows(
     until_ts: float | None = None,
 ) -> list[dict[str, Any]]:
     """Read usage ledger snapshots from ``<storage_name>_sessions_usage`` strictly read-only."""
+    _validated_db_path(db_path)
     if not db_path.exists():
         return []
     names = TableNames(storage_name)
