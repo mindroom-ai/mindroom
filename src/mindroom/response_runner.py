@@ -521,7 +521,12 @@ class ResponseRunner:
         """
         config = self.deps.runtime.config
         agent = config.agents.get(self.deps.agent_name)
-        if agent is None or not agent.skill_learning.enabled or request.contact is not None:
+        if (
+            agent is None
+            or not agent.skill_learning.enabled
+            or agent.skill_learning.trigger == "friction"
+            or request.contact is not None
+        ):
             return None, runtime
         reviews = self.deps.runtime.orchestrator.skill_reviews
         agent_name = self.deps.agent_name

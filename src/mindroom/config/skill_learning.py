@@ -1,5 +1,7 @@
 """Opt-in background skill review settings."""
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom.config.schema_hints import dashboard_hint
@@ -11,6 +13,13 @@ class SkillLearningConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = Field(default=False, description="Review conversations and maintain learned workspace skills")
+    trigger: Literal["interval", "friction"] = Field(
+        default="interval",
+        description=(
+            "How skill reviews are triggered: 'interval' reviews every review_interval model replies, "
+            "'friction' promotes recurring failure clusters detected by the trace_audit automation"
+        ),
+    )
     model: str | None = Field(
         default=None,
         description="Review model alias; defaults to the model of the reviewed response",

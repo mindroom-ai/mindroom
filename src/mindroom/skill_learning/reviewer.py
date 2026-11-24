@@ -12,7 +12,7 @@ digest instead, like Hermes' routed review.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -31,7 +31,7 @@ from mindroom.logging_config import get_logger
 from mindroom.model_usage import context_input_tokens_from_counts
 from mindroom.providers import registry as provider_registry
 from mindroom.session_storage.agent_storage import create_session_storage
-from mindroom.skill_learning.tools import SkillCatalog, SkillTools, load_skill_catalog
+from mindroom.skill_learning.tools import ReviewProgress, SkillCatalog, SkillTools, load_skill_catalog
 from mindroom.skill_learning.transcript import conversation_messages, render_transcript
 from mindroom.token_counting.counts import count, fit_text
 from mindroom.tool_jobs.background_after import application_arguments
@@ -45,21 +45,24 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.agent_loop.model_loop import LoopState, RequestDecision
+    from mindroom.agent_loop.tools import PlannedCall
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.conversation_text import Utterance
     from mindroom.llm.provider import ModelProvider, ModelRequest, TokenCounter, ToolSpec
     from mindroom.llm.usage import MessageMetrics
     from mindroom.skill_learning.capture import CapturedRequest
-    from mindroom.skill_learning.tools import ReviewProgress
     from mindroom.tool_system.invocation import ToolCall, ToolNext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.trace_audit.models import FailureCluster
 
 logger = get_logger(__name__)
 
 # Hermes caps one review fork at 16 iterations and 75% of the review model's context window, at most 600k input
 # tokens across all of its requests, falling back to 120k when the window is unknown.
 _REVIEW_MAX_TOOL_CALLS = 16
+AUDIT_REVIEW_MAX_TOOL_CALLS = 4
+AUDIT_REVIEW_MAX_INPUT_TOKENS = 16_000
 _INPUT_CONTEXT_FRACTION = 0.75
 _MAX_INPUT_TOKENS = 600_000
 _FALLBACK_INPUT_TOKENS = 120_000
@@ -80,6 +83,22 @@ _SKILL_TOOL_LINES = {
     "get_skill_script": "get_skill_script(skill_name, script_path): load one support file under scripts/, named the "
     "same way; scripts never run in a review.",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class ReviewOutcome:
+    """Outcome and usage summary of one bounded evidence-only audit-cluster review."""
+
+    changed_skills: dict[str, str]
+    model_name: str
+    provider: str
+    model_id: str
+    input_tokens: int
+    output_tokens: int
+    model_requests: int
+    tool_calls: int
+    final_text: str = ""
+    metrics: RunMetrics = field(default_factory=RunMetrics)
 
 
 @dataclass(frozen=True)
@@ -359,19 +378,28 @@ def _context_tokens(config: Config, model: ModelProvider, model_name: str, metri
     )
 
 
-def _review_hooks(config: Config, review: _ReviewRequest, metrics: RunMetrics) -> LoopHooks:
+def _review_hooks(
+    config: Config,
+    review: _ReviewRequest,
+    metrics: RunMetrics,
+    *,
+    budget_tokens: int | None = None,
+    on_planned_calls: Callable[[int], None] | None = None,
+) -> LoopHooks:
     """Return the hooks of one review's loop: its input budget, the tool definitions it offers, and its output limit.
 
     Like an agent's reply, a review answers the tool calls of a response the output limit cut off instead of running
     them, so a truncated skill_manage call never writes a truncated skill.
     """
-    budget_tokens = _review_input_budget_tokens(config, review.model_name)
+    effective_budget = (
+        _review_input_budget_tokens(config, review.model_name) if budget_tokens is None else budget_tokens
+    )
 
     async def within_budget(_state: LoopState) -> RequestDecision:
         # Like Hermes, the review ends before its next request once the input it sent reached the budget.
-        if (spent := _context_tokens(config, review.model, review.model_name, metrics)) < budget_tokens:
+        if (spent := _context_tokens(config, review.model, review.model_name, metrics)) < effective_budget:
             return SendRequest()
-        logger.info("Skill review reached its input budget", budget_tokens=budget_tokens, spent_tokens=spent)
+        logger.info("Skill review reached its input budget", budget_tokens=effective_budget, spent_tokens=spent)
         return EndRun()
 
     async def offer_definitions(state: LoopState) -> RequestDecision:
@@ -379,9 +407,242 @@ def _review_hooks(config: Config, review: _ReviewRequest, metrics: RunMetrics) -
         state.tools = review.definitions
         return SendRequest()
 
+    async def count_planned(_state: LoopState, planned: Sequence[PlannedCall]) -> None:
+        if on_planned_calls is not None:
+            on_planned_calls(len(planned))
+
     return LoopHooks(
         before_request=(within_budget, offer_definitions),
         answer_tool_calls=output_limit_policy(),
+        before_dispatch=count_planned if on_planned_calls is not None else None,
+    )
+
+
+async def _execute_review(
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    session_id: str | None,
+    run_session_id: str,
+    identity: ToolExecutionIdentity | None,
+    review: _ReviewRequest,
+    max_tool_calls: int,
+    budget_tokens: int | None = None,
+    record_usage: bool = True,
+) -> tuple[RunRecord, RunMetrics, int]:
+    """Run one prepared review loop and persist its usage under ``kind="skill_learning"`` when requested."""
+    invocation_id = uuid4().hex
+    model_identity = review.model.identity
+    # The loop adds the usage of each of the review's requests to the record's metrics.
+    metrics = RunMetrics()
+    record = RunRecord(
+        run_id=invocation_id,
+        session_id=run_session_id,
+        model=model_identity.id,
+        model_provider=model_identity.provider,
+        metrics=metrics,
+        # A review that reaches its request cap logs it under the reviewed agent.
+        agent_id=agent_name,
+    )
+    messages = list(review.messages)
+    executed_calls = 0
+
+    def _add_calls(count_delta: int) -> None:
+        nonlocal executed_calls
+        executed_calls += count_delta
+
+    try:
+        events = run_model_loop(
+            review.model,
+            messages,
+            review.tools,
+            record=record,
+            run=RunContext(run_id=invocation_id, session=UnstoredSession(run_session_id)),
+            hooks=_review_hooks(config, review, metrics, budget_tokens=budget_tokens, on_planned_calls=_add_calls),
+            max_tool_calls_per_turn=max_tool_calls,
+            request_template=review.settings,
+        )
+        async for _event in events:
+            pass
+    finally:
+        # Only the review's own replies, whose metrics give the usage report its requests. The usage counts against
+        # the conversation it reviewed, also when a timeout or a stop ended the review.
+        record.messages = messages[len(review.messages) :]
+        if record_usage and record.messages and session_id is not None:
+            await record_run_usage(
+                record,
+                owner=HelperUsageOwner(
+                    storage_factory=partial(
+                        create_session_storage,
+                        agent_name,
+                        config,
+                        runtime_paths,
+                        execution_identity=identity,
+                    ),
+                    session_id=session_id,
+                ),
+                kind="skill_learning",
+                requester_id=identity.requester_id if identity is not None else None,
+            )
+    return record, metrics, executed_calls
+
+
+def _audit_cluster_dossier(cluster: FailureCluster) -> str:
+    """Format a generalized, evidence-only dossier for one promoted trace-audit failure cluster."""
+    lines = [
+        f"Cluster key: {cluster.cluster_key}",
+        f"Category: {cluster.category}",
+        f"Remedy: {cluster.remedy}",
+        f"Distinct sessions: {cluster.distinct_sessions} (occurrences: {cluster.occurrence_count})",
+        f"Verified fix observed in traces: {'yes' if cluster.has_verified_fix else 'no'}",
+    ]
+    if cluster.tool_name:
+        op = f"/{cluster.operation}" if cluster.operation else ""
+        lines.append(f"Tool failure pattern: {cluster.tool_name}{op} ({cluster.kind}/{cluster.diagnostic_family})")
+    if cluster.target_skill:
+        lines.append(f"Suggested target skill: {cluster.target_skill}")
+    if cluster.root_causes:
+        lines.append("Generalized root causes:")
+        lines.extend(f"- {cause}" for cause in cluster.root_causes)
+    if cluster.proposed_rules:
+        lines.append("Proposed procedural rules:")
+        lines.extend(f"- {rule}" for rule in cluster.proposed_rules)
+    return "\n".join(lines)
+
+
+def _audit_review_prompt(cluster: FailureCluster, catalog: SkillCatalog, runnable: Sequence[str]) -> str:
+    """Build the conservative evidence-only prompt for an audit-cluster skill review."""
+    owners = "\n".join(
+        f"- {entry.name} ({entry.owner}): {entry.description}"
+        for entry in sorted(catalog.entries.values(), key=lambda item: item.name)
+    )
+    tool_lines = "\n".join(f"- {_SKILL_TOOL_LINES[name]}" for name in runnable)
+    return (
+        "This turn is a bounded, evidence-only skill review triggered by a recurring failure cluster from passive "
+        "trace auditing. No raw conversation transcript is included.\n\n"
+        f"<failure_cluster>\n{_audit_cluster_dossier(cluster)}\n</failure_cluster>\n\n"
+        "Instructions:\n"
+        "1. Prefer patching an existing learner-owned skill first: call get_skill_instructions before patching or "
+        "editing.\n"
+        "2. Create a new learner skill ONLY if no existing learner skill fits and the procedural rule is broadly "
+        "reusable across future tasks.\n"
+        "3. You may only change skills owned by `learner`; never try to edit `user` or `configured` skills.\n"
+        "4. Keep additions concise, general, and free of task-specific literals, file paths, or credentials.\n"
+        "5. If equivalent guidance already exists, or the issue is too narrow or transient, make NO edits and reply "
+        'exactly "Nothing to save.".\n'
+        f"6. You have a strict budget of at most {AUDIT_REVIEW_MAX_TOOL_CALLS} tool calls.\n\n"
+        f"Tools:\n{tool_lines}\n\n"
+        f"Skills and their owners:\n{owners or '(none yet)'}\n\n"
+        f"You can only call {_listing(runnable)} in this review; every other tool is unavailable."
+    )
+
+
+def _audit_review_model_name(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    *,
+    room_id: str | None = None,
+    model_name: str | None = None,
+) -> str:
+    """Resolve the review model for one audit-cluster review."""
+    if model_name is not None:
+        return model_name
+    if (configured := config.agents[agent_name].skill_learning.model) is not None:
+        return configured
+    return resolve_turn_model(
+        config,
+        runtime_paths,
+        ModelScope(entity=agent_name, room_id=room_id, thread_id=None),
+        None,
+    ).model_name
+
+
+async def review_audit_cluster(
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    cluster: FailureCluster,
+    skills_root: Path,
+    progress: ReviewProgress | None = None,
+    identity: ToolExecutionIdentity | None = None,
+    room_id: str | None = None,
+    model_name: str | None = None,
+    record_usage: bool = True,
+) -> ReviewOutcome:
+    """Run one bounded evidence-only skill review for a promoted trace-audit failure cluster."""
+    active_progress = ReviewProgress() if progress is None else progress
+    catalog = await asyncio.to_thread(load_skill_catalog, config, runtime_paths, agent_name, skills_root)
+    tools = SkillTools(skills_root, dict(catalog.entries), catalog.reserved_names, progress=active_progress)
+    resolved_model_name = _audit_review_model_name(
+        config,
+        runtime_paths,
+        agent_name,
+        room_id=room_id,
+        model_name=model_name,
+    )
+    model = provider_registry.build_model_provider(
+        config,
+        runtime_paths,
+        resolved_model_name,
+        execution_identity=identity,
+    )
+    definitions = await asyncio.to_thread(
+        _agent_skill_definitions,
+        config,
+        runtime_paths,
+        agent_name,
+        skills_root,
+        catalog,
+    )
+    functions, runnable = _review_tools(definitions, tools)
+    review = _ReviewRequest(
+        model=model,
+        model_name=resolved_model_name,
+        messages=[Message(role="user", content=_audit_review_prompt(cluster, catalog, runnable))],
+        definitions=definitions,
+        tools=functions,
+        settings=EMPTY_REQUEST,
+        forked=False,
+    )
+    session_id = cluster.session_ids[-1] if cluster.session_ids else None
+    run_session_id = session_id or f"trace_audit:{cluster.cluster_key}"
+    budget_tokens = min(AUDIT_REVIEW_MAX_INPUT_TOKENS, _review_input_budget_tokens(config, resolved_model_name))
+    record, metrics, executed_calls = await _execute_review(
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_name=agent_name,
+        session_id=session_id,
+        run_session_id=run_session_id,
+        identity=identity,
+        review=review,
+        max_tool_calls=AUDIT_REVIEW_MAX_TOOL_CALLS,
+        budget_tokens=budget_tokens,
+        record_usage=record_usage,
+    )
+    input_tokens = _context_tokens(config, review.model, review.model_name, metrics)
+    model_requests = len(own_model_messages(record))
+    logger.info(
+        "Audit-cluster skill review model run finished",
+        cluster_key=cluster.cluster_key,
+        model_requests=model_requests,
+        tool_calls=executed_calls,
+        input_tokens=input_tokens,
+        changed=sorted(active_progress.changes),
+    )
+    return ReviewOutcome(
+        changed_skills=dict(active_progress.changes),
+        model_name=resolved_model_name,
+        provider=model.identity.provider,
+        model_id=model.identity.id,
+        input_tokens=input_tokens,
+        output_tokens=metrics.tokens.output_tokens,
+        model_requests=model_requests,
+        tool_calls=executed_calls,
+        final_text=record.content if isinstance(record.content, str) else "",
+        metrics=metrics,
     )
 
 
@@ -412,53 +673,16 @@ async def review_conversation(
     )
     if review is None:
         return
-    invocation_id = uuid4().hex
-    model_identity = review.model.identity
-    # The loop adds the usage of each of the review's requests to the record's metrics.
-    metrics = RunMetrics()
-    record = RunRecord(
-        run_id=invocation_id,
+    record, metrics, _executed_calls = await _execute_review(
+        config=config,
+        runtime_paths=runtime_paths,
+        agent_name=agent_name,
         session_id=session_id,
-        model=model_identity.id,
-        model_provider=model_identity.provider,
-        metrics=metrics,
-        # A review that reaches its request cap logs it under the reviewed agent.
-        agent_id=agent_name,
+        run_session_id=session_id,
+        identity=identity,
+        review=review,
+        max_tool_calls=_REVIEW_MAX_TOOL_CALLS,
     )
-    messages = list(review.messages)
-    try:
-        events = run_model_loop(
-            review.model,
-            messages,
-            review.tools,
-            record=record,
-            run=RunContext(run_id=invocation_id, session=UnstoredSession(session_id)),
-            hooks=_review_hooks(config, review, metrics),
-            max_tool_calls_per_turn=_REVIEW_MAX_TOOL_CALLS,
-            request_template=review.settings,
-        )
-        async for _event in events:
-            pass
-    finally:
-        # Only the review's own replies, whose metrics give the usage report its requests. The usage counts against
-        # the conversation it reviewed, also when a timeout or a stop ended the review.
-        record.messages = messages[len(review.messages) :]
-        if record.messages:
-            await record_run_usage(
-                record,
-                owner=HelperUsageOwner(
-                    storage_factory=partial(
-                        create_session_storage,
-                        agent_name,
-                        config,
-                        runtime_paths,
-                        execution_identity=identity,
-                    ),
-                    session_id=session_id,
-                ),
-                kind="skill_learning",
-                requester_id=identity.requester_id if identity is not None else None,
-            )
     logger.info(
         "Skill review model run finished",
         forked=review.forked,

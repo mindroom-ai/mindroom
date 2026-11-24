@@ -1017,6 +1017,7 @@ visibility = [
     "mindroom.knowledge_graph.clients",
     "mindroom.knowledge_graph.ingestion",
     "mindroom.automations.exploration",
+    "mindroom.automations.trace_audit",
     "mindroom.memory._mem0_backend",
     "mindroom.history.mid_turn_compaction",
 ]
@@ -1052,6 +1053,7 @@ visibility = [
     "mindroom.knowledge.chunk_context",
     "mindroom.history.mid_turn_compaction",
     "mindroom.trace_audit.auditor",
+    "mindroom.automations.trace_audit",
 ]
 
 [[modules]]
@@ -10232,12 +10234,13 @@ visibility = [
     "mindroom.config.resolution",
     "mindroom.config.models",
     "mindroom.automations.exploration",
+    "mindroom.automations.trace_audit",
 ]
 
 [[modules]]
 path = "mindroom.automations.threads"
 depends_on = ["mindroom.constants", "mindroom.path_confinement"]
-visibility = ["mindroom.automations.dreaming", "mindroom.automations.runner", "mindroom.knowledge_graph.ingestion", "mindroom.automations.exploration"]
+visibility = ["mindroom.automations.dreaming", "mindroom.automations.runner", "mindroom.knowledge_graph.ingestion", "mindroom.automations.exploration", "mindroom.automations.trace_audit"]
 
 [[modules]]
 path = "mindroom.automations.steps"
@@ -10251,6 +10254,7 @@ visibility = [
     "mindroom.history.conversation_text",
     "mindroom.reply_turn.locked_turn",
     "mindroom.trace_audit.source",
+    "mindroom.automations.trace_audit",
 ]
 
 [[modules]]
@@ -10260,6 +10264,7 @@ depends_on = [
     "mindroom.automations.prompt_curation",
     "mindroom.config.automations",
     "mindroom.automations.exploration",
+    "mindroom.automations.trace_audit",
 ]
 
 [[modules]]
@@ -10584,6 +10589,23 @@ depends_on = [
     "mindroom.session_storage.agent_storage",
     "mindroom.llm",
     "mindroom.config.resolution",
+]
+visibility = ["mindroom.automations.registry"]
+
+[[modules]]
+path = "mindroom.automations.trace_audit"
+depends_on = [
+    "mindroom.automations.registry",
+    "mindroom.automations.steps",
+    "mindroom.automations.threads",
+    "mindroom.config.automations",
+    "mindroom.config.resolution",
+    "mindroom.contacts.turns",
+    "mindroom.helper_usage",
+    "mindroom.session_storage.agent_storage",
+    "mindroom.trace_audit.auditor",
+    "mindroom.trace_audit.models",
+    "mindroom.trace_audit.pipeline",
 ]
 visibility = ["mindroom.automations.registry"]
 [[modules]]

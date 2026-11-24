@@ -24,10 +24,10 @@ from zoneinfo import ZoneInfo
 from croniter import croniter
 
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
-from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, Ask, AutomationContext, Done
+from mindroom.automations.steps import AUTOMATION_HOOK_PREFIX, Ask, AutomationContext, Done, Run
 from mindroom.automations.threads import automations_tracking_root, record_automation_thread
 from mindroom.background_tasks import SupervisedLoop, create_background_task
-from mindroom.config.automations import PluginAutomation
+from mindroom.config.automations import BUILTIN_AUTOMATION_NAMES, PluginAutomation
 from mindroom.config.resolution import agent_automations, memory_backend
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
@@ -52,6 +52,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.automations.registry import AutomationDefinition
+    from mindroom.automations.steps import AuditClusterReviewer, CheckStep
     from mindroom.bot import AgentBot
     from mindroom.config.automations import Automation
     from mindroom.config.main import Config
@@ -147,12 +148,19 @@ def _state_dir(runtime_paths: RuntimePaths, chain: _Chain, state_root: Path) -> 
     return primary_records_dir(state_root, runtime_paths) / "automations"
 
 
+def _is_builtin(automation: Automation) -> bool:
+    """Return whether ``automation`` is a MindRoom built-in automation rather than a plugin automation."""
+    return not isinstance(automation, PluginAutomation) and automation.name in BUILTIN_AUTOMATION_NAMES
+
+
 def _check(
     config: Config,
     runtime_paths: RuntimePaths,
     chain: _Chain,
     definition: AutomationDefinition,
-) -> Ask | None:
+    *,
+    review_audit_cluster: AuditClusterReviewer | None = None,
+) -> CheckStep:
     """Run one automation's check; raises ``OSError`` or ``ValueError`` when it cannot read what it checks."""
     agent_name, automation = chain.agent_name, chain.settings
     if definition.requires_file_memory and memory_backend(config, agent_name) != "file":
@@ -186,6 +194,8 @@ def _check(
         execution_identity=identity,
         workspace=runtime.workspace.root,
         state_dir=_state_dir(runtime_paths, chain, runtime.state_root),
+        _room_id=chain.room_id,
+        _review_audit_cluster=review_audit_cluster if _is_builtin(automation) else None,
     )
     return definition.check(context)
 
@@ -202,6 +212,8 @@ class AutomationRunner:
     definition_provider: Callable[[str], AutomationDefinition | None]
     # Who may use which agent, which a private instance's requester must still pass before a run on their behalf.
     agent_reply_memberships: AgentReplyMembershipIndex
+    # Built-in trace_audit nomination callback wired to SkillReviewRunner.review_audit_cluster.
+    review_audit_cluster: AuditClusterReviewer | None = None
     # Each automation's (cron, timezone) and the next time it is due, recomputed when either changes.
     _next_due: dict[str, tuple[tuple[str, str], datetime]] = field(default_factory=dict, init=False)
     # Agents and private instances with an automation between its check and the end of its chain; their automations
@@ -344,7 +356,14 @@ class AutomationRunner:
                 return
             chain = _Chain(key, agent_name, requester_id, automation, room_id)
             try:
-                step = await asyncio.to_thread(_check, config, self.runtime_paths, chain, definition)
+                step = await asyncio.to_thread(
+                    _check,
+                    config,
+                    self.runtime_paths,
+                    chain,
+                    definition,
+                    review_audit_cluster=self.review_audit_cluster,
+                )
             except (OSError, ValueError) as exc:
                 logger.warning(
                     "Automation check failed",
@@ -355,8 +374,7 @@ class AutomationRunner:
                 )
                 await self._notify(bot, chain, None, f"⚠️ The {automation.name} automation could not run: {exc}")
                 return
-            if step is not None:
-                posted = await self._post(config, bot, chain, None, step, clock_offset)
+            posted = await self._dispatch_check_step(config, bot, chain, step, clock_offset)
         finally:
             if not posted:
                 self._release(instance)
@@ -394,6 +412,60 @@ class AutomationRunner:
         finally:
             if not posted:
                 self._release(chain.instance)
+
+    async def _dispatch_check_step(
+        self,
+        config: Config,
+        bot: AgentBot,
+        chain: _Chain,
+        step: CheckStep,
+        clock_offset: timedelta,
+    ) -> bool:
+        """Execute one step returned by an automation check; return whether a visible prompt was posted."""
+        if isinstance(step, Run):
+            if not _is_builtin(chain.settings):
+                logger.warning(
+                    "Plugin automation returned built-in-only Run step; ignored",
+                    agent=chain.agent_name,
+                    automation=chain.settings.name,
+                    requester=chain.requester_id,
+                )
+                return False
+            await self._run_passive(bot, chain, step)
+            return False
+        if isinstance(step, Ask):
+            return await self._post(config, bot, chain, None, step, clock_offset)
+        if step is not None:
+            logger.warning(
+                "Automation check returned an invalid step; ignored",
+                agent=chain.agent_name,
+                automation=chain.settings.name,
+                requester=chain.requester_id,
+                step_type=type(step).__name__,
+            )
+        return False
+
+    async def _run_passive(self, bot: AgentBot, chain: _Chain, step: Run) -> None:
+        """Await a built-in automation's passive ``Run`` step on the main loop and post any non-empty notice."""
+        try:
+            done = await step.execute()
+        except Exception as exc:
+            logger.warning(
+                "Automation run failed",
+                agent=chain.agent_name,
+                automation=chain.settings.name,
+                requester=chain.requester_id,
+                error=str(exc),
+            )
+            await self._notify(bot, chain, None, f"⚠️ The {chain.settings.name} automation could not run: {exc}")
+            return
+        if isinstance(done, Done):
+            if done.on_loop is not None:
+                done.on_loop()
+            if done.notice:
+                await self._notify(bot, chain, None, done.notice)
+            for thread_id in done.resolve:
+                await self._tag_thread(bot, chain, thread_id, RESOLVED_THREAD_TAG)
 
     async def _notify(self, bot: AgentBot, chain: _Chain, thread_id: str | None, text: str) -> None:
         """Post ``text`` as a notice whose mentions no agent acts on, so it starts no run."""

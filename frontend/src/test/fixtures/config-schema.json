@@ -572,6 +572,9 @@
                     "$ref": "#/$defs/ExplorationAutomation"
                   },
                   {
+                    "$ref": "#/$defs/TraceAuditAutomation"
+                  },
+                  {
                     "$ref": "#/$defs/PluginAutomation"
                   }
                 ],
@@ -593,6 +596,7 @@
           "$ref": "#/$defs/SkillLearningConfig",
           "default": {
             "enabled": false,
+            "trigger": "interval",
             "model": null,
             "review_interval": 10,
             "timeout_seconds": 120,
@@ -1875,6 +1879,9 @@
               },
               {
                 "$ref": "#/$defs/ExplorationAutomation"
+              },
+              {
+                "$ref": "#/$defs/TraceAuditAutomation"
               },
               {
                 "$ref": "#/$defs/PluginAutomation"
@@ -4894,7 +4901,8 @@
             "enum": [
               "prompt_curation",
               "dreaming",
-              "exploration"
+              "exploration",
+              "trace_audit"
             ]
           },
           "pattern": "^[a-z][a-z0-9_]*$",
@@ -5506,6 +5514,16 @@
           "title": "Enabled",
           "type": "boolean"
         },
+        "trigger": {
+          "default": "interval",
+          "description": "How skill reviews are triggered: 'interval' reviews every review_interval model replies, 'friction' promotes recurring failure clusters detected by the trace_audit automation",
+          "enum": [
+            "interval",
+            "friction"
+          ],
+          "title": "Trigger",
+          "type": "string"
+        },
         "model": {
           "anyOf": [
             {
@@ -5985,6 +6003,113 @@
       ],
       "title": "ToolConfigEntry",
       "type": "object"
+    },
+    "TraceAuditAutomation": {
+      "additionalProperties": false,
+      "description": "Hourly passive audit of settled sessions for recurring friction and teachable failures.",
+      "properties": {
+        "cron": {
+          "default": "0 * * * *",
+          "description": "When to check, in the agent's timezone",
+          "title": "Cron",
+          "type": "string"
+        },
+        "room": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Room key or Matrix room ID of a room the agent is in, for the prompt; defaults to the agent's first configured room",
+          "title": "Room"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model for the prompt's runs, a key of models; defaults to the agent's own model",
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "name": {
+          "const": "trace_audit",
+          "default": "trace_audit",
+          "description": "Built-in automation name",
+          "title": "Name",
+          "type": "string"
+        },
+        "min_idle_seconds": {
+          "default": 600,
+          "description": "Idle seconds before a session is audited",
+          "maximum": 86400,
+          "minimum": 0,
+          "title": "Min Idle Seconds",
+          "type": "integer"
+        },
+        "sample_rate": {
+          "default": 0.02,
+          "description": "Fraction of clean runs sampled per pass",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Sample Rate",
+          "type": "number"
+        },
+        "max_audits_per_run": {
+          "default": 12,
+          "description": "Max evidence cards audited per pass",
+          "maximum": 100,
+          "minimum": 1,
+          "title": "Max Audits Per Run",
+          "type": "integer"
+        },
+        "min_cluster_sessions": {
+          "default": 2,
+          "description": "Distinct sessions needed to promote",
+          "maximum": 50,
+          "minimum": 1,
+          "title": "Min Cluster Sessions",
+          "type": "integer"
+        },
+        "cooldown_days": {
+          "default": 14,
+          "description": "Days before a promoted cluster may re-promote",
+          "maximum": 365,
+          "minimum": 0,
+          "title": "Cooldown Days",
+          "type": "integer"
+        },
+        "max_nominations_per_run": {
+          "default": 1,
+          "description": "Max clusters promoted per pass",
+          "maximum": 10,
+          "minimum": 1,
+          "title": "Max Nominations Per Run",
+          "type": "integer"
+        },
+        "notify": {
+          "default": true,
+          "description": "Post a summary notice for actionable clusters in report-only mode",
+          "title": "Notify",
+          "type": "boolean"
+        }
+      },
+      "title": "TraceAuditAutomation",
+      "type": "object",
+      "required": [
+        "name"
+      ]
     },
     "TypeSafeJudgmentConfig": {
       "additionalProperties": false,

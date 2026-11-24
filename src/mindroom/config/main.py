@@ -93,6 +93,7 @@ from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
 from mindroom.config.resolution import (
     ResolvedAgent,
     ResolvedScope,
+    agent_automations,
     agent_policy,
     agent_tool_facts,
     authored_compaction_model_fields,
@@ -1778,6 +1779,16 @@ class Config(BaseModel):
                         f"Agent {agent_name!r} automation {automation.name!r} uses unknown model {automation.model!r}",
                     )
                     raise ValueError(msg)
+            if (
+                agent.skill_learning.enabled
+                and agent.skill_learning.trigger == "friction"
+                and not any(entry.name == "trace_audit" for entry in agent_automations(self, agent_name))
+            ):
+                msg = (
+                    f"Agent {agent_name!r} sets skill_learning.trigger: 'friction', "
+                    "which requires 'trace_audit' in its effective automations"
+                )
+                raise ValueError(msg)
         return self
 
     def knowledge_graph_agents(self) -> list[str]:
@@ -1962,7 +1973,12 @@ def _tag_automation_unions(node: Any) -> None:  # noqa: ANN401 - a JSON schema n
 def _describe_automation_union(schema: dict[str, Any]) -> None:
     """Shape the automation union for the dashboard's form: a pinned name per built-in and a free one for plugins."""
     defs = schema["$defs"]
-    for built_in in ("PromptCurationAutomation", "DreamingAutomation", "ExplorationAutomation"):
+    for built_in in (
+        "PromptCurationAutomation",
+        "DreamingAutomation",
+        "ExplorationAutomation",
+        "TraceAuditAutomation",
+    ):
         # The form fills required fields when a variant is picked, and the name is what selects the variant.
         defs[built_in]["required"] = ["name", *defs[built_in].get("required", [])]
     plugin = defs["PluginAutomation"]

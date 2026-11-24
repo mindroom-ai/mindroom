@@ -142,8 +142,24 @@ class ExplorationAutomation(_ScheduledAutomation):
     )
 
 
+class TraceAuditAutomation(_ScheduledAutomation):
+    """Hourly passive audit of settled sessions for recurring friction and teachable failures."""
+
+    requires_file_memory: ClassVar[bool] = False
+
+    name: Literal["trace_audit"] = Field(default="trace_audit", description="Built-in automation name")
+    cron: str = Field(default="0 * * * *", description="When to check, in the agent's timezone")
+    min_idle_seconds: int = Field(default=600, ge=0, le=86_400, description="Idle seconds before a session is audited")
+    sample_rate: float = Field(default=0.02, ge=0.0, le=1.0, description="Fraction of clean runs sampled per pass")
+    max_audits_per_run: int = Field(default=12, ge=1, le=100, description="Max evidence cards audited per pass")
+    min_cluster_sessions: int = Field(default=2, ge=1, le=50, description="Distinct sessions needed to promote")
+    cooldown_days: int = Field(default=14, ge=0, le=365, description="Days before a promoted cluster may re-promote")
+    max_nominations_per_run: int = Field(default=1, ge=1, le=10, description="Max clusters promoted per pass")
+    notify: bool = Field(default=True, description="Post a summary notice for actionable clusters in report-only mode")
+
+
 # Reserved for the built-ins, so every entry matches one kind of automation.
-BUILTIN_AUTOMATION_NAMES = ("prompt_curation", "dreaming", "exploration")
+BUILTIN_AUTOMATION_NAMES = ("prompt_curation", "dreaming", "exploration", "trace_audit")
 
 
 class PluginAutomation(_ScheduledAutomation):
@@ -185,7 +201,10 @@ class PluginAutomation(_ScheduledAutomation):
 
 def _automation_kind(value: object) -> str:
     """Pick the entry's model: a built-in name selects that built-in, any other name a plugin automation."""
-    if isinstance(value, PromptCurationAutomation | DreamingAutomation | ExplorationAutomation | PluginAutomation):
+    if isinstance(
+        value,
+        PromptCurationAutomation | DreamingAutomation | ExplorationAutomation | TraceAuditAutomation | PluginAutomation,
+    ):
         return value.name if value.name in BUILTIN_AUTOMATION_NAMES else "plugin"
     name = cast("Mapping[str, object]", value).get("name") if isinstance(value, Mapping) else None
     return name if isinstance(name, str) and name in BUILTIN_AUTOMATION_NAMES else "plugin"
@@ -195,6 +214,7 @@ Automation = Annotated[
     Annotated[PromptCurationAutomation, Tag("prompt_curation")]
     | Annotated[DreamingAutomation, Tag("dreaming")]
     | Annotated[ExplorationAutomation, Tag("exploration")]
+    | Annotated[TraceAuditAutomation, Tag("trace_audit")]
     | Annotated[PluginAutomation, Tag("plugin")],
     Discriminator(_automation_kind),
 ]

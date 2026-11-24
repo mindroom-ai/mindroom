@@ -30,7 +30,7 @@ from mindroom.matrix.message_builder import build_message_content
 from mindroom.runtime_resolution import resolve_agent_execution, resolve_agent_runtime
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.skill_learning.library import archive_unused_skills
-from mindroom.skill_learning.reviewer import review_conversation
+from mindroom.skill_learning.reviewer import review_audit_cluster, review_conversation
 from mindroom.skill_learning.tools import ReviewFile, ReviewProgress, library_turn
 from mindroom.skill_learning.transcript import count_model_replies
 from mindroom.tool_system.skills import agent_workspace_skills_root
@@ -44,7 +44,9 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.skill_learning.capture import CapturedRequest
+    from mindroom.skill_learning.reviewer import ReviewOutcome
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.trace_audit.models import FailureCluster
 
 logger = get_logger(__name__)
 # Diff characters a notice carries per file and in total, so the event stays far below Matrix's 64 KiB limit.
@@ -107,6 +109,17 @@ def _skills_root(config: Config, runtime_paths: RuntimePaths, scope: _ReviewScop
     """Return the workspace skills directory that this conversation's reviews maintain."""
     runtime = resolve_agent_runtime(scope.agent, config, runtime_paths, execution_identity=scope.identity)
     return agent_workspace_skills_root(runtime.workspace.root)
+
+
+async def _archive_unused(skills_root: Path, archive_after_days: int) -> None:
+    """Archive unused learned skills under the skills-library lock."""
+    # Archival moves whole skill directories, so a chat skill_manage call waits instead of writing into one.
+    async with library_turn(skills_root):
+        archived = await run_blocking_until_complete(
+            partial(archive_unused_skills, skills_root, archive_after_days=archive_after_days, now=datetime.now(UTC)),
+        )
+    if archived:
+        logger.info("Archived unused learned skills", archived=archived)
 
 
 @dataclass
@@ -203,18 +216,7 @@ class SkillReviewRunner:
         progress = ReviewProgress()
         try:
             skills_root = await asyncio.to_thread(_skills_root, config, self.runtime_paths, scope)
-            # Archival moves whole skill directories, so a chat skill_manage call waits instead of writing into one.
-            async with library_turn(skills_root):
-                archived = await run_blocking_until_complete(
-                    partial(
-                        archive_unused_skills,
-                        skills_root,
-                        archive_after_days=settings.archive_after_days,
-                        now=datetime.now(UTC),
-                    ),
-                )
-            if archived:
-                logger.info("Archived unused learned skills", archived=archived)
+            await _archive_unused(skills_root, settings.archive_after_days)
             await asyncio.wait_for(
                 review_conversation(
                     config=config,
@@ -239,18 +241,88 @@ class SkillReviewRunner:
                 create_background_task(self._notify(scope, progress), name=f"skill_notice:{scope.agent}")
         logger.info("Skill review finished", changed=sorted(progress.changes))
 
+    async def review_audit_cluster(
+        self,
+        config: Config,
+        *,
+        agent_name: str,
+        cluster: FailureCluster,
+        identity: ToolExecutionIdentity | None = None,
+        room_id: str | None = None,
+    ) -> ReviewOutcome | None:
+        """Review one promoted trace-audit failure cluster under the skills library lock and timeout."""
+        if self._stopped:
+            return None
+        settings = config.agents[agent_name].skill_learning
+        if not settings.enabled:
+            return None
+        session_id = cluster.session_ids[-1] if cluster.session_ids else f"trace_audit:{cluster.cluster_key}"
+        scope = _ReviewScope(agent_name, session_id, identity)
+        log_fields = {
+            key: value
+            for key, value in {
+                "agent_id": agent_name,
+                "session_id": session_id,
+                "requester_id": identity.requester_id if identity is not None else None,
+                "room_id": room_id or (identity.room_id if identity is not None else None),
+                "cluster_key": cluster.cluster_key,
+                "kind": "skill_learning",
+            }.items()
+            if value is not None
+        }
+        progress = ReviewProgress()
+        outcome: ReviewOutcome | None = None
+        target_room_id = room_id or (identity.room_id if identity is not None else None)
+        with bound_log_context(**log_fields), bind_llm_request_log_context(**log_fields):
+            try:
+                skills_root = await asyncio.to_thread(_skills_root, config, self.runtime_paths, scope)
+                await _archive_unused(skills_root, settings.archive_after_days)
+                outcome = await asyncio.wait_for(
+                    review_audit_cluster(
+                        config=config,
+                        runtime_paths=self.runtime_paths,
+                        agent_name=agent_name,
+                        cluster=cluster,
+                        skills_root=skills_root,
+                        progress=progress,
+                        identity=identity,
+                        room_id=target_room_id,
+                    ),
+                    timeout=settings.timeout_seconds,
+                )
+            except TimeoutError:
+                logger.info("Audit-cluster skill review reached its timeout")
+            except Exception:
+                logger.exception("Audit-cluster skill review failed")
+            finally:
+                if settings.notify and progress.changes and not self._stopped and target_room_id:
+                    await self._notify_room(agent_name, target_room_id, None, progress)
+            logger.info("Audit-cluster skill review finished", changed=sorted(progress.changes))
+        return outcome
+
     async def _notify(self, scope: _ReviewScope, progress: ReviewProgress) -> None:
         """Tell the conversation which skills its review changed, like Hermes' self-improvement summary."""
         identity = scope.identity
-        bot = self.bot_provider(scope.agent)
+        if identity is None or identity.channel != "matrix" or not identity.room_id:
+            return
+        await self._notify_room(scope.agent, identity.room_id, identity.resolved_thread_id, progress)
+
+    async def _notify_room(
+        self,
+        agent_name: str,
+        room_id: str,
+        thread_id: str | None,
+        progress: ReviewProgress,
+    ) -> None:
+        """Post one skill-review change notice in ``room_id`` (optionally inside ``thread_id``)."""
+        bot = self.bot_provider(agent_name)
         client = bot.client if bot is not None and bot.running else None
-        if bot is None or client is None or identity is None or identity.channel != "matrix" or not identity.room_id:
+        if bot is None or client is None:
             return
         changes = progress.changes
         body = "💾 Skill review: " + " · ".join(f"{action} `{name}`" for name, action in sorted(changes.items()))
-        thread_id = identity.resolved_thread_id
         # Like approval events, the reply fallback names the thread's newest event for clients without threads.
-        latest = await bot.latest_thread_event_id_if_needed(identity.room_id, thread_id) if thread_id else None
+        latest = await bot.latest_thread_event_id_if_needed(room_id, thread_id) if thread_id else None
         content = build_message_content(
             body,
             thread_event_id=thread_id,
@@ -262,7 +334,7 @@ class SkillReviewRunner:
                 SKIP_MENTIONS_KEY: True,
             },
         )
-        if await send_message_result(client, identity.room_id, content) is None:
+        if await send_message_result(client, room_id, content) is None:
             logger.warning("Could not post skill review notice")
 
 

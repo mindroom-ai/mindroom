@@ -242,8 +242,8 @@ def test_the_automation_union_is_chosen_by_name_with_plugin_automations_as_the_f
 
     assert union["discriminator"] == {"propertyName": "name"}
     names = [defs[branch["$ref"].removeprefix("#/$defs/")]["properties"]["name"] for branch in union["oneOf"]]
-    assert [name.get("const") for name in names] == ["prompt_curation", "dreaming", "exploration", None]
-    assert names[3]["not"] == {"enum": ["prompt_curation", "dreaming", "exploration"]}
+    assert [name.get("const") for name in names] == ["prompt_curation", "dreaming", "exploration", "trace_audit", None]
+    assert names[4]["not"] == {"enum": ["prompt_curation", "dreaming", "exploration", "trace_audit"]}
 
 
 @pytest.mark.parametrize(
