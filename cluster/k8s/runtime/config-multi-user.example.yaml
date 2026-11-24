@@ -65,8 +65,8 @@ personal_agents:
         - shell
         - memory
         - scheduler
-        - todo
         - matrix_message
+        - {name: todo, defer: true}
         - {name: filesystem, defer: true}
         - {name: browser, defer: true}
         - {name: website, defer: true}
