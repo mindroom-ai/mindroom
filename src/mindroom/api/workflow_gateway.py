@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, R
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
+from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes
 from mindroom.json_utils import has_only_finite_numbers
 from mindroom.script_runs.broker import (
     ScriptBrokerAuthenticationError,
@@ -112,16 +113,13 @@ def _refusals() -> Iterator[None]:
 
 
 async def _read[Body: _WireModel](request: Request, body_type: type[Body], limit: int) -> Body | Response:
-    """Parse the request's JSON body, or return the 413 that names its size, measured on the whole body."""
-    size, chunks = 0, []
-    async for chunk in request.stream():
-        size += len(chunk)
-        if size <= limit:
-            chunks.append(chunk)
-    if size > limit:
-        return JSONResponse({"bytes": size, "limit": limit}, status_code=413)
+    """Parse the request's JSON body, or return 413 once the stream exceeds *limit* bytes."""
     try:
-        body = body_type.model_validate_json(b"".join(chunks))
+        raw = await collect_bounded_bytes(request.stream(), max_bytes=limit)
+    except ByteLimitExceededError:
+        return JSONResponse({"limit": limit}, status_code=413)
+    try:
+        body = body_type.model_validate_json(raw)
     except ValidationError as exc:
         raise HTTPException(status_code=422, detail=exc.errors(include_url=False, include_input=False)) from exc
     if not has_only_finite_numbers(body.model_dump()):

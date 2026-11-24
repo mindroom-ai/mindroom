@@ -2117,6 +2117,7 @@ depends_on = [
 [[modules]]
 path = "mindroom.api.workflow_gateway"
 depends_on = [
+    "mindroom.bounded_bytes",
     "mindroom.json_utils",
     "mindroom.workflow_runs.engine",
     "mindroom.workflow_runs.models",
@@ -2695,6 +2696,7 @@ expose = [
     "WorkflowLimits",
     "calling_node",
     "ceiling",
+    "limit_reached",
     "nested_key",
 ]
 

@@ -94,7 +94,7 @@ async def test_node_request_over_one_mebibyte_is_413_with_the_byte_count(
 
     refused = await client.post("nodes", content=body, headers={"Content-Type": "application/json"})
 
-    assert (refused.status_code, refused.json()) == (413, {"bytes": len(body), "limit": _MEBIBYTE})
+    assert (refused.status_code, refused.json()) == (413, {"limit": _MEBIBYTE})
     assert stack.status(stack.run_id)[1] == []
 
 
@@ -108,7 +108,7 @@ async def test_finish_accepts_a_report_over_one_mebibyte_and_refuses_one_over_ei
     refused = await client.post("finish", content=too_large, headers={"Content-Type": "application/json"})
     accepted = await client.post("finish", json={"result": "x" * (2 * _MEBIBYTE)})
 
-    assert (refused.status_code, refused.json()) == (413, {"bytes": len(too_large), "limit": 8 * _MEBIBYTE})
+    assert (refused.status_code, refused.json()) == (413, {"limit": 8 * _MEBIBYTE})
     assert accepted.status_code == 200
     assert stack.store.get_run(stack.run_id).result == "x" * (2 * _MEBIBYTE)
 

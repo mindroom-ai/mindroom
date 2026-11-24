@@ -18,7 +18,11 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import NAMESPACE_OID, uuid5
 from weakref import WeakValueDictionary
 
-from mindroom.background_tasks import run_coroutine_until_complete, wait_for_future_until_complete
+from mindroom.background_tasks import (
+    run_blocking_until_complete,
+    run_coroutine_until_complete,
+    wait_for_future_until_complete,
+)
 from mindroom.delegation.personas import persona_allows
 from mindroom.delegation.state import RUN_SUBAGENT, SubagentPersona
 from mindroom.logging_config import get_logger
@@ -189,6 +193,10 @@ def ceiling(context: ToolRuntimeContext, *saved: Mapping[str, object] | None) ->
     return asdict(kept) if kept is not None else None
 
 
+def _covers(side: tuple[str, ...] | None, name: str, *, toolkits: bool = False) -> bool:
+    return side is None or name in side or (toolkits and name.partition(".")[0] in side)
+
+
 def _both(
     one: tuple[str, ...] | None,
     other: tuple[str, ...] | None,
@@ -198,23 +206,23 @@ def _both(
     """Return the names both lists hold, where None holds every name and a toolkit holds each of its functions."""
     if one is None or other is None:
         return other if one is None else one
-    names = dict.fromkeys((*one, *other))
     return tuple(
         name
-        for name in names
-        if all(name in side or (toolkits and name.partition(".")[0] in side) for side in (one, other))
+        for name in dict.fromkeys((*one, *other))
+        if _covers(one, name, toolkits=toolkits) and _covers(other, name, toolkits=toolkits)
     )
 
 
+def _within(actual: tuple[str, ...] | None, cap: tuple[str, ...] | None, *, toolkits: bool = False) -> bool:
+    return cap is None or (actual is not None and all(_covers(cap, name, toolkits=toolkits) for name in actual))
+
+
 def _fits_ceiling(persona: SubagentPersona | None, cap: SubagentPersona) -> bool:
-    """Return whether *persona* stays within *cap*, using the same intersection as `ceiling()`."""
-    tools = None if persona is None else persona.tools
-    skills = None if persona is None else persona.kept_skills
-    knowledge = None if persona is None else persona.kept_knowledge
+    """Return whether *persona* stays within *cap*, using the same coverage rule as `ceiling()`."""
     return (
-        _both(tools, cap.tools, toolkits=True) == tools
-        and _both(skills, cap.kept_skills) == skills
-        and _both(knowledge, cap.kept_knowledge) == knowledge
+        _within(None if persona is None else persona.tools, cap.tools, toolkits=True)
+        and _within(None if persona is None else persona.kept_skills, cap.kept_skills)
+        and _within(None if persona is None else persona.kept_knowledge, cap.kept_knowledge)
     )
 
 
@@ -537,7 +545,7 @@ class WorkflowEngine:
         effective_limit = run.max_cost_usd if max_cost_usd is None else max_cost_usd
         if effective_limit is not None:
             spent = self.run_usage(run_id)["cost_usd"]
-            if _limit_reached(spent, effective_limit):
+            if limit_reached(spent, effective_limit):
                 msg = (
                     f"Run {run_id} has already spent ${_usd(spent)} (limit ${_usd(effective_limit)}). "
                     f"Pass max_cost_usd above ${_usd(spent)} to resume it."
@@ -610,7 +618,7 @@ class WorkflowEngine:
         try:
             async with self._condition(run_id):
                 # Waited for also by a caller that is cancelled here, so the run it finds says whether it took it.
-                reopened = await wait_for_future_until_complete(asyncio.ensure_future(asyncio.to_thread(take)))
+                reopened = await run_blocking_until_complete(take)
         except SupersededAttemptError:
             raise WorkflowRunStoreError(_TAKEN.format(run_id)) from None
         return reopened
@@ -769,12 +777,7 @@ class WorkflowEngine:
         if isinstance(context, str):
             raise WorkflowRunStoreError(context)
         try:
-            raw = await self.scripts.resolve_source(
-                context,
-                source=None,
-                path=f"{WORKFLOWS_DIR}/{name}.py",
-                create_workspace=False,
-            )
+            raw = await self.resolve_source(context, {"name": name})
         except ValueError as exc:
             missing = isinstance(exc.__cause__, FileNotFoundError)
             if missing:
@@ -1433,7 +1436,7 @@ class WorkflowEngine:
         text = run.outcome_text()
         if run.state is not WorkflowRunState.COMPLETED:
             return text
-        nodes = await asyncio.to_thread(self.store.nodes, run.run_id)
+        nodes = await asyncio.to_thread(self.store.nodes, run.run_id, light=True)
         failed = [
             f"n{node.seq}"
             for node in nodes
@@ -1460,7 +1463,7 @@ class WorkflowEngine:
         without, it ran because a rule said so, and its lane is dirty whatever it answers. The attempt's epoch is
         the run's here, and the call's task keeps it.
         """
-        call_id = uuid5(NAMESPACE_OID, f"{run.run_id}:{node.key}:{node.generation}").hex
+        call_id = _broker_call_id(node)
         # Saved before the dispatch, so a crash after the tool ran reads the broker's receipt for this call.
         handle = DispatchHandle("broker", f"{attempt.run_id}:{call_id}", dispatched=False, same_as=same_as)
         node = replace(node, state=WorkflowNodeState.RUNNING, handle=handle)
@@ -1469,7 +1472,7 @@ class WorkflowEngine:
             # The node that waited for its place has an end by now: its run ended.
             raise SupersededAttemptError(_RUN_ENDED)
         node = saved
-        call = partial(self._broker_outcome, attempt, node, run.epoch, tool_call, call_id=call_id)
+        call = partial(self._broker_outcome, attempt, node, run.epoch, tool_call)
         # The call has its task before anything else may fail: a saved call nobody runs would never end.
         self._spawn(run.run_id, self._run_tool_node(node, run.epoch, call))
         # A run that waited for a person works again from here.
@@ -1743,7 +1746,7 @@ class WorkflowEngine:
         while current is not None:
             if current.max_cost_usd is not None:
                 spent = self.run_usage(current.run_id)["cost_usd"]
-                if _limit_reached(spent, current.max_cost_usd):
+                if limit_reached(spent, current.max_cost_usd):
                     return _OVER_BUDGET.format(spent=_usd(spent), limit=_usd(current.max_cost_usd))
             current = self.store.get_run(current.parent_run_id) if current.parent_run_id is not None else None
         return None
@@ -2146,11 +2149,10 @@ class WorkflowEngine:
         epoch: int,
         tool_call: tuple[ScriptToolGrant, dict[str, object]],
         *,
-        call_id: str | None = None,
         gate_only: bool = False,
     ) -> _Outcome:
         """Run one broker call for *node* within the rate limit and return its node outcome."""
-        cid = call_id or uuid5(NAMESPACE_OID, f"{node.run_id}:{node.key}:{node.generation}").hex
+        cid = _broker_call_id(node)
         waits = partial(self._node_waits, node, epoch, gate_only=gate_only)
         call = partial(
             self.broker.execute_for_workflow,
@@ -2251,7 +2253,7 @@ class WorkflowEngine:
             # Before any call of the run is stopped: the place it gives up starts no call that waited for one.
             self._places.pop(run.run_id, None)
             self._condition(run.run_id).notify_all()
-            nodes = self.store.nodes(run.run_id, include_stale=True)
+            nodes = await asyncio.to_thread(self.store.nodes, run.run_id, include_stale=True, light=True)
         deadline = asyncio.get_running_loop().time() + _STOP_SECONDS
         handles = [node.handle for node in nodes if node.state in LIVE_NODE_STATES and node.handle is not None]
         runtime = self.agents()
@@ -2297,14 +2299,20 @@ class WorkflowEngine:
                     task.cancel()
                 await asyncio.gather(*tasks, return_exceptions=True)
                 current = self.store.get_run(run.run_id)
-                nodes = self.store.nodes(run.run_id, include_stale=True)
-                for node in nodes:
-                    # An agent's job outlives an attempt, and so do a nested run and a question: none outlives its run.
-                    waits_for_job = node.kind == "ask" or (
-                        node.handle is not None and node.handle.kind in ("job", "run")
+                nodes = await asyncio.to_thread(self.store.nodes, run.run_id, include_stale=True, light=True)
+                # An agent's job outlives an attempt, and so do a nested run and a question: none outlives its run.
+                to_reconcile = [
+                    node.key
+                    for node in nodes
+                    if node.state in LIVE_NODE_STATES
+                    and (
+                        ended
+                        or not (node.kind == "ask" or (node.handle is not None and node.handle.kind in ("job", "run")))
                     )
-                    if node.state in LIVE_NODE_STATES and (ended or not waits_for_job):
-                        await self._reconcile(current, node, run.epoch, stop=ended)
+                ]
+                for key in to_reconcile:
+                    if (full := await asyncio.to_thread(self.store.get_node, run.run_id, key)) is not None:
+                        await self._reconcile(current, full, run.epoch, stop=ended)
                 if state is WorkflowRunState.COMPLETED:
                     # What the completed script no longer reaches leaves the run's current view.
                     await asyncio.to_thread(self.store.mark_stale, run.run_id, run.epoch)
@@ -2442,7 +2450,11 @@ def _receipt(node: WorkflowNode) -> NodeReceipt:
     )
 
 
-def _limit_reached(spent: float, limit: float) -> bool:
+def _broker_call_id(node: WorkflowNode) -> str:
+    return uuid5(NAMESPACE_OID, f"{node.run_id}:{node.key}:{node.generation}").hex
+
+
+def limit_reached(spent: float, limit: float) -> bool:
     """Return whether *spent* has reached *limit*, tolerating binary float drift on summed turn costs."""
     return spent >= limit or math.isclose(spent, limit, rel_tol=1e-9, abs_tol=0.0)
 

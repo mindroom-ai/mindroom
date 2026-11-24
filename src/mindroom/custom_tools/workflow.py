@@ -7,7 +7,7 @@ import hashlib
 import json
 import math
 from collections import Counter
-from dataclasses import asdict, fields, replace
+from dataclasses import fields, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
@@ -27,6 +27,7 @@ from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
     JobSpec,
     ManagedJobToolkit,
+    call_job_id,
     get_background_runtime,
 )
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
@@ -39,7 +40,7 @@ from mindroom.tool_system.tool_hooks import dispatch_external_tool_hooks
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
 from mindroom.workflow_runs.answers import handle_workflow_answer
-from mindroom.workflow_runs.engine import WorkflowLimits, calling_node, ceiling, nested_key
+from mindroom.workflow_runs.engine import WorkflowLimits, calling_node, ceiling, limit_reached, nested_key
 from mindroom.workflow_runs.models import (
     LIVE_NODE_STATES,
     TERMINAL_RUN_STATES,
@@ -715,7 +716,7 @@ async def handle_workflow_control(
             max_cost = content.get("max_cost_usd")
             if max_cost is None and run.max_cost_usd is not None:
                 spent = (await asyncio.to_thread(workflows.run_usage, run.run_id))["cost_usd"]
-                if spent >= run.max_cost_usd or math.isclose(spent, run.max_cost_usd, rel_tol=1e-9, abs_tol=0.0):
+                if limit_reached(spent, run.max_cost_usd):
                     max_cost = spent + run.max_cost_usd
             arguments = {"run_id": run.run_id, "max_cost_usd": max_cost}
             job = await _resume_job(workflows, context, arguments, limits, job_id, jobs)
@@ -955,6 +956,4 @@ def _inline_origin(context: ToolRuntimeContext) -> str:
     call = current_tool_call()
     if call is None or not call.context.run_id or not call.context.call_id:
         return f"inline:{uuid4().hex}"
-    owner = asdict(context.execution_identity)
-    identity = {"owner": owner, "run_id": call.context.run_id, "tool_call_id": call.context.call_id}
-    return "inline:" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    return "inline:" + call_job_id(context.execution_identity, call.context.run_id, call.context.call_id)

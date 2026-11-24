@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
 from contextlib import asynccontextmanager, suppress
@@ -54,6 +55,14 @@ type _OutcomeStatus = Literal["completed", "failed", "cancelled", "denied", "int
 type _BackgroundStatus = Literal["running", "awaiting_approval", "cancel_requested"] | _OutcomeStatus
 # Statuses after which execution has ended for good, with an outcome a reply can retrieve.
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "denied", "interrupted"})
+
+
+def call_job_id(owner: ToolExecutionIdentity, run_id: str, call_id: str) -> str:
+    """Return the deterministic job ID for one tool call of *owner* in *run_id*."""
+    identity = {"owner": asdict(owner), "run_id": run_id, "tool_call_id": call_id}
+    return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
 _RUNNING_STATUSES = frozenset({"running", "awaiting_approval"})
 _UNAVAILABLE = "Tool job is not available in this conversation."
 _JOB_PREFIX_PATTERN = re.compile(r"[a-f0-9]{8,63}")

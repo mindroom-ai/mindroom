@@ -10,11 +10,9 @@ MindRoom agent's included, keeps the synchronous leaves it starts owned by the j
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 from contextlib import nullcontext
 from copy import deepcopy
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -55,6 +53,7 @@ from mindroom.tool_jobs.runtime import (
     BackgroundOutcome,
     JobSpec,
     ManagedJobToolkit,
+    call_job_id,
     format_job_handle,
     get_background_runtime,
 )
@@ -443,8 +442,7 @@ async def _run_managed_call(
     if not run_id or not call_id:
         msg = "Managed tool execution requires an exact run and tool-call identity"
         raise ValueError(msg)
-    identity = {"owner": asdict(owner), "run_id": run_id, "tool_call_id": call_id}
-    job_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    job_id = call_job_id(owner, run_id, call_id)
     detached = _detached(job_call)
     # The reply records the call before its job starts, as an inline call's hooks do; the job body runs unrecorded.
     record_return = await record_call(function.name, dict(detached.arguments))
