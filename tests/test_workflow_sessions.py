@@ -140,7 +140,8 @@ async def test_second_turn_continues_the_same_child_as_its_own_job(stack: Workfl
     assert job1.job_id != job2.job_id
     assert child1.subagent_id == child2.subagent_id
     assert child1.session_id == child2.session_id
-    assert child1.task == "dev"
+    assert child1.task == "Step one"
+    assert child2.task == "Step two"
     assert session.links["subagent_id"] == child1.subagent_id
     assert (turn1.session_key, turn2.session_key) == ("@0", "@0")
 
@@ -157,12 +158,14 @@ async def test_second_turn_continues_the_same_child_as_its_own_job(stack: Workfl
     graph = graph_rows(stack.store.nodes(stack.run_id), usage_by_node, (), ())
     by_id = {row["id"]: row for row in graph.nodes}
     session_row, turn1_row, turn2_row = by_id[f"n{session.seq}"], by_id[f"n{turn1.seq}"], by_id[f"n{turn2.seq}"]
-    assert (session_row["kind"], session_row["turns"], session_row["subagent"]) == ("session", 2, child1.subagent_id)
-    assert (turn1_row["kind"], turn1_row["session"], turn2_row["session"]) == (
-        "turn",
-        session_row["id"],
-        session_row["id"],
+    assert (session_row["kind"], session_row["label"], session_row["turns"], session_row["subagent"]) == (
+        "session",
+        "dev",
+        2,
+        child1.subagent_id,
     )
+    assert (turn1_row["kind"], turn1_row["label"], turn1_row["session"]) == ("turn", "Step one", session_row["id"])
+    assert (turn2_row["kind"], turn2_row["label"], turn2_row["session"]) == ("turn", "Step two", session_row["id"])
 
 
 @pytest.mark.asyncio
@@ -432,16 +435,25 @@ async def test_session_turn_delegation_hooks_receive_turn_message_not_session_na
     stack.child_script(answer("read it"), answer("summary"))
 
     await stack.result("@0", "session", {"name": "reviewer"}, meta={"name": "reviewer"})
-    assert await stack.result("@1", "turn", _turn_args("@0", 1, "Read draft"), meta={"name": "reviewer"}) == "read it"
     assert (
-        await stack.result("@2", "turn", _turn_args("@0", 2, "Summarize draft"), meta={"name": "reviewer"}) == "summary"
+        await stack.result("@1", "turn", _turn_args("@0", 1, "Read draft\nFull details"), meta={"name": "reviewer"})
+        == "read it"
+    )
+    assert (
+        await stack.result(
+            "@2",
+            "turn",
+            _turn_args("@0", 2, "Summarize draft\nMore details"),
+            meta={"name": "reviewer"},
+        )
+        == "summary"
     )
 
     child1, child2 = delegation_child(stack.node_job("@1")), delegation_child(stack.node_job("@2"))
-    assert (child1.task, child2.task) == ("reviewer", "reviewer")
+    assert (child1.task, child2.task) == ("Read draft", "Summarize draft")
     assert [(name, args.get("task") or args.get("message")) for name, args in seen] == [
-        ("run_subagent", "Read draft"),
-        ("continue_subagent", "Summarize draft"),
+        ("run_subagent", "Read draft\nFull details"),
+        ("continue_subagent", "Summarize draft\nMore details"),
     ]
 
 

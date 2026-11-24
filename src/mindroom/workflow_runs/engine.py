@@ -881,7 +881,7 @@ class WorkflowEngine:
             generation=generation,
             state=WorkflowNodeState.COMPLETED,
             attempt=run.attempt,
-            label=node_label(shown, asked, meta.get("label") or asked.get("name") or node_name),
+            label=node_label(shown, asked, meta.get("label") or asked.get("name")),
             name=node_name,
             phase=cast("str | None", meta.get("phase")),
             members=members,

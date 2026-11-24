@@ -339,38 +339,47 @@ def agent(
     Raises AgentError when the turn fails, is cancelled, is denied, or times out after `timeout` seconds.
     """
     _current_lane()
-    options: dict[str, object] = {
-        "name": name,
-        "agent": agent,
-        "model": model,
-        "system": system,
-        "tools": tools,
-        "skills": skills,
-        "knowledge": knowledge,
-        "profile": profile,
-        "minimal": minimal,
-        "output_path": output_path,
-        "dedicated_worker": dedicated_worker,
-        "resource_profile": resource_profile,
-    }
-    _check_options("agent", unknown, frozenset(options) | {"schema", "timeout"})
-    # What the turn is, which a resume compares; how long this attempt waits for it is no part of that.
-    # An empty list is a choice, of none: only an option that was not given is left out.
-    given = {option: value for option, value in options.items() if value is not None and value is not False}
+    given = _agent_options("agent", locals(), unknown, extra=frozenset({"name", "schema", "timeout"}))
     call = {"prompt": str(prompt), **given}
     if schema is None:
         return str(_call("agent", call, name=name, timeout=timeout))
     return _call("agent", {**call, "schema": schema}, name=name, timeout=timeout)
 
 
+_SHARED_OPTIONS = (
+    "agent",
+    "model",
+    "system",
+    "tools",
+    "skills",
+    "knowledge",
+    "profile",
+    "minimal",
+    "output_path",
+    "dedicated_worker",
+    "resource_profile",
+)
+
+
+def _agent_options(
+    function: str,
+    values: dict[str, object],
+    unknown: dict[str, object],
+    *,
+    extra: frozenset[str] = frozenset(),
+) -> dict[str, object]:
+    """Validate *unknown* and return the non-default agent options from *values*; empty lists are kept."""
+    allowed = frozenset(_SHARED_OPTIONS) | extra
+    _check_options(function, unknown, allowed)
+    keys = (*_SHARED_OPTIONS, "name") if "name" in extra else _SHARED_OPTIONS
+    return {k: values[k] for k in keys if values[k] is not None and values[k] is not False}
+
+
 class Session:
     """An agent that keeps its conversation across `ask()` turns."""
 
     def __init__(self, key: str, name: str) -> None:
-        self._key = key
-        self._name = name
-        self._turn = 0
-        self._lock = threading.Lock()
+        self._key, self._name, self._turn, self._lock = key, name, 0, threading.Lock()
 
     def ask(self, message: str, *, schema: object = None, timeout: float | None = None) -> object:
         """Send the next message to this agent and return its answer; it remembers the earlier turns."""
@@ -400,25 +409,10 @@ def spawn(
     resource_profile: str | None = None,
     **unknown: object,
 ) -> Session:
-    """Create an agent that keeps its conversation; takes the options of agent() except prompt and schema."""
+    """Create an agent that keeps its conversation; takes the options of agent() except prompt, schema and timeout."""
     _current_lane()
-    options: dict[str, object] = {
-        "agent": agent,
-        "model": model,
-        "system": system,
-        "tools": tools,
-        "skills": skills,
-        "knowledge": knowledge,
-        "profile": profile,
-        "minimal": minimal,
-        "output_path": output_path,
-        "dedicated_worker": dedicated_worker,
-        "resource_profile": resource_profile,
-    }
-    _check_options("spawn", unknown, frozenset(options))
-    label = str(name)
-    given = {option: value for option, value in options.items() if value is not None and value is not False}
-    key = _next_key()
+    given = _agent_options("spawn", locals(), unknown)
+    label, key = str(name), _next_key()
     _call("session", {"name": label, **given}, key=key, name=label)
     return Session(key, label)
 
