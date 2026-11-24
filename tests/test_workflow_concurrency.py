@@ -17,6 +17,7 @@ import pytest_asyncio
 from mindroom.approval import manager as approval_manager
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.script_runs.models import ScriptRunState
+from mindroom.workflow_runs import agent_dispatch as agent_dispatch_module
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.limits import WorkflowLimits
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
@@ -241,9 +242,9 @@ async def test_agent_that_starts_in_the_place_a_tool_call_leaves_is_not_inside_t
     async def launch(*_args: object, **_kwargs: object) -> object:
         seen.append(calling_node())
         msg = "Seen."
-        raise engine_module.AgentNodeError(msg)
+        raise agent_dispatch_module.AgentNodeError(msg)
 
-    monkeypatch.setattr(engine_module, "launch_child", launch)
+    monkeypatch.setattr(agent_dispatch_module, "launch_child", launch)
     await stack.start(max_concurrent=1)
     gate = asyncio.Event()
     stack.counting_tool.after_effect = gate.wait

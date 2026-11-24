@@ -2571,7 +2571,7 @@ expose = [
 [[modules]]
 path = "mindroom.workflow_runs.structured"
 depends_on = ["mindroom.json_utils"]
-visibility = ["mindroom.workflow_runs.agent_nodes", "mindroom.workflow_runs.engine"]
+visibility = ["mindroom.workflow_runs.agent_dispatch", "mindroom.workflow_runs.agent_nodes"]
 
 [[interfaces]]
 from = ["mindroom.workflow_runs.structured"]
@@ -2733,11 +2733,35 @@ from = ["mindroom.workflow_runs.interactions"]
 expose = ["RunInteractions"]
 
 [[modules]]
+path = "mindroom.workflow_runs.agent_dispatch"
+depends_on = [
+    "mindroom.tool_jobs.runtime",
+    "mindroom.workflow_runs.agent_nodes",
+    "mindroom.workflow_runs.coordination",
+    "mindroom.workflow_runs.limits",
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.replay",
+    "mindroom.workflow_runs.store",
+    "mindroom.workflow_runs.structured",
+]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.agent_dispatch"]
+expose = [
+    "NO_AGENTS",
+    "OWNER_NOT_READY",
+    "RUN_ENDED",
+    "TIMED_PREFIX",
+    "AgentDispatcher",
+    "works",
+]
+
+[[modules]]
 path = "mindroom.workflow_runs.engine"
 depends_on = [
     "mindroom.delegation.personas",
     "mindroom.delegation.state",
-    "mindroom.tool_jobs.runtime",
+    "mindroom.workflow_runs.agent_dispatch",
     "mindroom.workflow_runs.agent_nodes",
     "mindroom.workflow_runs.coordination",
     "mindroom.workflow_runs.faults",
@@ -2748,7 +2772,6 @@ depends_on = [
     "mindroom.workflow_runs.peers",
     "mindroom.workflow_runs.recovery",
     "mindroom.workflow_runs.saved",
-    "mindroom.workflow_runs.structured",
     "mindroom.workflow_runs.replay",
     "mindroom.workflow_runs.store",
 ]
@@ -9891,8 +9914,8 @@ visibility = [
     # A secret request waits on its card as an approval does, so a Stop cancels its job.
     "mindroom.secret_request_cards",
     "mindroom.orchestration.workflow_runtime",
+    "mindroom.workflow_runs.agent_dispatch",
     "mindroom.workflow_runs.agent_nodes",
-    "mindroom.workflow_runs.engine",
 ]
 
 [[modules]]

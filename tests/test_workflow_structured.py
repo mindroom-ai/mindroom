@@ -14,6 +14,7 @@ import pytest_asyncio
 from mindroom.config.models import ModelPricing
 from mindroom.delegation.background import delegation_child
 from mindroom.script_runs.models import ScriptRunState
+from mindroom.workflow_runs import agent_dispatch as agent_dispatch_module
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.agent_nodes import turn_job_id
@@ -268,7 +269,7 @@ async def test_null_answer_is_the_calls_result(stack: WorkflowStack) -> None:
 async def test_run_that_ends_while_an_answer_is_wrong_starts_no_correction(stack: WorkflowStack) -> None:
     """A Stop of the run reads the turn that ended and starts no further one."""
     model = stack.child_script(answer("no json here"), answer(_GOOD))
-    original = engine_module.launch_child
+    original = agent_dispatch_module.launch_child
     started: list[int] = []
 
     async def counted(*args: object, **options: object) -> object:
@@ -278,12 +279,12 @@ async def test_run_that_ends_while_an_answer_is_wrong_starts_no_correction(stack
             await stack.engine.cancel(stack.run_id, reason="Stopped.")
         return await original(*args, **options)  # type: ignore[arg-type]
 
-    engine_module.launch_child = counted  # type: ignore[assignment]
+    agent_dispatch_module.launch_child = counted  # type: ignore[assignment]
     try:
         await stack.submit("@0", "agent", _ASK)
         await stack.until(lambda: stack.store.get_node(stack.run_id, "@0").state is not WorkflowNodeState.RUNNING)
     finally:
-        engine_module.launch_child = original
+        agent_dispatch_module.launch_child = original
 
     assert len(model.requests) == 1
 
@@ -331,13 +332,13 @@ async def test_further_turn_whose_first_child_is_gone_is_told_the_task_again(
 ) -> None:
     """A further turn continues the first turn's child. Without it the agent starts anew, and needs the task too."""
     model = stack.child_script(answer("no json here"), answer(_GOOD))
-    launch = engine_module.launch_child
+    launch = agent_dispatch_module.launch_child
 
     async def forgetful(*args: object, **options: object) -> object:
         jobs = _Forgetful(options.pop("jobs")) if options.get("turn", 1) > 1 else options.pop("jobs")  # type: ignore[operator]
         return await launch(*args, jobs=jobs, **options)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(engine_module, "launch_child", forgetful)
+    monkeypatch.setattr(agent_dispatch_module, "launch_child", forgetful)
 
     assert await stack.result("@0", "agent", _ASK) == {"ok": True}
 
