@@ -14,10 +14,13 @@ import pytest
 from mindroom import reply_lifecycle as rl
 from mindroom import reply_scope, turn_store
 from mindroom.event_journal import (
+    RUNTIME_SOURCE_KINDS,
     ApprovalFailure,
     DeliveryStage,
     DepartureSource,
+    EventClass,
     EventKind,
+    InboundEvent,
     PrincipalStore,
     replies,
     reply_messages,
@@ -31,6 +34,7 @@ from mindroom.event_journal.replies import (
     Decide,
     PreparedReplyRow,
     ReplyRowRequest,
+    ReplyStopped,
     WakeApproval,
 )
 from mindroom.event_journal.schema import SQLITE_DIALECT, schema_statements
@@ -51,7 +55,7 @@ from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.turn_record import SourceEventMetadata, TurnRecord
 from tests import test_event_journal_store as journal_tests
 from tests.journal_membership_helpers import admit_room_membership
-from tests.reply_span_helpers import paused_for_approval, reply_shown_for_approval
+from tests.reply_span_helpers import no_reply_jobs, paused_for_approval, reply_shown_for_approval
 from tests.test_event_journal_store import ROOM, admit, text
 
 if TYPE_CHECKING:
@@ -646,6 +650,7 @@ async def test_a_replay_lists_the_tool_calls_of_an_attempt_a_superseded_one_took
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         approval_ended=lambda _ended: None,
+        reply_stopped=no_reply_jobs,
     )
     await principal.replies.record_tool_call(
         span_id=first.span_id,
@@ -687,6 +692,7 @@ async def test_a_regeneration_lists_only_the_tool_calls_of_its_own_edits_earlier
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         approval_ended=lambda _ended: None,
+        reply_stopped=no_reply_jobs,
     )
     lost_regeneration = replace(
         first,
@@ -716,6 +722,41 @@ async def test_a_regeneration_lists_only_the_tool_calls_of_its_own_edits_earlier
     calls = await runtime.interrupted_tool_calls(handle)
 
     assert [call.tool_name for call in calls] == ["edit_attempt"]
+
+
+async def test_only_the_attempts_a_restart_cut_short_count_as_restart_interruptions(
+    journal_store: EventJournalStore,
+) -> None:
+    """Approval pauses and a superseded attempt ended on their own: of the attempts taken over, one was lost."""
+    principal = journal_store.principal(PRINCIPAL)
+    reply, first = await _claimed(principal)
+    runtime = reply_scope.ReplyRuntime(
+        store=principal,
+        entity_name="agent",
+        generation="gen-1",
+        retry_sources=lambda _room_id, _sources: None,
+        approval_ended=lambda _ended: None,
+        reply_stopped=no_reply_jobs,
+    )
+    outcomes = (SpanOutcome.PAUSED, SpanOutcome.PAUSED, SpanOutcome.LOST, SpanOutcome.SUPERSEDED)
+    attempts = [
+        replace(
+            first,
+            span_id=f"span-{place}" if place else first.span_id,
+            claimed_at_ns=20 * (place + 1),
+            outcome=outcome,
+        )
+        for place, outcome in enumerate(outcomes)
+    ]
+    current = replace(first, span_id="span-now", kind=SpanKind.REPLAY, claimed_at_ns=200)
+    await _apply(
+        journal_store,
+        rl.Transition(outcome=rl.Outcome.APPLIED, reply=reply, spans=(*attempts, current)),
+    )
+
+    handle = reply_scope.SpanHandle(runtime=runtime, span=current, reply=reply, base=Presentation())
+
+    assert await runtime.restart_interruptions(handle) == 1
 
 
 async def test_a_departure_ends_the_rooms_replies_and_refuses_their_rows(journal_store: EventJournalStore) -> None:
@@ -965,6 +1006,7 @@ async def test_a_stop_still_cancels_its_span_when_waking_its_approval_fails(jour
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         approval_ended=ended.append,
+        reply_stopped=no_reply_jobs,
         spans=_Spans(),
     )
     with (
@@ -1015,6 +1057,7 @@ async def test_a_departure_cancels_a_span_claimed_before_its_task_registers(jour
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         approval_ended=lambda _ended: None,
+        reply_stopped=no_reply_jobs,
     )
     runtime.spans.expect(span.span_id)
     await admit_room_membership(principal, ROOM, "leave", source=DepartureSource.LOCAL)
@@ -1040,6 +1083,7 @@ async def test_the_bot_cancels_the_spans_deletions_ended_and_a_restart_drops_the
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         approval_ended=lambda _ended: None,
+        reply_stopped=no_reply_jobs,
         spans=spans,
     )
     await _delete(principal, "$source")
@@ -1229,7 +1273,6 @@ async def test_discarding_an_unavailable_owners_approval_ends_the_reply_it_pause
 
     effects = await alice.approvals.discard_unavailable_approval_continuation(
         "approval-1",
-        notice_principal_id="router@alice",
     )
 
     # Its effects are returned like a finish's, for whatever runs them.
@@ -1273,6 +1316,7 @@ async def test_a_resume_behind_an_unresolved_row_of_its_reply_waits_for_it(journ
         generation="gen-2",
         retry_sources=lambda room_id, sources: retried.append((room_id, sources)),
         approval_ended=lambda _ended: None,
+        reply_stopped=no_reply_jobs,
     )
     await runtime.take_ownership()
     stored = await alice.approvals.approval_continuation("approval-1")
@@ -1357,6 +1401,7 @@ async def test_an_approval_end_reaches_its_conversation_even_when_its_caller_is_
         generation="gen-1",
         retry_sources=lambda _room_id, _sources: None,
         approval_ended=ended.append,
+        reply_stopped=no_reply_jobs,
     )
     committing = asyncio.Event()
     finish = ApprovalStore.finish_approval_continuation
@@ -1596,10 +1641,33 @@ async def _acknowledge_the_create(principal: PrincipalStore) -> tuple[object, ..
 async def test_pending_stop_is_applied_when_the_create_binds_its_target(journal_store: EventJournalStore) -> None:
     """A Stop on an event not yet bound reaches the running span once the create is acknowledged."""
     principal = await _stop_waiting_for_the_create(journal_store)
-    assert await _acknowledge_the_create(principal) == (rl.CancelSpan("span-1", by_stop=True),)
+    # The Stop also reaches the jobs the reply's calls started.
+    assert await _acknowledge_the_create(principal) == (
+        ReplyStopped("reply-1"),
+        rl.CancelSpan("span-1", by_stop=True),
+    )
     stored = await principal.replies.load("reply-1")
     assert stored is not None
     assert stored.stop_receipt_order == 9
+
+
+@pytest.mark.parametrize("late_order", [8, 9])
+async def test_a_stop_older_than_or_the_same_as_the_one_the_reply_took_reaches_none_of_its_jobs(
+    journal_store: EventJournalStore,
+    late_order: int,
+) -> None:
+    """A Stop older than the one the reply recorded, as can follow an edit's regeneration, stops none of its jobs.
+
+    Nor does the same Stop seen again.
+    """
+    principal = journal_store.principal(PRINCIPAL)
+    reply, _span = await _claimed(principal)
+    first = await principal.replies.stop(reply.reply_id, receipt_order=9, now_ns=100)
+    assert first is not None
+    assert ReplyStopped(reply.reply_id) in first.post_commit
+    late = await principal.replies.stop(reply.reply_id, receipt_order=late_order, now_ns=200)
+    assert late is not None
+    assert ReplyStopped(reply.reply_id) not in late.post_commit
 
 
 @pytest.mark.parametrize("own_room_stop", [False, True])
@@ -1627,7 +1695,7 @@ async def test_a_pending_stop_from_another_room_never_reaches_the_reply(
     stored = await principal.replies.load("reply-1")
     assert stored is not None
     if own_room_stop:
-        assert effects == (rl.CancelSpan("span-1", by_stop=True),)
+        assert effects == (ReplyStopped("reply-1"), rl.CancelSpan("span-1", by_stop=True))
         assert stored.stop_receipt_order == 9
     else:
         assert effects == ()
@@ -1693,6 +1761,21 @@ async def test_settling_a_replay_without_a_turn_ends_the_reply_it_would_continue
     assert not await _answered(journal_store, "$source")
 
 
+async def test_settling_several_replays_ends_their_replies_in_reply_id_order(journal_store: EventJournalStore) -> None:
+    """Replies ended together are locked and returned in reply-ID order, not in the order they were created."""
+    principal = journal_store.principal(PRINCIPAL)
+    await principal.replies.write_generation("gen-1")
+    for name, now_ns in (("b", 10), ("a", 20)):
+        await admit(principal, f"${name}")
+        request = _request(f"span-{name}", reply_id=f"reply-{name}", source=f"${name}")
+        await principal.replies.claim(replace(request, now_ns=now_ns))
+        await _pending_turn(journal_store, f"${name}")
+    await principal.replies.write_generation("gen-2")
+    assert len(await principal.replies.owner_lost("gen-2", now_ns=80)) == 2
+
+    assert await principal.settle_many(("$b", "$a")) == ("reply-a", "reply-b")
+
+
 async def test_a_replay_is_superseded_only_once_its_reply_owes_no_row(journal_store: EventJournalStore) -> None:
     """While the placeholder's send is unresolved the replay keeps its sources; once sent, both settle together."""
     principal = journal_store.principal(PRINCIPAL)
@@ -1738,6 +1821,95 @@ async def test_a_replay_is_superseded_only_once_its_reply_owes_no_row(journal_st
     assert gone.redaction_pending == ("$reply",)
     assert not await principal.is_pending("$source")
     assert await principal.replies.supersede_replay(("$elsewhere",), now_ns=110) is None
+
+
+@pytest.mark.parametrize("kind", sorted(RUNTIME_SOURCE_KINDS))
+async def test_a_removed_entity_s_runtime_sources_settle_unanswered(
+    journal_store: EventJournalStore,
+    kind: EventKind,
+) -> None:
+    """No bot runs a removed entity's runtime source again; another entity's, and Matrix events, keep waiting."""
+    principal, other = journal_store.principal(PRINCIPAL), journal_store.principal("other@alice")
+    for store in (principal, other):
+        await _admit_runtime_source(store, kind, "runtime:1")
+    await admit(principal, "$message")
+
+    assert await journal_store.end_entity_replies(lambda name: name == "agent", now_ns=10) == 0
+
+    assert not await principal.is_pending("runtime:1")
+    settled = await principal.load_event("runtime:1")
+    assert settled is None or settled.source == {}
+    assert await other.is_pending("runtime:1")
+    assert await principal.is_pending("$message")
+
+
+async def _admit_runtime_source(principal: PrincipalStore, kind: EventKind, event_id: str) -> None:
+    await principal.admit(
+        InboundEvent(
+            event_id=event_id,
+            room_id=ROOM,
+            thread_id=None,
+            kind=kind,
+            event_class=EventClass.ACTIONABLE,
+            sender="@agent:example.org",
+            origin_server_ts=1,
+            source={"requester_id": "@user:example.org"},
+        ),
+    )
+
+
+async def test_a_removed_entity_s_approval_held_job_follow_up_stays_for_its_approval(
+    journal_store: EventJournalStore,
+) -> None:
+    """A follow-up paused on an approval is the approval's to settle; the entity that returns still replays it."""
+    principal, second_login = journal_store.principal(PRINCIPAL), journal_store.principal("agent@bob")
+    await _admit_runtime_source(principal, EventKind.JOB_FOLLOW_UP, "job:held")
+    # The entity's other login has a row of the same id that no approval holds.
+    await _admit_runtime_source(second_login, EventKind.JOB_FOLLOW_UP, "job:held")
+    await _admit_runtime_source(principal, EventKind.JOB_FOLLOW_UP, "job:orphan")
+    await _admit_runtime_source(principal, EventKind.COMPACTION, "compaction:orphan")
+    continuation = await paused_for_approval(
+        principal,
+        replace(
+            journal_tests.TestApprovalContinuations.continuation(state="waiting"),
+            sources=ResponseSources(("job:held",), ("job:held",)),
+        ),
+    )
+    assert continuation is not None
+    # The unavailable-owner cleanup has not discarded the approval yet; its failing continuation waits to replay.
+    failure = ApprovalFailure(ApprovalFailureKind.ERROR, "agent removed")
+    assert await principal.approvals.request_approval_failure("approval-1", failure, expected_state="waiting")
+
+    assert await journal_store.end_entity_replies(lambda name: name == "agent", now_ns=10) == 1
+
+    assert await principal.is_pending("job:held")
+    held = await principal.load_event("job:held")
+    assert held is not None
+    assert held.source == {"requester_id": "@user:example.org"}
+    assert not await second_login.is_pending("job:held")
+    assert not await principal.is_pending("job:orphan")
+    assert not await principal.is_pending("compaction:orphan")
+    # The entity is configured again: its new bot is offered the continuation's source, and nothing else.
+    returned = await principal.pending(room_id=ROOM, runtime_generation="gen-returned")
+    assert [event.event_id for event in returned] == ["job:held"]
+    # It never returns: the unavailable-owner cleanup that discards the approval is what settles its source.
+    router = journal_store.principal("router@alice")
+    delivery_id = await router.approvals.enqueue_unavailable_approval_notice(
+        approval_id="approval-1",
+        room_id=ROOM,
+        thread_id="$thread",
+        payload=text("agent removed"),
+    )
+    assert delivery_id is not None
+    await router.claim_matrix_delivery(delivery_id=delivery_id, stage=DeliveryStage.FINAL)
+    await router.acknowledge_matrix_delivery(
+        delivery_id=delivery_id,
+        stage=DeliveryStage.FINAL,
+        event_id="$unavailable",
+        delivered_projections=(),
+    )
+    assert await principal.approvals.discard_unavailable_approval_continuation("approval-1") is not None
+    assert not await principal.is_pending("job:held")
 
 
 async def test_a_coalesced_turn_s_replay_is_superseded_only_once_its_other_messages_settled(

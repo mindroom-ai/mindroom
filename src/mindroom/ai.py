@@ -13,6 +13,7 @@ from mindroom.agent_cli.cli_shell_agent import bind_standard_cli
 from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.lifetime import cli_control_calls
 from mindroom.agent_cli.minimal_agent import minimal_attempt, minimal_turn, presented_build
+from mindroom.agent_cli.session import CONFIG_RELOAD_CALL
 from mindroom.agent_loop.build import prompt_for_turn, tool_owners_by_agent
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext
@@ -26,6 +27,7 @@ from mindroom.ai_run_metadata import (
 from mindroom.approval.resume import resume_from_session
 from mindroom.budgets.pricing import model_prices
 from mindroom.config.resolution import memory_backend as agent_memory_backend
+from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost
 from mindroom.delegation.execution import drive_delegation_stream
 from mindroom.delegation.lifecycle import (
     authorize_delegation,
@@ -33,6 +35,8 @@ from mindroom.delegation.lifecycle import (
     delegation_grant,
     note_child_run_id,
     observe_child_event,
+    reload_stopped_child_result,
+    running_child_run,
 )
 from mindroom.delegation.state import child_execution_identity
 from mindroom.error_handling import get_user_friendly_error_message
@@ -63,11 +67,13 @@ from mindroom.memory import (
     MemoryPromptParts,
     build_memory_prompt_parts,
     conversation_entrypoint_preamble,
+    entrypoint_snapshot_path,
     strip_user_turn_time_prefix,
 )
 from mindroom.metadata_merge import deep_merge_metadata
 from mindroom.pre_model_preparation import build_agent_off_loop, prepare_prompt_branches
 from mindroom.providers import registry as provider_registry
+from mindroom.providers.pipeline.prompt_hold import prompt_hold_path
 from mindroom.response_turn import (
     AttemptResolved,
     CompletedAttempt,
@@ -85,6 +91,7 @@ from mindroom.response_turn import (
     is_empty_reply,
     pause_without_approval_error,
     paused_attempt_from_response,
+    publish_error_run_metadata,
     replays_as_turn,
     skip_unapproved_attempt,
     stream_response_turn,
@@ -117,6 +124,7 @@ from mindroom.turn_model import ModelScope, TurnModel, resolve_turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
+    from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_loop.model_loop import LoopHooks
@@ -130,7 +138,7 @@ if TYPE_CHECKING:
     from mindroom.history.types import PreparedHistoryState, ScopeSummary
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent
-    from mindroom.llm.provider import ModelProvider, ModelRequest, TokenCounter
+    from mindroom.llm.provider import ModelProvider, ModelRequest
     from mindroom.llm.runs import AnyRunRecord, ToolExecution
     from mindroom.llm.usage import RunMetrics
     from mindroom.response_turn import TurnRunState
@@ -204,6 +212,7 @@ class _PreparedAgentRun:
     are the stored history the request replays under the resolved plan, and ``turn`` is the new input around the
     prompt.
     ``cli_context`` holds the context documents a minimal turn's Bash reads through `mindroom-agent`.
+    ``memory_copy`` is the file of the MEMORY.md copy the system messages hold, None when they hold none.
     """
 
     build: AgentBuild
@@ -218,6 +227,7 @@ class _PreparedAgentRun:
     # store can change mid-run (for example via the thread_model tool).
     runtime_model_name: str
     cli_context: Mapping[str, str]
+    memory_copy: Path | None
 
     @property
     def prompt_text(self) -> str:
@@ -504,9 +514,14 @@ def _agent_loop_hooks(
             prompt_id=prepared.turn.prompt.id,
             lifecycle=ctx.compaction_lifecycle,
             turn_recorder=run_context.turn_recorder,
+            # A voice call's turn, and a contact's, finishes its calls inside the turn and is never replayed.
+            checkpoints=not ctx.inline_tools,
+            memory_copy=prepared.memory_copy,
         ),
         participation=ctx.participation,
         skill_review_capture=ctx.skill_review_capture,
+        # A delegated child leaves its owner's reply to the owner to end.
+        steering=ctx.delegation_depth == 0,
     )
 
 
@@ -668,6 +683,7 @@ def _memory_conversation(
     system prompt every turn and can drop the agent's own memory writes, so none of them has a cache to keep.
     Without automatic compaction, fitting a long conversation into the context window is such a limit. Nor has a turn
     that stores no run (``usage_kind``), as its later turns replay none of its memory writes.
+    The copy lies beside the conversation's database, so in a private agent's own state root.
     """
     if (
         ctx.persona is not None
@@ -683,7 +699,33 @@ def _memory_conversation(
         return None
     session = scope_context.session
     compaction = compaction_marker(session) if session is not None else (None, None)
-    return ConversationRef(scope_context.session_id, compaction)
+    return ConversationRef(
+        compaction,
+        entrypoint_snapshot_path(scope_context.storage.path, scope_context.session_id),
+    )
+
+
+def _with_prompt_hold(
+    ctx: ResponseTurnContext,
+    build: AgentBuild,
+    scope_context: ScopeSessionContext | None,
+) -> AgentBuild:
+    """Return ``build`` with its requests naming the file that holds the system prompt of the turn's conversation.
+
+    So history is sized as each request is sent (``providers/pipeline/prompt_hold.py``). Only a route proven to take
+    a system prompt update holds one, and neither an authored persona, a minimal agent, nor a turn that stores no run
+    (``usage_kind``), which no later turn replays. The file lies in the state root of the conversation's database.
+    """
+    if (
+        ctx.persona is not None
+        or ctx.agent_mode == "minimal"
+        or ctx.usage_kind is not None
+        or scope_context is None
+        or not build.spec.model.capabilities.system_updates
+    ):
+        return build
+    path = prompt_hold_path(scope_context.storage.path, scope_context.session_id)
+    return replace(build, request_template=replace(build.request_template, prompt_hold=path))
 
 
 async def _prepare_turn_memory(
@@ -691,9 +733,8 @@ async def _prepare_turn_memory(
     config: Config,
     runtime_paths: RuntimePaths,
     conversation: ConversationRef | None,
-    counter: TokenCounter,
 ) -> MemoryPromptParts:
-    """Recall memories for a configured agent turn whose model counts with ``counter``; a persona recalls none."""
+    """Recall memories for a configured agent turn; a persona recalls none."""
     if ctx.persona is not None:
         return MemoryPromptParts()
     return await build_memory_prompt_parts(
@@ -703,7 +744,6 @@ async def _prepare_turn_memory(
         runtime_paths,
         execution_identity=ctx.execution_identity,
         conversation=conversation,
-        counter=counter,
     )
 
 
@@ -730,7 +770,6 @@ async def _system_messages_after_compaction(
         runtime_paths,
         ctx.execution_identity,
         conversation=compacted,
-        counter=build.spec.model.token_counter,
     )
     return _turn_system_messages(build, ctx, fresh)
 
@@ -739,10 +778,12 @@ async def _turn_model_and_provider(
     ctx: ResponseTurnContext,
     config: Config,
     runtime_paths: RuntimePaths,
+    on_model_resolved: Callable[[str], None] | None,
 ) -> tuple[TurnModel, ModelProvider]:
-    """Resolve the turn's model and build its provider once, before memory sizes the MEMORY.md preload with it.
+    """Resolve the turn's model and build its provider once.
 
     Both run off the event loop: resolution reads thread and room model overrides from disk (#1260).
+    ``on_model_resolved`` hears the model before its provider is built, so a failure from there on names it.
     """
     runtime_model = await asyncio.to_thread(
         resolve_turn_model,
@@ -756,6 +797,8 @@ async def _turn_model_and_provider(
         ),
         None,
     )
+    if on_model_resolved is not None:
+        on_model_resolved(runtime_model.model_name)
     if ctx.reusable_build is not None:
         return runtime_model, ctx.reusable_build.spec.model
     provider = await asyncio.to_thread(
@@ -776,17 +819,19 @@ async def _prepare_agent_and_prompt(
     config: Config,
     scope_context: ScopeSessionContext | None,
     current_event_id: str | None,
+    on_model_resolved: Callable[[str], None] | None = None,
 ) -> _PreparedAgentRun:
     """Prepare the agent build, this turn's system messages (stable, then turn), and its request input.
 
-    Returns the prepared run input plus history bookkeeping for one agent turn.
+    Returns the prepared run input plus history bookkeeping for one agent turn. ``on_model_resolved`` hears the
+    turn's model as soon as it is resolved, before anything is built for it.
     """
     agent_name = ctx.entity_label
     prompt = ctx.prompt
     execution_identity = ctx.execution_identity
     pipeline_timing = ctx.pipeline_timing
 
-    runtime_model, provider = await _turn_model_and_provider(ctx, config, runtime_paths)
+    runtime_model, provider = await _turn_model_and_provider(ctx, config, runtime_paths, on_model_resolved)
 
     def _build_agent() -> tuple[TurnModel, AgentBuild]:
         """Build the agent off the event loop (#1260): it walks workspace scaffolding and reads context files."""
@@ -802,7 +847,7 @@ async def _prepare_agent_and_prompt(
                 plugins=current_plugins(config, runtime_paths),
                 include_interactive_questions=ctx.include_interactive_questions,
                 tool_function_filter=ctx.tool_function_filter,
-                include_openai_compat_guidance=ctx.include_openai_compat_guidance,
+                outside_matrix=ctx.outside_matrix,
                 execution_identity=execution_identity,
                 delegation_depth=ctx.delegation_depth,
                 refresh_scheduler=ctx.refresh_scheduler,
@@ -814,7 +859,7 @@ async def _prepare_agent_and_prompt(
                 persona=ctx.persona,
                 tool_names=ctx.tool_names,
             )
-        return runtime_model, build
+        return runtime_model, _with_prompt_hold(ctx, build, scope_context)
 
     memory_backend = agent_memory_backend(config, agent_name)
     memory_conversation = _memory_conversation(ctx, config, scope_context)
@@ -851,7 +896,6 @@ async def _prepare_agent_and_prompt(
                         config,
                         runtime_paths,
                         memory_conversation,
-                        provider.token_counter,
                     ),
                     build_agent=_build_agent,
                     agent_name=agent_name,
@@ -866,7 +910,6 @@ async def _prepare_agent_and_prompt(
             config,
             runtime_paths,
             memory_conversation,
-            provider.token_counter,
         )
         _mark_pipeline_timing(pipeline_timing, "memory_prepare_ready")
         _mark_pipeline_timing(pipeline_timing, "agent_build_start")
@@ -909,11 +952,11 @@ async def _prepare_agent_and_prompt(
         config=config,
         resolved_runtime_model=runtime_model,
         compaction_lifecycle=ctx.compaction_lifecycle,
-        current_sender_id=None if ctx.include_openai_compat_guidance else ctx.current_sender_id or ctx.requester_id,
+        current_sender_id=None if ctx.outside_matrix else ctx.current_sender_id or ctx.requester_id,
         current_timestamp_ms=ctx.current_timestamp_ms,
         current_event_id=current_event_id,
         current_prompt_is_structured=ctx.current_prompt_is_structured,
-        include_openai_compat_guidance=ctx.include_openai_compat_guidance,
+        outside_matrix=ctx.outside_matrix,
         pipeline_timing=pipeline_timing,
     )
     system_messages = await _system_messages_after_compaction(
@@ -960,6 +1003,7 @@ async def _prepare_agent_and_prompt(
         prepared_history=prepared_execution.prepared_history,
         runtime_model_name=runtime_model.model_name,
         cli_context=cli_context,
+        memory_copy=memory_conversation.snapshot if memory_conversation is not None else None,
     )
 
 
@@ -972,6 +1016,7 @@ async def _prepare_agent_run_context(
     config: Config,
     scope_context: ScopeSessionContext | None,
     turn_recorder: TurnRecorder,
+    on_model_resolved: Callable[[str], None] | None = None,
 ) -> _AgentRunContext:
     """Prepare one attempt of an agent response, as its ``continuation`` state asks, through metadata assembly."""
     ctx = replace(
@@ -994,6 +1039,7 @@ async def _prepare_agent_run_context(
         config=config,
         scope_context=scope_context,
         current_event_id=continuation.active_current_event_id,
+        on_model_resolved=on_model_resolved,
     )
     if pipeline_timing is not None:
         pipeline_timing.mark("history_ready", overwrite=True)
@@ -1035,14 +1081,14 @@ async def run_delegated_child_response(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     supports_native_tool_approval: bool = True,
     approval_config: Config | None = None,
-    prior_usage: Sequence[RunMetrics] = (),
+    prior_usage: Mapping[str, RunMetrics] | None = None,
 ) -> str:
     """Execute the normal response envelope for a prepared child owned by either adapter.
 
     The native delegation driver resumes a child that pauses for approval; the direct delegate tool, which cannot,
     passes ``supports_native_tool_approval=False``. A minimal child cannot pause for approval: approval-gated tools
     stay hidden from it, so no adapter ever has to resume it natively. ``prior_usage`` is the usage of the child's turn
-    before this envelope: a resumed run a model switch continued, whose continuation this envelope runs.
+    before this envelope, by run id: a resumed run a model switch continued, whose continuation this envelope runs.
     """
     identity = child_execution_identity(child)
     authorized_config = authorize_delegation(
@@ -1068,7 +1114,11 @@ async def run_delegated_child_response(
         only=child.persona.kept_knowledge if child.persona is not None else None,
     )
     context = get_tool_runtime_context()
-    child_context = child_tool_runtime_context(context, child) if context is not None else None
+    # The child's tools check reloads against the config its agent was built from, without the caller's approval
+    # overlay: the overlay's base, or the live config it was authorized under, never the caller turn's older snapshot.
+    built_from = config if approval_config is not None else authorized_config
+    child_context = child_tool_runtime_context(context, child, config=built_from) if context is not None else None
+    observation = running_child_run()
     turn = ResponseTurnContext(
         agent_mode=child.agent_mode,
         persona=child.persona,
@@ -1102,6 +1152,8 @@ async def run_delegated_child_response(
             runtime_paths,
             model_name=model_name,
         ),
+        # The child's settlement adds what its subagents cost to its own.
+        subagent_cost=None if observation is None else observation.subagent_cost,
     )
     # The child's tools run as the child, whichever adapter runs it; its caller's identity stays with the caller.
     with tool_runtime_context(child_context) if child_context is not None else detached_tool_scope(identity):
@@ -1110,9 +1162,11 @@ async def run_delegated_child_response(
             runtime_paths,
             active_config,
             sinks=sinks,
-            resume=TurnResume(prior_usage=tuple(prior_usage)),
+            resume=TurnResume(prior_usage=prior_usage or {}),
         )
-    return result.text
+    record = None if observation is None else observation.current_record()
+    # A child a config reload stopped hands its caller what its settlement records, not its unfinished text.
+    return (reload_stopped_child_result(child, record) if record is not None else None) or result.text
 
 
 def _with_background_tool_jobs(
@@ -1138,6 +1192,8 @@ class TurnResult:
     text: str
     completed: CompletedAttempt | None = None
     failed: HandledAttempt | None = None
+    # What the subagent turns whose results the turn received cost.
+    subagent_cost: SubagentCost = field(default_factory=SubagentCost)
 
     @cached_property
     def run_metadata(self) -> dict[str, Any]:
@@ -1148,7 +1204,8 @@ class TurnResult:
         """
         ending = self.completed or self.failed
         build = ending.build_run_metadata if ending is not None else None
-        return build() if build is not None else {}
+        with receiving_subagent_cost(self.subagent_cost):
+            return build() if build is not None else {}
 
 
 async def ai_response(
@@ -1167,11 +1224,14 @@ async def ai_response(
     """
     completed: list[CompletedAttempt] = []
     failed: list[HandledAttempt] = []
+    sinks = sinks or TurnSinks()
+    subagent_cost = SubagentCost() if sinks.subagent_cost is None else sinks.subagent_cost
     reporting = replace(
-        sinks or TurnSinks(),
+        sinks,
         run_metadata_collector=None,
         on_completed=completed.append,
         on_failed=failed.append,
+        subagent_cost=subagent_cost,
     )
     body, _tool_trace = await collect_streamed_response_content(
         stream_agent_response(ctx, runtime_paths, config, sinks=reporting, resume=resume),
@@ -1182,6 +1242,7 @@ async def ai_response(
         text=body,
         completed=completed[-1] if completed else None,
         failed=failed[-1] if failed else None,
+        subagent_cost=subagent_cost,
     )
 
 
@@ -1254,7 +1315,7 @@ async def _process_stream_events(  # noqa: C901, PLR0912
     except ResponsePausedForApproval:
         raise
     except Exception as e:
-        logger.exception("Error during streaming AI response")
+        logger.warning("Error during streaming AI response", exc_info=True)
         state.error = e
 
 
@@ -1292,7 +1353,7 @@ async def _stream_agent_attempt_chunks(
     except ResponsePausedForApproval:
         raise
     except Exception as e:
-        logger.exception("Error starting streaming AI response")
+        logger.warning("Error starting streaming AI response", exc_info=True)
         state.error = e
 
 
@@ -1323,6 +1384,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
     try:
         _assert_agent_target(agent_name, config)
     except ValueError as e:
+        publish_error_run_metadata(sinks)
         yield FailedReply(error_text(e), e)
         return
 
@@ -1340,12 +1402,14 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 config=config,
                 scope_context=run.scope_context,
                 turn_recorder=run.record,
+                on_model_resolved=sinks.on_model_resolved,
             )
         except Exception as e:
-            logger.exception("Error preparing agent", agent=agent_name)
             if skipped := skip_unapproved_attempt(ctx.participation, reason="preparation_failed"):
+                logger.exception("Error preparing agent", agent=agent_name)
                 yield AttemptResolved(skipped)
                 return
+            logger.warning("Error preparing agent", agent=agent_name, exc_info=True)
             yield AttemptResolved(HandledAttempt(FailedReply(error_text(e), e)))
             return
         prepared_run = run_context.prepared_run
@@ -1365,6 +1429,11 @@ async def stream_agent_response(  # noqa: C901, PLR0915
         record = state.terminal.record
         if state.error is not None:
             if skipped := skip_unapproved_attempt(ctx.participation, reason="run_failed_before_decision"):
+                logger.error(
+                    "Streaming AI response failed before participation decision",
+                    agent=agent_name,
+                    exc_info=state.error,
+                )
                 yield AttemptResolved(skipped)
             else:
                 failure_text = error_text(state.error)
@@ -1378,7 +1447,7 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                             record,
                             RunStatus.error,
                             run_id=attempt.run_id,
-                            prior_usage=run.prior_usage,
+                            prior_usage=tuple(run.prior_usage.values()),
                         ),
                     ),
                 )
@@ -1412,6 +1481,13 @@ async def stream_agent_response(  # noqa: C901, PLR0915
             )
             return
 
+        control_calls = cli_control_calls(attempt.run_id)
+        stopped = next((call.result for call in control_calls if call.tool_name == CONFIG_RELOAD_CALL), None)
+        if stopped:
+            # The run stopped after the refused call, before the model could answer: the reply ends with why.
+            shown = state.assistant_text
+            state.assistant_text = append_stream_text(shown, stopped, separate=True)
+            yield TextDelta(state.assistant_text[len(shown) :])
         completed_without_output = _stream_completed_without_visible_output(state, record)
         final_status = RunStatus.error if completed_without_output else RunStatus.completed
         final_text = record.content or ""
@@ -1425,14 +1501,15 @@ async def stream_agent_response(  # noqa: C901, PLR0915
                 attempt_run_id=attempt.run_id,
                 usage=record.metrics,
                 tool_executions=tuple(record.tools or ()),
-                control_calls=cli_control_calls(attempt.run_id),
+                # The reload's stop ends the turn, also when a model switch in the same batch asked for another attempt.
+                control_calls=() if stopped else control_calls,
                 completed_tools=tuple(state.completed_tools),
                 build_run_metadata=_attempt_run_metadata_builder(
                     run_context,
                     record,
                     final_status,
                     run_id=record.run_id,
-                    prior_usage=run.prior_usage,
+                    prior_usage=tuple(run.prior_usage.values()),
                 ),
             ),
         )

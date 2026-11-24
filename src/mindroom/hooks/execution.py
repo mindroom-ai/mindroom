@@ -7,8 +7,12 @@ import time
 from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING, cast
+from uuid import uuid4
 
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.entity_resolution import owner_matrix_id
 from mindroom.logging_config import get_logger
 from mindroom.timing import elapsed_ms_since
 from mindroom.tool_system.tool_environment import ToolEnvironment
@@ -35,17 +39,25 @@ from .context import (
     ToolAfterCallContext,
     ToolBeforeCallContext,
     ToolEnvironmentContext,
+    ToolResultTransformContext,
     message_envelope_for_hook_context,
 )
+from .registry import HookRegistryLifetime
 from .types import (
+    EVENT_BOT_READY,
     EVENT_MESSAGE_RECEIVED,
     EVENT_TOOL_ENVIRONMENT,
+    EVENT_TOOL_RESULT_TRANSFORM,
     EnrichmentItem,
     RegisteredHook,
     default_timeout_ms_for_event,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from mindroom.runtime_protocols import OrchestratorRuntime
+
     from .registry import HookRegistry
 
 logger = get_logger(__name__)
@@ -105,7 +117,27 @@ def _scope_room_ids(context: HookContext) -> tuple[str, ...]:
     return ()
 
 
-def _hook_in_scope(hook: RegisteredHook, context: HookContext) -> bool:
+async def _emitter_runs_room_hooks(event_name: str, context: HookContext) -> bool:
+    """Return whether this emission runs the event's room-scoped hooks, which one no runtime's bot made always does."""
+    if isinstance(context, MessageReceivedContext) and context._routed:
+        # The person's message holds the one claim, taken by the first bot it reached; its route takes none.
+        return False
+    lifetime = context._hook_registry_state
+    if not isinstance(lifetime, HookRegistryLifetime):
+        return True
+    event_id = None
+    if isinstance(context, MessageReceivedContext):
+        event_id = context.envelope.source_event_id
+    elif isinstance(context, ReactionReceivedContext | RoomMemberJoinedContext | RoomMemberLeftContext):
+        event_id = context.event_id
+    return await lifetime.runs_room_hooks(_scope_room_ids(context), event_name, event_id)
+
+
+def _hook_in_scope(hook: RegisteredHook, context: HookContext, *, service: bool) -> bool:
+    # The runtime's own bot:ready runs the service-scoped hooks and no others, and a bot's own runs the others.
+    if (hook.scope == "service" and hook.event_name == EVENT_BOT_READY) != service:
+        return False
+
     if hook.agents is not None:
         agent_name = _scope_agent_name(context)
         if agent_name is None or agent_name not in hook.agents:
@@ -156,11 +188,14 @@ def _bind_hook_context(
     """Return the copy of ``context`` one hook receives, under that hook's plugin name, settings, and logger."""
     replacement_kwargs: dict[str, object] = {
         "plugin_name": hook.plugin_name,
-        "settings": dict(hook.settings),
+        "settings": deepcopy(hook.settings),
         "logger": _context_logger(hook),
         "_hook_registry_snapshot": registry,
     }
-    if isinstance(context, ToolBeforeCallContext | ToolAfterCallContext | ToolEnvironmentContext):
+    if isinstance(
+        context,
+        ToolBeforeCallContext | ToolAfterCallContext | ToolResultTransformContext | ToolEnvironmentContext,
+    ):
         replacement_kwargs["arguments"] = deepcopy(context.arguments)
     if isinstance(context, ToolAfterCallContext):
         replacement_kwargs["result"] = _snapshot_tool_observer_value(context.result)
@@ -193,8 +228,11 @@ async def _invoke_hook(hook: RegisteredHook, context: HookContext) -> _HookInvoc
     timeout_seconds = _effective_timeout_ms(hook) / 1000
     started_at = time.monotonic()
     try:
-        async with asyncio.timeout(timeout_seconds):
+        async with asyncio.timeout(timeout_seconds) as deadline:
             result = await hook.callback(context)
+        if deadline.expired():
+            # The hook caught the cancellation its deadline sent and returned anyway, so it timed out.
+            raise TimeoutError  # noqa: TRY301
     except asyncio.CancelledError:
         raise
     except (Exception, SystemExit) as error:
@@ -219,18 +257,21 @@ async def _invoke_hook(hook: RegisteredHook, context: HookContext) -> _HookInvoc
     return _HookInvocationResult(succeeded=True, value=result)
 
 
-def _eligible_hooks(
+async def _eligible_hooks(
     registry: HookRegistry,
     event_name: str,
     context: HookContext,
+    *,
+    service: bool = False,
 ) -> tuple[RegisteredHook, ...]:
     hooks = registry.hooks_for(event_name)
     if not hooks:
         return ()
 
+    runs_room_hooks: bool | None = None
     eligible_hooks: list[RegisteredHook] = []
     for hook in hooks:
-        if not _hook_in_scope(hook, context):
+        if not _hook_in_scope(hook, context, service=service):
             continue
         if (
             isinstance(context, MessageReceivedContext)
@@ -238,6 +279,12 @@ def _eligible_hooks(
             and hook.plugin_name in context.skip_plugin_names
         ):
             continue
+        # Asked last and once: the first emission with a room-scoped hook to run takes the event's claim.
+        if hook.scope == "room":
+            if runs_room_hooks is None:
+                runs_room_hooks = await _emitter_runs_room_hooks(event_name, context)
+            if not runs_room_hooks:
+                continue
         eligible_hooks.append(hook)
     return tuple(eligible_hooks)
 
@@ -248,8 +295,9 @@ async def emit(
     context: HookContext,
     *,
     continue_on_cancelled: bool = False,
+    service: bool = False,
 ) -> None:
-    """Run observer hooks serially for one event."""
+    """Run observer hooks serially for one event; ``service`` marks the runtime's own once-per-process ``bot:ready``."""
     depth = _EMIT_DEPTH.get()
     if depth >= _MAX_EMIT_DEPTH:
         logger.warning(
@@ -262,7 +310,7 @@ async def emit(
 
     token = _EMIT_DEPTH.set(depth + 1)
     try:
-        for hook in _eligible_hooks(registry, event_name, context):
+        for hook in await _eligible_hooks(registry, event_name, context, service=service):
             hook_context = _bind_hook_context(registry, hook, context)
             try:
                 await _invoke_hook(hook, hook_context)
@@ -277,6 +325,32 @@ async def emit(
             _merge_observer_context_changes(context, hook_context)
     finally:
         _EMIT_DEPTH.reset(token)
+
+
+def service_bot_ready_emission(orchestrator: OrchestratorRuntime) -> Callable[[], Awaitable[None]] | None:
+    """Capture the runtime's one ``bot:ready`` for service-scoped hooks: the router entity, with the rooms bots joined.
+
+    The hooks, config and joined rooms are this call's, so a replacement that begins before the result is called
+    changes nothing the hooks see. None when no hook listens.
+    """
+    if not orchestrator.hook_registry_state.registry.has_hooks(EVENT_BOT_READY):
+        return None
+    bindings = orchestrator.service_hook_bindings()
+    joined = (room_id for bot in orchestrator.agent_bots.values() if bot.client for room_id in bot.client.rooms)
+    context = AgentLifecycleContext(
+        **bindings.context_kwargs(
+            EVENT_BOT_READY,
+            config=orchestrator.config,
+            runtime_paths=orchestrator.runtime_paths,
+            correlation_id=f"{EVENT_BOT_READY}:service:{uuid4().hex}",
+        ),
+        entity_name=ROUTER_AGENT_NAME,
+        entity_type="router",
+        rooms=tuple(sorted(orchestrator.config.get_all_configured_rooms())),
+        matrix_user_id=owner_matrix_id(orchestrator.runtime_paths),
+        joined_room_ids=tuple(dict.fromkeys(joined)),
+    )
+    return partial(emit, bindings.registry, EVENT_BOT_READY, context, service=True)
 
 
 async def emit_gate(
@@ -297,7 +371,7 @@ async def emit_gate(
 
     token = _EMIT_DEPTH.set(depth + 1)
     try:
-        for hook in _eligible_hooks(registry, event_name, context):
+        for hook in await _eligible_hooks(registry, event_name, context):
             hook_context = cast(
                 "ToolBeforeCallContext",
                 _bind_hook_context(registry, hook, context),
@@ -337,7 +411,7 @@ async def emit_policy(
 
     token = _EMIT_DEPTH.set(depth + 1)
     try:
-        for hook in _eligible_hooks(registry, event_name, context):
+        for hook in await _eligible_hooks(registry, event_name, context):
             hook_context = cast(
                 "ContactBeforeSendContext",
                 _bind_hook_context(registry, hook, context),
@@ -351,6 +425,57 @@ async def emit_policy(
             context.feedback = hook_context.feedback
             if context.verdict != "send":
                 return
+    finally:
+        _EMIT_DEPTH.reset(token)
+
+
+async def emit_tool_result_transform(
+    registry: HookRegistry,
+    context: ToolResultTransformContext,
+    *,
+    rewritable: bool = True,
+) -> str | None:
+    """Run tool:result_transform hooks serially in priority order and return the text they leave, failing closed.
+
+    Each hook returns a ``str`` to replace the text the hook before it left, or ``None`` to keep it. One that fails,
+    times out, or returns anything else, or a run nested too deeply, stops the chain and withholds the result: None.
+    A result that is not ``rewritable`` reaches every hook as itself; a replacement that contains it keeps it, and any
+    other replacement withholds it. A Stop a hook caught still propagates.
+    """
+    hooks = await _eligible_hooks(registry, EVENT_TOOL_RESULT_TRANSFORM, context)
+    if not hooks:
+        return context.result
+    log_kwargs = {"tool_name": context.tool_name, "agent_name": context.agent_name}
+    depth = _EMIT_DEPTH.get()
+    if depth >= _MAX_EMIT_DEPTH:
+        logger.warning("Withheld tool result", **log_kwargs, reason="hooks nested too deeply")
+        return None
+    token = _EMIT_DEPTH.set(depth + 1)
+    task = asyncio.current_task()
+    try:
+        text = context.result
+        for hook in hooks:
+            cancelling = 0 if task is None else task.cancelling()
+            hook_context = _bind_hook_context(registry, hook, replace(context, result=text))
+            invocation = await _invoke_hook(hook, hook_context)
+            if task is not None and task.cancelling() > cancelling:
+                raise asyncio.CancelledError
+            value = invocation.value
+            # A hook that took a control result's text out wants it gone; it cannot be rewritten, so it is withheld.
+            removed = not rewritable and isinstance(value, str) and text not in value
+            if not invocation.succeeded or not isinstance(value, str | None) or removed:
+                logger.warning(
+                    "Withheld tool result",
+                    **log_kwargs,
+                    plugin_name=hook.plugin_name,
+                    hook_name=hook.hook_name,
+                )
+                return None
+            if value not in (None, text) and not rewritable:
+                logger.info("Kept a control tool result a hook rewrote", **log_kwargs, hook_name=hook.hook_name)
+            elif value is not None:
+                text = value
+        return text
     finally:
         _EMIT_DEPTH.reset(token)
 
@@ -374,7 +499,7 @@ async def _collect[C: HookContext](
     context: C,
 ) -> list[tuple[C, object | None]]:
     """Run collector hooks concurrently; return each finished hook's own context and return value, in hook order."""
-    hooks = _eligible_hooks(registry, event_name, context)
+    hooks = await _eligible_hooks(registry, event_name, context)
     if not hooks:
         return []
 
@@ -478,7 +603,7 @@ async def _emit_serial_transform(
     continue_on_cancelled: bool,
 ) -> _TransformDraft:
     current_draft = context.draft
-    for hook in _eligible_hooks(registry, event_name, context):
+    for hook in await _eligible_hooks(registry, event_name, context):
         hook_draft = deepcopy(current_draft) if copy_on_write else current_draft
         hook_context = cast("_TransformContext", _bind_hook_context(registry, hook, replace(context, draft=hook_draft)))
         try:

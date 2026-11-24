@@ -57,6 +57,8 @@ class _ComputerBrowserProvider:
         invoke: Callable[[AnyToolkit, Callable[..., object], list[object], dict[str, object]], Awaitable[object]],
     ) -> tuple[str, BrowserSession]:
         """Bind the output-wrapped toolkit; the caller owns invocation policy and timeout."""
+        from mindroom.custom_tools.browser import BrowserTools  # noqa: PLC0415
+
         key = toolkit.bind_worker_display(display, workspace)
 
         async def execute(current_function: str, *args: object, **kwargs: object) -> object:
@@ -70,7 +72,9 @@ class _ComputerBrowserProvider:
                 raise ValueError(msg)
             return await invoke(toolkit, function.entrypoint, list(args), kwargs)
 
-        return key, BrowserSession(execute=execute, close=toolkit.aclose)
+        # The agent's browser bridge reaches the built-in browser's page because it runs in this process.
+        page = toolkit.worker_shown_page if isinstance(toolkit, BrowserTools) else None
+        return key, BrowserSession(execute=execute, close=toolkit.aclose, page=page)
 
 
 def select_browser_provider(

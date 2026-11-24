@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict, replace
@@ -39,8 +40,13 @@ from mindroom.delegation.background import delegation_child
 from mindroom.delegation.job_approvals import request_child_approvals
 from mindroom.delegation.lifecycle import prepare_child_turn
 from mindroom.delegation.recovery import read_child_run
-from mindroom.delegation.sessions import SUBAGENT_BUSY, load_retained_subagent_turn, subagent_recovery_lock
-from mindroom.delegation.state import DelegationState
+from mindroom.delegation.sessions import (
+    SUBAGENT_BUSY,
+    load_retained_subagent_turn,
+    subagent_liveness,
+    subagent_recovery_lock,
+)
+from mindroom.delegation.state import RESTART_INTERRUPTION_REASON, DelegationState, child_card_id
 from mindroom.event_journal import JOB_ENDED_REASON, BackgroundApprovalDecision, tool_job_run_id
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus
@@ -73,6 +79,7 @@ from tests.tool_job_helpers import (
     SpanRecorder,
     admit_delegation_spec,
     answer_of,
+    call_job_tool,
     cancel_settled,
     delegating_config,
     intercept_job_saves,
@@ -293,6 +300,62 @@ async def test_parent_cancellation_during_job_admission_keeps_accepted_child(
 
 
 @pytest.mark.asyncio
+async def test_parent_cancellation_before_job_admission_starts_no_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A `run_subagent` call cancelled while its job still waits for the runtime leaves no job and starts no child."""
+    paths = _runtime_paths(tmp_path)
+    config = delegating_config()
+    owner = _identity()
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(config, paths)
+    register_background_runtime(paths, runtime)
+    executing = asyncio.Event()
+
+    async def run_forever() -> None:
+        executing.set()
+        await asyncio.Event().wait()
+
+    agents = ScriptedAgents({"code": ScriptedModel([[Await(run_forever)]])})
+    agents.models["leader"] = ScriptedModel([])
+    agents.install(monkeypatch)
+    entity_ids(config, paths)
+    build = create_agent(
+        "leader",
+        config,
+        paths,
+        owner,
+        supports_native_tool_approval=True,
+        include_interactive_questions=False,
+        knowledge=None,
+        model=turn_model(config, paths, "leader"),
+        plugins=config_plugins(config, paths),
+    )
+    assert build.tool_jobs is not None
+    arguments = {"task": "Research", "agent_name": "code"}
+    try:
+        async with execution_resources():
+            with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=owner)):
+                async with runtime._lock:
+                    # The call itself, not a reply around it, so the cancellation lands on the waiting start.
+                    call = asyncio.create_task(
+                        call_job_tool(build.tool_jobs, "run_subagent", arguments, session_id=owner.session_id or ""),
+                    )
+                    async with asyncio.timeout(JOB_TEST_TIMEOUT):
+                        while not runtime._lock._waiters:  # noqa: ASYNC110 - no event says the start waits.
+                            await asyncio.sleep(0.01)
+                    call.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await call
+                await asyncio.sleep(0.1)
+                assert await runtime.list_jobs(owner=owner, depth=0) == []
+                assert not executing.is_set()
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("detach", "human"), [(False, False), (True, False), (True, True)])
 @pytest.mark.parametrize(
     ("approval", "exclude_after_acceptance"),
@@ -353,7 +416,9 @@ async def test_a_background_subagent_runs_its_child_once(  # noqa: C901, PLR0915
         await asyncio.wait_for(cards.posted.wait(), JOB_TEST_TIMEOUT)
         job_id = the_job().job_id
         await wait_for_status(runtime, job_id, "awaiting_approval")
-        assert cards.requested == [(tool_job_run_id(job_id), "write-once", "write_report")]
+        # The card names the child's turn with its call, under the job.
+        card = child_card_id(delegation_child(the_job()).delegation_id, "write-once")
+        assert cards.requested == [(tool_job_run_id(job_id), card, "write_report")]
         assert reports.effects == []
         if exclude_after_acceptance:
             config.background_tool_jobs.exclude_toolkits.append("delegate")
@@ -366,7 +431,7 @@ async def test_a_background_subagent_runs_its_child_once(  # noqa: C901, PLR0915
             assert await job_card_decision(
                 runtime.journal,
                 tool_job_run_id(job_id),
-                "write-once",
+                card,
             ) == BackgroundApprovalDecision("denied", JOB_ENDED_REASON)
             return
         status = "denied" if approval == "denied" else "approved"
@@ -534,7 +599,8 @@ async def test_a_parent_waits_for_its_childs_approval_no_longer_than_a_gated_cal
             assert result.status is RunStatus.completed
             handle = json.loads(str(answer_of(result, "first").content))
             assert handle["status"] == "awaiting_approval"
-            assert cards.requested == [(tool_job_run_id(handle["job_id"]), "w", "write_report")]
+            card = child_card_id(delegation_child(runtime._entries[handle["job_id"]].job).delegation_id, "w")
+            assert cards.requested == [(tool_job_run_id(handle["job_id"]), card, "write_report")]
             assert reports.effects == []
         finally:
             await runtime.shutdown()
@@ -997,7 +1063,7 @@ async def test_shutdown_interrupts_a_running_child_like_a_restart(
     monkeypatch: pytest.MonkeyPatch,
     shutdown: bool,
 ) -> None:
-    """Only a cancellation request cancels a running child; shutdown records the restart interruption."""
+    """Only a cancellation request cancels a running child; shutdown records the restart, which interrupts its job."""
     runtime = await tool_job_runtime(tmp_path)
     child = _BlockingChild()
 
@@ -1011,9 +1077,7 @@ async def test_shutdown_interrupts_a_running_child_like_a_restart(
     await _drive_background_child(tmp_path, monkeypatch, runtime, child, while_waiting=stop)
     (job,) = (await saved_jobs(tmp_path)).values()
     assert (job.status, job.result) == (
-        ("failed", "Subagent turn was interrupted by a restart. Send a follow-up to continue its history.")
-        if shutdown
-        else ("cancelled", "Delegation cancelled.")
+        ("interrupted", RESTART_INTERRUPTION_REASON) if shutdown else ("cancelled", "Delegation cancelled.")
     )
 
 
@@ -1054,7 +1118,7 @@ async def test_cancelled_child_inside_a_stopping_job_records_why_it_stopped(tmp_
             await unwind()
     reason = interrupt.await_args.kwargs["reason"]
     assert (reason, interrupt.await_args.kwargs.get("status", "cancelled")) == (
-        ("Subagent turn was interrupted by a restart. Send a follow-up to continue its history.", "failed")
+        (RESTART_INTERRUPTION_REASON, "failed")
         if stop in {"shutdown", "teardown"}
         else ("Delegation cancelled.", "cancelled")
     )
@@ -1584,3 +1648,17 @@ async def test_a_follow_up_waits_until_the_earlier_turns_job_has_ended(
     finally:
         release.set()
         await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_subagent_lock_descriptors_are_read_write(tmp_path: Path, flock_access_modes: list[int]) -> None:
+    """The shared liveness lock and the exclusive recovery lock work on NFS only on read-write descriptors."""
+    paths = _runtime_paths(tmp_path)
+    _config, _owner, child = _prepared_child(paths)
+
+    async with subagent_liveness(child, paths):
+        pass
+    assert flock_access_modes == [os.O_RDWR]
+    with subagent_recovery_lock(child.subagent_id, paths) as acquired:
+        assert acquired
+    assert flock_access_modes == [os.O_RDWR] * 2

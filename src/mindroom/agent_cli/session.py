@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 __all__ = [
+    "CONFIG_RELOAD_CALL",
     "MAX_CLI_GRANT_LIFETIME_NS",
+    "RELOAD_STOPPED",
     "CliAuthenticationError",
     "CliBashWindowRequiredError",
     "CliCallConflictError",
+    "CliCatalogReloadedError",
     "CliGrant",
     "CliOperationError",
     "CliOperationOwner",
@@ -23,6 +26,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, cast
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
     from mindroom.agent_cli.protocol import AgentCliOperation
     from mindroom.response_turn import ResponseTurnContext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -42,6 +47,19 @@ class CliBashWindowRequiredError(ValueError):
 
 class CliOperationError(ValueError):
     """A caller-safe rejection whose message is relayed to the CLI."""
+
+
+# The control call a minimal turn reports once a config reload refused a call, which stops its run, and the key of
+# its run's metadata that holds why the run ended.
+CONFIG_RELOAD_CALL = "mindroom:config_reload"
+RELOAD_STOPPED = (
+    "MindRoom's configuration was reloaded while this turn ran, so the turn stopped: a MindRoom call it made did not "
+    "run. A new turn runs under the reloaded configuration."
+)
+
+
+class CliCatalogReloadedError(CliOperationError):
+    """A config reload changed what the turn's CLI tools were built from: the call does not run, nor any later one."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -175,8 +193,26 @@ class CliOperationOwner(Protocol):
         """Read metadata, or enqueue one owned operation from the shell command that opened ``window``."""
         ...
 
-    async def get_call(self, call_id: str) -> dict[str, object]:
-        """Read one exact-owner receipt."""
+    async def get_call(
+        self,
+        call_id: str,
+        *,
+        wait: float = 0.0,
+        after_progress: int | None = None,
+    ) -> dict[str, object]:
+        """Read one exact-owner receipt, optionally long-polling for settlement or progress."""
+        ...
+
+    async def cancel_call(self, call_id: str) -> dict[str, object]:
+        """Idempotently cancel one exact-owner call without requiring a free capacity slot."""
+        ...
+
+    def stream_call(self, call_id: str) -> AsyncGenerator[dict[str, object]]:
+        """Return the frames of one exact-owner streamed call for its only reader, ending with its receipt."""
+        ...
+
+    async def write_stdin(self, call_id: str, seq: int, data: str, *, eof: bool) -> bool:
+        """Write one numbered base64 chunk to the stdin of a streamed call's command; False once it takes no more."""
         ...
 
 

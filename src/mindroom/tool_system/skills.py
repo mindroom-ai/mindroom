@@ -61,33 +61,7 @@ _GET_SKILL_SCRIPT_DESCRIPTION = (
 )
 _PROMPT_HEADER = (
     "<skills_system>",
-    "",
-    "## What are Skills?",
-    "Skills are packages of domain expertise that extend your capabilities. Each skill contains:",
-    "- **Instructions**: Detailed guidance on when and how to apply the skill",
-    "- **Scripts**: Executable code templates you can use or adapt",
-    "- **References**: Supporting documentation (guides, cheatsheets, examples)",
-    "",
-    "## IMPORTANT: How to Use Skills",
-    "**Skill names are NOT callable functions.** You cannot call a skill directly by its name.",
-    "Instead, you MUST use the provided skill access tools:",
-    "",
-    "1. `get_skill_instructions(skill_name)` - Load the full instructions for a skill",
-    "2. `get_skill_reference(skill_name, reference_path)` - Access specific documentation",
-    "3. `get_skill_script(skill_name, script_path)` - Read scripts",
-    "",
-    "## Progressive Discovery Workflow",
-    "1. **Browse**: Review the skill summaries below to understand what's available",
-    "2. **Load**: When a task matches a skill, call `get_skill_instructions(skill_name)` first",
-    "3. **Reference**: Use `get_skill_reference` to access specific documentation as needed",
-    "4. **Scripts**: Use `get_skill_script` to read scripts from a skill; it never runs them",
-    "",
-    "**IMPORTANT**: References are documentation files (NOT executable). Only use `get_skill_script` when "
-    "`<scripts>` lists actual script files. If `<scripts>none</scripts>`, do NOT call `get_skill_script`.",
-    "",
-    "This approach ensures you only load detailed instructions when actually needed.",
-    "",
-    "## Available Skills",
+    "Available skills (load via skill tools, not callable directly):",
 )
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", re.DOTALL)
 
@@ -208,7 +182,11 @@ class SkillsToolkit(Toolkit):
         return tuple(self._skills.values())
 
     def prompt_block(self) -> str:
-        """Return the skills section of the system prompt, or ``""`` when no skill loaded."""
+        """Return the skills section of the system prompt, or ``""`` when no skill loaded.
+
+        It names no reference or script file, which ``get_skill_instructions`` lists, so a new file in a skill
+        leaves the system prompt, and with it every open conversation's prompt cache, unchanged.
+        """
         if not self._skills:
             return ""
         lines = list(_PROMPT_HEADER)
@@ -216,13 +194,8 @@ class SkillsToolkit(Toolkit):
             lines.append("<skill>")
             lines.append(f"  <name>{skill.name}</name>")
             lines.append(f"  <description>{skill.description}</description>")
-            lines.append(
-                f"  <scripts>{', '.join(skill.scripts)}</scripts>" if skill.scripts else "  <scripts>none</scripts>",
-            )
-            if skill.references:
-                lines.append(f"  <references>{', '.join(skill.references)}</references>")
             lines.append("</skill>")
-        lines.extend(("", "</skills_system>"))
+        lines.append("</skills_system>")
         return "\n".join(lines)
 
     @tool(description=_GET_SKILL_INSTRUCTIONS_DESCRIPTION)

@@ -8,6 +8,8 @@ from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING
 
+from mindroom.background_tasks import run_blocking_until_complete
+from mindroom.constants import AI_RUN_METADATA_KEY
 from mindroom.failure_text import failure_text
 from mindroom.history.compaction import (
     ConversationChangedError,
@@ -70,7 +72,7 @@ if TYPE_CHECKING:
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.storage import FoldBasis
     from mindroom.history.types import CompactionLifecycle, CompactionOutcome, NativeHistory
-    from mindroom.llm.provider import ModelIdentity, ModelProvider
+    from mindroom.llm.provider import ModelIdentity, ModelProvider, ModelRequest
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.llm.usage import MessageMetrics
     from mindroom.session_storage.store import ConversationStore
@@ -141,6 +143,39 @@ class PreparedScopeHistory:
     request_size: RequestSize | None = None
 
 
+async def _sized_without_held_updates(
+    sizer: RequestSizer,
+    request: ModelRequest,
+    size: RequestSize,
+    decide: Callable[..., CompactionDecision],
+    limit: int | None,
+) -> tuple[RequestSize, CompactionDecision]:
+    """Return the size and compaction decision of ``request``, which ``sizer`` sized as ``size``.
+
+    Updates of a held prompt alone must not fold or trim a history the current prompt fits with within ``limit``:
+    then the conversation's hold starts over, and the size and decision are those of the request with the current
+    prompt, ``size`` less what the route estimates the held prompt and its updates add.
+    """
+    decision = decide(request_tokens=size.tokens)
+
+    def loses_history(tokens: int, decided: CompactionDecision) -> bool:
+        return decided.mode == "required" or (limit is not None and tokens > limit)
+
+    if not loses_history(size.tokens, decision) or request.prompt_hold is None or request.prompt_hold_pin is not None:
+        return size, decision
+    fresh = replace(request, prompt_hold=None)
+    added = await asyncio.to_thread(lambda: sizer.model.request_tokens(request) - sizer.model.request_tokens(fresh))
+    fresh_size = replace(size, tokens=size.tokens - added)
+    fresh_decision = decide(request_tokens=fresh_size.tokens)
+    if loses_history(fresh_size.tokens, fresh_decision):
+        return size, decision
+    try:
+        request.prompt_hold.unlink(missing_ok=True)
+    except OSError:
+        return size, decision
+    return fresh_size, fresh_decision
+
+
 @timed("system_prompt_assembly.history_prepare.scope_history")
 async def prepare_scope_history(
     *,
@@ -201,13 +236,20 @@ async def prepare_scope_history(
     request_size = await asyncio.to_thread(sizer.size, request(native=native_history))
     summary_tokens = await asyncio.to_thread(estimate_summary_tokens, session, model)
     native_route = native_history_route(native_history)
-    compaction_decision = classify_compaction_decision(
+    decide = partial(
+        classify_compaction_decision,
         plan=execution_plan,
         force_compact_before_next_run=state.force_compact_before_next_run,
-        request_tokens=request_size.tokens,
         summary_request_tokens=static_tokens + summary_tokens,
         # Only an active native route compacts between the trigger and the limit; without one, text compaction must.
         allow_native_compaction=native_route is not None,
+    )
+    request_size, compaction_decision = await _sized_without_held_updates(
+        sizer,
+        request(native=native_history),
+        request_size,
+        decide,
+        execution_plan.limit_tokens,
     )
     logger.info(
         "History preparation check",
@@ -252,29 +294,19 @@ async def prepare_scope_history(
         )
         history_budget = _history_share(target, static_tokens)
         history_tokens = max(0, request_size.tokens - static_tokens)
-        compaction_result = await _run_scope_compaction_with_lifecycle(
-            mode=state.compaction_mode,
-            session_id=session.session_id,
-            scope=scope_context.scope,
-            execution_plan=execution_plan,
+        compaction_result = await _compact_stored_scope(
+            scope_context,
+            resolved_inputs,
+            model,
+            config,
+            runtime_paths,
+            state=state,
             history_budget=history_budget,
-            current_history_tokens=history_tokens,
+            # A trigger-level pass may store a summary above its target, but never one the reply cannot replay.
+            max_summary_tokens=_history_share(execution_plan.limit_tokens, static_tokens),
+            before_tokens=history_tokens,
             runs_before=len(visible_runs),
-            compaction_lifecycle=compaction_lifecycle,
-            compact=partial(
-                _compact_before_reply,
-                storage=scope_context.storage,
-                session=session,
-                state=state,
-                resolved_inputs=resolved_inputs,
-                history_budget=history_budget,
-                # A trigger-level pass may store a summary above its target, but never one the reply cannot replay.
-                max_summary_tokens=_history_share(execution_plan.limit_tokens, static_tokens),
-                before_tokens=history_tokens,
-                model=model,
-                config=config,
-                runtime_paths=runtime_paths,
-            ),
+            lifecycle=compaction_lifecycle,
         )
         outcome = compaction_result.outcome
         compaction_reply_outcome = compaction_result.reply_outcome
@@ -303,14 +335,63 @@ async def prepare_scope_history(
     )
 
 
-# Runs one compaction under the lifecycle wrapper, given the callbacks that report its progress and its success.
-type _ScopeCompactor = Callable[
-    [
-        Callable[[CompactionLifecycleProgress], Awaitable[None]] | None,
-        Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
-    ],
-    Awaitable[CompactionOutcome | None],
-]
+async def compact_scope_now(
+    context: ScopeSessionContext,
+    inputs: HistoryPreparationInputs,
+    build_model: Callable[[], ModelProvider],
+    lifecycle: CompactionLifecycle,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Fold a live manual request; return whether it had nothing left to compact."""
+    session = context.session
+    if session is None or not (state := read_scope_state(session)).force_compact_before_next_run:
+        return False
+    runs = scope_visible_runs(session)
+    if not runs:
+        await clear_manual_compaction_request(storage=context.storage, session=session, state=state)
+        return True
+    model = await run_blocking_until_complete(build_model)
+    limit = inputs.execution_plan.limit_tokens
+    cap = None if limit is None else _manual_summary_cap(runs, limit, model.identity)
+    before = await asyncio.to_thread(
+        estimate_prompt_visible_history_tokens,
+        session=session,
+        history_settings=inputs.history_settings,
+        model=model,
+    )
+    await _compact_stored_scope(
+        context,
+        inputs,
+        model,
+        config,
+        runtime_paths,
+        state=state,
+        history_budget=cap,
+        max_summary_tokens=cap,
+        before_tokens=before,
+        runs_before=len(runs),
+        lifecycle=lifecycle,
+    )
+    return False
+
+
+def _manual_summary_cap(runs: Sequence[AnyRunRecord], limit: int, identity: ModelIdentity) -> int:
+    for run in reversed(runs):
+        if (run.model, run.model_provider) != (identity.id, identity.provider):
+            continue
+        match (run.metadata or {}).get(AI_RUN_METADATA_KEY):
+            case {
+                "prepared_context": {"tokens": int(total)},
+                "compaction": {"replay_plan": {"estimated_tokens": int(history)}},
+            } if type(total) is int and type(history) is int and 0 <= history <= total:
+                return min(limit // 2, max(0, limit - (total - history)))
+    return limit // 2
+
+
+type _Progress = Callable[[CompactionLifecycleProgress], Awaitable[None]]
+type _Complete = Callable[[CompactionOutcome], Awaitable[CompactionOutcome]]
+type _ScopeCompactor = Callable[[_Progress | None, _Complete], Awaitable[CompactionOutcome | None]]
 
 
 async def _run_scope_compaction_with_lifecycle(
@@ -339,7 +420,7 @@ async def _run_scope_compaction_with_lifecycle(
         threshold_tokens=execution_plan.trigger_threshold_tokens,
     )
     notice_event_id = await notify(lifecycle, "start", lambda lifecycle: lifecycle.start(start))
-    # Later notices edit the start notice, so they are sent only when it was.
+    # Later events carry back the handle start returned, so they are reported only when it returned one.
     notices = lifecycle if notice_event_id is not None else None
 
     # Progress events report the model that actually served each persisted
@@ -379,7 +460,9 @@ async def _run_scope_compaction_with_lifecycle(
     try:
         outcome = await compact(_progress if lifecycle is not None else None, _complete)
     except asyncio.CancelledError as error:
-        if not completed_successfully:
+        # A cancel cuts the compaction short; it did not fail. An automatic one rides on its reply, whose ending
+        # already tells it was cut short, so its entry stays running. A manual notice has no other ending.
+        if not completed_successfully and mode == "manual":
             await _fail("failed", failure_text(error))
         raise
     except Exception as error:
@@ -408,7 +491,7 @@ async def _send_notice[T](
     session_id: str,
     scope: HistoryScope,
 ) -> T | None:
-    """Send one compaction notice through ``lifecycle``, if any; notices are best-effort, so a failure is only logged."""
+    """Report one lifecycle event through ``lifecycle``, if any; best-effort, so a failure is only logged."""
     if lifecycle is None:
         return None
     delivery = send(lifecycle)
@@ -424,51 +507,66 @@ async def _send_notice[T](
         return None
 
 
-async def _compact_before_reply(
-    progress: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None,
-    complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
-    *,
-    storage: ConversationStore,
-    session: ConversationSession,
-    state: HistoryScopeState,
+async def _compact_stored_scope(
+    context: ScopeSessionContext,
     resolved_inputs: HistoryPreparationInputs,
-    history_budget: int | None,
-    max_summary_tokens: int | None,
-    before_tokens: int,
     model: ModelProvider,
     config: Config,
     runtime_paths: RuntimePaths,
-) -> CompactionOutcome | None:
-    try:
-        return await compact_scope_history(
-            storage=storage,
-            session=session,
-            state=state,
-            summarizer=load_summarizer(
-                resolved_inputs.execution_plan,
-                resolved_inputs.history_settings,
-                config=config,
-                runtime_paths=runtime_paths,
-                session_id=session.session_id,
-                scope=owner_scope(session),
-                on_usage=scope_usage_recorder(storage, session.session_id),
-            ),
-            available_history_budget=history_budget,
-            max_summary_tokens=max_summary_tokens,
-            before_tokens=before_tokens,
-            replay_window_tokens=resolved_inputs.execution_plan.replay_window_tokens,
-            threshold_tokens=resolved_inputs.execution_plan.trigger_threshold_tokens,
-            progress=progress,
-            complete=complete,
-            model=model,
-        )
-    except ConversationChangedError:
-        # A request the conversation outran stays, so the next reply compacts what the conversation holds then.
-        raise
-    except Exception:
-        # A failing manual compaction must not retry on every reply.
-        await clear_manual_compaction_request(storage=storage, session=session, state=state)
-        raise
+    *,
+    state: HistoryScopeState,
+    history_budget: int | None,
+    max_summary_tokens: int | None,
+    before_tokens: int,
+    runs_before: int,
+    lifecycle: CompactionLifecycle | None,
+) -> _ScopeCompactionLifecycleResult:
+    storage, session, plan = context.storage, context.session, resolved_inputs.execution_plan
+    assert session is not None
+
+    async def compact(progress: _Progress | None, complete: _Complete) -> CompactionOutcome | None:
+        try:
+            return await compact_scope_history(
+                storage=storage,
+                session=session,
+                state=state,
+                summarizer=load_summarizer(
+                    plan,
+                    resolved_inputs.history_settings,
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    session_id=session.session_id,
+                    scope=owner_scope(session),
+                    on_usage=scope_usage_recorder(storage, session.session_id),
+                ),
+                available_history_budget=history_budget,
+                max_summary_tokens=max_summary_tokens,
+                before_tokens=before_tokens,
+                replay_window_tokens=plan.replay_window_tokens,
+                threshold_tokens=plan.trigger_threshold_tokens,
+                progress=progress,
+                complete=complete,
+                model=model,
+            )
+        except ConversationChangedError:
+            # A request the conversation outran stays, so the next reply compacts what the conversation holds then.
+            raise
+        except Exception:
+            # A failing manual compaction must not retry on every reply.
+            await clear_manual_compaction_request(storage=storage, session=session, state=state)
+            raise
+
+    return await _run_scope_compaction_with_lifecycle(
+        mode=state.compaction_mode,
+        session_id=session.session_id,
+        scope=context.scope,
+        execution_plan=plan,
+        history_budget=history_budget,
+        current_history_tokens=before_tokens,
+        runs_before=runs_before,
+        compaction_lifecycle=lifecycle,
+        compact=compact,
+    )
 
 
 async def summarize_run_locally(
@@ -519,10 +617,7 @@ async def compact_scope_mid_turn(
     execution_plan = resolved_inputs.execution_plan
     scope = owner_scope(session)
 
-    async def compact(
-        _progress: Callable[[CompactionLifecycleProgress], Awaitable[None]] | None,
-        complete: Callable[[CompactionOutcome], Awaitable[CompactionOutcome]],
-    ) -> CompactionOutcome:
+    async def compact(_progress: _Progress | None, complete: _Complete) -> CompactionOutcome:
         # One fold writes one row, so there is no per-chunk progress to report.
         return await compact_running_turn(
             storage=storage,

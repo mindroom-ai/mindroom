@@ -14,6 +14,7 @@ from mindroom.constants import (
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
+    ROUTE_EVENT_TYPE,
     ROUTER_AGENT_NAME,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
@@ -35,6 +36,7 @@ from mindroom.requester_identity import (
     is_human_requester_id,
     resolve_human_requester_alias,
 )
+from mindroom.thread_utils import mentions_owner_alone
 from mindroom.turn_origin import requester_id_from_trusted_original_sender
 from mindroom.turn_record import TurnRecord
 from mindroom.turns.facts import IngressFacts
@@ -53,10 +55,10 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-# Every bot syncs on its own, so this bot can deliver a newcomer's first message just before the router's
-# sync applies their join. The first gate re-decides on each membership publication for this long; a
+# Every bot syncs on its own, so this bot can deliver a newcomer's first message just before the room
+# observer's sync applies their join. The first gate re-decides on each membership publication for this long; a
 # decision still unresolved then fails into the journal's retry, which also re-reads this bot's roster.
-_ROUTER_CATCH_UP_SECONDS = 1.0
+_MEMBERSHIP_CATCH_UP_SECONDS = 1.0
 
 
 class _SenderReplyPolicy(Protocol):
@@ -70,6 +72,10 @@ class _SenderReplyPolicy(Protocol):
         observed_room: nio.MatrixRoom | None = None,
     ) -> bool:
         """Return whether this agent may reply to one requester in a room."""
+        ...
+
+    def routes_for_sender_in_room(self, sender_id: str, room_id: str) -> bool:
+        """Return whether this agent routes one requester's messages in a room, as its steward."""
         ...
 
 
@@ -154,7 +160,8 @@ class IngressValidator:
             source_kind=content_source_kind,
         )
         lane_requester_id = self._resolve_alias(promoted_requester or sender)
-        acting_requester_id = self._acting_requester_id(sender_entity_name, trusted_content, content_source_kind)
+        sender_replies = self._sender_replies(sender)
+        acting_requester_id = self._acting_requester_id(sender_replies, trusted_content, content_source_kind)
         # The agent's own messages never start a contact turn, so its replies written for the owner stay its echo.
         contact = (
             None
@@ -176,7 +183,12 @@ class IngressValidator:
             self.deps.runtime.config,
             self.deps.runtime_paths,
         )
-        router_relay_original_event_id = (
+        # Journal dispatch names what a managed account's route event routes outside the content, so a message
+        # that only carries route content is no route.
+        routed = source_dict.get(ROUTE_EVENT_TYPE) if sender_entity_name is not None else None
+        routed_event_ids = tuple(routed) if isinstance(routed, list) else ()
+        # An old visible relay names the human message it relays by replying to it; see `IngressFacts._routed`.
+        visible_relay_original_event_id = (
             reply_to_event_id_from_content(content)
             if sender_entity_name == ROUTER_AGENT_NAME
             and resolved_source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
@@ -193,11 +205,28 @@ class IngressValidator:
             acting_requester_id=acting_requester_id,
             hook_source=_trusted_hook_source(trusted_content),
             message_received_depth=_trusted_message_received_depth(trusted_content),
-            discovery_event_id=router_relay_original_event_id
-            or _final_reply_original_event_id(sender_entity_name, source_dict),
+            routed_event_ids=routed_event_ids,
+            discovery_event_id=(routed_event_ids[-1] if routed_event_ids else None)
+            or visible_relay_original_event_id
+            or _final_reply_original_event_id(sender_replies, source_dict),
             sender_entity_name=sender_entity_name,
             requester_entity_name=self.managed_entity_name_for_sender(acting_requester_id or lane_requester_id),
+            mention_names=self._mention_names(content.get("m.mentions")),
+            aimed_at_owner=mentions_owner_alone(content, self.deps.runtime.config, self.deps.runtime_paths),
             contact_refused=contact is not None and contact.requester_id is None,
+        )
+
+    def _mention_names(self, mentions: object) -> tuple[str, ...]:
+        """Return the display name, entity name and Matrix ID of each agent and team an event's pills mention."""
+        config = self.deps.runtime.config
+        user_ids = cast("dict[str, object]", mentions).get("user_ids") if isinstance(mentions, dict) else None
+        registry = entity_identity_registry(config, self.deps.runtime_paths)
+        return tuple(
+            name
+            for user_id in (user_ids if isinstance(user_ids, list) else ())
+            if isinstance(user_id, str)
+            and (entity := registry.current_entity_name_for_user_id(user_id, include_router=False)) is not None
+            for name in (config.entity_display_name(entity), entity, user_id[1:], user_id[1:].partition(":")[0])
         )
 
     def _is_access_checked(self, user_id: str) -> bool:
@@ -208,7 +237,7 @@ class IngressValidator:
 
     def _acting_requester_id(
         self,
-        sender_entity_name: str | None,
+        sender_replies: bool,
         trusted_content: Mapping[str, Any],
         content_source_kind: str | None,
     ) -> str | None:
@@ -221,7 +250,7 @@ class IngressValidator:
         acting_requester = trusted_content.get(ACTING_REQUESTER_KEY)
         if (
             not isinstance(acting_requester, str)
-            or sender_entity_name in {None, ROUTER_AGENT_NAME}
+            or not sender_replies
             or content_source_kind not in {None, MESSAGE_SOURCE_KIND}
             or not self._is_access_checked(acting_requester)
         ):
@@ -231,7 +260,7 @@ class IngressValidator:
     def entity_final_reply_original_event_id(self, event: DispatchEvent | MatrixMediaEvent) -> str | None:
         """Return the reply a managed entity's completed edit finalizes, or None for any other event."""
         source = event.source if isinstance(event.source, dict) else {}
-        return _final_reply_original_event_id(self.managed_entity_name_for_sender(event.sender), source)
+        return _final_reply_original_event_id(self._sender_replies(event.sender), source)
 
     def entity_final_reply(self, event: nio.RoomMessageFormatted) -> nio.RoomMessageFormatted | None:
         """Return a managed entity's completed edit as the reply message it finalizes.
@@ -251,6 +280,11 @@ class IngressValidator:
     def sender_is_trusted_for_ingress_metadata(self, sender_id: str) -> bool:
         """Return whether one sender may supply trusted ingress metadata: the entity registry manages it."""
         return self.managed_entity_name_for_sender(sender_id) is not None
+
+    def _sender_replies(self, sender_id: str) -> bool:
+        """Return whether one sender is an agent or a team: the owner account is managed yet writes no reply."""
+        registry = entity_identity_registry(self.deps.runtime.config, self.deps.runtime_paths)
+        return registry.is_managed_user_id(sender_id, include_router=False)
 
     def managed_entity_name_for_sender(self, sender_id: str) -> str | None:
         """Return the configured entity alias for an exact current Matrix user ID."""
@@ -286,8 +320,12 @@ class IngressValidator:
             await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]), room_id=room.room_id)
             return False
 
-        # The first gate is where a newcomer's first message meets a router that has not seen the join yet.
-        if not await self._can_reply_once_router_catches_up(facts.run_requester_id, room):
+        # The first gate is where a newcomer's first message meets an observer that has not seen the join yet.
+        # A steward takes a message it may not answer itself, to route it.
+        if not (
+            await self._can_reply_once_membership_resolves(facts.run_requester_id, room)
+            or self.deps.turn_policy.routes_for_sender_in_room(facts.run_requester_id, room.room_id)
+        ):
             await self.deps.turn_store.record_turn(TurnRecord.create([event.event_id]), room_id=room.room_id)
             return False
 
@@ -300,8 +338,11 @@ class IngressValidator:
         room_id: str,
         *,
         unanswered: tuple[str, ...],
+        or_routed: bool = False,
     ) -> AsyncIterator[bool]:
         """Hold the admission fence for one decision, and yield whether the requester may still be answered here.
+
+        ``or_routed`` also admits a requester whose messages this agent only routes, as the room's steward.
 
         Authorization is current, never frozen at precheck, so it is checked again
         under the fence a configuration change waits at. A denied decision settles
@@ -313,7 +354,9 @@ class IngressValidator:
         reaches that room only through a send the contact's message policy approved.
         """
         async with self.deps.runtime.admission_fence():
-            if self.deps.turn_policy.can_reply_to_sender_in_room(requester_id, room_id):
+            if self.deps.turn_policy.can_reply_to_sender_in_room(requester_id, room_id) or (
+                or_routed and self.deps.turn_policy.routes_for_sender_in_room(requester_id, room_id)
+            ):
                 contact = contact_room(self.deps.runtime.config, self.deps.runtime_paths, room_id, self.deps.agent_name)
                 with guarded_room(room_id) if contact is not None else nullcontext():
                     yield True
@@ -321,15 +364,15 @@ class IngressValidator:
             await self.deps.settle_ignored_sources(unanswered)
             yield False
 
-    async def _can_reply_once_router_catches_up(self, sender_id: str, room: nio.MatrixRoom) -> bool:
-        """Decide reply access, deciding again on each router membership publication while it stays unresolved.
+    async def _can_reply_once_membership_resolves(self, sender_id: str, room: nio.MatrixRoom) -> bool:
+        """Decide reply access, deciding again on each membership publication while it stays unresolved.
 
-        Only the router's published membership grants. The message itself proves only that its sender was joined
+        Only the room observer's published membership grants. The message itself proves only that its sender was joined
         when sending it, not that they still are, so waiting changes when the decision settles, never what it allows.
         """
         memberships = self.deps.runtime.agent_reply_memberships
         try:
-            async with asyncio.timeout(_ROUTER_CATCH_UP_SECONDS):
+            async with asyncio.timeout(_MEMBERSHIP_CATCH_UP_SECONDS):
                 while True:
                     try:
                         return self.deps.turn_policy.can_reply_to_sender_in_room(
@@ -348,14 +391,10 @@ def _is_falling_back_reply(content: Mapping[str, Any]) -> bool:
     return isinstance(relates_to, dict) and relates_to.get("is_falling_back") is True
 
 
-def _final_reply_original_event_id(sender_entity_name: str | None, source: dict[str, Any]) -> str | None:
-    """Return the reply a managed non-router entity's completed edit finalizes."""
+def _final_reply_original_event_id(sender_replies: bool, source: dict[str, Any]) -> str | None:
+    """Return the reply an agent's or a team's completed edit finalizes."""
     content = source.get("content")
-    if (
-        not isinstance(content, dict)
-        or content.get(STREAM_STATUS_KEY) != STREAM_STATUS_COMPLETED
-        or sender_entity_name in {None, ROUTER_AGENT_NAME}
-    ):
+    if not isinstance(content, dict) or content.get(STREAM_STATUS_KEY) != STREAM_STATUS_COMPLETED or not sender_replies:
         return None
     return EventInfo.from_event(source).original_event_id
 

@@ -14,7 +14,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.delivery_gateway import DeliveryGateway
-from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.final_delivery import Completed, FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
@@ -36,18 +36,23 @@ from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import Owned, ResponseSources
+from mindroom.response_turn import CompletedApprovalRun
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.teams.envelope import prepare_materialized_team_execution
 from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers, build_team_spec, resolve_exact_team_members
 from mindroom.teams.spec import TeamMode
+from mindroom.tool_jobs.runtime import BackgroundOutcome
 from mindroom.turn_model import ModelScope, resolve_turn_model
+from mindroom.turn_origin import TurnIntent
 from tests.access_schema_support import with_current_room_member_access
-from tests.bot_helpers import _hook_plugin, make_test_agent_bot
+from tests.approval_continuation_helpers import approval_continuation, resumed_approval
+from tests.bot_helpers import _hook_plugin, make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     install_model_providers,
     make_turn_context,
+    make_visible_message,
     message_origin,
     patch_response_runner_module,
     request_envelope,
@@ -56,8 +61,21 @@ from tests.conftest import (
     unstored_team_scope_context,
     unwrap_extracted_collaborator,
 )
+from tests.delegation_helpers import turn_tool_context
 from tests.fakes.scripted_model import ScriptedModel, answer
-from tests.response_runner_helpers import _noop_typing, stream_transport
+from tests.reply_span_helpers import paused_for_approval
+from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target, stream_transport
+from tests.test_reply_records_turns import (
+    _acknowledge_selection,
+    _answer,
+    _model_stream,
+    _regeneration,
+    _reply,
+    _streaming_bot,
+)
+from tests.test_response_payload_preparation import _preparation, _request
+from tests.test_response_runner_focused import _admit_approval_source
+from tests.test_tool_job_follow_ups import _ended, _follow_up, _runner_key, _runner_owner, _runner_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -445,6 +463,52 @@ async def test_a_prepared_team_turn_sends_the_prompt_without_unseen_context(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("first_as_shown", ["The release date is Thursday.", "recording.ogg"], ids=["text", "voice"])
+async def test_a_routed_team_reads_each_message_of_its_batch_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first_as_shown: str,
+) -> None:
+    """A team a route names gets the route's prompt, and the thread's copies of the messages it holds are left out."""
+    config = _config(tmp_path)
+    built = _built_team(config, _team_members(config, monkeypatch))
+    turn = make_turn_context(
+        room_id="!room:localhost",
+        thread_id="$root",
+        requester_id="@user:localhost",
+        reply_to_event_id="$question",
+    )
+
+    prepared = await prepare_materialized_team_execution(
+        # What the runner's shared turn context holds for a routed request: the messages its route names.
+        replace(turn, prompt_source_event_ids=("$first", "$question")),
+        scope_context=unstored_team_scope_context(
+            config,
+            [member.id for member in built.spec.members],
+            team_name=None,
+        ),
+        built=built,
+        message="The release date is Thursday.\n\nWhat day did I say?",
+        thread_history=[
+            make_visible_message(sender="@user:localhost", body="Planning the release", event_id="$root"),
+            make_visible_message(sender="@user:localhost", body=first_as_shown, event_id="$first"),
+            make_visible_message(sender="@user:localhost", body="What day did I say?", event_id="$question"),
+        ],
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        runtime_model=resolve_turn_model(config, runtime_paths_for(config), ModelScope(entity=None), None),
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@user:localhost",
+    )
+
+    rendered = "\n".join(str(message.content) for message in prepared.run_input(MediaInputs()))
+    assert "Planning the release" in rendered
+    assert rendered.count("The release date is Thursday.") == 1
+    assert rendered.count("What day did I say?") == 1
+    assert "recording.ogg" not in rendered
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
 async def test_agent_delivery_threads_system_enrichment_items(tmp_path: Path, streaming: bool) -> None:
     """Agent delivery, streamed or delivered whole, forwards system enrichment items into the AI layer."""
@@ -514,3 +578,228 @@ async def test_agent_delivery_threads_system_enrichment_items(tmp_path: Path, st
     assert effects.await_args.args[0].final_visible_event_id == "$response"
 
     assert seen_items == [system_items]
+
+
+_MARKER = EnrichmentItem(key="marker", text="Marker from a system:enrich hook.", cache_policy="stable")
+
+
+def _install_marker_hook(bot: AgentBot) -> list[SystemEnrichContext]:
+    """Give ``bot`` a plugin whose system:enrich hook adds ``_MARKER``; return the contexts the hook runs with."""
+    seen: list[SystemEnrichContext] = []
+
+    @hook(EVENT_SYSTEM_ENRICH)
+    async def add_marker(ctx: SystemEnrichContext) -> None:
+        seen.append(ctx)
+        ctx.add_instruction(_MARKER.key, _MARKER.text, cache_policy=_MARKER.cache_policy)
+
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_hook_plugin("marker", [add_marker])])
+    return seen
+
+
+def _message_turn(*, source_kind: str = MESSAGE_SOURCE_KIND) -> ResponseRequest:
+    """Return a message turn as dispatch hands it over, its payload left for the runner to build under the lock."""
+    target = _target()
+    preparation = _preparation(target)
+    envelope = replace(
+        preparation.dispatch.envelope,
+        origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind=source_kind),
+    )
+    preparation = replace(preparation, dispatch=replace(preparation.dispatch, envelope=envelope, correlation_id="corr"))
+    return replace(
+        _request(target, preparation, thread_history=[]),
+        response_envelope=envelope,
+        correlation_id="corr",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_message_turn_runs_system_enrich_once(tmp_path: Path) -> None:
+    """A message turn, whose payload the runner builds under the lock, gets the hook's instructions from one run."""
+    bot = await _streaming_bot(tmp_path)
+    seen = _install_marker_hook(bot)
+    model = AsyncMock(return_value="An answer.")
+
+    assert await _answer(bot, _message_turn(), model) == Owned()
+
+    assert model.await_args.args[0].system_enrichment_items == (_MARKER,)
+    [ctx] = seen
+    assert (ctx.target_entity_name, ctx.target_member_names) == ("general", None)
+    assert (ctx.envelope.source_event_id, ctx.correlation_id) == ("$event", "corr")
+
+
+@pytest.mark.asyncio
+async def test_hook_instructions_come_ahead_of_the_runtimes_own(tmp_path: Path) -> None:
+    """A silent schedule's quiet-delivery guidance, which the runtime adds, follows the hook's instructions."""
+    bot = await _streaming_bot(tmp_path)
+    _install_marker_hook(bot)
+    model = AsyncMock(return_value="A finding.")
+
+    assert await _answer(bot, _message_turn(source_kind=SILENT_SCHEDULE_SOURCE_KIND), model) == Owned()
+
+    keys = [item.key for item in model.await_args.args[0].system_enrichment_items]
+    assert keys == [_MARKER.key, "silent_schedule_delivery"]
+
+
+@pytest.mark.asyncio
+async def test_an_edit_regeneration_runs_system_enrich(tmp_path: Path) -> None:
+    """The answer an edit regenerates gets the hook's instructions, with the edit as the hook's message."""
+    bot = await _streaming_bot(tmp_path)
+    seen = _install_marker_hook(bot)
+    await _answer(bot, _plain_request(_target()), AsyncMock(return_value="First answer."))
+    regenerated = AsyncMock(return_value="Second answer.")
+
+    assert await _answer(bot, _regeneration(answer_event_id=(await _reply(bot)).event_id), regenerated) == Owned()
+
+    assert regenerated.await_args.args[0].system_enrichment_items == (_MARKER,)
+    assert seen[-1].envelope.source_event_id == "$edit"
+    assert (seen[-1].target_entity_name, seen[-1].target_member_names) == ("general", None)
+
+
+@pytest.mark.asyncio
+async def test_an_interactive_selection_answer_runs_system_enrich(tmp_path: Path) -> None:
+    """The answer to a selection, which fills its acknowledgement, gets the hook's instructions."""
+    bot = await _streaming_bot(tmp_path)
+    seen = _install_marker_hook(bot)
+    ack_event_id, span_id = await _acknowledge_selection(bot)
+    request = replace(_plain_request(_target()), existing_event_id=ack_event_id, interactive_span_id=span_id)
+    model = AsyncMock(return_value="Selected answer.")
+
+    assert await _answer(bot, request, model) == Owned()
+
+    assert model.await_args.args[0].system_enrichment_items == (_MARKER,)
+    [ctx] = seen
+    assert ctx.envelope.source_event_id == "$event"
+
+
+@pytest.mark.asyncio
+async def test_a_job_follow_up_runs_system_enrich(tmp_path: Path) -> None:
+    """The turn that reports ended background jobs gets the hook's instructions, with the follow-up as its message."""
+    bot = _bot(tmp_path)
+    await bot._take_over_replies()
+    unique_room_send_responses(bot.client)
+    seen = _install_marker_hook(bot)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    key = _runner_key(bot)
+    runtime = await _runner_runtime(bot, tmp_path)
+    turns: list[ResponseTurnContext] = []
+
+    async def stream(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        turns.append(ctx)
+        yield "The job finished."
+
+    try:
+        await _ended(runtime, "work", BackgroundOutcome("completed", "done"), owner=_runner_owner(key))
+        event = await _follow_up(bot.journal_principal(), key, "job-follow-up:1")
+        with patch_response_runner_module(
+            stream_agent_response=stream,
+            should_use_streaming=AsyncMock(return_value=True),
+            typing_indicator=_noop_typing,
+        ):
+            await runner._run_job_follow_up(event)
+    finally:
+        await runtime.shutdown()
+
+    [turn] = turns
+    assert turn.system_enrichment_items == (_MARKER,)
+    [ctx] = seen
+    assert (ctx.envelope.source_event_id, ctx.correlation_id) == ("job-follow-up:1", "job-follow-up:1")
+    assert ctx.envelope.origin.intent is TurnIntent.JOB_FOLLOW_UP
+
+
+@pytest.mark.asyncio
+async def test_a_team_turn_tells_system_enrich_its_members(tmp_path: Path) -> None:
+    """A team turn handed over with its prompt built names its members to the hook and gets the hook's instructions."""
+    bot = await _streaming_bot(tmp_path)
+    seen = _install_marker_hook(bot)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    model = AsyncMock(return_value="Team answer.")
+
+    with patch_response_runner_module(
+        team_response_stream=_model_stream(model),
+        should_use_streaming=AsyncMock(return_value=False),
+        typing_indicator=_noop_typing,
+    ):
+        assert (
+            await runner.generate_team_response_helper(
+                _plain_request(_target()),
+                member_names=[bot.agent_name],
+                team_mode="coordinate",
+            )
+            == Owned()
+        )
+
+    assert model.await_args.args[1].system_enrichment_items == (_MARKER,)
+    [ctx] = seen
+    assert (ctx.target_entity_name, ctx.target_member_names) == ("general", ("general",))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("entity_kind", "member_names"), [("agent", None), ("team", ("alpha", "beta"))])
+@pytest.mark.parametrize(
+    ("source_kind", "keys"),
+    [
+        pytest.param(MESSAGE_SOURCE_KIND, [_MARKER.key], id="message"),
+        pytest.param(SILENT_SCHEDULE_SOURCE_KIND, [_MARKER.key, "silent_schedule_delivery"], id="silent-schedule"),
+    ],
+)
+async def test_an_approval_resume_runs_system_enrich_for_the_run_it_resumes(
+    tmp_path: Path,
+    entity_kind: str,
+    member_names: tuple[str, ...] | None,
+    source_kind: str,
+    keys: list[str],
+) -> None:
+    """A reply resumed after a tool approval runs the hook once, on its paused message, and resumes with its instructions.
+
+    A team's resume names the team's members to the hook and runs on the model its run paused on. A silent schedule's
+    resume also carries its quiet-delivery guidance after the hook's instructions, as its turn did.
+    """
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    runner.deps.runtime.config.models["large"] = runner.deps.runtime.config.models["default"]
+    await _admit_approval_source(runner.deps.replies.store)
+    seen = _install_marker_hook(bot)
+    tool_context = turn_tool_context(
+        runner.deps.runtime.config,
+        runner.deps.runtime_paths,
+        approval_continuation().execution_identity,
+    )
+    continuation = approval_continuation(
+        entity_kind=entity_kind,
+        origin=message_origin(sender_id="@user:localhost", source_kind=source_kind),
+        correlation_id="corr-resume",
+        execution_identity=tool_context.execution_identity,
+        runtime_model_name="large",
+        team_member_names=member_names or (),
+        team_mode="coordinate" if member_names else None,
+    )
+    assert await paused_for_approval(runner.deps.replies.store, continuation) is not None
+    target = _target(thread_id="$thread")
+    agent_resume = AsyncMock(return_value=CompletedApprovalRun(response_text="Done.", metadata_content={}))
+    team_resume = AsyncMock(return_value=CompletedApprovalRun(response_text="Done.", metadata_content={}))
+
+    with (
+        patch.object(runner.deps.tool_runtime, "build_turn_context", return_value=tool_context),
+        patch("mindroom.approval.execution.AgentApprovalExecution.continue_run", new=agent_resume),
+        patch("mindroom.approval.continuation_runner.continue_paused_team_run", new=team_resume),
+    ):
+        async with resumed_approval(bot, continuation) as claimed:
+            await runner.approvals._continue_entity_call(
+                claimed,
+                request=runner.approvals.approval_response_request(claimed, target=target),
+                target=target,
+                tool_trace_collector=[],
+                progress=None,
+                cli_approval_handler=None,
+            )
+
+    [ctx] = seen
+    assert (ctx.target_entity_name, ctx.target_member_names) == ("general", member_names)
+    assert (ctx.envelope.source_event_id, ctx.correlation_id) == ("$source", "corr-resume")
+    resumed, skipped = (team_resume, agent_resume) if member_names else (agent_resume, team_resume)
+    skipped.assert_not_awaited()
+    items = resumed.await_args.kwargs["system_enrichment_items"]
+    assert items[0] == _MARKER
+    assert [item.key for item in items] == keys
+    if member_names:
+        assert team_resume.await_args.kwargs["model_name"] == "large"

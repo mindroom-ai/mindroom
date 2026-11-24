@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 from . import interactive_questions, journal, matrix_delivery_rows, membership_hooks, outbox, projection, reads
 from .approval_store import ApprovalStore
 from .matrix_delivery_rows import ReplyRowRefusedError
+from .membership_state import current_active_membership_epoch, projection_generation
 from .principal_rows import PrincipalRows
 from .replies import ReplyStore
 
@@ -101,6 +102,10 @@ class ReplayView(PrincipalRows):
         """Return whether one event still owes semantic work."""
         return await self._read(journal.is_pending, event_id)
 
+    async def revise_pending(self, event_id: str, content: Mapping[str, object]) -> None:
+        """Store the content its sender edited a pending message to, which a replay of the message then reads."""
+        await self._write(journal.revise_pending, event_id, content)
+
     async def settle(self, event_id: str) -> tuple[str, ...]:
         """Mark one event's semantic work terminal; return the replies that ends, as ``settle_many`` does."""
         return await self._write(journal.settle_turn_sources, (event_id,))
@@ -137,6 +142,10 @@ class DispatchView(ReplayView):
     async def load_event(self, event_id: str) -> JournalEvent | None:
         """Return one admitted event."""
         return await self._read(journal.load, event_id)
+
+    async def admitted_membership_owner(self, event_id: str) -> tuple[str, int] | None:
+        """Return the room and membership epoch that admitted this event."""
+        return await self._read(journal.admitted_membership_owner, event_id)
 
     async def claim_semantic_consumer(
         self,
@@ -210,6 +219,10 @@ class _MembershipEpochView(PrincipalRows):
         """Return the current membership epoch for one room."""
         return await self._read(journal.current_membership_epoch, room_id)
 
+    async def active_membership_epoch(self, room_id: str) -> int | None:
+        """Return the room's epoch only while it is not departure-fenced."""
+        return await self._read(current_active_membership_epoch, room_id)
+
 
 class _HydrationMarkerView(PrincipalRows):
     """The hydration marker both reading and hydrating a conversation consult."""
@@ -262,6 +275,31 @@ class ConversationReadView(_HydrationMarkerView):
         """Return the position of a room's newest visible message, or nothing."""
         return await self._read(reads.latest_room_cursor, room_id=room_id)
 
+    async def room_thread_activity(
+        self,
+        *,
+        room_id: str,
+        since_ts: int,
+        until_ts: int,
+        exclude_thread_id: str | None,
+        thread_limit: int,
+        row_limit: int,
+        summary_tail: int,
+        summary_key: str,
+    ) -> tuple[reads.ThreadActivity, ...]:
+        """Return the threads of a room with messages in a window, each with its title sources, in one snapshot."""
+        return await self._read(
+            reads.room_thread_activity,
+            room_id=room_id,
+            since_ts=since_ts,
+            until_ts=until_ts,
+            exclude_thread_id=exclude_thread_id,
+            thread_limit=thread_limit,
+            row_limit=row_limit,
+            summary_tail=summary_tail,
+            summary_key=summary_key,
+        )
+
     async def latest_visible_event_id(self, *, room_id: str, thread_id: str) -> str | None:
         """Return the newest visible event in one thread, or nothing."""
         return await self._read(reads.latest_visible_event_id, room_id=room_id, thread_id=thread_id)
@@ -275,6 +313,10 @@ class HydrationView(_MembershipEpochView, _HydrationMarkerView):
     """Building a conversation from the server and repairing one message of it."""
 
     __slots__ = ()
+
+    async def projection_generation(self, room_id: str) -> int:
+        """Return the generation of what this principal projects of one room, which a history walk starts under."""
+        return await self._read(projection_generation, room_id)
 
     async def room_history_recovery(self, room_id: str) -> RoomHistoryRecovery | None:
         """Return one room's current history-recovery obligation, if any."""
@@ -343,6 +385,7 @@ class HydrationView(_MembershipEpochView, _HydrationMarkerView):
         complete: bool,
         attempted_policy_rank: int = 0,
         expected_membership_epoch: int,
+        expected_projection_generation: int | None = None,
     ) -> bool:
         """Install a hydration in bounded writes, then publish it once complete.
 
@@ -364,12 +407,16 @@ class HydrationView(_MembershipEpochView, _HydrationMarkerView):
         for, and the direction that costs a redundant walk rather than a short
         answer.
         """
+        # A walk names the generation it read before it fetched; a caller that already holds its events names none.
+        if expected_projection_generation is None:
+            expected_projection_generation = await self.projection_generation(room_id)
         for chunk in batched(events, _HYDRATION_INSTALL_CHUNK_SIZE, strict=False):
             if not await self._write(
                 journal.install_hydration_chunk,
                 room_id=room_id,
                 events=chunk,
                 expected_membership_epoch=expected_membership_epoch,
+                expected_projection_generation=expected_projection_generation,
             ):
                 return False
         return await self._write(
@@ -379,6 +426,7 @@ class HydrationView(_MembershipEpochView, _HydrationMarkerView):
             complete=complete,
             attempted_policy_rank=attempted_policy_rank,
             expected_membership_epoch=expected_membership_epoch,
+            expected_projection_generation=expected_projection_generation,
         )
 
     async def install_refetched_revision(
@@ -394,28 +442,17 @@ class HydrationView(_MembershipEpochView, _HydrationMarkerView):
         """Install a point-refetched revision if its refresh token still holds, returning its stored size."""
         return await self._write(
             projection.install_refetched_revision,
-            room_id=request.room_id,
-            logical_event_id=request.logical_event_id,
+            request,
             revision_event_id=revision_event_id,
             revision_ts=revision_ts,
             revision_sender=revision_sender,
             revision_transaction_id=revision_transaction_id,
             content=content,
-            expected_revision_event_id=request.revision_event_id,
-            expected_refresh_token=request.refresh_token,
-            expected_membership_epoch=request.membership_epoch,
         )
 
     async def drop_refetched_message(self, request: RefreshRequest) -> bool:
         """Remove a logical message the server has no remaining revision of."""
-        return await self._write(
-            projection.drop_refetched_message,
-            room_id=request.room_id,
-            logical_event_id=request.logical_event_id,
-            expected_revision_event_id=request.revision_event_id,
-            expected_refresh_token=request.refresh_token,
-            expected_membership_epoch=request.membership_epoch,
-        )
+        return await self._write(projection.drop_refetched_message, request)
 
 
 class ExportProjectionView(ConversationReadView, HydrationView):
@@ -435,6 +472,10 @@ class ExportProjectionView(ConversationReadView, HydrationView):
     async def conversation_is_complete(self, *, room_id: str, thread_id: str | None) -> bool:
         """Return whether this conversation's hydration walk reached its end."""
         return await self._read(reads.conversation_is_complete, room_id=room_id, thread_id=thread_id)
+
+    async def thread_fingerprint(self, *, room_id: str, thread_id: str) -> reads.ThreadFingerprint | None:
+        """Return what a strict read of one thread depends on: its hydration marker and rows, or None without a marker."""
+        return await self._read(reads.thread_fingerprint, room_id=room_id, thread_id=thread_id)
 
 
 class MatrixDeliveryView(_MembershipEpochView):

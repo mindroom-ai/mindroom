@@ -63,6 +63,7 @@ class LaneDelivery:
     # The turn claim of a readiness task's source: the lane attaches it to the
     # ready event, or releases it once the readiness task has ended.
     claim: TurnClaim | None = None
+    submission_id: str | None = None
 
 
 @dataclass
@@ -158,6 +159,7 @@ class IngressLanes:
         ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
         claim: TurnClaim | None = None,
         busy_at_submit: bool = False,
+        submission_id: str | None = None,
     ) -> None:
         """Load one slot with its conversation key and ready payload."""
         if slot.released or slot.closed:
@@ -174,6 +176,7 @@ class IngressLanes:
             received_at=time.time(),
             busy_at_submit=busy_at_submit,
             claim=claim,
+            submission_id=submission_id,
         )
         slot.loaded.set()
         self._ensure_worker(slot.lane_key)
@@ -191,6 +194,7 @@ class IngressLanes:
         *,
         before_or_at_receipt_time: float,
         exclude_slot_ids: set[int] | None = None,
+        submission_id: str | None = None,
     ) -> list[LaneSlot]:
         """Return undelivered slots for one lane received inside an open burst window."""
         lane = self._lanes.get(lane_key, ())
@@ -201,6 +205,7 @@ class IngressLanes:
             and not slot.settled.is_set()
             and slot.receipt_time <= before_or_at_receipt_time
             and (exclude_slot_ids is None or id(slot) not in exclude_slot_ids)
+            and (submission_id is None or (slot.delivery is not None and slot.delivery.submission_id == submission_id))
         ]
 
     def unsettled_slots(self) -> list[LaneSlot]:
@@ -225,14 +230,6 @@ class IngressLanes:
                 chain.from_iterable(self._lanes.values()),
                 self._settling_slots.values(),
             )
-        )
-
-    def has_pending_delivery(self, key: CoalescingKey) -> bool:
-        """Return whether the requester's lane still holds loaded work for one conversation key."""
-        lane_key = ReceiptLaneKey.for_coalescing_owner(key.room_id, key.owner)
-        return lane_key is not None and any(
-            slot.delivery is not None and slot.delivery.key == key
-            for slot in chain(self._lanes.get(lane_key, ()), self._settling_slots.values())
         )
 
     def all_settled(self) -> bool:

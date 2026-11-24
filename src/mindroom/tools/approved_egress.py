@@ -205,6 +205,9 @@ def _grant_subject(context: ToolRuntimeContext) -> EgressGrantSubject:
     agent_name = context.agent_name
     scope = agent_policy(context.config, agent_name).effective_execution_scope
     placement = placement_for_session(context.session_id)
+    # TODO: No grant reaches a reply's named workers (`workers.named`), nor does an agent's or normal worker's grant
+    # reach a subagent's own worker: the egress proxy matches a pod by its own worker key. Teach mindroom-egress-proxy
+    # to also match the normal key a pinned key (`named=` or `subagent=`) serves, then drop the branch below.
     if placement is not None:
         # A subagent with a worker of its own reaches the network from that worker, which the proxy knows by its key.
         normal_key = normal_worker_key(context.resolve_worker_target())

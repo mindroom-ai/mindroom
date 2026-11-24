@@ -92,7 +92,10 @@ _DESKTOP_PARAMETERS: dict[str, object] = {
         "request_id": {"type": "string", "description": "Original request ID to recover with request_status."},
         "app": {
             "type": "string",
-            "description": "Exact application ID returned by list_apps.",
+            "description": (
+                "Exact application ID returned by list_apps; while status reports control_scope computer, "
+                "any installed app's bundle ID also works."
+            ),
         },
         "state_id": {
             "type": "string",
@@ -922,9 +925,9 @@ def _error_result(action: str, message: str) -> ToolValue:
 
 def _setup_required_result(action: str, error: str | None, *, chat_pairing: bool) -> ToolValue:
     if chat_pairing:
-        message = "Desktop setup is required for this requester and agent. Run `!desktop setup` in this Matrix chat."
+        message = "Desktop setup is required for this requester and agent. Run `/desktop setup` in this Matrix chat."
         if error is not None:
-            message = f"Desktop configuration is invalid: {error} Run `!desktop setup` to replace it."
+            message = f"Desktop configuration is invalid: {error} Run `/desktop setup` to replace it."
     else:
         message = "Desktop setup requires a live Matrix agent chat."
         if error is not None:

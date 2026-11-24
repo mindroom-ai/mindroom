@@ -116,9 +116,14 @@ class VoiceConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = Field(default=False, description="Enable voice message processing")
+    dictation: bool | None = Field(
+        default=None,
+        description="Enable streaming composer dictation via voice.stt (defaults to voice.enabled)",
+    )
     visible_router_echo: bool = Field(
         default=True,
-        description="Show router voice progress, or direct fallback text when transcription is disabled",
+        title="Voice Transcript",
+        description="Post the transcript of a voice message before the reply",
     )
     stt: VoiceSTTConfig = Field(
         default_factory=VoiceSTTConfig,
@@ -128,3 +133,8 @@ class VoiceConfig(BaseModel):
         default_factory=_VoiceLLMConfig,
         description="Transcript normalization configuration",
     )
+
+    @property
+    def dictation_enabled(self) -> bool:
+        """Return whether streaming composer dictation is enabled."""
+        return self.dictation if self.dictation is not None else self.enabled

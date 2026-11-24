@@ -20,6 +20,7 @@ from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_lifecycle import response_lifecycle_reservation_context
 from mindroom.response_sources import Owned, ResponseSources
+from mindroom.streaming import PROGRESS_PLACEHOLDER
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 
@@ -121,7 +122,9 @@ class InteractiveSelections:
             selected_value=dispatch.selection.selected_value,
         )
         try:
-            reservation = await self.deps.response_runner.reserve_response_lifecycle(response_envelope)
+            reservation = await self.deps.response_runner.lifecycle_coordinator.reserve_response_lifecycle(
+                response_envelope,
+            )
         except BaseException:
             self.deps.retry_dispatch_sources(response_target.room_id, (source_event_id,))
             raise
@@ -281,6 +284,8 @@ class InteractiveSelections:
             await self.deps.resolver.fetch_thread_history(
                 room.room_id,
                 selection.thread_id,
+                requester_id=facts.run_requester_id,
+                target_room=room,
             )
             if selection.thread_id
             else []
@@ -306,15 +311,20 @@ class InteractiveSelections:
         # is the turn's initial delivery and not its answer. Staging it that way
         # also keeps it from settling the journal source: a placeholder
         # discharges nothing, and a crash before the model finished would
-        # otherwise leave "Processing your response..." in the room with
+        # otherwise leave "Thinking..." in the room with
         # nothing pending to replay.
         ack_event_id, interactive_span_id = await self.deps.visible_responses.deliver_selection_acknowledgement(
             selection_handled_turn,
             target=response_target,
-            response_text=(
-                f"You selected: {selection.selection_key} {selection.selected_label}\n\nProcessing your response..."
-            ),
+            # The answered question card already shows the choice, so this is the
+            # Thinking placeholder every reply starts with.
+            response_text=PROGRESS_PLACEHOLDER,
             delivery_turn_id=source_event_id,
+            # The answer sends no placeholder of its own, so this one names the model as that placeholder would.
+            ai_run_content=self.deps.response_runner.placeholder_ai_run_content(
+                response_target,
+                requester_id=facts.run_requester_id,
+            ),
         )
         if not ack_event_id:
             self.deps.logger.error(
@@ -357,15 +367,14 @@ class InteractiveSelections:
             attachment_ids=selection_attachment_ids,
         )
 
+        pending_event_ids = tuple(dict.fromkeys((source_event_id, *selection_handled_turn.source_event_ids)))
         fate = await self.deps.response_runner.generate_response(
             ResponseRequest(
                 prompt=selection_payload.prompt,
                 model_prompt=selection_payload.model_prompt,
                 thread_history=thread_history,
                 sources=ResponseSources(
-                    pending_event_ids=tuple(
-                        dict.fromkeys((source_event_id, *selection_handled_turn.source_event_ids)),
-                    ),
+                    pending_event_ids=pending_event_ids,
                     logical_source_event_ids=selection_handled_turn.source_event_ids,
                     discovery_event_ids=selection_handled_turn.discovery_event_ids,
                 ),
@@ -385,7 +394,11 @@ class InteractiveSelections:
             ),
         )
         # A reply's records, a refused claim, or an approval owns the selection; any other ending leaves it here.
-        return isinstance(fate, Owned)
+        if isinstance(fate, Owned):
+            return True
+        # No answer took the acknowledgement's reply, so end it rather than leave it saying it is still processing.
+        await self.deps.delivery_gateway.settle_unclaimed_reply(pending_event_ids, source_deleted=False)
+        return False
 
     async def _interactive_selection_is_durably_terminal(self, room_id: str, source_event_id: str) -> bool:
         """Return whether the exact selection source is durably terminal.

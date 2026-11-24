@@ -754,6 +754,7 @@ class SummaryCalls:
         summary_prompt: str,  # noqa: ARG002
         timeout_seconds: float,  # noqa: ARG002
         on_usage: Callable[[MessageMetrics], Any] | None = None,
+        keep_thinking_setting: bool = False,  # noqa: ARG002
     ) -> str:
         self.inputs.append(summary_input)
         if on_usage is not None:

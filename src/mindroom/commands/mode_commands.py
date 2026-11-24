@@ -29,7 +29,7 @@ def handle_mode_command(
     """Authorize the target agent before inspecting or changing its scoped choice."""
     words = args_text.split()
     if len(words) != 2 or words[1] not in {"standard", "minimal", "show", "reset"}:
-        return "Use `!mode <agent> minimal|standard|show|reset`."
+        return "Use `/mode <agent> minimal|standard|show|reset`."
     agent_name, action = words
     if agent_name not in config.agents:
         return f"Unknown agent `{agent_name}`."
@@ -45,7 +45,7 @@ def handle_mode_command(
         return f"Access denied for agent `{agent_name}`."
     room_mode = config.get_entity_thread_mode(agent_name, runtime_paths, room_id=target.room_id) == "room"
     if not room_mode and target.source_thread_id is None:
-        return f"Run `!mode {agent_name} {action}` inside an existing thread for this agent."
+        return f"Run `/mode {agent_name} {action}` inside an existing thread for this agent."
     target = MessageTarget.resolve(
         target.room_id,
         target.source_thread_id,

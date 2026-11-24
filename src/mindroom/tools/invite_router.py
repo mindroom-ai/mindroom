@@ -1,4 +1,4 @@
-"""Router invite recovery tool configuration."""
+"""Registration of the retired `invite_router` tool name."""
 
 from __future__ import annotations
 
@@ -15,17 +15,16 @@ if TYPE_CHECKING:
     name="invite_router",
     file_access=ToolFileAccess.NONE,
     display_name="Invite Router",
-    description="Invite the MindRoom router to the current Matrix room",
-    docs_url="https://docs.mindroom.chat/tool-approval/#when-the-router-is-missing",
+    description="Deprecated: no longer needed, rooms work without another account",
+    docs_url="https://docs.mindroom.chat/authorization/",
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
     requires_primary_runtime=True,
-    requires_room_context=True,
     function_names=("invite_router",),
 )
 def invite_router_tools() -> type[InviteRouterTools]:
-    """Return router invite recovery tools."""
+    """Return the retired router invite stub."""
     from mindroom.custom_tools.invite_router import InviteRouterTools
 
     return InviteRouterTools

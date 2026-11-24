@@ -27,7 +27,7 @@ from mindroom.agent_cli.delegation import approval_calls_for_cli_pause
 from mindroom.agent_cli.events import emit_cli_suspension
 from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.agent_cli.protocol import ToolCallOperation
-from mindroom.agent_cli.session import CliAuthenticationError, TurnToolRegistry
+from mindroom.agent_cli.session import CONFIG_RELOAD_CALL, RELOAD_STOPPED, CliAuthenticationError, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cli_shell_env
 from mindroom.agent_loop.spec import RunContext
 from mindroom.agent_loop.tools import PlannedCall
@@ -38,13 +38,15 @@ from mindroom.approval.receipt_readers import approval_receipt_context
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.constants import AI_RUN_METADATA_KEY
+from mindroom.delegation.cost import SubagentCost
 from mindroom.event_journal import ApprovalCall, ApprovalDecision, approval_arguments_digest
 from mindroom.history.types import HistoryScope
+from mindroom.hooks import EnrichmentItem
 from mindroom.knowledge.read_protocol import SearchHit
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.llm.events import ToolCallOrigin
 from mindroom.llm.media import Audio, Image
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, system_text
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, ToolExecution
 from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.media_inputs import MediaInputs
@@ -98,6 +100,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.agent_loop.build import AgentBuild
+    from mindroom.config.main import Config
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
@@ -226,9 +229,10 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
     continuation_count: int,
 ) -> None:
-    """Recovery preserves knowledge, cancellation registration, typing and the remaining budget.
+    """Recovery preserves knowledge, cancellation registration and the remaining budget.
 
-    The follow-up turn, built afresh after the switch, sends the approval receipt the runner binds.
+    The follow-up turn, built afresh after the switch, sends the approval receipt the runner binds and the resume's
+    system enrichment.
     """
     runtime = _helper_runtime(tmp_path, tools=["shell", "thread_model"])
     # The switch reads the runtime's budgets, which this runtime has none of.
@@ -315,12 +319,6 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
         },
     )
     execution = _approval_execution(tmp_path, runtime, monkeypatch, knowledge)
-    typing_events = []
-
-    async def room_typing(_room, enabled, _timeout):
-        typing_events.append(enabled)
-
-    monkeypatch.setattr(execution.client(), "room_typing", room_typing)
     run_ids = []
     stream_agent_response = approval_execution.stream_agent_response
     monkeypatch.setattr(
@@ -332,14 +330,16 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
             **kwargs,
         ),
     )
+    instruction = EnrichmentItem(key="plugin", text="Answer in one sentence.", minimal_required=True)
     with approval_receipt_context(RECEIPT_CALLS, run_id=continuation.run_id):
         result = await execution.continue_run(
             continuation,
             paused_answer=PausedAnswer(),
             tool_context=runtime,
             tool_trace_collector=[],
-            typing_log_context={},
+            quiet=False,
             progress=None,
+            system_enrichment_items=(instruction,),
         )
     if continuation_count == 4:
         assert "Model switching did not produce a final answer" in result.response_text
@@ -349,6 +349,7 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
         assert "Recovered with knowledge." in result.response_text
         assert len(model.requests) == 1
         assert carries_approval_receipt(model.requests[0])
+        assert instruction.text in system_text(model.requests[0].messages)
         assert len(builds) == 2
         # The fresh minimal turn is built with the knowledge the recovery resolved.
         assert [source.description for source in builds[-1].surface.knowledge_sources] == ["Saved notes"]
@@ -356,7 +357,6 @@ async def test_recovered_model_switch_call_retains_response_lifecycle(
         assert len(run_ids) == 1
         assert run_ids[0] != "saved-run"
     assert all(built.surface.mode == "minimal" for built in builds)
-    assert typing_events == [True, False]
 
 
 @pytest.mark.asyncio
@@ -390,7 +390,7 @@ async def test_a_recovered_call_s_follow_up_publishes_the_usage_its_turn_spent_b
             session_id=runtime.session_id,
             agent_id="helper",
             status=RunStatus.cancelled,
-            metadata=with_prior_usage({"agent_mode": "minimal"}, [spent]),
+            metadata=with_prior_usage({"agent_mode": "minimal"}, {"run-1": spent}),
             messages=[Message(role="user", content="Switch, then answer")],
         ),
     )
@@ -444,8 +444,9 @@ async def test_a_recovered_call_s_follow_up_publishes_the_usage_its_turn_spent_b
             paused_answer=PausedAnswer(),
             tool_context=runtime,
             tool_trace_collector=[],
-            typing_log_context={},
+            quiet=False,
             progress=None,
+            system_enrichment_items=(),
         )
 
     assert isinstance(result, CompletedApprovalRun)
@@ -599,6 +600,8 @@ async def test_restart_resolves_hidden_call_and_never_replays_parent(
             progress=publish,
         )
     assert isinstance(follow_up, cli_approval_recovery.CliFollowUpTurn)
+    # The turn after the recovered call answers the event its tools answer, which a routed turn's source is not.
+    assert follow_up.ctx.reply_to_event_id == runtime.reply_to_event_id != continuation.source_event_ids[0]
     if control == "after-toolcall" and approved:
         assert follow_up.reusable_build is None
         assert follow_up.ctx.active_model_name == "new-model"
@@ -1071,6 +1074,7 @@ async def _checkpointed_batch(
     ("shell", "missing_shell_function", "nested", "preset"),
     [(shell, missing, None, False) for shell in (False, True) for missing in (None, "run_shell_command")]
     + [(True, None, "media", False), (True, None, "approval", False), (True, None, "suspend", False)]
+    + [(True, None, "reload", False), (True, None, "saved_stop", False)]
     + [(True, None, None, True)],
 )
 async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # noqa: C901 - checkpoint through real resumed provider
@@ -1097,6 +1101,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
     effects = []
     shell_tokens = []
+    reloaded: list[Config] = []
 
     async def run_shell_command(args: str, timeout: int = 120, tail: int = 100) -> str:  # noqa: ARG001, ASYNC109
         assert args in {"exact approved shell", "later model shell"}
@@ -1104,6 +1109,9 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         token = current_agent_cli_shell_env().token
         if token not in shell_tokens:
             shell_tokens.append(token)
+        if nested == "reload":
+            # The config reloads while the recovered command runs, before its CLI call.
+            reloaded.append(runtime.config.model_copy(update={"timezone": "Europe/Amsterdam"}))
         if nested:
             owner = shell_cli_owner(registry)
             queued = await owner.operation(
@@ -1118,7 +1126,7 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
             )
             async with asyncio.timeout(5):
                 receipt = await settled_receipt(owner, queued["call_id"])
-            if nested != "suspend":
+            if nested not in {"suspend", "reload"}:
                 assert receipt["status"] == "completed"
         return "fresh shell result"
 
@@ -1162,6 +1170,9 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         runtime.execution_identity,
     )
     persisted, session = await _checkpointed_batch(runtime, store, sibling_image)
+    if nested == "saved_stop":
+        # A reload refused a sibling call of the paused command before the restart, which the saved run records.
+        persisted.metadata = {**(persisted.metadata or {}), CONFIG_RELOAD_CALL: RELOAD_STOPPED}
     continuation = approval_continuation(
         approval_id="approved",
         run_id="saved-run",
@@ -1233,7 +1244,11 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
             ),
         )
 
-    runtime = replace(runtime, cli_approval_handler=approve)
+    runtime = replace(
+        runtime,
+        cli_approval_handler=approve,
+        config_provider=lambda: reloaded[-1] if reloaded else runtime.config,
+    )
     if missing_shell_function:
         runtime.config.agents["helper"].tools = [{"shell": {"exclude_tools": [missing_shell_function]}}]
     provider = ScriptedProvider(
@@ -1304,6 +1319,9 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
             tool_trace_collector=[],
             tool_context=runtime,
             progress=publish,
+            system_enrichment_items=(),
+            quiet=False,
+            subagent_cost=SubagentCost(),
         )
 
     def stored_runs() -> list[dict]:
@@ -1342,6 +1360,14 @@ async def test_minimal_recovery_keeps_mode_media_and_uses_fresh_shell_grant(  # 
         saved = store.get_run("saved-run")
         assert saved is not None
         assert any(item.get("id") == "old-bash" for message in saved.messages for item in message.tool_calls or ())
+        return
+    if nested in {"reload", "saved_stop"}:
+        # A call the reload refused, now or before the restart, ends the recovered turn with the reason: the model is
+        # not asked again.
+        assert RELOAD_STOPPED in result.response_text
+        assert provider.requests == []
+        assert responses == []
+        assert effects == ["exact approved shell", *(["nested media"] if nested == "saved_stop" else [])]
         return
     assert "finished" in result.response_text
     # Like a standard recovery, the hidden call and the fresh model text stream into the continued reply.
@@ -1454,8 +1480,9 @@ async def test_generated_cli_approval_rebuilds_and_authorizes_exact_function(
             paused_answer=PausedAnswer(),
             tool_context=runtime,
             tool_trace_collector=[],
-            typing_log_context={},
+            quiet=False,
             progress=None,
+            system_enrichment_items=(),
         )
 
     if available and permitted:
@@ -1570,8 +1597,9 @@ async def test_an_approved_call_of_an_implied_toolkit_runs_after_its_bash_stoppe
             paused_answer=PausedAnswer(text=paused.response_text, tool_trace=paused.tool_trace if saved_trace else ()),
             tool_context=runtime,
             tool_trace_collector=[],
-            typing_log_context={},
+            quiet=False,
             progress=None,
+            system_enrichment_items=(),
         )
 
     assert result.response_text == "Listed"

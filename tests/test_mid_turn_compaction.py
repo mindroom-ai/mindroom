@@ -8,7 +8,7 @@ import json
 import re
 import sqlite3
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Never
 from uuid import uuid4
 
@@ -26,6 +26,7 @@ from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
 from mindroom.history import compaction, mid_turn_compaction
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
 from mindroom.history.replay import configured_replay_plan, estimate_summary_text_tokens
+from mindroom.history.reply_compactions import ReplyCompactionLifecycle, ReplyCompactions
 from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
 from mindroom.history.request_size import RequestSize, RequestSizer
 from mindroom.history.storage import new_scope_session, read_scope_state, with_force_compaction
@@ -67,6 +68,7 @@ from mindroom.session_storage.schema import quote_identifier
 from mindroom.session_storage.store import persist_to, watch_session_row
 from mindroom.token_counting.counts import count, utf8_byte_bound
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.runtime_context import (
     DetachedRequesterContext,
     detached_requester_context,
@@ -1352,10 +1354,12 @@ async def test_the_turns_metadata_reaches_the_summary_once(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("earlier_summary", [None, "OLD-SUMMARY"])
+@pytest.mark.parametrize("unseen", [False, True], ids=["prompt-only", "unseen-message"])
 async def test_first_request_over_the_limit_from_tools_compacts_history_before_dropping_it(
     tmp_path: Path,
     summary_calls: SummaryCalls,
     earlier_summary: str | None,
+    unseen: bool,
 ) -> None:
     config, paths = _config(tmp_path)
     storage = create_session_storage("test_agent", config, paths, execution_identity=None)
@@ -1376,9 +1380,15 @@ async def test_first_request_over_the_limit_from_tools_compacts_history_before_d
     model = ToolLoopModel(tool_rounds=0)
     # Tool definitions alone push the first request, which has no exchanges of its own yet, over the limit.
     lookup = Function(name="lookup", description="d" * 10_000, entrypoint=lambda: "ok")
-    agent = _scoped_agent(model, config, paths, storage, tools=[lookup])
+    # The reply's delivery, before the model's first request: it has collected nothing.
+    recorder = ReplyCompactions()
+    recorder.bind(CollectedStreamPresentation(show_tool_calls=False, track_hidden_tools=True))
+    lifecycle = ReplyCompactionLifecycle(recorder, RecordingCompactionLifecycle())
+    agent = _scoped_agent(model, config, paths, storage, tools=[lookup], lifecycle=lifecycle)
+    # A Matrix message the agent has not seen yet folds with the history, though the model has not run.
+    prompt = [Message(role="user", content="An unseen message"), Message(role="user", content="Do the task")]
 
-    output = await _run(agent, "Do the task")
+    output = await _run(agent, prompt if unseen else "Do the task")
 
     assert str(output.content) == "done"
     first = model.requests[0]
@@ -1389,6 +1399,9 @@ async def test_first_request_over_the_limit_from_tools_compacts_history_before_d
     assert folded_run_ids(storage) == [f"run-{index}" for index in range(4)]
     if earlier_summary is not None:
         assert earlier_summary in summary_calls.inputs[0]
+    # A fold before the reply's first model request sits before the reply, even when it takes unseen messages along.
+    [entry] = recorder.content() or []
+    assert entry["phase"] == "pre_turn"
 
 
 @pytest.mark.asyncio
@@ -1617,11 +1630,12 @@ async def test_a_scoped_fold_sizes_the_request_it_rewrote_once(tmp_path: Path) -
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("summary_calls")
 async def test_mid_turn_compaction_emits_compaction_hooks(tmp_path: Path) -> None:
+    """A delegated child's compaction hooks report the compaction and name its turn and the turn that delegated it."""
     config, paths = _config(tmp_path)
     storage = seeded_storage(config, paths)
     hook_context, observed = _observed_compaction_hooks(config, paths)
 
-    with tool_runtime_context(hook_context):
+    with tool_runtime_context(replace(hook_context, turn_id="turn-child", parent_turn_id="turn-parent")):
         await _run(
             _scoped_agent(ToolLoopModel(tool_rounds=5, calls_per_round=2), config, paths, storage),
             "Do the task",
@@ -1630,6 +1644,7 @@ async def test_mid_turn_compaction_emits_compaction_hooks(tmp_path: Path) -> Non
     assert [ctx.event_name for ctx in observed[:2]] == [EVENT_COMPACTION_BEFORE, EVENT_COMPACTION_AFTER]
     assert observed[1].token_count_after is not None
     assert observed[1].token_count_after < observed[1].token_count_before
+    assert {(ctx.turn_id, ctx.parent_turn_id) for ctx in observed} == {("turn-child", "turn-parent")}
 
 
 @pytest.mark.asyncio
@@ -1752,10 +1767,8 @@ async def test_cancellation_during_the_summary_call_writes_nothing_and_propagate
 
     assert summary_calls.inputs
     assert summary_rows_of(storage, TEST_AGENT_SCOPE.key) == []
-    assert [type(event).__name__ for event in lifecycle.events] == [
-        "CompactionLifecycleStart",
-        "CompactionLifecycleFailure",
-    ]
+    # Cut short, not failed: the automatic compaction reports no failure, so the reply's entry stays running.
+    assert [type(event).__name__ for event in lifecycle.events] == ["CompactionLifecycleStart"]
 
 
 @pytest.mark.asyncio

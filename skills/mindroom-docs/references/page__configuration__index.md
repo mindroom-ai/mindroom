@@ -23,8 +23,8 @@ Edits to an agent's or team's own settings, such as `instructions`, `model`, `to
 Changing `display_name` or `accept_invites`, an agent's `private` settings, whether an agent has the `desktop` tool, or which MCP tools it has restarts that agent or team.
 Removing an agent or team makes it leave its rooms, except direct messages, when the reload applies.
 An edit saved while MindRoom is still starting applies once startup finishes.
-An edit that restarts no agent, team, or router and changes no access, room, or authorization setting, such as a model definition, knowledge base, or agent instruction change, applies within seconds even while agents are replying.
-Other edits, including ones that restart an agent or team, an agent's or team's `access` or `rooms`, `administrators`, `authorization`, `room_defaults`, `rooms`, or `router.access`, first wait for active responses to finish, for at most 600 seconds.
+Most edits that start, stop, or restart no account, such as a model definition, knowledge base, or agent instruction change, apply within seconds even while agents are replying.
+Other edits, including ones that restart an agent or team, an agent's or team's `access` or `rooms`, adding or removing an agent's `contacts`, `administrators`, `authorization`, `mindroom_user`, `room_defaults`, `rooms`, or `router.access`, first wait for active responses to finish, for at most 600 seconds.
 To confirm that a reload finished, use [`mindroom config check-applied`](https://docs.mindroom.chat/deployment/config-bundles/#config-fingerprint-and-config-check-applied).
 
 ## Minimal Configuration
@@ -61,7 +61,7 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `defaults` | Fallback values for agent settings and global-only behavior | [Agents — Defaults](https://docs.mindroom.chat/configuration/agents/#defaults) |
 | `memory` | Memory backends and embedder | [Memory](https://docs.mindroom.chat/memory/) |
 | `knowledge_bases` | File-backed knowledge bases | [Knowledge Bases](https://docs.mindroom.chat/knowledge/) |
-| `knowledge_reranker` | Optional reranker for knowledge search results | [Reranking](https://docs.mindroom.chat/knowledge/#reranking) |
+| `reranker` | Optional reranker for knowledge search results and, with `memory.search.rerank`, memory searches | [Reranking](https://docs.mindroom.chat/knowledge/#reranking) |
 | `knowledge_graph` | Graph of facts built from agents' conversations | [Knowledge Graph](https://docs.mindroom.chat/knowledge-graph/) |
 | `mcp_servers` | External Model Context Protocol servers | [MCP](https://docs.mindroom.chat/mcp/) |
 | `plugins` | Plugin loading | [Plugins](https://docs.mindroom.chat/plugins/) |
@@ -77,7 +77,9 @@ Keep `models.default` configured, because room topic generation and automatic th
 | `external_trigger_policy` | Inbound external triggers | [External Triggers](https://docs.mindroom.chat/external-triggers/) |
 | `slack` | How Slack workspace members map to Matrix users | [Slack](https://docs.mindroom.chat/tools/slack/#slack-configuration) |
 | `tool_approval` | Human approval for tool calls | [Tool Approval](https://docs.mindroom.chat/tool-approval/#tool-approval) |
+| `email_invites` | Chat link, expiry, and approvers of invites to a room by email | [Email Invites](#email-invites) |
 | `egress_broker` | Agent Keys: services whose API keys and connected accounts are added to worker requests without the worker seeing them | [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/) |
+| `tailnet_ssh` | Tailnet logins and SSH public keys for access to dedicated agent workers | [Tailnet SSH](https://docs.mindroom.chat/tailnet-ssh/) |
 | `background_tool_jobs` | Background execution of tool calls, on by default | [Background Jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
 | `personal_rooms` | One private room per onboarded user | [Personal Rooms](https://docs.mindroom.chat/personal-rooms/#personal-rooms) |
 | `personal_agents` | Templates that give each onboarded user their own agent | [Personal Agents](https://docs.mindroom.chat/personal-agents/#personal-agents) |
@@ -161,6 +163,21 @@ diff before.yaml after.yaml
 When the configuration uses include tags, structured saves from the dashboard and the self-config tools are rejected, so edit the source files instead; the raw config editor still edits the top-level file's text (see [Dashboard](https://docs.mindroom.chat/dashboard/#configurations-split-with-include)).
 `MINDROOM_CONFIG_TEMPLATE` copies only the single template file, so a template that uses includes needs its included files shipped next to the config path.
 
+## Email Invites
+
+The optional root `email_invites` block configures the [`email_invite`](https://docs.mindroom.chat/email-invites/) tool; the feature is on for an agent when `email_invite` is in its `tools`.
+
+```yaml
+email_invites:
+  chat_url: https://chat.mindroom.chat   # origin of the Chat web app the link opens; default shown
+  expiry_days: 7                         # 1 to 30
+  approvers: []                          # Matrix user IDs who may approve in any room
+```
+
+`chat_url` must be an `https` origin, or an `http` origin on a local address, with no path.
+The mail server comes from the environment: `MINDROOM_SMTP_URL` (`smtps://[user:password@]host[:port]` or `smtp://[user:password@]host[:port]`, kept out of workers like other secrets) and `MINDROOM_SMTP_FROM`, the sender, for example `MindRoom <invites@example.org>`.
+Without both, the tool returns the link for the approver to forward by hand.
+
 ## Built-In Prompt Overrides
 
 Use the optional root `prompts` block to replace MindRoom's built-in prompts, keyed by the prompt's uppercase name:
@@ -187,7 +204,7 @@ Template prompts accept only their own `{field_name}` placeholders, and an unsup
 Placeholders are exact `{field_name}` replacements, not Jinja or Python `str.format`, so `{message.text}`, `{message!r}`, and `{message:.2f}` are rejected.
 Escape literal braces as `{{` and `}}` in overrides that use placeholders.
 Changed overrides apply through hot reload.
-Changing a prompt that agents build in when they start, such as `HIDDEN_TOOL_CALLS_PROMPT` or `AGENT_IDENTITY_CONTEXT_TEMPLATE`, restarts every agent, team, and the router; other prompt changes apply without restarts.
+Changing a prompt that agents build in when they start, such as `HIDDEN_TOOL_CALLS_PROMPT` or `AGENT_IDENTITY_CONTEXT_TEMPLATE`, restarts every agent, team, and the owner account; other prompt changes restart only an agent in an active voice call.
 
 ## Environment Variables
 
@@ -222,6 +239,7 @@ Container `env_file`/`--env-file` injection sets process variables and therefore
 | `MATRIX_REGISTRATION_SHARED_SECRET`, `MATRIX_REGISTRATION_SHARED_SECRET_FILE` | Synapse shared registration secret, or a file containing it, for creating managed agent accounts without pairing | _(unset)_ |
 | `MATRIX_MANAGED_ACCOUNT_AUTH` | `password` or `appservice` authentication for accounts MindRoom creates and operates (see [Agent Users](https://docs.mindroom.chat/matrix/#agent-users)) | `password` |
 | `MATRIX_APPSERVICE_TOKEN`, `MATRIX_APPSERVICE_TOKEN_FILE` | Application-service token, or a file containing it, used when `MATRIX_MANAGED_ACCOUNT_AUTH=appservice` | _(unset)_ |
+| `MATRIX_USER_APPSERVICE_TOKEN`, `MATRIX_USER_APPSERVICE_TOKEN_FILE` | Token of a separate application service, or a file containing it, that lets a personal agent's [`matrix_user`](https://docs.mindroom.chat/tools/matrix-and-attachments/#matrix_user) tool act as its owner | _(unset)_ |
 | `MINDROOM_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS` | Seconds to wait at startup for the homeserver to respond (`0` waits indefinitely); a certificate verification failure stops startup immediately | _(wait indefinitely)_ |
 | `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` | Positive seconds allowed for the first Matrix sync response | `600` |
 | `MINDROOM_MATRIX_INGESTION_GRACE_SECONDS` | Positive seconds the sync watchdog and `/api/health` keep waiting while event catch-up is still making progress; set it above the deployment's observed healthy catch-up time | `600` |
@@ -236,7 +254,7 @@ Provider keys from the environment or `.env` also supply shared credentials, as 
 | Variable | Description |
 |----------|-------------|
 | `OPENAI_BASE_URL` | Base URL for `provider: openai` models and the `openai` memory embedder and memory LLM, such as a local inference server; a model's `extra_kwargs.base_url` overrides it, and `extra_kwargs.client_params.base_url` overrides both |
-| `ANTHROPIC_BASE_URL` | Base URL for `provider: anthropic` models and the `anthropic` memory LLM, such as a gateway; a model's `extra_kwargs.client_params.base_url` overrides it |
+| `ANTHROPIC_BASE_URL` | Base URL for `provider: anthropic` models and the `anthropic` memory LLM, such as a gateway; a model's `extra_kwargs.base_url` overrides it, and `extra_kwargs.client_params.base_url` overrides both |
 
 ### Dashboard and API
 
@@ -253,6 +271,7 @@ Provider keys from the environment or `.env` also supply shared credentials, as 
 | `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED` | `true` allows unauthenticated `/v1/*` access for local development only | _(unset)_ |
 | `OPENAI_COMPAT_API_KEY_REQUESTERS` | JSON object mapping `/v1` API keys to Matrix user IDs (see [Requester identities](https://docs.mindroom.chat/openai-api/#requester-identities-and-delegation)) | _(none)_ |
 | `MINDROOM_AUTO_BUILD_FRONTEND` | Set to `0` to skip the automatic dashboard frontend build | _(enabled)_ |
+| `MINDROOM_PLUGIN_ORIGIN_PORT` | Port of a second listener that serves plugins' pages on [origins of their own](https://docs.mindroom.chat/plugins/#origins-of-your-own); that page lists `MINDROOM_PLUGIN_ORIGIN_DOMAIN` and `MINDROOM_PLUGIN_ORIGIN_PUBLIC_PORT` | _(unset; off)_ |
 
 ### Workers and Background Scripts
 
@@ -263,7 +282,7 @@ Provider keys from the environment or `.env` also supply shared credentials, as 
 | `MINDROOM_WORKER_BACKEND` | Worker backend for tool execution (`static_runner`, `docker`, or `kubernetes`) | `static_runner` |
 | `MINDROOM_SANDBOX_PROXY_URL` | Sandbox proxy endpoint URL (static runner) | _(none)_ |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Auth token for the sandbox proxy | _(none)_ |
-| `MINDROOM_EGRESS_BROKER_PORT` | Port of the [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/#environment-variables) egress broker; setting it turns Agent Keys on, and that page lists the other `MINDROOM_EGRESS_BROKER_*` variables | _(unset; off)_ |
+| `MINDROOM_EGRESS_BROKER_PORT` | Port of the [Agent Keys](https://docs.mindroom.chat/deployment/egress-broker/#environment-variables) egress broker for workers; `off` turns Agent Keys off, and that page lists the other `MINDROOM_EGRESS_BROKER_*` variables | _(unset; a loopback broker for shell calls in the primary)_ |
 | `MINDROOM_SCRIPT_GATEWAY_URL` | Worker-reachable background-script gateway base URL, including `/api/script-gateway` | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_PORT` | Port for a second listener that serves only the script gateway and Agent CLI routes | _(none)_ |
 | `MINDROOM_SCRIPT_GATEWAY_ISOLATED` | `true` attests that the Kubernetes script-gateway listener exposes only the gateway and Agent CLI routes | `false` |

@@ -19,10 +19,11 @@ bug; flip it deliberately when it is fixed.
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, ClassVar
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -30,16 +31,18 @@ from structlog.testing import capture_logs
 
 from mindroom import reply_lifecycle as rl
 from mindroom.approval.tool_approval import shutdown_approval_runtime
+from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.cancellation import request_task_cancel
 from mindroom.config.agent import AgentConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import STREAM_STATUS_KEY
+from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY, STREAM_STATUS_KEY, TOOL_TRACE_CONTENT_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import DeliveryStage, EventClass, EventKind, InboundEvent
 from mindroom.final_delivery import Owed, Suppressed, Suppression
 from mindroom.history.interrupted_replay import is_interrupted_replay_run, persist_interrupted_replay_snapshot
+from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT, STOPPED_BY_USER_NOTE, is_recovered_run
 from mindroom.history.session_context import create_scope_session_storage, resolve_bound_team_scope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
@@ -55,17 +58,24 @@ from mindroom.hooks import (
     SessionHookContext,
     hook,
 )
-from mindroom.llm.provider import TextDelta
+from mindroom.llm.messages import Message, system_text
+from mindroom.llm.provider import TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
+from mindroom.llm.usage import MessageMetrics
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.matrix.visible_body import visible_content_from_content
 from mindroom.reply_presentation import TEAM_PLACEHOLDER, Presentation, decode_presentation, render_body
 from mindroom.response_sources import Owned, SourceFate
+from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE, _flush_phase_boundary_if_needed
 from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.events import tool_markers_in_text
 from mindroom.turn_policy import ResponseAction
 from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
+from tests.approval_continuation_helpers import dispatch_approval
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     TEST_PASSWORD,
     bind_runtime_paths,
     initialize_approval_store_for_test,
@@ -111,6 +121,7 @@ _BARE_PROMPT = f'<msg event_id="{_SOURCE}" from="{_REQUESTER}"><![CDATA[hello]]>
 _TEAM_HEADER = "🤝 **Team Response** (Writer, Checker):\n\n"
 _EDIT_INTERVAL = 0.0
 _TEAM_MEMBERS = "**Writer**: Writer fact.\n\n**Checker**: Checker fact."
+_QUIET_DELIVERY = "Return exactly NO_REPLY when this scheduled check completes routinely without findings."
 
 
 class _EchoTools(Toolkit):
@@ -156,6 +167,8 @@ class _Homeserver:
     fail_text: str | None = None
     # How many writes that end a reply (``completed`` status) the server fails next, as an unreachable homeserver does.
     fail_completed: int = 0
+    # Text the server refuses in every write that is still streaming, as a homeserver that keeps refusing an edit does.
+    refuse_streaming_text: str | None = None
 
     async def room_send(
         self,
@@ -169,6 +182,13 @@ class _Homeserver:
         """Accept one send, collapsing a repeated transaction ID onto one event."""
         if message_type == "m.room.message" and self.fail_text is not None and self.fail_text in _body(content):
             self.fail_text = None
+            return nio.RoomSendError(message="homeserver unavailable", status_code="M_UNKNOWN")
+        if (
+            message_type == "m.room.message"
+            and self.refuse_streaming_text is not None
+            and self.refuse_streaming_text in _body(content)
+            and content.get(STREAM_STATUS_KEY) == "streaming"
+        ):
             return nio.RoomSendError(message="homeserver unavailable", status_code="M_UNKNOWN")
         if message_type == "m.room.message" and self.fail_completed and content.get(STREAM_STATUS_KEY) == "completed":
             self.fail_completed -= 1
@@ -194,9 +214,14 @@ class _Homeserver:
 
 
 def _body(content: Mapping[str, Any]) -> str:
-    """Return the body a reader would see, following an edit into its replacement."""
-    replacement = content.get("m.new_content")
-    return str((replacement if isinstance(replacement, dict) else content).get("body", ""))
+    """Return the body MindRoom Chat reads, following an edit into its replacement, with its tool markers back."""
+    return str(tool_markers_in_text(visible_content_from_content(content)).get("body", ""))
+
+
+def _trace_events(content: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Return the tool calls a write shows, following an edit into its replacement."""
+    shown: dict[str, Any] = visible_content_from_content(content)
+    return list((shown.get(TOOL_TRACE_CONTENT_KEY) or {}).get("events", []))
 
 
 @dataclass
@@ -438,9 +463,10 @@ def _team_scope(turn: _Turn) -> HistoryScope:
     )
 
 
-async def _team_reply(turn: _Turn) -> SourceFate:
+async def _team_reply(turn: _Turn, request: ResponseRequest | None = None) -> SourceFate:
+    """Answer ``request``, a plain message unless given, with the collaborate team of both members."""
     return await turn.runner.generate_team_response_helper(
-        _plain_request(_target()),
+        request or _plain_request(_target()),
         member_names=list(_MEMBERS),
         team_mode="collaborate",
     )
@@ -481,14 +507,19 @@ async def _past_edit_interval() -> None:
     await asyncio.sleep(0)
 
 
-def _streams_then_blocks(text: str, running: asyncio.Event) -> list[ScriptStep]:
-    """Return a model turn that streams ``text`` as its own edit, then waits until it is cancelled."""
+def _blocks(running: asyncio.Event) -> Await:
+    """Return a model step that sets ``running``, then waits until it is cancelled."""
 
     async def block() -> None:
         running.set()
         await asyncio.Event().wait()
 
-    return [Await(_past_edit_interval), TextDelta(text), Await(block)]
+    return Await(block)
+
+
+def _streams_then_blocks(text: str, running: asyncio.Event) -> list[ScriptStep]:
+    """Return a model turn that streams ``text`` as its own edit, then waits until it is cancelled."""
+    return [Await(_past_edit_interval), TextDelta(text), _blocks(running)]
 
 
 async def _explode() -> None:
@@ -531,7 +562,7 @@ def _require_echo_approval(turn: _Turn) -> None:
     )
     turn.bot.config.background_tool_jobs.enabled = False
 
-    async def prepare_event(_room: str, _thread: str | None, content: dict) -> dict:
+    async def prepare_event(_room: str, _thread: str | None, content: dict, _sender_entity: str) -> dict:
         return content
 
     async def send_card(_delivery: MatrixDelivery) -> str:
@@ -543,8 +574,8 @@ def _require_echo_approval(turn: _Turn) -> None:
         send_approval_delivery=send_card,
         resolve_approval_delivery=AsyncMock(return_value=None),
         cards=turn.bot._journal_store.principal("router@shared"),
-        transport_sender_id=lambda: "@router:localhost",
-        transport_device_id=lambda: "DEVICE",
+        sender_bot=lambda _entity_name, _room_id: object(),
+        sender_device_id=AsyncMock(return_value="DEVICE"),
     )
 
 
@@ -687,11 +718,9 @@ async def test_a_user_stop_mid_stream_cancels_the_streamed_reply(
         ("cancelled", {"event_id": "$sent0", "failure_reason": "cancelled_by_user", "kind": "ai"}),
     ]
     [run] = turn.agent_runs()
-    assert is_interrupted_replay_run(run)
-    assert _original_status(run) == "cancelled"
-    assert run.content == "Partial answer\n\n(turn stopped before completion)"
-    # CHARACTERIZATION: current behavior; an interrupted row stores the bare message tag, not the model prompt.
-    assert _messages(run) == [("user", _BARE_PROMPT), ("assistant", run.content)]
+    # The stopped run keeps its own messages: the prompt as the model read it, then what it showed and the stop note.
+    assert is_recovered_run(run)
+    assert _messages(run) == [("user", _MODEL_PROMPT), ("assistant", f"Partial answer\n\n{STOPPED_BY_USER_NOTE}")]
     assert not await turn.pending()
 
 
@@ -787,11 +816,10 @@ async def test_a_user_stop_while_a_whole_delivery_runs_the_model(
     assert turn.hooks.fired == [
         ("cancelled", {"event_id": "$sent0", "failure_reason": "cancelled_by_user", "kind": "ai"}),
     ]
-    run = _interrupted(turn.agent_runs())
-    assert _original_status(run) == "cancelled"
+    [run] = turn.agent_runs()
+    assert is_recovered_run(run)
     # CHARACTERIZATION: current behavior; history keeps model text the room never showed.
-    assert run.content == "Partial answer\n\n(turn stopped before completion)"
-    assert _messages(run) == [("user", _BARE_PROMPT), ("assistant", run.content)]
+    assert _messages(run) == [("user", _MODEL_PROMPT), ("assistant", f"Partial answer\n\n{STOPPED_BY_USER_NOTE}")]
     assert not await turn.pending()
 
 
@@ -804,12 +832,16 @@ async def test_a_stop_while_the_stream_waits_for_matrix_records_the_turn_stopped
 
     With tool calls hidden, a tool start first flushes the text streamed so far,
     and that flush waits behind the held write. The model already asked for the
-    tool, which never runs.
+    tool, which never runs. The flush reaches the reply's records only after the
+    Stop committed, so it is not sent and the note goes below what the room showed.
     """
-    turn_requested_tool = asyncio.Event()
+    flushing = asyncio.Event()
 
-    async def tool_requested() -> None:
-        turn_requested_tool.set()
+    async def flush_behind_hold(*args: Any, **kwargs: Any) -> None:  # noqa: ANN401
+        flushing.set()
+        await _flush_phase_boundary_if_needed(*args, **kwargs)
+
+    monkeypatch.setattr("mindroom.streaming._flush_phase_boundary_if_needed", flush_behind_hold)
 
     async def wait_for_hold() -> None:
         await turn.homeserver.held.wait()
@@ -818,7 +850,6 @@ async def test_a_stop_while_the_stream_waits_for_matrix_records_the_turn_stopped
         TextDelta("Partial "),
         Await(wait_for_hold),
         *calls(tool_call("echo", "call-1", text="hi"), content="answer"),
-        Await(tool_requested),
     ]
     turn = await _turn(
         tmp_path,
@@ -830,7 +861,8 @@ async def test_a_stop_while_the_stream_waits_for_matrix_records_the_turn_stopped
     )
     turn.homeserver.hold_text = "Partial"
     response = asyncio.create_task(turn.runner.generate_response(_plain_request(_target())))
-    await asyncio.wait_for(turn_requested_tool.wait(), timeout=10)
+    # The Stop must land once the tool start reached the stream consumer, not merely once the model asked for the tool.
+    await asyncio.wait_for(flushing.wait(), timeout=10)
 
     assert await _stop(turn)
     turn.homeserver.release.set()
@@ -840,16 +872,21 @@ async def test_a_stop_while_the_stream_waits_for_matrix_records_the_turn_stopped
     assert echo_tool.calls == []
     reply = await turn.reply()
     assert reply.state is rl.ReplyState.CANCELLED
+    assert not any("answer" in body for body in turn.homeserver.bodies)
     assert (turn.homeserver.bodies[-1], turn.homeserver.statuses[-1]) == (
-        f"Partial answer\n\n{_CANCEL_NOTE}",
+        f"Partial\n\n{_CANCEL_NOTE}",
         "cancelled",
     )
-    run = _interrupted(turn.agent_runs())
-    # The Stop lands while the consumer writes, outside the model's await, and the turn is still recorded stopped.
-    assert _original_status(run) == "cancelled"
-    assert run.content.startswith(
-        "Partial answer\n\n(turn stopped before completion; 1 tool call(s) were still running)",
-    )
+    # The Stop lands while the consumer writes, outside the model's await, and the turn is still recorded stopped:
+    # the run called a tool, so it stays as its own messages, the call answered, and ends with the note of the Stop.
+    [run] = turn.agent_runs()
+    assert (run.status, is_interrupted_replay_run(run)) == (RunStatus.completed, False)
+    assert _messages(run)[1:] == [
+        ("assistant", "answer"),
+        ("tool", INTERRUPTED_CALL_RESULT),
+        ("assistant", STOPPED_BY_USER_NOTE),
+    ]
+    assert (run.metadata or {})[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] == "$sent0"
 
 
 @pytest.mark.parametrize(
@@ -941,6 +978,447 @@ async def test_a_silent_schedule_that_reports_nothing_shows_nothing(
     assert not is_interrupted_replay_run(run)
     assert run.content == "NO_REPLY"
     assert not await turn.pending()
+
+
+async def _respond_auto_approved(turn: _Turn, request: ResponseRequest, *, team: bool = False) -> None:
+    """Answer ``request``, whose ``echo`` call pauses for an approval the policy grants at once, so the reply resumes.
+
+    A ``team`` answer is the collaborate team's of both members. It returns once the bot's background work is done, so
+    assertions see the ended approval.
+    """
+    _require_echo_approval(turn)
+    try:
+        with patch("mindroom.approval.response.evaluate_tool_approval", AsyncMock(return_value=(False, 60.0))):
+            fate = await (_team_reply(turn, request) if team else turn.runner.generate_response(request))
+            assert fate == Owned()
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=turn.bot._runtime_view)
+    finally:
+        await shutdown_approval_runtime()
+
+
+@pytest.mark.usefixtures("echo_tool")
+@pytest.mark.parametrize("streaming", [True, False], ids=["streamed", "whole"])
+@pytest.mark.parametrize(
+    ("resumed", "shown_calls"),
+    [
+        pytest.param([answer("NO_REPLY")], "🔧 `echo` [1]", id="resumed-run"),
+        # The resumed run switches the thread's model for this response, and the fresh attempt reports nothing.
+        pytest.param(
+            [
+                calls(tool_call("switch_thread_model", "call-2", model_name="default", when="after-toolcall")),
+                answer("NO_REPLY"),
+            ],
+            "🔧 `echo` [1]\n\n🔧 `switch_thread_model` [2]",
+            id="fresh-attempt",
+        ),
+        # The fresh attempt answers nothing: a quiet turn neither retries it nor answers with the empty-reply notice.
+        pytest.param(
+            [
+                calls(tool_call("switch_thread_model", "call-2", model_name="default", when="after-toolcall")),
+                answer(""),
+            ],
+            "🔧 `echo` [1]\n\n🔧 `switch_thread_model` [2]",
+            id="empty-fresh-attempt",
+        ),
+    ],
+)
+@pytest.mark.parametrize("show_tool_calls", [True, False], ids=["calls-shown", "calls-hidden"])
+async def test_a_silent_schedule_that_reports_nothing_after_an_approval_ends_its_waiting_message(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
+    resumed: list[list[ScriptStep]],
+    shown_calls: str,
+    show_tool_calls: bool,
+) -> None:
+    """Pins a silent schedule whose approved run reports nothing: its approval completes and its waiting message ends.
+
+    The message keeps what its pause showed, its calls finished, and never shows the no-report token; one that showed
+    only its placeholder ends with the nothing-to-show note. It stays, so the run stays in history. Every run the
+    resume starts asks for quiet delivery, as the turn's own did, and nothing streams or shows typing.
+    """
+    turn = await _turn(
+        tmp_path,
+        monkeypatch,
+        streaming=streaming,
+        show_tool_calls=show_tool_calls,
+        tools=[_ECHO_TOOL, "thread_model"],
+        scripts={"default": [calls(tool_call("echo", "call-1", text="hi")), *resumed]},
+    )
+
+    # A model switch needs a thread.
+    await _respond_auto_approved(turn, _silent_schedule(_plain_request(_target(thread_id="$thread"))))
+
+    reply = await turn.reply()
+    assert reply.state is rl.ReplyState.COMPLETED
+    # The pause's message is the only one, and its end is an edit of it.
+    assert turn.homeserver.statuses == ["pending", "completed"]
+    assert turn.homeserver.bodies[-1] == (shown_calls if show_tool_calls else "Done.")
+    assert turn.bot.client.room_redact.await_args_list == []
+    assert turn.bot.client.room_typing.await_args_list == []
+    assert await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE) is None
+    assert not await turn.pending()
+    _first, *after_pause = turn.models["default"].requests
+    assert len(after_pause) == len(resumed)
+    assert all(_QUIET_DELIVERY in system_text(request.messages) for request in after_pause)
+
+
+@pytest.mark.usefixtures("echo_tool")
+@pytest.mark.parametrize("streaming", [True, False], ids=["requester-online", "requester-away"])
+@pytest.mark.parametrize(
+    ("replayed", "answer_calls_shown", "answer_calls_hidden"),
+    [
+        pytest.param([answer("NO_REPLY")], "Done.", "Done.", id="reports-nothing"),
+        pytest.param([answer("Disk full.")], "Disk full.", "Disk full.", id="finding"),
+        # The replay's own call numbers after the call the stopped attempt showed, as a stream of it would.
+        pytest.param(
+            [calls(tool_call("multiply", "call-2", a=6, b=7)), answer("NO_REPLY")],
+            "🔧 `multiply` [2]",
+            "Done.",
+            id="call-then-reports-nothing",
+        ),
+        pytest.param(
+            [calls(tool_call("multiply", "call-2", a=6, b=7)), answer("Disk full.")],
+            "🔧 `multiply` [2]\n\nDisk full.",
+            "Disk full.",
+            id="call-then-finding",
+        ),
+    ],
+)
+@pytest.mark.parametrize("show_tool_calls", [True, False], ids=["calls-shown", "calls-hidden"])
+async def test_a_silent_schedule_replayed_after_a_restart_stopped_its_approved_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
+    replayed: list[list[ScriptStep]],
+    answer_calls_shown: str,
+    answer_calls_hidden: str,
+    show_tool_calls: bool,
+) -> None:
+    """Pins a silent schedule whose approved run a restart stopped, so its turn replays below the waiting message.
+
+    The replay is delivered whole, as the turn's own answer is, whether or not its requester is online: one that
+    reports nothing ends the waiting message without the no-report token, and a finding is shown below what the stopped
+    attempt showed and the restart note.
+    """
+    running = asyncio.Event()
+    turn = await _turn(
+        tmp_path,
+        monkeypatch,
+        streaming=streaming,
+        show_tool_calls=show_tool_calls,
+        tools=[_ECHO_TOOL, "calculator"],
+        scripts={
+            "default": [
+                calls(tool_call("echo", "call-1", text="hi"), content="Let me check."),
+                [_blocks(running)],
+                *replayed,
+            ],
+        },
+    )
+    request = _silent_schedule(_plain_request(_target()))
+    _require_echo_approval(turn)
+    try:
+        with patch("mindroom.approval.response.evaluate_tool_approval", AsyncMock(return_value=(False, 60.0))):
+            response = asyncio.create_task(turn.runner.generate_response(request))
+            await asyncio.wait_for(running.wait(), timeout=10)
+            request_task_cancel(response, process_shutdown=True)
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(response, timeout=10)
+            # Recovery hands the stopped approved run back to its turn, which replays.
+            stopped = await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE)
+            assert stopped is not None
+            await dispatch_approval(turn.runner.approvals, stopped, target=_target())
+            assert await turn.runner.generate_response(request) == Owned()
+    finally:
+        await shutdown_approval_runtime()
+
+    reply = await turn.reply()
+    assert reply.state is rl.ReplyState.COMPLETED
+    spans = await turn.bot.journal_principal().replies.spans(reply.reply_id)
+    assert [span.kind for span in spans] == [rl.SpanKind.TURN, rl.SpanKind.APPROVAL_RESUME, rl.SpanKind.REPLAY]
+    # The waiting message is the only message, and the replay's end is one edit of it.
+    assert turn.homeserver.statuses == ["pending", "completed"]
+    shown, answered = (
+        ("Let me check.\n\n🔧 `echo` [1]", answer_calls_shown)
+        if show_tool_calls
+        else ("Let me check.", answer_calls_hidden)
+    )
+    assert turn.homeserver.bodies[-1] == f"{shown}\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\n{answered}"
+    # The edit carries a tool call for each marker it shows, in order.
+    shown_calls = [event["tool_name"] for event in _trace_events(turn.homeserver.writes[-1])]
+    assert shown_calls == re.findall(r"🔧 `(\w+)`", turn.homeserver.bodies[-1])
+    assert turn.bot.client.room_typing.await_args_list == []
+    assert not await turn.pending()
+
+
+@pytest.mark.usefixtures("echo_tool")
+@pytest.mark.parametrize("silent", [True, False], ids=["silent-schedule", "message"])
+async def test_an_approved_run_shows_typing_unless_its_turn_is_a_silent_schedule(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    silent: bool,
+) -> None:
+    """Pins the typing of a reply whose approved run resumes: a message's shows it, a silent schedule's never does."""
+    turn = await _turn(
+        tmp_path,
+        monkeypatch,
+        streaming=False,
+        tools=[_ECHO_TOOL],
+        scripts={"default": [calls(tool_call("echo", "call-1", text="hi")), answer("A finding.")]},
+    )
+    request = _plain_request(_target())
+
+    await _respond_auto_approved(turn, _silent_schedule(request) if silent else request)
+
+    assert (await turn.reply()).state is rl.ReplyState.COMPLETED
+    typing = [call.args[1] for call in turn.bot.client.room_typing.await_args_list]
+    # The turn types until it pauses, and its resume types again until its answer.
+    assert typing == ([] if silent else [True, False, True, False])
+
+
+@pytest.mark.usefixtures("echo_tool")
+@pytest.mark.parametrize("show_tool_calls", [True, False], ids=["calls-shown", "calls-hidden"])
+async def test_a_silent_schedule_whose_answer_ends_with_the_no_report_line_reports_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    show_tool_calls: bool,
+) -> None:
+    """Pins a silent schedule whose model narrates, calls a tool, and ends with the no-report token: nothing is posted."""
+    turn = await _turn(
+        tmp_path,
+        monkeypatch,
+        streaming=False,
+        show_tool_calls=show_tool_calls,
+        tools=[_ECHO_TOOL],
+        scripts={
+            "default": [calls(tool_call("echo", "call-1", text="hi"), content="Let me check."), answer("NO_REPLY")],
+        },
+    )
+
+    assert await turn.runner.generate_response(_silent_schedule(_plain_request(_target()))) == Owned()
+
+    assert (await turn.reply()).state is rl.ReplyState.GONE
+    assert await turn.span_outcomes() == [rl.SpanOutcome.SUPPRESSED]
+    assert turn.homeserver.writes == []
+    assert not await turn.pending()
+
+
+@pytest.mark.usefixtures("echo_tool")
+@pytest.mark.parametrize("show_tool_calls", [True, False], ids=["calls-shown", "calls-hidden"])
+async def test_a_silent_schedule_s_waiting_message_keeps_its_narration_without_the_no_report_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    show_tool_calls: bool,
+) -> None:
+    """Pins a silent schedule that narrates before its approval and reports nothing after it.
+
+    The waiting message ends with what it showed, the narration and its finished calls, and never the token.
+    """
+    turn = await _turn(
+        tmp_path,
+        monkeypatch,
+        streaming=False,
+        show_tool_calls=show_tool_calls,
+        tools=[_ECHO_TOOL],
+        scripts={
+            "default": [calls(tool_call("echo", "call-1", text="hi"), content="Let me check."), answer("NO_REPLY")],
+        },
+    )
+
+    await _respond_auto_approved(turn, _silent_schedule(_plain_request(_target())))
+
+    assert (await turn.reply()).state is rl.ReplyState.COMPLETED
+    assert turn.homeserver.statuses == ["pending", "completed"]
+    assert turn.homeserver.bodies[-1] == ("Let me check.\n\n🔧 `echo` [1]" if show_tool_calls else "Let me check.")
+    assert await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE) is None
+    assert not await turn.pending()
+
+
+@pytest.mark.usefixtures("echo_tool")
+@pytest.mark.parametrize("show_tool_calls", [True, False], ids=["calls-shown", "calls-hidden"])
+@pytest.mark.parametrize(
+    ("finding", "checker_answer", "members_shown", "members_hidden"),
+    [
+        pytest.param("", "NO_REPLY", None, None, id="nothing-found"),
+        pytest.param(
+            "Writer found a leak.",
+            "NO_REPLY",
+            "**Writer**:\n\n🔧 `echo` [1]\n\nWriter found a leak.",
+            "**Writer**: Writer found a leak.",
+            id="member-finding",
+        ),
+        # The checker reported before the writer's call paused, so its run ended before the resume.
+        pytest.param(
+            "NO_REPLY",
+            "Checker found a leak.",
+            "**Writer**:\n\n🔧 `echo` [1]\n\n**Checker**: Checker found a leak.",
+            "**Checker**: Checker found a leak.",
+            id="finding-before-the-pause",
+        ),
+    ],
+)
+async def test_a_silent_schedule_s_team_whose_leader_reports_nothing_after_an_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    show_tool_calls: bool,
+    finding: str,
+    checker_answer: str,
+    members_shown: str | None,
+    members_hidden: str | None,
+) -> None:
+    """Pins a silent schedule's team whose leader answers the no-report token after a member's approved call.
+
+    With nothing found, the waiting message ends with the nothing-to-show note; a member's finding stays shown, even one
+    reported before the pause, without any token.
+    """
+    turn = await _turn(
+        tmp_path,
+        monkeypatch,
+        streaming=False,
+        show_tool_calls=show_tool_calls,
+        scripts={
+            "default": [calls(tool_call("delegate_task_to_members", "call-all", task="Check")), answer("NO_REPLY")],
+            "writer-model": [calls(tool_call("echo", "call-1", text="hi")), answer(finding)],
+            "checker-model": [answer(checker_answer)],
+        },
+    )
+    turn.bot.config.agents["writer"].tools = [_ECHO_TOOL]
+
+    await _respond_auto_approved(turn, _silent_schedule(_plain_request(_target())), team=True)
+
+    assert (await turn.reply()).state is rl.ReplyState.COMPLETED
+    assert turn.homeserver.statuses[-1] == "completed"
+    assert turn.bot.client.room_typing.await_args_list == []
+    if members_shown is None:
+        ended = "Done."
+    elif show_tool_calls:
+        ended = f"{_TEAM_HEADER}{members_shown}\n\n\n**Team Consensus**:\n\n🔧 `delegate_task_to_members` [2]"
+    else:
+        ended = f"{_TEAM_HEADER}{members_hidden}\n\n\n*No team consensus - showing individual responses only*"
+    # The pause's message is the only one, and its end is an edit of it.
+    assert len(turn.homeserver.writes) == 2
+    assert turn.homeserver.bodies[-1] == ended
+    assert await turn.bot.journal_principal().approvals.approval_continuation_for_source(_SOURCE) is None
+    assert not await turn.pending()
+
+
+@pytest.mark.usefixtures("echo_tool")
+@pytest.mark.parametrize("show_tool_calls", [True, False], ids=["calls-shown", "calls-hidden"])
+async def test_a_silent_schedule_s_team_waiting_message_never_shows_a_member_s_no_report_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    show_tool_calls: bool,
+) -> None:
+    """Pins a quiet team that waits for approval twice after a member answered the no-report token.
+
+    Neither waiting message shows that member's no-report line: not the turn's, and not the one its approved run shows
+    when it pauses again. With nothing else to show, the waiting message shows the placeholder, as an agent's does.
+    """
+    turn = await _turn(
+        tmp_path,
+        monkeypatch,
+        streaming=False,
+        show_tool_calls=show_tool_calls,
+        scripts={
+            "default": [calls(tool_call("delegate_task_to_members", "call-all", task="Check")), answer("NO_REPLY")],
+            "writer-model": [
+                calls(tool_call("echo", "call-1", text="hi")),
+                calls(tool_call("echo", "call-2", text="again")),
+                answer("NO_REPLY"),
+            ],
+            "checker-model": [answer("NO_REPLY")],
+        },
+    )
+    turn.bot.config.agents["writer"].tools = [_ECHO_TOOL]
+
+    await _respond_auto_approved(turn, _silent_schedule(_plain_request(_target())), team=True)
+
+    assert (await turn.reply()).state is rl.ReplyState.COMPLETED
+    # Each pause's waiting message, then the end.
+    assert turn.homeserver.statuses == ["pending", "pending", "completed"]
+    if show_tool_calls:
+        consensus = "\n\n\n**Team Consensus**:\n\n🔧 `delegate_task_to_members`"
+        waiting = [
+            f"{_TEAM_HEADER}**Writer**:\n\n🔧 `echo` [1] ⏳{consensus} [2]",
+            f"{_TEAM_HEADER}**Writer**:\n\n🔧 `echo` [1]\n\n🔧 `echo` [2] ⏳{consensus} [3]",
+        ]
+    else:
+        waiting = ["Thinking...", "Thinking..."]
+    assert turn.homeserver.bodies == [*waiting, "Done."]
+
+
+@pytest.mark.usefixtures("echo_tool")
+async def test_a_silent_schedule_s_resumed_finding_that_streamed_no_text_is_shown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pins a silent schedule whose approved run hands its finding over whole, with no text delta, while calls are hidden.
+
+    The waiting message showed nothing of the run's text, yet the finding is the reply's answer, not a report of nothing.
+    """
+    whole = [
+        UsageReported(MessageMetrics()),
+        TurnCompleted(message=Message(role="assistant", content="Disk full."), stop_reason="end"),
+    ]
+    turn = await _turn(
+        tmp_path,
+        monkeypatch,
+        streaming=False,
+        show_tool_calls=False,
+        tools=[_ECHO_TOOL],
+        scripts={"default": [calls(tool_call("echo", "call-1", text="hi")), whole]},
+    )
+
+    await _respond_auto_approved(turn, _silent_schedule(_plain_request(_target())))
+
+    assert (await turn.reply()).state is rl.ReplyState.COMPLETED
+    assert turn.homeserver.bodies[-1] == "Disk full."
+
+
+@pytest.mark.usefixtures("echo_tool")
+@pytest.mark.parametrize("silent", [True, False], ids=["silent-schedule", "message"])
+async def test_a_resumed_answer_a_hook_suppresses_fails_its_approval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    silent: bool,
+) -> None:
+    """Pins a resumed answer a ``message:before_response`` hook suppresses: the approval fails with its note."""
+    turn = await _turn(
+        tmp_path,
+        monkeypatch,
+        streaming=False,
+        tools=[_ECHO_TOOL],
+        scripts={"default": [calls(tool_call("echo", "call-1", text="hi")), answer("A finding.")]},
+    )
+    turn.hooks.suppress = True
+    request = _plain_request(_target())
+
+    await _respond_auto_approved(turn, _silent_schedule(request) if silent else request)
+
+    assert (await turn.reply()).state is rl.ReplyState.FAILED
+    assert turn.homeserver.bodies[-1].endswith("Tool approval continuation failed safely.")
+
+
+@pytest.mark.usefixtures("echo_tool")
+async def test_a_silent_schedule_s_resumed_report_is_shown_whole(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pins a silent schedule whose approved run reports a finding while its requester is online: no live progress."""
+    turn = await _turn(
+        tmp_path,
+        monkeypatch,
+        streaming=True,
+        tools=[_ECHO_TOOL],
+        scripts={"default": [calls(tool_call("echo", "call-1", text="hi")), answer("A finding.")]},
+    )
+
+    await _respond_auto_approved(turn, _silent_schedule(_plain_request(_target())))
+
+    assert (await turn.reply()).state is rl.ReplyState.COMPLETED
+    assert turn.homeserver.statuses == ["pending", "completed"]
+    assert turn.homeserver.bodies[-1].endswith("A finding.")
 
 
 async def test_a_run_whose_reply_a_hook_suppressed_still_counts_as_succeeded(
@@ -1068,11 +1546,12 @@ async def test_a_process_shutdown_mid_stream_leaves_the_reply_for_replay(
     assert turn.hooks.fired == []
     runs = turn.agent_runs()
     assert not any(is_interrupted_replay_run(run) for run in runs)
-    # CHARACTERIZATION: current behavior; the agent loop still stores its own cancelled run, holding only the prompt.
+    # CHARACTERIZATION: current behavior; the agent loop still stores its own cancelled run, holding the prompt and
+    # the message without content that stands for the response the shutdown cut off.
     [run] = runs
     assert run.status is RunStatus.cancelled
     assert run.content is None
-    assert _messages(run) == [("user", _MODEL_PROMPT)]
+    assert _messages(run) == [("user", _MODEL_PROMPT), ("assistant", None)]
     assert await turn.pending()
 
 
@@ -1284,8 +1763,9 @@ async def test_a_pause_whose_progress_edit_fails_ends_the_reply_without_an_inter
         tools=[_ECHO_TOOL],
         scripts={"default": [calls(tool_call("echo", "call-1", text="hi"), content="Before approval")]},
     )
-    # The edit that would show the paused tool call is the one the homeserver refuses.
-    turn.homeserver.fail_text = "🔧 `echo` [1]"
+    # The homeserver refuses every progress edit that would show the paused tool call, the pause's own flush included:
+    # one refused progress edit alone is resent by the next, so only a flush that cannot land fails the pause.
+    turn.homeserver.refuse_streaming_text = "🔧 `echo` [1]"
     _require_echo_approval(turn)
     try:
         await turn.runner.generate_response(_plain_request(_target()))

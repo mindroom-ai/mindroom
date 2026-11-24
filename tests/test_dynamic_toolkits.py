@@ -33,7 +33,7 @@ from mindroom.llm.messages import system_text
 from mindroom.llm.provider import ToolSpec
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.providers.gemini import wire as gemini_wire
-from mindroom.tool_system.agent_tools import resolve_agent_tools, room_turn_offers, turn_room_flags
+from mindroom.tool_system.agent_tools import resolve_agent_tools, room_turn_offers, turn_keeps_room_tools
 from mindroom.tool_system.agno_toolkits import adapt_toolkit, offered_refusal
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, defer_toolkit
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
@@ -62,6 +62,8 @@ def _runtime_paths(tmp_path: Path, **env: str) -> RuntimePaths:
         process_env={
             "MATRIX_HOMESERVER": "http://localhost:8008",
             "MINDROOM_NAMESPACE": "",
+            # Agent Keys is off unless a test sets the broker port.
+            "MINDROOM_EGRESS_BROKER_PORT": "off",
             **env,
         },
     )
@@ -155,10 +157,8 @@ def test_openai_compatible_context_hides_desktop(tmp_path: Path) -> None:
     raw["agents"]["code"]["tools"] = ["calculator", "desktop"]  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
-    room_tools, matrix_room_tools = turn_room_flags(identity)
     candidates = resolve_agent_tools(config, "code", builtin_tool_registry()).candidates(
-        room_tools=room_tools,
-        matrix_room_tools=matrix_room_tools,
+        room_tools=turn_keeps_room_tools(identity),
     )
 
     assert [entry.name for entry in candidates] == ["calculator"]
@@ -204,14 +204,14 @@ def test_config_accepts_inline_deferred_tool_flags(tmp_path: Path) -> None:
     entries = config.agents["code"].tools
     assert [(entry.name, entry.defer, entry.initial) for entry in entries] == [
         ("shell", False, False),
-        ("file", True, True),
+        ("filesystem", True, True),
         ("searxng", True, False),
     ]
     assert entries[1].overrides == {"enable_delete_file": True}
     assert entries[2].overrides == {"fixed_max_results": 10}
     assert config.authored_model_dump()["agents"]["code"]["tools"] == [
         "shell",
-        {"file": {"enable_delete_file": True, "defer": True, "initial": True}},
+        {"filesystem": {"enable_delete_file": True, "defer": True, "initial": True}},
         {"searxng": {"fixed_max_results": 10, "defer": True}},
     ]
 
@@ -253,6 +253,21 @@ def _only_validation_error(raw: dict[str, object]) -> tuple[tuple[str | int, ...
         Config.model_validate(raw)
     [error] = exc_info.value.errors()
     return tuple(error["loc"]), error["msg"]
+
+
+@pytest.mark.parametrize("tool_name", ["triggers", "external_trigger_manager"])
+@pytest.mark.parametrize("flags", [{"defer": True}, {"defer": True, "initial": True}])
+def test_config_allows_deferred_triggers_and_alias(tool_name: str, flags: dict[str, bool]) -> None:
+    """Opt-in triggers toolkit and its external_trigger_manager alias support deferral."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{tool_name: flags}]  # type: ignore[index]
+
+    config = Config.model_validate(raw)
+    entries = config.agents["code"].tools
+    assert len(entries) == 1
+    assert entries[0].name == "triggers"
+    assert entries[0].defer is True
+    assert entries[0].initial is flags.get("initial", False)
 
 
 @pytest.mark.parametrize("tool_name", sorted(_DEFER_PROHIBITED_CONTROL_TOOLS))
@@ -359,7 +374,7 @@ def test_eager_preset_expansion_preserves_default_concrete_tool_overrides(tmp_pa
     overrides_by_name = {entry.name: entry.tool_config_overrides for entry in runtime_configs}
 
     assert overrides_by_name["shell"] == {"shell_path_prepend": "/run/wrappers/bin"}
-    assert overrides_by_name["coding"] == {}
+    assert overrides_by_name["filesystem"] == {}
 
 
 def test_attached_deferred_concrete_tool_preserves_override_over_preset_child(tmp_path: Path) -> None:
@@ -627,7 +642,7 @@ async def test_native_tool_search_keeps_unconfigured_desktop_safe(tmp_path: Path
 
 
 def _egress_broker_env(*, broker_on: bool) -> dict[str, str]:
-    return {"MINDROOM_EGRESS_BROKER_PORT": "8768"} if broker_on else {}
+    return {"MINDROOM_EGRESS_BROKER_PORT": "8768" if broker_on else "off"}
 
 
 @pytest.mark.asyncio
@@ -1252,6 +1267,50 @@ def test_chat_ui_names_the_canvas_library_source_only_for_an_agent_with_canvases
     assert ("https://cdn.jsdelivr.net/npm/" in prompt) is named
 
 
+def test_chat_ui_remote_assets_replace_the_library_hint(tmp_path: Path) -> None:
+    """Remote assets include the library source, so the agent is not told that no other source works."""
+    raw = _base_config_data()
+    options = {"enable_show_canvas": True, "enable_canvas_libraries": True, "enable_canvas_remote_assets": True}
+    raw["agents"]["code"]["tools"] = [{"chat_ui": options}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    prompt = _build_prompt(_code_agent(config, tmp_path))
+
+    assert "from any https: address" in prompt
+    assert "no other source works" not in prompt
+
+
+@pytest.mark.parametrize(
+    ("options", "named"),
+    [
+        ({"enable_show_canvas": True}, False),
+        ({"enable_canvas_remote_assets": True}, False),
+        ({"enable_show_canvas": True, "enable_canvas_remote_assets": True}, True),
+        ({"enable_show_canvas": True, "enable_canvas_remote_assets": True, "exclude_tools": ["show_canvas"]}, False),
+    ],
+)
+def test_chat_ui_names_remote_assets_only_for_an_agent_with_canvases(
+    tmp_path: Path,
+    options: dict[str, object],
+    named: bool,
+) -> None:
+    """Remote asset guidance needs both the deployment opt-in and an offered show_canvas."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{"chat_ui": options}]  # type: ignore[index]
+    config = _validated_config(tmp_path, raw)
+
+    agent = _code_agent(config, tmp_path)
+    prompt = _build_prompt(agent)
+
+    hint = (
+        "Canvas pages may load images, styles, fonts, media and scripts from any https: address, "
+        "so a preview can use the real assets of the site it shows. "
+        "Fetching data, workers and nested frames stay blocked."
+    )
+    assert (hint in prompt) is named
+    assert ("from any https: address" in prompt) is named
+
+
 def test_excluding_a_disabled_chat_ui_function_keeps_the_toolkit(tmp_path: Path) -> None:
     """An operator may exclude show_canvas defensively; that must not drop the other chat_ui functions."""
     raw = _base_config_data()
@@ -1813,7 +1872,7 @@ async def test_config_order_decides_which_same_named_function_is_registered(
     """Agno registers the first toolkit's function for a name; deferral follows that owner and search offers only it."""
     raw = _base_config_data()
     raw["models"]["default"] = {"provider": provider, "id": model_id}  # type: ignore[index]
-    tools: list[object] = ["file", {"coding": {"defer": True}}]
+    tools: list[object] = ["filesystem", {"python": {"defer": True}}]
     raw["agents"]["code"]["tools"] = tools[::-1] if deferred_first else tools  # type: ignore[index]
     config = _validated_config(tmp_path, raw)
 
@@ -1823,7 +1882,7 @@ async def test_config_order_decides_which_same_named_function_is_registered(
     if "tool_search" in _function_names(agent):
         matches = (await _search(agent, "read_file"))["matches"]
         offered = [match["toolkit"] for match in matches if match["name"] == "read_file"]
-        assert offered == (["coding"] if deferred_first else [])
+        assert offered == (["python"] if deferred_first else [])
 
 
 def test_explicit_dynamic_tools_entry_is_ignored_where_call_tool_cannot_be_rewritten(tmp_path: Path) -> None:

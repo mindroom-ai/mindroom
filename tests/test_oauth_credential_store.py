@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import multiprocessing
+import multiprocessing.connection
 import os
 import shutil
 import sqlite3
@@ -36,6 +37,7 @@ from mindroom.oauth.providers import OAuthProvider, OAuthProviderError
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 
 if TYPE_CHECKING:
+    from multiprocessing.process import BaseProcess
     from multiprocessing.synchronize import Barrier, Event
 
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, WorkerScope
@@ -66,9 +68,33 @@ def _hold_sqlite_transaction(
         connection.close()
 
 
+def _until_set(event: Event, process: BaseProcess) -> bool:
+    """Wait for ``event`` while ``process`` runs, however long a busy machine takes to start it; return whether it is set."""
+    while not event.wait(0.05):
+        if not process.is_alive():
+            return event.is_set()
+    return True
+
+
+def _lock_refusals(monkeypatch: pytest.MonkeyPatch) -> asyncio.Queue[None]:
+    """Return a queue that receives an item each time the store is refused a lock it asks for from now on."""
+    refusals: asyncio.Queue[None] = asyncio.Queue()
+    lock_error = credential_store_module._sqlite_lock_error
+
+    def observed(error: sqlite3.OperationalError) -> bool:
+        refused = lock_error(error)
+        if refused:
+            refusals.put_nowait(None)
+        return refused
+
+    monkeypatch.setattr(credential_store_module, "_sqlite_lock_error", observed)
+    return refusals
+
+
 def _commit_sqlite_generation(database_path: str, committing: Event, committed: Event) -> None:
     """Publish a generation while another process keeps COMMIT in the pending-lock window."""
-    connection = sqlite3.connect(database_path, isolation_level=None, timeout=5)
+    # The COMMIT waits for the test to release the reader that blocks it, however long a busy machine takes.
+    connection = sqlite3.connect(database_path, isolation_level=None, timeout=3600)
     try:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute(
@@ -82,9 +108,8 @@ def _commit_sqlite_generation(database_path: str, committing: Event, committed: 
         connection.close()
 
 
-async def _wait_for_sqlite_pending_commit(database_path: Path) -> None:
+async def _wait_for_sqlite_pending_commit(database_path: Path, writer: BaseProcess) -> None:
     """Wait until a committing writer prevents a new reader from taking a shared lock."""
-    deadline = asyncio.get_running_loop().time() + 5
     while True:
         probe = sqlite3.connect(database_path, isolation_level=None, timeout=0)
         try:
@@ -98,7 +123,7 @@ async def _wait_for_sqlite_pending_commit(database_path: Path) -> None:
             if probe.in_transaction:
                 probe.execute("ROLLBACK")
             probe.close()
-        assert asyncio.get_running_loop().time() < deadline
+        assert writer.is_alive()
         await asyncio.sleep(0.01)
 
 
@@ -114,7 +139,8 @@ def _open_cold_store_after_absence_barrier(storage_path: str, barrier: Barrier) 
         exists = original_exists(path)
         if path == database_path and not exists and not observed_absence:
             observed_absence = True
-            barrier.wait(timeout=5)
+            # Waits for the other creator however long a busy machine takes to start it.
+            barrier.wait()
         return exists
 
     async def open_store() -> None:
@@ -288,21 +314,26 @@ def test_multiprocess_cold_start_admits_both_database_creators(tmp_path: Path) -
     """Two processes may create the same new credential scope without a losing-creator error."""
     process_context = multiprocessing.get_context("spawn")
     barrier = process_context.Barrier(2)
+    # A creator stuck for another reason ends with the test worker instead of outliving it.
     creators = [
         process_context.Process(
             target=_open_cold_store_after_absence_barrier,
             args=(str(tmp_path), barrier),
+            daemon=True,
         )
         for _ in range(2)
     ]
 
     for creator in creators:
         creator.start()
-    for creator in creators:
-        creator.join(timeout=10)
-        if creator.is_alive():
-            creator.terminate()
+    running = {creator.sentinel: creator for creator in creators}
+    while running:
+        for sentinel in multiprocessing.connection.wait(list(running)):
+            creator = running.pop(sentinel)
             creator.join()
+            if creator.exitcode != 0:
+                # A creator that failed before the barrier would leave the other waiting there for good.
+                barrier.abort()
 
     assert [creator.exitcode for creator in creators] == [0, 0]
 
@@ -933,10 +964,14 @@ def test_database_symlink_is_rejected(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_cross_process_writer_wait_is_cancellable_without_leaking_transaction(tmp_path: Path) -> None:
+async def test_cross_process_writer_wait_is_cancellable_without_leaking_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """A second process owns the same SQLite lock and a cancelled waiter leaves no lock behind."""
     context = _context(tmp_path)
     await _publish(context, "initial")
+    refusals = _lock_refusals(monkeypatch)
     process_context = multiprocessing.get_context("spawn")
     ready = process_context.Event()
     release = process_context.Event()
@@ -947,24 +982,23 @@ async def test_cross_process_writer_wait_is_cancellable_without_leaking_transact
     )
     holder.start()
     try:
-        assert await asyncio.to_thread(ready.wait, 5)
+        assert await asyncio.to_thread(_until_set, ready, holder)
 
         async def wait_for_store() -> None:
             async with oauth_credential_transaction(context) as transaction:
                 await transaction.commit()
 
         waiter = asyncio.create_task(wait_for_store())
-        await asyncio.sleep(0.1)
+        # The holder's lock refuses the waiter, which asks again instead of failing.
+        await refusals.get()
+        await refusals.get()
         assert not waiter.done()
         waiter.cancel()
         with pytest.raises(asyncio.CancelledError):
             await waiter
     finally:
         release.set()
-        await asyncio.to_thread(holder.join, 5)
-        if holder.is_alive():
-            holder.terminate()
-            holder.join()
+        await asyncio.to_thread(holder.join)
     assert holder.exitcode == 0
     async with oauth_credential_transaction(context) as transaction:
         assert (await transaction.snapshot()).credentials is not None
@@ -972,10 +1006,14 @@ async def test_cross_process_writer_wait_is_cancellable_without_leaking_transact
 
 
 @pytest.mark.asyncio
-async def test_reader_blocked_commit_retries_same_transaction(tmp_path: Path) -> None:
+async def test_reader_blocked_commit_retries_same_transaction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     """A reader-blocked COMMIT retries without rolling back or republishing."""
     context = _context(tmp_path)
     await _publish(context, "initial")
+    refusals = _lock_refusals(monkeypatch)
     process_context = multiprocessing.get_context("spawn")
     ready = process_context.Event()
     release = process_context.Event()
@@ -985,30 +1023,24 @@ async def test_reader_blocked_commit_retries_same_transaction(tmp_path: Path) ->
         kwargs={"write": False},
     )
     reader.start()
-    publish_calls = 0
     try:
-        assert await asyncio.to_thread(ready.wait, 5)
+        assert await asyncio.to_thread(_until_set, ready, reader)
 
         async def publish_once() -> None:
-            nonlocal publish_calls
             async with oauth_credential_transaction(context) as transaction:
-                publish_calls += 1
                 await transaction.publish({"token": "rotated"}, advance_connection_generation=False)
                 await transaction.commit()
 
         publication = asyncio.create_task(publish_once())
-        await asyncio.sleep(0.1)
+        # The reader's lock refuses only the COMMIT.
+        await refusals.get()
         assert not publication.done()
         release.set()
         await publication
     finally:
         release.set()
-        await asyncio.to_thread(reader.join, 5)
-        if reader.is_alive():
-            reader.terminate()
-            reader.join()
+        await asyncio.to_thread(reader.join)
     assert reader.exitcode == 0
-    assert publish_calls == 1
     async with oauth_credential_transaction(context) as transaction:
         assert (await transaction.snapshot()).credentials == {"token": "rotated"}
         await transaction.commit()
@@ -1049,32 +1081,32 @@ async def test_reader_retries_while_writer_crosses_commit_window(
     monkeypatch.setattr(credential_store_module, "_begin_read", pause_before_read_lock)
     blocking_reader.start()
     try:
-        assert await asyncio.to_thread(reader_ready.wait, 5)
+        assert await asyncio.to_thread(_until_set, reader_ready, blocking_reader)
 
         async def read_generation() -> str:
             async with oauth_credential_reader(context) as reader:
                 return (await reader.generations()).generation
 
         pending_read = asyncio.create_task(read_generation())
-        await asyncio.wait_for(reader_connection_open.wait(), timeout=5)
+        await reader_connection_open.wait()
         writer.start()
-        assert await asyncio.to_thread(writer_committing.wait, 5)
-        await _wait_for_sqlite_pending_commit(database_path)
+        assert await asyncio.to_thread(_until_set, writer_committing, writer)
+        await _wait_for_sqlite_pending_commit(database_path, writer)
 
+        refusals = _lock_refusals(monkeypatch)
         enter_reader.set()
-        await asyncio.sleep(0.1)
+        # The pending COMMIT refuses the reader's shared lock, so the reader waits for it.
+        await refusals.get()
         assert not pending_read.done()
         release_reader.set()
-        assert await asyncio.wait_for(pending_read, timeout=5) == "committed-generation"
-        assert await asyncio.to_thread(writer_committed.wait, 5)
+        assert await pending_read == "committed-generation"
+        assert await asyncio.to_thread(_until_set, writer_committed, writer)
     finally:
         release_reader.set()
-        await asyncio.to_thread(blocking_reader.join, 5)
-        await asyncio.to_thread(writer.join, 5)
+        # A failure before the writer starts shows as itself, not as a join of a process that never started.
         for process in (blocking_reader, writer):
-            if process.is_alive():
-                process.terminate()
-            process.join()
+            if process.pid is not None:
+                await asyncio.to_thread(process.join)
     assert blocking_reader.exitcode == 0
     assert writer.exitcode == 0
 

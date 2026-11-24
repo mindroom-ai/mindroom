@@ -5,9 +5,8 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-from mindroom.authorization import is_platform_administrator
 from mindroom.custom_tools.tool_payloads import custom_tool_payload
-from mindroom.requester_identity import resolve_human_requester_alias
+from mindroom.requester_identity import is_platform_administrator, resolve_human_requester_alias
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,

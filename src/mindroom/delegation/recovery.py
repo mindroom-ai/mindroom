@@ -7,8 +7,9 @@ from functools import partial
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.delegation.background import delegation_child
+from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost
 from mindroom.delegation.hooks import after_delegation
-from mindroom.delegation.lifecycle import finish_child_turn, settle_child_response
+from mindroom.delegation.lifecycle import child_own_usage, finish_child_turn, price_child, settle_child_response
 from mindroom.delegation.sessions import (
     SUBAGENT_BUSY,
     SubagentSessionError,
@@ -18,13 +19,16 @@ from mindroom.delegation.sessions import (
 )
 from mindroom.delegation.state import (
     DELEGATION_STATE_KEY,
+    RESTART_INTERRUPTION_REASON,
     TERMINAL_CHILD_STATUSES,
     DelegationChild,
     DelegationState,
     child_execution_identity,
     child_scope,
+    interrupted_by_restart,
 )
 from mindroom.delegation.storage import delegation_storage_config
+from mindroom.history.run_checkpoint import is_recovered_run, recover_interrupted_run
 from mindroom.history.session_context import create_scope_session_storage
 from mindroom.history.storage import new_scope_session
 from mindroom.history.types import HistoryScope
@@ -41,8 +45,6 @@ if TYPE_CHECKING:
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-_RESTART_INTERRUPTION_REASON = "Subagent turn was interrupted by a restart. Send a follow-up to continue its history."
-
 
 async def load_settled_subagent(
     subagent_id: str,
@@ -52,10 +54,27 @@ async def load_settled_subagent(
     runtime_paths: RuntimePaths,
     depth: int,
 ) -> DelegationChild:
-    """Load a scoped handle, first settling an abandoned attempt under its recovery lock, so this writes state.
+    """Load a scoped handle for a follow-up, settled as `settled_subagent` settles it.
 
     A handle whose current turn's job has not ended yet is refused as busy.
     """
+    child = await settled_subagent(subagent_id, owner=owner, config=config, runtime_paths=runtime_paths, depth=depth)
+    if _job_still_runs(child, runtime_paths):
+        # A settled child's job still delivers its answer, or continues the turn a restart stopped; until that job
+        # ends, the subagent is its.
+        raise SubagentSessionError(SUBAGENT_BUSY)
+    return child
+
+
+async def settled_subagent(
+    subagent_id: str,
+    *,
+    owner: ToolExecutionIdentity,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    depth: int,
+) -> DelegationChild:
+    """Load a scoped handle, first settling an abandoned attempt under its recovery lock, so this writes state."""
     load = partial(load_subagent, subagent_id, owner=owner, config=config, runtime_paths=runtime_paths, depth=depth)
     child = await load()
     if child.status == "running":
@@ -64,19 +83,20 @@ async def load_settled_subagent(
                 child = await load()
                 if child.status == "running":
                     await _recover_subagent_turn(child, config=config, runtime_paths=runtime_paths)
-    if _job_still_runs(child, runtime_paths):
-        # A settled child's job still delivers its answer; until that job ends, the handle keeps naming its turn.
-        raise SubagentSessionError(SUBAGENT_BUSY)
     return child
 
 
 def _job_still_runs(child: DelegationChild, runtime_paths: RuntimePaths) -> bool:
-    """Return whether a subagent job this process runs for the child's turn has not ended yet."""
+    """Return whether a subagent job of this process holds the child's subagent and has not ended yet.
+
+    The job is matched by the subagent, not by the turn: a job that continues after a restart names its next turn
+    before the handle does.
+    """
     runtime = get_background_runtime(runtime_paths)
     return runtime is not None and any(
         job.kind == "delegation"
         and job.status not in TERMINAL_STATUSES
-        and delegation_child(job).delegation_id == child.delegation_id
+        and delegation_child(job).subagent_id == child.subagent_id
         for job in runtime.retained_jobs()
     )
 
@@ -115,6 +135,15 @@ async def read_child_run(
     return response
 
 
+async def paused_for_approval(child: DelegationChild, config: Config, paths: RuntimePaths) -> RunRecord | None:
+    """Return the run of ``child``'s current turn when it is paused on calls that wait for an approval, and on no other."""
+    turn = await load_retained_subagent_turn(child, paths) or child
+    run = await read_child_run(turn, config, paths)
+    waits = [tool for tool in (run.tools or ()) if tool.is_paused] if run is not None else []
+    paused = run is not None and run.status == RunStatus.paused and bool(waits)
+    return run if paused and not any(tool.external_execution_required for tool in waits) else None
+
+
 async def _recover_subagent_turn(child: DelegationChild, *, config: Config, runtime_paths: RuntimePaths) -> None:
     """Reconcile an abandoned running claim while its exclusive liveness lock is held."""
     response = await read_child_run(child, config, runtime_paths)
@@ -125,7 +154,7 @@ async def _recover_subagent_turn(child: DelegationChild, *, config: Config, runt
         child,
         config=config,
         runtime_paths=runtime_paths,
-        reason=_RESTART_INTERRUPTION_REASON,
+        reason=RESTART_INTERRUPTION_REASON,
         status="failed",
     )
 
@@ -137,15 +166,27 @@ async def interrupt_stopped_child(
     runtime_paths: RuntimePaths,
     cancel_reason: str = "Delegation cancelled.",
 ) -> None:
-    """Settle a child its job stopped: a shutdown or restart interrupts it as crash recovery does, else it is cancelled."""
+    """Settle a child its job stopped: a shutdown or restart interrupts it as crash recovery does, else it is cancelled.
+
+    A job cancelled while it waited to continue a turn a restart had already settled ends cancelled too: its handle
+    keeps that turn as the restart left it, for a follow-up to continue. A shutdown or restart leaves the paused turn
+    of a workflow run's agent as it is (`paused_for_approval`).
+    """
     shutdown = job_stopped_by_shutdown()
+    if shutdown and child.workflow_run_id is not None and await paused_for_approval(child, config, runtime_paths):
+        # The agent of a workflow run's call that waited for a person keeps its paused turn, which never ran the
+        # calls it asked about: the next start resumes it with the decisions its cards hold by then.
+        child.status = "paused"
+        return
     await interrupt_child(
         child,
         config=config,
         runtime_paths=runtime_paths,
-        reason=_RESTART_INTERRUPTION_REASON if shutdown else cancel_reason,
+        reason=RESTART_INTERRUPTION_REASON if shutdown else cancel_reason,
         status="failed" if shutdown else "cancelled",
     )
+    if not shutdown and interrupted_by_restart(child):
+        child.status, child.result = "cancelled", cancel_reason
 
 
 async def interrupt_child(
@@ -161,6 +202,9 @@ async def interrupt_child(
     if retained is not None:
         child.run_id = retained.run_id
         child.model_name = retained.model_name
+        # What the saved turn cost so far stands too; a settlement below adds only what it settles.
+        child.cost_usd, child.subagents_cost_usd = retained.cost_usd, retained.subagents_cost_usd
+        child.subagents_cost_unknown = retained.subagents_cost_unknown
         if retained.status in TERMINAL_CHILD_STATUSES:
             # A settlement saved before a crash stands; only finish projecting it.
             child.status, child.result = retained.status, retained.result
@@ -168,27 +212,38 @@ async def interrupt_child(
             return
     config = delegation_storage_config(config, child.storage_bindings)
     response = await read_child_run(child, config, runtime_paths)
-    if response is not None and response.status == RunStatus.completed:
+    # A run recovery already finished did not complete: only its handle is left to settle.
+    recovered = response is not None and is_recovered_run(response)
+    if response is not None and response.status == RunStatus.completed and not recovered:
         await settle_child_response(child, response, config=config, runtime_paths=runtime_paths)
         return
-    if response is not None:
+    if response is not None and not recovered:
         await _cancel_delegations(response, config=config, runtime_paths=runtime_paths, reason=reason)
-        # The run keeps what the child wrote; why it stopped is its error, which is what it hands over.
-        response.status = RunStatus.cancelled if status == "cancelled" else RunStatus.error
-        response.error = reason
-        for tool in response.tools or ():
-            if tool.is_paused:
-                tool.result = reason
-                tool.is_error = True
-            tool.requires_confirmation = False
-            tool.external_execution_required = False
 
         def persist(storage: ConversationStore) -> None:
-            # The run exists; this rewrites its row without touching the usage ledger, through a stand-in session.
+            # The run exists; this rewrites its row through a stand-in session.
             stand_in = new_scope_session(session_id=child.session_id, scope=child_scope(child))
+            # A run a restart or a stop cut short keeps its work as a turn the child's follow-ups replay.
+            if recover_interrupted_run(storage, stand_in, response):
+                return
+            # Any other run keeps what the child wrote without replaying; why it stopped is its error, which is what
+            # it hands over, and the usage ledger stays as it is.
+            response.status = RunStatus.cancelled if status == "cancelled" else RunStatus.error
+            response.error = reason
+            for tool in response.tools or ():
+                if tool.is_paused:
+                    tool.result = reason
+                    tool.is_error = True
+                tool.requires_confirmation = False
+                tool.external_execution_required = False
             storage.save_run(stand_in, response, record_usage=False)
 
-        await run_session_storage_operation(partial(_child_storage, child, config, runtime_paths), persist)
+        # The save runs in the parent's context; the child's run keeps its own stored cost, not the parent's.
+        with receiving_subagent_cost(SubagentCost()):
+            await run_session_storage_operation(partial(_child_storage, child, config, runtime_paths), persist)
+    if response is not None:
+        # What the cut-short turn spent stands as its cost, which the turn that receives its job's result adds.
+        price_child(child, response, child_own_usage(response, config)[1])
     await finish_child_turn(child, config=config, runtime_paths=runtime_paths, status=status, reason=reason)
 
 

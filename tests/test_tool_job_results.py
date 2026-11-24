@@ -6,6 +6,7 @@ import io
 import json
 import math
 import os
+from dataclasses import asdict
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -41,7 +42,11 @@ def test_payload_round_trips_every_field_with_exact_types() -> None:
     """Rich values, structured values, state changes, and the error survive persistence unchanged."""
     payload = ToolResultPayload(
         value=[
-            ToolValue(content="picture", images=(Image(content=b"\x00\xff"),), files=(File(url="https://f.test/a"),)),
+            ToolValue(
+                content="picture",
+                images=(Image(content=b"\x00\xff", metadata={"source": {"pages": [2, 3]}}),),
+                files=(File(url="https://f.test/a"),),
+            ),
             {"structured_content": {"a": 1}, "pairs": [(1, "two"), ([], (3,))]},
         ],
         state_delta={"counter": {"before_present": True, "before": 1, "present": True, "value": 2}},
@@ -99,6 +104,46 @@ def test_payload_keeps_other_values_as_the_text_the_model_reads() -> None:
     payload = ToolResultPayload(value={"created": created, "amount": Decimal("1.50"), "ratio": math.nan, "ids": by_id})
 
     assert _saved(payload).value == {"created": str(created), "amount": "1.50", "ratio": "nan", "ids": str(by_id)}
+
+
+@pytest.mark.parametrize("kind", ["dict", "list", "metadata", "medium"])
+def test_payload_refuses_a_value_inside_itself_and_says_so(kind: str) -> None:
+    """A value that holds itself, also through a medium's metadata, is refused with that reason, not a recursion limit."""
+    cycle: object
+    if kind == "dict":
+        mapping: dict[str, object] = {}
+        mapping["self"] = mapping
+        cycle = mapping
+    elif kind == "list":
+        items: list[object] = []
+        items.append(items)
+        cycle = items
+    else:
+        metadata: dict[str, object] = {}
+        image = Image(content=b"chart", metadata=metadata)
+        metadata["self"] = image if kind == "medium" else [metadata]
+        cycle = ToolValue(content="chart", images=(image,))
+
+    with pytest.raises(ValueError, match=r"^it refers to itself$"):
+        encode_result_payload(ToolResultPayload(value=[{"events": (cycle,)}]))
+
+
+def test_payload_keeps_a_medium_inside_media_metadata_as_its_fields(tmp_path: Path) -> None:
+    """A medium inside another one's metadata saves as its fields, so a file it names is neither read nor needed."""
+    thumbnail = Image(filepath=str(tmp_path / "gone.png"))
+    image = Image(content=b"chart", metadata={"thumbnail": thumbnail})
+
+    saved = _saved(ToolResultPayload(value=ToolValue(content="chart", images=(image,))))
+
+    assert saved.value.images[0].metadata == {"thumbnail": asdict(thumbnail)}
+
+
+def test_payload_saves_an_item_held_in_several_places_in_each() -> None:
+    """Only a value inside itself is refused: an item that several places hold saves in each of them."""
+    shared = {"tags": ["a"]}
+    payload = ToolResultPayload(value={"first": shared, "second": [shared, {"again": shared}]})
+
+    assert _saved(payload) == payload
 
 
 def test_payload_captures_a_local_artifact_before_cleanup(tmp_path: Path) -> None:

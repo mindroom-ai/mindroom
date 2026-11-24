@@ -45,7 +45,7 @@ agents:
   assistant:
     display_name: Assistant
     role: A helpful assistant with direct file access to source docs
-    tools: [file, shell]
+    tools: [filesystem, shell]
     knowledge_bases: [source_docs]
 ```
 
@@ -79,6 +79,7 @@ knowledge_bases:
 | `chunk_size` | int | `5000` | Maximum characters per chunk for plain-text and Markdown files (minimum `128`); other formats such as JSON and PDF use their reader's own chunking; semantic mode only |
 | `chunk_overlap` | int | `0` | Overlap characters between adjacent plain-text and Markdown chunks; must be smaller than `chunk_size`; semantic mode only |
 | `chunk_context_model` | string | `null` | Model (a key under `models`) that writes a short context for each chunk of a multi-chunk file before it is indexed; see [Contextual Chunk Headers](#contextual-chunk-headers); semantic mode only |
+| `chunk_strategy` | `fixed` or `memory_entries` | `fixed` | `fixed` splits plain-text and Markdown files every `chunk_size` characters; `memory_entries` makes each memory entry (a `- [id=...]` line) or Markdown section up to `###` its own chunk of at most `chunk_size` characters, as semantic file memory does at 1,200; semantic mode only |
 | `include_patterns` | list | `[]` | Root-anchored glob patterns a file must match to be included |
 | `exclude_patterns` | list | `[]` | Root-anchored glob patterns removed after include filtering |
 | `include_extensions` | list | `null` | Exact set of extensions to index instead of the default text-like set (semantic mode only) |
@@ -88,6 +89,7 @@ knowledge_bases:
 | `git` | object | `null` | Sync the folder from a Git repository; see [Git-Backed Knowledge Bases](#git-backed-knowledge-bases) |
 
 Set `skip_hidden: false` if the folder intentionally contains dot-prefixed files that should be indexed.
+A file is left out of the base and its file listing when its name, or the name of a folder above it, is not valid UTF-8; rename it to include it.
 Use a smaller `chunk_size` when your embedding server has lower token or batch limits; a chunk too long for the embedding model fails the file that holds it, and with it the refresh, for example with `embedder request failed (HTTP 400)` from OpenAI, or `(HTTP 500)` from a llama.cpp server whose physical batch size is smaller than the chunk.
 
 ### Keeping Indexes Fresh
@@ -95,11 +97,14 @@ Use a smaller `chunk_size` when your embedding server has lower token or batch l
 Chat never waits for indexing or Git sync.
 Agents search the last successfully published index, and a missing, stale, or failed base schedules a background refresh while the current request continues.
 A successful refresh replaces the published index; a failed refresh keeps the previous one and shows the error in the base's status.
+On Linux, `watch: true` watches at most 2,000 folders of a base, and changes in folders past that cap are picked up when an agent searches the base, at most every five minutes.
+Folders such as `.git` and `node_modules` do not count toward the cap, since changes in them never start a refresh.
+A folder holding a file or folder name that is not valid UTF-8 may not be watched either; MindRoom logs a warning naming that folder, and changes in it are picked up when an agent searches the base.
 
 A refresh reuses the stored vectors of unchanged files and only embeds files that were added or edited.
 A semantic base keeps the index it last replaced on disk beside the live one, so the next refresh rewrites only the files that changed instead of copying the whole index; between refreshes the base therefore stores two indexes.
 Rewriting leaves free space inside an index file, which later writes reuse; once a quarter of a kept index is free space, for example after many files were deleted, the next refresh copies the live index instead, so neither file stays much larger than its contents.
-Changing `chunk_size`, `chunk_overlap`, `chunk_context_model`, the embedder, or any file filter re-embeds the whole base on the next refresh.
+Changing `chunk_size`, `chunk_overlap`, `chunk_context_model`, `chunk_strategy`, the embedder, or any file filter re-embeds the whole base on the next refresh.
 An explicit reindex from the dashboard or API rebuilds every vector, which is how you replace an index you no longer trust.
 A reindex requested while a refresh of the base runs starts once that refresh finishes.
 Closing the dashboard or dropping the API request does not stop a reindex once it is requested.
@@ -108,7 +113,7 @@ Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 42
 A batch of chunks larger than the account's tokens-per-minute limit is embedded again one chunk per request.
 
 Knowledge base configuration hot-reloads.
-After a `chunk_size`, `chunk_overlap`, or `chunk_context_model` change, agents keep searching the previous index until the rebuild succeeds.
+After a `chunk_size`, `chunk_overlap`, `chunk_context_model`, or `chunk_strategy` change, agents keep searching the previous index until the rebuild succeeds.
 After a change to `path`, `mode`, the embedder, the Git source, or any file filter, the base is not searchable until its new index is built.
 
 ### Folders Written by Another Host
@@ -248,22 +253,25 @@ A base whose folder sandboxed workers can write, or that contains such a folder,
 ### Reranking
 
 A reranker reads the query together with each candidate chunk and reorders them.
-A strong reranker improves on the merged ranking, but a small one can make it worse: on MindRoom's own documentation with the default 5000-character chunks, the right page came first for 79% of questions without a reranker, 86% with `BAAI/bge-reranker-v2-m3`, and 92% with Vertex AI's `semantic-ranker-default@latest`, while models limited to 512 tokens, such as `cross-encoder/ms-marco-MiniLM-L6-v2` and `BAAI/bge-reranker-base`, ranked worse than no reranker.
+A strong reranker improves on the merged ranking, but a small one can make it worse: on MindRoom's own documentation with the default 5000-character chunks, the right page came first for 79% of questions without a reranker, 86% with `BAAI/bge-reranker-v2-m3` (measured before MindRoom capped its input at 1024 tokens), and 92% with Vertex AI's `semantic-ranker-default@latest`, while models limited to 512 tokens, such as `cross-encoder/ms-marco-MiniLM-L6-v2` and `BAAI/bge-reranker-base`, ranked worse than no reranker.
 Strong rerankers need a GPU or a hosted API to answer quickly: Vertex AI ranked 20 candidates in about 0.3 seconds and 400 in 0.8, while `bge-reranker-v2-m3` took about 30 seconds per search on a 32-core CPU.
 
 ```yaml
-knowledge_reranker:
-  provider: cohere                 # or sentence_transformers, vertex_ai
+reranker:
+  provider: cohere                 # or sentence_transformers, vertex_ai, typesafe, openai_decisions
   model: rerank-v3.5
 ```
 
+Earlier releases named this setting `knowledge_reranker`; that name still loads, but a config that sets both fails.
+
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `provider` | `cohere`, `sentence_transformers`, or `vertex_ai` | required | `cohere` calls a rerank API in Cohere's request format; `sentence_transformers` runs a cross-encoder such as `BAAI/bge-reranker-v2-m3` inside MindRoom, installing the `sentence-transformers` extra on first use; `vertex_ai` calls Google's Vertex AI ranking API |
-| `model` | string | required | Rerank model name, such as `semantic-ranker-default@latest` for `vertex_ai` |
+| `provider` | `cohere`, `sentence_transformers`, `vertex_ai`, `typesafe`, or `openai_decisions` | required | `cohere` calls a rerank API in Cohere's request format; `sentence_transformers` runs a cross-encoder such as `BAAI/bge-reranker-v2-m3` inside MindRoom, installing the `sentence-transformers` extra on first use; `vertex_ai` calls Google's Vertex AI ranking API; `typesafe` and `openai_decisions` ask a [judgment backend](#judgment-rerankers) |
+| `model` | string | required | Rerank model name, such as `semantic-ranker-default@latest` for `vertex_ai`; not set for `typesafe` and `openai_decisions` |
 | `url` | string | `https://api.cohere.com/v2/rerank` | Rerank endpoint for `cohere`; Jina (`https://api.jina.ai/v1/rerank`), vLLM, and Infinity accept the same format |
 | `api_key` | string | `null` | API key for `cohere` |
 | `credentials_service` | string | `cohere` | Credential service that holds the `cohere` API key when `api_key` is unset |
+| `threshold` | number from 0 to 1 | `0.5`, or `0.3` for `typesafe` and `openai_decisions` | Minimum score of a memory that per-turn recall adds with [`memory.search.rerank`](https://docs.mindroom.chat/memory/#searching-file-memory) |
 
 `vertex_ai` signs in with the credential file `GOOGLE_APPLICATION_CREDENTIALS` names, or else Google Application Default Credentials, and ranks in `GOOGLE_CLOUD_PROJECT`, or else the project those credentials name, such as the cluster's project on GKE.
 Both variables may be set in MindRoom's `.env`, as for Gemini on Vertex AI.
@@ -271,8 +279,30 @@ That project needs the `discoveryengine.googleapis.com` API, and the identity ne
 The ranking API reads the first 1024 tokens of each chunk with its default models, 512 with older ones; MindRoom sends candidates in concurrent requests of 100, the unit Google bills as one query.
 
 The reranker sees the top 20 chunks of every base one search covers and returns the best of them across bases.
-It applies to `search_knowledge_base` only; automatic memory search keeps the merged ranking, so it adds no latency to replies.
+It applies to `search_knowledge_base`, and to file-memory searches when [`memory.search.rerank`](https://docs.mindroom.chat/memory/#searching-file-memory) is on, which it is by default for `typesafe` and `openai_decisions`; with it off, automatic memory search keeps the merged ranking and adds no latency to replies.
 If the reranker fails, the search returns its results in the merged order and logs a warning.
+
+Each provider scores a chunk from 0 to 1, and a chunk missing from the response ranks last.
+`sentence_transformers` uses the score of the cross-encoder's own activation, a sigmoid for one-label models such as `BAAI/bge-reranker-v2-m3`.
+It truncates each query and chunk pair to 1024 tokens, or to the model's own limit if that is shorter, which cuts ordinary default chunks too, since most full 5,000-character chunks exceed 1024 `BAAI/bge-reranker-v2-m3` tokens.
+The cap limits how much memory one search can need, but it does not guarantee a peak.
+The order of results never depends on that scale, so an endpoint in Cohere's format that returns raw logits still reranks `search_knowledge_base`; memory recall's `threshold` needs scores from 0 to 1, and recall ignores a reranker answer with a score outside that range.
+
+#### Judgment rerankers
+
+`typesafe` (System One, with `TYPESAFE_API_KEY`) and `openai_decisions` (the OpenAI Decisions API) rerank with the [judgment backends](https://docs.mindroom.chat/configuration/threads/#judgment-backends) and take the same fields: `threshold`, `timeout_seconds` (default `1.5`), and for `openai_decisions` a `credentials_service`.
+
+```yaml
+reranker:
+  provider: openai_decisions
+```
+
+One request asks, for every candidate, whether it helps reply to the query, and a candidate's score is the probability of yes.
+The query and each candidate are sent clipped to their first and last 1,000 characters, with credential-like values redacted, and candidate text is marked as data, never instructions.
+A request holds up to 128,000 bytes, about 50 clipped candidates; the candidates after those, any the backend refuses to judge, and any redaction cannot read score 0, so they rank in their merged order behind every candidate judged above 0, and pass only a recall `threshold` of 0.
+A failed request, or a missing API key, fails reranking as described above.
+At most eight rerank requests run at once, under a limit of their own, so reranking and other judgments never wait for each other.
+Their default `threshold` is `0.3`, the value a [recall benchmark](https://docs.mindroom.chat/memory/#searching-file-memory) picked, rather than the `0.8` their other judgment uses keep.
 
 ### Contextual Chunk Headers
 
@@ -479,7 +509,7 @@ agents:
   analyst:
     display_name: Analyst
     role: Answers questions from the team's knowledge bundles
-    tools: [file]
+    tools: [filesystem]
     knowledge_bases: [acme_okf]
     skills: [open-knowledge-format]
 ```

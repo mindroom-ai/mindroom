@@ -8,6 +8,7 @@ service URL is advertised on the Matrix server name's
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 import httpx
@@ -19,6 +20,11 @@ logger = get_logger(__name__)
 
 _RTC_FOCI_WELL_KNOWN_KEY = "org.matrix.msc4143.rtc_foci"
 _LIVEKIT_SCHEMES = frozenset({"ws", "wss"})
+#: How long a discovered service URL is reused. Every call join needs it first, and reading
+#: the well-known costs a new HTTPS connection, about half a second to a distant server.
+_SERVICE_URL_MAX_AGE_S = 600.0
+#: The service URL last discovered and when, by server name and transport settings.
+_discovered_service_urls: dict[tuple[str, bool, bool], tuple[str, float]] = {}
 
 
 @dataclass(frozen=True)
@@ -58,6 +64,30 @@ async def discover_livekit_service_url(
     *,
     ssl_verify: bool = True,
     allow_private_networks: bool = False,
+    max_age_s: float = _SERVICE_URL_MAX_AGE_S,
+) -> str | None:
+    """Return the LiveKit service URL from a Matrix server name's client well-known, read at most ``max_age_s`` ago."""
+    key = (server_name, ssl_verify, allow_private_networks)
+    discovered = _discovered_service_urls.get(key)
+    if discovered is not None and time.monotonic() - discovered[1] < max_age_s:
+        return discovered[0]
+    url = await _read_livekit_service_url(
+        server_name,
+        ssl_verify=ssl_verify,
+        allow_private_networks=allow_private_networks,
+    )
+    if url is None:
+        _discovered_service_urls.pop(key, None)
+    else:
+        _discovered_service_urls[key] = (url, time.monotonic())
+    return url
+
+
+async def _read_livekit_service_url(
+    server_name: str,
+    *,
+    ssl_verify: bool,
+    allow_private_networks: bool,
 ) -> str | None:
     """Read the LiveKit service URL from a Matrix server name's client well-known."""
     well_known_url = f"https://{server_name}/.well-known/matrix/client"

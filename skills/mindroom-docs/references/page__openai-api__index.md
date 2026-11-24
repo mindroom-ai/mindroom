@@ -2,6 +2,7 @@
 
 MindRoom serves an OpenAI-compatible chat completions API at `/v1`, so any chat frontend that speaks the OpenAI protocol (LibreChat, Open WebUI, LobeChat, ChatBox, BoltAI, and others) can use MindRoom agents and teams as selectable models.
 Each request runs the selected agent with its configured tools, instructions, memory, and knowledge bases, without Matrix.
+To run an agent from a Python program without `mindroom run`, use [headless runs](https://docs.mindroom.chat/headless/) instead.
 
 ## Setup
 
@@ -97,7 +98,7 @@ Requesting one of them returns HTTP 400 with code `unsupported_worker_scope`, an
 
 ## Auto-routing
 
-Select the `auto` model to let the router pick the best available agent for each message.
+Select the `auto` model to pick an available agent for each request: a configured [router judgment](https://docs.mindroom.chat/configuration/router/#responder-selection-judgments) decides first, then the router model when the judgment does not decide.
 `auto` considers agents only; select `team/<team_name>` to run a team.
 The response's `model` field names the chosen agent, and the session belongs to that agent.
 When a [router judgment](https://docs.mindroom.chat/configuration/router/#responder-selection-judgments) finds no suitable agent, the request fails with HTTP 400 and code `no_suitable_responder`; choose a model explicitly or rephrase.
@@ -177,7 +178,7 @@ Unmapped keys and unauthenticated callers can use every available model but cann
 ## Limitations
 
 - **Fewer tools than in Matrix**: `/v1` hides tool functions matched by a required [tool approval](https://docs.mindroom.chat/tool-approval/#tools-that-cannot-pause-for-approval) rule, including script rules, because approval cards need a Matrix room.
-  It also hides tools that need a live Matrix room, such as `scheduler`, `matrix_message`, `attachments`, and `todo`.
+  It also hides tools that need a live Matrix room, such as `scheduler`, `matrix_message`, and `todo`, and every [`attachments`](https://docs.mindroom.chat/attachments/#viewing-content) function but `view_file`.
 - **No requester-private agents**: see [Model selection](#model-selection).
 - **Partial token usage**: only non-streaming responses report `usage`.
   It counts the turn's final model run, summed over the leader and members for teams, with cached input included in `prompt_tokens`, so tokens spent on earlier internal attempts in the same turn are not counted.

@@ -19,6 +19,7 @@ from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import configured_routable_entity_ids_for_room, entity_identity_registry
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import MatrixState
+from tests.access_schema_support import refresh_memberships
 from tests.conftest import bind_runtime_paths, orchestrator_runtime_paths, runtime_paths_for
 from tests.identity_helpers import entity_names_for_ids
 from tests.matrix_state_helpers import save_matrix_state
@@ -417,7 +418,7 @@ class TestResponderCandidateSelection:
             room_id=grant_room_id,
         )
         memberships = AgentReplyMembershipIndex()
-        await memberships.refresh(config, runtime_paths, client)
+        await refresh_memberships(memberships, config, runtime_paths, client)
         assistant_id = entity_identity_registry(config, runtime_paths).current_id("assistant").full_id
         dm = nio.MatrixRoom("!dm:localhost", assistant_id)
         dm.add_member("@alice:localhost", "Alice", None)

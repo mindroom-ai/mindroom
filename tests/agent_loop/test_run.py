@@ -48,6 +48,8 @@ if TYPE_CHECKING:
 
     from agno.run import RunContext as AgnoRunContext
 
+    from mindroom.agent_loop.model_loop import LoopState
+    from mindroom.agent_loop.tools import PlannedCall
     from mindroom.tool_system.invocation import ToolCall, ToolNext
     from mindroom.tool_system.tool_function import AdaptedToolkit, ToolkitClose
 
@@ -1193,6 +1195,121 @@ async def test_resume_entry_hooks_run_after_the_decided_results_and_the_loop_con
     assert [event.call.tool_call_id for event in events if isinstance(event, ToolCompleted)] == ["c1", "c2"]
     assert record.metrics is not None
     assert record.metrics.tokens.total_tokens == 6
+
+
+@pytest.mark.asyncio
+async def test_a_resume_announces_each_approved_call_before_it_runs() -> None:
+    """``before_dispatch`` sees each approved call of a resume alone, with the calls before it done; a denial has none."""
+    log: list[object] = []
+
+    async def before_dispatch(state: LoopState, planned: Sequence[PlannedCall]) -> None:
+        done = [tool.tool_call_id for tool in state.record.tools or () if tool.result is not None]
+        log.append(([call.execution.tool_call_id for call in planned], done))
+
+    async def observe(call: ToolCall, call_next: ToolNext) -> object:
+        log.append(call.function.name)
+        return await call_next(call.arguments)
+
+    def paused() -> RunRecord:
+        record = _paused_record(_gated_add("c1"), _gated_add("c2"))
+        record.messages[-1].tool_calls = [tool_call("add", "c1", a=1, b=2), tool_call("add", "c2", a=1, b=2)]
+        return record
+
+    hooks = LoopHooks(before_dispatch=before_dispatch, tool_middleware=(observe,))
+    approvals = [_approval(call_id, "add", {"a": 1, "b": 2}) for call_id in ("c1", "c2")]
+    await _resume(spec(ScriptedModel([answer("Three.")]), gated(add)), paused(), approved=approvals, hooks=hooks)
+    assert log == [(["c1"], []), "add", (["c2"], ["c1"]), "add"]
+
+    log.clear()
+    denials = {"c1": "No.", "c2": "No."}
+    await _resume(spec(ScriptedModel([answer("Skipped.")]), gated(add)), paused(), denied=denials, hooks=hooks)
+    assert log == []
+
+
+@pytest.mark.asyncio
+async def test_resume_entry_stop_finishes_after_real_results_without_sampling() -> None:
+    """A resume-entry hook that returns True completes the resume once the approved call ran, without a request."""
+    ran: list[str] = []
+    seen: list[list[str | None]] = []
+
+    async def observe(call: ToolCall, call_next: ToolNext) -> object:
+        ran.append(call.function.name)
+        return await call_next(call.arguments)
+
+    async def stop(messages: list[Message], results: Sequence[Message]) -> bool:
+        seen.append([result.tool_call_id for result in results])
+        assert messages[-1] is results[-1]
+        return True
+
+    paused = _paused_record(_gated_add())
+    model = ScriptedModel([answer("never sent")])
+
+    events, record, store = await _resume(
+        spec(model, gated(add)),
+        paused,
+        approved=[_approval("c1", "add", {"a": 1, "b": 2})],
+        hooks=LoopHooks(on_resume_entry=(stop,), tool_middleware=(observe,)),
+    )
+
+    assert ran == ["add"]
+    assert seen == [["c1"]]
+    assert model.requests == []
+    assert record.status is RunStatus.completed
+    # The approved call was all the run waited on, and nothing waits once it ran.
+    assert [requirement.tool_execution.tool_call_id for requirement in paused.requirements] == ["c1"]
+    assert record.requirements == []
+    assert record.tools is not None
+    [tool] = record.tools
+    assert (tool.tool_call_id, tool.result, tool.is_error, tool.stop_after_call) == ("c1", '{"sum": 3}', False, False)
+    assert (tool.requires_confirmation, tool.confirmed) == (False, True)
+    assert [message.role for message in record.messages] == ["user", "assistant", "tool"]
+    assert [event.call.tool_call_id for event in events if isinstance(event, ToolCompleted)] == ["c1"]
+    assert [saved["status"] for saved in store.saved] == ["COMPLETED"]
+    assert sum(isinstance(event, RunFinished) for event in events) == 1
+
+
+@pytest.mark.asyncio
+async def test_after_batch_stop_persists_completed_nonempty_tool_only_run() -> None:
+    """A batch hook that ends a tool-only run stores it completed with its real calls and no invented answer."""
+
+    async def stop(*_hook_arguments: object) -> bool:
+        return True
+
+    store = _Store()
+    model = ScriptedModel(
+        [
+            calls(tool_call("add", "c1", a=2, b=3), tool_call("echo", "c2", text="hi"), metrics=usage(1, 1)),
+            answer("never sent"),
+        ],
+    )
+
+    events, record = await collect(
+        run_agent(
+            spec(model, toolkit(add, echo)),
+            _prompt(),
+            ctx=context(),
+            hooks=LoopHooks(after_tool_batch=(stop,)),
+            persist=store,
+            request_template=EMPTY_REQUEST,
+        ),
+    )
+
+    assert len(model.requests) == 1
+    assert sum(isinstance(event, RunFinished) for event in events) == 1
+    assert len(store.saved) == 1
+    stored = RunRecord.from_dict(store.saved[0])
+    assert stored.to_dict() == record.to_dict()
+    assert stored.status is RunStatus.completed
+    assert stored.content is None
+    assert stored.tools is not None
+    assert [(t.tool_call_id, t.result, t.is_error, t.stop_after_call) for t in stored.tools] == [
+        ("c1", '{"sum": 5}', False, False),
+        ("c2", "hi", False, False),
+    ]
+    assert [message.role for message in stored.messages] == ["system", "user", "assistant", "tool", "tool"]
+    assert [m.content for m in stored.messages if m.role == "assistant"] == [None]
+    assert not any(message.stop_after_tool_call for message in stored.messages)
+    assert stored.requirements == []
 
 
 @pytest.mark.parametrize(("ending", "status"), [("completed", "COMPLETED"), ("failed", "ERROR")])

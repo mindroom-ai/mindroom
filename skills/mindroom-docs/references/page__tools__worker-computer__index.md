@@ -39,10 +39,12 @@ agents:
     display_name: Researcher
     role: Research with a browser and save results.
     model: default
-    tools: [browser, shell, file]
-    worker_tools: [browser, shell, file]
+    tools: [browser, shell, filesystem]
+    worker_tools: [browser, shell, filesystem]
     worker_scope: user_agent
 ```
+
+Workers of agents with a `shared` or `user` worker scope never become a Computer, even with Computer enabled: their worker-routed `browser` keeps running in the worker without a Computer panel, while `browser_mcp` works only in a Computer.
 
 Keep the `browser` tool's default `target: host`; the connected-user `target: desktop` is a separate feature and does not run in the Computer.
 Browser URL restrictions still apply, so private networks stay blocked unless allowed.
@@ -143,7 +145,7 @@ Expose only this gateway; the worker's display has no public listener.
   <source src="https://github.com/user-attachments/assets/db2b13b5-35c0-4b15-bbc9-93dec148f666" type="video/mp4">
 </video>
 
-- **Watch** shows the browser without input rights.
+- **Watch** shows the worker's desktop and its browser without input rights.
 - **Take control** waits for the agent's current browser action to finish, then gives input to one viewer.
   While the user holds control, the agent's browser calls return a blocked result; background shell processes keep running.
 - **Resume agent** releases control, returns the screen to watch mode, and sends one ordinary message mentioning the agent in the originating room or thread.
@@ -152,12 +154,15 @@ Expose only this gateway; the worker's display has no public listener.
 - **Stop** closes the browser and display and ends the session.
   **Start computer** creates a fresh session; profiles and files remain.
 
+A plugin can show and steer the agent's page in its own interface through [the agent's browser bridge](https://docs.mindroom.chat/plugins/#the-agents-browser), under the same control.
+
 The room header in MindRoom Chat shows a Computer button once the agent has shown its computer in that conversation.
 Before that, and on phones, open it from the room's More menu with **Show Computer**.
 
 Changing room, thread, account, or selected agent closes the old viewer.
 On desktop the panel sits beside the conversation and closes the Members drawer; on mobile it fills the screen and has a close button.
 Keyboard input over a controlled screen goes to the browser, not the composer.
+The desktop has no menu: right-clicking it opens nothing, and no key or click on it starts a program.
 
 The browser keeps running between tool calls, including tabs the user opened.
 When the agent focuses a tab or acts on a page, that page comes to the foreground, so the agent's screenshots and snapshots show what the viewer sees.
@@ -173,7 +178,7 @@ agents:
     display_name: Researcher
     role: Research with a browser and save results.
     model: default
-    tools: [browser_mcp, shell, file]
+    tools: [browser_mcp, shell, filesystem]
     worker_scope: user_agent
 ```
 

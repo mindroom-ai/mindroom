@@ -3,11 +3,11 @@
 import asyncio
 import json
 import threading
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
-from typing import Literal, Never
+from typing import Literal, Never, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
@@ -282,6 +282,21 @@ def test_stream_watch_take_release_reconnect_and_stop(gateway: Gateway, *, combi
             ws.receive_bytes()
     assert client.get(path, headers=headers).status_code == 401
     assert create(client).json()["state"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_worker_text_ends_the_desktop_stream() -> None:
+    """The desktop stream is all RFB, so text from the worker ends it before anything after it reaches the viewer."""
+    websocket = AsyncMock()
+
+    async def worker() -> AsyncIterator[aiohttp.WSMessage]:
+        yield aiohttp.WSMessage(aiohttp.WSMsgType.BINARY, b"screen", None)
+        yield aiohttp.WSMessage(aiohttp.WSMsgType.TEXT, "status", None)
+        yield aiohttp.WSMessage(aiohttp.WSMsgType.BINARY, b"frame", None)
+
+    await computers._downstream(websocket, cast("aiohttp.ClientWebSocketResponse", worker()))
+    websocket.send_bytes.assert_awaited_once_with(b"screen")
+    websocket.send_text.assert_not_called()
 
 
 @pytest.mark.parametrize("failure", ["origin", "missing", "expired", "generation", "config"])
@@ -560,7 +575,7 @@ def test_worker_maintenance_touches_computer_stream_before_cleanup(
         api_main._cleanup_workers_once(
             config_lifecycle.require_api_state(app).snapshot.runtime_paths,
             touch_live_workers=lambda _manager: None,
-            computer_worker_keys=computers.active_computer_worker_keys(app),
+            held_worker_keys=computers.active_computer_worker_keys(app),
         )
         assert actions == ["touch:worker", "maintain"]
 
@@ -574,7 +589,7 @@ def test_orchestrator_unbind_revokes_active_stream(gateway: Gateway, monkeypatch
     headers = {"Authorization": "Bearer " + session["session_token"]}
     ticket = client.post(path + "/stream-ticket", headers=headers).json()["ticket"]
     paths = config_lifecycle.require_api_state(app).snapshot.runtime_paths
-    coordinator = ComputerRuntimeCoordinator(paths, AgentReplyMembershipIndex())
+    coordinator = ComputerRuntimeCoordinator(paths, AgentReplyMembershipIndex(), AsyncMock())
     with client.websocket_connect(
         path + "/stream",
         subprotocols=["binary", "mindroom-ticket." + ticket],

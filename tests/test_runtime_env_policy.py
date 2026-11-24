@@ -359,6 +359,33 @@ def test_env_projection_matrix_documents_sensitive_runtime_boundaries(tmp_path: 
     assert actual == _PROJECTION_MATRIX_EXPECTATIONS
 
 
+def test_the_user_appservice_token_never_reaches_a_worker(tmp_path: Path) -> None:
+    """The token that lets an agent act as a person stays in the primary, out of every worker and tool env."""
+    names = {
+        runtime_env_policy.MATRIX_USER_APPSERVICE_TOKEN_ENV,
+        runtime_env_policy.MATRIX_USER_APPSERVICE_TOKEN_FILE_ENV,
+    }
+    env = {name: f"value:{name}" for name in names}
+    runtime_paths = constants.RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path / "storage",
+        process_env=env,
+        env_file_values=env,
+    )
+    tool_runtime_paths = [
+        sandbox_exec.tool_runtime_paths_with_request_env(runtime_paths, {}, include_base_execution_env=include_base)
+        for include_base in (True, False)
+    ]
+
+    assert runtime_env_policy.public_worker_startup_env(env) == {}
+    assert runtime_env_policy.isolated_worker_runtime_env(env) == {}
+    assert runtime_env_policy.worker_extra_env(env) == {}
+    assert runtime_env_policy.shell_passthrough_env(env, patterns=("*",)) == {}
+    assert {name for paths in tool_runtime_paths for name in names if paths.env_value(name) is not None} == set()
+
+
 def test_execution_runtime_env_keeps_safe_runtime_values_and_drops_runner_control() -> None:
     """Sandbox execution reconstruction uses the centralized control deny policy."""
     env = {
@@ -470,6 +497,46 @@ def test_sandbox_subprocess_system_env_uses_policy_allowlist() -> None:
         "PYTHONPATH": "/app/src",
         "HTTP_PROXY": "http://proxy.example.invalid",
     }
+
+
+def test_sandbox_subprocess_system_env_excludes_host_cpu_thread_hints() -> None:
+    """Host CPU/memory hint vars do not bypass Kubernetes worker gating through the subprocess system allowlist."""
+    limit_env = {
+        "MINDROOM_WORKER_CPUS": "4",
+        "MINDROOM_WORKER_MEMORY_BYTES": "8589934592",
+        "OMP_NUM_THREADS": "1",
+        "PYTHON_CPU_COUNT": "1",
+        "PYTEST_XDIST_AUTO_NUM_WORKERS": "1",
+    }
+
+    assert runtime_env_policy.sandbox_subprocess_system_env(limit_env) == {}
+    assert runtime_env_policy.sandbox_shell_system_env(limit_env) == {}
+    assert runtime_env_policy.isolated_worker_runtime_env(limit_env) == {
+        "MINDROOM_WORKER_CPUS": "4",
+        "MINDROOM_WORKER_MEMORY_BYTES": "8589934592",
+    }
+    assert runtime_env_policy.public_worker_startup_env(limit_env) == {
+        "MINDROOM_WORKER_CPUS": "4",
+        "MINDROOM_WORKER_MEMORY_BYTES": "8589934592",
+    }
+    assert runtime_env_policy.worker_extra_env(limit_env) == limit_env
+
+
+def test_kubernetes_pod_limit_markers_never_leak_from_primary() -> None:
+    """Kubernetes pod downward-API markers stay excluded from startup manifests, isolated env, passthrough, and extraEnv."""
+    markers = {
+        runtime_env_policy.KUBERNETES_POD_CPU_LIMIT_ENV: "4",
+        runtime_env_policy.KUBERNETES_POD_MEMORY_LIMIT_BYTES_ENV: "8589934592",
+    }
+
+    assert runtime_env_policy.public_worker_startup_env(markers) == {}
+    assert runtime_env_policy.isolated_worker_runtime_env(markers) == {}
+    assert runtime_env_policy.sandbox_subprocess_system_env(markers) == {}
+    assert runtime_env_policy.sandbox_shell_system_env(markers) == {}
+    assert runtime_env_policy.shell_passthrough_env(markers, patterns=("*",)) == {}
+    assert runtime_env_policy.worker_extra_env(markers) == {}
+    assert not any(runtime_env_policy.is_trusted_tool_runtime_env_file_name(name) for name in markers)
+    assert not any(runtime_env_policy.is_trusted_tool_runtime_process_env_name(name) for name in markers)
 
 
 def test_worker_runtime_state_can_reintroduce_storage_subpath_after_backend_filtering() -> None:
@@ -591,3 +658,56 @@ def test_computer_origins_remain_primary_runtime_configuration() -> None:
     assert runtime_env_policy.public_worker_startup_env(env) == {}
     assert runtime_env_policy.isolated_worker_runtime_env(env) == {}
     assert runtime_env_policy.worker_extra_env(env) == {}
+
+
+def test_smtp_url_is_secret_env() -> None:
+    """The SMTP URL carries a password, so no worker inherits it."""
+    assert runtime_env_policy.public_worker_startup_env({"MINDROOM_SMTP_URL": "x"}) == {}
+    assert runtime_env_policy.isolated_worker_runtime_env({"MINDROOM_SMTP_URL": "x"}) == {}
+    assert not runtime_env_policy.is_shell_passthrough_allowed_env_name("MINDROOM_SMTP_URL")
+    assert not runtime_env_policy.is_worker_extra_env_name("MINDROOM_SMTP_URL")
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("http://proxy.example:3128", True),
+        ("http://proxy.example:3128/", True),
+        ("https://proxy.example:8443", True),
+        ("socks5://proxy.example:1080", True),
+        ("socks5h://proxy.example:1080", True),
+        ("proxy.example:3128", True),
+        ("https://proxy.example/?access_token=secret", False),
+        ("http://proxy.example/token", False),
+        ("http://proxy.example/#frag", False),
+        ("http://proxy.example/;param=secret", False),
+        ("ftp://proxy.example:21", False),
+        ("http://user:pass@proxy.example:3128", False),
+        ("socks5h://proxy.example:1080/?access_token=secret", False),
+        ("http://proxy.example:badport", False),
+        ("", False),
+    ],
+)
+def test_is_credential_free_proxy_url(url: str, expected: bool) -> None:
+    """Proxy URL allowlist accepts only credential-free http/https/socks5/socks5h origin URLs."""
+    assert runtime_env_policy.is_credential_free_proxy_url(url) is expected
+
+
+def test_sandbox_proxy_env_filters_reject_query_path_fragment_and_unsupported_schemes() -> None:
+    """Sandbox proxy filters drop URLs carrying query strings, paths, fragments, or unsupported schemes."""
+    env = {
+        "HTTP_PROXY": "http://proxy.example:3128/",
+        "HTTPS_PROXY": "https://proxy.example/?access_token=secret",
+        "http_proxy": "http://proxy.example/token",
+        "https_proxy": "http://proxy.example/#frag",
+        "ALL_PROXY": "ftp://proxy.example:21",
+        "all_proxy": "socks5h://proxy.example:1080",
+        "NO_PROXY": "localhost,.svc",
+    }
+    expected = {
+        "HTTP_PROXY": "http://proxy.example:3128/",
+        "all_proxy": "socks5h://proxy.example:1080",
+        "NO_PROXY": "localhost,.svc",
+    }
+    assert runtime_env_policy.strip_authenticated_proxy_env(env) == expected
+    assert runtime_env_policy.sandbox_worker_extra_env(env) == expected

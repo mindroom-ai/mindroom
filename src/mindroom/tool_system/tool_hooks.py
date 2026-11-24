@@ -13,39 +13,50 @@ import time
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar, copy_context
 from copy import deepcopy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom.background_tasks import wait_for_future_until_complete
+from mindroom.egress_broker.env import egress_broker_enabled
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EVENT_TOOL_ENVIRONMENT,
+    EVENT_TOOL_RESULT_TRANSFORM,
     HookBindings,
     ToolAfterCallContext,
     ToolBeforeCallContext,
     ToolEnvironmentContext,
+    ToolResultTransformContext,
     emit,
     emit_collect_environment,
     emit_gate,
+    emit_tool_result_transform,
 )
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import denial_note_for
 from mindroom.logging_config import get_logger
-from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
+from mindroom.oauth.providers import (
+    OAuthConnectionRequired,
+    is_oauth_connection_required_result,
+    oauth_connection_required_payload,
+)
+from mindroom.redaction import REDACTED
+from mindroom.secret_requests import secret_holder, temporary_secrets
 from mindroom.timing import elapsed_ms_since, emit_timing_event
 from mindroom.tool_jobs.control import job_checkpoint
 from mindroom.tool_jobs.execution_authority import check_current_execution_authority
 from mindroom.tool_system.call_record import tool_call_recorder
 from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.progress import tool_progress_through
 from mindroom.tool_system.runtime_context import current_execution_identity, get_tool_runtime_context
 from mindroom.tool_system.tool_calls import ToolCallTiming, record_tool_failure, record_tool_success
 from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment
-from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
     from concurrent.futures import Executor
 
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin, ToolApprovalDecision
@@ -61,6 +72,7 @@ _DECLINED_RESULT_TEMPLATE = (
     "Reason: {reason}\n\n"
     "Adjust your approach — try a different tool or different arguments."
 )
+_WITHHELD_RESULT_TEMPLATE = "The result of {tool_name} was withheld because a result check failed."
 _ToolHookResult = Any
 
 
@@ -69,6 +81,9 @@ type _ToolApprovalGate = Callable[[BackgroundScriptToolOrigin, str, dict[str, An
 
 
 logger = get_logger(__name__)
+# The shell command call, by toolkit and function: the one call a temporary secret is a variable of, and the call whose
+# command gets the egress broker's env when it runs in the primary.
+_SHELL_COMMAND = ("shell", "run_shell_command")
 
 
 @dataclass(slots=True)
@@ -185,6 +200,10 @@ class _ResolvedToolContext:
     correlation_id: str
     origin: BackgroundScriptToolOrigin | None
     message_received_depth: int = 0
+    # Whether the reply the call runs in shows it; a call without a Matrix conversation runs in none.
+    shown: bool = False
+    turn_id: str | None = None
+    parent_turn_id: str | None = None
 
     @property
     def agent_name(self) -> str | None:
@@ -220,6 +239,8 @@ class _ResolvedToolContext:
                 runtime_paths=self.runtime_paths,
                 correlation_id=self.correlation_id,
             ),
+            "turn_id": self.turn_id,
+            "parent_turn_id": self.parent_turn_id,
             "arguments": arguments,
             "agent_name": self.agent_name or "",
             "room_id": self.room_id,
@@ -233,6 +254,7 @@ class _ResolvedToolContext:
             **self.hook_context_kwargs(event_name, arguments),
             "thread_id": self.thread_id,
             "session_id": self.session_id,
+            "shown": self.shown,
         }
 
     def record_kwargs(self) -> dict[str, Any]:
@@ -289,6 +311,9 @@ def _resolve_tool_context(
             correlation_id=_correlation_id_for_runtime_context(context, origin),
             origin=origin,
             message_received_depth=context.message_received_depth,
+            shown=context.tool_calls_shown,
+            turn_id=context.turn_id,
+            parent_turn_id=context.parent_turn_id,
         )
     reply_to_event_id = current_llm_request_log_context().get("reply_to_event_id")
     return _ResolvedToolContext(
@@ -408,6 +433,39 @@ async def _emit_after_call(
         duration_ms=duration_ms,
     )
     await emit(resolved_context.hooks.registry, EVENT_TOOL_AFTER_CALL, after_context)
+
+
+def _checked_results(
+    func: Callable[..., Awaitable[_ToolHookResult]],
+    resolved_context: _ResolvedToolContext,
+    arguments: dict[str, Any],
+    tool_name: str,
+) -> Callable[..., Awaitable[_ToolHookResult]]:
+    """Return ``func`` with each successful result as the result-transform hooks leave its text, or withheld.
+
+    The call's record then gets only the checked result. A value with media keeps its media and flags; any other
+    value stays itself unless a hook replaced its text. A control result, an OAuth connection prompt or an outcome
+    that stops the run, is read after the call, so a hook can keep or withhold it but not rewrite it.
+    """
+
+    async def checked(**kwargs: Any) -> _ToolHookResult:  # noqa: ANN401 - the tool's own arguments
+        result = await func(**kwargs)
+        if _answered_failure(result):
+            return result
+        text = result.content if isinstance(result, ToolValue) else str(result)
+        stops = isinstance(result, ToolOutcome) and result.stop_after_call
+        control = stops or is_oauth_connection_required_result(text if isinstance(result, ToolValue) else result)
+        context_kwargs = resolved_context.call_hook_context_kwargs(EVENT_TOOL_RESULT_TRANSFORM, arguments)
+        context = ToolResultTransformContext(**context_kwargs, tool_name=tool_name, result=text)
+        transformed = await emit_tool_result_transform(resolved_context.hooks.registry, context, rewritable=not control)
+        if transformed is None:
+            withheld = _WITHHELD_RESULT_TEMPLATE.format(tool_name=tool_name)
+            return ToolOutcome(content=withheld, is_error=True, stop_after_call=stops)
+        if transformed == text:
+            return result
+        return replace(result, content=transformed) if isinstance(result, ToolValue) else transformed
+
+    return checked
 
 
 async def _run_before_hooks(
@@ -587,6 +645,7 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     has_before_hooks = hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL)
     has_after_hooks = hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL)
     has_environment_hooks = hook_registry.has_hooks(EVENT_TOOL_ENVIRONMENT)
+    has_transform_hooks = hook_registry.has_hooks(EVENT_TOOL_RESULT_TRANSFORM)
     emit_timing_event(
         "Tool hook dispatch timing",
         phase="bridge_entry",
@@ -597,7 +656,9 @@ async def _execute_bridge(  # noqa: C901, PLR0915
         has_after_hooks=has_after_hooks,
     )
     # The hooks of one call share one copy of its arguments, made only when a hook runs.
-    hook_arguments = deepcopy(args) if has_before_hooks or has_after_hooks or has_environment_hooks else {}
+    hook_arguments = (
+        deepcopy(args) if has_before_hooks or has_after_hooks or has_environment_hooks or has_transform_hooks else {}
+    )
 
     async def finish(
         outcome: str,
@@ -666,6 +727,15 @@ async def _execute_bridge(  # noqa: C901, PLR0915
     )
     if declined_result is not None:
         return await decline("blocked_environment_hooks", declined_result)
+    # What the requester gave this conversation goes over the hooks' variables: it is the person's own answer.
+    # Only a shell command gets it. A terminal started with it would keep it past its lifetime, for everyone who
+    # types there.
+    given = await _given_secrets(resolved_context)
+    if given and (registered_toolkit, tool_name) == _SHELL_COMMAND:
+        environment = environment.then(ToolEnvironment(values=given))
+    # The egress broker's env goes over everything else, as the sandbox proxy puts it over a worker call's own.
+    if (registered_toolkit, tool_name) == _SHELL_COMMAND and egress_broker_enabled(resolved_context.runtime_paths):
+        environment = environment.then(await _primary_shell_broker_environment(resolved_context))
 
     # Refuse the tool body to work that was stopped, or lost its grant, while its hooks and approval ran.
     try:
@@ -675,10 +745,23 @@ async def _execute_bridge(  # noqa: C901, PLR0915
         await finish("blocked_before_body", timing.result_ready(), error=stopped, blocked=True)
         raise
 
+    masked = _without_given_secrets(func, given)
+
+    async def tool(**kwargs: Any) -> _ToolHookResult:  # noqa: ANN401 - the tool's own arguments
+        with collected_tool_environment(environment):
+            return await masked(**kwargs)
+
+    # The result-transform hooks check the masked result outside the call's environment, and the record gets what
+    # they leave.
+    recorded = _checked_results(tool, resolved_context, hook_arguments, tool_name) if has_transform_hooks else tool
     tool_body_started_at = time.perf_counter()
     try:
-        with collected_tool_environment(environment):
-            result = await _call_recorded_tool(func, args, tool_name=tool_name, agent_name=resolved_context.agent_name)
+        result = await _call_recorded_tool(
+            recorded,
+            args,
+            tool_name=tool_name,
+            agent_name=resolved_context.agent_name,
+        )
     except OAuthConnectionRequired as exc:
         timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
         return await answer(oauth_connection_required_payload(exc), "oauth_connection_required")
@@ -690,6 +773,86 @@ async def _execute_bridge(  # noqa: C901, PLR0915
         raise
     timing.tool_body_ms = elapsed_ms_since(tool_body_started_at, clock=time.perf_counter, ndigits=2)
     return await answer(result, "error" if _answered_failure(result) else "success")
+
+
+async def _primary_shell_broker_environment(resolved_context: _ResolvedToolContext) -> ToolEnvironment:
+    """Return the egress broker's env for a shell call of an agent that uses the broker and runs its shell here.
+
+    Empty for any other call, including one routed to a worker, which the sandbox proxy gives the env instead.
+    """
+    agent_name = resolved_context.agent_name
+    if agent_name is None:
+        return ToolEnvironment()
+    # Deferred: the broker loads h11 and its TLS stack, which the slim tool registry must not import.
+    from mindroom.egress_broker.service import execution_env_for_primary_shell  # noqa: PLC0415
+
+    # The agent's tools are resolved and the credential store read, so off the event loop.
+    return await asyncio.to_thread(
+        execution_env_for_primary_shell,
+        resolved_context.runtime_paths,
+        config=resolved_context.config,
+        agent_name=agent_name,
+        execution_identity=resolved_context.execution_identity,
+    )
+
+
+async def _given_secrets(resolved_context: _ResolvedToolContext) -> dict[str, str]:
+    """Return the temporary secrets the call's requester gave its conversation, by variable name.
+
+    Every call reads the store, so the read here touches no file; the store's first read after a start and the
+    deletion of an expired value's file run in a thread.
+    """
+    holder = secret_holder(resolved_context.execution_identity)
+    if holder is None:
+        return {}
+    store = temporary_secrets()
+    storage_root = resolved_context.runtime_paths.storage_root
+    given = store.values_in_memory(holder, storage_root=storage_root)
+    if given is None:
+        given = await asyncio.to_thread(store.values, holder, storage_root=storage_root)
+    return given
+
+
+def _without_given_secrets(
+    func: Callable[..., Awaitable[_ToolHookResult]],
+    given: Mapping[str, str],
+) -> Callable[..., Awaitable[_ToolHookResult]]:
+    """Return the tool with the exact copies of the conversation's given secrets removed from what it shows.
+
+    Every call in the conversation is covered, since a later call may read what a command wrote. The reply's record
+    of the call, its tool trace, its hooks and the model all read the result this returns, masked in its text, in the
+    text of a value that carries media, and in the texts of a mapping or a list, such as the receipt of output saved
+    to a file; live reply frames read the progress it reports. Best effort, like all redaction: a command that encodes the value passes, and so does
+    what a command, or MindRoom on its behalf, writes to a file in the workspace.
+    """
+    if not given:
+        return func
+    # The longest first, so a value that holds another leaves no tail beside the shorter one's mask.
+    values = sorted(given.values(), key=lambda value: -len(value))
+
+    def masked_text(text: str) -> str:
+        for value in values:
+            text = text.replace(value, REDACTED)
+        return text
+
+    def masked(result: object) -> object:
+        if isinstance(result, str):
+            return masked_text(result)
+        if isinstance(result, ToolValue):
+            # A result with media beside its text, as a shell command that used the agent CLI returns.
+            return replace(result, content=masked_text(result.content))
+        if isinstance(result, dict):
+            return {key: masked(item) for key, item in result.items()}
+        if isinstance(result, list):
+            return [masked(item) for item in result]
+        return result
+
+    async def without_given_secrets(**arguments: Any) -> _ToolHookResult:  # noqa: ANN401 - the tool's own arguments
+        with tool_progress_through(masked_text):
+            result = await func(**arguments)
+        return masked(result)
+
+    return without_given_secrets
 
 
 async def dispatch_external_tool_hooks(
@@ -704,11 +867,13 @@ async def dispatch_external_tool_hooks(
     error: BaseException | None = None,
     blocked: bool = False,
     duration_ms: float = 0,
+    registered_toolkit: str | None = None,
 ) -> str | None:
     """Dispatch one phase of a durable external tool, called by ``execution_identity``, through the ordinary hook policy.
 
     The phase selects its hooks as a call does; a phase without a Matrix conversation, such as one a restart recovers,
-    runs the published plugins' hooks for ``config``.
+    runs the published plugins' hooks for ``config``. A before phase that names its ``registered_toolkit`` also asks
+    the environment hooks, which may decline a call as the before-call hooks may; what they set is not used.
     """
     resolved = _resolve_tool_context(
         execution_identity,
@@ -719,13 +884,22 @@ async def dispatch_external_tool_hooks(
     )
     hook_registry = resolved.hooks.registry
     if before:
-        if not hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL):
-            return None
-        return await _run_before_hooks(
-            resolved_context=resolved,
-            arguments=deepcopy(arguments),
-            tool_name=tool_name,
-        )
+        declined = None
+        if hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL):
+            declined = await _run_before_hooks(
+                resolved_context=resolved,
+                arguments=deepcopy(arguments),
+                tool_name=tool_name,
+            )
+        if declined is None and registered_toolkit is not None and hook_registry.has_hooks(EVENT_TOOL_ENVIRONMENT):
+            _, declined = await _collect_environment(
+                resolved_context=resolved,
+                arguments=deepcopy(arguments),
+                tool_name=tool_name,
+                registered_toolkit=registered_toolkit,
+                timing=_ToolBridgeTiming(started_at=time.perf_counter()),
+            )
+        return declined
     if hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL):
         await _emit_after_call(
             resolved_context=resolved,

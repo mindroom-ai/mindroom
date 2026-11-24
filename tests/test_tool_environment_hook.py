@@ -6,6 +6,8 @@ import asyncio
 import functools
 import json
 import os
+import socket
+import time
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
@@ -13,31 +15,43 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from mindroom import secret_requests
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, bound_agent_cli_shell_env
 from mindroom.api import sandbox_runner
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import resolve_primary_runtime_paths, resolve_runtime_paths
+from mindroom.credentials.manager import CredentialsManager
 from mindroom.egress_broker import service as egress_service
+from mindroom.egress_broker.secrets import save_secret
+from mindroom.egress_broker.service import serve_egress_broker
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EVENT_TOOL_ENVIRONMENT,
+    EVENT_TOOL_RESULT_TRANSFORM,
     HookRegistry,
     ToolAfterCallContext,
     ToolBeforeCallContext,
     ToolEnvironmentContext,
+    ToolResultTransformContext,
     default_timeout_ms_for_event,
     hook,
 )
+from mindroom.redaction import REDACTED
+from mindroom.secret_requests import _TemporarySecrets, secret_holder
 from mindroom.tool_system import sandbox_proxy
 from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.progress import report_tool_progress, tool_progress_reporter
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import detached_tool_scope, tool_runtime_context
-from mindroom.tool_system.tool_environment import ToolEnvironment
+from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
+from mindroom.tool_system.worker_routing import resolve_worker_target
 from mindroom.workers.backends import local as local_workers
 from mindroom.workers.backends.dedicated_launch import DedicatedWorkerLayout, dedicated_worker_startup_runtime_paths
 from mindroom.workers.models import WorkerHandle
@@ -60,8 +74,8 @@ if TYPE_CHECKING:
     from contextlib import AbstractContextManager
     from pathlib import Path
 
-    from mindroom.tool_system.invocation import ToolCall, ToolNext
-    from mindroom.tool_system.tool_function import ToolFunction, ToolOutcome
+    from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _ALICE = _MIND_EXECUTION_IDENTITY
@@ -123,9 +137,10 @@ class _Shell:
         *,
         identity: ToolExecutionIdentity = _ALICE,
         function: ToolFunction | None = None,
+        policy: ToolMiddleware | None = None,
     ) -> ToolOutcome:
-        """Run one tool call with ``arguments`` through the tool-call policy built from ``registry``."""
-        policy = detached_policy(registry)
+        """Run one tool call with ``arguments`` through ``policy``, by default the tool-call policy of ``registry``."""
+        policy = policy or detached_policy(registry)
         with self.runtime(), detached_tool_scope(identity):
             return await execute_tool_call(
                 function or self.function,
@@ -354,6 +369,98 @@ async def test_the_egress_proxy_a_worker_call_gets_wins_over_a_hook(
         change(ctx)
 
     assert await shell.run(_registry(proxy), 'printf "%s" "${HTTPS_PROXY-unset}"') == "egress"
+
+
+async def _run_in_agent_keys_primary_shell(
+    tmp_path: Path,
+    command: str,
+    process_env: dict[str, str] | None = None,
+    **shell_settings: str,
+) -> tuple[str, int]:
+    """Run `command` in the primary shell of an Agent Keys agent with a running broker; return its line and port."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_EGRESS_BROKER_PORT": str(port),
+            "MINDROOM_EGRESS_BROKER_HOST": "127.0.0.1",
+            "MINDROOM_EGRESS_BROKER_URL": f"http://host.docker.internal:{port}",
+            **(process_env or {}),
+        },
+    )
+    config = Config(
+        agents={
+            "mind": {"display_name": "Mind", "tools": ["shell", "egress_credentials"], "include_default_tools": False},
+        },
+        egress_broker={
+            "services": {
+                "github": {
+                    "rules": [{"host": "api.github.com", "auth": {"type": "bearer"}}],
+                    "placeholder_env": {"GH_TOKEN": "mindroom-brokered"},
+                },
+            },
+        },
+    )
+    manager = CredentialsManager(runtime_paths.storage_root / "credentials")
+    save_secret(manager, resolve_worker_target(None, "mind", _ALICE), "github", "s3cret")
+    toolkit = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        runs_in_worker=False,
+        tool_config_overrides=shell_settings or None,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
+    shell = _Shell(_function(toolkit, "shell", "run_shell_command"), sent=[], runtime=nullcontext)
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        outcome = await shell.call(
+            HookRegistry.empty(),
+            {"args": ["bash", "-c", command]},
+            policy=detached_policy(HookRegistry.empty(), config=config, runtime_paths=runtime_paths),
+        )
+    assert not outcome.is_error, outcome.content
+    return outcome.content.rsplit("\n", 1)[-1], port
+
+
+@pytest.mark.asyncio
+async def test_a_primary_shell_command_of_an_agent_keys_agent_gets_the_broker_env(tmp_path: Path) -> None:
+    """A shell that runs in the primary reaches the broker on loopback and trusts it through files, like a worker does.
+
+    The worker-facing URL is not used, since it may not resolve on the primary's host, and the CA PEM stays out.
+    """
+    command = (
+        'printf "%s|%s|%s|%s" "${HTTPS_PROXY##*@}" "${GH_TOKEN-unset}" '
+        '"$(test -s "$SSL_CERT_FILE" && test -s "$NODE_EXTRA_CA_CERTS" && echo files)" '
+        '"${MINDROOM_EGRESS_BROKER_CA_PEM-unset}"'
+    )
+
+    line, port = await _run_in_agent_keys_primary_shell(tmp_path, command)
+
+    assert line == f"127.0.0.1:{port}|mindroom-brokered|files|unset"
+
+
+@pytest.mark.asyncio
+async def test_the_broker_s_git_config_goes_after_the_git_config_the_shell_settings_pass(tmp_path: Path) -> None:
+    """Git config the shell's `extra_env_passthrough` hands a primary command survives the broker's own entries."""
+    git_config = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.sshCommand", "GIT_CONFIG_VALUE_0": "ssh -i key"}
+    command = (
+        'printf "%s|%s|%s|%s|%s" "$GIT_CONFIG_COUNT" "$GIT_CONFIG_KEY_0" "$GIT_CONFIG_VALUE_0" '
+        '"$GIT_CONFIG_KEY_1" "$GIT_CONFIG_KEY_2"'
+    )
+
+    line, _port = await _run_in_agent_keys_primary_shell(
+        tmp_path,
+        command,
+        git_config,
+        extra_env_passthrough="GIT_CONFIG_*",
+    )
+
+    assert line == "3|core.sshCommand|ssh -i key|http.proxy|http.proxyAuthMethod"
 
 
 @pytest.mark.asyncio
@@ -733,3 +840,273 @@ def test_a_hook_cannot_prepend_what_is_not_one_absolute_directory(directory: obj
 
     with pytest.raises(ValueError, match="one absolute directory"):
         ctx.prepend_path(directory)
+
+
+@pytest.fixture
+def given(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Callable[[str, str], None]:
+    """Give Alice's conversation with the agent a temporary secret, in a store of this test's own."""
+    store = _TemporarySecrets()
+    monkeypatch.setattr(secret_requests, "_TEMPORARY_SECRETS", store)
+    holder = secret_holder(_ALICE)
+    assert holder is not None
+
+    def give(name: str, value: str) -> None:
+        store.give(holder, name, value, keep="memory", now=time.time(), storage_root=tmp_path / "given")
+
+    return give
+
+
+@pytest.mark.asyncio
+async def test_a_given_secret_reaches_the_command_wherever_it_runs(
+    shell: _Shell,
+    given: Callable[[str, str], None],
+) -> None:
+    """A value the requester gave the conversation is a variable of its shell commands, with no hook involved."""
+    given("PASSPHRASE", "open sesame")
+
+    assert await shell.run(HookRegistry.empty(), 'printf %s "$PASSPHRASE" | wc -c') == "11"
+    if shell.sent:
+        assert shell.sent[-1]["execution_env"]["PASSPHRASE"] == "open sesame"  # noqa: S105
+
+
+@pytest.mark.asyncio
+async def test_a_given_secret_goes_over_a_hook_s_variable(shell: _Shell, given: Callable[[str, str], None]) -> None:
+    """The person's own value wins over a plugin's for the same name."""
+    given("PLUGIN_VALUE", "from the person")
+
+    output = await shell.run(_registry(_shell_environment), 'printf %s "$PLUGIN_VALUE" | wc -c')
+
+    assert output == str(len("from the person"))
+
+
+@pytest.mark.asyncio
+async def test_a_given_secret_stays_with_its_requester(tmp_path: Path, given: Callable[[str, str], None]) -> None:
+    """Another person's turn in the same room never receives the value."""
+    given("PASSPHRASE", "open sesame")
+    shell = _local_shell(tmp_path)
+
+    assert await shell.run(HookRegistry.empty(), 'printf %s "${PASSPHRASE:-unset}"', identity=_BOB) == "unset"
+    assert await shell.run(HookRegistry.empty(), 'printf %s "${PASSPHRASE:+set}"', identity=_ALICE) == "set"
+
+
+@pytest.mark.asyncio
+async def test_a_result_never_repeats_a_given_secret(shell: _Shell, given: Callable[[str, str], None]) -> None:
+    """Every exact copy of a live value is removed from a tool result before the model reads it."""
+    given("PASSPHRASE", "open-sesame-123")
+    command = 'echo "$PASSPHRASE $PASSPHRASE x${PASSPHRASE}y"'
+
+    outcome = await shell.call(HookRegistry.empty(), {"args": ["bash", "-c", command]})
+
+    assert not outcome.is_error, outcome.content
+    assert "open-sesame-123" not in outcome.content
+    assert outcome.content.count(REDACTED) == 3
+
+
+@pytest.mark.asyncio
+async def test_the_reply_s_record_of_a_call_never_holds_a_given_secret(
+    shell: _Shell,
+    given: Callable[[str, str], None],
+) -> None:
+    """The durable record of a call, which a tool trace and a replay read, gets the result the model gets."""
+    given("PASSPHRASE", "open-sesame-123")
+    recorded: list[object] = []
+
+    class _Recorder:
+        async def started(self, _tool_name: str, _args: object) -> str:
+            return "call-1"
+
+        async def finished(self, _call_id: str, _tool_name: str, _args: object, result: object) -> None:
+            recorded.append(result)
+
+    with recording_tool_calls(_Recorder()):
+        outcome = await shell.call(HookRegistry.empty(), {"args": ["bash", "-c", 'echo "$PASSPHRASE"']})
+
+    assert not outcome.is_error, outcome.content
+    assert len(recorded) == 1
+    assert "open-sesame-123" not in str(recorded[0])
+    assert REDACTED in str(recorded[0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("toolkit", "function_name", "received"),
+    [
+        ("shell", "run_shell_command", True),
+        ("shell", "check_shell_command", False),
+        ("terminal", "terminal_open", False),
+    ],
+)
+async def test_a_given_secret_is_a_variable_of_shell_commands_only(
+    tmp_path: Path,
+    given: Callable[[str, str], None],
+    toolkit: str,
+    function_name: str,
+    received: bool,
+) -> None:
+    """No other call gets the variable: a terminal opened with it would keep it past its lifetime, for anyone."""
+    given("PASSPHRASE", "open sesame")
+    shell = _local_shell(tmp_path)
+    seen: dict[str, str | None] = {}
+
+    async def capture(_call: ToolCall, _call_next: ToolNext) -> object:
+        seen.update(current_tool_environment().values)
+        return "done"
+
+    function = replace(shell.function, name=function_name, registered_toolkit=toolkit, middleware=(capture,))
+    outcome = await shell.call(HookRegistry.empty(), {"args": ["true"]}, function=function)
+
+    assert not outcome.is_error, outcome.content
+    assert ("PASSPHRASE" in seen) is received
+
+
+@pytest.mark.asyncio
+async def test_live_progress_never_shows_a_given_secret(shell: _Shell, given: Callable[[str, str], None]) -> None:
+    """What a running call reports for live reply frames loses the value before any listener gets it."""
+    given("PASSPHRASE", "open-sesame-123")
+    reports: list[str] = []
+
+    async def report(call: ToolCall, call_next: ToolNext) -> object:
+        report_tool_progress("typed open-sesame-123, waiting")
+        return await call_next(call.arguments)
+
+    function = replace(shell.function, middleware=(*shell.function.middleware, report))
+    with tool_progress_reporter(reports.append):
+        outcome = await shell.call(HookRegistry.empty(), {"args": ["true"]}, function=function)
+
+    assert not outcome.is_error, outcome.content
+    assert f"typed {REDACTED}, waiting" in reports
+    assert not any("open-sesame-123" in text for text in reports)
+
+
+@pytest.mark.asyncio
+async def test_a_secret_that_holds_another_is_removed_whole(tmp_path: Path, given: Callable[[str, str], None]) -> None:
+    """The longer value goes first, so no tail of it stays beside the shorter one's mask."""
+    given("SHORT", "open-sesame")
+    given("LONG", "open-sesame-and-more")
+    shell = _local_shell(tmp_path)
+
+    outcome = await shell.call(HookRegistry.empty(), {"args": ["bash", "-c", 'echo "$LONG"']})
+
+    assert not outcome.is_error, outcome.content
+    assert "and-more" not in outcome.content
+    assert outcome.content.count(REDACTED) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_structured_result_loses_a_given_secret_too(tmp_path: Path, given: Callable[[str, str], None]) -> None:
+    """A result that is a receipt, such as that of output saved to a file, is masked in its texts."""
+    given("PASSPHRASE", "open-sesame-123")
+    shell = _local_shell(tmp_path)
+    recorded: list[object] = []
+
+    class _Recorder:
+        async def started(self, _tool_name: str, _args: object) -> str:
+            return "call-1"
+
+        async def finished(self, _call_id: str, _tool_name: str, _args: object, result: object) -> None:
+            recorded.append(result)
+
+    async def receipt(_call: ToolCall, _call_next: ToolNext) -> object:
+        return {"status": "saved", "preview": "raw:open-sesame-123", "lines": ["open-sesame-123", 7]}
+
+    function = replace(shell.function, middleware=(receipt,))
+    with recording_tool_calls(_Recorder()):
+        outcome = await shell.call(HookRegistry.empty(), {"args": ["true"]}, function=function)
+
+    assert not outcome.is_error, outcome.content
+    assert recorded == [{"status": "saved", "preview": f"raw:{REDACTED}", "lines": [REDACTED, 7]}]
+    assert "open-sesame-123" not in str(outcome.content)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "value",
+    [
+        ToolValue(content="raw:open-sesame-123"),
+        ToolOutcome(content="failed with open-sesame-123", is_error=True, stop_after_call=True),
+    ],
+    ids=["value", "outcome"],
+)
+async def test_a_result_that_carries_media_loses_a_given_secret_in_its_text(
+    tmp_path: Path,
+    given: Callable[[str, str], None],
+    value: ToolValue,
+) -> None:
+    """A shell result with media attached, as a command that used the agent CLI returns, is masked in its text."""
+    given("PASSPHRASE", "open-sesame-123")
+    shell = _local_shell(tmp_path)
+    recorded: list[object] = []
+
+    class _Recorder:
+        async def started(self, _tool_name: str, _args: object) -> str:
+            return "call-1"
+
+        async def finished(self, _call_id: str, _tool_name: str, _args: object, result: object) -> None:
+            recorded.append(result)
+
+    async def answer(_call: ToolCall, _call_next: ToolNext) -> object:
+        return value
+
+    function = replace(shell.function, middleware=(answer,))
+    with recording_tool_calls(_Recorder()):
+        outcome = await shell.call(HookRegistry.empty(), {"args": ["true"]}, function=function)
+
+    masked = value.content.replace("open-sesame-123", REDACTED)
+    assert recorded == [replace(value, content=masked)]
+    assert outcome.content == masked
+    assert outcome.is_error is isinstance(value, ToolOutcome)
+
+
+@pytest.mark.asyncio
+async def test_a_result_check_reads_the_masked_result_outside_the_call_s_environment(
+    tmp_path: Path,
+    given: Callable[[str, str], None],
+) -> None:
+    """The check runs after the command, on its masked result, without the variables the command had."""
+    given("PASSPHRASE", "open-sesame-123")
+    seen: list[tuple[str, ToolEnvironment]] = []
+
+    @hook(EVENT_TOOL_RESULT_TRANSFORM)
+    async def check(ctx: ToolResultTransformContext) -> None:
+        seen.append((ctx.result, current_tool_environment()))
+
+    shell = _local_shell(tmp_path)
+    command = 'echo "$PASSPHRASE $PLUGIN_VALUE"'
+    outcome = await shell.call(_registry(_shell_environment, check), {"args": ["bash", "-c", command]})
+
+    assert not outcome.is_error, outcome.content
+    [(result, environment)] = seen
+    assert "open-sesame-123" not in result
+    assert REDACTED in result
+    assert "for @alice" in result
+    assert "PASSPHRASE" not in environment.values
+    assert "PLUGIN_VALUE" not in environment.values
+
+
+@pytest.mark.asyncio
+async def test_tool_environment_hook_cannot_set_or_unset_kubernetes_pod_limit_markers(
+    shell: _Shell,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-call shell tool:environment hooks cannot set or unset Kubernetes pod limit markers."""
+    monkeypatch.delenv("MINDROOM_KUBERNETES_POD_CPU_LIMIT", raising=False)
+    monkeypatch.delenv("MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES", raising=False)
+
+    @hook(EVENT_TOOL_ENVIRONMENT)
+    async def spoof_markers(ctx: ToolEnvironmentContext) -> None:
+        ctx.set_env("MINDROOM_KUBERNETES_POD_CPU_LIMIT", "4")
+        ctx.unset_env("MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES")
+
+    command = (
+        'printf "%s|%s|%s|%s" '
+        '"${MINDROOM_KUBERNETES_POD_CPU_LIMIT-unset}" "${MINDROOM_WORKER_CPUS-unset}" '
+        '"${OMP_NUM_THREADS-unset}" "${PYTHON_CPU_COUNT-unset}"'
+    )
+
+    assert await shell.run(_registry(spoof_markers), command) == "unset|unset|unset|unset"
+    if shell.sent:
+        request = shell.sent[-1]
+        for marker in ("MINDROOM_KUBERNETES_POD_CPU_LIMIT", "MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES"):
+            assert marker not in request["execution_env"]
+            assert marker not in request["environment"]["set_names"]
+            assert marker not in request["environment"]["unset_names"]

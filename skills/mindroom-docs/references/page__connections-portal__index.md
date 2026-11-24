@@ -43,12 +43,23 @@ The app confirms the browser's session with its own token, so a link forwarded t
 It confirms only a nonce issued by the backend it started with, so another backend, such as one an agent published in a shared room, cannot obtain a nonce from this one through the app.
 The steps are described in [Connections portal sign-in](https://docs.mindroom.chat/architecture/security-posture/#connections-portal-sign-in).
 
+## Published Reports
+
+With `MINDROOM_PUBLISHED_REPORTS_ACCESS=signed_in`, a [published report](https://docs.mindroom.chat/tools/agent-orchestration/#report_publishing) opens only for people the portal admits: users of MindRoom's homeserver who may use at least one agent or manage its credentials, or a [trusted upstream](#trusted-upstream-sign-in) identity.
+A signed-out browser goes to Chat's sign-in page described above and comes back to the page of the report it opened, with its query; without such a page it gets a page that asks to sign in from Chat, after which the link opens.
+Without a sign-in, a link answers the same whether its report exists, was revoked, or never existed.
+A signed-in browser opens the report under a view address with a key for that one report, valid for four hours, so the report's scripts, styles, fonts, and images load.
+Anyone given the view address can open that report until its key expires, the report is revoked, or MindRoom restarts, so share the report's link instead.
+Changing the setting keeps every link's address, and a revoked link stops opening at once.
+Over plain HTTP, sign-in comes back to the report only when Chat and MindRoom share a host name; otherwise it opens the portal, and the link opens when opened again.
+
 ## Settings
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` | unset | JSON list of the exact MindRoom Chat origins that may sign users in, such as `'["https://chat.example.org"]'`; unset or blank allows `https://chat.mindroom.chat`, plus any Chat on a local address while MindRoom itself is on a local address, and only while the homeserver binds tokens; `[]` turns sign-in from Chat, including the iOS app's, off |
 | `MINDROOM_PUBLIC_URL` | unset | The origin users open the portal on, which must be HTTPS or plain HTTP on a local address; unset, the portal accepts the request's own origin, the token audience is `http://localhost:<MINDROOM_PORT>`, and OAuth callbacks use that same localhost origin |
+| `MINDROOM_PUBLISHED_REPORTS_ACCESS` | `anyone_with_link` | Who may open [published reports](#published-reports): `anyone_with_link` (also when unset or blank), or `signed_in` for people signed in through the portal or trusted upstream auth; any other value stops MindRoom from starting |
 | `MINDROOM_CONNECTIONS_AGENT` | unset | Optional private agent (`private.per: user` or `user_agent`) that the [MCP Gateway](https://docs.mindroom.chat/deployment/mcp-gateway/) selects for each user at first; under trusted upstream auth it also limits the dashboard to `administrators` (see [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary)) |
 
 A configured allowlist replaces both defaults.
@@ -99,6 +110,7 @@ Without binding, a token could have been replayed from another deployment on the
 So the session reaches the dashboard only when it was started while the homeserver bound tokens, only while the user is still in `administrators`, never in hosted platform mode, and never to finish an OAuth flow that the API key started.
 The Connections header links the dashboard for administrators only, at `MINDROOM_DASHBOARD_URL` when it is set.
 Everyone else, and every session on a homeserver that does not bind tokens, keeps needing `MINDROOM_API_KEY` for the dashboard, which the CLI, MCP clients, and scripts use as before.
+Someone signed in to Connections who is neither in `administrators` nor `MINDROOM_OWNER_USER_ID` and opens a dashboard page goes back to the Chat origin they signed in from instead of the login, while `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` still lists it, else to the first web Chat origin listed there; `/login` still answers.
 Sign-in from Chat works alongside `MINDROOM_API_KEY` dashboard auth and alongside trusted upstream sign-in.
 
 ## Token Binding
@@ -118,6 +130,7 @@ The request-by-request exchange is described in [Connections portal sign-in](htt
 Behind an identity gateway, users can also reach the portal through [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with a [Matrix identity](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-identity) from a signed Matrix claim or the email-to-Matrix template; API-key and `MINDROOM_OWNER_USER_ID` authentication are rejected.
 When more than one user signs in through the gateway, also set `MINDROOM_CONNECTIONS_AGENT`, or every user it admits gets full dashboard access (see [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary)).
 To share a hostname with another frontend, forward `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, and `/api/oauth/*` to the MindRoom API, behind the authenticated upstream when you use trusted upstream sign-in.
+Leave `/api/oauth/<provider_id>/client-metadata.json` reachable without signing in, because the authorization server of a remote MCP server that [uses a client ID metadata document](https://docs.mindroom.chat/mcp/#oauth-client-registration) fetches it.
 Exclude `/connections` from the other application's service-worker navigation fallback.
 Portal assets are served under `/connections/assets/`, so root `/assets/` can keep serving the other application.
 
@@ -133,6 +146,7 @@ Portal assets are served under `/connections/assets/`, so root `/assets/` can ke
 | `403 Connections sign-in is not allowed from this client` | Add the exact Chat origin to `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, or remove an `[]` value; fix any invalid entry because one disables the whole list; the iOS app gets it only from an `[]` or invalid list |
 | `401 Matrix OpenID verification failed.`, `Invalid Matrix OpenID response.`, `Invalid Matrix OpenID subject.`, or `OpenID server does not match the configured Matrix server.` | Sign in to MindRoom Chat on the same homeserver as MindRoom, then open Connections again; on a homeserver that binds tokens, also set `MINDROOM_PUBLIC_URL` to the origin Chat opens |
 | An administrator's Dashboard link from Connections asks for the API key | Check that `/_matrix/client/versions` lists `io.mindroom.openid_audience` as `true` and `MINDROOM_PUBLIC_URL`, or `http://localhost:<MINDROOM_PORT>` when unset, is the origin Chat opens; the warning `Could not check whether the homeserver binds OpenID tokens` means MindRoom could not read `/versions`, and `Dashboard access check failed after the binding probe` means the second token check failed. Open Connections from Chat again afterwards, because the session records dashboard access at sign-in |
+| Opening the dashboard sends me to Chat | Your Connections session is not an administrator's: sign in at `/login` with `MINDROOM_API_KEY`, or add yourself to `administrators` and open Connections from Chat again |
 | `503 Matrix OpenID verifier is unavailable.` | MindRoom could not reach the configured homeserver; check that it is up and reachable from MindRoom |
 | `403 MINDROOM_CONNECTIONS_AGENT must name a private agent` | Point `MINDROOM_CONNECTIONS_AGENT` at an agent with `private.per: user` or `user_agent`, or unset it |
 | `403 No connections are available for this account` | Give the user agent access or list them in `credential_managers` |

@@ -1,12 +1,14 @@
 """Budget service authentication integration tests."""
 # ruff: noqa: D103
 
+from collections.abc import Callable
 from pathlib import Path
 
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
+from structlog.testing import capture_logs
 
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
@@ -64,9 +66,15 @@ def _client(temp_config_file: Path, tmp_path: Path, env: dict[str, str]) -> Test
     return client
 
 
-def _budget_assertion(private_key: rsa.RSAPrivateKey, **claim_overrides: object) -> str:
+def _budget_assertion(
+    private_key: rsa.RSAPrivateKey,
+    *,
+    omit_claims: frozenset[str] = frozenset(),
+    **claim_overrides: object,
+) -> str:
     return _service_assertion(
         private_key,
+        omit_claims=omit_claims,
         **{"aud": _BUDGET_AUDIENCE, "common_name": _BUDGET_CLIENT_ID, **claim_overrides},
     )
 
@@ -86,15 +94,47 @@ def test_budget_service_assertion_reads_budget_status(
     assert response.json()["default_limit_usd"] == 20.0
 
 
+def test_budget_service_accepts_service_assertion_without_subject(
+    temp_config_file: Path,
+    tmp_path: Path,
+    budget_service_auth: tuple[dict[str, str], rsa.RSAPrivateKey],
+) -> None:
+    """Cloudflare has sent service-token assertions with no `sub` claim at all."""
+    env, private_key = budget_service_auth
+    client = _client(temp_config_file, tmp_path, env)
+    token = _budget_assertion(private_key, omit_claims=frozenset({"sub"}))
+
+    response = client.get("/api/budgets/service", headers={_ASSERTION_HEADER: token})
+
+    assert response.status_code == 200
+
+
+_SERVICE_REJECTED = "Service JWT rejected"
+_JWT_REJECTED = "Trusted upstream JWT rejected"
+
+
 @pytest.mark.parametrize(
-    "claims",
+    ("claims", "expected_log"),
     [
-        pytest.param({}, id="usage-export-assertion"),
-        pytest.param({"aud": _BUDGET_AUDIENCE}, id="usage-export-client"),
-        pytest.param({"common_name": _BUDGET_CLIENT_ID}, id="usage-export-audience"),
-        pytest.param({"aud": _BUDGET_AUDIENCE, "common_name": _BUDGET_CLIENT_ID, "type": "user"}, id="wrong-type"),
+        pytest.param({}, {"event": _JWT_REJECTED, "error": "InvalidAudienceError"}, id="usage-export-assertion"),
+        pytest.param(
+            {"aud": _BUDGET_AUDIENCE},
+            {"event": _SERVICE_REJECTED, "failed_check": "common_name"},
+            id="usage-export-client",
+        ),
+        pytest.param(
+            {"common_name": _BUDGET_CLIENT_ID},
+            {"event": _JWT_REJECTED, "error": "InvalidAudienceError"},
+            id="usage-export-audience",
+        ),
+        pytest.param(
+            {"aud": _BUDGET_AUDIENCE, "common_name": _BUDGET_CLIENT_ID, "type": "user"},
+            {"event": _SERVICE_REJECTED, "failed_check": "type"},
+            id="wrong-type",
+        ),
         pytest.param(
             {"aud": _BUDGET_AUDIENCE, "common_name": _BUDGET_CLIENT_ID, "sub": "person@example.org"},
+            {"event": _SERVICE_REJECTED, "failed_check": "sub"},
             id="nonempty-subject",
         ),
     ],
@@ -104,17 +144,57 @@ def test_budget_service_rejects_other_service_assertions(
     tmp_path: Path,
     budget_service_auth: tuple[dict[str, str], rsa.RSAPrivateKey],
     claims: dict[str, object],
+    expected_log: dict[str, str],
+) -> None:
+    """A rejection logs which check failed, never the token."""
+    env, private_key = budget_service_auth
+    client = _client(temp_config_file, tmp_path, env)
+    token = _service_assertion(private_key, **claims)
+
+    with capture_logs() as logs:
+        response = client.get("/api/budgets/service", headers={_ASSERTION_HEADER: token})
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid budget service JWT"}
+    assert [log for log in logs if expected_log.items() <= log.items()]
+    assert token not in repr(logs)
+
+
+_HEADER_MARKER = "header-text-marker"
+
+
+@pytest.mark.parametrize(
+    ("build_token", "expected_log"),
+    [
+        pytest.param(
+            lambda key: _budget_assertion(key, omit_claims=frozenset({"common_name"})),
+            {"error": "MissingRequiredClaimError", "claim": "common_name"},
+            id="missing-claim",
+        ),
+        pytest.param(
+            lambda key: jwt.encode({"aud": _BUDGET_AUDIENCE}, key, algorithm="RS256", headers={"kid": _HEADER_MARKER}),
+            {"error": "PyJWKClientError", "claim": None},
+            id="unknown-key",
+        ),
+        pytest.param(lambda _key: "x" * (16 * 1024 + 1), {"error": "too_large"}, id="too-large"),
+    ],
+)
+def test_budget_service_verifier_rejection_logs_the_error_without_token_text(
+    temp_config_file: Path,
+    tmp_path: Path,
+    budget_service_auth: tuple[dict[str, str], rsa.RSAPrivateKey],
+    build_token: Callable[[rsa.RSAPrivateKey], str],
+    expected_log: dict[str, object],
 ) -> None:
     env, private_key = budget_service_auth
     client = _client(temp_config_file, tmp_path, env)
 
-    response = client.get(
-        "/api/budgets/service",
-        headers={_ASSERTION_HEADER: _service_assertion(private_key, **claims)},
-    )
+    with capture_logs() as logs:
+        response = client.get("/api/budgets/service", headers={_ASSERTION_HEADER: build_token(private_key)})
 
     assert response.status_code == 401
-    assert response.json() == {"detail": "Invalid budget service JWT"}
+    assert [log for log in logs if {"event": _JWT_REJECTED, **expected_log}.items() <= log.items()]
+    assert _HEADER_MARKER not in repr(logs)
 
 
 @pytest.mark.parametrize("path", ["/api/budgets", "/api/usage/export", "/api/config/raw"])

@@ -174,15 +174,19 @@ def payloads(monkeypatch: pytest.MonkeyPatch, current_static_runner: None) -> li
 def dedicated_routing(monkeypatch: pytest.MonkeyPatch) -> None:
     """Route calls to a dedicated worker whose key is the target's own or, for unscoped targets, its unscoped one."""
 
-    def worker_route(*, worker_target: ResolvedWorkerTarget | None, **_kwargs: object) -> tuple[WorkerRoute, None]:
+    def worker_route(
+        *,
+        worker_target: ResolvedWorkerTarget | None,
+        **_kwargs: object,
+    ) -> tuple[WorkerRoute, None, None]:
         assert worker_target is not None
         route = WorkerRoute(
             protocol=WORKER_PROTOCOL_VERSION,
             worker_key=worker_target.worker_key or resolve_unscoped_worker_key("code"),
         )
-        return route, None
+        return route, None, None
 
-    monkeypatch.setattr(sandbox_proxy_module, "_worker_route", worker_route)
+    monkeypatch.setattr(sandbox_proxy_module, "_worker_route_with_sandbox", worker_route)
 
 
 def _call(
@@ -227,7 +231,7 @@ def test_calls_with_the_broker_off_import_no_broker_code(
     monkeypatch: pytest.MonkeyPatch,
     tool_name: str,
 ) -> None:
-    """Without a broker port, a worker-routed shell or python call never imports broker code and adds no broker env."""
+    """With the broker off, a worker-routed shell or python call never imports broker code and adds no broker env."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
     runtime_paths = resolve_runtime_paths(
@@ -238,6 +242,7 @@ def test_calls_with_the_broker_off_import_no_broker_code(
             "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner:8765",
             "MINDROOM_SANDBOX_PROXY_TOKEN": "proxy-token",
             "MINDROOM_SANDBOX_EXECUTION_MODE": "all",
+            "MINDROOM_EGRESS_BROKER_PORT": "off",
         },
     )
     for module in pkgutil.iter_modules(mindroom.egress_broker.__path__):
@@ -302,13 +307,17 @@ async def test_subagent_worker_shell_call_signs_its_normal_worker_key(
 ) -> None:
     """A call routed to a subagent's own worker carries the normal worker's key, the scope the broker serves."""
 
-    def worker_route(**_kwargs: object) -> tuple[WorkerRoute, None]:
-        return WorkerRoute(
-            protocol=WORKER_PROTOCOL_VERSION,
-            worker_key=subagent_worker_key(resolve_unscoped_worker_key("code"), "e" * 32),
-        ), None
+    def worker_route(**_kwargs: object) -> tuple[WorkerRoute, None, None]:
+        return (
+            WorkerRoute(
+                protocol=WORKER_PROTOCOL_VERSION,
+                worker_key=subagent_worker_key(resolve_unscoped_worker_key("code"), "e" * 32),
+            ),
+            None,
+            None,
+        )
 
-    monkeypatch.setattr(sandbox_proxy_module, "_worker_route", worker_route)
+    monkeypatch.setattr(sandbox_proxy_module, "_worker_route_with_sandbox", worker_route)
     config = _config(*_KEYS_AGENT_TOOLS)
     manager = CredentialsManager(runtime_paths.storage_root / "credentials")
     target = resolve_worker_target(None, "code", _identity())

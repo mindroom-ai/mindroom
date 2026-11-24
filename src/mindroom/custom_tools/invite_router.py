@@ -1,82 +1,24 @@
-"""Agent tool for adding the router to the current Matrix room."""
+"""Deprecated agent tool that once invited the router to the current Matrix room."""
 
 from __future__ import annotations
 
-import asyncio
-
-import nio
-
-from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.entity_resolution import entity_identity_registry
-from mindroom.matrix.invited_rooms_store import is_inviter_allowed
-from mindroom.matrix.personal_room_store import personal_room_excludes_router
 from mindroom.tool_system.authoring import Toolkit
-from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
-_ROUTER_JOIN_POLL_SECONDS = 0.25
-_ROUTER_JOIN_TIMEOUT_SECONDS = 5.0
-
-
-def _membership(response: object) -> str | None:
-    if not isinstance(response, nio.RoomGetStateEventResponse):
-        return None
-    membership = response.content.get("membership")
-    return membership if isinstance(membership, str) else None
-
-
-async def _wait_for_join(client: nio.AsyncClient, room_id: str, router_id: str) -> bool:
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + _ROUTER_JOIN_TIMEOUT_SECONDS
-    while loop.time() < deadline:
-        response = await client.room_get_state_event(room_id, "m.room.member", router_id)
-        if _membership(response) == "join":
-            return True
-        await asyncio.sleep(_ROUTER_JOIN_POLL_SECONDS)
-    return False
-
-
-async def _invite_and_wait(client: nio.AsyncClient, room_id: str, router_id: str) -> str:
-    response = await client.room_invite(room_id, router_id)
-    if not isinstance(response, nio.RoomInviteResponse):
-        return "Error: Router invite failed; current agent may lack invite permission."
-    if await _wait_for_join(client, room_id, router_id):
-        return "Router joined."
-    return "Router invited; join still pending. Retry after it joins."
+# LEGACY_COMPAT: the `invite_router` tool name in agent configs and prompts.
+# Legacy format: an agent's `tools` list, or a prompt, that names `invite_router`, which invited the router account.
+# Last legacy release: every release before the router-free change ships, v2026.11.459 the newest when written,
+#   offers the working tool; replacement: unreleased, rooms need no router account, so nothing replaces the call.
+# Handling: the name stays registered so such configs load; the call invites nobody and says it is not needed.
+#   Remove the stub after the first router-free release.
+# Coverage: tests/test_invite_router_tool.py::test_invite_router_answers_no_longer_needed
 
 
 class InviteRouterTools(Toolkit):
-    """Expose explicit router invite recovery to agents."""
+    """Keep the retired `invite_router` name callable."""
 
     def __init__(self) -> None:
         super().__init__(name="invite_router", tools=[self.invite_router])
 
     async def invite_router(self) -> str:
-        """Invite router to current Matrix room."""
-        context = get_tool_runtime_context()
-        if context is None:
-            return "Error: Matrix room context unavailable."
-
-        config = context.current_config
-        identities = entity_identity_registry(config, context.runtime_paths)
-        router_id = identities.current_id(ROUTER_AGENT_NAME).full_id
-        membership_response = await context.client.room_get_state_event(
-            context.room_id,
-            "m.room.member",
-            router_id,
-        )
-        membership = _membership(membership_response)
-        if membership == "join":
-            return "Router already joined."
-        if personal_room_excludes_router(context.runtime_paths, context.room_id, router_id):
-            # Its guest check would remove the router again.
-            return (
-                "Error: This adopted personal room does not admit the router; "
-                "an operator can add router_user_id to its personal-room record."
-            )
-        transport_agent_id = identities.current_id(context.recipient).full_id
-        if not is_inviter_allowed(config, context.runtime_paths, ROUTER_AGENT_NAME, transport_agent_id):
-            return "Error: Router auto-accept does not allow this Matrix transport account."
-        if membership == "invite":
-            return "Router invite pending; retry after it joins."
-
-        return await _invite_and_wait(context.client, context.room_id, router_id)
+        """No longer needed: agents need no router."""
+        return "invite_router is no longer needed: approvals, commands and access work without another account."

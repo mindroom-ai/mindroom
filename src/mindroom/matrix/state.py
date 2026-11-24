@@ -224,14 +224,23 @@ def get_room_alias_from_id(room_id: str, runtime_paths: constants.RuntimePaths) 
 def _matrix_state_cache_key(state_file: Path) -> tuple[Path, int, int | None, int | None]:
     """Return a key with eager local invalidation and bounded external staleness."""
     stat_ttl_bucket = int(monotonic() / _MATRIX_STATE_STAT_TTL_SECONDS)
-    mtime_ns, size = _matrix_state_file_signature(state_file, stat_ttl_bucket)
-    return state_file, _matrix_state_write_generation, mtime_ns, size
+    write_generation = _matrix_state_write_generation
+    mtime_ns, size = _matrix_state_file_signature(state_file, stat_ttl_bucket, write_generation)
+    return state_file, write_generation, mtime_ns, size
 
 
 @lru_cache(maxsize=64)
-def _matrix_state_file_signature(state_file: Path, stat_ttl_bucket: int) -> tuple[int | None, int | None]:
-    """Stat one state file at most once per TTL bucket."""
-    del stat_ttl_bucket
+def _matrix_state_file_signature(
+    state_file: Path,
+    stat_ttl_bucket: int,
+    write_generation: int,
+) -> tuple[int | None, int | None]:
+    """Stat one state file at most once per TTL bucket and local write.
+
+    Keying on the write generation keeps a stat taken before a local write out of every key built after it, so
+    the next bucket's stat cannot reload the unchanged file as a new object and invalidate the memos keyed on it.
+    """
+    del stat_ttl_bucket, write_generation
     try:
         stat = state_file.stat()
     except OSError:

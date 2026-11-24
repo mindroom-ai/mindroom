@@ -4,6 +4,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mindroom.config.judgment import JudgmentConfig
 from mindroom.config.schema_hints import dashboard_hint
+from mindroom.config.tool_aliases import ToolNames
+from mindroom.config.validation import validate_unique_entries
 
 # Tools that act with the owner's authority beyond the conversation, so a contact turn never offers them.
 CONTACT_CONTROL_TOOLS = frozenset(
@@ -17,6 +19,7 @@ CONTACT_CONTROL_TOOLS = frozenset(
         "claude_agent",
         "skill_manage",
         "dynamic_tools",
+        "matrix_user",
     },
 )
 
@@ -30,7 +33,7 @@ class ContactsConfig(BaseModel):
         default_factory=list,
         description="Rules that apply to every contact of this agent, ahead of each owner's own rules",
     )
-    tools: list[str] = Field(
+    tools: ToolNames = Field(
         default_factory=list,
         description="Default tools offered in contact turns when the owner chose none for that contact",
         json_schema_extra=dashboard_hint(reference="tool"),
@@ -38,6 +41,13 @@ class ContactsConfig(BaseModel):
     judgment: JudgmentConfig | None = Field(
         default=None,
         description="Judgment backend that checks each message against the rules; unset runs no judge",
+    )
+    remote_agents: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Exact or wildcard Matrix IDs of agents on other MindRoom deployments that this agent may ask for "
+            "contact and be asked by; empty keeps contacts within this deployment"
+        ),
     )
 
     @field_validator("tools")
@@ -49,3 +59,9 @@ class ContactsConfig(BaseModel):
                 msg = f"contacts.tools may not include {name}"
                 raise ValueError(msg)
         return tools
+
+    @field_validator("remote_agents")
+    @classmethod
+    def refuse_duplicate_remote_agents(cls, remote_agents: list[str]) -> list[str]:
+        """Name each pattern once, so the configured intent has one reading."""
+        return validate_unique_entries(remote_agents, field_name="contacts.remote_agents")

@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, TypeVar
@@ -25,10 +26,10 @@ from mindroom.tool_system.worker_routing import (
     build_tool_execution_identity,
     detached_execution_identity,
 )
+from mindroom.workers.placements import placement_for_session
 
 if TYPE_CHECKING:
-    import asyncio
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterator
     from pathlib import Path
 
     import nio
@@ -149,6 +150,14 @@ class ToolRuntimeContext:
     # Whether a call may name a workspace file for its result (``mindroom_output_path``); a silent listening turn's may
     # not, as the room text driving it would pick the file.
     tool_output_paths: bool = True
+    # Whether people see this turn's calls in its reply, which tool hooks read as ``shown``; only a reply that shows tool
+    # calls in a turn that is not quiet sets it.
+    tool_calls_shown: bool = False
+    # The agent turn the calls run in, and in a delegated child's turn the turn that delegated it; None outside a turn.
+    turn_id: str | None = None
+    parent_turn_id: str | None = None
+    # Vetted fork parent ``(room_id, thread_id)`` scopes loaded into this turn's history.
+    fork_parent_scopes: frozenset[tuple[str, str]] = frozenset()
 
     @property
     def current_config(self) -> Config:
@@ -276,12 +285,14 @@ class ToolRuntimeContext:
         # why-lazy: runtime resolution loads the config and credential modules, which slim tool authoring must not.
         from mindroom.runtime_resolution import resolve_agent_execution  # noqa: PLC0415
 
-        return resolve_agent_execution(
+        target = resolve_agent_execution(
             self.agent_name,
             self.config,
             self.runtime_paths,
             execution_identity=self.execution_identity,
         ).worker_target
+        # A subagent turn's own worker stays with the target, so a plugin that keeps it reaches that worker later.
+        return replace(target, placement=placement_for_session(self.session_id))
 
     def agent_workspace_root(self, *, create: bool = False) -> Path:
         """Return the workspace of the agent this dispatch runs as, at the primary's path for it.
@@ -290,15 +301,26 @@ class ToolRuntimeContext:
         record, when they do not exist yet.
         """
         # why-lazy: runtime resolution loads the config and credential modules, which slim tool authoring must not.
-        from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
+        if create:
+            from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
 
-        return resolve_agent_runtime(
+            return resolve_agent_runtime(
+                self.agent_name,
+                self.config,
+                self.runtime_paths,
+                execution_identity=self.execution_identity,
+                create=True,
+            ).workspace.root
+
+        from mindroom.runtime_resolution import resolve_agent_storage  # noqa: PLC0415
+
+        storage = resolve_agent_storage(
             self.agent_name,
             self.config,
             self.runtime_paths,
             execution_identity=self.execution_identity,
-            create=create,
-        ).workspace.root
+        )
+        return storage.workspace(self.config, self.runtime_paths).root
 
 
 @dataclass(frozen=True, slots=True)
@@ -340,8 +362,10 @@ class ToolRuntimeSupport:
         agent_name: str | None = None,
         active_model_name: str | None = None,
         attachment_ids: list[str] | tuple[str, ...] | None = None,
+        fork_parent_scopes: Collection[tuple[str, str]] = (),
         correlation_id: str | None = None,
         source_envelope: MessageEnvelope | None = None,
+        turn_id: str | None = None,
     ) -> ToolRuntimeContext | None:
         """Build shared runtime context for all tool calls."""
         client = self.runtime.client
@@ -364,8 +388,10 @@ class ToolRuntimeSupport:
             room=self.resolver.cached_room(target.room_id),
             storage_path=self.storage_path,
             attachment_ids=tuple(attachment_ids or ()),
+            fork_parent_scopes=frozenset(fork_parent_scopes),
             hooks=replace(self.hook_context.bindings(), registry=plugins.hooks),
             correlation_id=correlation_id,
+            turn_id=turn_id,
             message_received_depth=(source_envelope.message_received_depth if source_envelope is not None else 0),
             orchestrator=self.runtime.orchestrator,
             membership=self.membership,
@@ -384,18 +410,22 @@ class ToolRuntimeSupport:
         agent_name: str | None = None,
         active_model_name: str | None = None,
         attachment_ids: list[str] | tuple[str, ...] | None = None,
+        fork_parent_scopes: Collection[tuple[str, str]] = (),
         correlation_id: str | None = None,
         source_envelope: MessageEnvelope | None = None,
+        turn_id: str,
     ) -> ToolRuntimeContext:
-        """Build the tool context of a turn this bot runs now; a bot without a Matrix client is restarting."""
+        """Build the tool context of turn ``turn_id`` this bot runs now; a bot without a Matrix client is restarting."""
         context = self.build_context(
             target,
             user_id=user_id,
             agent_name=agent_name,
             active_model_name=active_model_name,
             attachment_ids=attachment_ids,
+            fork_parent_scopes=fork_parent_scopes,
             correlation_id=correlation_id,
             source_envelope=source_envelope,
+            turn_id=turn_id,
         )
         if context is None:
             msg = f"Agent runtime '{self.agent_name}' is restarting."
@@ -439,6 +469,57 @@ _WORKER_PROGRESS_PUMP: ContextVar[WorkerProgressPump | None] = ContextVar(
     "worker_progress_pump",
     default=None,
 )
+_CALL_PROGRESS_SINK: ContextVar[Callable[[str], None] | None] = ContextVar("call_progress_sink", default=None)
+_CALL_REFUSAL_HOOK: ContextVar[Callable[[], None] | None] = ContextVar("call_refusal_hook", default=None)
+_CALL_CANCEL_NEVER_RAN_HOOK: ContextVar[Callable[[], None] | None] = ContextVar(
+    "call_cancel_never_ran_hook",
+    default=None,
+)
+
+
+class CallOutputStream:
+    """The frames of one streamed CLI call on their way to its one reader, and the way to its command's stdin.
+
+    ``frames`` is short: the worker call's thread waits while it is full, which stops the command once its pipes
+    fill, so a slow reader never makes MindRoom hold a command's output.
+    """
+
+    def __init__(self, loop: asyncio.AbstractEventLoop, *, queued_frames: int = 16) -> None:
+        self._loop = loop
+        self.frames: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=queued_frames)
+        # Whether the call's one reader was claimed, and whether what it has not read was dropped by a cancel.
+        self.attached = self.closed = False
+        # Set once the command's exit arrived. ``stopped`` says that the runner ended it for a cancel and saw its
+        # whole process group gone; a command that ended on its own may have left processes running.
+        self.ended = asyncio.Event()
+        self.stopped = False
+        # Writes one chunk (its number, base64 bytes, and whether stdin ends after it) to the command's stdin and
+        # returns whether stdin takes more; set once the call's worker request is on its way.
+        self.write_stdin: Callable[[int, str, bool], Awaitable[bool]] | None = None
+
+    def put(self, frame: dict[str, object]) -> None:
+        """Queue one frame from the worker call's thread; the frames of a call nobody reads any more are dropped."""
+        if frame.get("t") == "exit":
+            self.stopped = bool(frame.get("cancelled"))
+            self._loop.call_soon_threadsafe(self.ended.set)
+            if self.stopped:
+                return
+        queued = asyncio.run_coroutine_threadsafe(self.frames.put(frame), self._loop)
+        with suppress(asyncio.QueueShutDown):
+            # An event loop that stopped never answers, so the thread waits only while it runs.
+            while not queued.done() and self._loop.is_running():
+                with suppress(TimeoutError):
+                    queued.result(timeout=1.0)
+            if queued.done():
+                queued.result()
+
+    def close(self) -> None:
+        """Drop the frames nobody reads any more, which also wakes the worker call's thread that waits to add one."""
+        self.closed = True
+        self.frames.shutdown(immediate=True)
+
+
+_CALL_OUTPUT_STREAM: ContextVar[CallOutputStream | None] = ContextVar("call_output_stream", default=None)
 
 
 def get_tool_runtime_context() -> ToolRuntimeContext | None:
@@ -480,6 +561,28 @@ def get_worker_progress_pump() -> WorkerProgressPump | None:
     return _WORKER_PROGRESS_PUMP.get()
 
 
+def get_call_progress_sink() -> Callable[[str], None] | None:
+    """Return the active CLI call's progress sink, if any."""
+    return _CALL_PROGRESS_SINK.get()
+
+
+def get_call_output_stream() -> CallOutputStream | None:
+    """Return where the active CLI call's command streams its output, if the call asked for that."""
+    return _CALL_OUTPUT_STREAM.get()
+
+
+def note_call_refusal() -> None:
+    """Record a typed pre-execution named-worker refusal for the active CLI call."""
+    if (hook := _CALL_REFUSAL_HOOK.get()) is not None:
+        hook()
+
+
+def note_call_cancelled_never_ran() -> None:
+    """Record that the active CLI call was cancelled before dispatch to the worker."""
+    if (hook := _CALL_CANCEL_NEVER_RAN_HOOK.get()) is not None:
+        hook()
+
+
 def scope_hook_context_kwargs(
     context: ToolRuntimeContext,
     *,
@@ -499,6 +602,8 @@ def scope_hook_context_kwargs(
             runtime_paths=context.runtime_paths,
             correlation_id=correlation_id,
         ),
+        "turn_id": context.turn_id,
+        "parent_turn_id": context.parent_turn_id,
         "agent_name": scope.scope_id if scope.kind == "team" else context.agent_name,
         "scope": scope,
         "session_id": session_id,
@@ -633,6 +738,8 @@ async def emit_custom_event(
             runtime_paths=context.runtime_paths,
             correlation_id=context.correlation_id or f"{event_name}:{uuid4().hex}",
         ),
+        turn_id=context.turn_id,
+        parent_turn_id=context.parent_turn_id,
         payload=payload,
         source_plugin=plugin_name,
         room_id=context.room_id,
@@ -716,3 +823,25 @@ def worker_progress_pump_scope(
     finally:
         pump.shutdown.set()
         _WORKER_PROGRESS_PUMP.reset(token)
+
+
+@contextmanager
+def call_progress_sink_scope(
+    sink: Callable[[str], None] | None,
+    *,
+    on_refused: Callable[[], None] | None = None,
+    on_cancelled_never_ran: Callable[[], None] | None = None,
+    stream: CallOutputStream | None = None,
+) -> Iterator[None]:
+    """Bind per-call progress, refusal, and cancel hooks, and its output stream, for the lifetime of one CLI tool call."""
+    progress_token = _CALL_PROGRESS_SINK.set(sink)
+    refusal_token = _CALL_REFUSAL_HOOK.set(on_refused)
+    cancel_token = _CALL_CANCEL_NEVER_RAN_HOOK.set(on_cancelled_never_ran)
+    stream_token = _CALL_OUTPUT_STREAM.set(stream)
+    try:
+        yield
+    finally:
+        _CALL_OUTPUT_STREAM.reset(stream_token)
+        _CALL_CANCEL_NEVER_RAN_HOOK.reset(cancel_token)
+        _CALL_REFUSAL_HOOK.reset(refusal_token)
+        _CALL_PROGRESS_SINK.reset(progress_token)

@@ -7,10 +7,10 @@ import hashlib
 import json
 import re
 import sys
-from dataclasses import dataclass
-from importlib import util
+from dataclasses import dataclass, replace
+from importlib import import_module, machinery, util
 from pathlib import Path
-from types import ModuleType
+from types import CodeType, ModuleType
 from typing import TYPE_CHECKING, Any
 
 from mindroom.config.plugin import PluginEntryConfig  # noqa: TC001
@@ -18,14 +18,19 @@ from mindroom.constants import RuntimePaths, resolve_config_relative_path
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolMetadata
 from mindroom.tool_system.plugin_identity import validate_plugin_name
-from mindroom.tool_system.registry import PLUGIN_MODULE_PREFIX
+from mindroom.tool_system.registry import PLUGIN_MODULE_PREFIX, record_plugin_root
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
 logger = get_logger(__name__)
 
+# The (major, minor) plugin API version `mindroom.plugin_api` exports; docs/plugins.md says when to bump it.
+PLUGIN_API_VERSION = (1, 34)
+_PLUGIN_API_PATTERN = re.compile(r"([0-9]+)\.([0-9]+)")
 _PLUGIN_MANIFEST = "mindroom.plugin.json"
+# One DNS label, as a plugin origin's host takes its plugin's name and a label the plugin picks.
+DNS_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _WARNED_PLUGIN_MESSAGES: set[tuple[str, Path]] = set()
 _PreparedPluginModule = tuple[ModuleType, dict[str, ModuleType | None]] | None
@@ -40,11 +45,17 @@ class _PluginManifest:
     """Validated plugin manifest data."""
 
     name: str
+    # The plugin API version the plugin needs, as the manifest states it.
+    mindroom_plugin_api: str | None
     tools_module: str | None
     hooks_module: str | None
     oauth_module: str | None
     routes_module: str | None
+    lifecycle_module: str | None
+    origin_module: str | None
     skills: list[str]
+    reserved_namespaces: tuple[str, ...]
+    worker_preload: bool = False
 
 
 @dataclass(frozen=True)
@@ -52,13 +63,21 @@ class _PluginBase:
     """Loaded plugin details that depend only on the manifest."""
 
     name: str
+    mindroom_plugin_api: str | None
     root: Path
     manifest_path: Path
     tools_module_path: Path | None
     hooks_module_path: Path | None
     oauth_module_path: Path | None
     routes_module_path: Path | None
+    lifecycle_module_path: Path | None
+    origin_module_path: Path | None
     skill_dirs: list[Path]
+    reserved_namespaces: tuple[str, ...]
+    # The name Python's import system gives the root of a plugin configured as a package, such as ``my_plugin``.
+    package: str | None = None
+    # The manifest's promise that importing the plugin once per worker, before any request, equals importing it per call.
+    worker_preload: bool = False
 
 
 @dataclass
@@ -69,7 +88,6 @@ class _PluginCacheEntry:
 
 @dataclass(frozen=True, eq=False)
 class _ModuleCacheEntry:
-    mtime: float
     module: ModuleType
     # The tools the module registered while it executed.
     registrations: Mapping[str, ToolMetadata]
@@ -87,6 +105,34 @@ class SkippedPlugin:
 _PLUGIN_CACHE: dict[Path, _PluginCacheEntry] = {}
 # Keyed by module name, because nested plugin roots can import one file under several owners.
 _MODULE_IMPORT_CACHE: dict[str, _ModuleCacheEntry] = {}
+
+
+class _SourceFileLoader(machinery.SourceFileLoader):
+    """Compile a plugin module from its source, never a bytecode cache a same-size edit within a second leaves valid."""
+
+    def get_code(self, fullname: str) -> CodeType:
+        path = self.get_filename(fullname)
+        return self.source_to_code(self.get_data(path), path)
+
+
+class _PreparedModuleLoader(_SourceFileLoader):
+    """Find and load one plugin module into the module prepared for it, which stays at hand when its import fails."""
+
+    module: ModuleType | None = None
+
+    def find_spec(self, name: str, path: object = None, target: object = None) -> machinery.ModuleSpec | None:  # noqa: ARG002
+        return self.module.__spec__ if self.module is not None and name == self.name else None
+
+    def create_module(self, spec: machinery.ModuleSpec) -> ModuleType | None:  # noqa: ARG002
+        return self.module
+
+
+# A plugin package directory's file loaders: the default ones, with source compiled as the plugin loader does.
+_PLUGIN_FILE_LOADERS = (
+    (machinery.ExtensionFileLoader, machinery.EXTENSION_SUFFIXES),
+    (_SourceFileLoader, machinery.SOURCE_SUFFIXES),
+    (machinery.SourcelessFileLoader, machinery.BYTECODE_SUFFIXES),
+)
 
 
 def _warn_once(message: str, *, path: Path) -> None:
@@ -114,16 +160,26 @@ def _collect_plugin_bases(
 
         root: Path | None = None
         try:
-            root = _resolve_plugin_root(plugin_entry.path, runtime_paths)
-            plugin_base = _load_plugin_base(root)
+            root, package = _locate_plugin(plugin_entry.path, runtime_paths)
+            # Before its manifest loads, so a plugin whose manifest fails still adds no built-in tools.
+            record_plugin_root(root)
+            plugin_base = replace(_load_plugin_base(root), package=package)
         except Exception as exc:
-            _log_skipped_plugin_entry(plugin_entry.path, root, exc)
+            _log_failed_plugin_entry(plugin_entry, root, exc)
             skipped.append(SkippedPlugin(plugin_entry.path, exc, root))
             continue
 
         plugin_bases.append((plugin_base, plugin_entry))
     _reject_duplicate_plugin_manifest_names(plugin_bases)
     return plugin_bases, skipped
+
+
+def _log_failed_plugin_entry(plugin_entry: PluginEntryConfig, root: Path | None, exc: BaseException) -> None:
+    """Log one configured plugin that failed to load, not calling a required one skipped, since the primary refuses it."""
+    if plugin_entry.required:
+        logger.warning("Required plugin failed to load", plugin_path=plugin_entry.path, error=str(exc))
+    else:
+        _log_skipped_plugin_entry(plugin_entry.path, root, exc)
 
 
 def _log_skipped_plugin_entry(
@@ -169,43 +225,53 @@ def _reject_duplicate_plugin_manifest_names(
 
 
 def _resolve_plugin_root(plugin_path: str, runtime_paths: RuntimePaths) -> Path:
+    return _locate_plugin(plugin_path, runtime_paths)[0]
+
+
+def _locate_plugin(plugin_path: str, runtime_paths: RuntimePaths) -> tuple[Path, str | None]:
+    """Return a plugin's root and, for a plugin configured as a package, the package name of that root."""
     parsed_python_spec = _parse_python_plugin_spec(plugin_path)
     if parsed_python_spec is not None and parsed_python_spec[2]:
-        module_root = _resolve_python_plugin_root(plugin_path)
-        if module_root is not None:
-            return module_root
+        located = _locate_python_plugin(plugin_path)
+        if located is not None:
+            return located
         msg = f"Configured plugin module could not be resolved: {plugin_path}"
         raise PluginValidationError(msg)
 
     relative = resolve_config_relative_path(plugin_path, runtime_paths)
     if relative.exists():
-        return relative
+        return relative, None
 
-    module_root = _resolve_python_plugin_root(plugin_path)
-    if module_root is not None:
-        return module_root
-
-    return relative
+    return _locate_python_plugin(plugin_path) or (relative, None)
 
 
-def _resolve_python_plugin_root(plugin_path: str) -> Path | None:
+def _locate_python_plugin(plugin_path: str) -> tuple[Path, str | None] | None:
     parsed = _parse_python_plugin_spec(plugin_path)
     if parsed is None:
         return None
 
     module_name, subpath, _explicit = parsed
+    # Find each later part on disk inside the one before, so finding a plugin runs no package's __init__.py.
+    first, *rest = module_name.split(".")
     try:
-        spec = util.find_spec(module_name)
-    except ModuleNotFoundError:
-        return None
-    except (Exception, SystemExit) as exc:
+        # The first part goes through sys.modules and sys.meta_path, which raise for a module without a spec.
+        spec = util.find_spec(first)
+    except Exception as exc:
         msg = f"Failed to resolve plugin module {plugin_path}: {exc}"
         raise PluginValidationError(msg) from exc
+    for part in rest:
+        if spec is None or not spec.submodule_search_locations:
+            return None
+        # By its bare name, a namespace package's path never looks up its unimported parent in sys.modules.
+        spec = machinery.PathFinder.find_spec(part, list(spec.submodule_search_locations))
     if spec is None:
         return None
 
+    package: str | None = None
     if spec.submodule_search_locations:
         root = Path(next(iter(spec.submodule_search_locations)))
+        # Python imports the subpath's directories inside the package as packages too.
+        package = ".".join((module_name, *Path(subpath or "").parts))
     elif spec.origin:
         root = Path(spec.origin).parent
     else:
@@ -215,7 +281,7 @@ def _resolve_python_plugin_root(plugin_path: str) -> Path | None:
     if not resolved_root.exists() or not resolved_root.is_dir():
         return None
 
-    return resolved_root
+    return resolved_root, package
 
 
 def _parse_python_plugin_spec(plugin_path: str) -> tuple[str, str | None, bool] | None:
@@ -273,17 +339,24 @@ def _load_plugin_base(root: Path) -> _PluginBase:
     hooks_module_path = _resolve_module_path(root, manifest.hooks_module, kind="hooks")
     oauth_module_path = _resolve_module_path(root, manifest.oauth_module, kind="oauth")
     routes_module_path = _resolve_module_path(root, manifest.routes_module, kind="routes")
+    lifecycle_module_path = _resolve_module_path(root, manifest.lifecycle_module, kind="lifecycle")
+    origin_module_path = _resolve_module_path(root, manifest.origin_module, kind="origin")
     skill_dirs = _resolve_skill_dirs(root, manifest.skills)
 
     return _PluginBase(
         name=manifest.name,
+        mindroom_plugin_api=manifest.mindroom_plugin_api,
         root=root,
         manifest_path=manifest_path,
         tools_module_path=tools_module_path,
         hooks_module_path=hooks_module_path,
         oauth_module_path=oauth_module_path,
         routes_module_path=routes_module_path,
+        lifecycle_module_path=lifecycle_module_path,
+        origin_module_path=origin_module_path,
         skill_dirs=skill_dirs,
+        reserved_namespaces=manifest.reserved_namespaces,
+        worker_preload=manifest.worker_preload,
     )
 
 
@@ -311,11 +384,20 @@ def _parse_manifest(path: Path) -> _PluginManifest:
         logger.error("Invalid plugin manifest name", path=str(path), plugin_name=name, error=str(exc))  # noqa: TRY400
         msg = f"{exc} ({path})"
         raise PluginValidationError(msg) from exc
+    mindroom_plugin_api = _check_plugin_api(data.get("mindroom_plugin_api"), normalized_name, path)
 
     tools_module = _manifest_module(data, "tools_module", path)
     hooks_module = _manifest_module(data, "hooks_module", path)
     oauth_module = _manifest_module(data, "oauth_module", path)
     routes_module = _manifest_module(data, "routes_module", path)
+    lifecycle_module = _manifest_module(data, "lifecycle_module", path)
+    origin_module = _manifest_module(data, "origin_module", path)
+    if origin_module and not DNS_LABEL.fullmatch(normalized_name):
+        msg = (
+            f"Plugin {normalized_name!r} cannot serve origins: a plugin with an origin_module needs a name of at most"
+            f" 63 lowercase letters, digits, and hyphens, starting and ending with a letter or digit ({path})"
+        )
+        raise PluginValidationError(msg)
 
     raw_skills = data.get("skills", [])
     if raw_skills is None:
@@ -325,14 +407,50 @@ def _parse_manifest(path: Path) -> _PluginManifest:
         logger.error("Plugin skills must be a list of strings", path=str(path))
         raise PluginValidationError(msg)
 
+    reserved_namespaces = data.get("reserved_namespaces", [])
+    if not isinstance(reserved_namespaces, list) or not all(
+        isinstance(namespace, str) and namespace for namespace in reserved_namespaces
+    ):
+        event = "Plugin reserved_namespaces must be a list of non-empty strings"
+        logger.error(event, path=str(path))
+        msg = f"{event}: {path}"
+        raise PluginValidationError(msg)
+
+    worker_preload = data.get("worker_preload", False)
+    if not isinstance(worker_preload, bool):
+        msg = f"Plugin worker_preload must be true or false: {path}"
+        raise PluginValidationError(msg)
+
     return _PluginManifest(
         name=normalized_name,
+        mindroom_plugin_api=mindroom_plugin_api,
         tools_module=tools_module,
         hooks_module=hooks_module,
         oauth_module=oauth_module,
         routes_module=routes_module,
+        lifecycle_module=lifecycle_module,
+        origin_module=origin_module,
         skills=raw_skills,
+        reserved_namespaces=tuple(reserved_namespaces),
+        worker_preload=worker_preload,
     )
+
+
+def _check_plugin_api(needed: object, plugin_name: str, path: Path) -> str | None:
+    """Return the plugin API version the manifest needs, refusing another major or a later minor of this one."""
+    if needed is None:
+        return None
+    match = _PLUGIN_API_PATTERN.fullmatch(needed) if isinstance(needed, str) else None
+    if match is None:
+        msg = f'Plugin mindroom_plugin_api must be a "MAJOR.MINOR" string such as "1.0": {path}'
+        raise PluginValidationError(msg)
+    major, minor = PLUGIN_API_VERSION
+    version = (int(match[1]), int(match[2]))
+    if not (major, 0) <= version <= (major, minor):
+        advice = "upgrade MindRoom" if version > (major, minor) else "update the plugin"
+        msg = f"Plugin {plugin_name!r} needs plugin API {needed}, but this MindRoom provides {major}.{minor}: {advice} ({path})"
+        raise PluginValidationError(msg)
+    return match[0]
 
 
 def _manifest_module(data: dict[str, Any], field: str, path: Path) -> str | None:
@@ -388,6 +506,27 @@ def _module_name(plugin_name: str, plugin_root: Path, module_path: Path, prefix:
     return f"{package_name}.{_relative_module_name(plugin_root, module_path)}"
 
 
+def _package_parts(root: Path, module_path: Path) -> tuple[str, ...]:
+    """Return the parts of the name a module file inside ``root`` has below it, a package by its ``__init__.py``."""
+    parts = module_path.relative_to(root).with_suffix("").parts
+    return parts[:-1] if parts[-1:] == ("__init__",) else parts
+
+
+def _outside_other_plugins(plugin: _PluginBase) -> _PluginBase:
+    """Return ``plugin``, keeping names of its own when it lies in another plugin's directory, a manifest above it."""
+    if plugin.package is None or not any((parent / _PLUGIN_MANIFEST).exists() for parent in plugin.root.parents):
+        return plugin
+    return replace(plugin, package=None)
+
+
+def _import_name(plugin: _PluginBase, module_path: Path) -> str | None:
+    """Return the name Python's import system gives one of a package plugin's modules, or None when it gives none."""
+    if plugin.package is None:
+        return None
+    parts = (*plugin.package.split("."), *_package_parts(plugin.root, module_path))
+    return ".".join(parts) if all(part.isidentifier() for part in parts) else None
+
+
 def _package_chain_names(plugin_name: str, plugin_root: Path, module_path: Path, prefix: str) -> list[tuple[str, Path]]:
     package_name = _plugin_package_name(plugin_name, plugin_root, prefix)
     chain = [(package_name, plugin_root)]
@@ -418,9 +557,12 @@ def _install_plugin_package_chain(
     plugin_root: Path,
     module_path: Path,
     prefix: str,
+    *,
+    packages: bool = True,
 ) -> None:
     for package_name, package_root in _package_chain_names(plugin_name, plugin_root, module_path, prefix):
-        if package_name in sys.modules:
+        sys.path_importer_cache[str(package_root)] = machinery.FileFinder(str(package_root), *_PLUGIN_FILE_LOADERS)
+        if not packages or package_name in sys.modules:
             continue
         package = ModuleType(package_name)
         package.__file__ = str(package_root / "__init__.py")
@@ -437,15 +579,42 @@ def _restore_plugin_package_chain(previous_packages: dict[str, ModuleType | None
             sys.modules[package_name] = previous_module
 
 
-def _prepare_module(name: str, root: Path, path: Path, module_name: str, prefix: str) -> _PreparedPluginModule:
-    previous_packages = _snapshot_plugin_package_chain(name, root, path, prefix)
-    _install_plugin_package_chain(name, root, path, prefix)
-    if (spec := util.spec_from_file_location(module_name, path)) is None or spec.loader is None:
+def _prepare_module(
+    name: str,
+    root: Path,
+    path: Path,
+    module_name: str,
+    prefix: str,
+    *,
+    by_name: bool = False,
+) -> _PreparedPluginModule:
+    """Make one plugin module, in sys.modules under its separate namespace, or for ``_import_by_name`` when ``by_name``."""
+    previous_packages = {} if by_name else _snapshot_plugin_package_chain(name, root, path, prefix)
+    _install_plugin_package_chain(name, root, path, prefix, packages=not by_name)
+    loader = _PreparedModuleLoader(module_name, str(path)) if by_name else None
+    if (spec := util.spec_from_file_location(module_name, path, loader=loader)) is None or spec.loader is None:
         _restore_plugin_package_chain(previous_packages)
         return None
 
-    module = sys.modules[module_name] = util.module_from_spec(spec)
+    # Made before ``loader.module`` is set, so this one call creates it; the import's own call then returns it.
+    module = util.module_from_spec(spec)
+    if loader is None:
+        sys.modules[module_name] = module
+    else:
+        loader.module = module
     return module, previous_packages
+
+
+def _import_by_name(module: ModuleType) -> ModuleType:
+    """Import ``module``'s name, executing it as any import does: the packages' ``__init__.py`` first, under its lock."""
+    loader = module.__spec__.loader if module.__spec__ is not None else None
+    assert isinstance(loader, _PreparedModuleLoader)
+    # Replaced, never changed in place, so an import another thread runs through the finders skips none of them.
+    sys.meta_path = [loader, *sys.meta_path]
+    try:
+        return import_module(module.__name__)
+    finally:
+        sys.meta_path = [finder for finder in sys.meta_path if finder is not loader]
 
 
 def declared_tool_metadata(module_path: Path) -> dict[str, ToolMetadata]:

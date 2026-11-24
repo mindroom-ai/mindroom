@@ -21,6 +21,7 @@ owns the turn. The collectors and callbacks a turn reports to cross via
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from functools import partial
@@ -29,19 +30,27 @@ from uuid import uuid4
 
 from mindroom import ai_runtime
 from mindroom.agent_cli.lifetime import CliTurnLifetime
+from mindroom.ai_run_metadata import (
+    build_terminal_note_ai_run_metadata_content,
+    merge_usage,
+    prior_usage_by_run,
+)
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.cancellation import current_task_is_process_shutdown
 from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
     MATRIX_EVENT_ID_METADATA_KEY,
     MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
     MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
+from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost, stored_receipts
 from mindroom.delegation.state import DelegationState
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.interrupted_replay import NO_TURN_INPUT, TurnInput, persist_interrupted_replay_snapshot
-from mindroom.history.storage import remove_history_of_redacted_events
+from mindroom.history.run_checkpoint import recover_stopped_run
+from mindroom.history.session_context import load_scrubbed_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.request_context import bind_llm_request_log_context
@@ -55,7 +64,7 @@ from mindroom.tool_system.events import CollectedStreamPresentation, FailedReply
 from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT, continuation_decision_from_tools, stopped_calls
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping, Sequence
+    from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.agent_modes import AgentMode
@@ -104,11 +113,13 @@ __all__ = [
     "build_llm_request_log_context",
     "build_matrix_run_metadata",
     "collect_streamed_response_content",
+    "detached_turn_context",
     "is_empty_reply",
     "own_approved_calls",
     "pause_without_approval_error",
     "paused_attempt_from_response",
     "pending_approval_requirements",
+    "publish_error_run_metadata",
     "replays_as_turn",
     "skip_unapproved_attempt",
     "stream_response_turn",
@@ -336,6 +347,8 @@ class ResponseTurnContext:
     current_sender_id: str | None = None
     # Interactive selections reply to the question but consume history through the selecting source.
     history_boundary_event_id: str | None = None
+    # The messages the prompt already holds, a route's named sources, which are left out of the thread's history.
+    prompt_source_event_ids: tuple[str, ...] = ()
     member_display_names: Mapping[str, str] = field(default_factory=dict)
     active_model_name: str | None = None
     active_event_ids: frozenset[str] = frozenset()
@@ -396,9 +409,41 @@ class ResponseTurnContext:
     reusable_build: AgentBuild | None = None
 
     @property
-    def include_openai_compat_guidance(self) -> bool:
-        """Whether the turn answers the OpenAI-compatible API, which omits Matrix sender attribution."""
-        return self.execution_identity is not None and self.execution_identity.channel == "openai_compat"
+    def outside_matrix(self) -> bool:
+        """Whether the turn answers the OpenAI-compatible API or a headless run, which omit Matrix sender attribution."""
+        return self.execution_identity is not None and self.execution_identity.channel in ("openai_compat", "headless")
+
+
+def detached_turn_context(
+    entity_label: str,
+    *,
+    session_id: str | None,
+    execution_identity: ToolExecutionIdentity,
+    model_name: str | None = None,
+    prompt: str = "",
+    thread_history: Sequence[ResolvedVisibleMessage] | None = None,
+    knowledge: AgentKnowledge | None = None,
+    refresh_scheduler: KnowledgeRefreshScheduler | None = None,
+) -> ResponseTurnContext:
+    """Build the turn context of a turn without a Matrix conversation: an OpenAI-compatible completion or a headless run."""
+    return ResponseTurnContext(
+        entity_label=entity_label,
+        session_id=session_id,
+        run_id=None,
+        correlation_id=uuid4().hex,
+        reply_to_event_id=None,
+        room_id=None,
+        thread_id=None,
+        requester_id=execution_identity.requester_id,
+        matrix_run_metadata=None,
+        active_model_name=model_name,
+        prompt=prompt,
+        thread_history=thread_history,
+        execution_identity=execution_identity,
+        refresh_scheduler=refresh_scheduler,
+        knowledge=knowledge,
+        include_interactive_questions=False,
+    )
 
 
 @dataclass(frozen=True)
@@ -414,24 +459,33 @@ class TurnSinks:
     on_failed: Callable[[HandledAttempt], None] | None = None
     # Receives each attempt's run id and configured model name before the attempt starts.
     on_attempt_start: Callable[[str, str], None] | None = None
+    # Receives each attempt's resolved configured model name before streaming starts.
+    on_model_resolved: Callable[[str], None] | None = None
+    # Reads the active model payload for terminal error metadata when a failure happens without a run record.
+    active_model: Callable[[], Mapping[str, str] | None] | None = None
     # Whether the driver stores an interrupted turn in its scope's history; a delegated child's interruption belongs
     # to delegation recovery, and a voice call stores what it spoke.
     persist_interrupted: bool = True
     # The event the turn's Matrix reply shows, which an interrupted record names.
     response_event_id: Callable[[], str | None] | None = None
+    # Whether a Stop of its user reached the reply the turn writes, asked when the turn is cancelled.
+    stopped_by_user: Callable[[], bool] | None = None
+    # Collects what the subagent turns whose results the turn receives cost, which its run metadata reports; a turn
+    # whose caller passes none keeps its own, and a delegated child's is the one its settlement reads.
+    subagent_cost: SubagentCost | None = None
 
 
 @dataclass(frozen=True)
 class TurnResume:
     """Where a resumed turn starts: the restored attempt to settle first, if any, and the same-turn attempts spent.
 
-    ``prior_usage`` is the usage of the turn's attempts before the first one the resume settles or runs, which the
-    reply's usage adds (``TurnRunState.prior_usage``).
+    ``prior_usage`` is the usage of the turn's attempts before the first one the resume settles or runs, by the run
+    id of each, which the reply's usage adds (``TurnRunState.prior_usage``).
     """
 
     attempt: CompletedAttempt | None = None
     continuation_count: int = 0
-    prior_usage: tuple[RunMetrics, ...] = ()
+    prior_usage: Mapping[str, RunMetrics] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -478,9 +532,10 @@ class TurnRunState:
     # interrupted record keeps it until the attempt's run stores its own (``TurnPartialSnapshot.turn_input``), as the
     # run of an attempt that completes does.
     turn_input: TurnInput = NO_TURN_INPUT
-    # The calls the turn's spent attempts finished, and their usage, before a retry or a continuation started another.
+    # The calls the turn's spent attempts finished, and their usage by run id, before a retry or a continuation started
+    # another; a replay's holds the attempts a restart cut short too.
     prior_completed_tools: tuple[ToolTraceEntry, ...] = ()
-    prior_usage: tuple[RunMetrics, ...] = ()
+    prior_usage: dict[str, RunMetrics] = field(default_factory=dict)
     empty_response_retried: bool = False
     attempt: _LiveAttempt | None = None
 
@@ -814,9 +869,10 @@ async def _record_interrupted(
     if not sinks.persist_interrupted:
         return
     response_event_id = sinks.response_event_id() if sinks.response_event_id is not None else None
+    stopped = status is RunStatus.cancelled and sinks.stopped_by_user is not None and sinks.stopped_by_user()
     # A further cancellation, such as the one the streamer sends 0.5 s after a Stop, waits for the record too, so the
     # reply settles, and the conversation's next turn reads history, only once it is stored.
-    await run_blocking_until_complete(_persist_interrupted, ctx, adapter, run, response_event_id)
+    await run_blocking_until_complete(_persist_interrupted, ctx, adapter, run, response_event_id, stopped)
 
 
 def _persist_interrupted(
@@ -824,20 +880,47 @@ def _persist_interrupted(
     adapter: TurnAdapter[Any],
     run: TurnRunState,
     response_event_id: str | None,
+    stopped_by_user: bool,
 ) -> None:
-    """Store the turn's interrupted record into the scope its runs are stored in, loading it when the turn had not."""
+    """Store the turn's interrupted record into the scope its runs are stored in, loading it when the turn had not.
+
+    A turn its user stopped keeps the run its attempt stored instead, once a response of that run had begun
+    (``recover_stopped_run``): the next turn's request then starts with what the stopped run sent, which a provider's
+    prompt cache still holds, where the record's prose account of the same work would be new input.
+    """
     record = run.record
     try:
         scope_context = run.scope_context or adapter.load_scope()
+        storage, session = scope_context.storage, scope_context.stored_or_first_session()
+        if (
+            stopped_by_user
+            and record.run_id is not None
+            and recover_stopped_run(storage, session, record.run_id, response_event_id)
+        ):
+            return
         persist_interrupted_replay_snapshot(
-            storage=scope_context.storage,
-            session=scope_context.stored_or_first_session(),
+            storage=storage,
+            session=session,
             run_id=record.run_id or str(uuid4()),
             snapshot=record.interrupted_snapshot(response_event_id=response_event_id),
         )
     except Exception:
         # A lost replay row is the lesser harm; the turn's own exit must still run.
         logger.exception("Failed to persist interrupted replay state", entity=ctx.entity_label)
+
+
+def publish_error_run_metadata(sinks: TurnSinks) -> None:
+    """Publish terminal error ``io.mindroom.ai_run`` metadata when a handled failure has no run record.
+
+    A run the turn already published, such as one whose cleanup then failed, keeps what it published under the error
+    status.
+    """
+    collector = sinks.run_metadata_collector
+    if collector is None:
+        return
+    model = sinks.active_model() if sinks.active_model is not None else None
+    error = build_terminal_note_ai_run_metadata_content("error", model=model)[AI_RUN_METADATA_KEY]
+    collector[AI_RUN_METADATA_KEY] = {**error, **collector.get(AI_RUN_METADATA_KEY, {}), "status": "error"}
 
 
 async def _settle_failure(
@@ -850,6 +933,8 @@ async def _settle_failure(
 ) -> FailedReply:
     """Record a failed turn as interrupted and report its failure to the caller; return its error reply."""
     _publish_run_metadata(sinks, failure.build_run_metadata)
+    if failure.build_run_metadata is None:
+        publish_error_run_metadata(sinks)
     await _record_interrupted(ctx, adapter, sinks, run, continuation, RunStatus.error)
     if sinks.on_failed is not None:
         sinks.on_failed(failure)
@@ -893,35 +978,10 @@ def _drop_spent_attempt(run: TurnRunState, resolution: CompletedAttempt) -> None
     if not resolution.is_empty:
         run.turn_input = NO_TURN_INPUT
     if resolution.usage is not None:
-        run.prior_usage = (*run.prior_usage, resolution.usage)
+        run_id = resolution.attempt_run_id or resolution.run_id
+        assert run_id is not None, "an attempt that reported usage ran a run"
+        run.prior_usage[run_id] = resolution.usage
     run.attempt = None
-
-
-async def _remove_history_of_redacted_events(
-    ctx: ResponseTurnContext,
-    scope_context: ScopeSessionContext,
-) -> None:
-    """Remove persisted history derived from events since redacted, before the history is used.
-
-    This is the only cleanup after a redaction: every event this scope's history derives
-    from is checked against the agent's recorded redactions each time a
-    response opens it, which also covers a message no turn answered but a later turn read
-    as context.
-    """
-    if ctx.redacted_history_events is None or scope_context.session is None:
-        return
-    removed_event_ids = await remove_history_of_redacted_events(
-        scope_context.storage,
-        scope_context.session,
-        ctx.redacted_history_events,
-    )
-    if removed_event_ids:
-        logger.info(
-            "Removed history derived from redacted events",
-            session_id=scope_context.session.session_id,
-            history_scope=scope_context.scope.key,
-            redacted_event_ids=removed_event_ids,
-        )
 
 
 async def _load_scope_session(
@@ -930,8 +990,17 @@ async def _load_scope_session(
     run: TurnRunState,
 ) -> ScopeSessionContext:
     """Load the turn's scope session off the event loop, without the history of events since redacted."""
-    scope_context = await run_blocking_until_complete(adapter.load_scope)
-    await _remove_history_of_redacted_events(ctx, scope_context)
+    scope_context, removed_event_ids = await load_scrubbed_scope_session(
+        adapter.load_scope,
+        ctx.redacted_history_events,
+    )
+    if removed_event_ids and scope_context.session is not None:
+        logger.info(
+            "Removed history derived from redacted events",
+            session_id=scope_context.session.session_id,
+            history_scope=scope_context.scope.key,
+            redacted_event_ids=removed_event_ids,
+        )
     run.scope_context = scope_context
     set_consumption_storage(scope_context.storage_factory)
     return scope_context
@@ -1087,8 +1156,17 @@ async def stream_response_turn[ChunkT](
 ) -> AsyncGenerator[ChunkT | FailedReply]:
     """Own the whole response while binding context only during pulls and close; a failed turn ends with its reply."""
     lifetime = CliTurnLifetime()
+    subagent_cost = SubagentCost() if sinks.subagent_cost is None else sinks.subagent_cost
+    # The turn goes on from what its run metadata holds: a replay's, what the attempts a restart cut short received.
+    subagent_cost.add(stored_receipts(ctx.matrix_run_metadata))
+
+    @contextmanager
+    def bind() -> Iterator[None]:
+        with lifetime.bind(), receiving_subagent_cost(subagent_cost):
+            yield
+
     stream = context_bound_async_stream(
-        context_factory=lifetime.bind,
+        context_factory=bind,
         stream_factory=lambda: _stream_response_turn(
             ctx,
             adapter,
@@ -1121,7 +1199,9 @@ async def _stream_response_turn[ChunkT](  # noqa: C901, PLR0912, PLR0915
     turn, so a consumer that closes the stream right after cannot leave it unsettled, and a consumer that closes it
     earlier (a Stop that lands in the streamer, a delivery failure) leaves the turn recorded as stopped.
     """
-    run = TurnRunState(record=sinks.turn_recorder or TurnRecorder(), prior_usage=resume.prior_usage)
+    # A replay's run metadata holds what the attempts a restart cut short spent, as a resume names its paused run's.
+    prior_usage = merge_usage(prior_usage_by_run(ctx.matrix_run_metadata), resume.prior_usage)
+    run = TurnRunState(record=sinks.turn_recorder or TurnRecorder(), prior_usage=prior_usage)
     run.record.start(
         user_message=adapter.user_message,
         user_message_is_structured=ctx.current_prompt_is_structured,

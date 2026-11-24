@@ -343,6 +343,8 @@ class _BrowserSession:
     startup_cleanup_tasks: set[asyncio.Task[None]] = field(default_factory=set)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     upload_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # The profile whose tab the agent last brought to the front of a worker display.
+    shown: _BrowserProfileState | None = None
 
 
 # Chromium holds a profile directory for its whole process, and every reply or call builds a fresh toolkit, so a
@@ -390,7 +392,7 @@ def _persistent_launch_kwargs(
     launch_kwargs: dict[str, Any] = {
         "args": [PROXIED_WEBRTC_ONLY_ARG],
         "headless": headless,
-        # Block service workers because stale Cinny SW state after redeploy is a sharper risk than offline support.
+        # Block service workers because stale MindRoom Chat SW state after redeploy is a sharper risk than offline support.
         # Revisit if PWA targets matter.
         "service_workers": "block",
         "user_data_dir": str(user_data_dir),
@@ -710,6 +712,12 @@ class BrowserTools(Toolkit):
             msg = "Only a fresh browser toolkit can receive a worker session."
             raise ValueError(msg)
         self._worker_session, previous._worker_session = previous._worker_session, _BrowserSession()
+
+    def worker_shown_page(self) -> Page | None:
+        """Return the open active tab of the profile the agent last brought to the front of its worker display."""
+        state = self._worker_session.shown
+        tab = None if state is None else state.tabs.get(state.active_target_id or "")
+        return None if tab is None or tab.page.is_closed() else tab.page
 
     def _bind_worker_browser(self, display: str | None, workspace: Path) -> str:
         if self._worker_session.profiles:
@@ -1271,9 +1279,7 @@ class BrowserTools(Toolkit):
         page = await state.context.new_page()
         target_id = self._register_tab(state, page)
         # The new tab is current before it loads, so a later call without targetId reaches it even if loading fails.
-        if self._worker_display is not None:
-            await page.bring_to_front()
-        state.active_target_id = target_id
+        await self._activate_tab(state, target_id, page)
         if html is not None:
             # Content on about:blank, unlike a file:// page, cannot load or navigate to other local files.
             await page.set_content(html, wait_until="domcontentloaded", timeout=_DEFAULT_TIMEOUT_MS)
@@ -1890,10 +1896,15 @@ class BrowserTools(Toolkit):
             tab = next((candidate for candidate in state.tabs.values() if not candidate.page.is_closed()), None)
         if tab is None:
             tab = state.tabs[self._register_tab(state, await state.context.new_page())]
-        if self._worker_display is not None:
-            await tab.page.bring_to_front()
-        state.active_target_id = tab.target_id
+        await self._activate_tab(state, tab.target_id, tab.page)
         return tab.target_id, tab
+
+    async def _activate_tab(self, state: _BrowserProfileState, target_id: str, page: Page) -> None:
+        """Make a tab its profile's active one, and on a worker display bring it to the front."""
+        if self._worker_display is not None:
+            await page.bring_to_front()
+            self._worker_session.shown = state
+        state.active_target_id = target_id
 
     def _register_tab(self, state: _BrowserProfileState, page: Page) -> str:
         for tab in state.tabs.values():

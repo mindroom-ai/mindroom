@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, RedirectResponse, Response
 from mindroom.api.auth import (
     dashboard_host_public_origin,
     login_redirect_for_request,
+    non_administrator_chat_redirect,
     request_has_frontend_access,
     request_path_with_query,
     sanitize_next_path,
@@ -59,6 +60,17 @@ def _connections_frontend_enabled(runtime_paths: RuntimePaths, path: str) -> boo
     return not (len(segments) > 1 and segments[1] == "egress" and not egress_broker_enabled(runtime_paths))
 
 
+def _refused_page_response(request: Request, path: str) -> Response:
+    """Answer a browser that may not load the dashboard: a non-administrator signed in to Connections goes to Chat."""
+    if (chat_redirect := non_administrator_chat_redirect(request)) is not None:
+        return chat_redirect
+    target_path = sanitize_next_path(f"/{path}" if path else "/")
+    login_redirect = login_redirect_for_request(request, next_path=target_path)
+    if login_redirect is not None:
+        return login_redirect
+    raise HTTPException(status_code=401, detail="Authentication required")
+
+
 @router.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
 @router.api_route("/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
 async def serve_frontend(request: Request, path: str = "") -> Response:
@@ -76,11 +88,7 @@ async def serve_frontend(request: Request, path: str = "") -> Response:
         raise HTTPException(status_code=404, detail="Agent Keys are not enabled")
 
     if not await request_has_frontend_access(request):
-        target_path = sanitize_next_path(f"/{path}" if path else "/")
-        login_redirect = login_redirect_for_request(request, next_path=target_path)
-        if login_redirect is not None:
-            return login_redirect
-        raise HTTPException(status_code=401, detail="Authentication required")
+        return _refused_page_response(request, path)
 
     runtime_paths = api_runtime_paths(request)
     frontend_dir = ensure_frontend_dist_dir(runtime_paths)

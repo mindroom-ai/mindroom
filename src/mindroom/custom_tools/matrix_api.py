@@ -17,16 +17,20 @@ from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_contex
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.client_room_admin import room_admin_power_user
+from mindroom.matrix.reserved_content import MINDROOM_RESERVED_PREFIXES, reserved_content_keys
+from mindroom.matrix.state_failures import StateFailure, state_failure
 from mindroom.matrix.thread_mutation_impact import (
     event_thread_membership_known,
     redaction_thread_membership_known,
 )
+from mindroom.matrix_identifiers import has_agent_username
 from mindroom.requester_identity import (
     equivalent_requester_ids,
     is_access_checked_requester_id,
     is_human_requester_id,
 )
 from mindroom.tool_system.authoring import Toolkit
+from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -114,7 +118,6 @@ class MatrixApiTools(Toolkit):
         "redact": 2,
     }
     _HARD_BLOCKED_STATE_TYPES: ClassVar[frozenset[str]] = frozenset({"m.room.create"})
-    _RESERVED_MINDROOM_PREFIXES: ClassVar[tuple[str, ...]] = ("com.mindroom.", "io.mindroom.")
     _DANGEROUS_STATE_TYPES: ClassVar[frozenset[str]] = frozenset(
         {
             "m.room.power_levels",
@@ -211,10 +214,10 @@ class MatrixApiTools(Toolkit):
             return None, f"{field_name} is required and must be a non-empty string."
         return normalized_value, None
 
-    @classmethod
+    @staticmethod
     def _validate_content(
-        cls,
         content: dict[str, object] | None,
+        plugin_namespaces: tuple[str, ...],
     ) -> tuple[dict[str, object] | None, str | None]:
         if content is None:
             return None, "content must be a JSON object (dict)."
@@ -222,42 +225,19 @@ class MatrixApiTools(Toolkit):
             json.dumps(content, sort_keys=True)
         except (TypeError, ValueError) as exc:
             return None, f"content must be JSON-serializable: {exc}"
-        reserved_keys = cls._reserved_content_keys(content)
+        reserved_keys = reserved_content_keys(content, MINDROOM_RESERVED_PREFIXES)
         if reserved_keys:
             return None, (
                 f"content must not set MindRoom-reserved keys ({', '.join(reserved_keys)}); "
                 "they carry runtime trust metadata such as the relayed requester identity."
             )
+        plugin_keys = reserved_content_keys(content, plugin_namespaces)
+        if plugin_keys:
+            return None, (
+                f"content must not set plugin-reserved keys ({', '.join(plugin_keys)}); "
+                "a plugin reserves their namespace for content only it writes."
+            )
         return content, None
-
-    @classmethod
-    def _reserved_content_keys(cls, value: object) -> list[str]:
-        """Return every MindRoom-reserved key the model placed anywhere in *value*.
-
-        A managed Matrix account speaks for the runtime, so content the model
-        composes must never carry the namespaces ingress reads as runtime
-        metadata. Nested payloads count: edits and sidecars promote inner
-        objects into the content the receiving agent validates.
-
-        The walk keeps its own stack: content the model chose can nest deeply
-        enough to exhaust the interpreter's, and a rejection is only useful if
-        it reaches the caller.
-        """
-        found: set[str] = set()
-        pending: list[object] = [value]
-        while pending:
-            current = pending.pop()
-            if isinstance(current, dict):
-                found.update(key for key in current if isinstance(key, str) and cls._is_reserved_name(key))
-                pending.extend(current.values())
-            elif isinstance(current, list):
-                pending.extend(current)
-        return sorted(found)
-
-    @classmethod
-    def _is_reserved_name(cls, name: str) -> bool:
-        """Return whether one content key or event type belongs to MindRoom's runtime namespaces."""
-        return name.startswith(cls._RESERVED_MINDROOM_PREFIXES)
 
     @classmethod
     def _reserved_event_type_error(
@@ -266,27 +246,30 @@ class MatrixApiTools(Toolkit):
         action: str,
         room_id: str,
         event_type: str,
+        plugin_namespaces: tuple[str, ...],
         state_key: str | None = None,
     ) -> str | None:
-        """Reject writes to event types MindRoom's own runtime owns and reads back.
+        """Reject writes to event types MindRoom's own runtime or a plugin owns and reads back.
 
         A runtime-owned event is an instruction, not a message: a scheduled
         task's state event names the requester its fire will later speak for.
         Rejecting reserved content keys is not enough, because such a payload
         can carry the identity inside a field of its own -- so the model must
         not be able to author one of these events from the agent's Matrix
-        account at all.
+        account at all. A plugin's reserved namespaces hold its events alike.
         """
-        if not cls._is_reserved_name(event_type):
+        if event_type.startswith(MINDROOM_RESERVED_PREFIXES):
+            reservation = "is reserved for MindRoom runtime state"
+        elif event_type.startswith(plugin_namespaces):
+            reservation = "is reserved by a plugin"
+        else:
             return None
         state_key_payload = {} if state_key is None else {"state_key": state_key}
         return cls._error_payload(
             action=action,
             room_id=room_id,
             event_type=event_type,
-            message=(
-                f"Event type '{event_type}' is reserved for MindRoom runtime state and cannot be written by a tool."
-            ),
+            message=f"Event type '{event_type}' {reservation} and cannot be written by a tool.",
             **state_key_payload,
         )
 
@@ -372,6 +355,9 @@ class MatrixApiTools(Toolkit):
         event_type = raw_event_dict.get("type")
         content = raw_event_dict.get("content")
         normalized_content = cls._copy_string_keyed_dict(content) or {}
+        if has_agent_username(sender):
+            # The homeserver chose this hit from the text it holds; the marker lines go back for what is shown.
+            normalized_content = tool_markers_in_text(normalized_content)
         origin_server_ts = raw_event_dict.get("origin_server_ts")
         return {
             "event_id": event_id if isinstance(event_id, str) else "",
@@ -560,6 +546,7 @@ class MatrixApiTools(Toolkit):
             action=action,
             room_id=room_id,
             event_type=event_type,
+            plugin_namespaces=context.plugins.reserved_namespaces,
             state_key=state_key,
         )
         if reserved_error is not None:
@@ -642,6 +629,7 @@ class MatrixApiTools(Toolkit):
     @classmethod
     def _send_event_policy_error(
         cls,
+        context: ToolRuntimeContext,
         *,
         room_id: str,
         event_type: str,
@@ -650,6 +638,7 @@ class MatrixApiTools(Toolkit):
             action="send_event",
             room_id=room_id,
             event_type=event_type,
+            plugin_namespaces=context.plugins.reserved_namespaces,
         )
         if reserved_error is not None:
             return reserved_error
@@ -714,7 +703,7 @@ class MatrixApiTools(Toolkit):
                 room_id=room_id,
                 message=event_type_error,
             )
-        normalized_content, content_error = self._validate_content(content)
+        normalized_content, content_error = self._validate_content(content, context.plugins.reserved_namespaces)
         if content_error is not None:
             return self._error_payload(
                 action="send_event",
@@ -727,7 +716,7 @@ class MatrixApiTools(Toolkit):
         assert normalized_content is not None
 
         if (
-            policy_error := self._send_event_policy_error(room_id=room_id, event_type=normalized_event_type)
+            policy_error := self._send_event_policy_error(context, room_id=room_id, event_type=normalized_event_type)
         ) is not None:
             return policy_error
 
@@ -842,7 +831,7 @@ class MatrixApiTools(Toolkit):
         except Exception as exc:
             response = exc
 
-        if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+        if isinstance(response, nio.RoomGetStateEventError) and state_failure(response) is StateFailure.MISSING:
             return self._payload(
                 "ok",
                 action="get_state",
@@ -901,7 +890,7 @@ class MatrixApiTools(Toolkit):
                 message=event_type_error,
             )
         resolved_state_key = state_key or ""
-        normalized_content, content_error = self._validate_content(content)
+        normalized_content, content_error = self._validate_content(content, context.plugins.reserved_namespaces)
         if content_error is not None:
             return self._error_payload(
                 action="put_state",
@@ -1318,10 +1307,11 @@ class MatrixApiTools(Toolkit):
         - search: Full-text search one room's events with `search_term`, optional `keys`, pagination, and context.
 
         `room_id` defaults to the current Matrix tool runtime context room.
+        `get_event` returns the raw event: a version 3 reply has its calls in `io.mindroom.tool_trace.events` alone.
         `search` enforces a single-room scope via `room_id`; if `filter.rooms` is supplied it must match that room.
         `search` always uses the top-level `limit`; `filter.limit` is rejected to avoid conflicting inputs.
-        `com.mindroom.*` and `io.mindroom.*` are reserved for runtime metadata: `content` may not set keys in
-        those namespaces, and `send_event`/`put_state` may not write event types in them.
+        `com.mindroom.*`, `io.mindroom.*`, and the chat client's `chat.mindroom.*` are reserved for runtime metadata:
+        `content` may not set keys in those namespaces, and `send_event`/`put_state` may not write event types in them.
         `dry_run` is supported for send_event, put_state, and redact.
         `allow_dangerous` only affects put_state and redact for a small set of high-risk room-state event types,
         which also require the requester to be a joined room admin in the target room.

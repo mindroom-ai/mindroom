@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     name="google_docs",
     file_access=ToolFileAccess.NONE,
     display_name="Google Docs",
-    description="Create, read, edit, and format documents through the connected user's Google Docs",
+    description="Create, read, and edit documents through the connected user's Google Docs",
     category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.OAUTH,
@@ -53,15 +53,7 @@ if TYPE_CHECKING:
             type="boolean",
             required=False,
             default=True,
-            description="Allow inserting and replacing text in Google Docs.",
-        ),
-        ConfigField(
-            name="format_document",
-            label="Format Documents",
-            type="boolean",
-            required=False,
-            default=False,
-            description="Allow revision-checked formatting in one named document tab.",
+            description="Allow editing Google Docs: text insertion, text replacement, and batch updates.",
         ),
     ],
     managed_init_args=(
@@ -81,11 +73,11 @@ if TYPE_CHECKING:
         "google_docs_get_document",
         "google_docs_insert_text",
         "google_docs_replace_text",
-        "google_docs_format_document",
+        "google_docs_batch_update",
     ),
 )
 def google_docs_tools() -> type[GoogleDocsTools]:
-    """Return Google Docs tools for document creation, reading, editing, and formatting."""
+    """Return Google Docs tools for document creation, reading, and editing."""
     from mindroom.custom_tools.google_docs import GoogleDocsTools
 
     return GoogleDocsTools

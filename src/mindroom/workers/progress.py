@@ -2,6 +2,7 @@
 
 A start that becomes ready within the grace period reports nothing.
 A longer one reports ``cold_start``, then ``waiting`` at each interval, then ``ready``; a failed start reports ``failed``.
+Once the worker answers and is finishing its own setup, each interval reports ``preparing`` instead of ``waiting``.
 Every start, however short, logs one ``worker_cold_start`` event when it ends.
 """
 
@@ -16,8 +17,8 @@ from typing import TYPE_CHECKING
 from mindroom.logging_config import get_logger
 from mindroom.timing import elapsed_ms_between
 from mindroom.tool_system.worker_routing import (
+    pinned_worker_kind,
     resolved_worker_key_scope,
-    subagent_worker_state_scope_key,
     worker_key_agent_name,
     worker_log_id,
 )
@@ -46,6 +47,7 @@ class _ReporterState:
     backend_name: str
     started_at: float
     cold_start_emitted: bool = False
+    waiting_phase: WorkerReadyPhase = "waiting"
     next_waiting_elapsed: float = _WAITING_PROGRESS_INTERVAL_SECONDS
     done: bool = False
 
@@ -72,7 +74,7 @@ class _ReporterState:
             events.append(self.event("cold_start", elapsed_seconds))
             self.cold_start_emitted = True
         while self.cold_start_emitted and elapsed_seconds >= self.next_waiting_elapsed:
-            events.append(self.event("waiting", elapsed_seconds))
+            events.append(self.event(self.waiting_phase, elapsed_seconds))
             self.next_waiting_elapsed += _WAITING_PROGRESS_INTERVAL_SECONDS
         return events
 
@@ -186,6 +188,11 @@ class WorkerStartReporter:
         """Record how long the start took to reach ``milestone``, logged as ``<milestone>_ms``; a repeat replaces it."""
         self._milestones_ms[f"{milestone}_ms"] = elapsed_ms_between(self._state.started_at, time.monotonic())
 
+    def preparing(self) -> None:
+        """Report the rest of the wait as ``preparing``: the worker answers and is finishing its own setup."""
+        with self._condition:
+            self._state.waiting_phase = "preparing"
+
     def finish(self, error: BaseException | None) -> None:
         """Report the start as ``ready``, or as ``failed`` with ``error``, and log how long its callers waited."""
         with self._condition:
@@ -219,8 +226,9 @@ class WorkerStartReporter:
 
 
 def _worker_kind(spec: WorkerSpec) -> str:
-    if subagent_worker_state_scope_key(spec.worker_key) is not None:
-        return "subagent"
+    pinned = pinned_worker_kind(spec.worker_key)
+    if pinned is not None:
+        return pinned
     # Otherwise only a background script's run-pinned worker borrows the state of another worker's scope.
     return "script" if spec.state_scope_worker_key is not None else "tool"
 

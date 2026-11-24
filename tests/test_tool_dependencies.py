@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,7 @@ import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from importlib import metadata as importlib_metadata
+from importlib import util as importlib_util
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -43,7 +45,6 @@ from mindroom.tool_system.dependencies import (
 from mindroom.tool_system.google_workspaces import GoogleWorkspaceConfig, register_google_workspace_tools
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.registry import builtin_tool_registry, compose_tool_registry, plugin_module_registrations
-from mindroom.tools.openbb import openbb_tools
 from tests.conftest import register_test_tool
 
 _BUILTINS = builtin_tool_registry()
@@ -69,30 +70,60 @@ def _base_dependency_names() -> set[str]:
     return {canonicalize_name(Requirement(dependency).name) for dependency in pyproject["project"]["dependencies"]}
 
 
-@pytest.mark.parametrize("existing_value", [None, "true"])
-def test_openbb_tool_import_disables_auto_build(monkeypatch: pytest.MonkeyPatch, existing_value: str | None) -> None:
-    """OpenBB imports should disable upstream auto-build to avoid cross-process lock races."""
+_OPENBB_FIRST_CALL = textwrap.dedent(
+    """
+    from concurrent.futures import ThreadPoolExecutor
 
-    class DummyOpenBBTools:
-        pass
+    from openbb_core.app.model.obbject import OBBject
+    from openbb_core.provider.abstract.data import Data
 
-    def fake_import_module(module_name: str) -> SimpleNamespace:
-        assert module_name == "agno.tools.openbb"
-        assert os.environ["OPENBB_AUTO_BUILD"] == "false"
-        return SimpleNamespace(OpenBBTools=DummyOpenBBTools)
+    from mindroom.tools.openbb import openbb_tools
 
-    if existing_value is None:
-        monkeypatch.delenv("OPENBB_AUTO_BUILD", raising=False)
-    else:
-        monkeypatch.setenv("OPENBB_AUTO_BUILD", existing_value)
+    # Agents are built off the event loop, in a worker thread.
+    with ThreadPoolExecutor(1) as pool:
+        toolkit = pool.submit(lambda: openbb_tools()()).result()
+    assert hasattr(toolkit.obb, "equity"), "OpenBB command package was not built"
+    # The toolkit converts every result to polars, which needs pyarrow for text columns.
+    quotes = OBBject(results=[Data(symbol="AAPL", name="Apple"), Data(symbol="MSFT", name="Microsoft")])
+    print(quotes.to_polars().shape)
+    """,
+)
 
-    monkeypatch.setattr("mindroom.tools.openbb.importlib.import_module", fake_import_module)
 
-    assert openbb_tools() is DummyOpenBBTools
-    if existing_value is None:
-        assert "OPENBB_AUTO_BUILD" not in os.environ
-    else:
-        assert os.environ["OPENBB_AUTO_BUILD"] == existing_value
+def test_openbb_tool_builds_on_first_use_in_concurrent_processes(tmp_path: Path) -> None:
+    """Processes that load the OpenBB tool together from worker threads on a fresh install all reach its commands."""
+    installed = importlib_util.find_spec("openbb")
+    if installed is None or installed.origin is None:
+        pytest.skip("openbb extra is not installed")
+    # A copy of only the package's entry module is an OpenBB install that has never been built.
+    fresh_package = tmp_path / "openbb"
+    fresh_package.mkdir()
+    shutil.copy(installed.origin, fresh_package / "__init__.py")
+    env = {key: value for key, value in os.environ.items() if key != "OPENBB_AUTO_BUILD"}
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(tmp_path), env.get("PYTHONPATH")]))
+    # Processes sharing one install can have different temporary directories, as worker tool subprocesses do.
+    processes: list[subprocess.Popen[str]] = []
+    try:
+        for index in range(2):
+            temp_dir = tmp_path / f"tmp-{index}"
+            temp_dir.mkdir()
+            processes.append(
+                subprocess.Popen(
+                    [sys.executable, "-c", _OPENBB_FIRST_CALL],
+                    env={**env, "TMPDIR": str(temp_dir)},
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                ),
+            )
+        outputs = [process.communicate(timeout=300)[0] for process in processes]
+    finally:
+        for process in processes:
+            process.kill()
+            process.wait()
+
+    assert [process.returncode for process in processes] == [0, 0], outputs
+    assert all(output.rstrip().endswith("(2, 2)") for output in outputs), outputs
 
 
 def test_tool_extras_in_sync_with_pyproject() -> None:
@@ -111,6 +142,17 @@ def test_tool_extras_in_sync_with_pyproject() -> None:
     if result.returncode != 0:
         output = (result.stdout + result.stderr).strip()
         pytest.fail(f"Tool extras out of sync with pyproject.toml:\n{output}")
+
+
+def test_the_earlier_names_of_filesystem_stay_empty_extras() -> None:
+    """An install command that names the coding or file extra still resolves after the toolkits became filesystem."""
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    extras = pyproject["project"]["optional-dependencies"]
+    assert (extras["coding"], extras["file"], extras["filesystem"]) == ([], [], [])
+    locked = next(
+        line for line in Path("uv.lock").read_text(encoding="utf-8").splitlines() if "provides-extras" in line
+    )
+    assert all(f'"{extra}"' in locked for extra in ("coding", "file", "filesystem"))
 
 
 def test_core_runtime_imports_are_declared_as_base_dependencies() -> None:
@@ -751,6 +793,14 @@ def test_install_optional_extras_skips_uv_sync_outside_virtualenv(monkeypatch: p
     assert calls["env"] == 1
 
 
+def _fake_mindroom_site_packages(path: Path) -> Path:
+    """Return a site-packages directory holding a MindRoom distribution, as a test process's own installation."""
+    info = path / "mindroom-0.dist-info"
+    info.mkdir(parents=True)
+    (info / "METADATA").write_text("Metadata-Version: 2.1\nName: mindroom\nVersion: 0\n")
+    return path
+
+
 _DEPENDENCY_PROCESS_SCRIPT = """
 import importlib.metadata
 import json
@@ -758,12 +808,13 @@ import sys
 import tomllib
 from pathlib import Path
 
-from mindroom.tool_system import dependencies
-
 root = Path(sys.argv[1])
 mode = sys.argv[2]
 sys.prefix = str(root)
 sys.path.insert(0, str(root))
+
+from mindroom.tool_system import dependencies
+
 receipt = root / 'uv-receipt.toml'
 info = root / 'transient_embedding-1.dist-info'
 
@@ -850,11 +901,20 @@ def _dependency_process_line(process: subprocess.Popen[str]) -> str:
     return lines.get(timeout=20).strip()
 
 
+def _stop_dependency_processes(*processes: subprocess.Popen[str] | None) -> None:
+    for process in processes:
+        if process is not None:
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=20)
+
+
 @pytest.mark.parametrize("contender", ["reader", "mem0_reader", "installer"])
 def test_optional_dependency_environment_coordinates_processes(tmp_path: Path, contender: str) -> None:
     """Imports wait for complete metadata, and concurrent uv installs preserve receipt extras."""
-    environment = tmp_path / "environment"
-    environment.mkdir()
+    # The scripts put this directory first on sys.path before importing MindRoom,
+    # so its MindRoom distribution holds their lock.
+    environment = _fake_mindroom_site_packages(tmp_path / "environment")
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     (environment / "uv-receipt.toml").write_text(
@@ -895,16 +955,99 @@ def test_optional_dependency_environment_coordinates_processes(tmp_path: Path, c
         assert reader.returncode == 0, reader_error
         expected = "installed" if contender == "installer" else "imported complete metadata"
         assert expected in reader_output
+        assert (environment / ".mindroom-optional-dependencies.lock").exists()
         extras = tomllib.loads((environment / "uv-receipt.toml").read_text())["tool"]["requirements"][0]["extras"]
         assert set(extras) == (
             {"duckduckgo", "website"} if contender != "installer" else {"browser", "duckduckgo", "website"}
         )
     finally:
-        for process in (writer, reader):
-            if process is not None:
-                if process.poll() is None:
-                    process.kill()
-                process.communicate(timeout=20)
+        _stop_dependency_processes(writer, reader)
+
+
+_LOCK_CONTENDER_SCRIPT = """
+import sys
+
+site_packages, prefix, mode = sys.argv[1:]
+sys.path.insert(0, site_packages)
+sys.prefix = prefix
+
+from mindroom.tool_system.dependencies import optional_dependency_environment
+
+print('ready', flush=True)
+with optional_dependency_environment(exclusive=mode == 'installer'):
+    print('locked', flush=True)
+    if mode == 'installer':
+        sys.stdin.readline()
+"""
+
+
+@pytest.mark.parametrize("importer_prefix", ["primary", "worker-venv"])
+def test_dependency_lock_is_shared_across_temporary_directories(tmp_path: Path, importer_prefix: str) -> None:
+    """An import waits for an install from a process with another TMPDIR, also from a local worker's own venv."""
+    site_packages = _fake_mindroom_site_packages(tmp_path / "site-packages")
+
+    def start(mode: str, prefix: str) -> subprocess.Popen[str]:
+        scratch = tmp_path / f"{mode}-tmp"
+        scratch.mkdir()
+        return subprocess.Popen(
+            [sys.executable, "-u", "-c", _LOCK_CONTENDER_SCRIPT, str(site_packages), str(tmp_path / prefix), mode],
+            env={**os.environ, "TMPDIR": str(scratch)},
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    installer = start("installer", "primary")
+    importer: subprocess.Popen[str] | None = None
+    try:
+        assert installer.stdin is not None
+        assert _dependency_process_line(installer) == "ready"
+        assert _dependency_process_line(installer) == "locked"
+        importer = start("importer", importer_prefix)
+        assert _dependency_process_line(importer) == "ready"
+        with pytest.raises(subprocess.TimeoutExpired):
+            importer.wait(timeout=0.5)
+        installer.stdin.write("done\n")
+        installer.stdin.flush()
+        _, installer_error = installer.communicate(timeout=20)
+        assert installer.returncode == 0, installer_error
+        importer_output, importer_error = importer.communicate(timeout=20)
+        assert importer.returncode == 0, importer_error
+        assert importer_output.strip() == "locked"
+    finally:
+        _stop_dependency_processes(installer, importer)
+
+
+_REINSTALLED_MINDROOM_SCRIPT = """
+import shutil
+import sys
+from pathlib import Path
+
+site_packages = Path(sys.argv[1])
+sys.path.insert(0, str(site_packages))
+
+from mindroom.tool_system.dependencies import _environment_lock_path
+
+# An install that reinstalls MindRoom itself removes its metadata before writing the new one,
+# here before this process takes its first lock.
+shutil.rmtree(site_packages / 'mindroom-0.dist-info')
+print(_environment_lock_path())
+"""
+
+
+def test_dependency_lock_stays_put_while_mindroom_itself_is_reinstalled(tmp_path: Path) -> None:
+    """The lock does not move, or fail to resolve, while an install replaces MindRoom's own metadata."""
+    site_packages = _fake_mindroom_site_packages(tmp_path / "site-packages")
+    result = subprocess.run(
+        [sys.executable, "-c", _REINSTALLED_MINDROOM_SCRIPT, str(site_packages)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(site_packages / ".mindroom-optional-dependencies.lock")
 
 
 def test_unrelated_tool_constructors_run_in_parallel(
@@ -952,15 +1095,46 @@ def test_unrelated_tool_constructors_run_in_parallel(
     assert all(isinstance(tool, DummyToolkit) for tool in tools)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows has no POSIX file modes")
+def test_optional_dependency_lock_is_private_to_the_current_user(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Other local accounts that can read the installation cannot open its lock to hold it."""
+    site_packages = tmp_path / "site-packages"
+    site_packages.mkdir()
+    monkeypatch.setattr(dependencies, "_INSTALLATION_SITE_PACKAGES", site_packages)
+    with optional_dependency_environment():
+        pass
+    assert (site_packages / ".mindroom-optional-dependencies.lock").stat().st_mode & 0o777 == 0o600
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows temporary directories are per user")
-def test_optional_dependency_lock_directory_must_be_private(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Other local users cannot share or plant this user's lock directory."""
+@pytest.mark.skipif(sys.platform != "win32" and os.geteuid() == 0, reason="root can open files without permission")
+@pytest.mark.parametrize("installation", ["read-only", "lock-of-another-account"])
+def test_optional_dependency_lock_directory_must_be_private(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    installation: str,
+) -> None:
+    """When this user cannot open the installation's lock, other local users cannot share or plant its own lock."""
+    site_packages = tmp_path / "site-packages"
+    site_packages.mkdir()
+    monkeypatch.setattr(dependencies, "_INSTALLATION_SITE_PACKAGES", site_packages)
+    if installation == "read-only":
+        site_packages.chmod(0o555)
+    else:
+        # A lock another account created is private to it, so this user cannot open it.
+        (site_packages / ".mindroom-optional-dependencies.lock").touch(mode=0o000)
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     lock_dir = tmp_path / f"mindroom-optional-dependencies-{os.getuid()}"
     lock_dir.mkdir()
     lock_dir.chmod(0o755)
-    with pytest.raises(PermissionError, match="only the current user"), optional_dependency_environment():
-        pass
-    lock_dir.chmod(0o700)
-    with optional_dependency_environment():
-        assert len(list(lock_dir.glob("*.lock"))) == 1
+    try:
+        with pytest.raises(PermissionError, match="only the current user"), optional_dependency_environment():
+            pass
+        lock_dir.chmod(0o700)
+        with optional_dependency_environment():
+            assert len(list(lock_dir.glob("*.lock"))) == 1
+    finally:
+        site_packages.chmod(0o755)

@@ -19,9 +19,13 @@ from mindroom.api.sandbox_runner import (
     app_runner_token,
     app_runtime_config,
     app_runtime_paths,
+    app_sandbox_mount,
+    close_inprocess_shell_scopes,
     initialize_sandbox_runner_app,
     load_config_from_startup_runtime,
+    start_eager_worker_setup,
     startup_runner_token_from_env,
+    startup_sandbox_mount_from_env,
     validate_runner_token,
 )
 from mindroom.api.sandbox_runner import router as sandbox_runner_router
@@ -31,6 +35,13 @@ from mindroom.api.sandbox_runner_scripts import (
 from mindroom.api.sandbox_runner_scripts import router as sandbox_runner_scripts_router
 from mindroom.api.validation_errors import validation_error_response
 from mindroom.api.worker_computer import router as worker_computer_router
+from mindroom.api.worker_preview import router as worker_preview_router
+from mindroom.api.worker_services import close_worker_services
+from mindroom.api.worker_services import router as worker_services_router
+from mindroom.api.worker_ssh import router as worker_ssh_router
+from mindroom.api.worker_ssh import stop_worker_ssh
+from mindroom.api.worker_terminal import close_worker_terminals
+from mindroom.api.worker_terminal import router as worker_terminal_router
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY, WORKER_COMPUTER_ENABLED_ENV
 from mindroom.tool_system.worker_routing import resolved_worker_key_scope
 from mindroom.worker_computer.display import WorkerDisplay
@@ -46,39 +57,50 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     except TypeError:
         runner_token = startup_runner_token_from_env()
         runtime_paths, config = load_config_from_startup_runtime()
+        sandbox_mount = startup_sandbox_mount_from_env()
     else:
         config = app_runtime_config(app)
         runner_token = app_runner_token(app)
+        sandbox_mount = app_sandbox_mount(app)
     initialize_sandbox_runner_app(
         app,
         runtime_paths,
         config=config,
         runner_token=runner_token,
+        sandbox_mount=sandbox_mount,
     )
     computer = None
+    dedicated_key = sandbox_exec.runner_dedicated_worker_key(runtime_paths)
+    dedicated_scope = resolved_worker_key_scope(dedicated_key) if dedicated_key is not None else None
     if runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV):
         if not sandbox_exec.runner_uses_dedicated_worker(runtime_paths):
             msg = "Worker computer requires a dedicated worker."
             raise RuntimeError(msg)
-        if os.name == "posix" and os.geteuid() == 0:
-            msg = "Worker computer requires a non-root effective user."
-            raise RuntimeError(msg)
-        root = sandbox_exec.runner_dedicated_worker_root(runtime_paths)
-        computer = WorkerComputerRuntime(WorkerDisplay(root / ".computer"))
+        # The primary opens a Computer only on a user_agent worker (computer_runtime), and execution refuses a Computer
+        # browser call from any other scope, so the flag, which reaches every worker, leaves shared and user workers
+        # their persistent browser.
+        if dedicated_scope == "user_agent":
+            if os.name == "posix" and os.geteuid() == 0:
+                msg = "Worker computer requires a non-root effective user."
+                raise RuntimeError(msg)
+            root = sandbox_exec.runner_dedicated_worker_root(runtime_paths)
+            computer = WorkerComputerRuntime(WorkerDisplay(root / ".computer"))
     app.state.worker_computer = computer
-    dedicated_key = sandbox_exec.runner_dedicated_worker_key(runtime_paths)
     browser = (
-        WorkerBrowserRuntime()
-        if computer is None
-        and dedicated_key is not None
-        and resolved_worker_key_scope(dedicated_key) in {"shared", "user", "user_agent"}
-        else None
+        WorkerBrowserRuntime() if computer is None and dedicated_scope in {"shared", "user", "user_agent"} else None
     )
     app.state.worker_browser = browser
+    eager_setup = start_eager_worker_setup(app)
     try:
         await prepare_script_worker_before_serving(app)
         yield
     finally:
+        if eager_setup is not None:
+            eager_setup.cancel()
+        close_inprocess_shell_scopes()
+        await close_worker_terminals(app)
+        await stop_worker_ssh(app)
+        await close_worker_services(app)
         if computer is not None:
             await computer.close()
         if browser is not None:
@@ -112,16 +134,22 @@ app.add_middleware(_RunnerTokenMiddleware)
 app.include_router(sandbox_runner_router)
 app.include_router(worker_computer_router)
 app.include_router(sandbox_runner_scripts_router)
+app.include_router(worker_preview_router)
+app.include_router(worker_terminal_router)
+app.include_router(worker_services_router)
+app.include_router(worker_ssh_router)
 
 
 @app.get("/healthz")
-async def healthz() -> dict[str, str | int]:
-    """Return readiness plus the worker compatibility contract."""
+async def healthz(request: Request) -> dict[str, str | int]:
+    """Return readiness plus the worker compatibility contract, and the state of an eager setup when one started."""
     payload = worker_health_payload(mindroom_version=__version__)
+    setup = getattr(request.app.state, "worker_setup", None)
     return {
         "status": payload.status,
         "mindroom_version": payload.mindroom_version,
         "worker_protocol": payload.worker_protocol,
+        **({} if setup is None else {"setup": setup}),
     }
 
 

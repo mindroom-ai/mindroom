@@ -8,8 +8,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from mindroom.hooks.types import EnrichmentItem
-from mindroom.logging_config import get_logger
-from mindroom.tool_jobs.conversation import current_conversation
+from mindroom.tool_jobs.conversation import current_conversation, current_ended_jobs
 from mindroom.tool_jobs.runtime import describe_job
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 
@@ -18,9 +17,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.model_loop import AfterToolBatchHook
     from mindroom.llm.messages import Message
-    from mindroom.tool_jobs.runtime import BackgroundJob, ToolJobRuntime
-
-logger = get_logger(__name__)
+    from mindroom.tool_jobs.runtime import BackgroundJob
 
 
 @dataclass
@@ -56,49 +53,34 @@ def _job_notice_text(jobs: Sequence[BackgroundJob], notice: str) -> str:
     return "\n".join([*lines, notice])
 
 
-async def _acknowledge_cancellations(runtime: ToolJobRuntime, jobs: Sequence[BackgroundJob]) -> None:
-    """Mark noticed cancelled jobs acknowledged: a cancellation has no result to collect.
-
-    An acknowledgement can fail when the job expired or lost its access after it was listed, or when its store
-    fails; the reply carries on, and after a store failure a later reply notices the unacknowledged cancellation again.
-    """
-    for job in jobs:
-        if job.status != "cancelled":
-            continue
-        try:
-            await _acknowledge_cancellation(runtime, job)
-        except Exception:
-            logger.warning("Background job cancellation was not acknowledged", job_id=job.job_id, exc_info=True)
-
-
-async def _acknowledge_cancellation(runtime: ToolJobRuntime, job: BackgroundJob) -> None:
-    """Claim one cancelled job's outcome and mark it consumed, releasing the claim either way."""
-    waited = await runtime.wait(job.job_id, owner=job.owner, depth=job.depth, timeout=0)
-    if waited.claim is None:
-        return
-    try:
-        await runtime.acknowledge_wait(job.job_id, waited.claim)
-    finally:
-        await runtime.release_wait(job.job_id, waited.claim)
-
-
 async def _unnoticed_notice(notices: JobNotices) -> str | None:
     """Describe this reply's ended jobs it was not told about yet, and count them as told."""
-    current = current_conversation()
     context = get_tool_runtime_context()
-    if current is None or context is None:
+    if context is None:
         return None
-    runtime, key = current
-    jobs = [job for job in await runtime.ended_jobs(key) if job.job_id not in notices.noticed]
+    jobs = [job for job in await current_ended_jobs() if job.job_id not in notices.noticed]
     if not jobs:
         return None
     notices.noticed.update(job.job_id for job in jobs)
-    await _acknowledge_cancellations(runtime, jobs)
     return _job_notice_text(jobs, context.current_config.get_prompt("BACKGROUND_JOBS_ENDED_NOTICE"))
 
 
+def _continued_jobs() -> list[BackgroundJob]:
+    """Return the jobs this turn started that a restart stopped and that MindRoom continues on its own.
+
+    A turn the same restart cut short while its call waited for such a job holds no handle of it: its recovered run
+    only says the call was interrupted, so without a note of them the model would start the job's work again.
+    """
+    current = current_conversation()
+    context = get_tool_runtime_context()
+    if current is None or context is None or context.membership_turn_id is None:
+        return []
+    runtime, key = current
+    return [job for job in runtime.stopped_by_restart(key) if job.source_event_id == context.membership_turn_id]
+
+
 async def _turn_start_job_note() -> str | None:
-    """Describe the conversation's jobs that ended before this reply, cancelled ones included, once per reply.
+    """Describe the conversation's jobs that ended before this reply, once per reply.
 
     Every attempt of the reply asks again and gets the same note, since no later attempt replays an earlier one's
     turn context.
@@ -108,7 +90,15 @@ async def _turn_start_job_note() -> str | None:
         return None
     if not notices.started:
         notices.started = True
-        notices.start_note = await _unnoticed_notice(notices)
+        # Read before the ended jobs, so a job that ends between the two reads is in one of them.
+        continued = _continued_jobs()
+        notes = [await _unnoticed_notice(notices)]
+        continued = [job for job in continued if job.job_id not in notices.noticed]
+        context = get_tool_runtime_context()
+        if continued and context is not None:
+            notice = context.current_config.get_prompt("BACKGROUND_JOBS_CONTINUED_NOTICE")
+            notes.append(_job_notice_text(continued, notice))
+        notices.start_note = "\n\n".join(note for note in notes if note is not None) or None
     return notices.start_note
 
 

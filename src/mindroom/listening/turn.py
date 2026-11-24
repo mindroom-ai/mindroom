@@ -149,7 +149,12 @@ async def run_silent_turn(
     # No requester asked for the turn, so its tools run as the agent's own account in the room, and a tool that builds
     # its own catalog, such as script, keeps to listen.tools as the turn's own build does.
     context = replace(
-        bot.tool_runtime_support.build_turn_context(target, user_id=None, active_model_name=listen.model),
+        bot.tool_runtime_support.build_turn_context(
+            target,
+            user_id=None,
+            active_model_name=listen.model,
+            turn_id=uuid4().hex,
+        ),
         tool_function_filter=partial(_listed, tuple(listen.tools)),
         tool_output_paths=False,
     )

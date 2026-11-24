@@ -33,6 +33,8 @@ type DecisionStatus = Literal["approved", "denied", "expired"]
 
 # What a job's pending cards say once the job ends without a decision, whether it was stopped or a restart ended it.
 JOB_ENDED_REASON = "The background job asking for this approval ended before a decision."
+# What they say when a Stop on the reply that started the job ended it.
+REPLY_STOPPED_REASON = "The reply that started this job was stopped, so this call did not run."
 JOB_RUN_PREFIX = "tool-job:"
 
 
@@ -42,13 +44,6 @@ class ApprovalDecision(StrEnum):
     APPROVED = "approved"
     DENIED = "denied"
     EXPIRED = "expired"
-
-
-# The reason a call is denied without asking anyone, because no router is in the room to post its approval card.
-DEFAULT_ROUTER_MANAGED_ROOM_REASON = (
-    "Tool approval needs the router in this room. If `router.accept_invites` allows this Matrix transport account, "
-    "call `invite_router` and wait for the router to join; otherwise enable it or add the router manually, then retry."
-)
 
 
 @dataclass(frozen=True, slots=True)

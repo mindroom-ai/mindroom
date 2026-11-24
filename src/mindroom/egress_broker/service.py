@@ -1,4 +1,4 @@
-"""Run the egress broker inside the primary and give each worker-routed call its broker env."""
+"""Run the egress broker inside the primary and give each worker-routed call and primary shell call its broker env."""
 
 from __future__ import annotations
 
@@ -14,12 +14,17 @@ from urllib.parse import urlsplit
 
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.config.egress_broker import EgressBrokerConfig
+from mindroom.constants import trusted_tool_runtime_env_values
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.egress_broker.audit import AuditLog
 from mindroom.egress_broker.ca import BrokerCA
 from mindroom.egress_broker.dial import DialPolicy
 from mindroom.egress_broker.env import (
+    BROKER_CA_PEM_ENV,
+    apply_runner_ca_bundle,
     broker_execution_env,
+    broker_git_config,
+    broker_serves_primary_shell,
     egress_broker_enabled,
     personal_page_served,
     primary_callback_hosts,
@@ -49,6 +54,8 @@ from mindroom.runtime_env_policy import (
     EGRESS_BROKER_ENV_BY_KEY,
     credentials_encryption_key_value,
 )
+from mindroom.runtime_resolution import resolve_agent_execution
+from mindroom.tool_system.tool_environment import ToolEnvironment
 from mindroom.tool_system.worker_routing import normal_worker_key
 from mindroom.worker_computer.browser_proxy import browser_egress, proxy_env_setting
 
@@ -60,22 +67,28 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.egress_broker.secrets import SecretRequest
-    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
     from mindroom.worker_computer.browser_proxy import BrowserEgress
 
 __all__ = [
     "active_audit_log",
     "active_ca_pem",
+    "execution_env_for_primary_shell",
     "execution_env_for_worker",
     "manage_url",
     "serve_egress_broker",
+    "turn_off_unusable_default_broker",
 ]
 
 logger = get_logger(__name__)
 
 _THREAD_NAME = "mindroom-egress-broker"
 _DEFAULT_HOST = "0.0.0.0"  # noqa: S104 - workers reach the broker over the container or pod network
+# Each wildcard bind address and the loopback address primary commands dial for it: a listener bound to `::` takes
+# only IPv6 here, so it is reached on `::1`, never `127.0.0.1`.
+_WILDCARD_LOOPBACK = {"0.0.0.0": "127.0.0.1", "::": "::1"}  # noqa: S104
 _DEFAULT_TOKEN_TTL_SECONDS = 604800
+_PROXY_NAMES = frozenset({"http_proxy", "https_proxy", "all_proxy"})
 _STOP_TIMEOUT_SECONDS = 5.0
 # OAuth lookups can wait up to a token endpoint's deadline, so they get a small pool of their own: a stalled
 # provider holds at most these threads, never the loop's default executor that key lookups, audit writes, and
@@ -87,19 +100,31 @@ _OAUTH_LOOKUP_WORKERS = 4
 class _BrokerSettings:
     host: str
     port: int
-    url: str
+    # None when no worker-facing URL is set: the default broker serves only the primary's shell calls.
+    url: str | None
     token_ttl_seconds: int
+
+    @property
+    def primary_url(self) -> str:
+        """Return where the primary's own commands reach the bound broker, since the worker-facing `url` may not."""
+        host = _WILDCARD_LOOPBACK.get(self.host, self.host)
+        return f"http://[{host}]:{self.port}" if ":" in host else f"http://{host}:{self.port}"
 
 
 @dataclass(frozen=True)
 class _BrokerRuntime:
-    """What worker calls and the admin API need from the running broker."""
+    """What brokered calls and the admin API need from the running broker.
 
-    url: str
+    `primary_url` and `primary_ca_env` are the broker URL and CA file variables of shell commands run in the primary.
+    """
+
+    url: str | None
     signer: TokenSigner
     ca_pem: str
     audit: AuditLog
     credentials_manager: CredentialsManager
+    primary_url: str
+    primary_ca_env: Mapping[str, str]
 
 
 @dataclass
@@ -132,20 +157,31 @@ def _require_proxy_url(name: str, url: str) -> None:
 
 
 def _broker_settings(runtime_paths: RuntimePaths) -> _BrokerSettings | None:
-    """Read and validate the broker env; None when no port is set, so the broker stays off."""
+    """Read and validate the broker env; None when the port setting turns the broker off.
+
+    Without a port the broker listens on a loopback port the system picks, for the primary's shell calls only: a
+    fixed default could collide with another MindRoom on the machine, and nothing outside the process needs to know it.
+    """
 
     def env(key: str) -> str:
         return (runtime_paths.env_value(EGRESS_BROKER_ENV_BY_KEY[key]) or "").strip()
 
     if not egress_broker_enabled(runtime_paths):
         return None
+    raw_ttl = env("token_ttl_seconds")
+    ttl = _positive_int(EGRESS_BROKER_ENV_BY_KEY["token_ttl_seconds"], raw_ttl) if raw_ttl else None
+    if not env("port"):
+        return _BrokerSettings(
+            host="127.0.0.1",
+            port=0,
+            url=None,
+            token_ttl_seconds=ttl or _DEFAULT_TOKEN_TTL_SECONDS,
+        )
     port = _positive_int(EGRESS_BROKER_ENV_BY_KEY["port"], env("port"), maximum=65535)
     if not (url := env("url")):
         msg = f"{EGRESS_BROKER_ENV_BY_KEY['url']} is required when {EGRESS_BROKER_ENV_BY_KEY['port']} is set"
         raise ValueError(msg)
     _require_proxy_url(EGRESS_BROKER_ENV_BY_KEY["url"], url)
-    raw_ttl = env("token_ttl_seconds")
-    ttl = _positive_int(EGRESS_BROKER_ENV_BY_KEY["token_ttl_seconds"], raw_ttl) if raw_ttl else None
     return _BrokerSettings(
         host=env("host") or _DEFAULT_HOST,
         port=port,
@@ -408,17 +444,34 @@ class _BrokerService:
             manage_url=manage_url(self._runtime_paths),
             scope_info=config.scope_info,
         )
-        self._thread = threading.Thread(target=self._run, args=(broker,), name=_THREAD_NAME, daemon=True)
-        self._thread.start()
+        thread = threading.Thread(target=self._run, args=(broker,), name=_THREAD_NAME, daemon=True)
+        thread.start()
+        # Recorded only once running, so cleanup after a refused start never joins an unstarted thread.
+        self._thread = thread
         self._listening.wait()
         if self._start_error is not None:
             raise self._start_error
+        # Primary shell commands trust the broker CA through files of the primary's own; its process trust is unchanged.
+        # The files keep what the primary's own CA variables name, because the commands inherited those until now:
+        # the exported environment, then the runtime values with the `.env`, as the shell tool layers them.
+        primary_ca_env = {BROKER_CA_PEM_ENV: ca.cert_pem}
+        apply_runner_ca_bundle(
+            primary_ca_env,
+            state_dir / "primary_ca",
+            trusted_before={
+                **self._runtime_paths.process_env,
+                **trusted_tool_runtime_env_values(self._runtime_paths),
+            },
+        )
         self.runtime = _BrokerRuntime(
             url=self._settings.url,
             signer=signer,
             ca_pem=ca.cert_pem,
             audit=audit,
             credentials_manager=credentials_manager,
+            # The bound port, which the system picks for the default broker.
+            primary_url=replace(self._settings, port=broker.port).primary_url,
+            primary_ca_env=primary_ca_env,
         )
 
     def stop(self) -> None:
@@ -470,34 +523,70 @@ async def serve_egress_broker(
     config_provider: Callable[[], Config | None],
     credentials_manager: CredentialsManager | None = None,
 ) -> AsyncIterator[None]:
-    """Run the egress broker on its own thread while the context is open; a no-op without a port.
+    """Run the egress broker on its own thread while the context is open; a no-op while its port setting is off.
 
     `config_provider` returns the primary's current config, read on the broker thread for every CONNECT, so
     service edits apply without a restart; while it returns None or raises, the broker keeps the last config it read.
     Keys are read through `credentials_manager`, by default the runtime's, which is resolved only when the broker
-    starts. Raises ValueError for invalid settings and the bind error when the port is unavailable.
+    starts. With a set port, any startup failure, such as invalid settings or a port in use, is raised; the default
+    broker stops whatever it started, logs the failure, and MindRoom runs on without it.
     """
-    settings = _broker_settings(runtime_paths)
-    if settings is None:
+    service: _BrokerService | None = None
+    try:
+        if (settings := _broker_settings(runtime_paths)) is not None:
+            service = _BrokerService(
+                runtime_paths,
+                settings,
+                config_provider=config_provider,
+                credentials_manager=(
+                    credentials_manager
+                    if credentials_manager is not None
+                    else get_runtime_credentials_manager(runtime_paths)
+                ),
+            )
+            # Startup finishes even if the owner is cancelled meanwhile, so it can be stopped.
+            await run_blocking_until_complete(service.start)
+    except BaseException as exc:
+        if service is not None:
+            await run_blocking_until_complete(service.stop)
+        if not _default_port(runtime_paths) or not isinstance(exc, Exception):
+            raise
+        logger.warning("egress_broker_default_unavailable", error_type=type(exc).__name__, error=str(exc))
+        service = None
+    if service is None:
         yield
         return
-    service = _BrokerService(
-        runtime_paths,
-        settings,
-        config_provider=config_provider,
-        credentials_manager=(
-            credentials_manager if credentials_manager is not None else get_runtime_credentials_manager(runtime_paths)
-        ),
-    )
+    _active.runtime = runtime = service.runtime
+    logger.info("egress_broker_started", url=runtime and runtime.primary_url)
     try:
-        # Startup finishes even if the owner is cancelled meanwhile, so the finally below can stop it.
-        await run_blocking_until_complete(service.start)
-        _active.runtime = service.runtime
-        logger.info("egress_broker_started", host=settings.host, port=settings.port)
         yield
     finally:
         _active.runtime = None
         await run_blocking_until_complete(service.stop)
+
+
+def _default_port(runtime_paths: RuntimePaths) -> bool:
+    """Whether the broker port is unset, so the broker runs only by default."""
+    return not (runtime_paths.env_value(EGRESS_BROKER_ENV_BY_KEY["port"]) or "").strip()
+
+
+def turn_off_unusable_default_broker(runtime_paths: RuntimePaths, *, api: bool) -> RuntimePaths:
+    """Return `runtime_paths` with the default broker off where it cannot serve; a set port is left as it is.
+
+    Without the API nobody can answer the tool's key cards. Any proxy a primary shell would inherit, from the exported
+    environment or the `.env`, also keeps it off, so shells on a proxied network route as they did without the broker.
+    The warning names the variable, never its value.
+    """
+    if not egress_broker_enabled(runtime_paths) or not _default_port(runtime_paths):
+        return runtime_paths
+    if api:
+        # Python and curl read these names in any case, so the guard does too.
+        layers = (os.environ, runtime_paths.process_env, runtime_paths.env_file_values)
+        proxy = next((n for layer in layers for n, v in layer.items() if n.lower() in _PROXY_NAMES and v), None)
+        if proxy is None:
+            return runtime_paths
+        logger.warning("egress_broker_default_off", reason=f"{proxy} is set; set a broker port to use one")
+    return replace(runtime_paths, process_env={**runtime_paths.process_env, EGRESS_BROKER_ENV_BY_KEY["port"]: "off"})
 
 
 def _signable_target(worker_target: ResolvedWorkerTarget) -> ResolvedWorkerTarget:
@@ -524,11 +613,75 @@ def execution_env_for_worker(
     `call_env` is the env the call already carries; overlaying the result on it keeps its Git config entries.
     """
     runtime = _active.runtime
-    if runtime is None or config is None or worker_target is None:
+    if runtime is None or runtime.url is None or config is None or worker_target is None:
         return {}
+    return _execution_env(runtime, runtime_paths, config, worker_target, call_env=call_env, broker_url=runtime.url)
+
+
+def execution_env_for_primary_shell(
+    runtime_paths: RuntimePaths,
+    *,
+    config: Config,
+    agent_name: str,
+    execution_identity: ToolExecutionIdentity | None,
+) -> ToolEnvironment:
+    """Return the broker env for one shell call that runs in the primary, as a worker-routed call gets it.
+
+    Empty unless the broker is running and `agent_name` uses it with a shell that runs in the primary. The proxy is
+    the broker's loopback URL and the CA the files materialized at start, never the PEM variable. The broker's Git
+    config comes as entries the shell appends to the command's own, whatever sets them.
+    The call runs without the broker env when building it fails.
+    """
+    runtime = _active.runtime
+    if runtime is None:
+        return ToolEnvironment()
+    try:
+        if not broker_serves_primary_shell(config, agent_name, runtime_paths):
+            return ToolEnvironment()
+        worker_target = resolve_agent_execution(
+            agent_name,
+            config,
+            runtime_paths,
+            execution_identity=execution_identity,
+        ).worker_target
+        env = _execution_env(
+            runtime,
+            runtime_paths,
+            config,
+            worker_target,
+            call_env=None,
+            broker_url=runtime.primary_url,
+            primary_shell=True,
+        )
+    except Exception as exc:
+        # Config, credential-store, and identity resolution can raise anything; the shell command still runs.
+        logger.warning("egress_broker_primary_shell_env_failed", agent=agent_name, error_type=type(exc).__name__)
+        return ToolEnvironment()
+    if not env:
+        return ToolEnvironment()
+    env.pop(BROKER_CA_PEM_ENV)
+    values = {name: value for name, value in env.items() if not name.startswith("GIT_CONFIG_")}
+    return ToolEnvironment(
+        values={**values, **runtime.primary_ca_env},
+        git_config=broker_git_config(env["HTTPS_PROXY"]),
+    )
+
+
+def _execution_env(
+    runtime: _BrokerRuntime,
+    runtime_paths: RuntimePaths,
+    config: Config,
+    worker_target: ResolvedWorkerTarget,
+    *,
+    call_env: Mapping[str, str] | None,
+    broker_url: str,
+    primary_shell: bool = False,
+) -> dict[str, str]:
+    """Return the broker env of one call for `worker_target` through `broker_url`; empty without a signable target."""
     claims = WorkerClaims.from_worker_target(_signable_target(worker_target))
     if claims is None:
         return {}
+    claims = replace(claims, primary_shell=primary_shell)
     # Check status for the target the broker will rebuild from the token, so both agree on the scope.
     scope_target = claims.to_worker_target()
     try:
@@ -568,7 +721,7 @@ def execution_env_for_worker(
             from_config = name in config.egress_broker.services
             (config_placeholders if from_config else user_placeholders).update(egress_service.placeholder_env)
     return broker_execution_env(
-        broker_url=runtime.url,
+        broker_url=broker_url,
         token=runtime.signer.mint(claims),
         ca_pem=runtime.ca_pem,
         # A config service's placeholder wins over a user service's for the same variable.

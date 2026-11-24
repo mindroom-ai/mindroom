@@ -322,14 +322,14 @@ def test_subagent_participant_mode_must_be_a_known_string(mode: object) -> None:
 
 def test_function_level_permission_grants_cover_matching_participant_tools() -> None:
     """A permissions.tools entry can grant one function, which a participant may then name."""
-    participants = [{"id": "writer", "system_prompt": "P", "tools": ["file.read_file"]}]
-    parse_workflow_spec(_spec(participants=participants, permissions={"tools": ["file.read_file"]}))
+    participants = [{"id": "writer", "system_prompt": "P", "tools": ["filesystem.read_file"]}]
+    parse_workflow_spec(_spec(participants=participants, permissions={"tools": ["filesystem.read_file"]}))
     assert _errors(
         _spec(
-            participants=[{"id": "writer", "system_prompt": "P", "tools": ["file"]}],
-            permissions={"tools": ["file.read_file"]},
+            participants=[{"id": "writer", "system_prompt": "P", "tools": ["filesystem"]}],
+            permissions={"tools": ["filesystem.read_file"]},
         ),
-    ) == ["Participant 'writer' tool 'file' is not granted by permissions.tools."]
+    ) == ["Participant 'writer' tool 'filesystem' is not granted by permissions.tools."]
 
 
 # --- workflow steps ---

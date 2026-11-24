@@ -31,7 +31,7 @@ The [decisions](#decisions) and [accepted limitations](#accepted-limitations) be
 Every fact about an AI reply has one owner and one writer, so no two stores can disagree about a reply:
 
 - I-S1. Everything about an AI reply, including its event, state, presentation, Stop, each span's sources and their settlement, its tool calls, its redactions, and which bot instance claims its approval, is read from the reply records or from an in-memory cache of them that is never written separately; no other store writes it.
-  The turn rows keep user-message and turn facts, and a response event only for turns that are not AI replies, such as commands, rejections, and router notices; the journal keeps whether each event is pending or settled; agent history keeps the conversation the model sees.
+  The turn rows keep user-message and turn facts, and a response event only for turns that are not AI replies, such as commands, rejections, and notices; the journal keeps whether each event is pending or settled; agent history keeps the conversation the model sees.
 - I-S2. A reply settles its journal sources in the same transaction that marks the turn they index answered when the reply answered them, so a crash cannot leave one without the other.
   Deleted sources, sources that became terminal without an answer, and those of a removed entity or of an approval whose owner is gone settle unanswered.
   Sources settled outside a reply, by an ingress decision that drops a waiting replay or by a room departure, leave their turn unanswered and end the reply that waited on them.
@@ -47,6 +47,7 @@ Every fact about an AI reply has one owner and one writer, so no two stores can 
 ### Writes and restarts
 
 - Recovery renders from what a reply may already show, counting writes Matrix has not acknowledged, so a restart continues an interrupted reply in place below what it showed and a retried regeneration rewrites the same message; neither starts a second message.
+- No progress edit is written ahead once a Stop is committed, so only an edit already in flight may land before the Stop's note; what live frames already showed is still recorded, for that note to keep.
 - A span's rows, and the Matrix transaction IDs derived from them, are named by every message of the turn it answers, not by its newest message, because a retry can answer a coalesced turn's messages one by one and a one-message turn must never resolve to the rows the coalesced turn wrote (4).
   Naming every reply's rows by the reply was rejected because it renames every reply's rows for this one path, and renaming only the later reply's rows depends on the earlier reply's records still being kept.
 - A tool call is recorded as started before the tool runs and as completed when it returns, whether or not the reply shows tool calls, so a restarted reply can be told which calls already ran.
@@ -66,6 +67,10 @@ Every fact about an AI reply has one owner and one writer, so no two stores can 
 - Each bot start holds the conversations of its principal's pending approvals before it replays the journal.
 - Deleting the message a held reply answers cancels the approval, as a Stop would, and removes the reply.
 - A released approval hands its sources back to replay, unless a Stop is recorded: the reply then ends `cancelled` instead of replaying what the user stopped.
+- A silent-schedule answer that reports nothing after its approval, resumed or approved in place, ends the message its pause showed as a completed answer without the no-report token, or with the nothing-to-show note's text when nothing else is left; any other answer a resume withholds fails its approval.
+  The rule sits in final delivery and keys on the reply already showing a message, not on the span kind, so a run approved in place ends the same way, and so does a silent reply that a restart replays.
+  That replay is delivered whole below what its stopped attempt showed, like every quiet turn, rather than streamed as other replays are, because a stream would show the run's text live and its final skips final delivery's rule.
+  Redacting that message was rejected, because a redaction removes from history every run that wrote or read the message, which includes the silent run itself.
 
 ### Lifetime
 
@@ -95,6 +100,14 @@ Tool calls:
 
 - In a team, only the leader is told which tool calls an interrupted attempt made.
 
+Routing:
+
+- A burst of a person's messages that the steward's coalescing queue splits into two turns is routed twice, and each route is answered, by one agent or by two; the two turns hold different messages, so each message is still answered once.
+- A bot answers by its own rules when any message of its turn names it, is a follow-up to its running reply, or continues its thread, while the steward, whose queue batched the same messages differently, can route one of them to another agent; that message is then answered twice.
+- Two bots that both pass the steward check in the same moment, as when the room's power levels change while a message is routed, both route the turn, which can then get two answers.
+- An edit of one of several messages a route names regenerates nothing, as an edit of one of several relayed messages did.
+- At the upgrade from a release with a router, a message the router admitted but had not relayed is not answered, and one whose relay the router sent but had not recorded can be answered twice.
+
 Delivery and recovery:
 
 - A reply write made while its create's outcome is unknown is sized as a plain message and wrapped as an edit only when claimed, so after a homeserver outage an answer near the event size limit can be refused and end with the delivery-failed note.
@@ -115,7 +128,6 @@ Journal writes:
 
 - Every progress edit costs a journal write before it is sent (I7).
 - A crash loses what live frames showed beyond the last durable checkpoint, up to about one `update_interval` of text; MindRoom Chat falls back to the checkpoint, and the restarted reply continues below it.
-- A Stop or a stream error ends the reply below its last durable checkpoint, so MindRoom Chat can lose up to about one `update_interval` of text it showed live: no write may follow a committed Stop, and frames are not reply writes.
 - An error that aborts the whole SQLite transaction, such as a full disk, fails every write in that batch; no caller is told a write landed that did not.
 - The journal writer runs with the log context of the first write it served, so log lines a batch emits carry that caller's bound context.
 
@@ -130,7 +142,7 @@ The numbers in parentheses refer to the outcomes in [What counts as a defect](#w
 - I5. Every non-terminal reply has a durable path to progress: pending span sources, an approval continuation, or the next bot instance's takeover (2, 5).
 - I6. A span's sources settle with its terminal transition, except spans that hand them to a continuation, a retry, or a replay, so a crash can neither answer them again nor drop them (2, 3).
 - I7. Every reply write is recorded before it is sent, so recovery knows what Matrix may already show.
-  Live frames are not reply writes: they are never recorded, recovery never reads them, and every durable write names the last frame it covers.
+  Live frames are not reply writes: a stream that ends early records what they showed past the last landed edit as what the reply may show, which can include text streamed after the last frame, and every durable write names the last frame it covers.
 - I8. A Stop button is redacted when its reply leaves `active`, except while its span waits in place for an approval, since that span still runs.
 - I9. Every unfinished continuation has an owner that moves it: draining every owner leaves no continuation, owed write, or deferred claim, and every source settled; a stranded approval would hold its conversation and reply forever (1, 5).
 - I10. Retention never forgets a reply whose spans a continuation names, because the continuation reads its room, thread, event, and sources from them (I-S4).

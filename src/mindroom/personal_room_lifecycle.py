@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from functools import partial
 from time import monotonic
 from typing import TYPE_CHECKING
 
@@ -11,7 +12,6 @@ import nio
 
 from mindroom.background_tasks import create_background_task
 from mindroom.config.personal_agents import read_personal_agent_roster
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_room_admin import get_room_members
 from mindroom.matrix.personal_room_store import (
@@ -45,7 +45,9 @@ _RECONCILIATION_RETRY_SECONDS = 30.0
 # A candidate that keeps failing, such as a room waiting for a person to fix its
 # membership, is retried after doubling delays up to this cap.
 _RECONCILIATION_MAX_RETRY_SECONDS = 3600.0
-# Every bot in a room reports each membership event, so the router drops repeats among this many recent ones.
+# A retry usually heals a first failure, so a candidate is an error only once it has failed this many attempts in a row.
+_RECONCILIATION_ERROR_FAILURES = 3
+# Every bot in a room reports each membership event, so the observing bot drops repeats among this many recent ones.
 _RECENT_MEMBERSHIP_EVENTS = 1024
 
 
@@ -59,20 +61,28 @@ class _TargetPendingError(RuntimeError):
 
 @dataclass(frozen=True)
 class _CandidateBackoff:
-    """One candidate's consecutive reconciliation failures and when it is next due."""
+    """When a failing candidate is next due."""
 
-    failures: int
     delay_seconds: float
     retry_at: float
-    error_type: type[Exception]
 
 
-def _next_backoff(previous: _CandidateBackoff | None, error: Exception) -> _CandidateBackoff:
-    if previous is None:
-        failures, delay = 1, _RECONCILIATION_RETRY_SECONDS
-    else:
-        failures, delay = previous.failures + 1, min(2 * previous.delay_seconds, _RECONCILIATION_MAX_RETRY_SECONDS)
-    return _CandidateBackoff(failures, delay, monotonic() + delay, type(error))
+def _next_backoff(previous: _CandidateBackoff | None) -> _CandidateBackoff:
+    delay = (
+        _RECONCILIATION_RETRY_SECONDS
+        if previous is None
+        else min(2 * previous.delay_seconds, _RECONCILIATION_MAX_RETRY_SECONDS)
+    )
+    return _CandidateBackoff(delay, monotonic() + delay)
+
+
+@dataclass(frozen=True)
+class _FailureStreak:
+    """One candidate's failed reconciliation attempts in a row, the kinds of error they raised, and those logged as errors."""
+
+    failures: int
+    error_types: frozenset[type[Exception]]
+    logged_error_types: frozenset[type[Exception]]
 
 
 @dataclass(frozen=True)
@@ -94,14 +104,27 @@ class PersonalRoomLifecycle:
     lookup_target: Callable[[str], PersonalRoomTarget | None]
     # Starts a user's agent once provisioning added it to the roster.
     config_reload: ConfigReloadLifecycle
-    # Tells the router that a membership event (room_id, event_id) changed a room, which may unblock its roster.
+    # Tells every bot that a membership event (room_id, event_id) changed a room, which may unblock a roster.
     report_membership_change: Callable[[str, str], None]
+    # Whether this bot is a room's steward now; an onboarding room's steward takes its commands and known rejoins.
+    is_steward: Callable[[str], bool]
+    # The client that posts in a room for no agent; a retry names its first sender and gets that account or none.
+    poster_client: Callable[[str, tuple[str | None, str] | None], nio.AsyncClient | None]
+    # The owner account's client while it runs, which backs the optional admin join.
+    owner_client: Callable[[], nio.AsyncClient | None]
     # A live join and a reconciliation pass can both reach one user; only one may register the account.
     _provisioning: set[tuple[str, str]] = field(default_factory=set, init=False)
     _reconciled: bool = field(default=False, init=False)
+    # The onboarding rooms this bot stewarded all through the pass that set ``_reconciled``, which read them; a room
+    # it takes over after is read by another pass.
+    _reconciled_rooms: frozenset[str] = field(default=frozenset(), init=False)
+    # The rooms the running pass stewarded at its start that no sync frame has since seen another bot steward.
+    _held_through_pass: frozenset[str] = field(default=frozenset(), init=False)
     _config_revision: int = field(default=0, init=False)
     _completed_candidates: set[tuple[str, str]] = field(default_factory=set, init=False)
     _candidate_backoff: dict[tuple[str, str], _CandidateBackoff] = field(default_factory=dict, init=False)
+    # Kept across reloads, which each user's provisioning from a template requests, until the candidate succeeds.
+    _failure_streaks: dict[tuple[str, str], _FailureStreak] = field(default_factory=dict, init=False)
     # Live triggers that failed, with whether they asked to re-invite a departed owner.
     _retry_candidates: dict[tuple[str, str], bool] = field(default_factory=dict, init=False)
     # The personal room and unattested members each candidate last reported, warned about only when they change.
@@ -117,10 +140,21 @@ class PersonalRoomLifecycle:
     _next_reconciliation_at: float = field(default=0.0, init=False)
     _rerun_after_pass: bool = field(default=False, init=False)
 
-    @property
-    def observes_onboarding_joins(self) -> bool:
-        """Whether router baseline joins need durable admission for this feature."""
-        return self.agent_name == ROUTER_AGENT_NAME and self.runtime.config.personal_rooms is not None
+    def _stewarded_onboarding_rooms(self) -> frozenset[str]:
+        """The onboarding rooms this bot stewards, whose recorded intent and backfill its passes settle."""
+        settings = self.runtime.config.personal_rooms
+        if settings is None:
+            return frozenset()
+        return frozenset(filter(self.is_steward, resolve_room_aliases(settings.onboarding_rooms, self.runtime_paths)))
+
+    def _settled(self) -> bool:
+        """Whether the last pass settled every onboarding room this bot stewards now."""
+        return self._reconciled and self._stewarded_onboarding_rooms() <= self._reconciled_rooms
+
+    def onboards_from(self, room_id: str) -> bool:
+        """Whether the room is a configured onboarding room, whose joins every bot there enters into their claim."""
+        settings = self.runtime.config.personal_rooms
+        return settings is not None and room_id in resolve_room_aliases(settings.onboarding_rooms, self.runtime_paths)
 
     def config_changed(self) -> None:
         """Revisit existing records and optional backfill after a configuration reload."""
@@ -182,15 +216,22 @@ class PersonalRoomLifecycle:
 
     def schedule_reconciliation(self) -> None:
         """Start at most one maintenance pass without delaying durable sync admission."""
+        settings = self.runtime.config.personal_rooms
+        if settings is None:
+            # A reload turned the feature off, which ends every trigger still owed a retry.
+            self._retry_candidates.clear()
+            return
+        stewarded = self._stewarded_onboarding_rooms()
+        # A settled room seen while another bot stewards it is read again on takeover, as who is in it may change.
+        self._reconciled_rooms &= stewarded
+        self._held_through_pass &= stewarded
         if (
-            self._reconciled
-            or not self.observes_onboarding_joins
+            self._settled()
+            or not (stewarded or self._retry_candidates)
             or self._reconciliation_task is not None
             or monotonic() < self._next_reconciliation_at
         ):
             return
-        settings = self.runtime.config.personal_rooms
-        assert settings is not None
         if not self._reconciliation_ready(settings):
             return
         self._reconciliation_task = create_background_task(
@@ -234,7 +275,7 @@ class PersonalRoomLifecycle:
         *,
         reinvite_departed_owner: bool = False,
     ) -> None:
-        """Forward a trusted router observation; unavailable owners leave it retryable.
+        """Forward a trusted observation of an onboarding room, which each caller gates; unavailable owners leave it retryable.
 
         When personal_rooms.agent names a template, the requester's own agent
         serves the room: a missing one is provisioned only while the requester
@@ -245,8 +286,7 @@ class PersonalRoomLifecycle:
         """
         settings = self.runtime.config.personal_rooms
         if (
-            not self.observes_onboarding_joins
-            or settings is None
+            settings is None
             or source_room_id not in resolve_room_aliases(settings.onboarding_rooms, self.runtime_paths)
             or not is_human_requester_id(user_id, self.runtime.config, self.runtime_paths)
         ):
@@ -283,6 +323,8 @@ class PersonalRoomLifecycle:
             source_room_id,
             self.runtime.client,
             reinvite_departed_owner=reinvite_departed_owner,
+            poster=partial(self.poster_client, source_room_id),
+            admin=self.owner_client(),
         )
 
     async def _provision_personal_agent(
@@ -371,7 +413,9 @@ class PersonalRoomLifecycle:
             self._queue_retry(candidate, reinvite_departed_owner=reinvite_departed_owner)
         else:
             self._roster_mismatches.pop(candidate, None)
-            self._settle_retry(candidate, reinvite_departed_owner=reinvite_departed_owner)
+            # A trigger without re-invite authority leaves a failing re-invite pending, so it ends no failures.
+            if self._settle_retry(candidate, reinvite_departed_owner=reinvite_departed_owner):
+                self._end_failure_streak(candidate)
 
     def _queue_retry(self, candidate: tuple[str, str], *, reinvite_departed_owner: bool) -> None:
         """Hand a live trigger that did not finish to the next reconciliation pass."""
@@ -396,23 +440,24 @@ class PersonalRoomLifecycle:
         event: nio.RoomMessageFormatted,
         requester_user_id: str,
     ) -> bool:
-        """Recognize exact self-onboarding commands; ``requester_user_id`` is the event's trusted requester."""
+        """Recognize exact self-onboarding commands, typed with `!` or `/`; ``requester_user_id`` is the event's trusted requester.
+
+        Every bot in an onboarding room takes its command as handled, so none answers it as an unknown command, and
+        only the room's steward runs it.
+        """
         settings = self.runtime.config.personal_rooms
-        if (
-            not self.observes_onboarding_joins
-            or settings is None
-            or event.body.strip() not in settings.commands
-            or room.room_id not in resolve_room_aliases(settings.onboarding_rooms, self.runtime_paths)
-        ):
+        if settings is None:
             return False
-        if is_human_requester_id(
-            event.sender,
-            self.runtime.config,
-            self.runtime_paths,
-        ) and requester_user_id == resolve_human_requester_alias(
-            event.sender,
-            self.runtime.config,
-            self.runtime_paths,
+        body = event.body.strip()
+        command = f"!{body[1:]}" if body.startswith("/") else body
+        # Only a configured command reads the onboarding rooms, which can read saved Matrix state.
+        if command not in settings.commands or not self.onboards_from(room.room_id):
+            return False
+        if (
+            self.is_steward(room.room_id)
+            and is_human_requester_id(event.sender, self.runtime.config, self.runtime_paths)
+            and requester_user_id
+            == resolve_human_requester_alias(event.sender, self.runtime.config, self.runtime_paths)
         ):
             await self._onboard_live(event.sender, room.room_id)
         return True
@@ -424,7 +469,7 @@ class PersonalRoomLifecycle:
         roster, is logged and settles: raising would hold the room's event lane, so this agent would answer nothing
         there until someone repaired the room. A room whose reconciliation is still failing keeps retrying after
         doubling delays up to hourly; otherwise the room is checked again on restart or configuration reload.
-        Any change of membership, unlike a profile update, also tells the router, which retries at once onboarding
+        Any change of membership, unlike a profile update, also tells every bot, so the observing one retries at once onboarding
         that this room's imported roster blocked.
         """
         if event.membership != event.prev_membership:
@@ -443,7 +488,7 @@ class PersonalRoomLifecycle:
         await self.service.guest_membership_event(room, event.state_key, event.membership)
         if self.runtime.config.personal_rooms is None or event.membership != "join" or event.prev_membership == "join":
             return
-        if self.observes_onboarding_joins and event.prev_membership is not None:
+        if self.is_steward(room.room_id) and event.prev_membership is not None:
             await self._onboard_live(
                 event.state_key,
                 room.room_id,
@@ -451,7 +496,7 @@ class PersonalRoomLifecycle:
             )
 
     async def baseline_join(self, join: RoomMemberJoin) -> None:
-        """Onboard unknown prior membership only after the existing durable baseline gate."""
+        """Onboard unknown prior membership after the durable baseline gate, as the join claim's holder, steward or not."""
         if join.prev_membership is None:
             await self._onboard_live(join.user_id, join.room_id)
 
@@ -497,12 +542,13 @@ class PersonalRoomLifecycle:
             failed |= recorded_failed
         return candidates, failed
 
-    async def _backfill_candidates(self, onboarding_rooms: list[str]) -> tuple[set[tuple[str, str]], bool]:
-        """Collect lobby members without losing recorded intent when a lobby is unavailable."""
+    async def _backfill_candidates(self, onboarding_rooms: list[str]) -> tuple[set[tuple[str, str]], bool, set[str]]:
+        """Collect lobby members without losing recorded intent when a lobby is unavailable; name the lobbies read too."""
         assert self.runtime.client is not None
         candidates: set[tuple[str, str]] = set()
-        failed = False
-        for room_id in resolve_room_aliases(onboarding_rooms, self.runtime_paths):
+        failed, read = False, set[str]()
+        for room_id in filter(self.is_steward, resolve_room_aliases(onboarding_rooms, self.runtime_paths)):
+            read.add(room_id)
             try:
                 members = await get_room_members(self.runtime.client, room_id)
             except Exception:
@@ -514,7 +560,7 @@ class PersonalRoomLifecycle:
                 failed = True
                 continue
             candidates.update((user_id, room_id) for user_id in members)
-        return candidates, failed
+        return candidates, failed, read
 
     async def _reconcile(self) -> None:
         """Retry recorded intent and optional lobby backfill once the serving agents have synced.
@@ -525,28 +571,37 @@ class PersonalRoomLifecycle:
         """
         revision = self._config_revision
         settings = self.runtime.config.personal_rooms
-        if self._reconciled or not self.observes_onboarding_joins or settings is None:
+        stewarded = self._stewarded_onboarding_rooms()
+        if self._settled() or not (stewarded or self._retry_candidates) or settings is None:
             return
         if not self._reconciliation_ready(settings):
             return
+        self._held_through_pass = stewarded
         candidates, failed = await asyncio.to_thread(self._recorded_intent, settings)
         if settings.backfill:
-            backfill, backfill_failed = await self._backfill_candidates(settings.onboarding_rooms)
+            backfill, backfill_failed, read = await self._backfill_candidates(settings.onboarding_rooms)
             candidates.update(backfill)
             failed |= backfill_failed
+            stewarded &= read
+        # An onboarding room that another bot stewards is that bot's to read and settle, but not a trigger this bot took.
+        candidates = {candidate for candidate in candidates if self.is_steward(candidate[1])}
+        # So this pass settles only the rooms it stewarded throughout; one it lost meanwhile is owed a pass on takeover.
+        stewarded &= self._stewarded_onboarding_rooms()
         candidates.update(self._retry_candidates)
         if not failed:
             # Forget what requesters whose intent is gone last reported.
             self._roster_mismatches = {key: seen for key, seen in self._roster_mismatches.items() if key in candidates}
+            self._failure_streaks = {key: seen for key, seen in self._failure_streaks.items() if key in candidates}
             self._membership_changed &= candidates
         for candidate in sorted(candidates - self._completed_candidates):
             if revision != self._config_revision:
                 return
             if not await self._reconcile_candidate(candidate, revision):
                 failed = True
-        # A live trigger that failed during this pass is still owed a retry.
-        if not failed and not self._retry_candidates and revision == self._config_revision:
-            self._reconciled = True
+        # A live trigger that failed during this pass is still owed a retry, and a pass for retries alone read no lobby.
+        stewarded &= self._held_through_pass
+        if stewarded and not failed and not self._retry_candidates and revision == self._config_revision:
+            self._reconciled, self._reconciled_rooms = True, stewarded
 
     async def _reconcile_candidate(self, candidate: tuple[str, str], revision: int) -> bool:
         """Retry one candidate when due or its personal room's membership changed; False leaves it pending."""
@@ -565,10 +620,25 @@ class PersonalRoomLifecycle:
             # The user's own agent is starting; its first sync asks for the next pass.
             return False
         except Exception as error:
-            backoff = _next_backoff(previous, error)
+            backoff = _next_backoff(previous)
             if revision == self._config_revision:
                 self._candidate_backoff[candidate] = backoff
-            retry = {"attempt": backoff.failures, "retry_in_seconds": backoff.delay_seconds}
+            streak = self._failure_streaks.get(candidate, _FailureStreak(0, frozenset(), frozenset()))
+            failures = streak.failures + 1
+            new_error = type(error) not in streak.error_types
+            # A roster mismatch waits for a person and never logs an error; from the threshold on, each other kind
+            # of error logs one error, and its repeats stay warnings.
+            persistent = (
+                not isinstance(error, PersonalRoomRosterMismatchError)
+                and failures >= _RECONCILIATION_ERROR_FAILURES
+                and type(error) not in streak.logged_error_types
+            )
+            self._failure_streaks[candidate] = _FailureStreak(
+                failures,
+                streak.error_types | {type(error)},
+                streak.logged_error_types | {type(error)} if persistent else streak.logged_error_types,
+            )
+            retry = {"attempt": failures, "retry_in_seconds": backoff.delay_seconds}
             if isinstance(error, PersonalRoomRosterMismatchError):
                 # Expected until a person changes the room, so no traceback, and a warning only when the members change.
                 mismatch = (error.room_id, error.unexpected_user_ids)
@@ -583,23 +653,23 @@ class PersonalRoomLifecycle:
                     **retry,
                 )
                 if error.room_id in changed:
-                    # The room changed while this attempt read it, possibly before the router knew it was this room.
+                    # The room changed while this attempt read it, possibly before the observing bot knew it was this room.
                     self._retry_at_once({candidate})
-            elif previous is None or previous.error_type is not type(error):
-                logger.exception("Personal-room reconciliation failed", user_id=user_id, room_id=room_id, **retry)
             else:
-                logger.warning(
+                (logger.error if persistent else logger.warning)(
                     "Personal-room reconciliation failed",
                     user_id=user_id,
                     room_id=room_id,
                     error_type=type(error).__name__,
                     error=str(error),
+                    exc_info=new_error,
                     **retry,
                 )
             return False
         finally:
             self._changes_during_attempt = None
         self._roster_mismatches.pop(candidate, None)
+        self._end_failure_streak(candidate)
         # Its own owner invite comes back as a change, and the attempt already validated the room after it.
         self._membership_changed.discard(candidate)
         if revision == self._config_revision:
@@ -608,6 +678,18 @@ class PersonalRoomLifecycle:
             if self._settle_retry(candidate, reinvite_departed_owner=reinvite_departed_owner):
                 self._completed_candidates.add(candidate)
         return True
+
+    def _end_failure_streak(self, candidate: tuple[str, str]) -> None:
+        """Say once that a candidate whose reconciliation failed has succeeded, so a later failure counts anew."""
+        streak = self._failure_streaks.pop(candidate, None)
+        if streak is not None:
+            user_id, room_id = candidate
+            logger.info(
+                "Personal-room reconciliation recovered",
+                user_id=user_id,
+                room_id=room_id,
+                failed_attempts=streak.failures,
+            )
 
     def retained_room_ids(self) -> set[str]:
         """Return recorded rejoin authority, including when provisioning is disabled."""

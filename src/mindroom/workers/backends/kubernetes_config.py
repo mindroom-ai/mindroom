@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypedDict, cast
+from types import UnionType
+from typing import TYPE_CHECKING, Literal, TypedDict, Union, cast, get_args, get_origin
+
+import pydantic
 
 from mindroom import yaml_io
 from mindroom.constants import runtime_env_values
@@ -20,6 +24,7 @@ from mindroom.private_storage.private_instance_identity_store import (
 from mindroom.runtime_env_policy import (
     CREDENTIALS_ENCRYPTION_KEY_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
+    TAILNET_SSH_SECRET_ENV_NAMES,
     WORKER_BACKEND_ENV,
     WORKER_COMPUTER_ENABLED_ENV,
     credentials_encryption_key_value,
@@ -40,10 +45,18 @@ from mindroom.workers.backends.kubernetes_pod_names import (
     RESERVED_EXTRA_CONTAINER_NAMES,
     RESERVED_EXTRA_VOLUME_NAMES,
 )
-from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES
+from mindroom.workers.models import (
+    LABEL_TAILNET_SSH,
+    LABEL_TAILNET_SSH_RELEASE,
+    LABEL_WORKER_SANDBOX,
+    SCRIPT_RESOURCE_PROFILE_NAMES,
+    WORKER_SSH_PORT,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+    from pydantic_core import ErrorDetails
 
     from mindroom.constants import RuntimePaths
 
@@ -56,6 +69,7 @@ class _WorkerSeccompProfile(TypedDict):
 
 
 _DEFAULT_READY_TIMEOUT_SECONDS = 60.0
+_DEFAULT_SETUP_TIMEOUT_SECONDS = 180.0
 _DEFAULT_WORKER_PORT = 8766
 _DEFAULT_IMAGE_PULL_POLICY = "IfNotPresent"
 _DEFAULT_STORAGE_SUBPATH_PREFIX = "workers"
@@ -67,6 +81,9 @@ _DEFAULT_MEMORY_LIMIT = "1Gi"
 _DEFAULT_CPU_REQUEST = "100m"
 _DEFAULT_CPU_LIMIT = "500m"
 _DEFAULT_SCRIPT_RESOURCE_PROFILE = "small"
+_DEFAULT_NAMED_WORKER_IDLE_TIMEOUT_SECONDS = 600.0
+_DEFAULT_NAMED_WORKER_MAX_AGE_SECONDS = 4 * 60 * 60.0
+_DEFAULT_NAMED_WORKERS_MAX = 16
 _IN_CLUSTER_TOKEN_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/token")
 _IN_CLUSTER_CERT_PATH = Path("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt")
 
@@ -82,12 +99,14 @@ _STORAGE_MOUNT_PATH_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_m
 _STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
 _IDLE_TIMEOUT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["idle_timeout"]
 _READY_TIMEOUT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["ready_timeout"]
+_SETUP_TIMEOUT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["setup_timeout"]
 _NAME_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["name_prefix"]
 _NODE_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["node_name"]
 _COLOCATE_WITH_CONTROL_PLANE_NODE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["colocate_with_control_plane_node"]
 _RECONCILE_POD_TEMPLATES_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["reconcile_pod_templates"]
 _EXTRA_ENV_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_env_json"]
 _EXTRA_LABELS_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_labels_json"]
+_TAILNET_SSH_RELEASE_ID_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["tailnet_ssh_release_id"]
 _EXTRA_ANNOTATIONS_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_annotations_json"]
 _EXTRA_CONTAINERS_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_containers_json"]
 _EXTRA_VOLUMES_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_volumes_json"]
@@ -103,6 +122,9 @@ _DEFAULT_SCRIPT_RESOURCE_PROFILE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_K
 _ENABLE_SERVICE_LINKS_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["enable_service_links"]
 _AUTH_SECRET_NAME_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["auth_secret_name"]
 _SECCOMP_PROFILE_JSON_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["seccomp_profile_json"]
+_NAMED_WORKER_IDLE_TIMEOUT_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["named_worker_idle_timeout"]
+_NAMED_WORKER_MAX_AGE_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["named_worker_max_age"]
+NAMED_WORKERS_MAX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["named_workers_max"]
 _POD_NAMESPACE_ENV = "POD_NAMESPACE"
 _EXTRA_CONTAINER_ALLOWED_KEYS = frozenset(
     {
@@ -120,6 +142,26 @@ _EXTRA_CONTAINER_ALLOWED_KEYS = frozenset(
 )
 _EXTRA_VOLUME_SOURCE_KEYS = frozenset({"secret", "configMap", "emptyDir", "projected"})
 _EXTRA_VOLUME_ALLOWED_KEYS = frozenset({"name", *_EXTRA_VOLUME_SOURCE_KEYS})
+# Where the allowed keys can carry a Kubernetes quantity; "*" is every list item or mapping value,
+# and "a|b" names the wire and Python spellings the client accepts for one field.
+_EXTRA_CONTAINER_QUANTITY_PATHS = (
+    ("resources", "requests", "*"),
+    ("resources", "limits", "*"),
+    ("env", "*", "valueFrom|value_from", "resourceFieldRef|resource_field_ref", "divisor"),
+)
+_EXTRA_VOLUME_QUANTITY_PATHS = (
+    ("emptyDir", "sizeLimit|size_limit"),
+    (
+        "projected",
+        "sources",
+        "*",
+        "downwardAPI|downward_api",
+        "items",
+        "*",
+        "resourceFieldRef|resource_field_ref",
+        "divisor",
+    ),
+)
 _DNS_SUBDOMAIN_RE = re.compile(
     r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*",
 )
@@ -293,18 +335,103 @@ def _validate_unique_names(
         seen_names.add(name)
 
 
+def _with_string_quantity(value: object, path: tuple[str, ...], location: str) -> object:
+    """Return ``value`` with the quantity at ``path`` as a string: the API server takes a JSON number, the client not."""
+    if not path:
+        if isinstance(value, bool):
+            msg = f"{location}: quantities must be strings or numbers such as 1, 0.5, or 512Mi."
+            raise WorkerBackendError(msg)
+        return str(value) if isinstance(value, int | float) else value
+    key, rest = path[0], path[1:]
+    if key == "*" and isinstance(value, list):
+        return [_with_string_quantity(item, rest, f"{location}[{index}]") for index, item in enumerate(value)]
+    if key == "*" and isinstance(value, dict):
+        # The location stops at the map: its keys are user input and may be pasted credentials.
+        return {name: _with_string_quantity(item, rest, location) for name, item in value.items()}
+    for name in key.split("|"):
+        if isinstance(value, dict) and name in value:
+            value = {**value, name: _with_string_quantity(value[name], rest, f"{location}.{name}")}
+    return value
+
+
+def _schema_error(model_class: type, error: ErrorDetails) -> str:
+    """Describe one validation error by schema field names and list indices only, never by a user-supplied key."""
+    path: list[str] = []
+    annotation: object = model_class
+    for segment in error["loc"]:
+        while get_origin(annotation) in {Union, UnionType}:
+            annotation = next(arg for arg in get_args(annotation) if arg is not type(None))
+        fields = _field_annotations(annotation)
+        if isinstance(segment, int) and get_origin(annotation) is list:
+            annotation = get_args(annotation)[0]
+        elif segment in fields:
+            annotation = fields[segment]
+        else:
+            # An unknown key or a free-form map key is user input and can be a pasted credential.
+            return f"{'.'.join(path) or 'top level'}: invalid value ({error['type']})"
+        path.append(str(segment))
+    return f"{'.'.join(path)}: {error['msg']}"
+
+
+def _field_annotations(annotation: object) -> dict[object, object]:
+    """Map every name a model accepts for one of its fields, wire or Python, to that field's type."""
+    if not (isinstance(annotation, type) and issubclass(annotation, pydantic.BaseModel)):
+        return {}
+    return {
+        name: field.annotation
+        for python_name, field in annotation.model_fields.items()
+        for name in (python_name, field.alias, *getattr(field.validation_alias, "choices", [field.validation_alias]))
+    }
+
+
+def validated_kubernetes_object(model_name: str, value: dict[str, object], *, what: str) -> dict[str, object]:
+    """Return ``value`` in the wire form the installed client sends, naming each field it rejects but no values."""
+    try:
+        kubernetes_client = importlib.import_module("kubernetes.client")
+    except ModuleNotFoundError as exc:
+        msg = "The Kubernetes worker backend needs the 'kubernetes' package: install mindroom[kubernetes]."
+        raise WorkerBackendError(msg) from exc
+    model_class = getattr(kubernetes_client, model_name)
+    try:
+        model = model_class.model_validate(value)
+    except pydantic.ValidationError as exc:
+        errors = exc.errors(include_input=False, include_url=False)
+    else:
+        # Unlike the client's own serialization, this keeps explicit nulls, which clear fields in a patch.
+        return model.model_dump(mode="json", by_alias=True, exclude_unset=True)
+    # Raised outside the handler, so no chained exception carries the rejected values into logs.
+    fields = "; ".join(_schema_error(model_class, error) for error in errors)
+    msg = f"{what} is not a valid Kubernetes {model_name.removeprefix('V1')}: {fields}"
+    raise WorkerBackendError(msg)
+
+
+def _canonical_manifests(
+    items: tuple[dict[str, object], ...],
+    quantity_paths: tuple[tuple[str, ...], ...],
+    model_name: str,
+    env_name: str,
+) -> tuple[dict[str, object], ...]:
+    """Return ``items`` as the client's wire form, so typed creates and untyped patches send the same manifest."""
+    canonical: list[dict[str, object]] = []
+    for index, item in enumerate(items):
+        location = f"{env_name}[{index}]"
+        for path in quantity_paths:
+            item = cast("dict[str, object]", _with_string_quantity(item, path, location))  # noqa: PLW2901
+        canonical.append(validated_kubernetes_object(model_name, item, what=location))
+    return tuple(canonical)
+
+
 def _read_extra_containers_env(env: Mapping[str, str]) -> tuple[dict[str, object], ...]:
     containers = read_json_object_list_env(env, _EXTRA_CONTAINERS_JSON_ENV)
     for index, container in enumerate(containers):
-        unknown_keys = sorted(set(container) - _EXTRA_CONTAINER_ALLOWED_KEYS)
-        if unknown_keys:
-            unknown_keys_text = ", ".join(unknown_keys)
-            msg = f"{_EXTRA_CONTAINERS_JSON_ENV}[{index}] has unsupported keys: {unknown_keys_text}."
+        if not set(container) <= _EXTRA_CONTAINER_ALLOWED_KEYS:
+            allowed = ", ".join(sorted(_EXTRA_CONTAINER_ALLOWED_KEYS))
+            msg = f"{_EXTRA_CONTAINERS_JSON_ENV}[{index}]: unknown field; allowed: {allowed}."
             raise WorkerBackendError(msg)
         _validate_required_string(container, _EXTRA_CONTAINERS_JSON_ENV, index, "name")
         _validate_required_string(container, _EXTRA_CONTAINERS_JSON_ENV, index, "image")
     _validate_unique_names(containers, _EXTRA_CONTAINERS_JSON_ENV, RESERVED_EXTRA_CONTAINER_NAMES)
-    return containers
+    return _canonical_manifests(containers, _EXTRA_CONTAINER_QUANTITY_PATHS, "V1Container", _EXTRA_CONTAINERS_JSON_ENV)
 
 
 def _read_image_pull_secrets_env(env: Mapping[str, str]) -> tuple[str, ...]:
@@ -322,10 +449,9 @@ def _read_image_pull_secrets_env(env: Mapping[str, str]) -> tuple[str, ...]:
 def _read_extra_volumes_env(env: Mapping[str, str]) -> tuple[dict[str, object], ...]:
     volumes = read_json_object_list_env(env, _EXTRA_VOLUMES_JSON_ENV)
     for index, volume in enumerate(volumes):
-        unknown_keys = sorted(set(volume) - _EXTRA_VOLUME_ALLOWED_KEYS)
-        if unknown_keys:
-            unknown_keys_text = ", ".join(unknown_keys)
-            msg = f"{_EXTRA_VOLUMES_JSON_ENV}[{index}] has unsupported keys: {unknown_keys_text}."
+        if not set(volume) <= _EXTRA_VOLUME_ALLOWED_KEYS:
+            allowed = ", ".join(sorted(_EXTRA_VOLUME_ALLOWED_KEYS))
+            msg = f"{_EXTRA_VOLUMES_JSON_ENV}[{index}]: unknown field; allowed: {allowed}."
             raise WorkerBackendError(msg)
         _validate_required_string(volume, _EXTRA_VOLUMES_JSON_ENV, index, "name")
         source_keys = [key for key in _EXTRA_VOLUME_SOURCE_KEYS if key in volume]
@@ -333,7 +459,7 @@ def _read_extra_volumes_env(env: Mapping[str, str]) -> tuple[dict[str, object], 
             msg = f"{_EXTRA_VOLUMES_JSON_ENV}[{index}] must set exactly one of secret, configMap, emptyDir, projected."
             raise WorkerBackendError(msg)
     _validate_unique_names(volumes, _EXTRA_VOLUMES_JSON_ENV, RESERVED_EXTRA_VOLUME_NAMES)
-    return volumes
+    return _canonical_manifests(volumes, _EXTRA_VOLUME_QUANTITY_PATHS, "V1Volume", _EXTRA_VOLUMES_JSON_ENV)
 
 
 @dataclass(frozen=True, slots=True)
@@ -373,9 +499,36 @@ class KubernetesWorkerBackendConfig:
     tmp_size_limit: str | None = None
     user_resources: dict[str, dict[str, dict[str, str]]] = field(default_factory=dict)
     image_pull_secrets: tuple[str, ...] = ()
+    # A named worker is removed once no call has run in it for the idle timeout, or once it reaches the maximum age.
+    named_worker_idle_timeout_seconds: float = _DEFAULT_NAMED_WORKER_IDLE_TIMEOUT_SECONDS
+    named_worker_max_age_seconds: float = _DEFAULT_NAMED_WORKER_MAX_AGE_SECONDS
+    # How many named workers may run at once for every requester and agent together.
+    named_workers_max: int = _DEFAULT_NAMED_WORKERS_MAX
+    # How long a call waits for a ready worker to finish preparing itself before it runs in the worker as it is.
+    setup_timeout_seconds: float = _DEFAULT_SETUP_TIMEOUT_SECONDS
+    tailnet_ssh_release_id: str | None = None
 
     def __post_init__(self) -> None:
-        """Reject storage prefixes that are not strict relative descendants."""
+        """Validate and normalize Kubernetes configuration."""
+        if self.named_workers_max < 0:
+            msg = f"{NAMED_WORKERS_MAX_ENV} must be non-negative."
+            raise WorkerBackendError(msg)
+        if reserved_names := TAILNET_SSH_SECRET_ENV_NAMES.intersection(self.extra_env):
+            msg = f"{_EXTRA_ENV_JSON_ENV} cannot set reserved env vars: {', '.join(sorted(reserved_names))}."
+            raise WorkerBackendError(msg)
+        if self.worker_port == WORKER_SSH_PORT:
+            msg = f"{_PORT_ENV} cannot be {WORKER_SSH_PORT}; that port is reserved for SSH."
+            raise WorkerBackendError(msg)
+        for label in (LABEL_TAILNET_SSH, LABEL_TAILNET_SSH_RELEASE, LABEL_WORKER_SANDBOX):
+            if label in self.extra_labels:
+                msg = f"{_EXTRA_LABELS_JSON_ENV} must not set {label}; MindRoom sets it on eligible workers."
+                raise WorkerBackendError(msg)
+        if (
+            self.tailnet_ssh_release_id is not None
+            and re.fullmatch(r"[0-9a-f]{32}", self.tailnet_ssh_release_id) is None
+        ):
+            msg = f"{_TAILNET_SSH_RELEASE_ID_ENV} must be a 32-character lowercase hex release ID."
+            raise WorkerBackendError(msg)
         parts = self.storage_subpath_prefix.split("/")
         if (
             not self.storage_subpath_prefix
@@ -475,6 +628,7 @@ class KubernetesWorkerBackendConfig:
             colocate_with_control_plane_node=read_bool_env(env, _COLOCATE_WITH_CONTROL_PLANE_NODE_ENV, default=False),
             extra_env=read_json_mapping_env(env, _EXTRA_ENV_JSON_ENV),
             extra_labels=read_json_mapping_env(env, _EXTRA_LABELS_JSON_ENV),
+            tailnet_ssh_release_id=read_env(env, _TAILNET_SSH_RELEASE_ID_ENV) or None,
             extra_annotations=read_json_mapping_env(env, _EXTRA_ANNOTATIONS_JSON_ENV),
             extra_containers=_read_extra_containers_env(env),
             extra_volumes=_read_extra_volumes_env(env),
@@ -496,7 +650,42 @@ class KubernetesWorkerBackendConfig:
             reconcile_pod_templates=read_bool_env(env, _RECONCILE_POD_TEMPLATES_ENV, default=True),
             tmp_size_limit=read_env(env, _TMP_SIZE_LIMIT_ENV) or None,
             user_resources=_read_user_resources_env(env),
+            named_worker_idle_timeout_seconds=read_float_env(
+                env,
+                _NAMED_WORKER_IDLE_TIMEOUT_ENV,
+                _DEFAULT_NAMED_WORKER_IDLE_TIMEOUT_SECONDS,
+            ),
+            named_worker_max_age_seconds=read_float_env(
+                env,
+                _NAMED_WORKER_MAX_AGE_ENV,
+                _DEFAULT_NAMED_WORKER_MAX_AGE_SECONDS,
+            ),
+            named_workers_max=configured_named_workers_max(runtime_paths),
+            setup_timeout_seconds=read_float_env(env, _SETUP_TIMEOUT_ENV, _DEFAULT_SETUP_TIMEOUT_SECONDS),
         )
+
+
+def configured_named_workers_max(runtime_paths: RuntimePaths) -> int:
+    """Read the named worker limit without loading the full Kubernetes backend configuration."""
+    raw = runtime_paths.env_value(NAMED_WORKERS_MAX_ENV, default=str(_DEFAULT_NAMED_WORKERS_MAX))
+    try:
+        return int(raw)
+    except ValueError:
+        return _DEFAULT_NAMED_WORKERS_MAX
+
+
+def configured_runtime_class_name(runtime_paths: RuntimePaths) -> str | None:
+    """Read the configured Kubernetes RuntimeClass name without loading the full backend config."""
+    return read_env(runtime_env_values(runtime_paths), _RUNTIME_CLASS_NAME_ENV) or None
+
+
+def sandbox_mount_dir_runtime_class_refusal(runtime_class_name: str) -> str:
+    """Return the refusal message when sandbox ``mount_dir`` is requested under a RuntimeClass."""
+    return (
+        f"mount_dir is not supported when workers.kubernetes.runtimeClassName is set ({runtime_class_name!r}) "
+        "because runtimes such as gVisor do not preserve host inode numbers for mount verification; "
+        "use sandbox=true without mount_dir."
+    )
 
 
 def kubernetes_backend_config_signature(
@@ -555,12 +744,27 @@ def kubernetes_backend_config_signature(
     )
     if config.runtime_class_name is not None:
         signature = (*signature, f"runtime-class:{config.runtime_class_name}")
+    if config.tailnet_ssh_release_id is not None:
+        signature = (*signature, f"tailnet-ssh-release:{config.tailnet_ssh_release_id}")
     if config.tmp_size_limit is not None:
         signature = (*signature, f"tmp-size-limit:{config.tmp_size_limit}")
     if config.user_resources:
         signature = (*signature, f"user-resources:{stable_signature_json(config.user_resources)}")
     if config.image_pull_secrets:
         signature = (*signature, f"image-pull-secrets:{stable_signature_json(config.image_pull_secrets)}")
+    named_workers = (
+        config.named_worker_idle_timeout_seconds,
+        config.named_worker_max_age_seconds,
+        config.named_workers_max,
+    )
+    if named_workers != (
+        _DEFAULT_NAMED_WORKER_IDLE_TIMEOUT_SECONDS,
+        _DEFAULT_NAMED_WORKER_MAX_AGE_SECONDS,
+        _DEFAULT_NAMED_WORKERS_MAX,
+    ):
+        signature = (*signature, f"named-workers:{stable_signature_json(named_workers)}")
+    if config.setup_timeout_seconds != _DEFAULT_SETUP_TIMEOUT_SECONDS:
+        signature = (*signature, f"setup-timeout:{config.setup_timeout_seconds}")
     return signature
 
 

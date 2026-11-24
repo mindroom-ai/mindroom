@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.llm.media import File, file_text, is_text_mime_type
 from mindroom.llm.messages import media_items, stable_serialize
-from mindroom.native_compaction import native_replay_messages
+from mindroom.native_compaction import native_replay
 from mindroom.token_counting.counts import count
 
 if TYPE_CHECKING:
@@ -167,15 +167,18 @@ def route_request_tokens(
     parts_of: _PartsOf,
     *,
     keep_images: bool = False,
+    reset_scope: str | None = None,
 ) -> int:
     """Return what ``request`` gives the route's model from message ``start`` on, as ``parts_of`` renders it.
 
-    Media are priced by ``_media_tokens``, for the messages the request sends after its latest native checkpoint
-    replaced what precedes it; ``keep_images`` leaves the images to a route that prices them itself.
+    Media are priced by ``_media_tokens``, for the messages the request replays (``native_replay``, with the route's
+    ``reset_scope``): those its latest native checkpoint did not replace. ``keep_images`` leaves the images to a
+    route that prices them itself.
     """
     parts = RequestParts(counter)
     route = request.native_compaction.route if request.native_compaction is not None else None
-    sent = native_replay_messages(request.messages[start:], route)
+    stripped = request.strip_encrypted_replay
+    sent = native_replay(request.messages[start:], route, reset_scope=reset_scope, stripped=stripped).messages
     parts.cost(_media_tokens(counter, sent, keep_images=keep_images))
     parts_of(replace(request, messages=_without_media(request.messages, keep_images=keep_images)), start, parts)
     return parts.counted()

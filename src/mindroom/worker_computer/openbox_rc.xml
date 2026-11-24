@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+The Computer's desktop: no menus, and no key or mouse binding that starts a program.
+Without <keyboard> and <mouse> sections Openbox keeps its built-in bindings, which only focus, raise, move, resize, close, maximize, iconify, shade, and switch windows.
+-->
+<openbox_config xmlns="http://openbox.org/3.4/rc"/>

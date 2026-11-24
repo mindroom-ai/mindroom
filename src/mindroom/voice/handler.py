@@ -1,4 +1,4 @@
-"""Voice message handler with speech-to-text and light transcript normalization."""
+"""Voice message handling with light transcript normalization, and the speech-to-text call transcripts share."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import re
 import time
 import uuid
 from collections import OrderedDict
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
@@ -34,7 +35,13 @@ from mindroom.llm.messages import ModelProvenance
 from mindroom.llm.usage import HelperUsage, MessageMetrics, RequestUsage, RunMetrics, TokenCounts
 from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import parse_current_matrix_user_id
-from mindroom.matrix.media import AudioMessageEvent, download_media_bytes, extract_media_caption, media_mime_type
+from mindroom.matrix.media import (
+    AudioMessageEvent,
+    carried_media_content,
+    download_media_bytes,
+    extract_media_caption,
+    media_mime_type,
+)
 from mindroom.matrix.mentions import format_message_with_mentions, resolve_entity_name_for_mention_localpart
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT, OPENAI_BASE_URL_DEFAULT
 from mindroom.providers import registry as provider_registry
@@ -53,6 +60,9 @@ logger = get_logger(__name__)
 # The overall deadline also bounds upload time and responses that keep trickling data.
 _STT_TOTAL_TIMEOUT_SECONDS = 60.0
 _STT_HTTP_TIMEOUT = httpx.Timeout(_STT_TOTAL_TIMEOUT_SECONDS, connect=5.0, write=10.0, pool=5.0)
+_STT_PROMPT_MAX_CHARS = 800
+_STT_BASE_PROMPT_MAX_CHARS = 400
+_STT_MODELS_WITHOUT_PROMPT = frozenset({"gpt-4o-transcribe-diarize"})
 _STT_AUDIO_EXTENSION_BY_MIME_TYPE = {
     "audio/aac": ".aac",
     "audio/flac": ".flac",
@@ -350,17 +360,14 @@ def _build_prepared_voice_message(
         extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] = True
     else:
         extra_content[VOICE_TRANSCRIPT_KEY] = True
-    original_content = event.source.get("content") if isinstance(event.source, dict) else None
-    inherited_mentions = original_content.get("m.mentions") if isinstance(original_content, dict) else None
-    if isinstance(inherited_mentions, dict):
-        extra_content["m.mentions"] = inherited_mentions
+    carried = carried_media_content(event)
+    relates_to = carried.pop("m.relates_to", None)
+    extra_content.update(carried)
 
     source = dict(event.source) if isinstance(event.source, dict) else {}
     content: dict[str, Any] = {}
-    if isinstance(original_content, dict):
-        relates_to = original_content.get("m.relates_to")
-        if isinstance(relates_to, dict):
-            content["m.relates_to"] = relates_to
+    if relates_to is not None:
+        content["m.relates_to"] = relates_to
     content.update(
         format_message_with_mentions(
             config,
@@ -546,6 +553,14 @@ def _transcription_usage(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class SpeechTranscript:
+    """What speech-to-text heard in one recording, and the provider's token usage for it, if it reported any."""
+
+    text: str
+    usage: HelperUsage | None
+
+
 async def _transcribe_audio(
     audio_data: bytes,
     config: Config,
@@ -553,73 +568,145 @@ async def _transcribe_audio(
     *,
     mime_type: str | None = None,
 ) -> str | None:
-    """Transcribe audio using OpenAI-compatible API.
-
-    Args:
-        audio_data: Audio file bytes
-        config: Application configuration
-        runtime_paths: Explicit runtime context for STT credential lookup
-        mime_type: Matrix-declared MIME type for the audio payload
+    """Transcribe a voice message, recording the provider's usage as voice transcription.
 
     Returns:
         Transcription text or None if failed
 
     """
-    try:
-        stt_base_url = normalize_speech_base_url(config.voice.stt.host)
-        url = f"{stt_base_url or OPENAI_BASE_URL_DEFAULT}/audio/transcriptions"
+    transcript = await transcribe_speech(audio_data, config, runtime_paths, mime_type=mime_type)
+    if transcript is None:
+        return None
+    if transcript.usage is not None:
+        await record_system_usage(transcript.usage, runtime_paths=runtime_paths, kind="voice_transcription")
+    return transcript.text
 
-        api_key = config.voice.stt.api_key
-        if api_key is None:
-            credentials_service = config.voice.stt.credentials_service
-            if credentials_service is not None:
-                api_key = get_api_key_for_service(credentials_service, runtime_paths)
-            elif config.voice.stt.provider == "openai_compatible":
-                api_key = LOCAL_OPENAI_API_KEY_DEFAULT
-        if not api_key:
-            logger.error("No OpenAI-compatible STT API key configured for voice transcription")
+
+def resolve_stt_connection(config: Config, runtime_paths: RuntimePaths) -> tuple[str, str] | None:
+    """Return the configured STT endpoint URL and bearer key, or None when no key can be resolved."""
+    stt_base_url = normalize_speech_base_url(config.voice.stt.host)
+    url = f"{stt_base_url or OPENAI_BASE_URL_DEFAULT}/audio/transcriptions"
+
+    api_key = config.voice.stt.api_key
+    if api_key is None:
+        credentials_service = config.voice.stt.credentials_service
+        if credentials_service is not None:
+            api_key = get_api_key_for_service(credentials_service, runtime_paths)
+        elif config.voice.stt.provider == "openai_compatible":
+            api_key = LOCAL_OPENAI_API_KEY_DEFAULT
+    if not api_key:
+        return None
+    return url, api_key
+
+
+def _apply_stt_prompt(form_data: dict[str, object], prompt: str | None) -> None:
+    """Merge an optional dictation prompt with ``extra_kwargs.prompt`` while preserving operator vocabulary."""
+    cleaned_prompt = prompt.strip() if prompt is not None else ""
+    if not cleaned_prompt:
+        return
+    existing_prompt = form_data.get("prompt")
+    base_prompt = existing_prompt.strip() if isinstance(existing_prompt, str) else ""
+    if not base_prompt:
+        form_data["prompt"] = cleaned_prompt[-_STT_PROMPT_MAX_CHARS:]
+        return
+    preserved_base = base_prompt[:_STT_BASE_PROMPT_MAX_CHARS].rstrip()
+    tail_budget = _STT_PROMPT_MAX_CHARS - len(preserved_base) - 1
+    tail = cleaned_prompt[-tail_budget:].lstrip()
+    form_data["prompt"] = f"{preserved_base} {tail}".strip()
+
+
+def _stt_http_timeout(timeout_seconds: float) -> httpx.Timeout:
+    """Return an httpx timeout matching ``timeout_seconds`` without widening short connect/write/pool caps."""
+    if timeout_seconds == _STT_HTTP_TIMEOUT.read:
+        return _STT_HTTP_TIMEOUT
+    return httpx.Timeout(
+        timeout_seconds,
+        connect=min(5.0, timeout_seconds),
+        write=min(10.0, timeout_seconds),
+        pool=min(5.0, timeout_seconds),
+    )
+
+
+async def transcribe_speech(
+    audio: bytes,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    mime_type: str | None = "audio/wav",
+    language: str | None = None,
+    prompt: str | None = None,
+    timeout_seconds: float | None = None,
+    http_client: httpx.AsyncClient | None = None,
+) -> SpeechTranscript | None:
+    """Transcribe audio with the ``voice.stt`` speech service, through its OpenAI-compatible API.
+
+    Records no usage: the caller records ``usage`` under its own kind.
+
+    Args:
+        audio: Audio file bytes, never written to disk
+        config: Application configuration, read for this request
+        runtime_paths: Explicit runtime context for STT credential lookup
+        mime_type: Declared MIME type of the audio
+        language: Language code hinted to the speech service, over one in its ``extra_kwargs``
+        prompt: Optional context prompt combined with any configured ``extra_kwargs.prompt``
+        timeout_seconds: Optional total deadline in seconds (defaults to ``_STT_TOTAL_TIMEOUT_SECONDS``)
+        http_client: Optional pooled HTTP client to reuse without closing
+
+    Returns:
+        The transcript, or None if transcription failed
+
+    """
+    effective_timeout = _STT_TOTAL_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+    try:
+        connection = resolve_stt_connection(config, runtime_paths)
+        if connection is None:
+            logger.error("No OpenAI-compatible STT API key configured for speech-to-text")
             return None
+        url, api_key = connection
+        stt_base_url = normalize_speech_base_url(config.voice.stt.host)
         headers = {"Authorization": f"Bearer {api_key}"}
 
         filename, upload_mime_type = _stt_upload_filename_and_mime_type(mime_type)
-        files = {"file": (filename, audio_data, upload_mime_type)}
+        files = {"file": (filename, audio, upload_mime_type)}
         form_data: dict[str, object] = {"model": config.voice.stt.model}
         form_data.update(config.voice.stt.extra_kwargs)
+        if language is not None:
+            form_data["language"] = language
+        if config.voice.stt.model in _STT_MODELS_WITHOUT_PROMPT:
+            form_data.pop("prompt", None)
+        else:
+            _apply_stt_prompt(form_data, prompt)
 
-        async with (
-            asyncio.timeout(_STT_TOTAL_TIMEOUT_SECONDS),
-            httpx.AsyncClient(timeout=_STT_HTTP_TIMEOUT) as http_client,
-        ):
+        http_timeout = _stt_http_timeout(effective_timeout)
+        async with asyncio.timeout(effective_timeout), AsyncExitStack() as stack:
+            if http_client is not None:
+                client = http_client
+                post_kwargs: dict[str, Any] = {"timeout": http_timeout}
+            else:
+                client = await stack.enter_async_context(httpx.AsyncClient(timeout=http_timeout))
+                post_kwargs = {}
             request_started_at = int(time.time())
-            response = await http_client.post(url, headers=headers, files=files, data=form_data)
+            response = await client.post(url, headers=headers, files=files, data=form_data, **post_kwargs)
             if response.status_code != 200:
-                logger.error(
-                    "stt_api_error",
-                    status_code=response.status_code,
-                    error=response.text,
-                )
+                logger.error("stt_api_error", status_code=response.status_code)
                 return None
 
             result = response.json()
 
-        usage = _transcription_token_usage(result)
-        if usage is not None:
+        tokens = _transcription_token_usage(result)
+        usage = None
+        if tokens is not None:
             model = form_data.get("model")
-            provider = "openai" if config.voice.stt.provider == "openai" and stt_base_url is None else None
-            await record_system_usage(
-                _transcription_usage(
-                    usage,
-                    model=model if isinstance(model, str) else None,
-                    provider=provider,
-                    created_at=request_started_at,
-                ),
-                runtime_paths=runtime_paths,
-                kind="voice_transcription",
+            usage = _transcription_usage(
+                tokens,
+                model=model if isinstance(model, str) else None,
+                provider="openai" if config.voice.stt.provider == "openai" and stt_base_url is None else None,
+                created_at=request_started_at,
             )
-        return result.get("text", "").strip()
+        return SpeechTranscript(text=result.get("text", "").strip(), usage=usage)
 
     except TimeoutError:
-        logger.warning("stt_transcription_timeout", timeout_seconds=_STT_TOTAL_TIMEOUT_SECONDS)
+        logger.warning("stt_transcription_timeout", timeout_seconds=effective_timeout)
         return None
     except Exception:
         logger.exception("Error transcribing audio")

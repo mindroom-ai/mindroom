@@ -28,8 +28,16 @@ struct InstalledDesktopApplication: Identifiable, Hashable {
 
 @MainActor
 enum InstalledApplicationCatalog {
-    /// MindRoom's own app and helper are never offered: their windows grant shell auto-approval and control leases.
-    static let mindRoomIdentifiers: Set<String> = ["chat.mindroom.menubar", "chat.mindroom.desktophelper"]
+    /// MindRoom's own apps and helpers are never offered: their windows grant shell auto-approval and control leases.
+    static let mindRoomIdentifiers: Set<String> = [
+        "chat.mindroom.menubar",
+        "chat.mindroom.desktophelper",
+        "chat.mindroom.app",
+        "chat.mindroom.app.helper",
+        "chat.mindroom.app.helper.Renderer",
+        "chat.mindroom.app.helper.GPU",
+        "chat.mindroom.app.helper.Plugin",
+    ]
 
     static func applications() -> [InstalledDesktopApplication] {
         let runningIDs = Set(NSWorkspace.shared.runningApplications.compactMap(\.bundleIdentifier))

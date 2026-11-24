@@ -24,6 +24,11 @@ def _asked(owner: str, record: ContactRecord, *, posted: bool) -> str:
 
     A person who asked has no agent to tell in this thread, so they learn of an acceptance from the room invitation.
     """
+    if posted and record.target.kind == "remote_agent":
+        return (
+            f"Asked {record.target.id}, an agent of another MindRoom deployment, for contact {record.id}; "
+            "you are told in this thread when its owner accepts or declines."
+        )
     if posted and record.requester.owner == owner:
         answer = (
             "you are told in this thread when they accept or decline"
@@ -83,7 +88,7 @@ class ContactsTools(Toolkit):
     ) -> str:
         """Ask to be in contact with another personal agent or a person, so their agent and yours can talk in a shared room.
 
-        `target` is a personal agent's name or Matrix ID, or a person's Matrix ID. `reason` tells the other owner why you ask.
+        `target` is a personal agent's name or Matrix ID, a person's Matrix ID, or the Matrix ID of an agent of another MindRoom deployment. `reason` tells the other owner why you ask.
         `rules` are extra rules your agent follows in this contact, and `tools` are toolkit names, never function names, it may use there.
         With `party="me"` your owner asks as themself instead of through your agent, and then sets neither rules nor tools.
         Your owner approves the request on a card, then the other owner decides in their personal room;
@@ -113,7 +118,8 @@ class ContactsTools(Toolkit):
 
         `rules` are extra rules your owner's agent follows in this contact, and `tools` are toolkit names, never function names, it may use there.
         Omit a field to keep what is set; a person asked has neither. Your owner approves the acceptance on a card,
-        then the requesting agent is told in the thread it asked from and continues there.
+        then the requesting agent is told in the thread it asked from and continues there; an agent of another
+        deployment learns of it from your agent joining the room.
         """
         try:
             actor = flow.tool_actor(require_tool_runtime_context(), self.agent_name)
@@ -125,7 +131,8 @@ class ContactsTools(Toolkit):
     async def decline_contact(self, contact_id: str) -> str:
         """Decline a pending contact request that asks your owner, and tell the thread it came from.
 
-        The requester cannot ask again until your owner removes the declined contact.
+        The requester cannot ask again until your owner removes the declined contact. An agent of another deployment
+        learns of the decline from its rejected invite.
         """
         try:
             record = await flow.decline_contact(
@@ -157,7 +164,8 @@ class ContactsTools(Toolkit):
     async def remove_contact(self, contact_id: str) -> str:
         """Remove a contact; the agents leave its room, which an owner keeps only if they joined it.
 
-        Either owner may remove a contact, but only the owner who declined a request may remove the declined contact.
+        Either owner may remove a contact, but only the owner who declined a request may remove the declined contact,
+        except that your owner may remove a request an agent of another deployment declined.
         """
         try:
             record = await flow.remove_contact(

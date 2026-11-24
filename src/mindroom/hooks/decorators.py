@@ -6,7 +6,7 @@ import inspect
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
-from .types import EVENT_AGENT_STARTED, HookCallback, validate_event_name
+from .types import EVENT_AGENT_STARTED, SERVICE_SCOPE_EVENTS, HookCallback, HookScope, validate_event_name
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -27,6 +27,7 @@ class _HookMetadata:
     agents: tuple[str, ...] | None
     rooms: tuple[str, ...] | None
     required: bool
+    scope: HookScope
 
 
 def hook(
@@ -38,14 +39,21 @@ def hook(
     agents: Iterable[str] | None = None,
     rooms: Iterable[str] | None = None,
     required: bool = False,
+    scope: HookScope = "agent",
 ) -> Callable[[HookCallback], HookCallback]:
-    """Annotate an async function as a MindRoom hook."""
+    """Annotate an async function as a MindRoom hook; ``scope`` is how often it runs, as docs/hooks.md says."""
     event_name = validate_event_name(event)
     if required and event_name != EVENT_AGENT_STARTED:
         msg = "required hooks are only supported for agent:started"
         raise ValueError(msg)
     normalized_agents = tuple(agent.strip() for agent in agents or () if agent.strip()) or None
     normalized_rooms = tuple(room.strip() for room in rooms or () if room.strip()) or None
+    if scope == "service" and event_name not in SERVICE_SCOPE_EVENTS:
+        msg = "scope='service' is only supported for bot:ready and config:reloaded"
+        raise ValueError(msg)
+    if scope != "agent" and normalized_agents:
+        msg = f"scope={scope!r} hooks run once for all agents and cannot filter by agents"
+        raise ValueError(msg)
 
     def decorator(callback: HookCallback) -> HookCallback:
         if not inspect.iscoroutinefunction(callback):
@@ -60,6 +68,7 @@ def hook(
             agents=normalized_agents,
             rooms=normalized_rooms,
             required=required,
+            scope=scope,
         )
         setattr(callback, _HOOK_METADATA_ATTR, metadata)
         return callback

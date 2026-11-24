@@ -13,7 +13,8 @@ _MAX_LENGTH = 300
 class _ErrorResponse(Protocol):
     """The error-body surface of an httpx.Response (a protocol so importers can lazy-import httpx)."""
 
-    text: str
+    @property
+    def text(self) -> str: ...
 
     def json(self) -> object: ...
 

@@ -23,8 +23,8 @@
           "mindroom.ai/worker-status": "starting",
           "mindroom.ai/last-started-at": "10.0",
           "mindroom.ai/failure-reason": "",
-          "mindroom.ai/template-hash": "361fe9dc735517f45cbcd57c0210878bdae29f3fd47c858b539d0fc4b7e30e87",
-          "mindroom.ai/workspace-template-hash": "361fe9dc735517f45cbcd57c0210878bdae29f3fd47c858b539d0fc4b7e30e87",
+          "mindroom.ai/template-hash": "84a69febca137beb5bb3eed56201a6626b8680d2bbc9f3f898bf47955682022c",
+          "mindroom.ai/workspace-template-hash": "84a69febca137beb5bb3eed56201a6626b8680d2bbc9f3f898bf47955682022c",
           "mindroom.ai/private-agent-names": "[\"mind\"]"
         }
       },
@@ -50,7 +50,7 @@
             },
             "annotations": {
               "mindroom.ai/worker-key": "v1:tenant-123:user:~@alice:example.org",
-              "mindroom.ai/startup-manifest-hash": "7056831817d7b9b4bfa373eb717eaa45dfea92eb4c7825130023d114f8aa4a0d",
+              "mindroom.ai/startup-manifest-hash": "f50b7f397b88a6679904b4ccb78a3d289b782368926164ba88467e63367fbbd2",
               "mindroom.ai/runner-token-hash": "262b6b9414f27399d440f93b9359e4843f6e88eb134e1ae1ea808e6ac590032b"
             }
           },
@@ -131,6 +131,26 @@
                       "secretKeyRef": {
                         "name": "mindroom-worker-944d6bf185360e41083d012c",
                         "key": "MINDROOM_SANDBOX_PROXY_TOKEN"
+                      }
+                    }
+                  },
+                  {
+                    "name": "MINDROOM_KUBERNETES_POD_CPU_LIMIT",
+                    "valueFrom": {
+                      "resourceFieldRef": {
+                        "containerName": "sandbox-runner",
+                        "resource": "limits.cpu",
+                        "divisor": "1"
+                      }
+                    }
+                  },
+                  {
+                    "name": "MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES",
+                    "valueFrom": {
+                      "resourceFieldRef": {
+                        "containerName": "sandbox-runner",
+                        "resource": "limits.memory",
+                        "divisor": "1"
                       }
                     }
                   },
@@ -322,8 +342,8 @@
             "mindroom.ai/worker-status": "ready",
             "mindroom.ai/last-started-at": "10.0",
             "mindroom.ai/failure-reason": "",
-            "mindroom.ai/template-hash": "361fe9dc735517f45cbcd57c0210878bdae29f3fd47c858b539d0fc4b7e30e87",
-            "mindroom.ai/workspace-template-hash": "361fe9dc735517f45cbcd57c0210878bdae29f3fd47c858b539d0fc4b7e30e87",
+            "mindroom.ai/template-hash": "84a69febca137beb5bb3eed56201a6626b8680d2bbc9f3f898bf47955682022c",
+            "mindroom.ai/workspace-template-hash": "84a69febca137beb5bb3eed56201a6626b8680d2bbc9f3f898bf47955682022c",
             "mindroom.ai/private-agent-names": "[\"mind\"]"
           }
         }
@@ -331,6 +351,7 @@
     ]
   ],
   "manifest": {
+    "eager_setup_plugins": [],
     "runtime_paths": {
       "config_path": "/srv/mindroom-golden/config.yaml",
       "env_file_values": {},

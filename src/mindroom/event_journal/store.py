@@ -8,6 +8,7 @@ rather than something it is trusted not to do.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -19,6 +20,7 @@ from . import (
     journal,
     reads,
     replies,
+    room_claims,
     tool_jobs,
     turn_rows,
 )
@@ -39,7 +41,7 @@ from .views import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from mindroom.interactive_models import InteractivePrompt
@@ -55,6 +57,7 @@ if TYPE_CHECKING:
         RoomMembershipPosition,
     )
     from .projection import ProjectedEvent
+    from .tool_jobs import ToolJobSnapshotUpdate
 
 _DEFAULT_APPROVAL_CONTINUATION_OWNER_LIMIT = 100
 
@@ -243,10 +246,24 @@ class EventJournalStore:
         return await self.backend.still_usable()
 
     async def end_entity_replies(self, ends: Callable[[str], bool], *, now_ns: int) -> int:
-        """End the open replies of the entities ``ends`` names; return how many ended."""
+        """End the open replies of the entities ``ends`` names, settling their runtime sources; return how many ended."""
         return await self.backend.write(
             lambda transaction: replies.end_entity_replies(transaction, ends, now_ns=now_ns),
         )
+
+    async def claim_room_event(self, room_id: str, event_id: str, purpose: str, owner: str) -> str:
+        """Save ``owner`` for one room event's purpose unless one is saved; return the saved owner (first writer wins).
+
+        Shared across principals: the claim says which bot does a once-per-event job, so every bot must read one row.
+        """
+        now_ns = time.time_ns()
+        return await self.backend.write(
+            lambda transaction: room_claims.claim(transaction, room_id, event_id, purpose, owner, now_ns=now_ns),
+        )
+
+    async def room_event_owner(self, room_id: str, event_id: str, purpose: str) -> str | None:
+        """Return the owner saved for one room event's purpose, saving none."""
+        return await self.backend.read(lambda t: room_claims.saved_owner(t, room_id, event_id, purpose))
 
     async def generation(self, *, new_generation: str) -> str:
         """Return this database's identity, minting it the first time it is opened.
@@ -336,9 +353,9 @@ class ToolJobStore:
         job_json: str,
         result_payload_json: str | None = None,
         *,
-        ends_approvals: bool,
+        approval_end_reason: str | None,
     ) -> None:
-        """Replace a job's snapshot, with its outcome payload when one is given; a save that ends the job's approvals denies its cards."""
+        """Replace a job's snapshot, with its outcome payload when one is given; a save that ends the job's approvals denies its cards with ``approval_end_reason``."""
         await self._backend.write(
             lambda transaction: tool_jobs.save(
                 transaction,
@@ -346,8 +363,16 @@ class ToolJobStore:
                 job_id,
                 job_json,
                 result_payload_json,
-                ends_approvals=ends_approvals,
+                approval_end_reason=approval_end_reason,
             ),
+        )
+
+    async def save_many(self, updates: Sequence[ToolJobSnapshotUpdate]) -> None:
+        """Replace multiple jobs' snapshots in one owned transaction."""
+        if not updates:
+            return
+        await self._backend.write(
+            lambda transaction: tool_jobs.save_many(transaction, self._runtime_generation, updates),
         )
 
     async def load_payload(self, job_id: str) -> str | None:

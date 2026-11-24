@@ -13,6 +13,7 @@ on:
       - 'frontend/**'
       - 'local/instances/deploy/Dockerfile.*'
       - 'local/instances/deploy/build-sqlite.sh'
+      - 'tailnet-gateway/**'
       - 'pyproject.toml'
       - 'uv.lock'
       - '.github/workflows/build-mindroom.yml'
@@ -49,6 +50,8 @@ jobs:
             dockerfile: local/instances/deploy/Dockerfile.mindroom
           - image_name: mindroom-minimal
             dockerfile: local/instances/deploy/Dockerfile.mindroom-minimal
+          - image_name: mindroom-tailnet-gateway
+            dockerfile: tailnet-gateway/Dockerfile
         platform:
           - linux/amd64
           - linux/arm64
@@ -144,6 +147,7 @@ jobs:
         target:
           - image_name: mindroom
           - image_name: mindroom-minimal
+          - image_name: mindroom-tailnet-gateway
 
     steps:
     - name: Login to GitHub Container Registry

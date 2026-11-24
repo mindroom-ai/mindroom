@@ -21,7 +21,6 @@ from mindroom.model_defaults import (
     ANTHROPIC_BASE_URL_DEFAULT,
     MEMORY_OLLAMA_LLM,
     OPENROUTER_BASE_URL_DEFAULT,
-    claude_rejects_sampling_controls,
     openai_rejects_sampling_controls,
 )
 from mindroom.timing import timed
@@ -233,9 +232,9 @@ def _mem0_llm_config(config: Config, runtime_paths: RuntimePaths) -> dict[str, A
             llm_provider_config["api_key"] = api_key
 
     model = llm_provider_config.get("model")
-    if llm_provider == "anthropic" and isinstance(model, str) and claude_rejects_sampling_controls(model):
-        # Mem0's Anthropic LLM sends its default temperature of 0.1, else a set top_p, and never top_k; these models
-        # reject every sampling value, and Mem0 sends neither when both are None.
+    if llm_provider == "anthropic":
+        # Mem0's Anthropic LLM sends its default temperature of 0.1, else a set top_p, and never top_k, and sends
+        # neither when both are None; the SDK takes no sampling argument, and API version 2026-10-21 none on any model.
         llm_provider_config["temperature"] = None
         llm_provider_config["top_p"] = None
 
@@ -364,6 +363,12 @@ async def create_memory_instance(
         # sampling values, and their max_completion_tokens cap would also count reasoning, so they get Mem0's
         # reasoning-model request instead, unless the config sets ``is_reasoning_model`` itself.
         llm_config.is_reasoning_model = True
+    if memory_llm is not None and memory_llm.provider == "anthropic":
+        # Mem0 builds its own Claude client, whose key SDK 2 would send as a bearer; it goes in X-Api-Key as on the chat route.
+        from mindroom.providers.anthropic.messages import send_key_as_x_api_key  # noqa: PLC0415
+
+        client = cast("Any", memory.llm).client
+        send_key_as_x_api_key(client, client.api_key)
     install_mem0_usage_capture(memory.llm, memory_llm.provider if memory_llm is not None else "ollama")
     embedder_provider = config.memory.embedder.provider
     if embedder_provider == "openai":

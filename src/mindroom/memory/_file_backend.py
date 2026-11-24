@@ -10,18 +10,19 @@ from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar
 from zoneinfo import ZoneInfo
 
 from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.config.resolution import entity_timezone, memory_search
 from mindroom.embeddings.errors import classified_embedder_error
+from mindroom.knowledge.retrieval import Candidate, Selection, o200k_tokens, retrieve
+from mindroom.knowledge.utils import configured_reranker
 from mindroom.logging_config import get_logger
 from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_within_root
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.timing import timed
-from mindroom.token_counting.counts import count
 
 from ._policy import MemoryScope, team_scope, team_scopes, team_user_id
 from ._prompting import redact_memory_text
@@ -48,7 +49,7 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import TokenCounter
+    from mindroom.knowledge.rerank import Reranker
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
@@ -526,7 +527,7 @@ def _search_scope_memory_entries(scope: MemoryScope, query: str, *, limit: int) 
         scored_entries.append({**entry, "score": score})
         seen_scored_text.add(normalized_text)
 
-    scored_entries.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
+    scored_entries.sort(key=lambda item: item.get("score", 0.0), reverse=True)
     scored_entries = scored_entries[:limit]
 
     if limit <= len(scored_entries):
@@ -535,7 +536,7 @@ def _search_scope_memory_entries(scope: MemoryScope, query: str, *, limit: int) 
     remaining_limit = limit - len(scored_entries)
     snippet_results = _scan_scope_memory_snippets(scope, query_tokens, seen_scored_text)
 
-    snippet_results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
+    snippet_results.sort(key=lambda item: item.get("score", 0.0), reverse=True)
     return scored_entries + snippet_results[:remaining_limit]
 
 
@@ -646,97 +647,24 @@ def _replace_scope_path_memory_entry(scope: MemoryScope, memory_id: str, content
     return True
 
 
-def _selected_lines(costs: list[int], first_entry: int, max_lines: int, budget: int) -> list[int]:
-    """Return the indexes of the whole lines within both caps, withholding the oldest structured entries first.
-
-    ``costs`` holds each line's tokens with its newline, and ``budget`` is the token cap.
-    `add_memory` appends entries, so a capped preload keeps the curated head before the first entry and fills the rest
-    with the newest lines; a file without entries, or whose head alone reaches a cap, keeps its leading lines. A long
-    line is withheld whole rather than cut, so the preload never shows a partial fact and the truncation marker
-    accounts for every withheld line.
-    """
-    leading = 0
-    kept = 0
-    for cost in costs[:max_lines]:
-        if kept + cost > budget:
-            break
-        kept += cost
-        leading += 1
-    if leading == len(costs) or leading < first_entry:
-        return list(range(leading))
-    kept = sum(costs[:first_entry])
-    newest: list[int] = []
-    for index in range(len(costs) - 1, first_entry - 1, -1):
-        if first_entry + len(newest) >= max_lines or kept + costs[index] > budget:
-            break
-        kept += costs[index]
-        newest.append(index)
-    return [*range(first_entry), *reversed(newest)]
-
-
-def _entrypoint_text(lines: Sequence[str]) -> str:
-    """Return the text of ``lines`` as the preamble inlines it."""
-    return "\n".join(lines).strip()
-
-
-def _line_tokens(counter: TokenCounter, line: str) -> int:
-    """Count one line with its newline as an upper bound: before the encoder loads, its UTF-8 bytes."""
-    return count(counter, line + "\n", upper_bound=True)
-
-
-def _lines_within_caps(lines: Sequence[str], config: Config, counter: TokenCounter) -> list[str]:
-    """Keep the whole lines within both caps, as ``counter`` counts them, withholding the oldest entries first."""
-    file_config = config.memory.file
-    first_entry = next(
-        (index for index, line in enumerate(lines) if FILE_MEMORY_ENTRY_PATTERN.match(line.strip())),
-        len(lines),
-    )
-    costs = [_line_tokens(counter, line) for line in lines]
-    kept = _selected_lines(costs, first_entry, file_config.max_entrypoint_lines, file_config.max_entrypoint_tokens)
-    return [lines[index] for index in kept]
-
-
-def cap_entrypoint(
-    entrypoint: MemoryEntrypointContext,
-    config: Config,
-    counter: TokenCounter,
-) -> MemoryEntrypointContext:
-    """Cut the preload to both caps, as the model the preload goes to counts it."""
-    kept = _lines_within_caps(entrypoint.lines, config, counter)
-    return replace(entrypoint, text=_entrypoint_text(kept), included_lines=len(kept))
-
-
-def entrypoint_tokens(text: str, counter: TokenCounter) -> int:
-    """Return the tokens of the MEMORY.md ``text`` as the preload's token cap counts them."""
-    return sum(_line_tokens(counter, line) for line in text.splitlines())
-
-
-def entrypoint_withholds_lines(text: str, config: Config, counter: TokenCounter) -> bool:
-    """Return whether the MEMORY.md preload would leave out any line of ``text``, its size counted with ``counter``."""
-    lines = text.splitlines()
-    return len(_lines_within_caps(lines, config, counter)) < len(lines)
-
-
 @timed("system_prompt_assembly.memory_file_entrypoint_read")
 def _load_scope_entrypoint_context(scope: MemoryScope) -> MemoryEntrypointContext:
-    """Load the scoped `MEMORY.md` entrypoint whole; ``cap_entrypoint`` cuts its preload."""
+    """Load the scoped `MEMORY.md` entrypoint whole; the preamble cuts what it inlines."""
     payload = _read_scope_entrypoint_payload(scope.root)
     if payload is None:
         return MemoryEntrypointContext()
     entrypoint_path = scope.root / FILE_MEMORY_ENTRYPOINT
-    lines = _decode_capped_text(payload).splitlines()
     if payload.truncated:
         logger.warning(
             "Truncated oversized file memory entrypoint",
             path=str(entrypoint_path),
             max_bytes=_MAX_MEMORY_FILE_BYTES,
         )
+    # Unlike search and writes, the preload keeps a partial last line the read cap left: a limit of at most 200,000
+    # characters always ends inside the read, so the cut never depends on what the read left out.
     return MemoryEntrypointContext(
         source_path=entrypoint_path,
-        # An oversized entrypoint still reports at least one withheld line, so the
-        # preamble tells the model to read the file instead of claiming completeness.
-        total_lines=len(lines) + 1 if payload.truncated else len(lines),
-        lines=tuple(lines),
+        text=payload.payload.decode("utf-8", errors="replace"),
     )
 
 
@@ -794,6 +722,61 @@ def _agent_keyword_results(scope: MemoryScope, query: str, limit: int) -> list[M
     return _keyword_results(scope, query, limit)
 
 
+# Semantic hits the per-turn recall, and a reranked search, fetch for their selection to choose from. The store
+# fuses `max(limit * 2, 50)` candidates per ranking, so up to 25 keeps the fusion width, and with it the ranking, of
+# a three-hit search.
+_RECALL_SEARCH_LIMIT = 20
+#: The o200k tokens one turn's recalled memories may take in total.
+_RECALL_TOKEN_BUDGET = 800
+#: The semantic hits one turn's recall injects: within 0.05 of the best hybrid score, at most 5, 800 o200k tokens.
+_RECALL_SELECTION = Selection(limit=5, token_budget=_RECALL_TOKEN_BUDGET, hybrid_score_gap=0.05)
+#: Seconds the per-turn recall waits for its reranker before keeping the hybrid selection.
+_RECALL_RERANK_DEADLINE_SECONDS = 2.0
+#: Reranker providers that passed the recall benchmark: with ``memory.search.rerank`` unset, memory search reranks
+#: with them and with no other.
+_RERANK_BY_DEFAULT_PROVIDERS = frozenset({"openai_decisions", "typesafe"})
+
+
+def _add_within_recall_budget(selected: Sequence[MemoryResult], extra: Sequence[MemoryResult]) -> list[MemoryResult]:
+    """Return ``selected`` followed by the hits of ``extra``, in order, that fit the recall budget ``selected`` left.
+
+    A hit of ``extra`` that does not fit is dropped, and a later, smaller one may still fit.
+    """
+    remaining = _RECALL_TOKEN_BUDGET - sum(o200k_tokens(result.get("memory", "")) for result in selected)
+    added: list[MemoryResult] = []
+    for result in extra:
+        tokens = o200k_tokens(result.get("memory", ""))
+        if tokens <= remaining:
+            added.append(result)
+            remaining -= tokens
+    return [*selected, *added]
+
+
+async def _retrieve_memories(
+    query: str,
+    results: Sequence[MemoryResult],
+    selection: Selection,
+    *,
+    reranker: Reranker | None = None,
+    deadline_seconds: float | None = None,
+) -> list[MemoryResult]:
+    """Return the ``results`` that ``selection`` keeps, judged by their memory text and score (0 when unscored).
+
+    A result the reranker scored carries the reranker's score.
+    """
+    candidates = [Candidate(result, result.get("memory", ""), result.get("score", 0.0)) for result in results]
+    kept = await retrieve(query, candidates, selection, reranker=reranker, deadline_seconds=deadline_seconds)
+    return [_rescored(candidate.item, candidate.score) for candidate in kept]
+
+
+def _rescored(result: MemoryResult, score: float) -> MemoryResult:
+    if result.get("score", 0.0) == score:
+        return result
+    rescored = result.copy()
+    rescored["score"] = score
+    return rescored
+
+
 @timed("system_prompt_assembly.memory_search.file.team_scope")
 def _team_keyword_results(scopes: list[MemoryScope], query: str, limit: int) -> list[MemoryResult]:
     return [result for scope in scopes for result in _keyword_results(scope, query, limit)]
@@ -832,6 +815,7 @@ class FileMemoryBackend:
         limit: int,
         execution_identity: ToolExecutionIdentity | None = None,
         editable: bool = False,
+        recall: bool = False,
     ) -> MemorySearchOutcome:
         """Search file-backed memories visible to an agent: its own scope, then its teams' scopes by keyword.
 
@@ -839,6 +823,19 @@ class FileMemoryBackend:
         file-reading paths run in worker threads (#1260); only the semantic
         index query stays natively async. A semantic-path failure falls back
         to keyword matches and surfaces its classified cause in the outcome.
+
+        ``recall`` is the per-turn recall. Its semantic hits are chosen by
+        ``_RECALL_SELECTION`` from a wider search and come first; the best
+        ``limit`` team keyword hits follow, since keyword and cosine scores
+        are not comparable, each only if it fits the token budget the
+        semantic hits left. Keyword matches, a fallback's included, rank as
+        in any search.
+
+        With ``memory.search.rerank`` (unset: on for the providers in
+        ``_RERANK_BY_DEFAULT_PROVIDERS``) and a configured reranker, semantic
+        hits are reranked from a wider search; recall then keeps those at or
+        above the reranker's threshold, and keeps the hybrid selection if
+        reranking fails or takes over two seconds.
         """
         agent_scope, *teams = await asyncio.to_thread(
             _visible_scopes,
@@ -852,7 +849,20 @@ class FileMemoryBackend:
         results: list[MemoryResult] | None = None
         search_config = memory_search(config, agent_name)
         # Semantic matches are read-only locators, so an editable search matches by keyword.
-        if search_config.mode == "semantic" and not editable:
+        semantic_search = search_config.mode == "semantic" and not editable
+        reranks = (
+            search_config.rerank
+            if search_config.rerank is not None
+            else config.reranker is not None and config.reranker.provider in _RERANK_BY_DEFAULT_PROVIDERS
+        )
+        reranker = configured_reranker(config, self.runtime_paths) if semantic_search and reranks else None
+        # Recall chooses from a fixed 20; a reranked tool search reorders at least 20 and still returns its whole limit.
+        candidate_limit = limit
+        if recall:
+            candidate_limit = _RECALL_SEARCH_LIMIT
+        elif reranker:
+            candidate_limit = max(limit, _RECALL_SEARCH_LIMIT)
+        if semantic_search:
             try:
                 results = await search_semantic_file_memories(
                     query,
@@ -861,7 +871,7 @@ class FileMemoryBackend:
                     config=config,
                     runtime_paths=self.runtime_paths,
                     search_config=search_config,
-                    limit=limit,
+                    limit=candidate_limit,
                     execution_identity=execution_identity,
                 )
             except SemanticFileMemoryIndexUnavailableError as exc:
@@ -881,11 +891,30 @@ class FileMemoryBackend:
                     "File-memory semantic search failed; falling back to keyword search",
                     agent=agent_name,
                 )
+        semantic = results is not None
         if results is None:
             results = await asyncio.to_thread(_agent_keyword_results, agent_scope, query, limit)
+        elif recall:
+            threshold = config.reranker.threshold if reranker and config.reranker else None
+            results = await _retrieve_memories(
+                query,
+                results,
+                replace(_RECALL_SELECTION, min_rerank_score=threshold),
+                reranker=reranker,
+                deadline_seconds=_RECALL_RERANK_DEADLINE_SECONDS,
+            )
+        else:
+            results = await _retrieve_memories(query, results, Selection(limit), reranker=reranker)
 
-        results.extend(await asyncio.to_thread(_team_keyword_results, teams, query, limit))
-        results.sort(key=lambda item: cast("float", item.get("score", 0.0)), reverse=True)
+        team_results = await asyncio.to_thread(_team_keyword_results, teams, query, limit)
+        if semantic and recall:
+            team_results.sort(key=lambda item: item.get("score", 0.0), reverse=True)
+            return MemorySearchOutcome(
+                results=_add_within_recall_budget(results, team_results[:limit]),
+                degraded_reason=degraded_reason,
+            )
+        results.extend(team_results)
+        results.sort(key=lambda item: item.get("score", 0.0), reverse=True)
         return MemorySearchOutcome(results=results[:limit], degraded_reason=degraded_reason)
 
     async def list_all(
@@ -992,5 +1021,5 @@ class FileMemoryBackend:
         *,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> MemoryEntrypointContext:
-        """Load the stable scoped `MEMORY.md` entrypoint of one agent whole, before ``cap_entrypoint`` cuts it."""
+        """Load the stable scoped `MEMORY.md` entrypoint of one agent whole, before the preamble cuts it."""
         return _load_scope_entrypoint_context(_agent_scope(agent_name, config, self.runtime_paths, execution_identity))

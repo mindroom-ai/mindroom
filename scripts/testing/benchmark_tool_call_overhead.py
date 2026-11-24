@@ -181,7 +181,8 @@ async def _run_shell_benchmark(iterations: int, warmup: int) -> list[dict[str, o
             storage_path=root / "storage",
             process_env={},
         )
-        toolkit = shell_tools()(runtime_paths=runtime)
+        # This benchmark measures the shell in this process, which needs `defaults.allow_shell_without_worker`.
+        toolkit = shell_tools()(runtime_paths=runtime, allow_without_worker=True)
         for label, command in (("shell_argv", ["printf", "benchmark-ok"]), ("shell_string", "printf benchmark-ok")):
             samples: list[float] = []
             for index in range(warmup + iterations):

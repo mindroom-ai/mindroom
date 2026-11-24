@@ -22,8 +22,9 @@ from mindroom.attachments.storage import load_attachment, register_local_attachm
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import SKIP_MENTIONS_KEY, resolve_runtime_paths
-from mindroom.custom_tools.attachments import AttachmentTools
+from mindroom.custom_tools.attachments import AttachmentTools, resolve_send_attachment
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
+from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
@@ -46,6 +47,7 @@ from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import bind_runtime_paths, make_latest_thread_event_id_mock, make_relation_lookup
+from tests.test_media_delivery import image_bytes
 
 if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
@@ -55,6 +57,7 @@ def _tool_context(
     tmp_path: Path,
     *,
     attachment_ids: tuple[str, ...] = (),
+    fork_parent_scopes: frozenset[tuple[str, str]] = frozenset(),
     process_env: dict[str, str] | None = None,
 ) -> ToolRuntimeContext:
     client = MagicMock()
@@ -90,6 +93,7 @@ def _tool_context(
         conversation_reader=conversation_reader,
         storage_path=tmp_path,
         attachment_ids=attachment_ids,
+        fork_parent_scopes=fork_parent_scopes,
     )
 
 
@@ -130,7 +134,7 @@ def test_attachments_tool_hides_send_method_from_exposed_tools() -> None:
     """Attachments tool should expose discovery, registration, and model viewing without send operations."""
     tool = AttachmentTools()
     exposed = {method.__name__ for method in tool.functions.values()}
-    assert exposed == {"list_attachments", "get_attachment", "register_attachment", "view_file"}
+    assert exposed == {"list_attachments", "get_attachment", "register_attachment", "inline_image", "view_file"}
     assert not hasattr(tool, "send_attachments")
 
 
@@ -259,6 +263,68 @@ async def test_get_attachment_view_returns_image_media(tmp_path: Path) -> None:
     assert result.images[0].content == image_bytes
     assert result.images[0].mime_type == "image/png"
     assert result.images[0].id.startswith("mindroom_viewed_")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("room_id", "in_turn_ids", "parent_scopes", "viewable"),
+    [
+        ("!room:localhost", True, frozenset(), True),
+        ("!other:localhost", True, frozenset({("!other:localhost", "$parent:localhost")}), True),
+        ("!other:localhost", True, frozenset(), False),
+        ("!other:localhost", True, frozenset({("!other:localhost", "$different_parent:localhost")}), False),
+        ("!other:localhost", False, frozenset({("!other:localhost", "$parent:localhost")}), False),
+    ],
+    ids=[
+        "same-room-fork",
+        "cross-room-fork-in-parent-scopes",
+        "other-room-listed-without-parent-scope",
+        "other-room-listed-wrong-parent-thread",
+        "other-room-runtime-id-only",
+    ],
+)
+async def test_get_attachment_view_shows_an_image_the_turn_was_given_from_another_thread_of_its_room(
+    tmp_path: Path,
+    room_id: str,
+    in_turn_ids: bool,
+    parent_scopes: frozenset[tuple[str, str]],
+    viewable: bool,
+) -> None:
+    """Vetted fork attachments (same- or cross-room) are viewable; arbitrary other-room IDs stay out."""
+    image_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=",
+    )
+    image_path = tmp_path / "parent.png"
+    image_path.write_bytes(image_bytes)
+    attachment = register_local_attachment(
+        tmp_path,
+        image_path,
+        kind="image",
+        attachment_id="att_parent",
+        mime_type="image/png",
+        room_id=room_id,
+        thread_id="$parent:localhost",
+    )
+    assert attachment is not None
+    context = _tool_context(
+        tmp_path,
+        attachment_ids=("att_parent",) if in_turn_ids else (),
+        fork_parent_scopes=parent_scopes,
+    )
+    if not in_turn_ids:
+        context.runtime_attachment_ids.append("att_parent")
+
+    with tool_runtime_context(context):
+        result = await toolkit_offers(AttachmentTools(), "get_attachment").entrypoint(
+            attachment_id="att_parent",
+            view=True,
+        )
+
+    if viewable:
+        assert isinstance(result, ToolValue)
+        assert result.images
+    else:
+        assert "outside the authorized conversation context" in str(result)
 
 
 @pytest.mark.asyncio
@@ -448,7 +514,7 @@ def test_attachments_tool_get_attachment_schema_describes_output_path() -> None:
     assert "view" not in parameters["required"]
     assert schema["mindroom_output_path"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
     assert schema["mindroom_output_path"]["default"] is None
-    assert "Use this for large output" in schema["mindroom_output_path"]["description"]
+    assert "save the full supported output" in schema["mindroom_output_path"]["description"]
     assert "mindroom_output_path" not in parameters["required"]
     assert "save_to_disk" not in schema
 
@@ -802,15 +868,60 @@ async def test_attachments_tool_get_attachment_worker_save_protocol_error_return
     assert not any((tmp_path / "workspace").rglob("*"))
 
 
+def test_view_file_finds_only_files_it_may_read(tmp_path: Path) -> None:
+    """A path view_file finds lies inside the workspace under workspace access, a worker's included."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "plot.png").write_bytes(b"png")
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"png")
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+
+    assert tool.views("plot.png")
+    assert tool.views(str(workspace / "plot.png"))
+    assert not tool.views(str(outside))
+    assert not tool.views("missing.png")
+    in_worker = AttachmentTools(tool_output_workspace_root=workspace, workspace_in_worker=True)
+    assert in_worker.views("only-in-the-worker.png")
+    assert in_worker.views(str(workspace / "plot.png"))
+    assert not in_worker.views(str(outside))
+    unrestricted = AttachmentTools(
+        tool_output_workspace_root=workspace,
+        workspace_in_worker=True,
+        file_access="unrestricted",
+    )
+    assert unrestricted.views(str(outside))
+
+
+@pytest.mark.asyncio
+async def test_view_file_in_a_worker_needs_no_tool_runtime_context(tmp_path: Path) -> None:
+    """A turn without a room sets no tool runtime context; the worker view sends the config the toolkit was built with."""
+    config = Config(agents={"openclaw": AgentConfig(display_name="OpenClaw")})
+    tool = get_tool_by_name(
+        "attachments",
+        resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        runtime_config=config,
+        worker_target=_shared_worker_target(),
+        workspace_in_worker=True,
+        tool_output_workspace_root=tmp_path / "workspace",
+        tools=builtin_tool_registry(),
+    )
+    assert isinstance(tool, AttachmentTools)
+    viewed = ToolValue(content=json.dumps({"path": "plot.png", "view_status": "ready"}))
+
+    with patch("mindroom.custom_tools.attachments.view_file_from_worker", return_value=viewed) as view:
+        result = await tool.view_file("plot.png")
+
+    assert result == viewed
+    assert view.call_args.kwargs["runtime_config"] is config
+
+
 @pytest.mark.asyncio
 async def test_view_file_worker_failure_returns_view_error(tmp_path: Path) -> None:
     """A worker view that fails reports the failure in the view receipt instead of raising."""
     tool = _worker_attachment_tool(tmp_path, runtime_env=_WORKER_RUNTIME_ENV, workspace_in_worker=True)
 
-    with (
-        tool_runtime_context(_tool_context(tmp_path, process_env=_WORKER_RUNTIME_ENV)),
-        patch("mindroom.custom_tools.attachments.view_file_from_worker", side_effect=RuntimeError("worker down")),
-    ):
+    with patch("mindroom.custom_tools.attachments.view_file_from_worker", side_effect=RuntimeError("worker down")):
         result = await tool.view_file("plot.png")
 
     assert json.loads(result.content) == {
@@ -1690,3 +1801,177 @@ def test_tool_runtime_context_none_temporarily_clears_nested_scope(tmp_path: Pat
 @pytest.fixture(autouse=True)
 def _reset_matrix_message_rate_limit() -> None:
     MatrixMessageTools._recent_actions.clear()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("by_path", [False, True], ids=["attachment-id", "workspace-path"])
+@pytest.mark.parametrize("alt", [None, "a [cat]", r"a \[cat]", "one\ntwo"])
+@pytest.mark.parametrize("filename", ["cat.png", "cat.jpg"])
+async def test_inline_image_returns_embeddable_markdown(
+    tmp_path: Path,
+    by_path: bool,
+    alt: str | None,
+    filename: str,
+) -> None:
+    """Both send reference forms upload images and return markdown usable in a reply."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / filename
+    source.write_bytes(image_bytes())
+    record = register_local_attachment(
+        tmp_path,
+        source,
+        kind="image",
+        mime_type="image/png" if filename.endswith(".png") else "image/jpeg",
+    )
+    assert record is not None
+    context = _tool_context(tmp_path, attachment_ids=(record.attachment_id,))
+    context.client.rooms[context.room_id].encrypted = False
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+    reference = filename if by_path else record.attachment_id
+    with (
+        patch(
+            "mindroom.matrix.client_delivery.upload_media_bytes",
+            new=AsyncMock(return_value=(nio.UploadResponse("mxc://hs/abc"), None)),
+        ) as upload,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.inline_image(reference, alt=alt))
+    assert payload["status"] == "ok"
+    assert upload.await_args.kwargs["content_type"] == "image/png"
+    assert payload["attachment_id"].startswith("att_")
+    assert payload["mxc_uri"] == "mxc://hs/abc"
+    html = markdown_to_html(payload["markdown"])
+    assert '<img src="mxc://hs/abc"' in html
+    expected_alt = (alt or filename).replace("\n", " ")
+    escaped_alt = expected_alt.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+    assert payload["markdown"] == f"![{escaped_alt}](mxc://hs/abc)"
+    assert load_attachment(tmp_path, payload["attachment_id"]) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    ["non-image", "encrypted-room", "upload-failure", "encrypted-upload", "read-limit", "out-of-context"],
+)
+async def test_inline_image_rejects_unusable_media(tmp_path: Path, case: str) -> None:
+    """Invalid images and unsafe uploads produce errors, never an embeddable URL."""
+    source = tmp_path / ("notes.txt" if case == "non-image" else "cat.png")
+    source.write_bytes(b"notes" if case == "non-image" else image_bytes())
+    record = register_local_attachment(
+        tmp_path,
+        source,
+        kind="file" if case == "non-image" else "image",
+        mime_type="text/plain" if case == "non-image" else "image/png",
+    )
+    assert record is not None
+    context = _tool_context(tmp_path, attachment_ids=() if case == "out-of-context" else (record.attachment_id,))
+    context.client.rooms[context.room_id].encrypted = case == "encrypted-room"
+    upload_result = (None, None) if case == "upload-failure" else ("mxc://hs/abc", {"file": {"key": "secret"}})
+    with (
+        patch(
+            "mindroom.custom_tools.attachments.upload_media_bytes_as_mxc",
+            new=AsyncMock(return_value=upload_result),
+        ) as upload,
+        patch("mindroom.custom_tools.attachments.MAX_SOURCE_BYTES", 1 if case == "read-limit" else 20 * 1024 * 1024),
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await AttachmentTools().inline_image(record.attachment_id))
+    assert payload["status"] == "error"
+    assert "markdown" not in payload
+    if case not in {"upload-failure", "encrypted-upload"}:
+        upload.assert_not_awaited()
+    if case in {"encrypted-room", "encrypted-upload"}:
+        assert "matrix_message" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_inline_image_rejects_non_image_bytes(tmp_path: Path) -> None:
+    """An image filename does not make arbitrary bytes safe to upload as an image."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "fake.png").write_bytes(b"not an image")
+    context = _tool_context(tmp_path)
+    context.client.rooms[context.room_id].encrypted = False
+    with (
+        patch(
+            "mindroom.custom_tools.attachments.upload_media_bytes_as_mxc",
+            new=AsyncMock(return_value=("mxc://hs/abc", {"url": "mxc://hs/abc"})),
+        ) as upload,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await AttachmentTools(tool_output_workspace_root=workspace).inline_image("fake.png"))
+    assert payload["status"] == "error"
+    assert "image" in payload["message"]
+    assert "markdown" not in payload
+    upload.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_inline_image_checks_encryption_before_resolving(tmp_path: Path) -> None:
+    """Encrypted rooms must not resolve or retain a workspace file."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "cat.png").write_bytes(image_bytes())
+    context = _tool_context(tmp_path)
+    context.client.rooms[context.room_id].encrypted = True
+    with (
+        patch("mindroom.custom_tools.attachments.resolve_send_attachment", wraps=resolve_send_attachment) as resolve,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await AttachmentTools(tool_output_workspace_root=workspace).inline_image("cat.png"))
+    assert payload["status"] == "error"
+    assert "matrix_message" in payload["message"]
+    resolve.assert_not_called()
+    assert not list_tool_runtime_attachment_ids(context)
+    assert not (tmp_path / "incoming_media").exists()
+    assert not (tmp_path / "attachments").exists()
+
+
+@pytest.mark.asyncio
+async def test_inline_image_resolves_in_worker_thread(tmp_path: Path) -> None:
+    """File registration must not copy and hash bytes on the event loop."""
+    context = _tool_context(tmp_path)
+    context.client.rooms[context.room_id].encrypted = False
+
+    def resolve_off_loop(*_args: object, **_kwargs: object) -> str:
+        with pytest.raises(RuntimeError, match="no running event loop"):
+            asyncio.get_running_loop()
+        return "test resolution error"
+
+    with (
+        patch("mindroom.custom_tools.attachments.resolve_send_attachment", side_effect=resolve_off_loop),
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await AttachmentTools().inline_image("cat.png"))
+    assert payload["status"] == "error"
+    assert payload["message"] == "test resolution error"
+
+
+@pytest.mark.asyncio
+async def test_inline_image_rejects_already_encrypted_media(tmp_path: Path) -> None:
+    """Runtime-only ciphertext cannot be used in a markdown image."""
+    context = _tool_context(tmp_path)
+    context.client.rooms[context.room_id].encrypted = False
+    media = RuntimeEncryptedMediaAttachment(
+        attachment_id="att_media",
+        filename="cat.png",
+        url="mxc://hs/abc",
+        key="key",
+        iv="iv",
+        sha256="hash",
+        mime_type="image/png",
+        size=1,
+    )
+    register_tool_runtime_media_attachment(context, media)
+    with tool_runtime_context(context):
+        payload = json.loads(await AttachmentTools().inline_image("att_media"))
+    assert payload["status"] == "error"
+    assert "plaintext" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_inline_image_requires_context() -> None:
+    """Roomless tool calls fail without uploading."""
+    payload = json.loads(await AttachmentTools().inline_image("cat.png"))
+    assert payload["status"] == "error"

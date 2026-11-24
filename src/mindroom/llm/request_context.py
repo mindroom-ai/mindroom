@@ -1,8 +1,8 @@
-"""The per-request logging context callers bind around one model request, and the JSON view of arbitrary values.
+"""The context callers bind around model requests, the logging context and the request headers, and a JSON view of values.
 
 Request telemetry (``LLM usage`` lines, the opt-in request log) attributes each provider request to the agent,
 session, and correlation id bound here; the context travels with the task, so stages wrapped around the
-adapter read it without being handed it.
+adapter read it without being handed it. The request headers travel the same way to the adapters that send them.
 """
 
 from __future__ import annotations
@@ -14,21 +14,27 @@ from dataclasses import asdict, dataclass, fields, is_dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator, Mapping
 
 __all__ = [
     "REQUEST_ATTRIBUTION_FIELDS",
     "JSONValue",
     "RequestAttribution",
     "bind_llm_request_log_context",
+    "bind_request_headers",
     "current_llm_request_log_context",
     "json_safe",
+    "with_request_headers",
 ]
 
 type _JSONScalar = str | int | float | bool | None
 type JSONValue = _JSONScalar | list["JSONValue"] | dict[str, "JSONValue"]
 
 _REQUEST_CONTEXT = ContextVar[dict[str, JSONValue] | None]("mindroom_llm_request_log_context", default=None)
+_REQUEST_HEADERS: ContextVar[Callable[[], Mapping[str, str]] | None] = ContextVar(
+    "mindroom_llm_request_headers",
+    default=None,
+)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -54,18 +60,21 @@ def json_safe(value: object) -> JSONValue:
     Dataclasses become dicts, bytes become base64 text as the provider SDKs send media, and other unknown values
     become their ``repr``.
     """
-    normalized: object = value
-    if not isinstance(normalized, type) and is_dataclass(normalized):
-        normalized = asdict(normalized)
-    if isinstance(normalized, bytes):
-        return base64.b64encode(normalized).decode("ascii")
-    if isinstance(normalized, dict):
-        return {str(key): json_safe(item) for key, item in cast("dict[Any, Any]", normalized).items()}
-    if isinstance(normalized, list | tuple | set | frozenset):
-        return [json_safe(item) for item in cast("Any", normalized)]
-    if isinstance(normalized, str | int | float | bool) or normalized is None:
-        return normalized
-    return repr(normalized)
+    # The request log converts every value of every request, so plain JSON values skip the checks for other types.
+    value_type = type(value)
+    if value_type is str or value_type is int or value_type is float or value_type is bool or value is None:
+        return cast("JSONValue", value)
+    if value_type is not dict and value_type is not list and not isinstance(value, type) and is_dataclass(value):
+        value = asdict(value)
+    if isinstance(value, bytes):
+        return base64.b64encode(value).decode("ascii")
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in cast("dict[Any, Any]", value).items()}
+    if isinstance(value, list | tuple | set | frozenset):
+        return [json_safe(item) for item in cast("Any", value)]
+    if isinstance(value, str | int | float | bool):
+        return value
+    return repr(value)
 
 
 def current_llm_request_log_context() -> dict[str, JSONValue]:
@@ -82,3 +91,25 @@ def bind_llm_request_log_context(**context: object) -> Iterator[None]:
         yield
     finally:
         _REQUEST_CONTEXT.reset(token)
+
+
+@contextmanager
+def bind_request_headers(headers: Callable[[], Mapping[str, str]]) -> Iterator[None]:
+    """Bind the headers of the OpenAI-family and Claude model requests sent in this context, read as each is sent."""
+    token = _REQUEST_HEADERS.set(headers)
+    try:
+        yield
+    finally:
+        _REQUEST_HEADERS.reset(token)
+
+
+def with_request_headers(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Return one model request's SDK arguments with the bound headers over its own ``extra_headers``.
+
+    The SDKs send a request's ``extra_headers`` over the client's default headers, so the bound headers win over
+    every header the model's config authors. Without bound headers the arguments are returned as they are.
+    """
+    headers = _REQUEST_HEADERS.get()
+    if headers is None:
+        return kwargs
+    return {**kwargs, "extra_headers": {**(kwargs.get("extra_headers") or {}), **headers()}}

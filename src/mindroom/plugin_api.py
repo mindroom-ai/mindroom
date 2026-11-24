@@ -1,17 +1,21 @@
 """The supported import surface for plugin code.
 
-Plugins import MindRoom's entry points from here; the modules that own them may change between releases.
+Plugins import MindRoom's entry points and the types they annotate with from here; the modules that own them may
+change between releases.
 `GoogleCloudToolkit` and the `mindroom.memory` helpers stay in their documented modules, because those modules load
 Agno at import and this one stays free of Agno and provider SDKs.
-`tests/test_plugin_api.py` pins these names, each callable's parameter names and kinds, and each enum's member names.
+`tests/test_plugin_api.py` pins this surface's names, parameter names and kinds, and the other parts its docstring
+lists, and fails on a change to them until the change is pinned there with `PLUGIN_API_VERSION`, this surface's version.
 """
 
 from __future__ import annotations
 
 from mindroom.agent_loop.helper import HelperResult, complete_prompt
 from mindroom.automations import Ask, AutomationContext, Done, automation, automation_threads
-from mindroom.constants import ROUTER_AGENT_NAME, VOICE_PREFIX, resolve_config_relative_path
-from mindroom.file_access import resolve_agent_file
+from mindroom.config.main import Config
+from mindroom.constants import ROUTER_AGENT_NAME, VOICE_PREFIX, RuntimePaths, resolve_config_relative_path
+from mindroom.entity_directory import ManagedEntity, entity_directory
+from mindroom.file_access import resolve_agent_file, write_agent_file
 from mindroom.hooks import (
     ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
     EVENT_AGENT_STARTED,
@@ -36,6 +40,11 @@ from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EVENT_TOOL_ENVIRONMENT,
+    EVENT_TOOL_RESULT_TRANSFORM,
+    EVENT_TURN_ENDED,
+    EVENT_TURN_PAUSED,
+    EVENT_TURN_RESUMED,
+    EVENT_TURN_STARTED,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     AfterResponseContext,
     AgentLifecycleContext,
@@ -49,6 +58,9 @@ from mindroom.hooks import (
     FinalResponseDraft,
     FinalResponseTransformContext,
     HookBindings,
+    HookContext,
+    HookMatrixAdmin,
+    HookMessageSender,
     MessageEnrichContext,
     MessageEnvelope,
     MessageReceivedContext,
@@ -64,20 +76,43 @@ from mindroom.hooks import (
     ToolAfterCallContext,
     ToolBeforeCallContext,
     ToolEnvironmentContext,
+    ToolResultTransformContext,
     TranscriptLine,
     TurnIntent,
+    TurnLifecycleContext,
     TurnOrigin,
+    TurnOutcome,
     TurnTrust,
     hook,
 )
 from mindroom.llm.provider import ModelProvider
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
-from mindroom.oauth import OAuthConsentGroup, OAuthDiscoveryConfig, OAuthProvider, oauth_runtime_bootstrapper
+from mindroom.oauth import (
+    OAuthConsentGroup,
+    OAuthDiscoveryConfig,
+    OAuthProvider,
+    OAuthProviderError,
+    oauth_runtime_bootstrapper,
+)
 from mindroom.oauth.google import google_cloud_oauth_provider
+from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.oauth.service import build_oauth_connect_instruction, oauth_connect_url
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root, write_file_within_root
+from mindroom.plugin_context import PluginContext, current_plugin_context
+from mindroom.plugin_lifecycle import PluginLifecycle
+from mindroom.plugin_worker_services import (
+    WorkerService,
+    WorkerServiceError,
+    WorkerServiceState,
+    ensure_worker_service,
+    stop_worker_service,
+)
 from mindroom.providers.registry import build_model_provider
+from mindroom.public_fetch import PublicFetchError, PublicFetchResult, fetch_public_url, fetch_public_url_sync
+from mindroom.redaction import redact_sensitive_text
+from mindroom.requester_identity import is_human_requester_id as is_human_user
+from mindroom.requester_identity import is_platform_administrator
 from mindroom.tool_system.atlassian_connections import (
     AtlassianConnectionConfig,
     atlassian_connection_oauth_provider,
@@ -85,6 +120,7 @@ from mindroom.tool_system.atlassian_connections import (
 )
 from mindroom.tool_system.authoring import CurrentCall, Toolkit, current_call, tool, toolkit_functions
 from mindroom.tool_system.declarations import (
+    ApprovalAlias,
     ConfigField,
     SetupType,
     ToolCategory,
@@ -93,12 +129,14 @@ from mindroom.tool_system.declarations import (
     ToolManagedInitArg,
     ToolStatus,
 )
+from mindroom.tool_system.events import ToolTraceEntry
 from mindroom.tool_system.google_workspaces import (
     GoogleWorkspaceConfig,
     google_workspace_oauth_providers,
     register_google_workspace_tools,
 )
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.plugin_imports import PLUGIN_API_VERSION
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
@@ -108,7 +146,7 @@ from mindroom.tool_system.runtime_context import (
     get_tool_runtime_context,
 )
 from mindroom.tool_system.tool_function import ToolValue
-from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, dump_worker_target, load_worker_target
 from mindroom.turn_model import ModelScope, resolve_turn_model
 
 __all__ = [
@@ -135,17 +173,25 @@ __all__ = [
     "EVENT_TOOL_AFTER_CALL",
     "EVENT_TOOL_BEFORE_CALL",
     "EVENT_TOOL_ENVIRONMENT",
+    "EVENT_TOOL_RESULT_TRANSFORM",
+    "EVENT_TURN_ENDED",
+    "EVENT_TURN_PAUSED",
+    "EVENT_TURN_RESUMED",
+    "EVENT_TURN_STARTED",
+    "PLUGIN_API_VERSION",
     "ROUTER_AGENT_NAME",
     "TRUSTED_INTERNAL_RELAY_SOURCE_KIND",
     "VOICE_PREFIX",
     "AfterResponseContext",
     "AgentLifecycleContext",
+    "ApprovalAlias",
     "Ask",
     "AtlassianConnectionConfig",
     "AutomationContext",
     "BeforeResponseContext",
     "CancelledResponseContext",
     "CompactionHookContext",
+    "Config",
     "ConfigField",
     "ConfigReloadedContext",
     "ContactBeforeSendContext",
@@ -158,21 +204,32 @@ __all__ = [
     "GoogleWorkspaceConfig",
     "HelperResult",
     "HookBindings",
+    "HookContext",
+    "HookMatrixAdmin",
+    "HookMessageSender",
+    "ManagedEntity",
     "MessageEnrichContext",
     "MessageEnvelope",
     "MessageReceivedContext",
     "MessageTarget",
     "ModelProvider",
     "ModelScope",
+    "OAuthConnectionRequired",
     "OAuthConsentGroup",
     "OAuthDiscoveryConfig",
     "OAuthProvider",
+    "OAuthProviderError",
+    "PluginContext",
+    "PluginLifecycle",
+    "PublicFetchError",
+    "PublicFetchResult",
     "ReactionReceivedContext",
     "ResolvedWorkerTarget",
     "ResponseDraft",
     "ResponseResult",
     "RoomMemberJoinedContext",
     "RoomMemberLeftContext",
+    "RuntimePaths",
     "ScheduleFiredContext",
     "SenderKind",
     "SessionHookContext",
@@ -185,14 +242,21 @@ __all__ = [
     "ToolExecutionTarget",
     "ToolFileAccess",
     "ToolManagedInitArg",
+    "ToolResultTransformContext",
     "ToolRuntimeContext",
     "ToolStatus",
+    "ToolTraceEntry",
     "ToolValue",
     "Toolkit",
     "TranscriptLine",
     "TurnIntent",
+    "TurnLifecycleContext",
     "TurnOrigin",
+    "TurnOutcome",
     "TurnTrust",
+    "WorkerService",
+    "WorkerServiceError",
+    "WorkerServiceState",
     "atlassian_connection_oauth_provider",
     "automation",
     "automation_threads",
@@ -202,24 +266,36 @@ __all__ = [
     "config_plugins",
     "current_call",
     "current_execution_identity",
+    "current_plugin_context",
+    "dump_worker_target",
     "emit_custom_event",
+    "ensure_worker_service",
+    "entity_directory",
+    "fetch_public_url",
+    "fetch_public_url_sync",
     "get_logger",
     "get_tool_by_name",
     "get_tool_runtime_context",
     "google_cloud_oauth_provider",
     "google_workspace_oauth_providers",
     "hook",
+    "is_human_user",
+    "is_platform_administrator",
+    "load_worker_target",
     "oauth_connect_url",
     "oauth_runtime_bootstrapper",
     "open_directory_within_root",
     "read_regular_file_within_root",
+    "redact_sensitive_text",
     "register_atlassian_connection_tools",
     "register_google_workspace_tools",
     "register_tool_with_metadata",
     "resolve_agent_file",
     "resolve_config_relative_path",
     "resolve_turn_model",
+    "stop_worker_service",
     "tool",
     "toolkit_functions",
+    "write_agent_file",
     "write_file_within_root",
 ]

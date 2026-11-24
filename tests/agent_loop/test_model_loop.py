@@ -14,74 +14,46 @@ from pydantic import BaseModel
 from structlog.testing import capture_logs
 
 from mindroom.agent_loop.model_loop import (
-    EMPTY_REQUEST,
-    NO_HOOKS,
     EndRun,
     LoopEnded,
     LoopHooks,
     LoopState,
     SendRequest,
-    run_model_loop,
 )
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT, output_limit_policy
 from mindroom.agent_loop.run import resumed_record
-from mindroom.agent_loop.tools import MAX_CONSECUTIVE_TOOL_FAILURES, MEDIA_FOLLOW_UP_TEXT, PreparedTools
+from mindroom.agent_loop.tools import MAX_CONSECUTIVE_TOOL_FAILURES
+from mindroom.constants import TOOL_TRACE_CONTENT_KEY
 from mindroom.llm.errors import ProviderError, RateLimited
 from mindroom.llm.events import ReasoningDelta, ToolCompleted, ToolStarted
-from mindroom.llm.messages import AGGREGATE_USAGE_KEY, REWRITTEN_ATTEMPT_KEY, Message
+from mindroom.llm.messages import (
+    AGGREGATE_USAGE_KEY,
+    CUT_OFF_TEXT_KEY,
+    MEDIA_FOLLOW_UP_TEXT,
+    REWRITTEN_ATTEMPT_KEY,
+    Message,
+)
 from mindroom.llm.provider import DeferredTools, ModelRequest, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.provider import ReasoningDelta as ReasoningEvent
 from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
 from mindroom.llm.runs import FailingTool, RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import MessageMetrics, RunMetrics
+from mindroom.tool_system.events import build_tool_trace_content, format_tool_completed_event
 from mindroom.tool_system.invocation import MISSING_TOOL_ERROR_TEXT, ToolCall, ToolNext
-from tests.agent_loop.helpers import add, boom, context, echo, external, gated, spec, toolkit
+from tests.agent_loop.helpers import add, boom, echo, external, gated, run_loop, run_record, spec, toolkit
 from tests.fakes.scripted_model import SYNTHETIC, Await, ScriptedModel, answer, calls, raw_tool_call, tool_call, usage
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from mindroom.agent_loop.model_loop import LoopEvent
-    from mindroom.agent_loop.spec import AgentSpec
     from mindroom.agent_loop.tools import PlannedCall
-    from mindroom.llm.runs import AnyRunRecord
 
 pytestmark = pytest.mark.asyncio
 
 
-def _record() -> RunRecord:
-    return RunRecord(run_id="run-1", agent_id="code", metrics=RunMetrics())
-
-
 def _prompt() -> list[Message]:
     return [Message(role="system", content="You are Code."), Message(role="user", content="hi")]
-
-
-async def _run(
-    agent: AgentSpec,
-    messages: list[Message],
-    *,
-    hooks: LoopHooks = NO_HOOKS,
-    record: AnyRunRecord | None = None,
-    request_template: ModelRequest = EMPTY_REQUEST,
-    resumed: Sequence[RunRequirement] | None = None,
-) -> tuple[list[LoopEvent], AnyRunRecord]:
-    record = record or _record()
-    events = [
-        event
-        async for event in run_model_loop(
-            agent.model,
-            messages,
-            PreparedTools(functions=agent.functions),
-            record=record,
-            run=context(),
-            hooks=hooks,
-            max_tool_calls_per_turn=agent.max_tool_calls_per_turn,
-            request_template=request_template,
-            resumed=resumed,
-        )
-    ]
-    return events, record
 
 
 def _names(events: Sequence[LoopEvent]) -> list[str]:
@@ -95,7 +67,7 @@ async def test_a_text_answer_streams_deltas_records_usage_and_ends_the_loop() ->
     model = ScriptedModel([[ReasoningEvent("hmm"), *answer("Hello, Alice.", usage(12, 3, time_to_first_token=0.25))]])
     messages = _prompt()
 
-    events, record = await _run(spec(model), messages)
+    events, record = await run_loop(spec(model), messages)
 
     assert events[0] == ReasoningDelta("hmm")
     assert "".join(event.text for event in events if isinstance(event, TextDelta)) == "Hello, Alice."
@@ -149,7 +121,7 @@ async def test_an_answer_to_another_request_than_the_loop_sent_records_no_reques
     model = ScriptedModel([[TextDelta("done"), rewritten]])
     messages = _prompt()
 
-    await _run(spec(model), messages)
+    await run_loop(spec(model), messages)
 
     assert messages[-1].provider_data == {
         REWRITTEN_ATTEMPT_KEY: True,
@@ -169,7 +141,7 @@ async def test_request_settings_come_from_the_template_and_tools_from_the_spec()
         deferred_tools=DeferredTools(names=frozenset({"add"}), portable=True),
     )
 
-    await _run(spec(model, toolkit(add, echo)), _prompt(), request_template=template)
+    await run_loop(spec(model, toolkit(add, echo)), _prompt(), request_template=template)
 
     [request] = model.requests
     assert (request.tool_choice, request.output_schema, request.deferred_tools) == (
@@ -185,7 +157,7 @@ async def test_a_stream_that_never_completes_raises_a_provider_error() -> None:
     model = ScriptedModel([[TextDelta("partial")]])
 
     with pytest.raises(ProviderError, match="without completing the turn") as info:
-        await _run(spec(model), _prompt())
+        await run_loop(spec(model), _prompt())
 
     assert info.value.provider == "Synthetic"
 
@@ -230,7 +202,7 @@ async def test_parallel_calls_complete_as_they_finish_and_answer_the_next_reques
     )
     messages = _prompt()
 
-    events, record = await _run(spec(model, toolkit(first, second)), messages)
+    events, record = await run_loop(spec(model, toolkit(first, second)), messages)
 
     assert _names(events) == [
         "TextDelta",
@@ -294,7 +266,7 @@ async def test_unknown_tools_and_bad_arguments_answer_the_model_in_call_order() 
     messages = _prompt()
 
     with capture_logs() as logs:
-        events, record = await _run(spec(model, toolkit(add)), messages)
+        events, record = await run_loop(spec(model, toolkit(add)), messages)
 
     tool_messages = [message for message in messages if message.role == "tool"]
     assert [(m.tool_call_id, m.tool_call_error) for m in tool_messages] == [("c1", True), ("c2", True), ("c3", False)]
@@ -311,6 +283,20 @@ async def test_unknown_tools_and_bad_arguments_answer_the_model_in_call_order() 
     assert [entry["entity"] for entry in logs if entry["event"] == "tool_not_offered"] == ["code"]
 
 
+async def test_a_refused_call_is_published_as_not_succeeding() -> None:
+    """A call the loop refused completes with ``is_error`` in the reply's public trace; one that ran does not."""
+    model = ScriptedModel([calls(tool_call("missing", "c1"), tool_call("add", "c2", a=1, b=2)), answer("ok")])
+
+    events, _record = await run_loop(spec(model, toolkit(add)), _prompt())
+
+    completed = [format_tool_completed_event(event.call) for event in events if isinstance(event, ToolCompleted)]
+    content = build_tool_trace_content(completed)
+    assert content is not None
+    refused, ran = content[TOOL_TRACE_CONTENT_KEY]["events"]
+    assert (refused["tool_call_id"], refused["is_error"]) == ("c1", True)
+    assert "is_error" not in ran
+
+
 async def test_a_cut_off_response_records_and_announces_its_calls_without_running_them() -> None:
     """Calls of a response the output limit cut off are answered, recorded as failed, and announced, in call order."""
     cut_off = calls(tool_call("add", "c1", a=1, b=1), tool_call("echo", "c2", text="huge"))
@@ -318,7 +304,7 @@ async def test_a_cut_off_response_records_and_announces_its_calls_without_runnin
     model = ScriptedModel([cut_off, answer("Split it.")])
     messages = _prompt()
 
-    events, record = await _run(
+    events, record = await run_loop(
         spec(model, toolkit(add, echo)),
         messages,
         hooks=LoopHooks(answer_tool_calls=output_limit_policy()),
@@ -360,7 +346,7 @@ async def test_the_tool_call_limit_refuses_counted_calls_and_caps_the_requests()
     messages = _prompt()
 
     with capture_logs() as logs:
-        events, record = await _run(spec(model, toolkit(add), max_tool_calls_per_turn=1), messages)
+        events, record = await run_loop(spec(model, toolkit(add), max_tool_calls_per_turn=1), messages)
 
     limit_text = "Tool call limit reached. Tool call add not executed. Don't try to execute it again."
     tool_messages = [message for message in messages if message.role == "tool"]
@@ -435,7 +421,7 @@ async def test_a_tool_that_keeps_failing_is_refused_and_a_model_that_keeps_calli
         batches.extend(result.tool_call_id for result in results)
 
     with capture_logs() as logs:
-        events, record = await _run(
+        events, record = await run_loop(
             spec(model, toolkit(boom)),
             messages,
             hooks=LoopHooks(after_tool_batch=(after_batch,)),
@@ -483,7 +469,7 @@ async def test_a_model_that_heeds_the_refusal_keeps_its_other_tools_and_answers(
     messages = _prompt()
 
     with capture_logs() as logs:
-        events, record = await _run(spec(model, toolkit(boom, add)), messages)
+        events, record = await run_loop(spec(model, toolkit(boom, add)), messages)
 
     answers = {message.tool_call_id: message.content for message in messages if message.role == "tool"}
     assert answers["refused-1"] == answers["refused-2"] == _failing_tool_refusal("bad link")
@@ -506,7 +492,7 @@ async def test_one_batch_of_many_failing_calls_counts_as_one_failure() -> None:
     messages = _prompt()
 
     with capture_logs() as logs:
-        events, record = await _run(spec(model, toolkit(boom)), messages)
+        events, record = await run_loop(spec(model, toolkit(boom)), messages)
 
     # The batch cost one request, so the tool still runs on the next one.
     assert [message.content for message in messages if message.role == "tool"] == [
@@ -532,7 +518,7 @@ async def test_calls_the_loop_refused_without_running_leave_the_streak_alone() -
     messages = _prompt()
 
     with capture_logs() as logs:
-        events, record = await _run(spec(model, toolkit(boom)), messages)
+        events, record = await run_loop(spec(model, toolkit(boom)), messages)
 
     answers = {message.tool_call_id: message.content for message in messages if message.role == "tool"}
     assert answers["runs"] == "the tool itself failed"
@@ -553,7 +539,7 @@ async def test_calls_past_the_call_limit_leave_the_streak_alone() -> None:
     messages = _prompt()
 
     with capture_logs() as logs:
-        events, record = await _run(spec(model, toolkit(boom), max_tool_calls_per_turn=2), messages)
+        events, record = await run_loop(spec(model, toolkit(boom), max_tool_calls_per_turn=2), messages)
 
     # Only the batch whose calls ran counts; a call refused for the limit says nothing about whether the tool works.
     assert record.failing_tools == {"boom": FailingTool(failures=1, last_error="bad link")}
@@ -570,11 +556,11 @@ async def test_a_call_refused_for_failing_uses_up_the_call_limit() -> None:
             answer("Stopping here."),
         ],
     )
-    record = _record()
+    record = run_record()
     record.failing_tools = {"boom": FailingTool(failures=MAX_CONSECUTIVE_TOOL_FAILURES, last_error="bad link")}
     messages = _prompt()
 
-    events, record = await _run(spec(model, toolkit(boom, add), max_tool_calls_per_turn=1), messages, record=record)
+    events, record = await run_loop(spec(model, toolkit(boom, add), max_tool_calls_per_turn=1), messages, record=record)
 
     # The refusal answered a call the model made, so it takes the turn's only call and the next batch gets none.
     assert [message.content for message in messages if message.role == "tool"] == [
@@ -593,11 +579,11 @@ async def test_calling_a_refused_tool_again_past_the_call_limit_still_ends_the_r
             answer("never sent"),
         ],
     )
-    record = _record()
+    record = run_record()
     record.failing_tools = {"boom": FailingTool(failures=MAX_CONSECUTIVE_TOOL_FAILURES, last_error="bad link")}
     messages = _prompt()
 
-    events, record = await _run(spec(model, toolkit(boom), max_tool_calls_per_turn=1), messages, record=record)
+    events, record = await run_loop(spec(model, toolkit(boom), max_tool_calls_per_turn=1), messages, record=record)
 
     # The second call is past the limit, but it calls the refused tool again, so the run ends without another request.
     refusal = _failing_tool_refusal("bad link")
@@ -623,7 +609,7 @@ async def test_a_success_resets_the_failure_streak_of_its_tool() -> None:
     messages = _prompt()
 
     with capture_logs() as logs:
-        events, record = await _run(spec(model, toolkit(flaky)), messages)
+        events, record = await run_loop(spec(model, toolkit(flaky)), messages)
 
     assert [message.content for message in messages if message.role == "tool"] == [
         *(["rejected"] * almost),
@@ -639,7 +625,7 @@ async def test_a_stop_after_tool_call_ends_the_loop_without_another_request() ->
     model = ScriptedModel([calls(tool_call("echo", "c1", text="switch"), metrics=usage(1, 1)), answer("never sent")])
     messages = _prompt()
 
-    events, record = await _run(spec(model, toolkit(echo, stop_after_call=True)), messages)
+    events, record = await run_loop(spec(model, toolkit(echo, stop_after_call=True)), messages)
 
     assert len(model.requests) == 1
     assert events[-1] == LoopEnded(paused=False)
@@ -656,11 +642,11 @@ async def test_a_denied_call_answers_with_its_note_as_a_failed_call_that_keeps_i
     execution.requires_confirmation = True
     requirement = RunRequirement(execution)
     requirement.reject("Alice declined.")
-    record = _record()
+    record = run_record()
     record.tools = [execution]
     messages = _prompt()
 
-    events, _ = await _run(spec(model, gated(echo)), messages, record=record, resumed=[requirement])
+    events, _ = await run_loop(spec(model, gated(echo)), messages, record=record, resumed=[requirement])
 
     assert events == [LoopEnded(paused=False)]
     assert model.requests == []
@@ -678,13 +664,13 @@ async def test_a_denied_call_answers_with_its_note_as_a_failed_call_that_keeps_i
 async def test_a_resume_keeps_refusing_a_tool_that_was_failing_before_the_pause() -> None:
     # A delegation's result resumes its parent without anyone deciding, so the count lives on the stored record.
     model = ScriptedModel([calls(tool_call("boom", "c1", reason="again")), answer("done")])
-    paused = _record()
+    paused = run_record()
     paused.status = RunStatus.paused
     paused.failing_tools = {"boom": FailingTool(failures=MAX_CONSECUTIVE_TOOL_FAILURES, last_error="bad link")}
     record = resumed_record(RunRecord.from_dict(paused.to_dict()))
     messages = _prompt()
 
-    events, record = await _run(spec(model, toolkit(boom)), messages, record=record, resumed=[])
+    events, record = await run_loop(spec(model, toolkit(boom)), messages, record=record, resumed=[])
 
     assert [message.content for message in messages if message.role == "tool"] == [_failing_tool_refusal("bad link")]
     assert record.failing_tools["boom"].refusals == 1
@@ -701,12 +687,12 @@ async def test_a_batch_that_ignores_a_refusal_and_pauses_ends_the_run_once_its_r
         ],
     )
     agent = spec(model, toolkit(boom), external(echo))
-    record = _record()
+    record = run_record()
     record.failing_tools = {"boom": FailingTool(failures=MAX_CONSECUTIVE_TOOL_FAILURES, last_error="bad", refusals=1)}
     messages = _prompt()
 
     with capture_logs() as logs:
-        events, record = await _run(agent, messages, record=record)
+        events, record = await run_loop(agent, messages, record=record)
 
     assert events[-1] == LoopEnded(paused=True)
     assert not [entry for entry in logs if entry["event"] == "failing_tool_ended_run"]
@@ -715,7 +701,7 @@ async def test_a_batch_that_ignores_a_refusal_and_pauses_ends_the_run_once_its_r
     [requirement] = stored.requirements
     requirement.set_external_execution_result("Try the mirror.")
     with capture_logs() as logs:
-        events, resumed = await _run(agent, messages, record=stored, resumed=[requirement])
+        events, resumed = await run_loop(agent, messages, record=stored, resumed=[requirement])
 
     # The resume answers the delegation, then ends with the line that says why, without another request.
     assert len(model.requests) == 1
@@ -741,14 +727,14 @@ async def test_the_calls_a_resume_answers_count_toward_their_tools_failures() ->
     requirements[0].confirm()
     requirements[1].set_external_execution_result("the child failed")
     requirements[2].set_external_execution_result("the child answered")
-    record = _record()
+    record = run_record()
     record.tools = [approved, failed, succeeded]
     record.failing_tools = {
         "boom": FailingTool(failures=MAX_CONSECUTIVE_TOOL_FAILURES - 1, last_error="bad"),
         "ask_agent": FailingTool(failures=3, last_error="earlier"),
     }
 
-    _, record = await _run(spec(model, gated(boom)), _prompt(), record=record, resumed=requirements)
+    _, record = await run_loop(spec(model, gated(boom)), _prompt(), record=record, resumed=requirements)
 
     assert record.failing_tools == {
         "boom": FailingTool(failures=MAX_CONSECUTIVE_TOOL_FAILURES, last_error="still broken"),
@@ -770,13 +756,132 @@ async def test_a_batch_that_stops_the_run_skips_the_batch_hooks() -> None:
         ],
     )
 
-    await _run(
+    await run_loop(
         spec(model, toolkit(add), toolkit(echo, name="stopper", stop_after_call=True)),
         _prompt(),
         hooks=LoopHooks(after_tool_batch=(after_batch,)),
     )
 
     assert batches == [["c1"]]
+
+
+async def test_after_batch_stop_records_all_results_and_makes_no_next_request() -> None:
+    """A batch hook that returns True ends the loop normally once the whole batch has its real results.
+
+    The calls finish in reverse order; the loop still waits for both, stores them in call order with their own
+    outcomes, sends no further request, and runs no batch hook after the one that ended it.
+    """
+    started = {"c1": asyncio.Event(), "c2": asyncio.Event()}
+    release = {"c1": asyncio.Event(), "c2": asyncio.Event()}
+    second_finished = asyncio.Event()
+    finished: list[str] = []
+
+    async def first(label: str) -> str:
+        """Answer once released.
+
+        Args:
+            label: Its label.
+
+        """
+        started["c1"].set()
+        await asyncio.wait_for(release["c1"].wait(), timeout=5)
+        finished.append("c1")
+        return f"first {label}"
+
+    async def second(label: str) -> str:
+        """Answer once released.
+
+        Args:
+            label: Its label.
+
+        """
+        started["c2"].set()
+        await asyncio.wait_for(release["c2"].wait(), timeout=5)
+        finished.append("c2")
+        second_finished.set()
+        return f"second {label}"
+
+    async def release_in_reverse() -> None:
+        await asyncio.wait_for(asyncio.gather(started["c1"].wait(), started["c2"].wait()), timeout=5)
+        release["c2"].set()
+        await asyncio.wait_for(second_finished.wait(), timeout=5)
+        release["c1"].set()
+
+    hook_calls: list[tuple[str, list[str | None]]] = []
+
+    async def observe(_messages: list[Message], results: Sequence[Message]) -> None:
+        hook_calls.append(("observe", [result.tool_call_id for result in results]))
+
+    async def stop(messages: list[Message], results: Sequence[Message]) -> bool:
+        hook_calls.append(("stop", [result.tool_call_id for result in results]))
+        # The batch's real results are already on the live messages when the hook decides.
+        assert messages[-2:] == list(results)
+        return True
+
+    async def later(_messages: list[Message], results: Sequence[Message]) -> None:
+        hook_calls.append(("later", [result.tool_call_id for result in results]))
+
+    model = ScriptedModel(
+        [
+            calls(tool_call("first", "c1", label="a"), tool_call("second", "c2", label="b"), metrics=usage(1, 1)),
+            answer("never sent"),
+        ],
+    )
+    messages = _prompt()
+
+    releaser = asyncio.create_task(release_in_reverse())
+    events, record = await run_loop(
+        spec(model, toolkit(first, second)),
+        messages,
+        hooks=LoopHooks(after_tool_batch=(observe, stop, later)),
+    )
+    await releaser
+
+    assert finished == ["c2", "c1"]
+    assert events[-1] == LoopEnded(paused=False)
+    assert [event.call.tool_call_id for event in events if isinstance(event, ToolCompleted)] == ["c2", "c1"]
+    assert len(model.requests) == 1
+    assert hook_calls == [("observe", ["c1", "c2"]), ("stop", ["c1", "c2"])]
+    assert [message.role for message in messages] == ["system", "user", "assistant", "tool", "tool"]
+    tool_messages = messages[3:]
+    assert [(m.tool_call_id, m.content, m.tool_call_error, m.stop_after_tool_call) for m in tool_messages] == [
+        ("c1", "first a", False, False),
+        ("c2", "second b", False, False),
+    ]
+    assert record.tools is not None
+    assert [(t.tool_call_id, t.result, t.is_error, t.stop_after_call) for t in record.tools] == [
+        ("c1", "first a", False, False),
+        ("c2", "second b", False, False),
+    ]
+    assert record.requirements == []
+    assert record.content is None
+
+
+async def test_after_batch_stop_leaves_a_paused_batch_paused_with_its_requirement_pending() -> None:
+    """A hook that ends the loop after a batch that paused does not settle the call that waits for a decision."""
+
+    async def stop(*_hook_arguments: object) -> bool:
+        return True
+
+    model = ScriptedModel(
+        [calls(tool_call("echo", "c1", text="fine"), tool_call("add", "c2", a=6, b=7), metrics=usage(1, 1))],
+    )
+
+    events, record = await run_loop(
+        spec(model, toolkit(echo), gated(add)),
+        _prompt(),
+        hooks=LoopHooks(after_tool_batch=(stop,)),
+    )
+
+    assert events[-1] == LoopEnded(paused=True)
+    assert len(model.requests) == 1
+    [requirement] = record.requirements
+    assert (requirement.tool_execution.tool_call_id, requirement.is_resolved()) == ("c2", False)
+    assert record.tools is not None
+    assert [(t.tool_call_id, t.result, t.stop_after_call) for t in record.tools] == [
+        ("c1", "fine", False),
+        ("c2", None, False),
+    ]
 
 
 async def test_tool_media_reach_the_model_on_a_follow_up_user_message() -> None:
@@ -792,7 +897,7 @@ async def test_tool_media_reach_the_model_on_a_follow_up_user_message() -> None:
     model = ScriptedModel([calls(tool_call("picture", "c1", label="a"), metrics=usage(1, 1)), answer("I see it.")])
     messages = _prompt()
 
-    await _run(spec(model, toolkit(picture)), messages)
+    await run_loop(spec(model, toolkit(picture)), messages)
 
     result, follow_up, final = messages[3:]
     assert (result.role, result.content, result.images) == ("tool", "picture a", None)
@@ -816,7 +921,7 @@ async def test_a_confirmation_pause_announces_the_call_records_a_requirement_and
     )
     messages = _prompt()
 
-    events, record = await _run(spec(model, toolkit(echo), gated(add)), messages)
+    events, record = await run_loop(spec(model, toolkit(echo), gated(add)), messages)
 
     assert events[-1] == LoopEnded(paused=True)
     assert [event.call.tool_call_id for event in events if isinstance(event, ToolStarted)] == ["c1", "c2"]
@@ -865,7 +970,7 @@ async def test_a_tool_that_leaves_a_decision_on_the_record_pauses_the_loop_after
 
     model = ScriptedModel([calls(tool_call("delegate", "c1", task="Multiply 6 by 7"), metrics=usage(1, 1))])
 
-    events, _ = await _run(spec(model, toolkit(delegate)), _prompt(), record=record)
+    events, _ = await run_loop(spec(model, toolkit(delegate)), _prompt(), record=record)
 
     assert events[-1] == LoopEnded(paused=True)
     assert len(model.requests) == 1
@@ -884,7 +989,7 @@ async def test_a_resume_that_leaves_the_record_waiting_ends_paused_before_any_re
     record.member_responses.append(_paused_member(execution))
     model = ScriptedModel([])
 
-    events, _ = await _run(spec(model), _prompt(), record=record, resumed=())
+    events, _ = await run_loop(spec(model), _prompt(), record=record, resumed=())
 
     assert events == [LoopEnded(paused=True)]
     assert model.requests == []
@@ -893,7 +998,7 @@ async def test_a_resume_that_leaves_the_record_waiting_ends_paused_before_any_re
 async def test_a_delegation_pause_waits_for_the_external_result() -> None:
     model = ScriptedModel([calls(tool_call("echo", "c1", text="task"), metrics=usage(1, 1))])
 
-    events, record = await _run(spec(model, external(echo)), _prompt())
+    events, record = await run_loop(spec(model, external(echo)), _prompt())
 
     assert events[-1] == LoopEnded(paused=True)
     assert record.tools is not None
@@ -938,7 +1043,7 @@ async def test_every_hook_fires_at_its_documented_point() -> None:
     )
     model = ScriptedModel([calls(tool_call("echo", "c1", text="x"), metrics=usage(1, 1)), answer("done")])
 
-    await _run(spec(model, toolkit(echo)), _prompt(), hooks=hooks)
+    await run_loop(spec(model, toolkit(echo)), _prompt(), hooks=hooks)
 
     assert log == [
         ("before_request", "first", 0, 2, 1),
@@ -968,7 +1073,7 @@ async def test_a_hook_that_ends_the_run_stops_before_the_request_and_later_hooks
     )
     messages = _prompt()
 
-    events, record = await _run(
+    events, record = await run_loop(
         spec(model, toolkit(echo)),
         messages,
         hooks=LoopHooks(before_request=(stay_silent, never_after_an_end)),
@@ -990,7 +1095,7 @@ async def test_a_pre_request_hook_rewrites_the_live_list_in_place() -> None:
     model = ScriptedModel([calls(tool_call("echo", "c1", text="x"), metrics=usage(1, 1)), answer("done")])
     messages = _prompt()
 
-    await _run(spec(model, toolkit(echo)), messages, hooks=LoopHooks(before_request=(compact,)))
+    await run_loop(spec(model, toolkit(echo)), messages, hooks=LoopHooks(before_request=(compact,)))
 
     assert [message.role for message in model.requests[1].messages] == ["system", "tool"]
     assert [message.role for message in messages] == ["system", "tool", "assistant"]
@@ -1004,7 +1109,7 @@ async def test_rewritten_tool_calls_are_what_runs_and_what_the_message_stores() 
     model = ScriptedModel([calls(tool_call("call_tool", "c1", name="echo"), metrics=usage(1, 1)), answer("done")])
     messages = _prompt()
 
-    events, record = await _run(spec(model, toolkit(echo)), messages, hooks=LoopHooks(rewrite_tool_calls=rewrite))
+    events, record = await run_loop(spec(model, toolkit(echo)), messages, hooks=LoopHooks(rewrite_tool_calls=rewrite))
 
     assert record.tools is not None
     assert (record.tools[0].tool_name, record.tools[0].result) == ("echo", "real")
@@ -1016,7 +1121,7 @@ async def test_a_tool_exception_is_an_error_result_not_a_failed_loop() -> None:
     model = ScriptedModel([calls(tool_call("boom", "c1", reason="kaboom"), metrics=usage(1, 1)), answer("recovered")])
     messages = _prompt()
 
-    events, record = await _run(spec(model, toolkit(boom)), messages)
+    events, record = await run_loop(spec(model, toolkit(boom)), messages)
 
     assert events[-1] == LoopEnded(paused=False)
     assert record.tools is not None
@@ -1037,10 +1142,10 @@ async def test_cancellation_mid_stream_settles_the_received_usage_once() -> None
 
     model = ScriptedModel([[TextDelta("Par"), UsageReported(usage(50, 2), final=False), Await(wait_to_be_cancelled)]])
     messages = _prompt()
-    record = _record()
+    record = run_record()
 
     async def consume() -> None:
-        await _run(spec(model), messages, record=record)
+        await run_loop(spec(model), messages, record=record)
 
     task = asyncio.create_task(consume())
     await asyncio.wait_for(streaming.wait(), timeout=5)
@@ -1051,7 +1156,11 @@ async def test_cancellation_mid_stream_settles_the_received_usage_once() -> None
     settled = messages[-1]
     assert [message.role for message in messages] == ["system", "user", "assistant"]
     assert (settled.content, settled.metrics) == (None, usage(50, 2))
-    assert settled.provider_data == {"mindroom_model": {"id": "scripted-model", "provider": "Synthetic"}}
+    # The text the cut-off response streamed is kept beside the message, which stays without content.
+    assert settled.provider_data == {
+        CUT_OFF_TEXT_KEY: "Par",
+        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
+    }
     assert record.metrics is not None
     assert (
         record.metrics.tokens.input_tokens,
@@ -1089,8 +1198,8 @@ async def test_a_turn_interrupted_after_it_completed_and_before_the_loop_took_it
     )
     model = ScriptedModel([[TextDelta("done"), finished, Await(finish_the_stream)]])
     messages = _prompt()
-    record = _record()
-    task = asyncio.create_task(_run(spec(model), messages, record=record))
+    record = run_record()
+    task = asyncio.create_task(run_loop(spec(model), messages, record=record))
     await asyncio.wait_for(draining.wait(), timeout=5)
 
     if ending == "cancelled":
@@ -1114,7 +1223,11 @@ async def test_a_turn_interrupted_after_it_completed_and_before_the_loop_took_it
     assert messages[-1].metrics == usage(50, 2)
     # Kept or cut off, the usage reads as one request only when it was one; only a kept answer records its request.
     [request] = model.requests
-    identity = {REQUEST_IDENTITY_KEY: request_prefixes(model, request)[-1]} if ending == "completes" else {}
+    identity = (
+        {REQUEST_IDENTITY_KEY: request_prefixes(model, request)[-1]}
+        if ending == "completes"
+        else {CUT_OFF_TEXT_KEY: "done"}
+    )
     assert messages[-1].provider_data == {
         **(marker or {}),
         "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
@@ -1139,10 +1252,10 @@ async def test_a_provider_error_mid_stream_keeps_the_received_usage_and_propagat
     # After a retry the reports add up the attempts, which the pipeline marks on them.
     model = ScriptedModel([[UsageReported(usage(7, 0), final=False, sums_attempts=retried), Await(throttle)]])
     messages = _prompt()
-    record = _record()
+    record = run_record()
 
     with pytest.raises(RateLimited, match="slow down"):
-        await _run(spec(model), messages, record=record)
+        await run_loop(spec(model), messages, record=record)
 
     assert messages[-1].metrics == usage(7, 0)
     assert messages[-1].provider_data == {
@@ -1153,21 +1266,43 @@ async def test_a_provider_error_mid_stream_keeps_the_received_usage_and_propagat
     assert record.metrics.tokens.input_tokens == 7
 
 
-async def test_a_cut_off_request_without_usage_leaves_no_message_behind() -> None:
+async def test_a_cut_off_request_without_usage_or_text_leaves_no_message_behind() -> None:
     async def fail() -> None:
         msg = "slow down"
         raise RateLimited(msg, provider="Synthetic")
 
-    model = ScriptedModel([[TextDelta("Par"), Await(fail)]])
+    model = ScriptedModel([[ReasoningEvent("Hmm"), Await(fail)]])
     messages = _prompt()
 
     with pytest.raises(RateLimited):
-        await _run(spec(model), messages)
+        await run_loop(spec(model), messages)
 
     assert [message.role for message in messages] == ["system", "user"]
 
 
-async def test_a_completed_turn_without_usage_cut_off_before_the_loop_took_it_leaves_no_message_behind() -> None:
+async def test_a_cut_off_request_without_usage_keeps_the_text_it_streamed_and_counts_nothing() -> None:
+    async def fail() -> None:
+        msg = "slow down"
+        raise RateLimited(msg, provider="Synthetic")
+
+    model = ScriptedModel([[TextDelta("Par"), TextDelta("tial"), Await(fail)]])
+    messages = _prompt()
+    record = run_record()
+
+    with pytest.raises(RateLimited):
+        await run_loop(spec(model), messages, record=record)
+
+    assert [message.role for message in messages] == ["system", "user", "assistant"]
+    # No request sends the message, which has no content; a run its user stopped is recovered with the text.
+    assert (messages[-1].content, messages[-1].metrics) == (None, MessageMetrics())
+    assert messages[-1].provider_data == {
+        CUT_OFF_TEXT_KEY: "Partial",
+        "mindroom_model": {"id": "scripted-model", "provider": "Synthetic"},
+    }
+    assert (record.metrics, record.content) == (RunMetrics(), None)
+
+
+async def test_a_completed_turn_without_usage_cut_off_before_the_loop_took_it_counts_nothing() -> None:
     draining = asyncio.Event()
 
     async def wait_to_be_cancelled() -> None:
@@ -1181,14 +1316,17 @@ async def test_a_completed_turn_without_usage_cut_off_before_the_loop_took_it_le
     )
     model = ScriptedModel([[TextDelta("done"), finished, Await(wait_to_be_cancelled)]])
     messages = _prompt()
-    record = _record()
-    task = asyncio.create_task(_run(spec(model), messages, record=record))
+    record = run_record()
+    task = asyncio.create_task(run_loop(spec(model), messages, record=record))
     await asyncio.wait_for(draining.wait(), timeout=5)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert [message.role for message in messages] == ["system", "user"]
+    # Only the text the turn streamed is kept, on a message without content or usage.
+    assert [message.role for message in messages] == ["system", "user", "assistant"]
+    assert (messages[-1].content, messages[-1].metrics) == (None, MessageMetrics())
+    assert (messages[-1].provider_data or {})[CUT_OFF_TEXT_KEY] == "done"
     assert record.metrics == RunMetrics()
 
 
@@ -1200,7 +1338,7 @@ async def test_metrics_time_to_first_token_comes_from_the_first_request_that_rep
         ],
     )
 
-    _, record = await _run(spec(model, toolkit(echo)), _prompt())
+    _, record = await run_loop(spec(model, toolkit(echo)), _prompt())
 
     assert record.metrics is not None
     assert record.metrics.time_to_first_token == 0.4
@@ -1213,7 +1351,7 @@ async def test_identity_strings_reach_the_record_metrics_and_message_stamp() -> 
     )
     messages = _prompt()
 
-    _, record = await _run(spec(model), messages)
+    _, record = await run_loop(spec(model), messages)
 
     assert record.metrics is not None
     assert record.metrics.details == {

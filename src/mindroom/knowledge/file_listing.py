@@ -169,10 +169,22 @@ def _is_hidden_relative_path(relative_path: Path) -> bool:
     return any(part.startswith(".") for part in relative_path.parts)
 
 
+def is_utf8(name: str) -> bool:
+    """Return whether a name read from the filesystem is valid UTF-8; Python escapes the bytes of one that is not."""
+    try:
+        name.encode()
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _include_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
-    """Return whether a relative path is managed by the base path filters."""
+    """Return whether a relative path is managed by the base path filters.
+
+    A path that is not valid UTF-8 is never managed: an index, a listing, and a search result all name files as text.
+    """
     path_obj = Path(relative_path)
-    if path_obj.is_absolute() or ".." in path_obj.parts or is_git_metadata_path(path_obj):
+    if path_obj.is_absolute() or ".." in path_obj.parts or is_git_metadata_path(path_obj) or not is_utf8(relative_path):
         return False
 
     base_config = config.get_knowledge_base_config(base_id)
@@ -223,8 +235,12 @@ def include_knowledge_relative_path(config: Config, base_id: str, relative_path:
 
 
 @contextmanager
-def _pinned_directory(path: Path) -> Iterator[int]:
-    """Pin one canonical absolute directory by a no-follow walk from the filesystem root."""
+def pinned_canonical_directory(path: Path) -> Iterator[int]:
+    """Pin one canonical absolute directory by a no-follow walk from the filesystem root.
+
+    Worker code can write bases inside agent workspaces, so a folder checked by name may be swapped for a link before
+    it is used; acting relative to the pinned descriptor refuses the swap instead of reaching the link target.
+    """
     with open_directory_within_root(Path(path.anchor), path.relative_to(path.anchor)) as directory_fd:
         yield directory_fd
 
@@ -359,7 +375,7 @@ def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> 
     include_patterns = config.get_knowledge_base_config(base_id).include_patterns
     files: set[Path] = set()
     try:
-        with _pinned_directory(root) as root_fd:
+        with pinned_canonical_directory(root) as root_fd:
             for target in _listing_targets(root, include_patterns):
                 for relative_path in _iter_target_files(root_fd, target, root):
                     if not include_knowledge_relative_path(config, base_id, relative_path.as_posix()):
@@ -386,7 +402,7 @@ def knowledge_files_from_relative_paths(
         return []
     files: list[Path] = []
     try:
-        with _pinned_directory(root) as root_fd:
+        with pinned_canonical_directory(root) as root_fd:
             for relative_path in sorted(set(relative_paths)):
                 if not include_knowledge_relative_path(config, base_id, relative_path):
                     continue
@@ -428,7 +444,6 @@ def git_tracked_relative_paths_from_checkout(
             env=hardened_git_env(git_dir=git_dir, work_tree=knowledge_root),
             check=False,
             capture_output=True,
-            text=True,
             timeout=effective_timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
@@ -439,14 +454,18 @@ def git_tracked_relative_paths_from_checkout(
         raise RuntimeError(msg) from exc
 
     if result.returncode != 0:
-        details = redact_credentials_in_text((result.stderr or result.stdout).strip())
+        details = redact_credentials_in_text(os.fsdecode(result.stderr or result.stdout).strip())
         msg = f"Git command failed with exit code {result.returncode}: git ls-files -z"
         if details:
             msg = f"{msg}\n{details}"
         raise RuntimeError(msg)
 
+    # Decode the bytes as a directory listing does: a carriage return stays in its name, and the bytes of a name that
+    # is not valid UTF-8 are escaped, so the inclusion rule leaves that file out instead of the listing failing.
     return {
-        path for path in result.stdout.split("\x00") if path and include_knowledge_relative_path(config, base_id, path)
+        path
+        for path in os.fsdecode(result.stdout).split("\x00")
+        if path and include_knowledge_relative_path(config, base_id, path)
     }
 
 

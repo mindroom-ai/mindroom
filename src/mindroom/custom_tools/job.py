@@ -6,8 +6,10 @@ import inspect
 import json
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.tool_jobs.consumption import consume_tool_job, job_failure, job_failure_text
-from mindroom.tool_jobs.conversation import current_approval_wait_timeout, current_conversation
+from mindroom.active_runs import pause_current_active_run
+from mindroom.tool_jobs.consumption import StagedConsumptions, job_failure, job_failure_text
+from mindroom.tool_jobs.control import waiting_on_jobs
+from mindroom.tool_jobs.conversation import current_approval_wait_timeout, current_ended_jobs
 from mindroom.tool_jobs.runtime import (
     JobAccessError,
     JobUnavailableError,
@@ -18,13 +20,21 @@ from mindroom.tool_jobs.runtime import (
 )
 from mindroom.tool_system.agno_toolkits import configure_toolkit_functions
 from mindroom.tool_system.authoring import Toolkit
+from mindroom.tool_system.output_files import (
+    ToolOutputFileHandled,
+    active_tool_output_file_request,
+    finalize_tool_output_file,
+    is_tool_output_error,
+    saved_output_envelope,
+)
 from mindroom.tool_system.runtime_context import current_execution_identity
 from mindroom.tool_system.tool_function import ToolValue
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Collection, Sequence
 
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_jobs.consumption import PreparedConsumption
     from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
     from mindroom.tool_system.output_files import ToolOutputFilePolicy
     from mindroom.tool_system.tool_function import ToolFunction
@@ -48,45 +58,42 @@ def is_job_function(function: ToolFunction) -> bool:
     )
 
 
-async def _claimed_result(runtime: ToolJobRuntime, job: BackgroundJob, claim: JobClaim) -> Any:  # noqa: ANN401 - Tool value.
-    """Return a completed job's outcome as this call's own result; every other outcome raises its reason.
+async def _finish_staged_result(staging: StagedConsumptions, result: object) -> Any:  # noqa: ANN401 - Tool value.
+    """Apply any active output-file policy before committing claims, releasing them if output redirection errors."""
+    output_request = active_tool_output_file_request()
+    if output_request is None:
+        await staging.commit()
+        return result
+    finalized = finalize_tool_output_file(output_request, result)
+    output_errored = (
+        saved_output_envelope(finalized) is None
+        if output_request.path is not None
+        else finalized is not result and is_tool_output_error(finalized)
+    )
+    if output_errored:
+        await staging.release()
+        return ToolOutputFileHandled(finalized)
+    await staging.commit()
+    return ToolOutputFileHandled(finalized)
 
-    The call that started the job fails the same way (``job_failure``).
-    """
-    value, payload = await consume_tool_job(runtime, job, claim)
-    failure = job_failure(job, value, payload)
-    if failure is not None:
-        raise RuntimeError(failure)
-    return value
 
-
-async def _collect(runtime: ToolJobRuntime, owner: ToolExecutionIdentity) -> str | ToolValue:
-    """Return every ended, unacknowledged job of this caller with its result, acknowledging each once this call saves."""
+def _render_collected(
+    entries: Sequence[tuple[BackgroundJob, int | None]],
+    prepared: Sequence[PreparedConsumption],
+) -> str | ToolValue:
     sections: list[str] = []
     collected: list[ToolValue] = []
-    current = current_conversation()
-    for job in () if current is None else await current[0].ended_jobs(current[1]):
-        try:
-            waited = await runtime.wait(job.job_id, owner=owner, depth=0, timeout=0)
-        except JobAccessError:
-            # A team member collects only its own jobs; the team collects them all.
-            continue
-        if waited.claim is None:
-            # Another caller is reading this outcome now.
-            continue
-        try:
-            value, payload = await consume_tool_job(runtime, waited.job, waited.claim)
-        except ValueError:
-            # Unavailable or undecodable; its claim is released, so a later collect reads it, and the others arrive now.
+    for job, index in entries:
+        if index is None:
             sections.append(f"{describe_job(job)} {job.status}: its result could not be read now")
             continue
+        item = prepared[index]
+        value = item.value
         if isinstance(value, ToolValue):
             collected.append(value)
             value = value.content
-        detail = job_failure_text(value, payload) if job.status == "failed" else value or ""
+        detail = job_failure_text(value, item.payload) if job.status == "failed" else value or ""
         sections.append(f"{describe_job(job)} {job.status}:\n{detail}".rstrip())
-    if not sections:
-        return "No ended background jobs."
     content = "\n\n".join(sections)
     images = tuple(item for result in collected for item in result.images)
     audios = tuple(item for result in collected for item in result.audios)
@@ -95,6 +102,56 @@ async def _collect(runtime: ToolJobRuntime, owner: ToolExecutionIdentity) -> str
     if images or audios or videos or files:
         return ToolValue(content=content, images=images, audios=audios, videos=videos, files=files)
     return content
+
+
+async def _claimed_result(runtime: ToolJobRuntime, job: BackgroundJob, claim: JobClaim) -> Any:  # noqa: ANN401 - Tool value.
+    """Return a completed job's outcome as this call's own result; every other outcome raises its reason.
+
+    The call that started the job fails the same way (``job_failure``).
+    """
+    staging = StagedConsumptions()
+    try:
+        await staging.stage(runtime, job, claim)
+        (prepared,) = staging.prepare_values()
+        failure = job_failure(job, prepared.value, prepared.payload)
+        if failure is None:
+            return await _finish_staged_result(staging, prepared.value)
+        await staging.commit()
+    except BaseException:
+        await staging.release()
+        raise
+    raise RuntimeError(failure)
+
+
+async def _collect(runtime: ToolJobRuntime, owner: ToolExecutionIdentity) -> Any:  # noqa: ANN401 - Tool value.
+    """Return every ended, unacknowledged job of this caller with its result, acknowledging each once this call saves."""
+    entries: list[tuple[BackgroundJob, int | None]] = []
+    staging = StagedConsumptions()
+    try:
+        for job in await current_ended_jobs():
+            try:
+                waited = await runtime.wait(job.job_id, owner=owner, depth=0, timeout=0)
+            except JobAccessError:
+                # A team member collects only its own jobs; the team collects them all.
+                continue
+            if waited.claim is None:
+                # Another caller is reading this outcome now.
+                continue
+            try:
+                index = await staging.stage(runtime, waited.job, waited.claim)
+            except ValueError:
+                # Unavailable or undecodable; its claim is released, so a later collect reads it, and the others arrive now.
+                entries.append((job, None))
+                continue
+            entries.append((job, index))
+        if not entries:
+            return "No ended background jobs."
+        # All awaits are finished; merge live session state synchronously before finalizing output and committing.
+        result = _render_collected(entries, staging.prepare_values())
+        return await _finish_staged_result(staging, result)
+    except BaseException:
+        await staging.release()
+        raise
 
 
 class JobTools(Toolkit):
@@ -157,7 +214,7 @@ class JobTools(Toolkit):
             action: Operation; list reports status, saved summaries, and the latest progress of running work, wait
                 retrieves the stored result or, when it times out, the job's progress, and collect returns and
                 acknowledges every ended job.
-            job_id: Exact job ID, required for wait and cancel.
+            job_id: Job ID (or a unique prefix of at least 8 hex characters), required for wait and cancel.
             limit: Maximum number of jobs to list, from 1 to 100; active jobs first.
             offset: Number of accessible jobs to skip, at least zero.
             wait_timeout: Seconds to wait; null waits until completion or a newer message, zero returns immediately.
@@ -185,14 +242,17 @@ class JobTools(Toolkit):
             if job_id is None:
                 return "job_id is required for this action."
             if action == "wait":
-                waited = await runtime.wait(
-                    job_id,
-                    owner=owner,
-                    depth=0,
-                    timeout=wait_timeout,
-                    # A job awaiting a human decision holds the reply no longer than the gated call itself does.
-                    approval_timeout=current_approval_wait_timeout(),
-                )
+                # A newer human message releases a reply whose running calls all only wait, without its judge.
+                with waiting_on_jobs():
+                    waited = await runtime.wait(
+                        job_id,
+                        owner=owner,
+                        depth=0,
+                        timeout=wait_timeout,
+                        # A job awaiting a human decision holds the reply no longer than the gated call itself does.
+                        approval_timeout=current_approval_wait_timeout(),
+                        pause_on_human_wait=pause_current_active_run,
+                    )
                 if waited.claim is not None:
                     return await _claimed_result(runtime, waited.job, waited.claim)
                 return format_job_handle(waited.job)

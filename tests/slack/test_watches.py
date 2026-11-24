@@ -17,6 +17,7 @@ import pytest
 from mindroom import constants
 from mindroom.config.main import Config
 from mindroom.slack.watches import SlackWatch, SlackWatchStore, _watch_id_for, _watch_room_problem, watch_problem
+from tests.matrix_state_helpers import persist_owner_account
 from tests.slack.room_state import room_state_client
 
 if TYPE_CHECKING:
@@ -129,11 +130,13 @@ def test_a_corrupt_store_raises_and_is_left_as_it_was(tmp_path: Path, operation:
 
 @pytest.fixture
 def paths(tmp_path: Path) -> RuntimePaths:
-    return constants.resolve_runtime_paths(
+    runtime_paths = constants.resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
         process_env={"MATRIX_HOMESERVER": "https://example.org"},
     )
+    persist_owner_account(runtime_paths)
+    return runtime_paths
 
 
 @pytest.fixture

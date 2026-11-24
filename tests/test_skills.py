@@ -145,7 +145,7 @@ def test_bundled_mindroom_docs_skill_is_discoverable(monkeypatch: pytest.MonkeyP
     assert (listing.path.parent / "references" / "reference-index.md").exists()
 
 
-@pytest.mark.parametrize("skill_name", ["open-knowledge-format", "agent-conversations"])
+@pytest.mark.parametrize("skill_name", ["open-knowledge-format", "agent-conversations", "overleaf"])
 def test_bundled_skill_loads_for_allowlisted_agent(tmp_path: Path, skill_name: str) -> None:
     """Ensure an agent that allowlists a bundled skill can load it."""
     skills = _build_skills(
@@ -846,7 +846,8 @@ def test_operator_skill_support_files_refresh_the_cached_skill(tmp_path: Path) -
             ("check.sh",),
             ("guide.md",),
         )
-        assert "<scripts>check.sh</scripts>" in with_script.prompt_block()
+        # The prompt names no support file, so adding one leaves the system prompt as it was.
+        assert with_script.prompt_block() == before.prompt_block()
         assert _call(with_script, "get_skill_script", "alpha", "check.sh")["content"] == "echo ok\n"
 
         (skill_dir / "references" / "guide.md").unlink()

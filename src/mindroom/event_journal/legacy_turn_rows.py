@@ -30,7 +30,6 @@ from mindroom.model_selection import freeze_command_result_content
 from mindroom.turn_record import (
     RevisionReplay,
     SourceEventMetadata,
-    SourceVisibleEcho,
     TurnRecord,
     canonical_optional_string,
     canonical_source_event_ids,
@@ -79,7 +78,6 @@ class _Decoded:
     # Revisions a pre-v2026.9.43 summary consumed through their source: revision to source.
     summary_revisions: Mapping[str, str]
     echo: str | None
-    echo_is_fallback: bool | None
     timestamp: float
 
 
@@ -179,8 +177,6 @@ def _decode(raw: object) -> _Decoded | None:
     raw_prompts = _mapping(stored.get("source_event_prompts")) or {}
     raw_voice = _mapping(stored.get("prepared_voice_sources")) or {}
     replay, redacted_revisions, summary_revisions = _revision_replay(stored.get("revision_replay"))
-    echo = canonical_optional_string(stored.get("visible_echo_event_id"))
-    echo_is_fallback = stored.get("visible_echo_is_fallback")
     record = TurnRecord.create(
         sources,
         discovery_event_ids=aliases,
@@ -219,8 +215,7 @@ def _decode(raw: object) -> _Decoded | None:
         redacted_revisions=redacted_revisions,
         deleted=frozenset(redacted) | redacted_sources,
         summary_revisions=MappingProxyType(dict(summary_revisions)),
-        echo=echo,
-        echo_is_fallback=echo_is_fallback if isinstance(echo_is_fallback, bool) and echo is not None else None,
+        echo=canonical_optional_string(stored.get("visible_echo_event_id")),
         timestamp=float(timestamp),
     )
 
@@ -642,7 +637,7 @@ def _converted_turn(
 ) -> TurnRecord | None:
     record = decoded.record
     echo = decoded.echo
-    echoes = {source: SourceVisibleEcho(echo, decoded.echo_is_fallback) for source in physical} if echo else None
+    echoes = dict.fromkeys(physical, echo) if echo else None
     if room_id is None:
         if not record.completed:
             return None

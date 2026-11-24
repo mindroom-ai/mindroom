@@ -13,7 +13,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from mindroom.constants import REASONING_CONTENT_KEY, STREAM_VISIBLE_BODY_KEY, TOOL_TRACE_CONTENT_KEY
+from mindroom.constants import (
+    COMPACTIONS_CONTENT_KEY,
+    REASONING_CONTENT_KEY,
+    STREAM_VISIBLE_BODY_KEY,
+    TOOL_TRACE_CONTENT_KEY,
+)
 from mindroom.matrix.large_messages import calculate_event_size, is_edit_message
 from mindroom.matrix.message_builder import build_thread_relation, markdown_to_html
 from mindroom.tool_system.events import (
@@ -34,6 +39,8 @@ _SEGMENT_TARGET_EDIT_BYTES = 22_000
 _SEGMENT_TARGET_ENCRYPTED_PLAINTEXT_BYTES = 30_000
 _SEGMENT_TARGET_ENCRYPTED_EDIT_BYTES = 16_000
 _SEGMENT_SHRINK_MARGIN = 0.9
+# The first segment of a split reply says how many segments the reply has, so a receiver can answer them as one turn.
+SEGMENT_COUNT_KEY = "io.mindroom.segment_count"
 # Rebuilt per segment after sizing (the tool trace) or not part of the visible
 # answer, so metadata can never split an answer or push it into a sidecar. A split
 # reply keeps no reasoning, which would otherwise repeat on every segment.
@@ -192,7 +199,10 @@ def _continuation_content(
     relation = (
         build_thread_relation(thread_id, latest_thread_event_id=reply_to_event_id or thread_id) if thread_id else None
     )
-    return _rich_text_content(source, body, relation=relation)
+    content = _rich_text_content(source, body, relation=relation)
+    # The reply's compactions are shown once, on its first segment.
+    content.pop(COMPACTIONS_CONTENT_KEY, None)
+    return content
 
 
 def _shrinking_trace_slices(entries: list[ToolTraceEntry]) -> tuple[list[ToolTraceEntry], ...]:
@@ -340,6 +350,16 @@ def _split_body(
     return chunks or None
 
 
+def _count_segments(first: dict[str, Any], visible_first: dict[str, Any], count: int, target_bytes: int) -> None:
+    """Tell receivers how many segments the reply has, on its first segment's visible content, where the count fits.
+
+    A first segment the count would push over its budget goes without it, and receivers answer it as it comes.
+    """
+    visible_first[SEGMENT_COUNT_KEY] = count
+    if calculate_event_size(first) > target_bytes:
+        del visible_first[SEGMENT_COUNT_KEY]
+
+
 def segment_matrix_content(
     content: dict[str, Any],
     *,
@@ -415,7 +435,9 @@ def segment_matrix_content(
         calculate_event_size(candidate) > continuation_target for candidate in continuations
     ):
         return None
+    if continuations:
+        _count_segments(first, first["m.new_content"] if is_edit else first, 1 + len(continuations), first_target)
     return SegmentedMatrixContent(first=first, continuations=continuations)
 
 
-__all__ = ["SegmentedMatrixContent", "first_segment_target_bytes", "segment_matrix_content"]
+__all__ = ["SEGMENT_COUNT_KEY", "SegmentedMatrixContent", "first_segment_target_bytes", "segment_matrix_content"]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import weakref
 from collections.abc import AsyncIterator, Iterator  # noqa: TC003 - Agno resolves tool annotations
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import nullcontext
@@ -21,8 +22,11 @@ from mindroom.agent_loop.spec import RunContext, UnstoredSession
 from mindroom.agent_loop.tools import offered_toolkits
 from mindroom.approval import tool_owners as approval_tools
 from mindroom.config.agent import AgentConfig
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.config.personal_agents import PersonalAgentInstance
+from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_jobs.control import JobControl, job_control_context
@@ -33,9 +37,10 @@ from mindroom.tool_system.runtime_context import current_execution_identity, get
 from mindroom.tool_system.tool_access import ToolKey, UnknownToolError
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction, ToolGate, ToolOutcome
 from mindroom.tool_system.tool_hooks import run_async_entrypoint_blocking_call
+from mindroom.workers.placements import DedicatedWorkerPlacement, dedicated_worker_placement
 from tests.agent_tool_helpers import offered_agno_function
 from tests.authorization_helpers import make_test_tool_runtime_context
-from tests.conftest import make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
+from tests.conftest import gc_paused, make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -505,6 +510,33 @@ async def test_closed_catalog_rejects_later_bindings(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("close_fails", [False, True], ids=["closes", "close-fails"])
+async def test_closed_catalog_is_freed_without_a_garbage_collection(tmp_path: Path, close_fails: bool) -> None:
+    """A closed catalog holds no reference cycle, even when a toolkit fails to close, so dropping it frees it at once."""
+
+    def action() -> str:
+        return "ok"
+
+    async def connect() -> Callable[[], Awaitable[None]]:
+        async def close() -> None:
+            if close_fails:
+                msg = "close failed"
+                raise RuntimeError(msg)
+
+        return close
+
+    toolkit = replace(_toolkit("existing", action), connect=connect)
+    catalog = await _catalog(tmp_path, [toolkit])
+    await catalog.connect([toolkit])
+    with pytest.raises(RuntimeError, match="close failed") if close_fails else nullcontext():
+        await catalog.close()
+    released = weakref.ref(catalog)
+    with gc_paused():
+        del catalog
+        assert released() is None
+
+
+@pytest.mark.asyncio
 async def test_arguments_are_frozen_before_started_event(tmp_path: Path) -> None:
     """A caller cannot alter an admitted call while consuming its events."""
     seen = []
@@ -910,6 +942,29 @@ async def test_shared_cli_authorizer_rejects_revoked_prepared_call(
     assert effects == []
 
 
+@pytest.mark.asyncio
+async def test_a_prepared_cli_call_survives_the_placement_its_subagent_turn_adds_to_its_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A target that keeps a subagent turn's own worker still matches the one prepared before the turn placed it."""
+
+    def action() -> str:
+        return "executed"
+
+    catalog = await _catalog(tmp_path, [_function(action)])
+    config = Config(agents={"helper": AgentConfig(display_name="Helper", tools=["shell"])})
+    runtime = replace(catalog.runtime_context, config=config, config_provider=lambda: config)
+    catalog.runtime_context = runtime
+    binding = await catalog.bind(ToolKey("actions", "action"))
+    monkeypatch.setattr(approval_tools, "is_sender_allowed_for_entity_replies_in_room", lambda *_a, **_k: True)
+    expected = runtime.resolve_worker_target()
+
+    with dedicated_worker_placement(runtime.session_id, DedicatedWorkerPlacement("c" * 32)):
+        assert runtime.resolve_worker_target().placement == DedicatedWorkerPlacement("c" * 32)
+        await approval_tools.authorize_prepared_tool_call(binding, expected_worker_target=expected)
+
+
 def _remove_helper(config: Config) -> None:
     del config.agents["helper"]
 
@@ -944,6 +999,33 @@ _CONFIG_EDITS: dict[str, tuple[Callable[[Config], object], bool]] = {
         False,
     ),
     "own_removal": (_remove_helper, False),
+    # Model entries shape model requests and prompts, never a toolkit or its permissions.
+    "model_added": (lambda config: config.models.__setitem__("extra", ModelConfig(provider="openai", id="x")), True),
+    "model_removed": (lambda config: config.models.pop("spare"), True),
+    "model_renamed": (lambda config: config.models.__setitem__("renamed", config.models.pop("spare")), True),
+    "model_display_name": (lambda config: setattr(config.models["default"], "display_name", "Fast"), True),
+    "model_pricing": (
+        lambda config: setattr(config.models["default"], "pricing", ModelPricing(input=1, output=2)),
+        True,
+    ),
+    "room_model_added": (lambda config: config.room_models.__setitem__("lobby", "spare"), True),
+    "own_room_appended": (lambda config: config.agents["helper"].rooms.append("new-room"), True),
+    "own_room_removed": (lambda config: config.agents["helper"].rooms.remove("lobby"), False),
+    "memory_search_exclude": (lambda config: config.memory.search.exclude.append("archive/**"), False),
+    "default_tools": (lambda config: setattr(config.defaults, "tools", ["calculator"]), False),
+    "default_worker_routing": (lambda config: setattr(config.defaults, "worker_scope", "user"), False),
+    "approval_rule": (
+        lambda config: setattr(
+            config.tool_approval,
+            "rules",
+            [ApprovalRuleConfig(match="action", action="require_approval")],
+        ),
+        False,
+    ),
+    "mcp_server": (
+        lambda config: config.mcp_servers.__setitem__("demo", MCPServerConfig(transport="stdio", command="npx")),
+        False,
+    ),
 }
 
 
@@ -962,8 +1044,12 @@ async def test_a_prepared_cli_call_survives_config_edits_that_leave_its_agent_un
     catalog = await _catalog(tmp_path, [_function(action)])
     config = Config(
         agents={
-            "helper": AgentConfig(display_name="Helper", tools=["shell"], instructions=["Be brief."]),
+            "helper": AgentConfig(display_name="Helper", tools=["shell"], instructions=["Be brief."], rooms=["lobby"]),
             "other": AgentConfig(display_name="Other", instructions=["Be thorough."]),
+        },
+        models={
+            "default": ModelConfig(provider="openai", id="default-id"),
+            "spare": ModelConfig(provider="openai", id="spare-id"),
         },
     )
     current = config.model_copy(deep=True)

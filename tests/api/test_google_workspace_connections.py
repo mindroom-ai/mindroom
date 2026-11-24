@@ -7,7 +7,7 @@ import json
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
-import httpx
+import httpx2
 import jwt
 import pytest
 from authlib.integrations import httpx_client as authlib_httpx_client
@@ -266,9 +266,9 @@ def test_additional_callback_and_reset_preserve_other_credentials(
 
     token_requests: list[dict[str, list[str]]] = []
 
-    def token_response(request: httpx.Request) -> httpx.Response:
+    def token_response(request: httpx2.Request) -> httpx2.Response:
         token_requests.append(parse_qs(request.content.decode()))
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "access_token": "secondary-access",
@@ -284,7 +284,7 @@ def test_additional_callback_and_reset_preserve_other_credentials(
     monkeypatch.setattr(
         authlib_httpx_client,
         "AsyncOAuth2Client",
-        lambda **kwargs: real_client(transport=httpx.MockTransport(token_response), **kwargs),
+        lambda **kwargs: real_client(transport=httpx2.MockTransport(token_response), **kwargs),
     )
     monkeypatch.setattr(
         "google.oauth2.id_token.verify_oauth2_token",

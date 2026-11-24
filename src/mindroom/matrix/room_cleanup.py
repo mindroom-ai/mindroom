@@ -53,7 +53,11 @@ async def _cleanup_orphaned_bots_in_room(
         logger.debug("orphaned_bot_cleanup_skipped_root_space", room_id=room_id)
         return []
 
-    if await is_dm_room(client, room_id):
+    is_dm = await is_dm_room(client, room_id)
+    if is_dm is None:
+        logger.warning("orphaned_bot_cleanup_skipped_dm_status_unknown", room_id=room_id)
+        return []
+    if is_dm:
         logger.debug("orphaned_bot_cleanup_skipped_dm_room", room_id=room_id)
         return []
 
@@ -67,7 +71,7 @@ async def _cleanup_orphaned_bots_in_room(
 
     removed_bots = []
 
-    # The sweeping client is the current router, never a retired identity, so
+    # The sweeping client is the owner account, never a retired identity, so
     # every orphan here is another account it can kick.
     for user_id in member_ids:
         matrix_id = MatrixID.parse(user_id)
@@ -112,7 +116,7 @@ async def cleanup_all_orphaned_bots(
 ) -> dict[str, list[str]]:
     """Remove retired bot identities from all rooms the client has access to.
 
-    Called with the running router's client, which needs kick permission in
+    Called with the running owner account's client, which needs kick permission in
     the rooms it cleans and is never itself a retired identity.
     Configured entities manage their own memberships, even if startup has not
     completed or their invited-room retention records have not been restored.

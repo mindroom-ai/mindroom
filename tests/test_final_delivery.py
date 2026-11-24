@@ -110,6 +110,7 @@ def test_final_delivery_outcome_identifies_substantive_delivery(
         pytest.param(Suppressed(Suppression.SILENT_NO_REPORT), "silent_no_report", id="silent-no-report"),
         pytest.param(Suppressed(Suppression.EMPTY_PROMPT), "empty_prompt", id="empty-prompt"),
         pytest.param(Suppressed(Suppression.PARTICIPATION_DECLINED), None, id="declined-fires-no-hook"),
+        pytest.param(Suppressed(Suppression.PARTICIPATION_FAILED), None, id="failed-check-fires-no-hook"),
         pytest.param(Failed(FailureCause.ERROR, "boom with secret"), "error", id="error-never-shows-text"),
         pytest.param(Failed(FailureCause.DELIVERY_FAILED), "delivery_failed", id="delivery-failed"),
         pytest.param(Failed(FailureCause.NOTHING_TO_SHOW), "nothing_to_show", id="nothing-to-show"),

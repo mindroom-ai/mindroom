@@ -17,9 +17,9 @@ from mindroom.hooks import HookContext
 from mindroom.hooks.matrix_admin import build_hook_matrix_admin
 from mindroom.logging_config import get_logger
 from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
+from mindroom.matrix.client_room_admin import admin_join_room_user_failure
 from mindroom.matrix.invited_rooms_store import invited_rooms_path, load_invited_rooms
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
-from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -357,6 +357,72 @@ async def test_hook_matrix_admin_force_join_user_calls_synapse_admin_api(tmp_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "body",
+    [{"errcode": "M_FORBIDDEN", "error": "Only server administrators"}, TimeoutError()],
+    ids=["errcode", "body_timeout"],
+)
+async def test_hook_matrix_admin_force_join_user_returns_false_when_refused(tmp_path: Path, body: object) -> None:
+    """A refused admin join, even one whose body never arrives, still reads as a plain failure to hooks."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.homeserver = "http://localhost:8008"
+    client.access_token = TEST_PASSWORD
+    response = MagicMock(status=403)
+    response.json = AsyncMock(side_effect=body) if isinstance(body, Exception) else AsyncMock(return_value=body)
+    client.send.return_value = response
+
+    admin = build_hook_matrix_admin(client, runtime_paths=test_runtime_paths(tmp_path))
+
+    with patch("mindroom.hooks.matrix_admin.invite_to_room", new=AsyncMock(return_value=True)):
+        assert await admin.force_join_user("!personal:localhost", "@user:localhost") is False
+    response.release.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "body", "failure"),
+    [
+        (200, {}, None),
+        (
+            403,
+            {"errcode": "M_FORBIDDEN", "error": "Only server administrators can use this endpoint"},
+            "answered HTTP 403 M_FORBIDDEN",
+        ),
+        (400, {"errcode": "M_FORBIDDEN: some free text"}, "answered HTTP 400"),
+        (500, ["not", "an", "object"], "answered HTTP 500"),
+        (502, ValueError("not JSON"), "answered HTTP 502"),
+        (403, TimeoutError(), "answered HTTP 403"),
+        (400, RecursionError(), "answered HTTP 400"),
+        (403, LookupError("'base64' is not a text encoding"), "answered HTTP 403"),
+    ],
+)
+async def test_admin_join_failure_names_only_the_http_status_and_errcode(
+    status: int,
+    body: object,
+    failure: str | None,
+) -> None:
+    """A failed admin join says its HTTP status and a well-formed Matrix errcode, never the response's free text."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.access_token = TEST_PASSWORD
+    response = MagicMock(status=status)
+    response.json = AsyncMock(side_effect=body) if isinstance(body, Exception) else AsyncMock(return_value=body)
+    client.send.return_value = response
+
+    assert await admin_join_room_user_failure(client, "!personal:localhost", "@user:localhost") == failure
+    response.release.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_admin_join_failure_says_when_the_client_has_no_access_token() -> None:
+    """Without a token nothing is sent, and the failure says why."""
+    client = AsyncMock(spec=nio.AsyncClient)
+    client.access_token = None
+
+    assert await admin_join_room_user_failure(client, "!personal:localhost", "@user:localhost") == "had no access token"
+    client.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_hook_matrix_admin_force_join_user_fails_without_access_token(tmp_path: Path) -> None:
     """Force-join should fail closed when no authenticated admin token exists."""
     client = AsyncMock(spec=nio.AsyncClient)
@@ -435,7 +501,7 @@ async def test_hook_matrix_admin_created_room_survives_lifecycle_cleanup(
     tmp_path: Path,
     new_room: bool,
 ) -> None:
-    """New and reconciled plugin rooms must survive the bot's own cleanup."""
+    """New and reconciled plugin rooms stay recorded, and the owner account's cleanup leaves no room."""
     config = _private_room_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     ids = entity_ids(config, runtime_paths)
@@ -468,7 +534,7 @@ async def test_hook_matrix_admin_created_room_survives_lifecycle_cleanup(
         rooms=[],
     )
     install_runtime_journal_support(bot)
-    bot.client = AsyncMock()
+    bot.client = AsyncMock(rooms={})
     left_room_ids: list[str] = []
 
     async def mock_leave_non_dm_rooms(
@@ -486,12 +552,11 @@ async def test_hook_matrix_admin_created_room_survives_lifecycle_cleanup(
         AsyncMock(return_value=["!private:localhost", "!old:localhost"]),
     )
     monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_non_dm_rooms", mock_leave_non_dm_rooms)
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.matrix_state_for_runtime", lambda *_args, **_kwargs: MatrixState())
 
-    await bot.leave_unconfigured_rooms()
+    await bot._room_lifecycle.leave_unconfigured_rooms()
 
     assert bot._room_lifecycle.invited_room_ids() == {"!private:localhost"}
-    assert left_room_ids == ["!old:localhost"]
+    assert left_room_ids == []
 
 
 def test_a_room_a_plugin_retains_for_the_running_router_owns_its_approvals_at_once(tmp_path: Path) -> None:
@@ -550,18 +615,12 @@ def test_hook_matrix_admin_retention_surfaces_storage_failure(tmp_path: Path) ->
     assert load_invited_rooms(invited_rooms_path(runtime_paths, ROUTER_AGENT_NAME)) == set()
 
 
-@pytest.mark.parametrize(("managed", "accept_invites"), [(False, True), (True, False)])
-def test_hook_matrix_admin_retention_respects_entity_policy(
-    tmp_path: Path,
-    managed: bool,
-    accept_invites: bool,
-) -> None:
-    """Retention cannot enroll unmanaged accounts or override disabled invites."""
+def test_hook_matrix_admin_retention_never_enrolls_an_unmanaged_account(tmp_path: Path) -> None:
+    """Retention cannot enroll an account MindRoom does not manage."""
     config = _private_room_config(tmp_path)
-    config.router.accept_invites = accept_invites
     runtime_paths = runtime_paths_for(config)
     client = AsyncMock(spec=nio.AsyncClient)
-    client.user_id = entity_ids(config, runtime_paths)[ROUTER_AGENT_NAME].full_id if managed else "@outsider:localhost"
+    client.user_id = "@outsider:localhost"
     admin = build_hook_matrix_admin(client, runtime_paths=runtime_paths, config=config)
 
     admin.retain_room("!private:localhost")

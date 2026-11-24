@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import functools
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Annotated, Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ValidationError
 
 from mindroom.api import config_lifecycle, oauth
@@ -26,6 +26,8 @@ from mindroom.api.connection_agents import (
     require_connections_same_origin,
 )
 from mindroom.api.egress_status import (
+    ADMIN_KEY_REFUSAL,
+    AgentKeysScope,
     AuditLogsResponse,
     EgressRuleSummary,
     EgressSourceStatus,
@@ -39,22 +41,24 @@ from mindroom.api.egress_status import (
     egress_oauth_status,
     egress_service_status,
     github_app_repositories,
-    key_refusal,
+    key_save_refusal,
     load_concurrently,
     oauth_provider_of_service,
     presets_response,
     require_access_offered,
     require_egress_broker_enabled,
+    resolve_agent_keys_scope,
     rule_summaries,
     service_oauth_provider,
 )
-from mindroom.authorization import is_sender_allowed_for_agent_credential_management, is_sender_allowed_for_responder
 from mindroom.config.egress_broker import EgressService
 from mindroom.config.main import validation_issue_message
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.egress_broker.env import EgressAgentScope, egress_agent_scope
+from mindroom.egress_broker.key_access import egress_key_access
 from mindroom.egress_broker.oauth_reuse import set_oauth_reuse
 from mindroom.egress_broker.oauth_source import broker_credential_context
+from mindroom.egress_broker.presets import EGRESS_PRESETS
 from mindroom.egress_broker.secrets import delete_secret, save_secret
 from mindroom.egress_broker.service import active_audit_log
 from mindroom.egress_broker.user_services import (
@@ -62,12 +66,14 @@ from mindroom.egress_broker.user_services import (
     InactiveUserService,
     ServiceSource,
     UserServiceConflictError,
+    consistent_read,
     delete_user_service,
     inactive_user_services,
     load_user_services,
     save_user_service,
     service_source,
-    user_service_hosts_not_allowed,
+    stored_user_service_names,
+    user_service_hosts_error,
 )
 from mindroom.oauth.credential_lifecycle import reset_oauth_credentials_blocking, resolve_oauth_credential_context
 from mindroom.oauth.registry import snapshot_oauth_providers
@@ -81,8 +87,7 @@ if TYPE_CHECKING:
     from mindroom.config.egress_broker import EgressBrokerConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.credentials.manager import CredentialsManager
-    from mindroom.egress_broker.secrets import OAuthAccess
+    from mindroom.egress_broker.secrets import OAuthAccess, OAuthStatus
     from mindroom.oauth import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
@@ -141,60 +146,29 @@ def _check_agent_eligibility(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> tuple[bool, bool] | None:
-    """Return ``(is_shared, can_manage)`` for an eligible agent, else ``None``.
-
-    Eligibility requires an agent that reaches the broker (`egress_agent_scope`) and permission to use it.
-    Listing, portal catalog, mutations, and the request log's shared-agent rows all decide through this one rule.
-    """
-    scope = egress_agent_scope(config, agent_name, runtime_paths)
-    if scope is None:
-        return None
-    if not is_sender_allowed_for_responder(
+    """Return ``(is_shared, can_manage)`` for an eligible agent, else ``None``; see `egress_key_access`."""
+    return egress_key_access(
         requester_id,
         agent_name,
-        None,
         config,
         runtime_paths,
         config_lifecycle.app_state(request.app).runtime.agent_reply_memberships,
-    ):
-        return None
-    is_shared = scope in {"shared", "unscoped"}
-    can_manage = not is_shared or is_sender_allowed_for_agent_credential_management(
-        requester_id,
-        agent_name,
-        config,
-        runtime_paths,
     )
-    return is_shared, can_manage
 
 
-@dataclass(frozen=True)
-class _ResolvedAgent:
-    """An agent the requester may use, with the worker target their credentials and services live under."""
-
-    config: Config
-    runtime_paths: RuntimePaths
-    target: ResolvedWorkerTarget
-    manager: CredentialsManager
-    can_manage: bool
-
-
-def _resolve_agent(request: Request, requester_id: str, agent_name: str) -> _ResolvedAgent:
+def _resolve_agent(request: Request, requester_id: str, agent_name: str) -> AgentKeysScope:
     """Resolve one agent for the requester, or 404 when it is unknown or the requester may not use it."""
     snapshot = config_lifecycle.bind_current_request_snapshot(request)
     config = snapshot.runtime_config
-    if config is None or agent_name not in config.agents:
+    memberships = config_lifecycle.app_state(request.app).runtime.agent_reply_memberships
+    agent = (
+        None
+        if config is None
+        else resolve_agent_keys_scope(config, snapshot.runtime_paths, memberships, requester_id, agent_name)
+    )
+    if agent is None:
         raise HTTPException(404, "Agent is not available", headers=CONNECTIONS_HEADERS)
-
-    runtime_paths = snapshot.runtime_paths
-    human_requester = resolve_human_requester_alias(requester_id, config, runtime_paths)
-    eligibility = _check_agent_eligibility(request, agent_name, human_requester, config, runtime_paths)
-    if eligibility is None:
-        raise HTTPException(404, "Agent is not available", headers=CONNECTIONS_HEADERS)
-
-    target = build_connection_agent_target(config, runtime_paths, human_requester, agent_name)
-    manager = get_runtime_credentials_manager(runtime_paths)
-    return _ResolvedAgent(config, runtime_paths, target, manager, can_manage=eligibility[1])
+    return agent
 
 
 def _resolve_agent_and_service(
@@ -204,7 +178,7 @@ def _resolve_agent_and_service(
     service_name: str,
     *,
     requester_owned_oauth: bool = False,
-) -> tuple[_ResolvedAgent, EgressService]:
+) -> tuple[AgentKeysScope, EgressService]:
     """Resolve one agent and one of its services for a mutation, which needs credential management (403).
 
     The service is one of the config's that serves the agent or one the requester's scope defines for itself, so a name
@@ -228,7 +202,7 @@ def _resolve_agent_and_service(
     return agent, service
 
 
-def _resolve_service_editor(request: Request, requester_id: str, agent_name: str) -> _ResolvedAgent:
+def _resolve_service_editor(request: Request, requester_id: str, agent_name: str) -> AgentKeysScope:
     """Resolve an agent whose own services the requester may change: their private agent, or a shared one they manage."""
     agent = _resolve_agent(request, requester_id, agent_name)
     if not agent.can_manage:
@@ -269,6 +243,15 @@ class EgressCredentialService(EgressSourceStatus):
     github_app_repositories: GitHubAppRepositories | None
 
 
+class OAuthLogin(BaseModel):
+    """A preset's login the caller connected for the agent's tools, or could connect, which a new service could use."""
+
+    provider: str
+    display_name: str
+    connected: bool
+    account_label: str | None
+
+
 class EgressCredentialAgent(BaseModel):
     """One agent with its egress services.
 
@@ -283,7 +266,8 @@ class EgressCredentialAgent(BaseModel):
     of the caller, everyone's on a `shared` agent, or the global store of an `unscoped` one. `scope_agents` names
     the caller's agents that share a `user` store, this one included, and is empty for any other scope.
     `managers` is a shared or unscoped agent's credential managers, as Matrix IDs; it is empty for the rest, and
-    for an agent with none only administrators manage it.
+    for an agent with none only administrators manage it. `oauth_logins` are the presets' logins of the caller's
+    own that a new service of a personal agent they manage could use; empty for any other agent.
     """
 
     agent_name: str
@@ -295,6 +279,7 @@ class EgressCredentialAgent(BaseModel):
     managers: list[str]
     services: list[EgressCredentialService]
     inactive_services: list[InactiveUserService]
+    oauth_logins: list[OAuthLogin] = []
 
 
 class EgressCredentialsResponse(BaseModel):
@@ -330,22 +315,7 @@ async def egress_services_for_agent(
     services = await asyncio.to_thread(agent_services, config, manager, target)
 
     async def row(name: str, service: EgressService) -> EgressCredentialService:
-        oauth_part = await egress_oauth_status(
-            request,
-            name,
-            service,
-            target,
-            config=config,
-            runtime_paths=runtime_paths,
-            manager=manager,
-            can_manage=can_manage,
-            connection_status=lambda provider: oauth.connection_status(
-                request,
-                resolve_oauth_credential_context(provider, runtime_paths, manager, target, config=config),
-                refresh=False,
-            ),
-            reuse_target=lambda _provider: target,
-        )
+        oauth_part = await _listed_oauth_status(request, name, service, target, can_manage=can_manage)
         sources = await egress_service_status(manager, target, service, name, oauth_part)
         return EgressCredentialService(
             name=name,
@@ -369,6 +339,69 @@ async def egress_services_for_agent(
         (functools.partial(row, name, service) for name, service in services.items()),
         limited=True,
     )
+
+
+async def _listed_oauth_status(
+    request: Request,
+    name: str,
+    service: EgressService,
+    target: ResolvedWorkerTarget,
+    *,
+    can_manage: bool,
+    bootstrap: bool = True,
+) -> OAuthStatus | None:
+    """Return service `name`'s OAuth status as the personal listing shows it, read without a token refresh."""
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
+    config, runtime_paths = snapshot.runtime_config, snapshot.runtime_paths
+    if config is None:
+        return None
+    manager = get_runtime_credentials_manager(runtime_paths)
+    return await egress_oauth_status(
+        request,
+        name,
+        service,
+        target,
+        config=config,
+        runtime_paths=runtime_paths,
+        manager=manager,
+        can_manage=can_manage,
+        connection_status=lambda provider: oauth.connection_status(
+            request,
+            resolve_oauth_credential_context(provider, runtime_paths, manager, target, config=config),
+            refresh=False,
+            # Without `bootstrap`, only a stored OAuth client counts: none is provisioned over the network.
+            bootstrap_client=bootstrap,
+        ),
+        reuse_target=lambda _provider: target,
+    )
+
+
+async def _oauth_logins(request: Request, target: ResolvedWorkerTarget) -> list[OAuthLogin]:
+    """List the presets' logins the caller connected for a personal agent's tools, or could connect, by provider.
+
+    It is the caller's own connection as a new preset service would show it, read like the rows, so a service
+    account, a shared sandbox, a connection that needs a reset, or a client not provisioned yet never shows.
+    """
+    presets = {name: EgressService.model_validate({"preset": name}) for name in EGRESS_PRESETS}
+    statuses = await load_concurrently(
+        (
+            functools.partial(_listed_oauth_status, request, name, service, target, can_manage=True, bootstrap=False)
+            for name, service in presets.items()
+        ),
+        limited=True,
+    )
+    return [
+        OAuthLogin(
+            provider=status.provider,
+            display_name=status.display_name,
+            connected=status.connected,
+            account_label=status.account_label if status.connected else None,
+        )
+        for status in statuses
+        if status is not None
+        and (status.connected or status.can_connect)
+        and not (status.service_account or status.unavailable_reason or status.reset_required)
+    ]
 
 
 async def _load_egress_agents(request: Request, requester_id: str) -> list[EgressCredentialAgent]:
@@ -415,6 +448,8 @@ async def _load_egress_agents(request: Request, requester_id: str) -> list[Egres
             managers=list(agent.credential_managers) if is_shared else [],
             services=services,
             inactive_services=inactive,
+            # Only a personal agent's own manager can let commands use their own login.
+            oauth_logins=await _oauth_logins(request, target) if can_manage and not is_shared else [],
         )
 
     # Agents load concurrently, like their rows, so the page waits for the slowest agent instead of all of them.
@@ -452,14 +487,14 @@ def put_egress_secret(
 ) -> None:
     """Set or replace an egress service secret for one agent; a service that takes no key (`key_refusal`) is a 422.
 
-    An `admin_key` service's key is a 403 here for everyone (`_refuse_admin_key`).
+    An `admin_key` service's key is a 403 here for everyone (`key_save_refusal`).
     """
     _require_egress_same_origin(request)
 
     agent, egress_service = _resolve_agent_and_service(request, requester_id, agent_name, service)
-    _refuse_admin_key(egress_service)
-    if (refusal := key_refusal(egress_service)) is not None:
-        raise _unprocessable(refusal)
+    if (refusal := key_save_refusal(egress_service)) is not None:
+        status, detail = refusal
+        raise HTTPException(status, detail, headers=CONNECTIONS_HEADERS)
 
     try:
         save_secret(agent.manager, agent.target, service, body.secret)
@@ -485,11 +520,7 @@ def delete_egress_secret(
 def _refuse_admin_key(service: EgressService) -> None:
     """Refuse with 403 a change to an `admin_key` service's key, which only the dashboard makes, administrators' too."""
     if service.admin_key:
-        raise HTTPException(
-            403,
-            "Only an administrator sets this service's key, on the dashboard",
-            headers=CONNECTIONS_HEADERS,
-        )
+        raise HTTPException(403, ADMIN_KEY_REFUSAL, headers=CONNECTIONS_HEADERS)
 
 
 # User services
@@ -529,13 +560,8 @@ def _parse_user_service(body: object) -> EgressService:
 
 def _require_hosts_within_operator_policy(operator: EgressBrokerConfig, service: EgressService) -> None:
     """Refuse a service whose rules would apply on hosts that `unmatched_hosts: deny` keeps closed."""
-    hosts = user_service_hosts_not_allowed(operator, service)
-    if hosts:
-        msg = (
-            "Your administrator only allows requests to hosts that one of its own services covers, "
-            f"so these hosts cannot be used: {', '.join(hosts)}"
-        )
-        raise _unprocessable(msg)
+    if error := user_service_hosts_error(operator, service):
+        raise _unprocessable(error)
 
 
 @router.get("/agents/{agent_name}/services/{name}")
@@ -564,14 +590,16 @@ def put_user_service(
     requester_id: _EgressUser,
     _size: Annotated[None, Depends(_limit_service_body)],
     body: Annotated[object, Body()] = None,
+    if_none_match: Annotated[str | None, Header()] = None,
 ) -> None:
-    """Create or replace one of the scope's own services.
+    """Create or replace one of the scope's own services; with `If-None-Match: *` (the page's Add) only create it.
 
     The body has the fields of a config service except `oauth_on_shared_workers`. Returns 413 for a body over 16 KiB,
     409 for the name of a config service, and 422, always with a string detail, for a body that is not a JSON object,
     an invalid service, a limit (count or size), a placeholder user services may not set, an unknown OAuth provider,
     one on a shared or unscoped agent, or one whose rules leave its provider's preset hosts, a service's own account of a
     requester-scoped provider (GitHub, built-in Atlassian), or rules on hosts that `unmatched_hosts: deny` keeps closed.
+    An Add of a name the scope already has is a 412, so it never takes over that service's key.
     """
     _require_egress_same_origin(request)
     agent = _resolve_service_editor(request, requester_id, agent_name)
@@ -589,25 +617,29 @@ def put_user_service(
             f"{provider.display_name} accounts belong to each user, not to one agent; leave oauth_separate_account off"
         )
         raise _unprocessable(msg)
-    stored = load_user_services(agent.manager, agent.target).get(name)
-    same_own_account = (
-        stored is not None and stored.oauth_separate_account and stored.oauth_provider == service.oauth_provider
-    )
-    if service.oauth_separate_account and not same_own_account:
-        # A delete that could not remove an own account, such as one while a config service shadowed the name, left
-        # it behind; it goes before the service can use it.
-        _remove_account(request, agent, name, service, by=requester_id)
-    try:
-        save_user_service(
-            agent.manager,
-            agent.target,
-            name,
-            service,
-            config_services=operator.services,
-            oauth_providers=providers.keys(),
+    # No other service write lands between an Add's check of the name, the account cleanup, and the save.
+    with consistent_read():
+        if if_none_match == "*" and name in stored_user_service_names(agent.manager, agent.target):
+            raise HTTPException(412, "You already have a service with this name", headers=CONNECTIONS_HEADERS)
+        stored = load_user_services(agent.manager, agent.target).get(name)
+        same_own_account = (
+            stored is not None and stored.oauth_separate_account and stored.oauth_provider == service.oauth_provider
         )
-    except ValueError as exc:
-        raise _unprocessable(str(exc)) from exc
+        if service.oauth_separate_account and not same_own_account:
+            # A delete that could not remove an own account, such as one while a config service shadowed the name,
+            # left it behind; it goes before the service can use it.
+            _remove_account(request, agent, name, service, by=requester_id)
+        try:
+            save_user_service(
+                agent.manager,
+                agent.target,
+                name,
+                service,
+                config_services=operator.services,
+                oauth_providers=providers.keys(),
+            )
+        except ValueError as exc:
+            raise _unprocessable(str(exc)) from exc
     if (
         stored is not None
         and stored.oauth_separate_account
@@ -654,7 +686,7 @@ async def _account_provider(
     service: str,
     *,
     connecting: bool,
-) -> tuple[_ResolvedAgent, EgressService, OAuthProvider]:
+) -> tuple[AgentKeysScope, EgressService, OAuthProvider]:
     """Run the account gates in order: same origin, agent and service access, then the provider."""
     _require_egress_same_origin(request)
     agent, egress_service = await asyncio.to_thread(
@@ -676,7 +708,7 @@ async def _account_provider(
     return agent, egress_service, provider
 
 
-def _remove_account(request: Request, agent: _ResolvedAgent, name: str, stored: EgressService, *, by: str) -> None:
+def _remove_account(request: Request, agent: AgentKeysScope, name: str, stored: EgressService, *, by: str) -> None:
     """Stop Agent Keys using the account service `name` used as `stored`, and remove it if it was the service's own.
 
     Only that service used its own account, so the account goes when the service does or stops having one.
@@ -691,7 +723,7 @@ def _remove_account(request: Request, agent: _ResolvedAgent, name: str, stored: 
 
 
 def _set_account_reuse(
-    agent: _ResolvedAgent,
+    agent: AgentKeysScope,
     provider: OAuthProvider,
     service: str,
     *,

@@ -79,11 +79,7 @@ class ResponseAttemptRunner:
         show_stop_button = self.deps.show_stop_button()
         if not show_stop_button or request.user_id is None:
             return show_stop_button
-        user_is_online = await is_user_online(
-            self.deps.client,
-            request.user_id,
-            room_id=request.target.room_id,
-        )
+        user_is_online = await is_user_online(self.deps.client, request.user_id)
         self.deps.logger.info(
             "Stop button decision",
             message_id=message_id,

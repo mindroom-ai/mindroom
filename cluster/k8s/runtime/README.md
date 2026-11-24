@@ -22,6 +22,7 @@ Use this chart when MindRoom should run inside an existing platform.
 - [Worker Egress Proxy](#worker-egress-proxy)
 - [Background Script Gateway](#background-script-gateway)
 - [Egress Broker](#egress-broker)
+- [Tailnet SSH](#tailnet-ssh)
 - [Matrix Managed Account Authentication](#matrix-managed-account-authentication)
 - [Existing Platform Example](#existing-platform-example)
 - [Notes](#notes)
@@ -38,6 +39,9 @@ helm upgrade --install mindroom-runtime ./cluster/k8s/runtime \
 The default values render a self-contained Deployment, Service, ConfigMap, runtime PVC, and PostgreSQL event-journal StatefulSet.
 A real deployment should provide a useful config and Matrix settings.
 The dashboard and API are fully privileged, so the chart gives the primary a generated `MINDROOM_API_KEY`, and the install notes show how to read it.
+
+For a ready-to-copy multi-user deployment (dedicated Kubernetes workers, per-user personal agents, Agent Keys, and semantic file memory), start from [`values-multi-user.example.yaml`](values-multi-user.example.yaml) and its companion [`config-multi-user.example.yaml`](config-multi-user.example.yaml).
+Create the `mindroom-config` ConfigMap from the companion config, update the placeholder Matrix settings and Secrets, and install with `-f values-multi-user.yaml`.
 
 ## Rollout Progress Deadline
 
@@ -133,13 +137,14 @@ eventCache:
 ```
 
 When `config.create` is enabled and `config.data` is empty, the chart renders a minimal config whose `event_journal` section follows `eventCache`.
-When using `config.existingConfigMap` or custom `config.data`, keep that config's `event_journal` settings aligned with the chart values.
+When using `config.existingConfigMap` or custom `config.data`, keep that config's `event_journal` settings aligned with the chart values: for PostgreSQL, set `event_journal.backend: postgres` (`event_journal.database_url_env` already defaults to the chart-injected `MINDROOM_EVENT_CACHE_DATABASE_URL`).
 The runtime config rejects unknown top-level keys, so a `cache` section makes MindRoom refuse to start.
 
 ## Config Sources
 
 By default the chart keeps the existing ConfigMap behavior.
 Omit `config.source` or set `config.source: configMap` to mount a chart-created or existing ConfigMap at `config.mountPath`.
+Changing `config.existingConfigMap` to a different ConfigMap name updates the pod template and rolls the Deployment, whereas editing `config.data` or the contents of the same `config.existingConfigMap` does not roll the pod or hot-reload automatically because the ConfigMap is mounted with `subPath` and has no config-checksum pod annotation; run `kubectl rollout restart deployment/<fullname>` after `helm upgrade`.
 Set `config.source: file` when another init container or content bundle places `agent-config.yaml` on the runtime filesystem before MindRoom starts.
 In file mode, `config.path` must be an absolute container path.
 In file mode, the chart does not render or mount the runtime config ConfigMap.
@@ -675,6 +680,7 @@ egressBroker:
 ```
 
 The primary container then exposes an `egress-broker` port and gets `MINDROOM_EGRESS_BROKER_PORT`, `MINDROOM_EGRESS_BROKER_HOST=0.0.0.0`, and `MINDROOM_EGRESS_BROKER_URL`, plus `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` when `egressBroker.tokenTtlSeconds` is set.
+With `egressBroker.enabled: false` it gets `MINDROOM_EGRESS_BROKER_PORT=off` instead, because MindRoom otherwise starts a loopback broker for shell calls in the primary.
 The URL points workers at a `<fullname>-egress-broker` ClusterIP Service for that port.
 The Service is separate from the main runtime Service so `service.type` never exposes the broker port outside the cluster.
 Workers need no changes: each call carries its own token and CA certificate.
@@ -718,6 +724,7 @@ Users open it from MindRoom Chat (see [Connections portal](../../../docs/connect
 - **Trusted upstream auth.** The gateway in front of the runtime must authenticate users and sign a JWT.
   Configure it with the `trustedUpstreamAuth` values, and set an HTTPS `MINDROOM_PUBLIC_URL` through `env.extra`, as below.
 - **Routing.** Forward `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, and `/api/oauth/*` from the gateway to the runtime Service.
+  Leave `/api/oauth/<provider_id>/client-metadata.json` reachable without signing in, because the authorization server of a remote MCP server that [uses a client ID metadata document](../../../docs/mcp.md#oauth-client-registration) fetches it.
   The chart creates no ingress.
 - **`MINDROOM_CONNECTIONS_AGENT`.** Set it to a private agent (`private.per: user` or `user_agent`), as in the example, whenever more than one user can sign in through the gateway.
   Without it, every user the gateway admits gets full dashboard access, whatever `administrators` lists.
@@ -740,6 +747,12 @@ env:
 
 See [Trusted Upstream Browser Auth](../../../docs/deployment/trusted-upstream-auth.md) for every setting and what the chart checks, the Matrix identity options, and what users outside `administrators` can reach.
 Connecting accounts also needs the providers' [OAuth clients](../../../docs/oauth-framework.md#built-in-providers), and personal GitHub and Atlassian accounts need agents with worker scope `user` or `user_agent` unless the service sets `oauth_on_shared_workers`; see [Personal accounts and shared sandboxes](../../../docs/deployment/egress-broker.md#personal-accounts-and-shared-sandboxes).
+
+## Tailnet SSH
+
+Enable `tailnetSsh.enabled` with the Kubernetes worker backend and set `tailnetSsh.authKeySecret` to a release Secret containing `auth-key`.
+For GitOps or `helm template`, set `tailnetSsh.existingSecret` to a Secret holding the shared listener token (`tailnetSsh.key` defaults to `token`) so offline renders do not rotate it.
+See [Kubernetes Tailnet SSH](../../../docs/tailnet-ssh.md#kubernetes) for setup, release-scoped network policies, and upgrade notes, and [values.yaml](values.yaml) for all chart settings.
 
 ## Matrix Managed Account Authentication
 

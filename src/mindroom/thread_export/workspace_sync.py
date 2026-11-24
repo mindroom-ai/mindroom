@@ -39,12 +39,14 @@ if TYPE_CHECKING:
     from mindroom.event_journal import PrincipalStore
     from mindroom.matrix.identity import MatrixID
     from mindroom.response_admission import ResponseAdmissionGate
+    from mindroom.thread_export.execution import ExportedThreads
     from mindroom.thread_export.models import ThreadExportGroup, ThreadExportStats
 
 logger = get_logger(__name__)
 
 _WORKSPACE_EXPORT_DIRNAME = "thread_exports"
-_DEBOUNCE_SECONDS = 2.0
+# Long enough that a busy room is not re-exported every few seconds with nearly all of its threads unchanged.
+_DEBOUNCE_SECONDS = 60.0
 
 
 class _ThreadExportBot(Protocol):
@@ -53,6 +55,9 @@ class _ThreadExportBot(Protocol):
     running: bool
     client: nio.AsyncClient | None
     rooms: list[str]
+
+    @property
+    def agent_name(self) -> str: ...
 
     @property
     def matrix_id(self) -> MatrixID:
@@ -80,6 +85,7 @@ class WorkspaceThreadExportDeps:
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
     bot_provider: Callable[[str], _ThreadExportBot | None]
+    steward_provider: Callable[[str], _ThreadExportBot | None]
     response_admission_gate: ResponseAdmissionGate
     agent_reply_memberships: AgentReplyMembershipIndex
     debounce_seconds: float = _DEBOUNCE_SECONDS
@@ -102,9 +108,11 @@ class WorkspaceThreadExportRunner:
         self._wakeup = asyncio.Event()
         self._loop = SupervisedLoop("thread_export_workspace_sync", self._run)
         self._manual_exports: set[asyncio.Task[object]] = set()
+        # What earlier passes wrote, per agent.
+        self._exported: dict[str, ExportedThreads] = {}
 
     async def sync(self, config: Config) -> None:  # noqa: ARG002 - each pass reads the active config
-        """Start the loop, and reconcile every workspace against a changed config right away.
+        """Start the loop, and queue a pass that reconciles every workspace against a changed config.
 
         The first sync, from startup maintenance, finds the startup pass already queued once bots ran, so only later syncs queue one.
         """
@@ -157,16 +165,18 @@ class WorkspaceThreadExportRunner:
                 raise RuntimeError(msg)
 
             def source_for_group(group: ThreadExportGroup) -> ThreadExportSource:
-                bot = self._deps.bot_provider(group.entity_name)
+                # A configured room is read by its steward, any running bot joined to it.
+                owner = group.rooms[0].room_id if group.entity_name is None else group.entity_name
+                provider = self._deps.steward_provider if group.entity_name is None else self._deps.bot_provider
+                bot = provider(owner)
                 if bot is None or not bot.running or bot.client is None:
-                    msg = f"No running Matrix owner for {group.entity_name}; retry after startup or reload"
+                    msg = f"No running Matrix owner for {owner}; retry after startup or reload"
                     raise RuntimeError(msg)
                 return _source_for_bot(
                     bot,
                     group.rooms,
                     None,
                     config,
-                    entity_name=group.entity_name,
                     membership_index=self._deps.agent_reply_memberships,
                 )
 
@@ -305,8 +315,8 @@ class WorkspaceThreadExportRunner:
                     tuple(rooms),
                     agent_targets,
                     config,
-                    entity_name=agent_name,
                     membership_index=self._deps.agent_reply_memberships,
+                    exported=self._exported.setdefault(agent_name, {}),
                 ),
             )
         stats = await export_threads_to_sources(
@@ -350,8 +360,8 @@ def _source_for_bot(
     targets: tuple[ThreadExportTarget, ...] | None,
     config: Config,
     *,
-    entity_name: str,
     membership_index: AgentReplyMembershipIndex,
+    exported: ExportedThreads | None = None,
 ) -> ThreadExportSource:
     """Read ``rooms`` through one running bot's client and projection view."""
     client = bot.client
@@ -365,9 +375,10 @@ def _source_for_bot(
             self_sender=bot.matrix_id.full_id,
         ),
         rooms=rooms,
-        entity_name=entity_name,
+        entity_name=bot.agent_name,
         membership_index=membership_index,
         target_output_dirs=None if targets is None else tuple(target.output_dir for target in targets),
+        exported=exported,
     )
 
 

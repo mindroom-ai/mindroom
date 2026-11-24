@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from mindroom.redaction import REDACTION_FAILED
+from mindroom.redaction import REDACTED
 from mindroom.tool_system.progress import report_tool_progress, shown_progress, tool_progress_reporter
 
 
@@ -20,12 +20,15 @@ def test_a_nested_progress_reporter_keeps_its_reports_from_the_one_it_shadows() 
     assert outer == ["outer only"]
 
 
-def test_output_redaction_cannot_delimit_shows_only_the_failure() -> None:
-    """A secret-named key whose value may be on the next line hides the whole output, as the call's result preview does."""
-    manifest = "env:\n  - name: DB_PASSWORD\n    valueFrom:\n      secretKeyRef:\n        name: db\n"
+def test_output_hides_what_follows_a_secret_name_that_ends_its_line() -> None:
+    """A secret-named key whose value may be on a later line hides the rest of the output; what came before still shows."""
+    manifest = "env:\n  - name: DB_PASSWORD\n    valueFrom:\n      secretKeyRef:\n        name: db-credentials\n"
     rollout = "\n".join(f"rollout: {index}/100 pods ready" for index in range(1, 101))
 
-    assert shown_progress(manifest + rollout) == REDACTION_FAILED
+    assert (
+        shown_progress(manifest + rollout)
+        == f"env:\n  - name: DB_PASSWORD\n    valueFrom:\n      secretKeyRef:\n        {REDACTED}"
+    )
 
 
 def test_shown_output_is_what_a_live_reply_shows() -> None:

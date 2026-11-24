@@ -14,17 +14,20 @@ from functools import partial
 from typing import TYPE_CHECKING, cast
 
 from mindroom.ai import run_delegated_child_response
-from mindroom.ai_run_metadata import prior_usage_of
+from mindroom.ai_run_metadata import prior_usage_by_run
 from mindroom.approval.receipt_readers import add_approval_receipt_reader
 from mindroom.approval.resume import approval_decisions, with_resumed_turn_log_context
 from mindroom.approval.tool_owners import require_original_toolkit, required_approval_tool_names
 from mindroom.config.resolution import entity_timezone
+from mindroom.constants import is_silent_schedule_no_report_response, without_no_report_lines
+from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost, stored_receipts
 from mindroom.delegation.execution import drive_delegation_stream, resume_from_approval
 from mindroom.delegation.state import member_call_id, member_delegation_card, pending_call_slot
 from mindroom.helper_usage import helper_usage_context
 from mindroom.history.native import restore_native_history, with_native_history
 from mindroom.history.replay import configured_replay_plan
 from mindroom.history.session_context import load_scope_session, resolve_bound_team_scope
+from mindroom.hooks import render_system_enrichment_block
 from mindroom.llm.provider import ModelRequest
 from mindroom.llm.runs import RunStatus, TeamRunRecord
 from mindroom.loop_hooks import HookTurn, leader_loop_hooks
@@ -52,7 +55,7 @@ from mindroom.tool_system.runtime_context import current_plugins
 from mindroom.turn_model import ModelScope, resolve_team_turn_models
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 
     from mindroom.agent_loop.run import ApprovedCall
     from mindroom.approval.resume import ResumeDecisions
@@ -61,9 +64,10 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalCall
     from mindroom.history.session_context import ScopeSessionContext
     from mindroom.history.types import HistoryScope, ResolvedReplayPlan
+    from mindroom.hooks import EnrichmentItem
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.llm.events import RunEvent, ToolCompleted, ToolStarted
-    from mindroom.llm.runs import RunRequirement
+    from mindroom.llm.runs import AnyRunRecord, RunRequirement
     from mindroom.response_turn import PausedAttempt
     from mindroom.run_storage import RunStorage, TerminalRecord
     from mindroom.streaming import ProgressPublisher
@@ -218,12 +222,14 @@ def drive_team_delegations(
     return cast("AsyncIterator[TeamRunEvent]", driven)
 
 
-def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAttempt) -> PausedAttempt:
+def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAttempt, *, quiet: bool) -> PausedAttempt:
     """Render the pending calls into their slots and freeze the document the pause shows.
 
     Each call waits in the slot ``pending_call_slot`` names, the rule the approval card anchors by too. The approval
     card of a member's own delegation call adds no marker: the member's slot already shows that call pending under
-    its own id, and the resume finishes it there. Every other call waits under its own id.
+    its own id, and the resume finishes it there. Every other call waits under its own id. A ``quiet`` turn's waiting
+    document shows no slot's no-report lines, as its answer would not; the frozen document keeps them, so its resume
+    reads each run as it was.
     """
     member_ids = presentation.member_ids
     for requirement in paused.requirements:
@@ -233,12 +239,44 @@ def continued_team_pause(presentation: TeamStreamPresentation, paused: PausedAtt
         if member_id is not None:
             member_id = presentation.resolve_member_id(member_id, requirement.member_display_name)
         presentation.start_tool(requirement.tool_execution.call, member_id=member_id)
+    shown = presentation
+    if quiet:
+        shown = replace(presentation)
+        _strip_no_report_lines(shown)
     return replace(
         paused,
-        response_text=presentation.render_body(finished=False),
+        response_text=shown.render_body(finished=False),
         tool_trace=tuple(presentation.tool_trace),
         response_presentation_state=presentation.to_state(),
     )
+
+
+def settle_quiet_team_answer(
+    presentation: TeamStreamPresentation,
+    record: TeamRunRecord,
+    member_runs: Iterable[AnyRunRecord],
+) -> str | None:
+    """Settle a quiet turn's team answer: the leader's bare answer when the team reports nothing, else None.
+
+    The team reports nothing when its leader does and so does each of its ``member_runs``, as an answer does; delivery
+    withholds that answer, as an agent's. A document that stays keeps every finding but loses its slots' no-report
+    lines, which this removes from ``presentation``.
+    """
+    answer = (record.handover_content or "").strip()
+    if is_silent_schedule_no_report_response(answer) and all(
+        is_silent_schedule_no_report_response(run.handover_content or "") for run in member_runs
+    ):
+        return answer
+    _strip_no_report_lines(presentation)
+    return None
+
+
+def _strip_no_report_lines(presentation: TeamStreamPresentation) -> None:
+    """Remove the no-report lines from each slot of ``presentation``, replacing its slot texts rather than editing them."""
+    presentation.consensus = without_no_report_lines(presentation.consensus)
+    presentation.per_member = {
+        member_id: without_no_report_lines(text) for member_id, text in presentation.per_member.items()
+    }
 
 
 async def _build_paused_members(team: TeamSpec, paused: TeamRunRecord) -> None:
@@ -277,12 +315,16 @@ async def continue_paused_team_run(
     show_tool_calls: bool,
     tool_trace_collector: list[ToolTraceEntry],
     progress: ProgressPublisher | None,
+    system_enrichment_items: tuple[EnrichmentItem, ...],
+    quiet: bool,
 ) -> CompletedApprovalRun | PausedAttempt:
     """Rebuild a team and continue its exact persisted paused run.
 
     ``configured_team_name`` is the entity the approval was saved under: the configured team, or for an ad hoc team
     the member whose account handles it. ``progress``, when given, shows the resumed document live in the reply
-    being continued; the terminal delivery stays with the caller.
+    being continued; the terminal delivery stays with the caller. The resumed runs keep their stored system prompts,
+    and each member run the resume starts renders ``system_enrichment_items`` into its own. A ``quiet`` turn's team
+    that reports nothing answers as its turn would (``settle_quiet_team_answer``).
     """
     if not member_names:
         # Saved approvals name their members; without them no member could run the approved calls.
@@ -363,6 +405,7 @@ async def continue_paused_team_run(
             model_name=model_name,
             configured_team_name=team_name,
             timezone=entity_timezone(config, configured_team_name),
+            system_enrichment=render_system_enrichment_block(system_enrichment_items),
         )
         await _build_paused_members(built.spec, persisted)
         native = restore_native_history(built.spec.leader.model, persisted_run=persisted, session=scope.session)
@@ -395,6 +438,7 @@ async def continue_paused_team_run(
                     storage=storage,
                     replay_plan=plan,
                     prompt_id=None,
+                    checkpoints=False,
                 ),
             ),
             request_template=with_native_history(ModelRequest(messages=()), native),
@@ -418,7 +462,9 @@ async def continue_paused_team_run(
             approval_calls=driver_calls,
         )
         events = with_resumed_turn_log_context(events, entity_name=entity_name)
-        with helper_usage_context(scope):
+        # The resumed turn goes on from what its subagents had cost before the pause, and its reply reports it.
+        subagent_cost = SubagentCost(stored_receipts(persisted.metadata))
+        with helper_usage_context(scope), receiving_subagent_cost(subagent_cost):
             await publish_team_presentation(progress, presentation)
             async with closing_async_stream(events):
                 async for event in events:
@@ -431,27 +477,35 @@ async def continue_paused_team_run(
             attempt.show_unshown_handover(run)
         paused = paused_attempt_from_response(continued, toolkit_owners=built.spec.tool_owners())
         if paused is not None:
-            return continued_team_pause(presentation, paused)
+            return continued_team_pause(presentation, paused, quiet=quiet)
         if continued.status is not RunStatus.completed:
             # Paused on a call no approval asks about and no delegation answers, as the agent resume fails on it.
             raise pause_without_approval_error(continued, entity_label="team")
         if show_tool_calls:
             tool_trace_collector.extend(presentation.tool_trace)
+        # Each member run of this team run is a stored row of it, the resume's updated in place; read only when needed.
+        member_runs = (row for row in storage.session.runs if row.parent_run_id == run_id)
+        quiet_answer = settle_quiet_team_answer(presentation, continued, member_runs) if quiet else None
         # The document already holds what each run wrote before the pause and handed over since, the leader's included,
         # so one that stays empty, every run's text blank, shows the no-reply note, as a new team turn's does.
-        response_text = presentation.render_body(finished=True) or (
-            format_team_header(members.display_names) + NO_TEAM_RESPONSE
+        response_text = (
+            quiet_answer
+            if quiet_answer is not None
+            else (
+                presentation.render_body(finished=True) or format_team_header(members.display_names) + NO_TEAM_RESPONSE
+            )
         )
-        return CompletedApprovalRun(
-            response_text=response_text,
-            metadata_content=attempt.metadata_content(
-                config,
-                session_id=session_id,
-                status=continued.status,
-                # The usage of the turn's attempts before the paused run, which its record carries across the pause.
-                prior_usage=prior_usage_of(persisted),
-            ),
-        )
+        with receiving_subagent_cost(subagent_cost):
+            return CompletedApprovalRun(
+                response_text=response_text,
+                metadata_content=attempt.metadata_content(
+                    config,
+                    session_id=session_id,
+                    status=continued.status,
+                    # The usage of the turn's attempts before the paused run, which its record carries across the pause.
+                    prior_usage=tuple(prior_usage_by_run(persisted.metadata).values()),
+                ),
+            )
     finally:
         await finalize_consumption()
 
@@ -461,4 +515,5 @@ __all__ = [
     "continue_paused_team_run",
     "continued_team_pause",
     "drive_team_delegations",
+    "settle_quiet_team_answer",
 ]

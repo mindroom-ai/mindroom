@@ -12,7 +12,9 @@ from time import time
 from typing import TYPE_CHECKING, Any, Self
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Iterable, Mapping
+
+    from _typeshed import DataclassInstance
 
     from mindroom.llm.messages import ModelProvenance
 
@@ -80,7 +82,7 @@ def _compact(values: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _known_fields(cls: type, data: Mapping[str, Any]) -> dict[str, Any]:
+def _known_fields(cls: type[DataclassInstance], data: Mapping[str, Any]) -> dict[str, Any]:
     """Return the entries of a stored dict that name a field of the dataclass ``cls``."""
     names = {item.name for item in fields(cls)}
     return {key: value for key, value in data.items() if key in names}
@@ -93,7 +95,7 @@ def _flattened(record: _Counts) -> dict[str, Any]:
     return {**record.tokens.to_dict(first=_STORED_COUNTER_ORDER), **values}
 
 
-def _known_counts(cls: type, data: Mapping[str, Any]) -> dict[str, Any]:
+def _known_counts(cls: type[DataclassInstance], data: Mapping[str, Any]) -> dict[str, Any]:
     """Return the entries of a stored usage dict that name a field of ``cls``, its counters read into ``tokens``."""
     # LEGACY_COMPAT: Usage dicts stored with provider extras and a provider-reported cost.
     # Legacy format: request metrics on assistant messages and the per-model entries of run metrics hold a
@@ -277,6 +279,17 @@ class RunMetrics(_Counts):
         return result
 
 
+def team_run_usage(leader: RunMetrics | None, members: Iterable[RunMetrics | None]) -> RunMetrics | None:
+    """Return a team run's usage: ``leader``'s and ``members``' summed, in the leader's duration, which spans theirs."""
+    metrics = [usage for usage in (leader, *members) if usage is not None]
+    if not metrics:
+        return None
+    total = sum(metrics[1:], metrics[0])
+    if len(metrics) > 1 and leader is not None:
+        total.duration = leader.duration
+    return total
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RequestUsage:
     """The usage one provider request reported: its time, its metrics, and the model that answered it.
@@ -341,4 +354,5 @@ __all__ = [
     "TokenCounts",
     "VoiceDuration",
     "add_usage",
+    "team_run_usage",
 ]

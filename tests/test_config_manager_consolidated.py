@@ -1085,7 +1085,7 @@ class TestConsolidatedConfigManager:
     @pytest.mark.parametrize("broker_on", [False, True])
     def test_get_info_offers_the_egress_tool_only_while_the_broker_is_on(self, tmp_path: Path, broker_on: bool) -> None:
         """The tool list and tool details offer egress_credentials only while the egress broker is on."""
-        process_env = {"MINDROOM_EGRESS_BROKER_PORT": "8768"} if broker_on else {}
+        process_env = {"MINDROOM_EGRESS_BROKER_PORT": "8768" if broker_on else "off"}
         runtime_paths = resolve_runtime_paths(config_path=_minimal_config_path(tmp_path), process_env=process_env)
         cm = ConfigManagerTools(runtime_paths)
 
@@ -1190,6 +1190,32 @@ class TestConsolidatedConfigManager:
         config = load_config_yaml(config_path)
         assert "test_agent" in config.agents
         assert config.agents["test_agent"].display_name == "Test Agent"
+
+    def test_manage_agent_takes_filesystem_by_its_other_names(self, tmp_path: Path) -> None:
+        """File and coding create, update, and describe the filesystem toolkit, keeping the entry's own settings."""
+        config_path = tmp_path / "config.yaml"
+        agent = AgentConfig(display_name="Reader", tools=[{"filesystem": {"exclude_tools": ["write_file"]}}])
+        models = {"default": {"provider": "openai", "id": "test-model"}}
+        write_config_yaml(Config(agents={"reader": agent}, models=models), config_path)
+        cm = _config_manager(config_path)
+
+        created = cm.manage_agent(
+            operation="create",
+            agent_name="coder",
+            display_name="Coder",
+            tools=["coding", "file"],
+        )
+        updated = cm.manage_agent(operation="update", agent_name="reader", tools=["file", "calculator"])
+
+        assert "Successfully created" in created, created
+        assert "Successfully updated" in updated, updated
+        config = load_config_yaml(config_path)
+        assert config.agents["coder"].tool_names == ["filesystem"]
+        assert config.agents["reader"].model_dump(exclude_none=True)["tools"] == [
+            {"filesystem": {"exclude_tools": ["write_file"]}},
+            "calculator",
+        ]
+        assert "Tool: filesystem" in cm.get_info(info_type="tool_details", name="coding")
 
     def test_configuration_mutations_load_one_authoritative_snapshot(self, tmp_path: Path) -> None:
         """Authorization and mutation must use the same single loaded configuration."""
@@ -1630,6 +1656,24 @@ class TestConsolidatedConfigManager:
         result = cm.manage_agent(operation="validate", agent_name="test_agent")
         assert "Invalid tools" not in result
 
+    def test_manage_agent_validate_accepts_a_model_at_one_of_its_levels(self, tmp_path: Path) -> None:
+        """A model reference at a listed reasoning level is a configured model."""
+        config_path = tmp_path / "config.yaml"
+        reasoning = {"levels": ["low", "high"], "default": "low"}
+        config = Config(
+            agents={"test_agent": AgentConfig(display_name="Test Agent", role="Test role", model="sol@high")},
+            models={
+                "default": {"provider": "openai", "id": "m"},
+                "sol": {"provider": "codex", "id": "s", "reasoning": reasoning},
+            },
+        )
+        write_config_yaml(config, config_path)
+
+        result = _config_manager(config_path).manage_agent(operation="validate", agent_name="test_agent")
+
+        assert "Model: sol@high" in result
+        assert "not in configured models" not in result
+
     def test_manage_agent_create_rejects_unknown_knowledge_bases(self, tmp_path: Path) -> None:
         """Create must fail when knowledge base IDs are not configured."""
         config_path = tmp_path / "config.yaml"
@@ -1759,10 +1803,10 @@ class TestConsolidatedConfigManager:
         )
 
         assert config.defaults.tool_names == ["scheduler", "shell"]
-        assert config.agents["code"].tool_names == ["file", "shell"]
+        assert config.agents["code"].tool_names == ["filesystem", "shell"]
 
         resolved = config.resolve_agent("code").tools.authored
-        assert [entry.name for entry in resolved[:3]] == ["file", "shell", "scheduler"]
+        assert [entry.name for entry in resolved[:3]] == ["filesystem", "shell", "scheduler"]
         resolved_shell = next(entry for entry in resolved if entry.name == "shell")
         assert resolved_shell.tool_config_overrides == {
             "enable_run_shell_command": True,
@@ -1904,7 +1948,7 @@ class TestConsolidatedConfigManager:
             {"shell": {"extra_env_passthrough": "DAWARICH_*"}},
         ]
         assert reloaded.model_dump(exclude_none=True)["agents"]["code"]["tools"] == [
-            "file",
+            "filesystem",
             {"shell": {"enable_run_shell_command": True}},
         ]
 
@@ -1942,7 +1986,7 @@ class TestConsolidatedConfigManager:
         }
         assert resolved["openclaw_compat"] == {}
         assert resolved["shell"] == {"enable_run_shell_command": False}
-        assert resolved["coding"] == {}
+        assert resolved["filesystem"] == {}
         assert resolved["browser"] == {}
 
     def test_manage_agent_update_preserves_inline_tool_overrides(self, tmp_path: Path) -> None:

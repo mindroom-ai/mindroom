@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -18,6 +18,7 @@ import pytest
 from pydantic import ValidationError
 
 from mindroom import interactive
+from mindroom.ai import collect_streamed_response_content
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig, StreamingConfig
@@ -34,11 +35,12 @@ from mindroom.history.interrupted_replay import (
     _render_interrupted_replay_content,
 )
 from mindroom.hooks import MessageEnvelope
-from mindroom.llm.events import ToolCompleted, ToolStarted
+from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
 from mindroom.llm.runs import RunRequirement, ToolExecution
-from mindroom.matrix.client_delivery import DeliveredMatrixEvent, build_edit_event_content
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent, build_edit_event_content, edit_message_result
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.large_messages import calculate_event_size
+from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.reply_turn.inbox import InboxResponses
@@ -65,8 +67,17 @@ from mindroom.streaming import (
     send_streaming_response,
 )
 from mindroom.streaming import _consume_streaming_chunks as _consume_streaming_chunks_impl
+from mindroom.teams.presentation import TeamStreamPresentation
 from mindroom.timing import DispatchPipelineTiming
-from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
+from mindroom.tool_system.events import (
+    CollectedStreamPresentation,
+    StructuredStreamChunk,
+    ToolTraceEntry,
+    build_tool_trace_content,
+    format_tool_started_event,
+    tool_markers_in_text,
+    tool_markers_out_of_text,
+)
 from mindroom.tool_system.runtime_context import WorkerProgressEvent, get_worker_progress_pump
 from mindroom.workers.models import WorkerReadyProgress
 from tests.access_schema_support import with_current_room_member_access
@@ -97,6 +108,11 @@ if TYPE_CHECKING:
 
 IN_PROGRESS_MARKER = " ⋯"
 _INTERRUPTION_SUMMARY = "(turn stopped before completion)"
+
+
+def _shown_body(content: dict[str, Any]) -> str:
+    """Return the body MindRoom Chat reads from one sent payload: its replacement's, with its tool markers back."""
+    return tool_markers_in_text(content.get("m.new_content", content))["body"]
 
 
 async def _aiter(*events: object) -> AsyncIterator[object]:
@@ -661,6 +677,7 @@ class TestStreamingBehavior:
             event_id: str,
             new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             delivered_edits.append(
                 build_edit_event_content(event_id=event_id, new_content=new_content, new_text=new_text),
@@ -947,10 +964,7 @@ class TestStreamingBehavior:
             await streaming.finalize(mock_client)
 
             assert mock_client.room_send.call_count == 2
-            return [
-                call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
-                for call in mock_client.room_send.call_args_list
-            ]
+            return [_shown_body(call.kwargs["content"]) for call in mock_client.room_send.call_args_list]
 
         visible_bodies = await run_case(show_tool_calls=True)
         assert visible_bodies[0].startswith("Hello, this is a partial wo")
@@ -960,7 +974,7 @@ class TestStreamingBehavior:
 
         hidden_bodies = await run_case(show_tool_calls=False)
         assert hidden_bodies[0] == "Hello, this is a partial wo"
-        assert hidden_bodies[1] == "Hello, this is a partial wo\n\n"
+        assert hidden_bodies[1] == "Hello, this is a partial wo"
 
     @pytest.mark.asyncio
     async def test_pre_tool_flush_does_not_double_emit_after_idle_gap(self) -> None:
@@ -1003,10 +1017,7 @@ class TestStreamingBehavior:
         await streaming.finalize(mock_client)
 
         assert mock_client.room_send.call_count == 2
-        bodies = [
-            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
-            for call in mock_client.room_send.call_args_list
-        ]
+        bodies = [_shown_body(call.kwargs["content"]) for call in mock_client.room_send.call_args_list]
         assert bodies[0].startswith("x" * 40)
         assert "search_web" in bodies[0]
         assert "search_web" in bodies[1]
@@ -1206,10 +1217,7 @@ class TestStreamingBehavior:
         await _finish_delivery(delivery_queue, delivery_task)
 
         assert mock_client.room_send.call_count == 2
-        bodies = [
-            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
-            for call in mock_client.room_send.call_args_list
-        ]
+        bodies = [_shown_body(call.kwargs["content"]) for call in mock_client.room_send.call_args_list]
         assert "search_web" in bodies[0]
         assert "save_file" in bodies[1]
 
@@ -1273,10 +1281,7 @@ class TestStreamingBehavior:
             await _consume_streaming_chunks_for_test(mock_client, second_response_stream(), streaming)
 
         assert mock_client.room_send.call_count == 2
-        bodies = [
-            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
-            for call in mock_client.room_send.call_args_list
-        ]
+        bodies = [_shown_body(call.kwargs["content"]) for call in mock_client.room_send.call_args_list]
         assert "search_web" in bodies[0]
         assert "save_file" in bodies[1]
 
@@ -1330,10 +1335,7 @@ class TestStreamingBehavior:
         await _consume_streaming_chunks_for_test(mock_client, response_stream(), streaming)
 
         assert mock_client.room_send.call_count == 3
-        bodies = [
-            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
-            for call in mock_client.room_send.call_args_list
-        ]
+        bodies = [_shown_body(call.kwargs["content"]) for call in mock_client.room_send.call_args_list]
         assert "search_web" in bodies[0]
         assert "save_file" not in bodies[1]
         assert "save_file" in bodies[2]
@@ -1456,10 +1458,7 @@ class TestStreamingBehavior:
             await _finish_delivery(delivery_queue, delivery_task)
 
         assert mock_client.room_send.call_count == 1
-        bodies = [
-            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
-            for call in mock_client.room_send.call_args_list
-        ]
+        bodies = [_shown_body(call.kwargs["content"]) for call in mock_client.room_send.call_args_list]
         assert "search_web" in bodies[-1]
         assert "save_file" in bodies[-1]
 
@@ -1512,10 +1511,7 @@ class TestStreamingBehavior:
             await _consume_streaming_chunks_for_test(mock_client, response_stream(), streaming)
 
         assert mock_client.room_send.call_count == 2
-        bodies = [
-            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
-            for call in mock_client.room_send.call_args_list
-        ]
+        bodies = [_shown_body(call.kwargs["content"]) for call in mock_client.room_send.call_args_list]
         assert "⏳" in bodies[0]
         assert "⏳" not in bodies[1]
 
@@ -1682,10 +1678,7 @@ class TestStreamingBehavior:
             _queue_delivery_request(delivery_queue, progress_hint=True)
             await _finish_delivery(delivery_queue, delivery_task)
 
-        bodies = [
-            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
-            for call in mock_client.room_send.call_args_list
-        ]
+        bodies = [_shown_body(call.kwargs["content"]) for call in mock_client.room_send.call_args_list]
         assert bodies == ["0123456789", "abcdefghij"]
 
     @pytest.mark.asyncio
@@ -1749,10 +1742,7 @@ class TestStreamingBehavior:
             _queue_delivery_request(delivery_queue, progress_hint=True)
             await _finish_delivery(delivery_queue, delivery_task)
 
-        bodies = [
-            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
-            for call in mock_client.room_send.call_args_list
-        ]
+        bodies = [_shown_body(call.kwargs["content"]) for call in mock_client.room_send.call_args_list]
         assert len(bodies) == 2
         assert "⏳" in bodies[0]
         assert "⏳" not in bodies[1]
@@ -1855,10 +1845,7 @@ class TestStreamingBehavior:
             await _finish_delivery(delivery_queue, delivery_task)
 
         assert mock_client.room_send.call_count == 2
-        bodies = [
-            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
-            for call in mock_client.room_send.call_args_list
-        ]
+        bodies = [_shown_body(call.kwargs["content"]) for call in mock_client.room_send.call_args_list]
         assert bodies == ["A", "AB"]
 
     @pytest.mark.asyncio
@@ -2281,6 +2268,7 @@ class TestStreamingBehavior:
             _event_id: str,
             new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             edited_contents.append((new_content, new_text))
             return DeliveredMatrixEvent(event_id="$edit", content_sent=dict(new_content))
@@ -2408,6 +2396,7 @@ class TestStreamingBehavior:
             _client: object,
             room_id: str,
             content: dict[str, object],
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             sent_messages.append((room_id, content))
             return DeliveredMatrixEvent(event_id="$stream_1", content_sent=dict(content))
@@ -2628,6 +2617,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             edited_texts.append(new_text)
             first_edit_finished.set()
@@ -2755,6 +2745,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             edited_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
@@ -2793,6 +2784,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             if "Preparing isolated worker" in new_text:
                 msg = "edit blew up"
@@ -2848,6 +2840,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             edited_texts.append(new_text)
             if "Preparing isolated worker" in new_text:
@@ -2902,6 +2895,7 @@ class TestStreamingBehavior:
             _client: object,
             _room_id: str,
             content: dict[str, object],
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             return DeliveredMatrixEvent(event_id="$event123", content_sent=dict(content))
 
@@ -2951,6 +2945,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             edited_texts.append(new_text)
             if "Preparing isolated worker" in new_text and "hello" not in new_text and "world" not in new_text:
@@ -3013,6 +3008,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             _new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             await stream_finished.wait()
             edited_statuses.append(_new_content.get(STREAM_STATUS_KEY))
@@ -3045,31 +3041,30 @@ class TestStreamingBehavior:
         assert edited_statuses == [STREAM_STATUS_STREAMING]
 
     @pytest.mark.asyncio
-    async def test_streaming_edit_returning_none_raises_delivery_error(self) -> None:
-        """A Matrix edit failure returning None must not be treated as a successful non-terminal send."""
+    async def test_streaming_progress_edit_returning_none_is_not_committed_and_the_terminal_update_lands(self) -> None:
+        """A progress edit Matrix fails is not a success, yet the stream goes on and its terminal update lands."""
         mock_client = _make_matrix_client_mock()
 
-        terminal_texts: list[str] = []
+        edited: list[tuple[str, object]] = []
         edit_results = [None, DeliveredMatrixEvent(event_id="$terminal", content_sent={})]
 
         async def record_edit(
             _client: object,
             _room_id: str,
             _event_id: str,
-            _new_content: dict[str, object],
+            new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent | None:
-            terminal_texts.append(new_text)
+            edited.append((new_text, new_content.get(STREAM_STATUS_KEY)))
             return edit_results.pop(0)
 
         async def stream() -> AsyncIterator[str]:
             yield "hello"
 
-        with (
-            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)),
-            pytest.raises(StreamingDeliveryError, match="Failed to edit streaming message") as exc_info,
-        ):
-            await send_streaming_response(
+        records = FakeReplyRecords(edit=record_edit)
+        with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
+            outcome = await send_streaming_response(
                 client=mock_client,
                 target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
                 config=self.config,
@@ -3078,12 +3073,79 @@ class TestStreamingBehavior:
                 existing_event_id="$thinking_123",
                 adopt_existing_placeholder=True,
                 streaming_cls=_ImmediateStreamingResponse,
-                **FakeReplyRecords(edit=record_edit).hooks(),
+                **records.hooks(),
             )
 
-        # The failed edit is the stream's last write: its span exit, not the stream, notes the failure.
-        assert terminal_texts == ["hello"]
-        assert str(exc_info.value.error) == "Failed to edit streaming message"
+        assert edited == [("hello", STREAM_STATUS_STREAMING), ("hello", STREAM_STATUS_COMPLETED)]
+        # The failed edit never counts as delivered progress.
+        assert [write.kind for write in records.writes] == ["progress", "terminal"]
+        assert outcome.rendered_body == "hello"
+        assert outcome.visible_body_state == "visible_body"
+        assert not outcome.failed
+
+    @pytest.mark.asyncio
+    async def test_a_homeserver_blip_on_one_progress_edit_does_not_end_the_stream(self) -> None:
+        """One progress edit lost to a homeserver restart is resent by the next one, and the answer still lands."""
+        mock_client = _make_matrix_client_mock()
+
+        edited: list[tuple[str, object]] = []
+        edit_recorded = asyncio.Event()
+
+        async def record_edit(
+            _client: object,
+            _room_id: str,
+            _event_id: str,
+            new_content: dict[str, object],
+            new_text: str,
+            **_kwargs: object,
+        ) -> DeliveredMatrixEvent | None:
+            edited.append((new_text, new_content.get(STREAM_STATUS_KEY)))
+            edit_recorded.set()
+            if len(edited) == 1:
+                # The homeserver is restarting: this edit does not land.
+                return None
+            return DeliveredMatrixEvent(event_id=f"$edit_{len(edited)}", content_sent=dict(new_content))
+
+        async def wait_for_edits(count: int) -> None:
+            async with asyncio.timeout(5):
+                while len(edited) < count:
+                    edit_recorded.clear()
+                    await edit_recorded.wait()
+
+        async def stream() -> AsyncIterator[str]:
+            yield "Checking"
+            await wait_for_edits(1)
+            yield " the logs"
+            await wait_for_edits(2)
+            yield " now."
+            await wait_for_edits(3)
+
+        records = FakeReplyRecords(edit=record_edit)
+        with patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_edit)):
+            outcome = await send_streaming_response(
+                client=mock_client,
+                target=MessageTarget.resolve("!test:localhost", None, "$original_123", room_mode=True),
+                config=self.config,
+                runtime_paths=runtime_paths_for(self.config),
+                response_stream=stream(),
+                existing_event_id="$thinking_123",
+                adopt_existing_placeholder=True,
+                streaming_cls=_ImmediateStreamingResponse,
+                **records.hooks(),
+            )
+
+        assert edited == [
+            ("Checking", STREAM_STATUS_STREAMING),
+            # The next edit carries the whole reply again, so the failed one's text is not lost.
+            ("Checking the logs", STREAM_STATUS_STREAMING),
+            ("Checking the logs now.", STREAM_STATUS_STREAMING),
+            ("Checking the logs now.", STREAM_STATUS_COMPLETED),
+        ]
+        delivered = [write.progress for write in records.writes if write.kind == "progress_delivered"]
+        assert len(delivered) == 2
+        assert outcome.rendered_body == "Checking the logs now."
+        assert outcome.visible_body_state == "visible_body"
+        assert not outcome.failed
 
     @pytest.mark.asyncio
     async def test_send_or_edit_message_commits_frozen_preawait_snapshot(self) -> None:
@@ -3125,6 +3187,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             _new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             streaming.accumulated_text = "hello"
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
@@ -3216,7 +3279,7 @@ class TestStreamingBehavior:
                 session_id="session-1",
                 run_id="run-1",
                 requirements=(RunRequirement(tool),),
-                response_text=f"Before approval.{marker}",
+                response_text=f"Before approval.\n\n{marker}",
                 tool_trace=(trace_entry,),
                 toolkit_owners={("general", "inspect"): "test_toolkit"},
             ),
@@ -3243,7 +3306,7 @@ class TestStreamingBehavior:
             streaming.accumulated_text = "Before approval."
             await streaming._send_or_edit_message(mock_client)
             recorded_force_flags.clear()
-            streaming.accumulated_text += marker
+            streaming._append_tool_marker(marker)
             streaming.tool_trace.append(trace_entry)
             raise pause
 
@@ -3279,7 +3342,7 @@ class TestStreamingBehavior:
                     await run_stream()
                 assert raised_pause.value is pause
                 assert pause.presentation is not None
-                assert pause.presentation.response_text == f"Before approval.{marker}".rstrip()
+                assert pause.presentation.response_text == f"Before approval.\n\n{marker}"
                 assert pause.presentation.tool_trace == (trace_entry,)
             else:
                 with pytest.raises(PausePresentationError) as raised_delivery:
@@ -3309,7 +3372,7 @@ class TestStreamingBehavior:
                 session_id="session-1",
                 run_id="run-1",
                 requirements=(RunRequirement(tool),),
-                response_text=f"{raw_interactive}{marker}".rstrip(),
+                response_text=f"{raw_interactive}\n\n{marker}",
                 tool_trace=(trace_entry,),
                 toolkit_owners={("general", "inspect"): "test_toolkit"},
             ),
@@ -3317,7 +3380,7 @@ class TestStreamingBehavior:
 
         async def paused_stream() -> AsyncIterator[object]:
             yield StructuredStreamChunk(
-                content=f"{raw_interactive}{marker}",
+                content=f"{raw_interactive}\n\n{marker}",
                 tool_trace=[trace_entry],
             )
             raise pause
@@ -3341,8 +3404,8 @@ class TestStreamingBehavior:
 
         assert raised_pause.value is pause
         assert pause.presentation is not None
-        assert pause.presentation.response_text == f"{raw_interactive}{marker}".rstrip()
-        assert pause.presentation.rendered_response_text == f"{rendered_interactive}{marker}".rstrip()
+        assert pause.presentation.response_text == f"{raw_interactive}\n\n{marker}"
+        assert pause.presentation.rendered_response_text == f"{rendered_interactive}\n\n{marker}"
         assert pause.presentation.tool_trace == (trace_entry,)
 
     @pytest.mark.asyncio
@@ -3360,6 +3423,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             nonlocal in_flight, max_in_flight
             in_flight += 1
@@ -3412,7 +3476,12 @@ class TestStreamingBehavior:
         placeholder_sent = asyncio.Event()
         notice_shown = asyncio.Event()
 
-        async def record_send(_client: object, _room_id: str, content: dict[str, object]) -> DeliveredMatrixEvent:
+        async def record_send(
+            _client: object,
+            _room_id: str,
+            content: dict[str, object],
+            **_kwargs: object,
+        ) -> DeliveredMatrixEvent:
             placeholder_sent.set()
             return DeliveredMatrixEvent(event_id="$stream", content_sent=dict(content))
 
@@ -3422,6 +3491,7 @@ class TestStreamingBehavior:
             _event_id: str,
             new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             if "Preparing isolated worker" in new_text:
                 notice_shown.set()
@@ -3711,6 +3781,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             captured_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
@@ -3813,6 +3884,7 @@ class TestStreamingBehavior:
             _event_id: str,
             _new_content: dict[str, object],
             new_text: str,
+            **_kwargs: object,
         ) -> DeliveredMatrixEvent:
             captured_texts.append(new_text)
             return DeliveredMatrixEvent(event_id="$edit", content_sent={})
@@ -4091,7 +4163,7 @@ class TestStreamingBehavior:
         await streaming.finalize(mock_client)
 
         assert mock_client.room_send.call_count == 2
-        first_body = mock_client.room_send.call_args_list[0].kwargs["content"]["body"]
+        first_body = _shown_body(mock_client.room_send.call_args_list[0].kwargs["content"])
         assert "save_file" in first_body
         assert "Worker startup failed" not in first_body
 
@@ -4142,7 +4214,7 @@ class TestStreamingBehavior:
         await streaming.finalize(mock_client)
 
         assert mock_client.room_send.call_count == 2
-        first_body = mock_client.room_send.call_args_list[0].kwargs["content"]["body"]
+        first_body = _shown_body(mock_client.room_send.call_args_list[0].kwargs["content"])
         assert first_body == "Thinking..."
 
     @pytest.mark.asyncio
@@ -4222,10 +4294,7 @@ class TestStreamingBehavior:
             await _finish_delivery(delivery_queue, delivery_task)
 
         assert mock_client.room_send.call_count == 2
-        bodies = [
-            call.kwargs["content"].get("m.new_content", call.kwargs["content"])["body"]
-            for call in mock_client.room_send.call_args_list
-        ]
+        bodies = [_shown_body(call.kwargs["content"]) for call in mock_client.room_send.call_args_list]
         assert "Worker startup failed" in bodies[0]
         assert bodies[1] == "Thinking..."
 
@@ -4392,9 +4461,9 @@ class TestStreamTransportStopsWithItsMembership:
     async def test_a_progressive_edit_stops_once_the_membership_ended(self, tmp_path: Path) -> None:
         """The edit the fence invalidated must never leave this process.
 
-        Stopping is not failing. A failed non-terminal edit raises, and the
-        notice that failure produces would be one more direct write into the
-        same room the bot has left.
+        Stopping is not failing, and it is not trying either: a failed edit is
+        retried by the next one, and an edit that raises fails the stream,
+        whose notice would be one more direct write into the room the bot has left.
         """
         streaming = self._streaming(tmp_path, membership_is_current=False)
         streaming.event_id = "$visible"
@@ -4551,3 +4620,468 @@ async def test_a_failing_final_transform_still_delivers_the_streamed_answer(tmp_
 
     assert prepared is not None
     assert "the streamed answer" in prepared.content["body"]
+
+
+def _sending_client_mock() -> AsyncMock:
+    client = _make_matrix_client_mock()
+    client.room_send.return_value = MagicMock(spec=nio.RoomSendResponse, event_id="$stream-1")
+    return client
+
+
+def _tool_pair(call_id: str, tool_name: str) -> list[object]:
+    return [
+        ToolStarted(ToolExecution(tool_call_id=call_id, tool_name=tool_name, tool_args={}).call),
+        ToolCompleted(ToolExecution(tool_call_id=call_id, tool_name=tool_name, result="ok").call),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("chunks", "expected_body", "expected_at", "expected_body_line", "expected_hidden"),
+    [
+        pytest.param(
+            [*_tool_pair("call-1", "read_file"), *_tool_pair("call-2", "shell"), TextDelta("Done!")],
+            "Done!",
+            [0, 0],
+            [0, 0],
+            "Done!",
+            id="leading-tools",
+        ),
+        pytest.param(
+            [
+                TextDelta("Checking."),
+                *_tool_pair("call-1", "read_file"),
+                *_tool_pair("call-2", "shell"),
+                TextDelta("Found it."),
+            ],
+            "Checking.\n\nFound it.",
+            [1, 1],
+            [2, 2],
+            "Checking.\n\nFound it.",
+            id="between-paragraphs",
+        ),
+        pytest.param(
+            [*_tool_pair("call-1", "read_file"), TextDelta("\nFound it.")],
+            "Found it.",
+            [0],
+            [0],
+            "\nFound it.",
+            id="leading-lf-after-marker",
+        ),
+        pytest.param(
+            [*_tool_pair("call-1", "read_file"), TextDelta("\n"), TextDelta("\n"), TextDelta("Found it.")],
+            "Found it.",
+            [0],
+            [0],
+            "\n\nFound it.",
+            id="split-lf-after-marker",
+        ),
+        pytest.param(
+            [TextDelta("Checking.\r\n"), *_tool_pair("call-1", "read_file"), TextDelta("\r\nFound")],
+            "Checking.\r\n\nFound",
+            [1],
+            [2],
+            "Checking.\r\n\nFound",
+            id="crlf-around-marker",
+        ),
+        pytest.param(
+            [*_tool_pair("call-1", "read_file"), TextDelta("\r\n\r\nAfter.")],
+            "After.",
+            [0],
+            [0],
+            "\r\n\r\nAfter.",
+            id="double-crlf-after-marker",
+        ),
+        pytest.param(
+            [*_tool_pair("call-1", "read_file"), TextDelta("\r"), TextDelta("\nX")],
+            "X",
+            [0],
+            [0],
+            "\r\nX",
+            id="split-cr-lf-after-marker",
+        ),
+        pytest.param(
+            [*_tool_pair("call-1", "read_file"), TextDelta("\r\n"), TextDelta("After.")],
+            "After.",
+            [0],
+            [0],
+            "\r\nAfter.",
+            id="newline-only-crlf-after-marker",
+        ),
+        pytest.param(
+            [TextDelta("Checking.\r"), *_tool_pair("call-1", "read_file"), TextDelta("After.")],
+            "Checking.\r\n\nAfter.",
+            [1],
+            [2],
+            "Checking.\r\n\nAfter.",
+            id="lone-cr-before-marker",
+        ),
+        pytest.param(
+            [TextDelta("Doc\r\n\r\n"), *_tool_pair("call-1", "read_file")],
+            "Doc\r\n\r",
+            [1],
+            [2],
+            "Doc\r\n\r\n",
+            id="crlf-blank-line-before-trailing-marker",
+        ),
+        pytest.param(
+            [
+                TextDelta("Doc\r\n\r\n"),
+                ToolStarted(ToolExecution(tool_call_id="call-1", tool_name="read_file", tool_args={}).call),
+            ],
+            "Doc\r\n\r",
+            [1],
+            [2],
+            "Doc\r\n\r\n",
+            id="crlf-blank-line-before-pending-marker",
+        ),
+        pytest.param(
+            [TextDelta("Before\r\n\r\n"), *_tool_pair("call-1", "read_file"), TextDelta("After")],
+            "Before\r\n\r\n\nAfter",
+            [1],
+            [3],
+            "Before\r\n\r\nAfter",
+            id="crlf-blank-line-before-interior-marker",
+        ),
+        pytest.param(
+            [TextDelta("Checking."), *_tool_pair("call-1", "read_file"), *_tool_pair("call-2", "shell")],
+            "Checking.",
+            [1, 1],
+            [1, 1],
+            "Checking.",
+            id="trailing-completed-markers",
+        ),
+        pytest.param(
+            [
+                TextDelta("Checking."),
+                ToolStarted(ToolExecution(tool_call_id="call-1", tool_name="read_file", tool_args={}).call),
+            ],
+            "Checking.",
+            [1],
+            [1],
+            "Checking.",
+            id="trailing-pending-marker",
+        ),
+    ],
+)
+async def test_tool_markers_strip_to_clean_wire_body_without_blank_lines(
+    tmp_path: Path,
+    chunks: list[object],
+    expected_body: str,
+    expected_at: list[int],
+    expected_body_line: list[int],
+    expected_hidden: str,
+) -> None:
+    """Streamed and collected replies send a clean v3 body that reads back exactly; hidden calls leave only text."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    paths = runtime_paths_for(config)
+    mock_client = _sending_client_mock()
+
+    async def stream() -> AsyncIterator[object]:
+        for chunk in chunks:
+            yield chunk
+
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!room:localhost", None, "$src"),
+        config=config,
+        runtime_paths=paths,
+        show_tool_calls=True,
+        **reply_hooks(),
+    )
+    await _consume_streaming_chunks_for_test(mock_client, stream(), streaming)
+    prepared = await streaming._prepare_delivery_async(is_final=True, allow_empty_progress=False)
+    assert prepared is not None
+    streamed_wire = tool_markers_out_of_text(prepared.content)
+    assert streamed_wire["body"] == expected_body
+    assert "🔧" not in streamed_wire["body"]
+    assert streamed_wire["io.mindroom.tool_trace"]["version"] == 3
+    assert [event["at"] for event in streamed_wire["io.mindroom.tool_trace"]["events"]] == expected_at
+    assert [event["body_line"] for event in streamed_wire["io.mindroom.tool_trace"]["events"]] == expected_body_line
+    assert tool_markers_in_text(streamed_wire) == prepared.content
+
+    collected_body, collected_trace = await collect_streamed_response_content(
+        stream(),
+        presentation=CollectedStreamPresentation(show_tool_calls=True),
+    )
+    collected_content = format_message_with_mentions(
+        config,
+        paths,
+        collected_body,
+        extra_content=build_tool_trace_content(collected_trace),
+    )
+    collected_wire = tool_markers_out_of_text(collected_content)
+    assert collected_wire["body"] == expected_body
+    assert "🔧" not in collected_wire["body"]
+    assert collected_wire["io.mindroom.tool_trace"]["version"] == 3
+    assert [event["at"] for event in collected_wire["io.mindroom.tool_trace"]["events"]] == expected_at
+    assert [event["body_line"] for event in collected_wire["io.mindroom.tool_trace"]["events"]] == expected_body_line
+    assert tool_markers_in_text(collected_wire) == collected_content
+
+    hidden = StreamingResponse(
+        target=MessageTarget.resolve("!room:localhost", None, "$src"),
+        config=config,
+        runtime_paths=paths,
+        show_tool_calls=False,
+        **reply_hooks(),
+    )
+    await _consume_streaming_chunks_for_test(mock_client, stream(), hidden)
+    assert hidden.has_progress() is True
+    assert hidden.accumulated_text == expected_hidden
+
+
+@pytest.mark.asyncio
+async def test_tool_marker_edge_cases_hidden_progress_replacement_and_teams(tmp_path: Path) -> None:
+    """Cover hidden leading progress, calls-only replies, replacement inline mentions, and teams."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    paths = runtime_paths_for(config)
+    mock_client = _sending_client_mock()
+
+    # 1. Leading hidden ToolStarted marks progress while accumulated_text stays empty.
+    hidden = StreamingResponse(
+        target=MessageTarget.resolve("!room:localhost", None, "$src"),
+        config=config,
+        runtime_paths=paths,
+        show_tool_calls=False,
+        **reply_hooks(),
+    )
+    await _consume_streaming_chunks_for_test(
+        mock_client,
+        _aiter(ToolStarted(ToolExecution(tool_call_id="call-h1", tool_name="shell", tool_args={}).call)),
+        hidden,
+    )
+    assert hidden.accumulated_text == ""
+    assert hidden.has_progress() is True
+
+    # 2. Trailing markers only (no prose) stay v2 with canonical spacing and no leading/trailing blank lines.
+    calls_only_body, calls_only_trace = await collect_streamed_response_content(
+        _aiter(*_tool_pair("call-1", "read_file"), *_tool_pair("call-2", "shell")),
+        presentation=CollectedStreamPresentation(show_tool_calls=True),
+    )
+    assert calls_only_body == "🔧 `read_file` [1]\n\n🔧 `shell` [2]"
+    calls_only_content = format_message_with_mentions(
+        config,
+        paths,
+        calls_only_body,
+        extra_content=build_tool_trace_content(calls_only_trace),
+    )
+    assert tool_markers_out_of_text(calls_only_content) is calls_only_content
+
+    # 3. Replacement-mode snapshot quoting a pending marker inline still appends and completes the real marker line.
+    inline_sentence = "What does 🔧 `read` [1] ⏳ mean?"
+    replacement = ReplacementStreamingResponse(
+        target=MessageTarget.resolve("!room:localhost", None, "$src"),
+        config=config,
+        runtime_paths=paths,
+        show_tool_calls=True,
+        **reply_hooks(),
+    )
+    read_call = ToolExecution(tool_call_id="call-r1", tool_name="read", tool_args={}, result="ok").call
+    await _consume_streaming_chunks_for_test(
+        mock_client,
+        _aiter(ToolStarted(read_call), StructuredStreamChunk(content=inline_sentence), ToolCompleted(read_call)),
+        replacement,
+    )
+    assert replacement.accumulated_text == f"{inline_sentence}\n\n🔧 `read` [1]"
+    prepared_rep = await replacement._prepare_delivery_async(is_final=True, allow_empty_progress=False)
+    assert prepared_rep is not None
+    rep_wire = tool_markers_out_of_text(prepared_rep.content)
+    assert rep_wire["body"] == inline_sentence
+    assert rep_wire["io.mindroom.tool_trace"]["version"] == 3
+    assert tool_markers_in_text(rep_wire) == prepared_rep.content
+
+    # 4. Team slots with consecutive leading and mid-paragraph calls strip cleanly to v3.
+    team = TeamStreamPresentation.new(["alpha", "beta"], ["Alpha", "Beta"], show_tool_calls=True)
+    for cid, name in (("t1", "read_file"), ("t2", "shell")):
+        call = ToolExecution(tool_call_id=cid, tool_name=name, tool_args={}, result="ok").call
+        team.start_tool(call, member_id="alpha")
+        team.complete_tool(call, member_id="alpha")
+    team.append_member("alpha", "Done.")
+    team.append_member("beta", "Checking.")
+    for cid, name in (("t3", "read_file"), ("t4", "shell")):
+        call = ToolExecution(tool_call_id=cid, tool_name=name, tool_args={}, result="ok").call
+        team.start_tool(call, member_id="beta")
+        team.complete_tool(call, member_id="beta")
+    team.append_member("beta", "Found it.")
+    team.append_consensus("Agreed.")
+    team_content = format_message_with_mentions(
+        config,
+        paths,
+        team.render_body(finished=True),
+        extra_content=build_tool_trace_content(team.tool_trace),
+    )
+    team_wire = tool_markers_out_of_text(team_content)
+    assert team_wire["io.mindroom.tool_trace"]["version"] == 3
+    assert "🔧" not in team_wire["body"]
+    assert team_wire["body"] == (
+        "🤝 **Team Response** (Alpha, Beta):\n\n"
+        "**Alpha**:\n\nDone.\n\n"
+        "**Beta**: Checking.\n\nFound it.\n\n"
+        "\n**Team Consensus**:\n\nAgreed."
+    )
+    assert tool_markers_in_text(team_wire) == team_content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "deltas",
+    [
+        ["🔧 `read` [1]", " is literal."],
+        ["```\n🔧 `x` [1]", "\n```"],
+        ["🔧 `x` [1]", "\n", "next"],
+    ],
+)
+async def test_marker_shaped_prose_joins_as_plain_text_however_its_deltas_split(
+    tmp_path: Path,
+    deltas: list[str],
+) -> None:
+    """With no tool event between them, deltas that look like a marker join as they came, in every kind of reply."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!room:localhost", None, "$src"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        show_tool_calls=True,
+        **reply_hooks(),
+    )
+    await _consume_streaming_chunks_for_test(_sending_client_mock(), _aiter(*map(TextDelta, deltas)), streaming)
+    collected, _ = await collect_streamed_response_content(
+        _aiter(*map(TextDelta, deltas)),
+        presentation=CollectedStreamPresentation(show_tool_calls=True),
+    )
+    team = TeamStreamPresentation.new(["alpha"], ["Alpha"], show_tool_calls=True)
+    for delta in deltas:
+        team.append_member_run("alpha", "run-1", delta)
+        team.append_consensus(delta)
+
+    assert streaming.accumulated_text == collected == team.per_member["alpha"] == team.consensus == "".join(deltas)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("snapshot", "expected"),
+    [
+        pytest.param(
+            "Example:\n\n```\n🔧 `read` [1] ⏳\n```",
+            "Example:\n\n```\n🔧 `read` [1] ⏳\n```\n\n🔧 `read` [1]",
+            id="fenced-quote",
+        ),
+        pytest.param(
+            "Example:\r\n\r\n🔧 `read` [1] ⏳\r\n\r\nend",
+            "Example:\r\n\r\n🔧 `read` [1] ⏳\r\n\r\nend\n\n🔧 `read` [1]",
+            id="crlf-quote",
+        ),
+        pytest.param("🔧 `read` [1] ⏳\n\nDoc", "🔧 `read` [1]\n\nDoc", id="own-marker-first"),
+        pytest.param("Doc\n\n🔧 `read` [1] ⏳", "Doc\n\n🔧 `read` [1]", id="own-marker-last"),
+        # As a collected reply writes the marker of a call below text that ends in a CRLF blank line.
+        pytest.param(
+            "Doc\r\n\r\n\n🔧 `read` [1] ⏳\n\nAfter",
+            "Doc\r\n\r\n\n🔧 `read` [1]\n\nAfter",
+            id="own-marker-below-crlf-blank-line",
+        ),
+    ],
+)
+async def test_a_replacement_snapshot_holds_its_pending_call_as_one_marker_paragraph(
+    tmp_path: Path,
+    snapshot: str,
+    expected: str,
+) -> None:
+    """A snapshot that only quotes its pending call's marker gets the call's own, which alone the completion marks."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    replacement = ReplacementStreamingResponse(
+        target=MessageTarget.resolve("!room:localhost", None, "$src"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        show_tool_calls=True,
+        **reply_hooks(),
+    )
+    call = ToolExecution(tool_call_id="call-1", tool_name="read", tool_args={}, result="ok").call
+
+    await _consume_streaming_chunks_for_test(
+        _sending_client_mock(),
+        _aiter(ToolStarted(call), StructuredStreamChunk(content=snapshot), ToolCompleted(call)),
+        replacement,
+    )
+
+    assert replacement.accumulated_text == expected
+
+
+def test_newlines_dropped_after_a_tool_call_do_not_count_as_received_text(tmp_path: Path) -> None:
+    """Only appended characters count toward the next edit; an empty append still marks a presentation change."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!room:localhost", None, "$src"),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        show_tool_calls=True,
+        **reply_hooks(),
+    )
+    streaming._append_incremental_text("Checking.")
+    streaming._append_tool_marker("🔧 `read` [1] ⏳")
+    counted, delta_at = streaming.chars_since_last_update, streaming.last_delta_at
+    assert counted == len("Checking.\n\n🔧 `read` [1] ⏳")
+
+    streaming._append_incremental_text("\r\n")
+    assert (streaming.chars_since_last_update, streaming.last_delta_at) == (counted, delta_at)
+
+    streaming.last_delta_at = None
+    streaming._append_incremental_text("")
+    assert streaming.chars_since_last_update == counted
+    assert streaming.last_delta_at is not None
+
+    streaming._append_incremental_text("\nDone")
+    assert streaming.accumulated_text == "Checking.\n\n🔧 `read` [1] ⏳\n\nDone"
+    assert streaming.chars_since_last_update == len(streaming.accumulated_text)
+
+
+@pytest.mark.asyncio
+async def test_streaming_tool_calls_only_progress_edit_sends_thinking_placeholder_without_markers(
+    tmp_path: Path,
+) -> None:
+    """A real streaming tool-calls-only progress edit sends Thinking... with placeholder_body=True and zero markers."""
+    config = bind_runtime_paths(Config(), test_runtime_paths(tmp_path))
+    paths = runtime_paths_for(config)
+    mock_client = _sending_client_mock()
+    mock_client.user_id = "@mindroom_code:localhost"
+
+    pending_call = ToolExecution(tool_call_id="call-2", tool_name="shell", tool_args={"cmd": "pwd"}).call
+    streaming = StreamingResponse(
+        target=MessageTarget.resolve("!room:localhost", None, "$src"),
+        config=config,
+        runtime_paths=paths,
+        show_tool_calls=True,
+        **reply_hooks(),
+    )
+    await _consume_streaming_chunks_for_test(
+        mock_client,
+        _aiter(*_tool_pair("call-1", "read_file"), ToolStarted(pending_call)),
+        streaming,
+    )
+    prepared = await streaming._prepare_delivery_async(is_final=False, allow_empty_progress=False)
+    assert prepared is not None
+    assert prepared.content["body"] == "🔧 `read_file` [1]\n\n🔧 `shell` [2] ⏳"
+
+    mock_client.room_send = AsyncMock(return_value=nio.RoomSendResponse("$edit", "!room:localhost"))
+    delivered = await edit_message_result(
+        mock_client,
+        "!room:localhost",
+        "$reply",
+        prepared.content,
+        prepared.display_text,
+    )
+    assert delivered is not None
+    wire = mock_client.room_send.await_args.kwargs["content"]
+    assert wire["body"] == "* Thinking..."
+    assert wire["formatted_body"] == "<p>Thinking...</p>\n"
+    assert wire["m.new_content"]["body"] == "Thinking..."
+    assert wire["m.new_content"]["formatted_body"] == "<p>Thinking...</p>\n"
+    assert wire["m.new_content"]["io.mindroom.tool_trace"]["version"] == 3
+    assert wire["m.new_content"]["io.mindroom.tool_trace"]["placeholder_body"] is True
+    assert "🔧" not in wire["body"]
+    assert "🔧" not in wire["formatted_body"]
+    assert "🔧" not in wire["m.new_content"]["body"]
+    assert "🔧" not in wire["m.new_content"]["formatted_body"]
+    assert tool_markers_in_text(wire) == build_edit_event_content(
+        event_id="$reply",
+        new_content=prepared.content,
+        new_text=prepared.display_text,
+    )

@@ -9,7 +9,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 from mindroom.agent_loop.build import prompt_for_turn
@@ -19,6 +19,7 @@ from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.agents import create_agent
 from mindroom.ai import run_delegated_child_response
+from mindroom.ai_runtime import queued_notice_after_tool_batch
 from mindroom.approval.resume import ResumeRunner
 from mindroom.bot import AgentBot
 from mindroom.config.access import ResponderAccessConfig
@@ -47,6 +48,7 @@ from mindroom.llm.events import RunFinished
 from mindroom.llm.messages import Message
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
 from mindroom.matrix.identity import MatrixID
+from mindroom.mid_turn import QueuedMessage
 from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.participation_hook import participation_hook
 from mindroom.run_storage import RunStorage
@@ -91,6 +93,7 @@ if TYPE_CHECKING:
     from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import ChildResponseRunner
+    from mindroom.event_journal import ToolJobSnapshotUpdate
     from mindroom.llm.provider import ModelProvider
     from mindroom.llm.runs import RunRecord
     from mindroom.participation import ParticipationGate
@@ -121,9 +124,33 @@ async def _no_cleanup(_job: BackgroundJob) -> None:
     return None
 
 
+def _never_continues(_job: BackgroundJob) -> bool:
+    return False
+
+
 def always_owned(*_args: object, **_kwargs: object) -> bool:
     """Own every call's execution, as a turn with background jobs on does."""
     return True
+
+
+class NewerMessageWaits:
+    """The reply's queue, which holds a newer message of its requester until the reply ends."""
+
+    def has_interrupting_messages(self) -> bool:
+        """Say a newer message waits."""
+        return True
+
+    def interrupting_snapshot(self) -> tuple[QueuedMessage, ...]:
+        """Return the one newer message."""
+        return (QueuedMessage("$newer", None),)
+
+    def queued_snapshot(self) -> tuple[QueuedMessage, ...]:
+        """Hold no Queue message."""
+        return ()
+
+    def requester_steer_snapshot(self) -> tuple[QueuedMessage, ...]:
+        """Hold no Steer of the reply's requester."""
+        return ()
 
 
 def tool_job_journal(storage_root: Path) -> EventJournalStore:
@@ -141,12 +168,16 @@ class ProcessRuntime(ToolJobRuntime):
         grant: Callable[[BackgroundJob], JobGrant],
         authorize_execution: Callable[[ToolExecutionIdentity, JobTool, Mapping[str, Any]], None],
         cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]],
+        continues: Callable[[BackgroundJob], bool] = _never_continues,
+        reply_stopped: Callable[[BackgroundJob], Awaitable[bool]] | None = None,
     ) -> None:
         super().__init__(
             journal.tool_jobs(uuid4().hex),
             grant=grant,
             authorize_execution=authorize_execution,
             cancel=cancel,
+            continues=continues,
+            reply_stopped=reply_stopped,
         )
         self._journal = journal
 
@@ -233,16 +264,22 @@ async def tool_job_runtime(
     grant: Callable[[BackgroundJob], JobGrant] = _grant_all,
     authorize_execution: Callable[[ToolExecutionIdentity, JobTool, Mapping[str, Any]], None] = _allow_execution,
     cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]] = _no_cleanup,
+    continues: Callable[[BackgroundJob], bool] = _never_continues,
+    reply_stopped: Callable[[BackgroundJob], Awaitable[bool]] | None = None,
 ) -> ProcessRuntime:
     """Start one process's runtime whose grants allow every job and call and whose adapters need no extra cleanup.
 
-    It owns the saved jobs, fencing any earlier runtime, but leaves restoring them to `recover`.
+    It owns the saved jobs, fencing any earlier runtime, but leaves restoring them to `recover`. With ``continues``
+    naming subagent jobs, as the coordinator's runtime does, it keeps those a restart stopped for
+    `continue_stopped_jobs`; without, every job a restart stops ends.
     """
     runtime = ProcessRuntime(
         tool_job_journal(storage_root),
         grant=grant,
         authorize_execution=authorize_execution,
         cancel=cancel,
+        continues=continues,
+        reply_stopped=reply_stopped,
     )
     await runtime._store.take_ownership()
     return runtime
@@ -263,7 +300,7 @@ def run_journal_statements_inline(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # The journal's own saves, which every interception wraps however often a test intercepts them.
-_JOURNAL_ACCEPT, _JOURNAL_SAVE = ToolJobStore.accept, ToolJobStore.save
+_JOURNAL_ACCEPT, _JOURNAL_SAVE, _JOURNAL_SAVE_MANY = ToolJobStore.accept, ToolJobStore.save, ToolJobStore.save_many
 # Runs around one job save with its decoded snapshot and payload; raising fails the save, before or after it lands.
 type SaveHook = Callable[[dict[str, Any], object | None], Awaitable[None] | None]
 
@@ -275,7 +312,7 @@ def intercept_job_saves(
     after: SaveHook | None = None,
 ) -> None:
     """Run hooks around every journal save of a job, as a failing or slow database would; no hooks restores saving."""
-    original_accept, original_save = _JOURNAL_ACCEPT, _JOURNAL_SAVE
+    original_accept, original_save, original_save_many = _JOURNAL_ACCEPT, _JOURNAL_SAVE, _JOURNAL_SAVE_MANY
 
     async def hook(callback: SaveHook | None, job_json: str, payload_json: str | None) -> None:
         if callback is not None:
@@ -294,14 +331,22 @@ def intercept_job_saves(
         job_json: str,
         result_payload_json: str | None = None,
         *,
-        ends_approvals: bool,
+        approval_end_reason: str | None,
     ) -> None:
         await hook(before, job_json, result_payload_json)
-        await original_save(store, job_id, job_json, result_payload_json, ends_approvals=ends_approvals)
+        await original_save(store, job_id, job_json, result_payload_json, approval_end_reason=approval_end_reason)
         await hook(after, job_json, result_payload_json)
+
+    async def save_many(store: ToolJobStore, updates: Sequence[ToolJobSnapshotUpdate]) -> None:
+        for update in updates:
+            await hook(before, update.job_json, update.result_payload_json)
+        await original_save_many(store, updates)
+        for update in updates:
+            await hook(after, update.job_json, update.result_payload_json)
 
     monkeypatch.setattr(ToolJobStore, "accept", accept)
     monkeypatch.setattr(ToolJobStore, "save", save)
+    monkeypatch.setattr(ToolJobStore, "save_many", save_many)
 
 
 async def saved_jobs(storage_root: Path) -> dict[str, BackgroundJob]:
@@ -329,7 +374,7 @@ async def write_saved_job(storage_root: Path, job_id: str, job_json: str) -> Non
         store = journal.tool_jobs(uuid4().hex)
         await store.take_ownership()
         if job_id in {saved.job_id for saved in await journal.tool_jobs("reader").load_all()}:
-            await store.save(job_id, job_json, ends_approvals=False)
+            await store.save(job_id, job_json, approval_end_reason=None)
         else:
             await store.accept(job_id, job_json)
     finally:
@@ -448,6 +493,7 @@ def _job_turn(
     generated: tuple[ToolFunction, ...],
     middleware: tuple[ToolMiddleware, ...],
     participation: ParticipationGate | None = None,
+    queued_notice: str | None = None,
 ) -> tuple[AgentSpec, LoopHooks, ConversationSession, Persist[RunRecord] | None]:
     functions = (*(tool.function for tool in actor.tools.values()), *generated)
     spec = AgentSpec(
@@ -464,7 +510,10 @@ def _job_turn(
             *((participation_hook(participation, model),) if participation is not None else ()),
         ),
         tool_middleware=with_job_admission(actor, middleware),
-        after_tool_batch=(job_notice_hook(actor.name),),
+        after_tool_batch=(
+            *((queued_notice_after_tool_batch(queued_notice),) if queued_notice is not None else ()),
+            job_notice_hook(actor.name),
+        ),
     )
     session = ConversationSession(
         session_id=session_id,
@@ -487,13 +536,15 @@ async def run_job_turn(
     generated: tuple[ToolFunction, ...] = (),
     middleware: tuple[ToolMiddleware, ...] = (),
     participation: ParticipationGate | None = None,
+    queued_notice: str | None = None,
 ) -> RunRecord:
     """Run one turn of the actor on the owned loop with the job hooks an agent's turn installs.
 
     ``session_state`` is the session's state the run's tools share; ``store`` saves the run and that state as a
     reply does. ``generated`` are functions beside the actor's assembled toolkits, as MindRoom adds knowledge search,
     skill, and team delegation functions, which never become jobs. ``participation`` gates the reply as an agent's
-    turn does, deciding after the job definitions project.
+    turn does, deciding after the job definitions project. ``queued_notice`` is the text of the queued-message notice
+    the turn's batches give when a newer message waits, as a reply's turn installs it.
     """
     spec, hooks, session, persist = _job_turn(
         actor,
@@ -504,6 +555,7 @@ async def run_job_turn(
         generated=generated,
         middleware=middleware,
         participation=participation,
+        queued_notice=queued_notice,
     )
     run = RunContext(run_id=run_id, session=session)
     events = run_agent(
@@ -679,6 +731,99 @@ def settle_stopped_subagent(
         cleanup=partial(interrupt_stopped_child, config=config, runtime_paths=runtime_paths),
         runtime_paths=runtime_paths,
     )
+
+
+class ResolvingMembership(AgentReplyMembershipIndex):
+    """Room membership that is still resolving until a test proves it either way."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.state = "pending"
+
+    def is_current_room_member(
+        self,
+        sender_id: str,
+        room_id: str,
+        config: Config,
+        runtime_paths: RuntimePaths,
+    ) -> bool:
+        """Return whether the test proved the sender a member."""
+        del sender_id, room_id, config, runtime_paths
+        return self.state == "member"
+
+    def grants_pending(
+        self,
+        config: Config,
+        *,
+        joined_rooms: Sequence[str],
+        current_room_id: str | None,
+    ) -> bool:
+        """Return whether membership is still resolving."""
+        del config, joined_rooms, current_room_id
+        return self.state == "pending"
+
+
+# The journal principal of the bot whose replies start the jobs `stopped_job_coordinator` continues.
+JOB_BOT_PRINCIPAL = "leader@test"
+
+
+def stopped_job_coordinator(
+    runtime: ProcessRuntime,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    context: ToolRuntimeContext | None,
+    *,
+    synced: bool = True,
+    joined: bool = True,
+    unavailable: bool = False,
+    memberships: AgentReplyMembershipIndex | None = None,
+) -> ToolJobRuntimeCoordinator:
+    """Return a coordinator over ``runtime`` whose one bot is a stand-in with the real journal principal.
+
+    ``context`` is the tool context the conversation's bot rebuilds, None for a bot without a Matrix client yet;
+    ``synced`` is whether that bot completed its first sync, ``joined`` whether it is still in the jobs' rooms, and
+    ``unavailable`` whether its start failed for good.
+    Access is the coordinator's own check of ``config`` and ``memberships``.
+    """
+    bot = MagicMock(running=True, first_sync_complete=synced, admit_job_follow_up=AsyncMock())
+    bot.tool_runtime_support.build_context.return_value = context
+    bot.client.rooms.__contains__.return_value = joined
+    bot.journal_principal.return_value = runtime.journal.principal(JOB_BOT_PRINCIPAL)
+    coordinator = ToolJobRuntimeCoordinator(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: config,
+        bot_provider=lambda _name: bot,
+        agent_reply_memberships=memberships or AgentReplyMembershipIndex(),
+        journal_provider=lambda: runtime.journal,
+        entity_unavailable=lambda _name: unavailable,
+    )
+    coordinator._runtime = runtime
+    return coordinator
+
+
+async def continue_stopped_jobs(
+    runtime: ProcessRuntime,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    context: ToolRuntimeContext | None,
+    *,
+    synced: bool = True,
+    joined: bool = True,
+    unavailable: bool = False,
+    memberships: AgentReplyMembershipIndex | None = None,
+) -> None:
+    """Run the coordinator's pass that continues or settles the subagent jobs a restart stopped."""
+    coordinator = stopped_job_coordinator(
+        runtime,
+        config,
+        runtime_paths,
+        context,
+        synced=synced,
+        joined=joined,
+        unavailable=unavailable,
+        memberships=memberships,
+    )
+    await coordinator._continue_stopped_jobs(runtime)
 
 
 def subagent_job_id(runtime: ToolJobRuntime, child: DelegationChild) -> str:

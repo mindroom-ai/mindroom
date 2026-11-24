@@ -217,7 +217,7 @@ export function VoiceConfig() {
             <Info className="h-4 w-4" />
             <AlertDescription>
               {voiceConfig.enabled
-                ? "Voice messages will be automatically transcribed and processed. The router agent handles all voice messages to avoid duplicates."
+                ? "MindRoom transcribes voice messages when it can and handles them with the same reply rules as text messages."
                 : "Voice message handling is currently disabled. You can still review and edit settings below."}
             </AlertDescription>
           </Alert>
@@ -270,9 +270,7 @@ export function VoiceConfig() {
                 </span>
               </div>
               <div className="flex items-start justify-between gap-4">
-                <span className="text-muted-foreground">
-                  Visible Router Echo:
-                </span>
+                <span className="text-muted-foreground">Voice Transcript:</span>
                 <span className="font-mono text-right text-foreground">
                   {voiceConfig.visible_router_echo ? "Enabled" : "Disabled"}
                 </span>
@@ -287,11 +285,10 @@ export function VoiceConfig() {
                   htmlFor="visible-router-echo"
                   className="text-base font-semibold"
                 >
-                  Visible Router Echo
+                  Voice Transcript
                 </Label>
                 <p className="text-sm text-muted-foreground">
-                  Post the normalized transcript or fallback text as a
-                  display-only router message before any router handoff.
+                  Post the transcript of a voice message before the reply.
                 </p>
               </div>
               <input

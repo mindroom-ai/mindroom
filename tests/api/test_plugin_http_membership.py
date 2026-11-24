@@ -1,13 +1,15 @@
-"""Plugin routes can require live room membership, read through a running bot in the room, the router first.
+"""Plugin routes can require live room membership, read through the room's steward among the running bots.
 
 The embedded API binds the reader as it serves, and entity restarts and reloads leave it bound.
 """
 
 import asyncio
+import gc
+import weakref
 from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import nio
 import pytest
@@ -15,7 +17,7 @@ from fastapi import FastAPI, HTTPException, Request
 
 from mindroom.api import main
 from mindroom.api.app_state import ensure_app_state
-from mindroom.api.client_sessions import _client_session_store
+from mindroom.api.client_sessions import client_session_store
 from mindroom.bot import AgentBot
 from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
@@ -25,35 +27,38 @@ from mindroom.orchestration.entity_fleet import EntityStartResults
 from mindroom.orchestration.plugin_http_runtime import bind_room_members, unbind_room_members
 from mindroom.orchestrator import _MultiAgentOrchestrator, _run_api_server
 from mindroom.plugin_http import ClientUser, require_room_member
+from tests.access_schema_support import joined_members_response
 from tests.conftest import install_bots
 
 ROOM = "!room:example.org"
 OTHER_ROOM = "!other:example.org"
+BOT = "@mindroom_bot:example.org"
 
 
 @pytest.fixture
 def main_app() -> Iterator[FastAPI]:
-    """The global API app, with whatever room-members reader it had put back afterwards, even after a failure."""
+    """The global API app, with whatever room readers it had put back afterwards, even after a failure."""
     state = ensure_app_state(main.app)
-    previous = state.room_members
-    try:
-        yield main.app
-    finally:
-        state.room_members = previous
+    previous = state.room_members, state.room_state, state.room_direct, state.room_history
+    yield main.app
+    state.room_members, state.room_state, state.room_direct, state.room_history = previous
 
 
 def _request(app: FastAPI, user_id: str = "@alice:example.org") -> Request:
     """A request signed in with a client session of ``user_id``."""
-    token = _client_session_store(app).create(user_id).token
+    token = client_session_store(app).create(user_id).token
     return Request({"type": "http", "app": app, "headers": [(b"authorization", f"Bearer {token}".encode())]})
 
 
-def _client(*user_ids: str, rooms: tuple[str, ...] = (ROOM,)) -> SimpleNamespace:
-    """A Matrix client joined to ``rooms`` that answers ``user_ids`` as the members of ``ROOM``."""
-    members = [nio.RoomMember(user_id, None, None) for user_id in user_ids]
+def _client(*user_ids: str, rooms: tuple[str, ...] = (ROOM,), own_id: str = BOT, power: int = 0) -> SimpleNamespace:
+    """The client of ``own_id``, at ``power`` in the ``rooms`` it is joined to, answering ``user_ids`` as ``ROOM``'s members."""
+    cached_rooms = {room_id: nio.MatrixRoom(room_id, own_id) for room_id in rooms}
+    for room in cached_rooms.values():
+        room.power_levels.users[own_id] = power
     return SimpleNamespace(
-        rooms={room_id: object() for room_id in rooms},
-        joined_members=AsyncMock(return_value=nio.JoinedMembersResponse(members, ROOM)),
+        user_id=own_id,
+        rooms=cached_rooms,
+        joined_members=AsyncMock(return_value=joined_members_response(ROOM, *user_ids)),
     )
 
 
@@ -113,13 +118,35 @@ async def test_joined_members_error_503() -> None:
 
 
 @pytest.mark.asyncio
-async def test_joined_members_raising_503() -> None:
-    """A Matrix call that raises is 503 like an error response, never a pass and never a bare 500."""
+@pytest.mark.parametrize(
+    "error",
+    [TimeoutError("homeserver timed out"), nio.LocalProtocolError("durable sync session is closed")],
+)
+async def test_joined_members_raising_503(error: Exception) -> None:
+    """A Matrix call that raises is 503 like an error response, never a pass, never a bare 500, and never read again."""
     client = _client()
-    client.joined_members = AsyncMock(side_effect=TimeoutError("homeserver timed out"))
+    client.joined_members = AsyncMock(side_effect=error)
     with pytest.raises(HTTPException) as caught:
         await require_room_member(_request(_bound(client)), ROOM)
     assert (caught.value.status_code, caught.value.detail) == (503, "Room membership lookup failed; try again.")
+    client.joined_members.assert_awaited_once_with(ROOM)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("refusals", "status"), [(1, 200), (2, 200), (3, 503)])
+async def test_a_member_list_the_client_refuses_for_a_membership_change_is_read_again(
+    refusals: int,
+    status: int,
+) -> None:
+    """A join applied while the member list is read makes the client refuse it; the lookup reads it again, 3 times at most."""
+    client = _client("@alice:example.org")
+    answer = client.joined_members.return_value
+    client.joined_members.side_effect = [
+        *(nio.LocalProtocolError("room membership changed during lookup") for _ in range(refusals)),
+        answer,
+    ]
+    assert await _membership_status(_bound(client)) == status
+    assert client.joined_members.await_count == min(refusals + 1, 3)
 
 
 @pytest.mark.asyncio
@@ -139,14 +166,155 @@ async def test_joined_members_that_never_answers_503(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.asyncio
-async def test_router_in_room_is_asked_first() -> None:
-    """The router answers when it is in the room, even when an agent bot is in it too."""
-    router = _client("@alice:example.org")
-    agent = _client("@alice:example.org")
+async def test_callers_share_a_running_lookup_but_not_a_finished_one() -> None:
+    """Callers that ask while a room's lookup runs share it, each answered for their own user; a later one asks again."""
+    client = _client("@alice:example.org")
+    app = _bound(client)
+    users = ("@alice:example.org", "@bob:example.org", "@alice:example.org")
+    # All three ask before the lookup the first one starts gets to run.
+    callers = [asyncio.create_task(_membership_status(app, user_id)) for user_id in users]
+    assert await asyncio.gather(*callers) == [200, 403, 200]
+    client.joined_members.assert_awaited_once_with(ROOM)
+    client.joined_members.return_value = joined_members_response(ROOM, "@bob:example.org")
+    assert await _membership_status(app) == 403
+    assert client.joined_members.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_caller_after_a_lookup_answered_gets_a_fresh_answer() -> None:
+    """A caller that asks once a lookup answered starts a new one, even before the finished one is cleared away."""
+    late: list[asyncio.Task[int]] = []
+    release = asyncio.Event()
+
+    async def joined_members(_room_id: str) -> nio.JoinedMembersResponse:
+        if not late:
+            # This caller's first step runs after the lookup ends and before anything that ending scheduled.
+            late.append(asyncio.create_task(_membership_status(app)))
+            return joined_members_response(ROOM, "@alice:example.org")
+        await release.wait()
+        return joined_members_response(ROOM)
+
+    client = _client()
+    client.joined_members = AsyncMock(side_effect=joined_members)
+    app = _bound(client)
+    assert await _membership_status(app) == 200
+    # Asks while the late caller's lookup runs, so it shares that one.
+    later = asyncio.create_task(_membership_status(app))
+    await asyncio.sleep(0)
+    release.set()
+    assert await asyncio.gather(late[0], later) == [403, 403]
+    assert client.joined_members.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "status"),
+    [(joined_members_response(ROOM, "@alice:example.org"), 200), (nio.JoinedMembersError("boom"), 503)],
+)
+async def test_a_finished_lookup_is_not_kept(
+    answer: nio.JoinedMembersResponse | nio.JoinedMembersError,
+    status: int,
+) -> None:
+    """Once a lookup answered or failed and its caller has the answer, the bound reader holds on to nothing of it."""
+    client = _client()
+    client.joined_members.return_value = answer
+    # Kept for the whole test: the reader, and whatever it holds, lives as long as the app it is bound to.
+    app = _bound(client)
+    caller = asyncio.create_task(_membership_status(app))
+    await asyncio.sleep(0)
+    (lookup,) = asyncio.all_tasks() - {caller, asyncio.current_task()}
+    finished = weakref.ref(lookup)
+    del lookup
+    assert await caller == status
+    gc.collect()
+    assert finished() is None
+    assert ensure_app_state(app).room_members is not None
+
+
+@pytest.mark.asyncio
+async def test_callers_for_another_room_get_its_own_lookup() -> None:
+    """A lookup answers only for its own room, even while a caller for another room waits at the same time."""
+    client = _client(rooms=(ROOM, OTHER_ROOM))
+    answers = {
+        ROOM: joined_members_response(ROOM, "@alice:example.org"),
+        OTHER_ROOM: joined_members_response(OTHER_ROOM),
+    }
+    client.joined_members.side_effect = answers.__getitem__
+    app = _bound(client)
+    callers = [asyncio.create_task(_membership_status(app, room_id=room_id)) for room_id in (ROOM, OTHER_ROOM)]
+    assert await asyncio.gather(*callers) == [200, 403]
+    assert client.joined_members.await_args_list == [call(ROOM), call(OTHER_ROOM)]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_lookup_fails_every_caller_sharing_it_and_is_not_kept() -> None:
+    """A lookup that fails answers 503 to every caller sharing it, and the next caller asks again."""
+    client = _client()
+    client.joined_members.return_value = nio.JoinedMembersError("boom")
+    app = _bound(client)
+    callers = [asyncio.create_task(_membership_status(app)) for _ in range(3)]
+    assert await asyncio.gather(*callers) == [503, 503, 503]
+    client.joined_members.return_value = joined_members_response(ROOM, "@alice:example.org")
+    assert await _membership_status(app) == 200
+    assert client.joined_members.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_caller_that_goes_away_leaves_the_lookup_to_the_others() -> None:
+    """Cancelling the caller that started a room's lookup does not cancel it for the callers sharing it."""
+    client = _client("@alice:example.org")
+    app = _bound(client)
+    first, second = (asyncio.create_task(_membership_status(app)) for _ in range(2))
+    # After one turn of the loop both have asked, and the lookup the first one started has not run yet.
+    await asyncio.sleep(0)
+    first.cancel()
+    assert await second == 200
+    assert first.cancelled()
+    client.joined_members.assert_awaited_once_with(ROOM)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_a_lookup_ending_after_its_callers_left_reports_no_error(cancelled: bool) -> None:
+    """A lookup that fails or is cancelled once every caller sharing it went away gives asyncio no error to report."""
+    reported: list[dict[str, object]] = []
+    asyncio.get_running_loop().set_exception_handler(lambda _loop, context: reported.append(context))
+    client = _client()
+    release = asyncio.Event()
+
+    async def fails_once_released(_room_id: str) -> nio.JoinedMembersError:
+        await release.wait()
+        return nio.JoinedMembersError("boom")
+
+    client.joined_members = fails_once_released
+    caller = asyncio.create_task(_membership_status(_bound(client)))
+    await asyncio.sleep(0)
+    (lookup,) = asyncio.all_tasks() - {caller, asyncio.current_task()}
+    caller.cancel()
+    await asyncio.wait([caller])
+    if cancelled:
+        lookup.cancel()
+    else:
+        release.set()
+    await asyncio.wait([lookup])
+    # The cancelled caller's traceback holds the lookup too; asyncio reports an unretrieved exception as it is freed.
+    del caller, lookup
+    gc.collect()
+    assert reported == []
+
+
+@pytest.mark.asyncio
+async def test_the_rooms_steward_is_asked() -> None:
+    """The bot with the most power in the room answers, whatever its name and wherever it is listed."""
+    steward = _client("@alice:example.org", own_id="@mindroom_z:example.org", power=100)
+    router = _client("@alice:example.org", own_id="@mindroom_router:example.org", power=50)
+    agent = _client("@alice:example.org", own_id="@mindroom_a:example.org")
     app = FastAPI()
-    bind_room_members(app, {"general": _bot(agent), "router": _bot(router)})  # type: ignore[dict-item]
+    bots = {"general": _bot(agent), "router": _bot(router), "zeta": _bot(steward)}
+    bind_room_members(app, bots)  # type: ignore[arg-type]
     await require_room_member(_request(app), ROOM)
-    router.joined_members.assert_awaited_once_with(ROOM)
+    steward.joined_members.assert_awaited_once_with(ROOM)
+    router.joined_members.assert_not_awaited()
     agent.joined_members.assert_not_awaited()
 
 
@@ -232,11 +400,12 @@ async def test_restarted_bot_uses_its_new_client() -> None:
 
 
 def test_bind_then_unbind_clears() -> None:
-    """Unbinding removes the reader."""
+    """Unbinding removes every room reader."""
     app = _bound(_client())
-    assert ensure_app_state(app).room_members is not None
+    state = ensure_app_state(app)
+    assert None not in (state.room_members, state.room_state, state.room_direct, state.room_history)
     unbind_room_members(app)
-    assert ensure_app_state(app).room_members is None
+    assert (state.room_members, state.room_state, state.room_direct, state.room_history) == (None, None, None, None)
 
 
 def _orchestrator_config(tmp_path: Path, *, role: str = "Write code") -> Config:
@@ -245,6 +414,7 @@ def _orchestrator_config(tmp_path: Path, *, role: str = "Write code") -> Config:
         {
             "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {"demo": {"transport": "stdio", "command": "npx"}},
+            "server_emoji": {"enabled": True},
             "agents": {"code": {"display_name": "Code", "role": role, "tools": ["mcp_demo"]}},
         },
         _runtime_paths(tmp_path),
@@ -260,10 +430,10 @@ def _running_bot(client: SimpleNamespace) -> MagicMock:
     return MagicMock(spec=AgentBot, running=True, client=client)
 
 
-async def _membership_status(app: FastAPI) -> int:
-    """Return 200 when Alice passes the membership check for ``ROOM``, else the status it answers."""
+async def _membership_status(app: FastAPI, user_id: str = "@alice:example.org", room_id: str = ROOM) -> int:
+    """Return 200 when ``user_id`` passes the membership check for ``room_id``, else the status it answers."""
     try:
-        await require_room_member(_request(app), ROOM)
+        await require_room_member(_request(app, user_id), room_id)
     except HTTPException as error:
         return error.status_code
     return 200
@@ -307,7 +477,7 @@ async def test_serving_api_binds_membership_and_a_failed_reload_leaves_it_bound(
     orchestrator.running = True
     install_bots(
         orchestrator,
-        {ROUTER_AGENT_NAME: _running_bot(_client("@alice:example.org")), "code": _running_bot(_client())},
+        {ROUTER_AGENT_NAME: _running_bot(_client("@alice:example.org", power=100)), "code": _running_bot(_client())},
     )
     plan = build_config_update_plan(current_config=current, new_config=new, bots=orchestrator.agent_bots)
     statuses: list[int] = []
@@ -317,7 +487,7 @@ async def test_serving_api_binds_membership_and_a_failed_reload_leaves_it_bound(
         with (
             patch("mindroom.orchestrator.prepare_managed_accounts", new=AsyncMock()),
             patch.object(orchestrator, "_sync_mcp_manager", new=AsyncMock(return_value=set())),
-            patch.object(orchestrator, "_refresh_running_bots_presence", side_effect=RuntimeError("presence failed")),
+            patch.object(orchestrator, "_refresh_running_bots", side_effect=RuntimeError("presence failed")),
             pytest.raises(RuntimeError, match="presence failed"),
         ):
             await orchestrator._apply_config_update_plan(current, plan)
@@ -334,13 +504,13 @@ async def test_restarting_one_bot_keeps_membership_answering_through_another(
     tmp_path: Path,
     main_app: FastAPI,
 ) -> None:
-    """While a catalog change restarts one bot, the running router in the room keeps answering membership."""
+    """While a catalog change restarts the room's steward, another running bot in the room answers membership."""
     orchestrator = _MultiAgentOrchestrator(
         runtime_paths=_runtime_paths(tmp_path),
         config=_orchestrator_config(tmp_path),
     )
     orchestrator.running = True
-    code = _running_bot(_client("@alice:example.org"))
+    code = _running_bot(_client("@alice:example.org", power=100))
     install_bots(orchestrator, {ROUTER_AGENT_NAME: _running_bot(_client("@alice:example.org")), "code": code})
     bind_room_members(main_app, orchestrator.agent_bots)
     new_code = _running_bot(_client("@alice:example.org"))

@@ -10,7 +10,7 @@ import pytest
 from mindroom.event_journal import membership_hooks
 from mindroom.hooks import EVENT_ROOM_MEMBER_JOINED, HookRegistry, RoomMemberJoinedContext, hook
 from tests.test_durable_ingestion_runtime import ROOM, _consume_frame, _joined_frame, _owned_session
-from tests.test_room_member_hooks import _plugin, _room_member_event, _router_bot
+from tests.test_room_member_hooks import _plugin, _room_member_event, _steward_bot
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -43,7 +43,7 @@ def _registry(seen: list[str]) -> HookRegistry:
 @pytest.mark.asyncio
 async def test_membership_baselines_do_not_rewrite_an_installation_wide_json_file(tmp_path: Path) -> None:
     """Nio's per-member batches must not each serialize all earlier membership markers."""
-    bot = _router_bot(tmp_path)
+    bot = _steward_bot(tmp_path)
     members = tuple(
         _room_member_event(event_id=f"$baseline-{index}", user_id=f"@human{index}:localhost", prev_membership=None)
         for index in range(100)
@@ -60,7 +60,7 @@ async def test_membership_baselines_do_not_rewrite_an_installation_wide_json_fil
 @pytest.mark.parametrize("baseline", ["timeline", "state", "restored_state"])
 async def test_profile_update_after_baseline_does_not_onboard_existing_member(tmp_path: Path, baseline: str) -> None:
     """Actual Nio HISTORY/state baselines are silent; a new live member still gets a hook."""
-    bot = _router_bot(tmp_path)
+    bot = _steward_bot(tmp_path)
     seen: list[str] = []
     bot.orchestrator.hook_registry_state.registry = _registry(seen)
     try:
@@ -90,7 +90,7 @@ async def test_profile_update_after_baseline_does_not_onboard_existing_member(tm
 @pytest.mark.parametrize("snapshot_event_id", ["$snapshot", "$genuine-join"])
 async def test_snapshot_does_not_suppress_a_pending_genuine_join(tmp_path: Path, snapshot_event_id: str) -> None:
     """A state snapshot cannot turn an unfinished live hook into completed baseline history."""
-    bot = _router_bot(tmp_path)
+    bot = _steward_bot(tmp_path)
     seen: list[str] = []
     bot.orchestrator.hook_registry_state.registry = _registry(seen)
     try:
@@ -120,7 +120,7 @@ async def test_baseline_persistence_retries_before_nio_ack(
     baseline: str,
 ) -> None:
     """Baseline failure rolls back the receipt, and retained Nio input retries before acknowledgement."""
-    bot = _router_bot(tmp_path)
+    bot = _steward_bot(tmp_path)
     seen: list[str] = []
     bot.orchestrator.hook_registry_state.registry = _registry(seen)
     save = membership_hooks.record_baseline

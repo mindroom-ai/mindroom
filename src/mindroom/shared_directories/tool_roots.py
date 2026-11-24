@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
+from mindroom.path_safety import resolve_tool_base_dir, spell_output_paths
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -27,6 +29,8 @@ class SharedDirectoryRoot:
 
     path: Path
     writable: bool
+    # What a refused write calls the directory, such as the saved tool outputs that headless tools read beside a workdir.
+    label: str = "a shared directory"
 
 
 def no_shared_directory_roots() -> tuple[SharedDirectoryRoot, ...]:
@@ -92,10 +96,7 @@ def shared_directory_aware(path_parameter: str, *, writes: bool) -> Callable[[Ca
                 return _no_workspace_error(raw_path, has_shares=bool(toolkit.shared_directory_roots()))
             root, relative = match
             if writes and not root.writable:
-                return f"Error: {raw_path} is in a shared directory you can only read."
-            # The tools package imports every toolkit, and those toolkits import this module.
-            from mindroom.tools.path_safety import resolve_tool_base_dir, spell_output_paths  # noqa: PLC0415
-
+                return f"Error: {raw_path} is in {root.label} you can only read."
             rooted = copy.copy(toolkit)
             try:
                 rooted.base_dir = resolve_tool_base_dir(root.path)

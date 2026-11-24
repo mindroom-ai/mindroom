@@ -402,6 +402,37 @@ def test_write_ahead_of_an_older_generation_is_refused() -> None:
     assert transition.outcome is Outcome.STALE
 
 
+def test_after_a_stop_no_edit_is_written_ahead_but_what_frames_showed_is_recorded() -> None:
+    """Only the Stop's note may follow it, and that note keeps what live frames already showed."""
+    reply, span = _turn()
+    stop = rl.stop(reply, span, StopFacts(receipt_order=8, span_live=True), now_ns=NOW)
+    assert stop.reply is not None
+    edit = rl.write_ahead(
+        stop.reply,
+        span,
+        shown="edit",
+        previous=None,
+        active_generation=GEN,
+        durable_write_debt=False,
+        now_ns=NOW,
+    )
+    assert edit.outcome is Outcome.STOPPED
+    assert edit.reply == stop.reply
+    shown = rl.write_ahead(
+        stop.reply,
+        span,
+        shown="frames",
+        previous=None,
+        active_generation=GEN,
+        durable_write_debt=False,
+        now_ns=NOW,
+        shown_live=True,
+    )
+    assert shown.outcome is Outcome.APPLIED
+    assert shown.reply is not None
+    assert shown.reply.possibly_shown == "frames"
+
+
 def test_initial_create_acknowledgement_binds_the_event() -> None:
     """The create row's acknowledgement binds the reply's event and its placeholder state."""
     reply, span = _turn()
@@ -568,23 +599,13 @@ def _regenerating() -> tuple[Reply, Span]:
 def test_stop_after_a_regenerations_progress_edit_landed_cancels_instead_of_restoring() -> None:
     """The terminal write's confirmation of a landed edit means the room no longer shows the old answer."""
     reply, span = _regenerating()
-    stop = rl.stop(reply, span, StopFacts(receipt_order=8, span_live=True), now_ns=NOW)
+    stop = rl.stop(_progress(reply, span), span, StopFacts(receipt_order=8, span_live=True), now_ns=NOW)
     assert stop.reply is not None
     write = replace(
         _write(stop.reply, ReplyState.CANCELLED, shown="new partial"),
         confirms=rl.ProgressConfirmation(event_id="$reply", placeholder_only=False),
     )
-    ahead = rl.write_ahead(
-        stop.reply,
-        span,
-        shown="new partial",
-        previous=None,
-        active_generation=GEN,
-        durable_write_debt=False,
-        now_ns=NOW,
-    )
-    assert ahead.reply is not None
-    transition = rl.stopped(ahead.reply, span, replace(write, prepared_revision=ahead.reply.revision), now_ns=NOW)
+    transition = rl.stopped(stop.reply, span, write, now_ns=NOW)
     assert transition.reply is not None
     assert transition.reply.state is ReplyState.CANCELLED
     assert transition.row is not None
@@ -621,9 +642,9 @@ def _progress(reply: Reply, span: Span, shown: str = "new partial") -> Reply:
 def test_a_stop_after_an_unacknowledged_progress_edit_does_not_restore() -> None:
     """A progress edit Matrix may already show counts, so the Stop ends the reply cancelled instead of restoring."""
     reply, span = _regenerating()
-    stop = rl.stop(reply, span, StopFacts(receipt_order=8, span_live=True), now_ns=NOW)
+    stop = rl.stop(_progress(reply, span), span, StopFacts(receipt_order=8, span_live=True), now_ns=NOW)
     assert stop.reply is not None
-    transition = rl.stopped(_progress(stop.reply, span), span, None, now_ns=NOW)
+    transition = rl.stopped(stop.reply, span, None, now_ns=NOW)
     assert transition.reply is not None
     assert transition.reply.state is ReplyState.CANCELLED
     assert transition.reply.owed_write == rl.OwedWrite("span-2", rl.NoteKind.CANCELLED)

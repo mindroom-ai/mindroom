@@ -11,6 +11,7 @@ import subprocess
 import sys
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast, get_args
 from unittest.mock import DEFAULT, AsyncMock, Mock, patch
 
@@ -30,7 +31,7 @@ import mindroom.workspaces as workspaces_module
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli import config as config_cli
 from mindroom.cli.agent_docs import ensure_config_agent_docs
-from mindroom.cli.config import _format_config_search_locations, activate_cli_runtime
+from mindroom.cli.config import activate_cli_runtime
 from mindroom.cli.doctor import _validate_vertexai_claude_connection
 from mindroom.cli.main import (
     _CONNECT_ALREADY_CONNECTED_EXIT_CODE,
@@ -42,11 +43,13 @@ from mindroom.cli.main import main as cli_main
 from mindroom.cli.service import _shell_service_keys
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
+from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER, resolve_runtime_paths
 from mindroom.credentials.environment import get_secret_from_env
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
+from mindroom.event_journal.opening import EventJournalBindingError
 from mindroom.logging_config import configure_default_logging, uses_default_logging
+from mindroom.matrix.health import MSC4186_UNSTABLE_FEATURE
 from mindroom.matrix.state import MatrixAccount, MatrixState
 from mindroom.model_defaults import (
     CONFIG_INIT_MODEL_PRESETS,
@@ -165,20 +168,360 @@ def test_cli_import_keeps_help_path_runtime_modules_lazy() -> None:
     assert json.loads(result.stdout) == []
 
 
-def test_format_config_search_locations_numbers_paths_and_statuses(
-    tmp_path: Path,
+def test_config_search_locations_print_numbers_paths_and_statuses(
+    narrow_markup_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Each search location prints its number, its whole path, and whether it exists, on one line."""
+    monkeypatch.chdir(narrow_markup_dir)
+    existing = narrow_markup_dir / "config.yaml"
+    existing.write_text("agents: {}\n", encoding="utf-8")
+    missing = narrow_markup_dir / "missing.yaml"
+
+    config_cli.print_config_search_locations({"MINDROOM_CONFIG_PATH": str(missing)}, title="Search locations:")
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[1] == f"  1. {missing.resolve()} (not found)"
+    assert lines[2] == f"  2. {existing.resolve()} (exists)"
+
+
+def test_config_init_prints_env_and_config_paths_whole_on_one_line(
+    narrow_markup_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Config search-location rendering should include numbers and existence status."""
-    monkeypatch.chdir(tmp_path)
-    existing = tmp_path / "config.yaml"
-    existing.write_text("agents: {}\n", encoding="utf-8")
-    missing = tmp_path / "missing.yaml"
+    """A path with a bracketed folder, longer than the terminal is wide, prints whole on each `config init` line."""
+    # An owner exported in the shell would win over the one this test saves in `.env`.
+    monkeypatch.delenv(OWNER_MATRIX_USER_ID_ENV, raising=False)
+    target = narrow_markup_dir / "config.yaml"
+    env_path = narrow_markup_dir / ".env"
+    init = ["config", "init", "--path", str(target), "--matrix-server", "mindroom.chat", "--no-input"]
 
-    lines = _format_config_search_locations({"MINDROOM_CONFIG_PATH": str(missing)})
+    created = runner.invoke(app, init).output.splitlines()
+    env_path.write_text(f"{OWNER_MATRIX_USER_ID_ENV}=@Alice:fire:\n", encoding="utf-8")
+    kept = runner.invoke(app, init).output.splitlines()
+    overwritten = runner.invoke(app, [*init, "--force"]).output.splitlines()
 
-    assert lines[0] == f"  1. {missing.resolve()} ([dim]not found[/dim])"
-    assert lines[1] == f"  2. {existing.resolve()} ([green]exists[/green])"
+    assert f"Env file created: {env_path}" in created
+    assert f"Config created: {target}" in created
+    assert f"  Edit {env_path}  Set your API keys (Matrix homeserver is prefilled)" in created
+    assert f"Config file already exists: {target}" in kept
+    assert f"Config unchanged: {target}" in kept
+    assert f"Env file updated: {env_path}" in kept
+    assert f"Generated MINDROOM_API_KEY in {env_path}; restart MindRoom if it is already running to apply it." in kept
+    assert (
+        f"Warning: {OWNER_MATRIX_USER_ID_ENV} in {env_path} is not a valid Matrix user ID "
+        "('@Alice:fire:'), so the owner placeholders in config.yaml were left for you to replace."
+    ) in kept
+    assert f"Env file overwritten: {env_path}" in overwritten
+
+
+def test_config_inspect_commands_print_the_config_path_whole_on_one_line(narrow_markup_dir: Path) -> None:
+    """`config show`, `path`, `validate`, `resolve`, and `edit` print a markup-like, long config path whole."""
+    target = narrow_markup_dir / "config.yaml"
+
+    def lines(*args: str, env: dict[str, str] | None = None) -> list[str]:
+        return runner.invoke(app, ["config", *args, "--path", str(target)], env=env).output.splitlines()
+
+    assert f"No config file found at: {target}" in lines("show")
+    assert f"Validating configuration: {target}" in (validate := lines("validate"))
+    assert f"Error: Configuration file not found: {target}" in validate
+    assert f"Error: Configuration file not found: {target}" in lines("resolve")
+    target.write_text("agents: !include missing.yaml\n", encoding="utf-8")
+    assert f"Config file: {target}" in lines("show")
+    assert f"Resolved config path: {target} (exists)" in lines("path")
+    assert f"Error: Invalid configuration in {target}" in (invalid := lines("validate"))
+    assert f"  * config: !include: included file 'missing.yaml' does not exist (in {target}, line 1)" in invalid
+    edit = lines("edit", env={"EDITOR": "[missing]-editor"})
+    assert f"Opening {target} with [missing]-editor..." in edit
+    assert "Editor '[missing]-editor' not found." in edit
+
+
+def test_config_validate_prints_configured_names_whole_on_one_line(
+    narrow_markup_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The validate summary, missing-key warning, and automation issue keep long names and emoji codes as written."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY_FILE", raising=False)
+    agent = "an_agent_name_long_enough_to_push_each_summary_line_past_eighty_columns"
+    team = "a_team_name_long_enough_to_push_each_summary_line_past_eighty_columns"
+    model = "a:fire:model_name_long_enough_to_push_each_summary_line_past_eighty_columns"
+    target = narrow_markup_dir / "config.yaml"
+    config_text = (
+        f'models:\n  "{model}":\n    provider: anthropic\n    id: claude-sonnet-5-5\n'
+        f'agents:\n  {agent}:\n    display_name: Assistant\n    model: "{model}"\n'
+        f"teams:\n  {team}:\n    display_name: Team\n    role: Helps\n    agents: [{agent}]\n"
+        f'    model: "{model}"\n'
+        f'router:\n  model: "{model}"\n'
+    )
+    target.write_text(config_text, encoding="utf-8")
+
+    valid = runner.invoke(app, ["config", "validate", "--path", str(target)]).output.splitlines()
+    target.write_text(
+        config_text.replace(
+            "    display_name: Assistant\n",
+            "    display_name: Assistant\n    automations:\n      - {name: weekly_digest, cron: '0 9 * * 1'}\n",
+        ),
+        encoding="utf-8",
+    )
+    rejected = runner.invoke(app, ["config", "validate", "--path", str(target)]).output.splitlines()
+
+    assert f"  Agents: 1 ({agent})" in valid
+    assert f"  Teams:  1 ({team})" in valid
+    assert f"  Models: 1 ({model})" in valid
+    assert f"  * anthropic: Set ANTHROPIC_API_KEY (models: {model})" in valid
+    assert f"  agents.{agent}.automations: 'weekly_digest' is not provided by any loaded plugin" in rejected
+
+
+def test_first_run_setup_prints_the_env_and_config_paths_whole_on_one_line(
+    narrow_markup_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The first-run welcome, skipped key, typed key, and provider setup lines keep a markup-like, long path whole."""
+    runtime_paths = constants_module.resolve_primary_runtime_paths(
+        config_path=narrow_markup_dir / "config.yaml",
+        process_env={},
+    )
+    env_path = runtime_paths.env_path
+
+    from mindroom.cli.setup_detection import KeyCheckResult  # noqa: PLC0415
+
+    config_cli.create_first_run_config(runtime_paths, provider="openai", interactive=False)
+    with (
+        patch.object(config_cli, "secret", return_value="sk-typed"),
+        patch("mindroom.cli.setup_detection.detect_single_provider", return_value=None),
+        patch(
+            "mindroom.cli.setup_detection.verify_provider_api_key",
+            return_value=KeyCheckResult(status="valid"),
+        ),
+    ):
+        config_cli.create_first_run_config(runtime_paths, provider="openai", interactive=True)
+    config_cli.create_first_run_config(runtime_paths, provider="bedrock_claude", interactive=False)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert (
+        f"Welcome to MindRoom! Let's create your config at {runtime_paths.config_path} for MindRoom Chat (mindroom.chat)."
+    ) in lines
+    assert (
+        "Skipped. Connect your provider in the dashboard once MindRoom is running, "
+        f"or add OPENAI_API_KEY to {env_path} and restart `mindroom run`."
+    ) in lines
+    assert f"Env file updated: {env_path} (OPENAI_API_KEY)" in lines
+    assert f"  Set your AWS Bedrock region and credentials in {env_path} and restart `mindroom run`" in lines
+
+
+def test_dashboard_key_warnings_print_the_address_and_env_path_whole_on_one_line(
+    narrow_markup_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The open-dashboard warning keeps an IPv6 address Rich would read as markup, and the key lines a long path."""
+    runtime_paths = constants_module.resolve_runtime_paths(
+        config_path=narrow_markup_dir / "config.yaml",
+        process_env={"MINDROOM_WORKER_BACKEND": "docker"},
+    )
+    env_path = runtime_paths.env_path
+
+    config_cli.warn_dashboard_without_key("[fe80::1]:8765", env_path, ", or pass --api-host 127.0.0.1.")
+    with patch.object(config_cli, "write_private_env_text", side_effect=OSError("read-only [mount]")):
+        config_cli.ensure_worker_dashboard_api_key(runtime_paths, dashboard_has_credential=False)
+    config_cli.ensure_worker_dashboard_api_key(runtime_paths, dashboard_has_credential=False)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert (
+        "Warning: The dashboard API listens on [fe80::1]:8765 without MINDROOM_API_KEY, "
+        "so anyone who can reach that address can administer MindRoom."
+    ) in lines
+    assert f"  Set MINDROOM_API_KEY in {env_path}, or pass --api-host 127.0.0.1." in lines
+    assert (
+        "Warning: Dedicated workers can reach the dashboard API without MINDROOM_API_KEY, "
+        f"and {env_path} could not be updated: read-only [mount]"
+    ) in lines
+    assert (
+        f"Generated MINDROOM_API_KEY in {env_path} because dedicated workers can reach the dashboard API; "
+        "the dashboard login page asks for this key."
+    ) in lines
+
+
+def test_run_prints_the_dashboard_key_remedy_with_the_env_path_whole_on_one_line(
+    narrow_markup_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`mindroom run` on an open dashboard names the `.env` to set the key in, whole, even under a bracketed folder."""
+    for name in ("MINDROOM_API_KEY", "SUPABASE_URL", "SUPABASE_ANON_KEY", "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED"):
+        monkeypatch.delenv(name, raising=False)
+    cfg = narrow_markup_dir / "config.yaml"
+    _write_minimal_runtime_config(cfg)
+
+    with patch("mindroom.orchestrator.main", AsyncMock()):
+        result = _invoke_with_runtime(["run"], cfg)
+
+    assert result.exit_code == 0, result.output
+    env_path = (narrow_markup_dir / ".env").resolve()
+    assert f"  Set MINDROOM_API_KEY in {env_path}, or pass --api-host 127.0.0.1." in result.output.splitlines()
+
+
+def test_run_prints_errors_and_the_homeserver_whole_on_one_line(
+    narrow_markup_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`mindroom run` prints each error and the homeserver it names as written, whole on one line, without raising."""
+    for name in ("SUPABASE_URL", "SUPABASE_ANON_KEY", "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED"):
+        monkeypatch.delenv(name, raising=False)
+    cfg = narrow_markup_dir / "config.yaml"
+    text = str(narrow_markup_dir)
+    homeserver = f"https://matrix.example.test{text}"
+    dashboard_url = f"http://admin.example.org{text}"
+
+    def run(*args: str, error: Exception | None = None, env: dict[str, str] | None = None) -> list[str]:
+        with (
+            patch("mindroom.orchestrator.main", AsyncMock(side_effect=error)),
+            patch("mindroom.cli.main.create_first_run_config", side_effect=OSError(f"Permission denied: '{cfg}'")),
+            patch("mindroom.cli.connect.pair_local_install", side_effect=ValueError(f"Approval for {text} failed")),
+        ):
+            return _invoke_with_runtime(["run", "--no-api", *args], cfg, env=env).output.splitlines()
+
+    first_run = run("--provider", "openai")
+    _write_minimal_runtime_config(cfg)
+    pairing = run(env={"MINDROOM_PROVISIONING_URL": "https://mindroom.chat"})
+    refused = run(env={"MINDROOM_DASHBOARD_URL": dashboard_url})
+    failed = run(error=PermanentStartupError(f"Cannot read {text}"))
+    unreachable = run(
+        error=ConnectionRefusedError(f"Connection to {homeserver} refused"),
+        env={"MATRIX_HOMESERVER": homeserver},
+    )
+
+    assert f"Error: Permission denied: '{cfg}'" in first_run
+    assert f"Error: Approval for {text} failed" in pairing
+    assert any(line.startswith("Error: ") and f"'{dashboard_url}'" in line for line in refused)
+    assert f"Error: Cannot read {text}" in failed
+    assert f"  Details: Connection to {homeserver} refused" in unreachable
+    assert f"  2. MATRIX_HOMESERVER is set correctly (current: {homeserver})" in unreachable
+
+
+def test_run_prints_a_long_dashboard_address_whole_on_one_line(narrow_markup_dir: Path) -> None:
+    """The Dashboard and API URLs for a host name longer than the terminal is wide print whole on one line."""
+    cfg = narrow_markup_dir / "config.yaml"
+    _write_minimal_runtime_config(cfg)
+    host = f"mindroom.{'a-long-subdomain-label-' * 3}example.org"
+
+    with (
+        patch("mindroom.orchestrator.main", AsyncMock()),
+        patch("mindroom.frontend_assets.ensure_frontend_dist_dir", return_value=narrow_markup_dir),
+    ):
+        result = _invoke_with_runtime(["run", "--api-host", host], cfg)
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert f"Dashboard: http://{host}:8765" in lines
+    assert f"API: http://{host}:8765/api" in lines
+
+
+def test_avatar_commands_print_their_errors_whole_on_one_line(narrow_markup_dir: Path) -> None:
+    """`avatars generate` and `avatars sync` print a failure that names a markup-like, long path as written."""
+    cfg = narrow_markup_dir / "config.yaml"
+    _write_minimal_runtime_config(cfg)
+    text = str(narrow_markup_dir)
+
+    with patch(
+        "mindroom.avatar_generation.run_avatar_generation",
+        AsyncMock(side_effect=AvatarGenerationError(f"Cannot write {text}")),
+    ):
+        generated = _invoke_with_runtime(["avatars", "generate"], cfg).output.splitlines()
+    with patch(
+        "mindroom.avatar_generation.set_room_avatars_in_matrix",
+        AsyncMock(side_effect=AvatarSyncError(f"Cannot read {text}")),
+    ):
+        synced = _invoke_with_runtime(["avatars", "sync"], cfg).output.splitlines()
+
+    assert f"Error: Cannot write {text}" in generated
+    assert f"Error: Cannot read {text}" in synced
+
+
+def test_journal_adopt_prints_the_journals_and_a_refusal_whole_on_one_line(narrow_markup_dir: Path) -> None:
+    """`journal adopt` prints the bound journal, the configured one, and a refusal as written, each on one line."""
+    cfg = narrow_markup_dir / "config.yaml"
+    _write_minimal_runtime_config(cfg)
+    text = str(narrow_markup_dir)
+    previous = f"postgres {text}/old"
+    description = f"postgres {text}/new"
+    opening = "mindroom.event_journal.opening"
+
+    with (
+        patch(f"{opening}.describe_event_journal", return_value=description),
+        patch(f"{opening}.current_binding_description", return_value=previous),
+        patch(f"{opening}.adopt_event_journal", AsyncMock(return_value=2)),
+    ):
+        bound = _invoke_with_runtime(["journal", "adopt"], cfg, input="y\n").output.splitlines()
+    with (
+        patch(f"{opening}.describe_event_journal", return_value=description),
+        patch(f"{opening}.current_binding_description", return_value=None),
+        patch(f"{opening}.adopt_event_journal", AsyncMock(side_effect=EventJournalBindingError(f"{text} is in use"))),
+    ):
+        refused = _invoke_with_runtime(["journal", "adopt"], cfg).output.splitlines()
+
+    assert f"This install is bound to {previous}." in bound
+    assert (
+        f"Adopting {description} gives up the deduplication, delivery, and recovery history held in the bound journal."
+    ) in bound
+    assert f"Bound this install to {description} (generation 2)." in bound
+    assert f"Not adopted: {text} is in use" in refused
+
+
+def test_threads_export_prints_the_output_folder_and_errors_whole_on_one_line(narrow_markup_dir: Path) -> None:
+    """`threads export` prints its output folder, each failure, and an export error as written, each on one line."""
+    cfg = narrow_markup_dir / "config.yaml"
+    text = str(narrow_markup_dir)
+    output_dir = narrow_markup_dir / "exports"
+    room = ThreadExportRoom(key="lobby", room_id="!lobby:localhost", alias="#lobby:localhost", name="Lobby")
+    stats = ThreadExportStats(
+        output_dir=output_dir,
+        threads_unchanged=1,
+        failed_items=(
+            failure_for_target(f"cannot write {text}"),
+            failure_for_room(room, f"cannot read {text}", thread_id="$thread:localhost"),
+        ),
+    )
+    export = "mindroom.cli.thread_export.request_thread_export"
+
+    with patch(export, new=AsyncMock(return_value=stats)):
+        exported = _invoke_with_runtime(["threads", "export"], cfg).output.splitlines()
+    with patch(export, new=AsyncMock(side_effect=ValueError(f"Refused {text}"))):
+        refused = _invoke_with_runtime(["threads", "export"], cfg).output.splitlines()
+    with patch(export, new=AsyncMock(side_effect=OSError(f"Cannot reach {text}"))):
+        unreachable = _invoke_with_runtime(["threads", "export"], cfg).output.splitlines()
+
+    assert f"Exported 0/0 threads from 0 room(s) to {output_dir} (1 unchanged)" in exported
+    assert f"Failed target: cannot write {text}" in exported
+    assert f"Failed: lobby $thread:localhost: cannot read {text}" in exported
+    assert f"Error: Refused {text}" in refused
+    assert f"Error: Cannot reach {text}" in unreachable
+
+
+def test_connect_prints_its_errors_whole_on_one_line(narrow_markup_dir: Path) -> None:
+    """`mindroom connect` prints a self-hosted refusal and a pairing error as written, each on one line."""
+    cfg = narrow_markup_dir / "config.yaml"
+    text = str(narrow_markup_dir)
+    connect = ["connect", "--path", str(cfg)]
+
+    with patch("mindroom.cli.connect.self_hosted_pairing_error", return_value=f"{text} is self-hosted"):
+        refused = runner.invoke(app, connect).output.splitlines()
+    with patch("mindroom.cli.connect.pair_local_install", side_effect=ValueError(f"Cannot save {text}")):
+        failed = runner.invoke(app, [*connect, "--provisioning-url", "https://mindroom.chat"]).output.splitlines()
+
+    assert f"Error: {text} is self-hosted" in refused
+    assert f"Error: Cannot save {text}" in failed
+
+
+def test_config_init_prints_the_llama_cpp_commands_whole_on_one_line(narrow_markup_dir: Path) -> None:
+    """The llama.cpp server commands, longer than the terminal is wide, print unwrapped so they copy whole."""
+    target = narrow_markup_dir / "config.yaml"
+
+    result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "llama_cpp", "--no-input"])
+
+    lines = result.output.splitlines()
+    assert f"  {llama_cpp_server_command(LLAMA_CPP_GEMMA)}  Start the default local model server" in lines
+    assert f"  {llama_cpp_server_command(LLAMA_CPP_QWEN)}  Start the larger local model option" in lines
 
 
 def test_load_config_quiet_restores_unconfigured_structlog(tmp_path: Path) -> None:
@@ -270,6 +613,16 @@ class TestConfigInit:
         [
             ("codex", "mindroom.chat", "Run `codex login` before starting MindRoom (Matrix homeserver is prefilled)"),
             ("codex", "self-hosted", "Set your Matrix homeserver and run `codex login` before starting MindRoom"),
+            (
+                "claude_code",
+                "mindroom.chat",
+                "Run `claude auth login` before starting MindRoom (Matrix homeserver is prefilled)",
+            ),
+            (
+                "claude_code",
+                "self-hosted",
+                "Set your Matrix homeserver and run `claude auth login` before starting MindRoom",
+            ),
             ("openai", "mindroom.chat", "Set your API keys (Matrix homeserver is prefilled)"),
             ("openai", "self-hosted", "Set your API keys and Matrix homeserver"),
         ],
@@ -333,11 +686,14 @@ class TestConfigInit:
         assert "knowledge_bases" not in mind
         assert mind["tools"] == [
             "shell",
+            "coding",
             "memory",
             "scheduler",
             "update_awareness",
-            "todo",
             "matrix_message",
+            {"name": "todo", "defer": True},
+            {"name": "temporary_secrets", "defer": True},
+            {"name": "egress_credentials", "defer": True},
             {"name": "config_manager", "defer": True},
             {"name": "duckduckgo", "defer": True},
             {"name": "website", "defer": True},
@@ -347,6 +703,7 @@ class TestConfigInit:
             {"name": "thread_tags", "defer": True},
             {"name": "thread_summary", "defer": True},
             {"name": "thread_resolution", "defer": True},
+            {"name": "thread_snooze", "defer": True},
             {"name": "compact_context", "defer": True},
             {"name": "callback_manager", "defer": True},
             {"name": "chat_ui", "defer": True, "overrides": {"enable_show_canvas": True}},
@@ -354,6 +711,9 @@ class TestConfigInit:
             {"name": "script", "defer": True},
             {"name": "mcp_matrix_mcp", "defer": True},
         ]
+        # Mind's shell runs in MindRoom's process until a worker is set up, so the starter allows it there.
+        assert config["defaults"]["worker_tools"] == []
+        assert config["defaults"]["allow_shell_without_worker"] is True
         assert mind["delegate_to"] == ["mind"]
         assert mind["skill_learning"] == {"enabled": True}
         assert mind["automations"] == ["prompt_curation", "dreaming"]
@@ -363,6 +723,7 @@ class TestConfigInit:
             {"match": "manage_config", "action": "require_approval"},
             {"match": "manage_agent", "action": "require_approval"},
             {"match": "manage_team", "action": "require_approval"},
+            {"match": "matrix_user_write", "action": "require_approval"},
         ]
         # Background tool jobs are on by default, so the starter leaves the setting out.
         assert "background_tool_jobs" not in config
@@ -387,7 +748,7 @@ class TestConfigInit:
         assert config["memory"]["backend"] == "file"
         assert config["memory"]["embedder"]["provider"] == "sentence_transformers"
         assert config["memory"]["embedder"]["config"]["model"] == "sentence-transformers/all-MiniLM-L6-v2"
-        assert config["memory"]["file"]["max_entrypoint_lines"] == 200
+        assert "file" not in config["memory"]
         assert config["memory"]["search"] == {
             "mode": "semantic",
             "include": ["memory/**/*.md"],
@@ -564,7 +925,7 @@ class TestConfigInit:
         config = load_config_yaml(target)
         assert "mind_memory" not in config.knowledge_bases
 
-        ensure_default_agent_workspaces(config, runtime_storage)
+        ensure_default_agent_workspaces(config, resolve_runtime_paths(config_path=target))
         runtime_workspace = runtime_storage / "agents" / "mind" / "workspace"
         assert (runtime_workspace / "SOUL.md").exists()
         assert (runtime_workspace / "AGENTS.md").exists()
@@ -825,10 +1186,8 @@ class TestConfigInit:
         )
 
         assert result.exit_code == 0
-        # Rich folds long paths mid-token, so compare without any whitespace.
-        output = "".join(result.output.split())
         expected = f"{OWNER_MATRIX_USER_ID_ENV} in {tmp_path / '.env'} is not a valid Matrix user ID ('@Alice:selfhosted.example')"
-        assert "".join(expected.split()) in output
+        assert expected in result.output
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER in target.read_text(encoding="utf-8")
 
     def test_init_names_the_environment_as_the_source_of_an_unusable_owner(
@@ -1617,6 +1976,43 @@ class TestConfigInit:
         assert "\nOPENAI_API_KEY=your-openai-key-here" in f"\n{env_content}"
         assert "\n# OPENROUTER_API_KEY=your-openrouter-key-here" in f"\n{env_content}"
 
+    def test_config_init_claude_code_preset_runs_on_the_claude_subscription(self, tmp_path: Path) -> None:
+        """Config init --provider claude_code writes Claude Code models and no API key."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "claude_code"])
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(target.read_text())
+        assert config["models"] == {
+            "default": {
+                "provider": "claude_code",
+                "id": "claude-sonnet-5-5",
+                "display_name": "Claude Sonnet 5.5",
+                "context_window": 200_000,
+            },
+            "opus": {
+                "provider": "claude_code",
+                "id": "claude-opus-5-5",
+                "display_name": "Claude Opus 5.5",
+                "context_window": 200_000,
+            },
+            "haiku": {
+                "provider": "claude_code",
+                "id": "claude-haiku-5-5",
+                "display_name": "Claude Haiku 5.5",
+                "context_window": 200_000,
+            },
+        }
+        loaded_config = load_config_yaml(target)
+        assert loaded_config.router.model == "haiku"
+        assert loaded_config.defaults.thread_summary_model == "haiku"
+        assert loaded_config.agents["mind"].model == "default"
+
+        env_content = (tmp_path / ".env").read_text()
+        assert "Run `claude auth login` as the user that runs MindRoom" in env_content
+        assert "\nANTHROPIC_API_KEY=" not in env_content
+        assert "claude auth login" in normalize_console_output(result.output)
+
     def test_init_codex_preset_uses_codex_models(self, tmp_path: Path) -> None:
         """Config init --provider codex uses Codex ChatGPT-login defaults."""
         target = tmp_path / "config.yaml"
@@ -1627,14 +2023,14 @@ class TestConfigInit:
         assert config["models"] == {
             "default": {
                 "provider": "codex",
-                "id": "gpt-6.1-sol",
+                "id": "gpt-6.2-sol",
                 "display_name": "Sol",
                 "context_window": 258_000,
                 "extra_kwargs": {"reasoning_effort": "medium"},
             },
             "astra": {
                 "provider": "codex",
-                "id": "gpt-6-astra",
+                "id": "gpt-6.2-astra",
                 "display_name": "Astra",
                 "context_window": 258_000,
                 "extra_kwargs": {"reasoning_effort": "medium"},
@@ -1866,14 +2262,18 @@ class TestConfigMigrate:
         assert authorization.read_text(encoding="utf-8") == authorization_text
         assert not cfg.with_name(f"{cfg.name}.pre-membership-access").exists()
 
-    def test_migrate_missing_config_exits_with_error(self, tmp_path: Path) -> None:
-        """Config migrate should fail cleanly when no config exists."""
-        missing = tmp_path / "config.yaml"
+    def test_migrate_prints_the_config_path_whole_on_one_line(self, narrow_markup_dir: Path) -> None:
+        """A missing config fails, and the missing-config and updated-config lines print a markup-like, long path whole."""
+        cfg = narrow_markup_dir / "config.yaml"
+        migrate = ["config", "migrate", "--path", str(cfg)]
 
-        result = runner.invoke(app, ["config", "migrate", "--path", str(missing)])
+        missing = runner.invoke(app, migrate)
+        cfg.write_text("authorization:\n  global_users:\n    - '@owner:example.com'\n", encoding="utf-8")
+        migrated = runner.invoke(app, migrate).output.splitlines()
 
-        assert result.exit_code == 1
-        assert "No config file found" in normalize_console_output(result.output)
+        assert missing.exit_code == 1
+        assert f"No config file found at: {cfg}" in missing.output.splitlines()
+        assert f"Config updated: {cfg}" in migrated
 
 
 # ---------------------------------------------------------------------------
@@ -2008,20 +2408,22 @@ class TestConfigValidate:
         assert result.exit_code == 0
         assert "valid" in result.output.lower()
 
-    def test_validate_prints_room_names_as_written(self, tmp_path: Path) -> None:
-        """The summary prints configured room names verbatim, even ones that look like Rich markup."""
+    def test_validate_prints_room_names_as_written(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The summary prints configured room names verbatim on one line, even ones that look like Rich markup."""
+        monkeypatch.setattr(config_cli.console, "_width", 80)
+        long_room = "a-room-name-long-enough-to-push-the-summary-line-past-eighty-columns"
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models:\n  default:\n    provider: ollama\n    id: gemma4\n"
-            'agents:\n  assistant:\n    display_name: Assistant\n    model: default\n    rooms: ["[/fast]", "[bold]lobby"]\n'
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            f'    rooms: ["[/fast]", "[bold]lobby", ":fire:", "{long_room}"]\n'
             "router:\n  model: default\n",
         )
 
         result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
 
         assert result.exit_code == 0, result.output
-        output = normalize_console_output(result.output)
-        assert "Rooms: 2 ([/fast], [bold]lobby)" in output
+        assert f"  Rooms:  4 (:fire:, [/fast], [bold]lobby, {long_room})" in result.output.splitlines()
 
     def test_validate_prints_a_rejected_key_that_looks_like_markup_as_written(self, tmp_path: Path) -> None:
         """A validation error quotes the config key it rejects verbatim, even one that looks like Rich markup."""
@@ -2568,23 +2970,25 @@ class TestConfigValidate:
     ids=["init", "migrate", "validate"],
 )
 def test_a_non_utf8_env_file_names_itself_and_the_fix(
-    tmp_path: Path,
+    narrow_markup_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     command: list[str],
 ) -> None:
-    """A `.env` saved in another encoding stops the command with an error naming the file, not a traceback."""
-    env_path = tmp_path / ".env"
+    """A `.env` saved in another encoding stops the command with an error naming the file whole, not a traceback."""
+    env_path = narrow_markup_dir / ".env"
     env_path.write_text("OPENAI_API_KEY=sk-test\n", encoding="utf-16")
-    monkeypatch.setattr(sys, "argv", ["mindroom", *command, "--path", str(tmp_path / "config.yaml")])
+    monkeypatch.setattr(sys, "argv", ["mindroom", *command, "--path", str(narrow_markup_dir / "config.yaml")])
 
     with pytest.raises(SystemExit) as exited:
         cli_main()
 
     assert exited.value.code == 1
-    output = normalize_console_output(capsys.readouterr().out)
-    assert f"Error: {env_path.resolve()} is not UTF-8 text" in output
-    assert "save it as UTF-8" in output
+    lines = capsys.readouterr().out.splitlines()
+    assert any(
+        line.startswith(f"Error: {env_path.resolve()} is not UTF-8 text") and "save it as UTF-8" in line
+        for line in lines
+    ), lines
 
 
 def test_a_utf8_bom_env_file_keeps_its_first_variable(tmp_path: Path) -> None:
@@ -2646,7 +3050,22 @@ class TestRunFirstRunSetup:
 
     @pytest.fixture(autouse=True)
     def _interactive_terminal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mindroom.cli.setup_detection import DetectionSnapshot, KeyCheckResult  # noqa: PLC0415
+
         monkeypatch.setattr("mindroom.cli.main.terminal_is_interactive", lambda: True)
+        # Isolate first-run tests from the developer machine's CLIs, local Ollama, and live API key checks.
+        monkeypatch.setattr(
+            "mindroom.cli.setup_detection.detect_available_providers",
+            lambda _runtime_paths, **_kwargs: DetectionSnapshot(),
+        )
+        monkeypatch.setattr(
+            "mindroom.cli.setup_detection.detect_single_provider",
+            lambda _preset, _runtime_paths, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            "mindroom.cli.setup_detection.verify_provider_api_key",
+            lambda _preset, _api_key, **_kwargs: KeyCheckResult(status="valid"),
+        )
         # On a platform without a service manager, first-run setup starts MindRoom in the terminal without asking.
         monkeypatch.setattr(
             "mindroom.cli.service._get_service_manager",
@@ -2739,11 +3158,14 @@ class TestRunFirstRunSetup:
 
     def test_first_run_installs_the_login_service_by_default_instead_of_running_here(
         self,
-        tmp_path: Path,
+        narrow_markup_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A bare Enter after pairing hands the new setup to a started login service and returns to the shell."""
-        config_path = tmp_path / "config.yaml"
+        """A bare Enter after pairing hands the new setup to a started login service and returns to the shell.
+
+        The hint after it names a markup-like, long `.env` path whole, without raising.
+        """
+        config_path = narrow_markup_dir / "config.yaml"
         manager = self._service_manager(monkeypatch)
 
         result, paired, started = self._invoke_run(config_path, "codex\n\n", args=())
@@ -2753,7 +3175,8 @@ class TestRunFirstRunSetup:
         assert "Run MindRoom in the background and start it at login (systemd user service)? [Y/n]" in output
         assert "Service Installed" in output
         assert "Dashboard: http://localhost:8765" in output
-        assert "mindroom service restart" in output
+        env_path = (narrow_markup_dir / ".env").resolve()
+        assert f"After editing {env_path}, run mindroom service restart." in result.output.splitlines()
         assert len(paired) == 1
         assert started == []
         manager.install_service.assert_called_once_with()
@@ -3248,7 +3671,7 @@ class TestRunErrorHandling:
         )
         provider_guidance = (
             "mindroom config init --provider "
-            "{anthropic,azure,bedrock_claude,codex,kimi,llama.cpp,ollama,openai,openrouter,vertexai_claude}"
+            "{anthropic,azure,bedrock_claude,claude_code,codex,kimi,llama.cpp,ollama,openai,openrouter,vertexai_claude}"
         )
         assert provider_guidance in result.output
         assert "mindroom run --provider" in result.output
@@ -3375,30 +3798,17 @@ class TestRunErrorHandling:
         assert "GOOGLE_APPLICATION_CREDENTIALS is invalid" in result.output
         assert "Traceback" not in result.output
 
-    @pytest.mark.parametrize(
-        ("dashboard_url", "message"),
-        [
-            ("https://admin.example.org", "Error: MINDROOM_DASHBOARD_URL requires trusted upstream auth"),
-            # The value is echoed as text, never read as console markup.
-            ("http://admin.example.org/[/x]", "'http://admin.example.org/[/x]'"),
-        ],
-    )
-    def test_run_refuses_dashboard_auth_settings_it_cannot_serve(
-        self,
-        tmp_path: Path,
-        dashboard_url: str,
-        message: str,
-    ) -> None:
+    def test_run_refuses_dashboard_auth_settings_it_cannot_serve(self, tmp_path: Path) -> None:
         """Dashboard auth settings MindRoom cannot serve stop startup with their message, before anything runs."""
         cfg = tmp_path / "config.yaml"
         _write_minimal_runtime_config(cfg)
         mock_main = AsyncMock()
 
         with patch("mindroom.orchestrator.main", mock_main):
-            result = _invoke_with_runtime(["run"], cfg, env={"MINDROOM_DASHBOARD_URL": dashboard_url})
+            result = _invoke_with_runtime(["run"], cfg, env={"MINDROOM_DASHBOARD_URL": "https://admin.example.org"})
 
         assert result.exit_code == 1
-        assert message in result.output
+        assert "Error: MINDROOM_DASHBOARD_URL requires trusted upstream auth" in result.output
         assert isinstance(result.exception, SystemExit)
         mock_main.assert_not_called()
 
@@ -4027,6 +4437,12 @@ class TestDoctor:
     """Tests for `mindroom doctor`."""
 
     @pytest.fixture(autouse=True)
+    def _no_exported_anthropic_route(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Clear an Anthropic endpoint, token, or key exported in the shell; an endpoint makes doctor skip the key check."""
+        for name in ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
+            monkeypatch.delenv(name, raising=False)
+
+    @pytest.fixture(autouse=True)
     def _healthy_embedder_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Keep the real-embedding probe off the network; specific tests override it."""
         monkeypatch.setattr("mindroom.cli.doctor.probe_embedder", lambda *_args: None)
@@ -4320,6 +4736,155 @@ class TestDoctor:
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=Path("/proc/fake_mindroom_storage"))
         assert result.exit_code == 1
         assert "Storage not writable" in result.output
+
+    def test_doctor_prints_config_and_storage_paths_whole_on_one_line(
+        self,
+        narrow_markup_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The config folder, config file, storage, and a credential-store error print as written, each on one line."""
+        cfg = narrow_markup_dir / "config.yaml"
+        storage = narrow_markup_dir / "storage"
+        text = str(narrow_markup_dir)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        missing = _invoke_with_runtime(["doctor"], cfg, storage_path=storage).output.splitlines()
+        cfg.mkdir()
+        directory = _invoke_with_runtime(["doctor"], cfg, storage_path=storage).output.splitlines()
+        cfg.rmdir()
+        cfg.write_text(_VALID_CONFIG)
+        (narrow_markup_dir / "a-file").write_text("")
+        unwritable_storage = narrow_markup_dir / "a-file" / "storage"
+        with patch("mindroom.cli.doctor.get_runtime_credentials_manager", side_effect=OSError(f"Cannot open {text}")):
+            unwritable = _invoke_with_runtime(["doctor"], cfg, storage_path=unwritable_storage).output.splitlines()
+
+        assert f"Config directory: {narrow_markup_dir}" in missing
+        assert f"✗ Config file not found: {cfg}" in missing
+        assert f"✓ Storage writable: {storage}/" in missing
+        assert f"✗ Config path is not a file: {cfg}" in directory
+        assert f"✓ Config file: {cfg}" in unwritable
+        assert f"! Could not open the credential store (Cannot open {text})" in unwritable
+        assert any(line.startswith(f"✗ Storage not writable: {unwritable_storage} (") for line in unwritable), (
+            unwritable
+        )
+
+    def test_doctor_prints_the_homeserver_whole_on_one_line(
+        self,
+        narrow_markup_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Each homeserver result prints a homeserver Rich would read as markup, and its error, whole on one line."""
+        cfg = narrow_markup_dir / "config.yaml"
+        storage = narrow_markup_dir / "storage"
+        text = str(narrow_markup_dir)
+        homeserver = f"http://localhost:8008{text}"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setattr(
+            "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
+            lambda *_args, **_kwargs: homeserver,
+        )
+
+        def doctor(response: httpx.Response | httpx.HTTPError, config: str = _VALID_CONFIG) -> list[str]:
+            def get(*_args: object, **_kwargs: object) -> httpx.Response:
+                if isinstance(response, httpx.HTTPError):
+                    raise response
+                return response
+
+            cfg.write_text(config)
+            monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
+            return _invoke_with_runtime(["doctor"], cfg, storage_path=storage).output.splitlines()
+
+        versions = httpx.Response(200, json={"versions": ["v1.1"]})
+        reachable = doctor(versions)
+        unreachable = doctor(httpx.ConnectError(f"Cannot connect to {text}"))
+        failing = doctor(httpx.Response(502))
+        without_sliding_sync = doctor(versions, f"{_VALID_CONFIG}matrix_sync:\n  mode: sliding\n")
+
+        assert f"✓ Matrix homeserver: {homeserver}" in reachable
+        assert f"✗ Matrix homeserver unreachable: {homeserver} (Cannot connect to {text})" in unreachable
+        assert f"✗ Matrix homeserver HTTP 502: {homeserver}" in failing
+        assert (
+            f"✗ Matrix homeserver does not advertise MSC4186 Simplified Sliding Sync ({MSC4186_UNSTABLE_FEATURE}): "
+            f"{homeserver}. Set matrix_sync.mode: classic or upgrade the homeserver."
+        ) in without_sliding_sync
+
+    def test_doctor_prints_config_issues_whole_on_one_line(
+        self,
+        narrow_markup_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A config error and an automation issue that name long, markup-like keys print whole on one line."""
+        cfg = narrow_markup_dir / "config.yaml"
+        storage = narrow_markup_dir / "storage"
+        model = "[/x]-" + "a-model-name-long-enough-to-pass-eighty-columns-" * 2
+        agent = "an_agent_name_long_enough_to_push_the_config_issue_past_eighty_columns"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        cfg.write_text(
+            _VALID_CONFIG.replace("agents:\n", f'  "{model}":\n    provider: anthropic\n    id: c\nagents:\n'),
+        )
+        rejected = _invoke_with_runtime(["doctor"], cfg, storage_path=storage).output.splitlines()
+        cfg.write_text(
+            _VALID_CONFIG.replace("  assistant:\n", f"  {agent}:\n").replace(
+                "    model: default\n",
+                "    model: default\n    automations:\n      - {name: weekly_digest, cron: '0 9 * * 1'}\n",
+            ),
+        )
+        unprovided = _invoke_with_runtime(["doctor"], cfg, storage_path=storage).output.splitlines()
+
+        assert any(
+            line.startswith("✗ Config invalid: ") and f"rename models.{model} and update every reference" in line
+            for line in rejected
+        ), rejected
+        assert (
+            f"✗ Config invalid: agents.{agent}.automations: 'weekly_digest' is not provided by any loaded plugin"
+        ) in unprovided
+
+    def test_doctor_prints_a_pairing_error_and_a_missing_store_whole_on_one_line(
+        self,
+        narrow_markup_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A pairing error naming a markup-like path, and a missing store of a long-named bot, print on one line."""
+        cfg = narrow_markup_dir / "config.yaml"
+        cfg.write_text(_VALID_CONFIG)
+        storage = narrow_markup_dir / "storage"
+        text = str(narrow_markup_dir)
+        account = "agent_" + "a_long_agent_name_" * 5
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+        monkeypatch.setattr(
+            "mindroom.cli.doctor.local_pairing_required",
+            Mock(side_effect=ValueError(f"Unreadable credentials in {text}")),
+        )
+        save_matrix_state(
+            MatrixState(
+                accounts={
+                    account: MatrixAccount(
+                        username="mindroom_general",
+                        password="pw",  # noqa: S106
+                        domain="localhost",
+                        device_id="LOSTDEVICE",
+                    ),
+                },
+            ),
+            constants_module.resolve_runtime_paths(config_path=cfg, storage_path=storage),
+        )
+
+        lines = _invoke_with_runtime(
+            ["doctor"],
+            cfg,
+            storage_path=storage,
+            env={"MINDROOM_PROVISIONING_URL": "https://mindroom.chat"},
+        ).output.splitlines()
+
+        assert f"✗ Pairing: Unreadable credentials in {text}" in lines
+        assert (
+            f"⚠ Encryption store missing for {account} (@mindroom_general:localhost, device LOSTDEVICE); "
+            "that bot does not start until its store is restored from a backup"
+        ) in lines
 
     def test_skips_config_checks_when_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor skips config-validation and provider checks when config is missing."""
@@ -5719,7 +6284,96 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
 class TestLocalStackSetup:
     """Tests for `mindroom local-stack-setup`."""
 
-    def test_starts_synapse_and_cinny_containers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    @staticmethod
+    def _fake_docker(
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        returncode: int = 0,
+        stderr: str = "",
+        status: int = 200,
+    ) -> None:
+        """Answer every docker command with ``returncode`` and every health probe with ``status``, without waiting."""
+        monkeypatch.setattr("mindroom.cli.local_stack.sys.platform", "linux")
+        monkeypatch.setattr("mindroom.cli.local_stack.shutil.which", lambda _name: "/usr/bin/docker")
+        monkeypatch.setattr(
+            "mindroom.cli.local_stack._httpx_get",
+            lambda *_a, **_kw: httpx.Response(status, json={"versions": ["v1.1"]}),
+        )
+        # Each clock read moves 30 seconds, so the 60 second health wait probes once before it gives up.
+        clock = iter(range(0, 10_000, 30))
+        monkeypatch.setattr(
+            "mindroom.cli.local_stack.time",
+            SimpleNamespace(monotonic=lambda: next(clock), sleep=lambda _seconds: None),
+        )
+        monkeypatch.setattr(
+            "mindroom.cli.local_stack.subprocess.run",
+            lambda cmd, **_kw: subprocess.CompletedProcess(cmd, returncode, stdout="", stderr=stderr),
+        )
+
+    def test_prints_paths_urls_and_commands_whole_on_one_line(
+        self,
+        narrow_markup_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Each path, homeserver, server name, and command to copy prints as written, whole on one line."""
+        synapse_dir = narrow_markup_dir / "matrix"
+        synapse_dir.mkdir()
+        (synapse_dir / "docker-compose.yml").write_text("services: {}\n")
+        cfg = narrow_markup_dir / "config.yaml"
+        storage_path = narrow_markup_dir / "mindroom_data"
+        homeserver = f"http://localhost:8008{narrow_markup_dir}"
+        server_name = f"[work].{'a-server-name-label-' * 4}example"
+        container = f"mindroom-chat-{'a-long-container-name-' * 3}"
+        self._fake_docker(monkeypatch)
+        setup = ["local-stack-setup", "--synapse-dir", str(synapse_dir), "--homeserver-url", homeserver]
+
+        persisted = _invoke_with_runtime(
+            [*setup, "--server-name", server_name, "--chat-container-name", container],
+            cfg,
+            storage_path=storage_path,
+        )
+        printed = _invoke_with_runtime([*setup, "--no-persist-env"], cfg, storage_path=storage_path)
+
+        assert persisted.exit_code == 0, persisted.output
+        lines = persisted.output.splitlines()
+        assert f"Starting Synapse stack from {synapse_dir}..." in lines
+        assert any(line.startswith(f"Waiting for Synapse: {homeserver}/") for line in lines), lines
+        assert f"MindRoom Chat config written: {storage_path / 'local' / 'chat-config.json'}" in lines
+        assert f"  Synapse: {homeserver}" in lines
+        assert f"  Server:  {server_name}" in lines
+        assert f"  Env:     {narrow_markup_dir / '.env'}" in lines
+        assert f"  docker rm -f {container}" in lines
+        assert f"  cd {synapse_dir} && docker compose down" in lines
+        assert (
+            f"  MATRIX_HOMESERVER={homeserver} MATRIX_SERVER_NAME=localhost uv run mindroom run"
+            in printed.output.splitlines()
+        )
+
+    def test_prints_failures_whole_on_one_line(self, narrow_markup_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A bad homeserver URL, a missing compose file, a failed command, and an unhealthy service print whole."""
+        synapse_dir = narrow_markup_dir / "matrix"
+        synapse_dir.mkdir()
+        cfg = narrow_markup_dir / "config.yaml"
+        text = str(narrow_markup_dir)
+        homeserver = f"http://localhost:8008{text}"
+        setup = ["local-stack-setup", "--synapse-dir", str(synapse_dir)]
+
+        def lines(*args: str) -> list[str]:
+            return _invoke_with_runtime([*setup, *args], cfg).output.splitlines()
+
+        self._fake_docker(monkeypatch, returncode=1, stderr=f"Cannot start {text}", status=503)
+        invalid = lines("--homeserver-url", text)
+        missing = lines()
+        (synapse_dir / "docker-compose.yml").write_text("services: {}\n")
+        failed = lines()
+        unhealthy = lines("--skip-synapse", "--homeserver-url", homeserver)
+
+        assert f"Error: Invalid homeserver URL: {text}" in invalid
+        assert f"Error: Synapse compose file not found: {synapse_dir / 'docker-compose.yml'}" in missing
+        assert f"Error: Failed to start Synapse stack: Cannot start {text}" in failed
+        assert any(line.startswith(f"Error: Synapse did not become healthy at {homeserver}/") for line in unhealthy)
+
+    def test_starts_synapse_and_chat_containers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Command starts Synapse compose and the MindRoom Chat container."""
         synapse_dir = tmp_path / "matrix"
         synapse_dir.mkdir()
@@ -5748,10 +6402,10 @@ class TestLocalStackSetup:
                 "local-stack-setup",
                 "--synapse-dir",
                 str(synapse_dir),
-                "--cinny-port",
+                "--chat-port",
                 "18080",
-                "--cinny-container-name",
-                "mindroom-cinny-test",
+                "--chat-container-name",
+                "mindroom-chat-test",
             ],
             cfg,
             storage_path=storage_path,
@@ -5763,9 +6417,9 @@ class TestLocalStackSetup:
         assert any(cmd[:3] == ["docker", "run", "-d"] for cmd in commands)
         assert any(cmd[-1] == "ghcr.io/mindroom-ai/mindroom-chat:latest" for cmd in commands)
 
-        cinny_config = storage_path / "local" / "cinny-config.json"
-        assert cinny_config.exists()
-        config = json.loads(cinny_config.read_text())
+        chat_config = storage_path / "local" / "chat-config.json"
+        assert chat_config.exists()
+        config = json.loads(chat_config.read_text())
         assert config["homeserverList"] == ["http://localhost:8008"]
         assert config["featuredCommunities"]["rooms"] == ["#lobby:localhost"]
 
@@ -5803,73 +6457,65 @@ class TestLocalStackSetup:
 
         assert result.exit_code == 0
         assert ["docker", "compose", "up", "-d"] not in commands
+        assert ["docker", "rm", "-f", "mindroom-chat-local"] in commands
         assert any(cmd[:3] == ["docker", "run", "-d"] for cmd in commands)
 
-    @staticmethod
-    def _stub_local_stack(monkeypatch: pytest.MonkeyPatch) -> None:
-        """Stand in for Docker and a healthy homeserver."""
-        monkeypatch.setattr("mindroom.cli.local_stack.sys.platform", "linux")
-        monkeypatch.setattr("mindroom.cli.local_stack.shutil.which", lambda _name: "/usr/bin/docker")
-        monkeypatch.setattr(
-            "mindroom.cli.local_stack._httpx_get",
-            lambda *_a, **_kw: httpx.Response(200, json={"versions": ["v1.1"]}),
-        )
-        monkeypatch.setattr("mindroom.cli.local_stack.time.sleep", lambda *_a, **_kw: None)
-        monkeypatch.setattr(
-            "mindroom.cli.local_stack.subprocess.run",
-            lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""),
-        )
-
     @pytest.mark.parametrize(
-        ("homeserver_url", "env_prefix"),
+        ("homeserver_url", "expected_env"),
         [
-            ("http://localhost:8008", "MATRIX_HOMESERVER=http://localhost:8008 uv run"),
-            ("https://localhost:8448", "MATRIX_HOMESERVER=https://localhost:8448 MATRIX_SSL_VERIFY=false uv run"),
+            (
+                "http://localhost:8008",
+                {"MATRIX_HOMESERVER": "http://localhost:8008", "MATRIX_SERVER_NAME": "example.org"},
+            ),
+            (
+                "https://localhost:8448",
+                {
+                    "MATRIX_HOMESERVER": "https://localhost:8448",
+                    "MATRIX_SERVER_NAME": "example.org",
+                    "MATRIX_SSL_VERIFY": "false",
+                },
+            ),
         ],
     )
-    def test_no_persist_env_prints_inline_command(
+    def test_no_persist_env_prints_command_that_runs_with_the_settings_it_would_persist(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         homeserver_url: str,
-        env_prefix: str,
+        expected_env: dict[str, str],
     ) -> None:
-        """--no-persist-env writes no .env and prints the same settings it would persist."""
+        """--no-persist-env writes no .env, and its printed command, run as printed, sets what the .env would hold."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
-        self._stub_local_stack(monkeypatch)
+        run = subprocess.run  # The Docker stub replaces subprocess.run for every caller.
+        self._fake_docker(monkeypatch)
+        setup = [
+            "local-stack-setup",
+            "--skip-synapse",
+            "--homeserver-url",
+            homeserver_url,
+            "--server-name",
+            "example.org",
+        ]
 
-        result = _invoke_with_runtime(
-            ["local-stack-setup", "--skip-synapse", "--no-persist-env", "--homeserver-url", homeserver_url],
-            cfg,
-            storage_path=tmp_path / "mindroom_data",
-        )
+        result = _invoke_with_runtime([*setup, "--no-persist-env"], cfg, storage_path=tmp_path / "mindroom_data")
 
         assert result.exit_code == 0, result.output
         assert not (tmp_path / ".env").exists()
-        output = normalize_console_output(result.output)
-        assert f"{env_prefix} mindroom run" in output
-
-    def test_https_homeserver_persists_ssl_verify_override(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """An https:// local homeserver still gets MATRIX_SSL_VERIFY=false for its local certificate."""
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
-        self._stub_local_stack(monkeypatch)
-
-        result = _invoke_with_runtime(
-            ["local-stack-setup", "--skip-synapse", "--homeserver-url", "https://localhost:8448"],
-            cfg,
-            storage_path=tmp_path / "mindroom_data",
+        command = next(line.strip() for line in result.output.splitlines() if line.endswith(" uv run mindroom run"))
+        ran = run(
+            ["sh", "-c", command.replace(" uv run mindroom run", " env")],
+            env={"PATH": os.environ["PATH"]},
+            capture_output=True,
+            text=True,
+            check=True,
         )
-
-        assert result.exit_code == 0, result.output
-        env_content = (tmp_path / ".env").read_text()
-        assert "MATRIX_HOMESERVER=https://localhost:8448" in env_content
-        assert "MATRIX_SSL_VERIFY=false" in env_content
+        ran_env = dict(line.split("=", 1) for line in ran.stdout.splitlines())
+        assert {name: value for name, value in ran_env.items() if name.startswith("MATRIX_")} == expected_env
+        persisted = _invoke_with_runtime(setup, cfg, storage_path=tmp_path / "mindroom_data")
+        assert persisted.exit_code == 0, persisted.output
+        persisted_lines = (tmp_path / ".env").read_text().splitlines()
+        assert sorted(persisted_lines) == sorted(f"{name}={value}" for name, value in expected_env.items())
 
     def test_rejects_unsupported_platform(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Command fails on unsupported operating systems."""

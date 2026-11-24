@@ -208,7 +208,7 @@ async def test_job_fuzz_oracle_detects_corruption(tmp_path: Path, corruption: st
             await runner.runtime._store.save(
                 "job1",
                 json.dumps(asdict(replace(entries["job0"].job, job_id="job1"))),
-                ends_approvals=False,
+                approval_end_reason=None,
             )
         elif corruption == "outcome":
             entries["job1"].job = replace(entries["job1"].job, status="interrupted")

@@ -5,8 +5,15 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Literal, cast
+from functools import lru_cache
+from typing import TYPE_CHECKING, Any, Literal, cast
 
+from mindroom.constants import (
+    DURABLE_DELIVERY_ID_KEY,
+    NONTERMINAL_STREAM_STATUSES,
+    STREAM_STATUS_KEY,
+    STREAM_VISIBLE_BODY_KEY,
+)
 from mindroom.redaction import redact_sensitive_data, redact_sensitive_text
 
 if TYPE_CHECKING:
@@ -16,11 +23,18 @@ if TYPE_CHECKING:
     from mindroom.llm.runs import ToolExecution
 
 _TOOL_TRACE_KEY = "io.mindroom.tool_trace"
-_TOOL_TRACE_VERSION = 2
+# Version 3 is what Matrix gets: text without marker lines, each call's place as ``body_line`` and ``at`` on its entry.
+_TOOL_TRACE_VERSION = 3
+# Version 2 has its markers in the text, as the pipeline builds a reply before sending it.
+_MARKED_TEXT_VERSION = 2
+# The text of a streaming reply of calls alone, whose version-3 trace says so with ``placeholder_body``.
+_PLACEHOLDER_BODY = "Thinking..."
 
 _MAX_TOOL_ARGS_PREVIEW_CHARS = 1200
 _MAX_TOOL_ARG_VALUE_PREVIEW_CHARS = 250
 _MAX_TOOL_RESULT_DISPLAY_CHARS = 500
+# Live frames serialize a reply's whole trace ten times a second; a preview's redaction depends only on its text.
+_redact_preview = lru_cache(maxsize=4096)(redact_sensitive_text)
 _TRUNCATABLE_RESULT_ITEM_FIELDS = frozenset({"body_preview"})
 _TOOL_REF_ICON = "🔧"
 _TOOL_PENDING_MARKER = " ⏳"
@@ -28,6 +42,11 @@ _VISIBLE_TOOL_MARKER_LINE_PATTERN = re.compile(r"^\s*🔧 `[^`]+` \[\d+\](?: ⏳
 # Bounded so an index in untrusted text never reaches int()'s digit limit.
 _VISIBLE_TOOL_MARKER_INDEX_PATTERN = re.compile(r"(?<= \[)\d{1,9}(?=\](?: ⏳)?\s*$)")
 _VISIBLE_TOOL_MARKER_SEPARATOR_PATTERN = re.compile(r"^\s{0,3}---\s*$")
+# Top-level HTML blocks as MindRoom Chat counts them (``matrix/protocol/toolPositions.ts`` there).
+# ASCII, so a tag name ends where JavaScript's word boundary ends it.
+_HTML_TAG_PATTERN = re.compile(r"<(/?)([A-Za-z][A-Za-z0-9-]*)\b[^>]*?(/?)>", re.ASCII)
+_HTML_VOID_TAG_PATTERN = re.compile(r"area|base|br|col|embed|hr|img|input|link|meta|source|track|wbr", re.IGNORECASE)
+_NON_BLANK_PATTERN = re.compile(r"[^ \t\n\r\f]")
 _StructuredResultDict = dict[str, object]
 _StructuredResultList = list[object]
 _MALFORMED_TRACE = "Durable tool trace contains a malformed event"
@@ -42,15 +61,18 @@ class ToolTraceEntry:
     args_preview: str | None = None
     result_preview: str | None = None
     truncated: bool = False
-    # Internal continuation identity; public Matrix metadata omits these fields.
+    # The call's id, which public Matrix metadata carries too, so a client draws a card that names its call (a secret
+    # request's) at the call's line.
     tool_call_id: str | None = field(default=None, compare=False)
+    # Internal continuation identity; public Matrix metadata omits these fields.
     # The team member whose slot shows the call, by config name; None for a team leader's call and any call outside a
     # team.
     member_id: str | None = field(default=None, compare=False)
     parent_bash_call_id: str | None = field(default=None, compare=False)
     toolkit_name: str | None = field(default=None, compare=False)
-    # Whether the completed call failed, as its run recorded it, so an interrupted replay can say so. Internal like
-    # the identity above: the reply's records keep it, and public Matrix metadata omits it.
+    # Whether the completed call did not succeed, as its run recorded it: it errored, was refused or denied, or was
+    # cancelled or interrupted. An interrupted replay and a client say so; the result preview says why. The reply's
+    # records keep it, and public Matrix metadata carries it as ``is_error: true`` on such a completed call only.
     is_error: bool = field(default=False, compare=False)
     # The call as its tool event reported it, with its full arguments and result, which an interrupted replay renders.
     # Never serialized, so Matrix metadata and the reply's records keep only the previews, and a restored entry has none.
@@ -233,9 +255,18 @@ class CollectedStreamPresentation:
     def show_text(self, content: str) -> None:
         """Apply one text chunk: it replaces the collected text in a stream of whole documents, else continues it."""
         if self.replaces_text:
-            self.response_text = content
+            self._replace_text(content)
             return
         self.append_text(content)
+
+    def _replace_text(self, content: str) -> None:
+        """Replace the collected text; a paragraph break stays pending only where the new text ends at its tool call."""
+        ending = content.rstrip("\r\n")
+        last_line = ending.rsplit("\n", maxsplit=1)[-1]
+        at_marker = self.show_tool_calls and last_line in _trace_marker_lines(self.tool_trace)
+        unchanged = ending == self.response_text.rstrip("\r\n")
+        self.separate_next_text = at_marker or (self.separate_next_text and unchanged)
+        self.response_text = content
 
     def append_text(self, content: object | None) -> None:
         """Append one provider content delta when it is non-empty."""
@@ -244,7 +275,7 @@ class CollectedStreamPresentation:
             content,
             separate=self.separate_next_text,
         )
-        if content:
+        if str(content or "").strip("\r\n"):
             self.separate_next_text = False
 
     def start_tool(self, call: ReportedCall, *, origin: ToolCallOrigin | None = None) -> None:
@@ -257,9 +288,16 @@ class CollectedStreamPresentation:
             return
         self.tool_trace.append(trace_entry)
         if self.show_tool_calls:
-            self.response_text += text
-        elif self.response_text:
-            self.separate_next_text = True
+            self.response_text = append_stream_text(self.response_text, text, marker=True)
+        self.separate_next_text = bool(self.response_text)
+
+    def visible_tool_count(self) -> int:
+        """Return how many tool calls the reply shows so far."""
+        return len(self.tool_trace) if self.show_tool_calls else 0
+
+    def has_progress(self) -> bool:
+        """Return whether the reply collected any text or tool call yet; a tracked hidden call counts."""
+        return bool(self.response_text or self.tool_trace)
 
     def show_tool_progress(self, tool_call_id: str, text: str) -> None:
         """Keep a running call's latest output for the live reply until the call completes."""
@@ -283,9 +321,9 @@ class CollectedStreamPresentation:
 
     def show_document(self, chunk: StructuredStreamChunk) -> None:
         """Replace the collected presentation with a document the stream sent whole; one without a trace keeps it."""
-        self.response_text = chunk.content
         if chunk.tool_trace is not None:
             self.tool_trace = list(chunk.tool_trace)
+        self._replace_text(chunk.content)
         self.document_state = chunk.presentation_state
 
     def final_text(self) -> str:
@@ -596,15 +634,258 @@ def message_tool_trace(content: Mapping[str, object]) -> list[ToolTraceEntry] | 
     if not isinstance(payload, dict):
         return None
     events = cast("dict[str, object]", payload).get("events")
-    if not isinstance(events, list):
+    # Marker [n] names entry n, so a list with an entry that is no call has no entry to trust.
+    if not isinstance(events, list) or not all(isinstance(event, dict) for event in events):
         return []
     try:
-        return deserialize_tool_trace(
-            cast("list[Mapping[str, object]]", [event for event in events if isinstance(event, dict)]),
-        )
+        return deserialize_tool_trace(cast("list[Mapping[str, object]]", events))
     except RuntimeError:
         # Any room member can send this key, so a malformed trace reads as one without entries.
         return []
+
+
+def _html_block_spans(html: str) -> list[tuple[int, int]]:
+    """Return each top-level block of ``html``: an element with its content, a void element, or a run of text not blank."""
+    spans: list[tuple[int, int]] = []
+    depth = 0
+    text_start = 0
+    # No tag ends after the last ">", and before it every tag that opens ends, so no "<" is read twice.
+    for tag in [*_HTML_TAG_PATTERN.finditer(html, 0, html.rfind(">") + 1), None]:
+        text_end = len(html) if tag is None else tag.start()
+        if depth == 0 and (text := _NON_BLANK_PATTERN.search(html, text_start, text_end)) is not None:
+            spans.append((text.start(), text_end))
+        if tag is None:
+            break
+        closing, name, self_closing = tag.groups()
+        if closing:
+            depth = max(0, depth - 1)
+            if depth == 0 and spans:
+                spans[-1] = (spans[-1][0], tag.end())
+        else:
+            void = bool(self_closing) or _HTML_VOID_TAG_PATTERN.fullmatch(name) is not None
+            if depth == 0:
+                spans.append((tag.start(), tag.end() if void else len(html)))
+            depth += 0 if void else 1
+        text_start = tag.end()
+    return spans
+
+
+def _trace_calls(layer: Mapping[str, Any], version: int) -> dict[int, dict[str, Any]] | None:
+    """Return the named calls of a layer's trace of ``version`` by marker index; None unless each entry is a mapping."""
+    payload = layer.get(_TOOL_TRACE_KEY)
+    if not isinstance(payload, dict) or payload.get("version") != version:
+        return None
+    events = payload.get("events")
+    if not isinstance(events, list) or not all(isinstance(event, dict) for event in events):
+        return None
+    return {
+        index: event
+        for index, event in enumerate(cast("list[dict[str, Any]]", events), start=1)
+        if isinstance(event.get("tool_name"), str) and event["tool_name"]
+    }
+
+
+def _marker_texts(index: int, event: Mapping[str, Any]) -> tuple[str, str]:
+    """Return one call's marker as a body line and as a top-level HTML block, as MindRoom Chat writes them back."""
+    name, pending = event["tool_name"], event.get("type") == "tool_call_started"
+    suffix = f" [{index}]{_TOOL_PENDING_MARKER if pending else ''}"
+    code = name.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+    return f"{_TOOL_REF_ICON} `{name}`{suffix}", f"<p>{_TOOL_REF_ICON} <code>{code}</code>{suffix}</p>"
+
+
+def _body_with_markers(body: str, placed: list[tuple[int, dict[str, Any]]]) -> str | None:
+    """Return ``body`` with each call's marker before its ``body_line``; None unless each is a line, in their order."""
+    lines = body.split("\n") if body else []
+    marked: list[str] = []
+    line = 0
+    for index, event in placed:
+        next_line = event.get("body_line")
+        if type(next_line) is not int or not line <= next_line <= len(lines):
+            return None
+        marker = _marker_texts(index, event)[0]
+        marked += lines[line:next_line]
+        marked += [marker, ""] if next_line < len(lines) else [*([""] if marked else []), marker]
+        line = next_line
+    return "\n".join(marked + lines[line:])
+
+
+def has_placeholder_body(layer: Mapping[str, Any]) -> bool:
+    """Return whether a layer's text stands in for a reply that is its calls' markers alone."""
+    payload = layer.get(_TOOL_TRACE_KEY)
+    return isinstance(payload, dict) and payload.get("placeholder_body") is True
+
+
+def _is_zero(value: object) -> bool:
+    """Return whether a JSON value is the number 0, which MindRoom Chat cannot tell from 0.0; no boolean is."""
+    return isinstance(value, int | float) and not isinstance(value, bool) and value == 0
+
+
+def _placeholder_calls(
+    placed: list[tuple[int, dict[str, Any]]],
+    *,
+    all_named: bool,
+) -> list[tuple[int, dict[str, Any]]]:
+    """Return the placed calls of a ``placeholder_body`` trace, each at the start; none unless the trace is sound.
+
+    Its text stands in for a reply that is its markers alone, so the trace says all of the reply: every entry is a
+    named call (``all_named``), at least one has a position, and each position is ``body_line`` 0 with ``at`` 0.
+    MindRoom Chat's ``isPlaceholderTrace`` holds a trace to the same rule, so both discard the same texts.
+    """
+    if not all_named or not all(_is_zero(event.get(key)) for _index, event in placed for key in ("body_line", "at")):
+        return []
+    return [(index, {**event, "body_line": 0, "at": 0}) for index, event in placed]
+
+
+def _layer_with_markers(layer: Mapping[str, Any], fallback: str | None) -> tuple[dict[str, Any], str] | None:
+    """Restore ordered v3 positions in body, HTML and any edit fallback; None for invalid or missing positions."""
+    calls = _trace_calls(layer, _TOOL_TRACE_VERSION)
+    body, html = layer.get("body"), layer.get("formatted_body")
+    if calls is None or not isinstance(body, str) or not isinstance(html, str):
+        return None
+    placed = [(index, event) for index, event in calls.items() if "body_line" in event or "at" in event]
+    payload = layer[_TOOL_TRACE_KEY]
+    placeholder_body = has_placeholder_body(layer)
+    if placeholder_body:
+        placed = _placeholder_calls(placed, all_named=len(calls) == len(payload["events"]))
+    if not placed:
+        return None
+    if placeholder_body:
+        # The markers go back in place of the text, which a reader that puts none back shows instead.
+        body, html, fallback = "", "", None if fallback is None else ""
+    marked_body = _body_with_markers(body, placed)
+    marked_fallback = "" if fallback is None else _body_with_markers(fallback, placed)
+    if marked_body is None or marked_fallback is None:
+        return None
+    starts = [start for start, _end in _html_block_spans(html)] + [len(html)]
+    marked_html = ""
+    block = offset = 0
+    for index, event in placed:
+        next_block = event.get("at")
+        if type(next_block) is not int or not block <= next_block < len(starts):
+            return None
+        marked_html += f"{html[offset : starts[next_block]]}{_marker_texts(index, event)[1]}\n"
+        block, offset = next_block, starts[next_block]
+    events = [
+        {key: value for key, value in event.items() if key not in ("at", "body_line")} for event in payload["events"]
+    ]
+    trace = {**payload, "version": _MARKED_TEXT_VERSION, "events": events}
+    if placeholder_body:
+        del trace["placeholder_body"]
+    return {
+        **layer,
+        "body": marked_body,
+        "formatted_body": marked_html + html[offset:],
+        _TOOL_TRACE_KEY: trace,
+    }, marked_fallback
+
+
+def _body_without_markers(body: str, index_of_line: Mapping[str, int]) -> tuple[list[str], list[tuple[int, int]]]:
+    """Return the lines of ``body`` that are no call's marker, and each marker's call with the lines kept before it."""
+    kept: list[str] = []
+    body_lines: list[tuple[int, int]] = []
+    index = None
+    for line in body.split("\n"):
+        after_marker = index is not None
+        if (index := index_of_line.get(line)) is not None:
+            body_lines.append((index, len(kept)))
+        elif line or not after_marker:
+            kept.append(line)
+    # A marker's blank line follows it, but comes before the markers that end the text.
+    if body_lines and body_lines[-1][1] == len(kept) and kept and not kept[-1]:
+        kept.pop()
+        body_lines = [(index, min(place, len(kept))) for index, place in body_lines]
+    return kept, body_lines
+
+
+def _layer_without_markers(layer: Mapping[str, Any], fallback: str | None) -> tuple[dict[str, Any], str] | None:
+    """Move v2 marker lines and top-level marker blocks to v3 positions in body, HTML and any edit fallback."""
+    calls = _trace_calls(layer, _MARKED_TEXT_VERSION)
+    body, html = layer.get("body"), layer.get("formatted_body")
+    # A warm-up frame's canonical body keeps its markers, so the frame does too.
+    if calls is None or not isinstance(body, str) or not isinstance(html, str) or STREAM_VISIBLE_BODY_KEY in layer:
+        return None
+    if not message_tool_trace(layer):
+        # Readers take a trace with a malformed entry for none, so its marker lines are text to them and stay.
+        return None
+    markers = [_marker_texts(index, event) for index, event in calls.items()]
+    index_of_line = {marker_line: index for index, (marker_line, _block) in zip(calls, markers, strict=True)}
+    marker_blocks = {marker_block for _line, marker_block in markers}
+    kept, body_lines = _body_without_markers(body, index_of_line)
+    other = [] if fallback is None else _body_without_markers(fallback, index_of_line)[0]
+    pieces: list[str] = []
+    blocks: list[int] = []
+    cursor = other_blocks = 0
+    for start, stop in _html_block_spans(html):
+        if html[start:stop] not in marker_blocks:
+            other_blocks += 1
+            continue
+        blocks.append(other_blocks)
+        pieces.append(html[cursor:start])
+        cursor = stop + html.startswith("\n", stop)
+    # A marker line left in the text is text; the read-back in ``tool_markers_out_of_text`` rejects the rest.
+    if any(is_visible_tool_marker_line(line) for line in (*kept, *other)):
+        return None
+    places = {index: {"body_line": line, "at": block} for (index, line), block in zip(body_lines, blocks)}
+    payload = layer[_TOOL_TRACE_KEY]
+    events = [{**event, **places.get(index, {})} for index, event in enumerate(payload["events"], start=1)]
+    rest = "".join(pieces) + html[cursor:]
+    trace = {**payload, "version": _TOOL_TRACE_VERSION, "events": events}
+    if any(line.strip() for line in kept):
+        return {**layer, "body": "\n".join(kept), "formatted_body": rest, _TOOL_TRACE_KEY: trace}, "\n".join(other)
+    # A reply of calls alone keeps its lines, or a reader that puts no markers back would see no message. Only a
+    # progress write of a stream, sent outside the outbox, says it is thinking in their place: an outbox row is found
+    # again by its exact content, which the release before this one does not restore from ``placeholder_body``.
+    status = layer.get(STREAM_STATUS_KEY)
+    streams = isinstance(status, str) and status in NONTERMINAL_STREAM_STATUSES
+    if not streams or DURABLE_DELIVERY_ID_KEY in layer or kept or other or rest:
+        return None
+    return {
+        **layer,
+        "body": _PLACEHOLDER_BODY,
+        "formatted_body": f"<p>{_PLACEHOLDER_BODY}</p>\n",
+        _TOOL_TRACE_KEY: {**trace, "placeholder_body": True},
+    }, _PLACEHOLDER_BODY
+
+
+def _each_layer[C: Mapping[str, Any]](
+    content: C,
+    convert: Callable[[Mapping[str, Any], str | None], tuple[dict[str, Any], str] | None],
+) -> C | dict[str, Any]:
+    """Return ``content`` with its text converted: its own, or an edit's replacement and its fallback alike."""
+    replacement = content.get("m.new_content")
+    if not isinstance(replacement, dict):
+        converted = convert(content, None)
+        return converted[0] if converted else content
+    body = content.get("body")
+    keys = ("formatted_body", _TOOL_TRACE_KEY) if _TOOL_TRACE_KEY in content else ("formatted_body",)
+    # A fallback repeats its replacement after "* ": the same HTML and calls, converted once for both, and its own
+    # text. One that shows other HTML or other calls, or whose calls stand elsewhere, is someone's own and stays.
+    repeats = (
+        isinstance(body, str)
+        and body.startswith("* ")
+        and all(content.get(key) == replacement.get(key) for key in keys)
+    )
+    if has_placeholder_body(replacement) and not (repeats and body == f"* {replacement.get('body')}"):
+        # A placeholder stands in for the text of its own layer. A fallback that is not that text again says
+        # something else, so the replacement is converted alone and the fallback stays, as MindRoom Chat reads it.
+        converted = convert(replacement, None)
+        return {**content, "m.new_content": converted[0]} if converted else content
+    converted = convert(replacement, body[2:]) if repeats else None
+    if converted is None:
+        return content
+    layer, fallback = converted
+    return {**content, "m.new_content": layer, "body": f"* {fallback}", **{key: layer[key] for key in keys}}
+
+
+def tool_markers_out_of_text(content: dict[str, Any]) -> dict[str, Any]:
+    """Return content as Matrix gets it, markers as v3 positions; the same object unless it reads back exactly."""
+    sent = _each_layer(content, _layer_without_markers)
+    return sent if sent is not content and tool_markers_in_text(sent) == content else content
+
+
+def tool_markers_in_text[C: Mapping[str, Any]](content: C) -> C | dict[str, Any]:
+    """Restore v2 markers from v3 positions, else return the same object; call it only for a marker-carrying sender."""
+    return _each_layer(content, _layer_with_markers)
 
 
 def has_tool_trace(content: Mapping[str, object]) -> bool:
@@ -709,36 +990,40 @@ def renumbered_tool_trace(body: str, trace: Sequence[ToolTraceEntry]) -> tuple[s
     return remap_visible_tool_marker_indices(body, index_map), entries
 
 
-def append_stream_text(existing_text: str, content: object | None, *, separate: bool = False) -> str:
-    """Append one delta while preserving explicit and visible-tool boundaries."""
-    if not content:
-        return existing_text
-    delta = str(content)
-    last_line = existing_text.rsplit("\n", maxsplit=1)[-1].rstrip("\r")
-    needs_separator = separate or is_visible_tool_marker_line(last_line)
-    separator = ""
-    if existing_text and not delta.startswith(("\n", "\r")) and needs_separator:
-        if existing_text.endswith(("\n\n", "\r\n\r\n")):
-            separator = ""
-        elif existing_text.endswith(("\n", "\r")):
-            separator = "\n"
-        else:
-            separator = "\n\n"
-    return f"{existing_text}{separator}{delta}"
+def append_stream_text(
+    existing_text: str,
+    content: object | None,
+    *,
+    separate: bool = False,
+    marker: bool = False,
+) -> str:
+    """Append one delta, or a tool ``marker``; that or ``separate`` puts it one blank line below any text before it.
+
+    A separated delta loses the newlines it opens with, and one of newlines alone adds nothing, so its caller keeps
+    separating until a delta holds other text.
+    """
+    delta = str(content or "")
+    if not ((separate or marker) and existing_text):
+        return existing_text + delta
+    delta = delta.lstrip("\r\n")
+    # Matrix gets a marker as a v3 position only when an LF blank line precedes it, so a CRLF one serves text alone.
+    if not delta or existing_text.endswith("\n\n" if marker else ("\n\n", "\n\r\n")):
+        return existing_text + delta
+    return f"{existing_text}{'\n' if existing_text.endswith('\n') else '\n\n'}{delta}"
+
+
+def _trace_marker_lines(tool_trace: Sequence[ToolTraceEntry]) -> tuple[str, ...]:
+    """Return the marker line of each trace slot, in order."""
+    return tuple(
+        _tool_marker_line(entry.tool_name, index, pending=entry.type == "tool_call_started")
+        for index, entry in enumerate(tool_trace, start=1)
+    )
 
 
 def tool_markers_match_trace(text: str, tool_trace: Sequence[ToolTraceEntry]) -> bool:
     """Return whether visible marker lines exactly match the ordered trace slots."""
     visible_markers = tuple(line.strip() for line in text.splitlines() if is_visible_tool_marker_line(line))
-    expected_markers = tuple(
-        _tool_marker_line(entry.tool_name, index, pending=entry.type == "tool_call_started")
-        for index, entry in enumerate(tool_trace, start=1)
-    )
-    return visible_markers == expected_markers
-
-
-def _format_tool_marker(tool_name: str, tool_index: int | None, *, pending: bool) -> str:
-    return f"\n\n{_tool_marker_line(tool_name, tool_index, pending=pending)}\n\n"
+    return visible_markers == _trace_marker_lines(tool_trace)
 
 
 def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
@@ -760,6 +1045,11 @@ def _format_tool_args(tool_args: dict[str, object]) -> tuple[str, bool]:
     return args_preview, truncated or args_truncated
 
 
+def tool_args_chat_preview(tool_args: dict[str, object]) -> str:
+    """Return a call's arguments as a reply's tool trace shows them: redacted, values cut at 250 and the whole at 1200."""
+    return redact_sensitive_text(_format_tool_args(tool_args)[0])
+
+
 def _format_tool_started(
     tool_name: str,
     tool_args: dict[str, object],
@@ -773,7 +1063,7 @@ def _format_tool_started(
         args_preview=args_preview or None,
         truncated=truncated,
     )
-    return _format_tool_marker(tool_name, tool_index, pending=True), trace
+    return _tool_marker_line(tool_name, tool_index, pending=True), trace
 
 
 def format_tool_combined(
@@ -799,7 +1089,7 @@ def format_tool_combined(
         truncated=truncated,
         is_error=is_error,
     )
-    return _format_tool_marker(tool_name, tool_index, pending=False), trace
+    return _tool_marker_line(tool_name, tool_index, pending=False), trace
 
 
 def complete_pending_tool_block(accumulated_text: str, tool_name: str, tool_index: int) -> str:
@@ -885,7 +1175,7 @@ def serialize_tool_trace(
     *,
     include_internal: bool = False,
 ) -> tuple[dict[str, object], ...]:
-    """Serialize trace entries, optionally retaining restart-only identity and failure."""
+    """Serialize trace entries with their call ids and a completed call's failure, optionally with restart-only fields."""
     serialized: list[dict[str, object]] = []
     for entry in tool_trace:
         event: dict[str, object] = {
@@ -893,13 +1183,17 @@ def serialize_tool_trace(
             "tool_name": entry.tool_name,
         }
         if entry.args_preview is not None:
-            event["args_preview"] = redact_sensitive_text(entry.args_preview)
+            event["args_preview"] = _redact_preview(entry.args_preview)
         if entry.result_preview is not None:
-            event["result_preview"] = redact_sensitive_text(entry.result_preview)
+            event["result_preview"] = _redact_preview(entry.result_preview)
         if entry.truncated:
             event["truncated"] = True
+        if entry.is_error and entry.type == "tool_call_completed":
+            event["is_error"] = True
         if include_internal:
             event.update(_internal_fields(entry))
+        elif entry.tool_call_id is not None:
+            event["tool_call_id"] = entry.tool_call_id
         serialized.append(event)
     return tuple(serialized)
 
@@ -958,7 +1252,7 @@ def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolT
             raise RuntimeError(_MALFORMED_TRACE)
         restored.append(
             ToolTraceEntry(
-                type=cast("Literal['tool_call_started', 'tool_call_completed']", event_type),
+                type=event_type,
                 tool_name=tool_name,
                 args_preview=args_preview,
                 result_preview=result_preview,
@@ -974,10 +1268,10 @@ def deserialize_tool_trace(stored: Sequence[Mapping[str, object]]) -> list[ToolT
 
 
 def build_tool_trace_content(tool_trace: Sequence[ToolTraceEntry] | None) -> dict[str, object] | None:
-    """Build message content payload for tool trace metadata."""
+    """Build the tool trace of a message whose text still has its markers; ``tool_markers_out_of_text`` sends it."""
     if not tool_trace:
         return None
-    payload: dict[str, object] = {"version": _TOOL_TRACE_VERSION, "events": list(serialize_tool_trace(tool_trace))}
+    payload: dict[str, object] = {"version": _MARKED_TEXT_VERSION, "events": list(serialize_tool_trace(tool_trace))}
     if any(entry.truncated for entry in tool_trace):
         payload["content_truncated"] = True
     return {_TOOL_TRACE_KEY: payload}

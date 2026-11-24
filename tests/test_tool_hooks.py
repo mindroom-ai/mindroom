@@ -43,6 +43,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
+from mindroom.llm.events import ReportedCall
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
 from mindroom.oauth.providers import OAuthConnectionRequired
@@ -55,6 +56,7 @@ from mindroom.tool_jobs.runtime import JobAccessError, register_background_runti
 from mindroom.tool_system import tool_hooks
 from mindroom.tool_system.agno_toolkits import Function
 from mindroom.tool_system.call_record import recording_tool_calls
+from mindroom.tool_system.events import build_tool_trace_content, format_tool_started_event
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
@@ -776,6 +778,80 @@ async def test_tool_hook_bridge_allows_call_and_populates_contexts(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("reply", "shown"), [("shows_calls", True), ("default", False), ("detached", False)])
+async def test_a_call_tells_its_hooks_whether_its_reply_shows_it(tmp_path: Path, reply: str, shown: bool) -> None:
+    """Both hooks of a call read whether its reply shows it, and what the reply shows of its arguments.
+
+    A context that does not say its reply shows tool calls, and a call outside any conversation, read as hidden.
+    """
+    seen: list[tuple[bool, str | None]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        seen.append((ctx.shown, ctx.chat_preview()))
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        seen.append((ctx.shown, ctx.chat_preview()))
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before, after])])
+    bridge = tool_policy(registry)
+
+    async def next_func(**kwargs: object) -> str:
+        return f"read {kwargs['path']}"
+
+    context = _tool_runtime_context(tmp_path, hook_registry=registry)
+    scope = {
+        "shows_calls": lambda: tool_runtime_context(replace(context, tool_calls_shown=True)),
+        "default": lambda: tool_runtime_context(context),
+        "detached": lambda: detached_tool_scope(_execution_identity()),
+    }[reply]
+    with scope():
+        assert await bridge("read_file", next_func, {"path": "notes.txt"}) == "read notes.txt"
+
+    # The before-call and the after-call hook read the same.
+    assert seen == [(shown, "path=notes.txt" if shown else None)] * 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "preview"),
+    [
+        (
+            {"api_key": "sk-live-123", "body": "first line\nsecond " + "x" * 300},
+            "api_key=***redacted***, body=first line second " + "x" * 231 + "…",
+        ),
+        ({"sk-abcdefghijklmnopqrstuvwxyz0123": 1}, "***redacted***=1"),
+        ({"cmd": "export TOKEN=abc123\necho"}, "cmd=export TOKEN=***redacted***"),
+    ],
+    ids=["secret-value-and-long-value", "secret-key", "secret-assignment"],
+)
+async def test_a_shown_call_s_chat_preview_is_what_the_reply_s_tool_trace_shows(
+    tmp_path: Path,
+    arguments: dict[str, object],
+    preview: str,
+) -> None:
+    """The preview redacts secrets as the trace a reply carries does, keeps values on one line, and cuts them at 250."""
+    previews: list[str | None] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        previews.append(ctx.chat_preview())
+
+    registry = HookRegistry.from_plugins([_plugin("tool-policy", [before])])
+    bridge = tool_policy(registry)
+
+    context = replace(_tool_runtime_context(tmp_path, hook_registry=registry), tool_calls_shown=True)
+    with tool_runtime_context(context):
+        await bridge("post", AsyncMock(return_value="ok"), arguments)
+
+    _text, entry = format_tool_started_event(ReportedCall(tool_call_id="call-1", tool_name="post", tool_args=arguments))
+    trace = build_tool_trace_content([entry])
+    assert trace is not None
+    assert previews == [preview] == [trace["io.mindroom.tool_trace"]["events"][0]["args_preview"]]
+
+
+@pytest.mark.asyncio
 async def test_tool_after_call_hooks_cannot_mutate_returned_result(tmp_path: Path) -> None:
     """After-call hooks should observe results without mutating the returned value."""
 
@@ -1028,7 +1104,10 @@ async def test_tool_hook_context_send_message_uses_bound_sender(tmp_path: Path) 
         extra_content: dict[str, object] | None,
         *,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
+        del mentions, wake_mentioned
         sent.append((room_id, body, thread_id, source_hook, extra_content, trigger_dispatch))
         return f"${body}-event"
 
@@ -1109,8 +1188,10 @@ async def test_tool_hook_context_send_message_advances_existing_message_received
         extra_content: dict[str, object] | None,
         *,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
-        del room_id, body, thread_id, source_hook, trigger_dispatch
+        del room_id, body, thread_id, source_hook, trigger_dispatch, mentions, wake_mentioned
         sent.append(extra_content)
         return "$dispatch-event"
 
@@ -1212,7 +1293,10 @@ async def test_tool_hook_context_room_state_helpers_use_runtime_client(tmp_path:
         extra_content: dict[str, object] | None,
         *,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
+        del mentions, wake_mentioned
         sent.append((room_id, body, thread_id, source_hook, extra_content, trigger_dispatch))
         return "$dispatch-event"
 
@@ -1358,8 +1442,10 @@ async def test_a_sync_tool_call_keeps_its_hooks_on_the_loop_and_its_body_off_it(
         extra_content: dict[str, object] | None,
         *,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
-        del room_id, body, thread_id, source_hook, extra_content, trigger_dispatch
+        del room_id, body, thread_id, source_hook, extra_content, trigger_dispatch, mentions, wake_mentioned
         current_loop = asyncio.get_running_loop()
         current_thread = threading.get_ident()
         seen.append(("sender", current_thread, id(current_loop)))
@@ -1895,8 +1981,10 @@ async def test_emit_custom_event_preserves_message_received_depth_and_bound_room
         extra_content: dict[str, object] | None,
         *,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
-        del room_id, body, thread_id, source_hook, trigger_dispatch
+        del room_id, body, thread_id, source_hook, trigger_dispatch, mentions, wake_mentioned
         sent.append(extra_content)
         return "$dispatch-event"
 

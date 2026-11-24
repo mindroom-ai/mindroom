@@ -163,9 +163,13 @@ Add `silently` or `quietly` to a request when the trigger and routine no-report 
 ```
 
 A silent schedule does not show its trigger in the room.
-A successful run that returns nothing, whitespace, or only `NO_REPLY` (any case) posts no message.
+A successful run whose final response is empty, whitespace, or has `NO_REPLY` (any case) alone on its last non-blank line posts no message.
+A final `NO_REPLY` line means do not notify, so a report must not end with it.
 Findings, failures, and messages that tools send explicitly remain visible.
 Silent runs also show no typing indicator, progress placeholder, stop control, or streaming updates.
+When a silent run pauses for a [tool approval](tool-approval.md), it shows a waiting message; when the run continues after the decision with nothing to report, that message ends with the run's text and tool calls without the `NO_REPLY` line, or `Done.` when nothing else is left, and no new message is posted.
+A team's silent run reports nothing only when its leader and every member do, so a member's finding stays visible, without any `NO_REPLY` line, even when the leader answers `NO_REPLY`.
+After an approval, a team's run that reports nothing ends its waiting message with the leader's own text, or `Done.` when the leader wrote none, instead of the team's document.
 With `new_thread=True`, a silent schedule posts any finding or failure as a new room-level message.
 Say `make this schedule silent` or `make this schedule visible` in `!edit_schedule` to change the mode.
 
@@ -225,7 +229,8 @@ Recurring schedules cannot pre-approve calls.
 ## Timezone
 
 The top-level `timezone` setting (default `UTC`) is the IANA timezone MindRoom uses for the current date in agent prompts, message timestamps, file-memory daily notes, automation `cron` times, and interpreting and displaying scheduled times.
-An agent's own `timezone` overrides it for that agent, so one install can serve people in different timezones; the router and chat commands such as `!schedule` use the top-level setting.
+An agent's own `timezone` overrides it for that agent, so one install can serve people in different timezones.
+A new schedule created with the `!schedule` command uses the top-level setting, even when the agent handling the command has its own `timezone`.
 A team reply uses the timezone of the account that posts it: a configured team uses the top-level setting, and an [ad hoc team](configuration/teams.md#ad-hoc-teams) uses the timezone of the agent whose account posts its reply.
 An unknown timezone name fails config validation.
 
@@ -258,14 +263,16 @@ A run waits rather than proceeding when membership cannot be confirmed.
 ## Persistence and Missed Runs
 
 Schedules are stored in Matrix room state and survive restarts.
-In a room MindRoom did not create, a room admin may need to raise the router's power level to the room's state-event level, usually 50, before schedules can be saved; raising the router is enough for every agent, and the error names the account and the level to grant.
-MindRoom only acts on schedule state written by its own router, agent, or team accounts; schedule state written by any other account, including a room admin, is ignored and logged.
+In a room MindRoom did not create, a room admin may need to raise one MindRoom account's power level to the room's state-event level, usually 50, before schedules can be saved; the account with the most power in the room stores the schedules of every agent there, and an agent that cannot save one answers `I need moderator rights in this room to save schedules.`
+MindRoom only acts on schedule state written by its own owner, agent, or team accounts; schedule state written by any other account, including a room admin, is ignored and logged.
 The homeserver must support `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}?format=event` (Matrix spec v1.16), as Synapse, Tuwunel, and Dendrite do; otherwise reading tasks fails.
 
 ### Scheduled Task Restoration
 
-The router runs a schedule when, at the time the schedule is saved, it may post its trigger and save schedule state in the room; otherwise the agent that saved the schedule runs it, as in a DM or an agent's personal room.
-Every agent restores the schedules it runs in a room when it joins that room, at startup or when it accepts an invitation, and the router also restores the room's pending configuration changes.
+The agent or team that saved a schedule runs it: it posts the trigger when the schedule is due.
+A schedule saved by an earlier release that the router ran moves to the first agent or team its message mentions that is joined to the room and may post its trigger, else to the one with the lowest Matrix ID that may.
+It stays pending while no agent or team in the room may post its trigger.
+Every agent restores the schedules it runs in a room when it joins that room, at startup, when it accepts an invitation, or when it joins a [room listed under one of its rooms](rooms.md#rooms-under-a-room), and its own pending configuration previews when `/config` is enabled.
 Schedules keep running when their agent restarts, for example after a config edit: a one-time task that came due during the restart runs once the agent is back, and a recurring task runs the occurrence that came due if it is still within the catch-up window.
 A one-time task missed by less than 24 hours runs once its agent's Matrix sync is ready; an older one is marked failed instead.
 When an agent is removed from the config while MindRoom runs, each schedule it runs is marked failed and the agent says so in the schedule's thread, or in the room for a schedule without one; its schedules never move to another agent.
@@ -333,13 +340,13 @@ Agents append to `MEMORY.md` and their `context_files` far more often than they 
 `prompt_curation` checks their total size daily and, once it passes the trigger, asks the agent for a gradual cut.
 
 1. The check measures `MEMORY.md` plus the agent's `context_files` by the token estimate of the agent's configured model, not of a room or thread model override, which may count high ([how tokens are counted](configuration/history.md#how-tokens-are-counted)); for a private agent these are `MEMORY.md` and `private.context_files` in the requester's private root, because agent-level `context_files` load from the workspace every requester shares.
-2. Above `trigger_tokens`, or when the preload has to withhold part of `MEMORY.md` because it passes `memory.file.max_entrypoint_lines` (default `200`) or `memory.file.max_entrypoint_tokens`, it posts a prompt with exact numbers, for example "bring them to at most 19800 tokens in total, but not below 18700", a cut between `min_reduction` and `max_reduction` (10 to 15%).
-3. The prompt asks the agent to commit the files to git first, take lines out of a `MEMORY.md` over either preload cap first (the prompt shows its line and token counts against both caps), fold each later correction into the entry it corrects, keep each fact once in the file that owns it, move detail and history verbatim into `memory/` topic files with one-line pointers, and otherwise never invent facts or change their meaning.
+2. Above `trigger_tokens`, or when the preload has to withhold part of a file because it passes `defaults.max_preload_file_chars` (default `30000` characters per file), it posts a prompt with exact numbers, for example "bring them to at most 19800 tokens in total, but not below 18700", a cut between `min_reduction` and `max_reduction` (10 to 15%).
+3. The prompt asks the agent to commit the files to git first, take content out of any file over that limit first (the prompt names those files), fold each later correction into the entry it corrects, keep each fact once in the file that owns it, move detail and history verbatim into `memory/` topic files with one-line pointers, and otherwise never invent facts or change their meaning.
 4. Once the run ends, verify measures the files again; when any of these holds, it lists them in the thread and mentions the agent once to re-check its change against that commit:
     - a file can no longer be read safely;
     - a file shrank by more than 25%;
     - the files total less than the floor, or did not shrink;
-    - `MEMORY.md` was over the line cap and still has as many lines;
+    - a file was over the character limit and did not get shorter;
     - a file is no longer valid UTF-8;
     - total memory content (the files plus `memory/**`) dropped by more than `max_content_loss` of the files' size, which means detail was deleted instead of moved.
 
@@ -382,7 +389,7 @@ Each run keeps its agenda and report, and a run that reached review also its pat
 | `model` | the agent's model | A key of `models` to run both prompts with |
 
 `dreaming` needs `memory_backend: file` and something to work from: [auto-flush](memory.md#file-auto-flush-worker) writes the daily notes it reviews and [thread exports](thread-exports.md) add threaded conversations, so with neither on, and no daily notes the agent writes itself, it never runs.
-It also needs a tool that writes workspace files, such as `file`, `coding`, or `shell`, because the agent edits its copy and writes its report and verdict as files; without one, every run stops unfinished.
+It also needs a tool that writes workspace files, such as `filesystem` or `shell`, because the agent edits its copy and writes its report and verdict as files; without one, every run stops unfinished.
 Its prompt templates are overridable as `DREAMING_PROMPT_TEMPLATE` and `DREAMING_VERIFY_TEMPLATE`.
 
 ### `exploration`

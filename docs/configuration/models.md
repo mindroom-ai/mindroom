@@ -16,6 +16,7 @@ The same model can have different IDs on different providers; check the [OpenAI]
 - `openai` - GPT models and OpenAI-compatible endpoints
 - `codex` or `openai_codex` - OpenAI models available through a local Codex CLI ChatGPT login
 - `kimi` or `kimi_code` - Kimi models available through a local Kimi Code CLI login
+- `claude_code` - Claude models on your own Claude subscription, through a local Claude Code sign-in
 - `google` or `gemini` - Google Gemini models
 - `vertexai_claude` - Anthropic Claude models on Google Vertex AI
 - `ollama` - Local models via Ollama
@@ -49,6 +50,7 @@ The [macOS app's local model setup](../installation/macos-app.md#local-ai-models
 | `context_window` | No | `null` | Provider context window in tokens, at least 1; budgets history replay and compaction (see [Context Window](history.md#context-window)); a `compaction.model` or `compaction.fallback_model` needs its own value |
 | `pricing` | No | `null` | Prices in USD per million tokens for [Budgets](../budgets.md) and [reply costs](../usage.md#reply-cost): `input` and `output` (both required), plus `cache_read` and `cache_write`, which default to the `input` price; set `cache_write` for Claude models, whose cache writes cost more than input |
 | `stream_idle_timeout_seconds` | No | `null` | Seconds a streamed request may go without a provider event before it counts as stalled, at least 0; `0` disables the limit (see [Stalled Streams](#stalled-streams)) |
+| `reasoning` | No | `null` | Reasoning levels the model offers: `levels` (non-empty, no repeats) and `default` (one of `levels`), each one of `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` (see [Reasoning Levels](#reasoning-levels)) |
 
 The mapping key, such as `default` below, is the stable name agents, teams, the router, and commands use.
 It may contain only letters, digits, `:`, `_`, and `-`, so a key such as `gpt-6.1` fails config load; name it `gpt-6-1` instead and set `display_name` to show the dotted name.
@@ -58,7 +60,7 @@ It may contain only letters, digits, `:`, `_`, and `-`, so a key such as `gpt-6.
 models:
   default:
     provider: openai
-    id: gpt-6-astra
+    id: gpt-6.2-astra
     display_name: Quick helper
     icon: icons/helper.png
 ```
@@ -86,13 +88,13 @@ models:
   # OpenAI
   gpt:
     provider: openai
-    id: gpt-6-astra
+    id: gpt-6.2-astra
     context_window: 1050000
 
   # Google Gemini (both 'google' and 'gemini' work as provider names)
   gemini:
     provider: google
-    id: gemini-3.8-flash
+    id: gemini-4-hydrogen
     context_window: 1048576
 
   # Anthropic Claude on Vertex AI
@@ -153,25 +155,26 @@ models:
       base_url: http://localhost:8080/v1
 ```
 
-Models of every provider except `google`, `ollama`, and `synthetic` verify an HTTPS endpoint's certificate against the operating system's trust store, as do downloads of media that tools return as URLs, OpenAI embeddings, avatar generation, and the OpenAI speech requests of voice calls and outgoing voice messages, so a private CA installed in that store is trusted.
+MindRoom's own model clients, except `google`, `ollama`, and `synthetic`, verify an HTTPS endpoint's certificate against the operating system's trust store, as do downloads of media that tools return as URLs, OpenAI embeddings, avatar generation, and the OpenAI speech requests of voice calls and outgoing voice messages, so a private CA installed in that store is trusted.
 Setting `SSL_CERT_FILE` or `SSL_CERT_DIR` in the process environment replaces that store, so the file or directory must hold the public CAs too, for example the system CA bundle with the private CA appended.
 An `SSL_CERT_DIR` must be a hashed directory, as `c_rehash` or `openssl rehash` creates.
 
 Azure, Bedrock, Codex, and Kimi examples are in their own sections below.
-Claude Fable 5.1 uses `claude-fable-5-1` on Anthropic, `anthropic.claude-fable-5-1` on Bedrock, and `anthropic/claude-fable-5.1` on OpenRouter.
-Claude Opus 5.5 and Sonnet 5.5 use `claude-opus-5-5` and `claude-sonnet-5-5` on Anthropic and Vertex AI, `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5` on Bedrock, and `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5` on OpenRouter.
+Claude Fable 5.2 uses `claude-fable-5-2` on Anthropic and Vertex AI and `anthropic/claude-fable-5.2` on `provider: openrouter`.
+`bedrock_claude` calls Claude in Amazon Bedrock (the bedrock-mantle endpoint), which does not serve Fable 5.2, so it uses Fable 5.1 as `anthropic.claude-fable-5-1`.
+Claude Opus 5.5 and Sonnet 5.5 use `claude-opus-5-5` and `claude-sonnet-5-5` on Anthropic and Vertex AI, `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5` on Bedrock, and `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5` on `provider: openrouter`; [Claude through OpenRouter's Messages endpoint](#claude-through-openrouter) uses the Anthropic ids.
 For the direct DeepSeek API, use `deepseek-flash` for V4.1 Flash or `deepseek-v4-pro` for Pro; the older `deepseek-v4-flash` name is a [temporary compatibility route to V4.1 Flash](https://api-docs.deepseek.com/updates/#date-2026-09-10).
 OpenRouter serves the current V4.1 Flash release as `deepseek/deepseek-v4.1-flash-1017`.
 [GLM 5.3](https://docs.z.ai/guides/llm/glm-5.3) is available through the GLM Coding Plan endpoint shown above.
 The [Qwen3.8-27B model card](https://huggingface.co/Qwen/Qwen3.8-27B) and each hosting provider document their own context limits.
 
-### Claude 5.5 and Fable 5.1 Limits
+### Claude 5.5, Fable, and Mythos Limits
 
-Fable 5.1, Opus 5.5, and Sonnet 5.5 follow the same [tool-choice rules](https://platform.claude.com/docs/en/models/opus-5-5/migration-guide): `auto` and `none` are allowed, while forcing `any` or a named tool returns an error.
+Fable 5.1 and 5.2, Mythos 5.1 and 5.2, Opus 5.5, and Sonnet 5.5 follow the same [tool-choice rules](https://platform.claude.com/docs/en/models/opus-5-5/migration-guide): `auto` and `none` are allowed, while forcing `any` or a named tool returns an error.
 They reject `thinking: {type: disabled}` and manual `budget_tokens`; lower effort with `extra_kwargs.output_config: {effort: low}` instead, or use `extra_kwargs.thinking: {type: between_tools}` on [Sonnet 5.5](https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5#turn-off-up-front-thinking).
 With adaptive thinking, the notes these models write between tool calls are hidden, so responses show tool traces without that narration; Sonnet 5.5's `between_tools` setting returns those notes as text.
-Fable 5.1, Opus 5.5, Sonnet 5.5, and Haiku 5.5 reuse their reasoning from an earlier turn only while everything sent before it is unchanged, so after a change they answer without it instead of failing, most often because the date or other content of the system prompt has changed, or a compaction or replay limit rewrote earlier turns.
-With Sonnet 5.5's `between_tools` or on `bedrock_claude`, earlier turns' reasoning is never sent, while the current turn's reasoning between tool calls always is; Haiku 5.5 with `thinking: {type: disabled}` writes no reasoning to send.
+Fable 5.1 and 5.2, Mythos 5.1 and 5.2, Opus 5.5, Sonnet 5.5, and Haiku 5.5 reuse their reasoning from an earlier turn only while everything sent before it is unchanged, so after a change they answer without it instead of failing, most often because the date or other content of the system prompt has changed, or a compaction or replay limit rewrote earlier turns.
+With Sonnet 5.5's `between_tools`, or on `bedrock_claude` with any of these models but Mythos 5.1, earlier turns' reasoning is never sent, while the current turn's reasoning between tool calls always is; Haiku 5.5 with `thinking: {type: disabled}` writes no reasoning to send.
 A reply that resumes after a tool approval or a delegation keeps its reasoning, unless its history was trimmed to fit the context window or another reply or a compaction ran in the conversation while it waited; then it answers without that reasoning, and with `between_tools` or on `bedrock_claude`, an account created on or after August 31, 2026 can get a 400 error ``Invalid `signature` in `thinking` block`` on that resume.
 
 ## Environment Variables
@@ -180,8 +183,10 @@ Provider credentials come from environment variables, stored credentials, CLI lo
 A model uses the key saved for it in the dashboard's **Models** editor first, then `api_key` or `extra_kwargs.api_key` from its config, then the provider's shared key from the environment or credential store.
 A key in `extra_kwargs.client_params.api_key` reaches the provider's API client over all of these, so that model never needs the shared key.
 Setting both `api_key` and `extra_kwargs.api_key` is a validation error, and a blank key counts as unset.
+A model key written as `${NAME}`, such as `api_key: ${OPENROUTER_TEAM_API_KEY}`, is read from that environment variable (or `NAME_FILE`), so two models of one provider can use different accounts while the keys stay out of `config.yaml`; the whole value must be the reference.
+When the variable is unset and that key is the one the model uses, `mindroom config validate` and `mindroom doctor` name it and replies fail with an error naming it; a key saved in the dashboard that overrides it prevents both.
 A model that authenticates another way (`auth_token` for `anthropic`, `azure_ad_token` or `azure_ad_token_provider` for `azure`, or Vertex AI for `google` and `gemini`) never receives the shared key.
-`codex`, `kimi`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and ignore a configured one.
+`codex`, `kimi`, `claude_code`, `bedrock_claude`, `vertexai_claude`, and `synthetic` models authenticate without an API key and ignore a configured one.
 
 Shared API keys are read from these variables:
 
@@ -267,14 +272,14 @@ The endpoint must support the selected API.
 models:
   astra:
     provider: openai
-    id: gpt-6-astra
+    id: gpt-6.2-astra
     api: responses
     extra_kwargs:
       base_url: http://localhost:4000/v1
       reasoning_effort: high
 ```
 
-[GPT-6 Astra, GPT-6.1 Sol, and GPT-6.1 Terra require Responses for function calling](https://developers.openai.com/api/docs/guides/latest-model), and GPT-6 Luna supports function calling in Chat Completions only with `reasoning_effort: none`.
+[GPT-6.2 Astra, GPT-6.2 Sol, and GPT-6.1 Terra require Responses for function calling](https://developers.openai.com/api/docs/guides/latest-model), and GPT-6 Luna supports function calling in Chat Completions only with `reasoning_effort: none`.
 Through a proxy or custom alias, set `api: responses` for GPT-6 models, or tool calls on Astra, Sol, Terra, and Luna fail at their default reasoning effort.
 Set `extra_kwargs.reasoning_effort` or `extra_kwargs.reasoning` only when you want to customize reasoning.
 A reply shows the model's reasoning while it thinks only when the model requests a reasoning summary, with `extra_kwargs.reasoning_summary: auto` or `extra_kwargs.reasoning: {summary: auto}`.
@@ -311,12 +316,12 @@ Model access and usage limits depend on the logged-in ChatGPT account, so check 
 
 | Model | Model ID | Best fit |
 |-------|----------|----------|
-| GPT-6.1 Sol | `gpt-6.1-sol` | Near-Astra reasoning for long-running work; the starter default |
-| GPT-6 Astra | `gpt-6-astra` | The hardest end-to-end reasoning and agentic work |
+| GPT-6.2 Sol | `gpt-6.2-sol` | Near-Astra reasoning for long-running work; the starter default |
+| GPT-6.2 Astra | `gpt-6.2-astra` | The hardest end-to-end reasoning and agentic work |
 | GPT-6.1 Terra | `gpt-6.1-terra` | Fast everyday coding, writing, screenshots, and computer use |
 | GPT-6 Luna | `gpt-6-luna` | Efficient, high-volume work such as summaries and routing |
 
-Older or preview slugs work when the account exposes them, the form `openai-codex/gpt-6.1-sol` is accepted, and the legacy `gpt-5.6` alias maps to `gpt-5.6-sol`.
+Older or preview slugs work when the account exposes them, the form `openai-codex/gpt-6.2-sol` is accepted, and the legacy `gpt-5.6` alias maps to `gpt-5.6-sol`.
 If Codex state lives outside `~/.codex`, set `CODEX_HOME` in the `.env` beside `config.yaml` or the process environment, or `extra_kwargs.codex_home`; `~` prefixes are expanded.
 `mindroom config init --provider codex` generates this config (see [CLI](../cli.md)):
 
@@ -324,14 +329,14 @@ If Codex state lives outside `~/.codex`, set `CODEX_HOME` in the `.env` beside `
 models:
   default:
     provider: codex
-    id: gpt-6.1-sol
+    id: gpt-6.2-sol
     display_name: Sol
     context_window: 258000
     extra_kwargs:
       reasoning_effort: medium
   astra:
     provider: codex
-    id: gpt-6-astra
+    id: gpt-6.2-astra
     display_name: Astra
     context_window: 258000
     extra_kwargs:
@@ -352,7 +357,7 @@ defaults:
 ```
 
 Use `258000` as the context window: it fits the Codex window of every model above, which is smaller than the OpenAI API window.
-Set reasoning effort with `extra_kwargs.reasoning_effort`; GPT-6.1 Sol, GPT-6 Astra, GPT-6.1 Terra, and GPT-6 Luna accept `low`, `medium`, `high`, `xhigh`, and `max`.
+Set reasoning effort with `extra_kwargs.reasoning_effort`; GPT-6.2 Sol, GPT-6.2 Astra, GPT-6.1 Terra, and GPT-6 Luna accept `low`, `medium`, `high`, `xhigh`, and `max`.
 Codex models ask for a reasoning summary (`auto`, as the Codex CLI does) unless `extra_kwargs.reasoning_summary` or `extra_kwargs.reasoning.summary` sets another, so a reply shows the model's reasoning while it thinks.
 Codex clients also offer Ultra for Sol, Astra, and Terra, but Ultra's Codex-managed subagents are not available through MindRoom.
 The provider supports text and image input with text output; transcription, text-to-speech, and realtime speech are not supported.
@@ -389,6 +394,69 @@ Kimi K3.1 Pro and K3 reason before replying by default, so responses include rea
 Setting `extra_kwargs.reasoning_effort` to `none` makes K3.1 Pro requests fail with HTTP 400, while K3 then answers with K2.8 Preview without reasoning.
 The adapter depends on the Kimi Code CLI login format and backend, so a Kimi Code update can require a MindRoom update.
 
+## Claude Models with a Claude Subscription
+
+Use `provider: claude_code` to run Claude on your own Claude Pro, Max, Team, or Enterprise subscription instead of the billed Anthropic API.
+MindRoom runs the Claude Code CLI you signed in to, and that CLI talks to Anthropic.
+The agent keeps MindRoom's tools, memory, history, and approvals; Claude Code's own tools, skills, memory files, and your user and project settings and hooks are off.
+Managed settings an administrator installed for Claude Code on the machine, such as `/etc/claude-code/managed-settings.json`, still apply, including any hooks they define.
+Use it for a personal deployment that runs as the subscriber: every reply the agent gives, to anyone who may talk to it, counts toward that one subscription's limits.
+No reply is billed to an API key, but that does not mean no extra charge: Claude Code follows your Claude account's extra-usage setting.
+With extra usage turned on, replies continue past the plan's included usage and Anthropic charges the account for them; turn it off in your Claude account's usage settings if you want a hard limit.
+
+Set it up as the user that runs MindRoom:
+
+1. Install [Claude Code](https://code.claude.com/docs/en/setup) 2.1.328 or later.
+2. Run `claude auth login` and sign in with the subscription.
+3. Install the Claude Agent SDK with `pip install 'mindroom[claude_agent]'`; MindRoom installs it on first use unless auto-install is off.
+
+`mindroom config init --provider claude_code` generates this config (see [CLI](../cli.md)):
+
+```yaml
+models:
+  default:
+    provider: claude_code
+    id: claude-sonnet-5-5
+    display_name: Claude Sonnet 5.5
+    context_window: 200000
+  opus:
+    provider: claude_code
+    id: claude-opus-5-5
+    display_name: Claude Opus 5.5
+    context_window: 200000
+  haiku:
+    provider: claude_code
+    id: claude-haiku-5-5
+    display_name: Claude Haiku 5.5
+    context_window: 200000
+
+router:
+  model: haiku
+
+defaults:
+  thread_summary_model: haiku
+```
+
+The `id` is any model ID or alias Claude Code takes for `--model`, such as `claude-opus-5-5` or `opus`, within what the plan includes.
+`extra_kwargs` accepts `cli_path`, the `claude` executable to run, and `effort`, one of `low`, `medium`, `high`, `xhigh`, or `max`.
+Without `cli_path`, MindRoom runs the `claude` on its `PATH`; interactive setup (`mindroom run` or `mindroom config init` in a terminal) pins `cli_path` when it detects `claude`, while non-interactive `--provider claude_code` keeps the config portable.
+Set `cli_path` manually when a service's `PATH` does not include it.
+MindRoom's storage directory must allow executing files for this provider.
+MindRoom never reads Claude Code's credentials, ignores an authored `api_key`, and does not accept a token, endpoint, or headers for this provider.
+MindRoom removes inherited `ANTHROPIC_*`, `CLAUDE_CODE_*`, `CLAUDE_BG_AUTH_SNAPSHOT_PATH`, and `CLAUDE_AUTO_BACKGROUND_TASKS` variables from Claude Code's environment (except settings MindRoom explicitly allows), so Claude Code never uses an `ANTHROPIC_API_KEY` exported for other models.
+The provider supports text and image input; the model is told when an audio, video, or file attachment was left out.
+Use [reasoning levels](#reasoning-levels) to select effort with a model reference like `opus@high`.
+These conversations do not appear in Claude Code's own session history.
+MindRoom runs at most 8 Claude Code processes at a time; while all 8 are answering, another reply is retried and fails if none finishes meanwhile.
+[`mindroom doctor`](../cli.md#doctor) starts Claude Code without sending it a prompt to check the installation and sign-in.
+
+A reply fails with a message that names the fix in these cases:
+
+- Claude Code or the Claude Agent SDK is missing, or Claude Code is older than 2.1.328: install the required dependency or run `claude update`.
+- Claude Code is not signed in to a Pro, Max, Team, or Enterprise plan: run `claude auth login` as the user that runs MindRoom.
+- `CLAUDE_CODE_STREAM_CLOSE_TIMEOUT` or `CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK` is set: unset it in MindRoom's environment because the SDK reads it directly.
+- The plan's usage limit is reached: the message gives the time the limit resets when Claude Code reports it.
+
 ## OpenRouter Provider Routing
 
 OpenRouter routes each request to one of several upstream providers serving the model, and upstream quality varies.
@@ -411,7 +479,7 @@ models:
 Provider slugs are in the `tag` field of `https://openrouter.ai/api/v1/models/<model-id>/endpoints`.
 Account-level OpenRouter settings (ignored providers, data-policy filters) still apply, so pinning an upstream your account excludes fails with `No endpoints found`.
 Verify a new pin with a direct API request and check the `provider` field in the response.
-MindRoom's `LLM usage` log line names the upstream that served each OpenRouter response in `served_provider`.
+For `provider: openrouter` (Chat Completions), MindRoom's `LLM usage` log line names the upstream in `served_provider`.
 
 ## Azure OpenAI
 
@@ -441,7 +509,7 @@ models:
     context_window: 1000000
 ```
 
-Bedrock lists Fable 5.1 and Sonnet 5 as open access, while Opus 5.5 and Sonnet 5.5 access can depend on the AWS account and region.
+Bedrock lists Fable 5.1 and Sonnet 5 as open access (Fable 5.2 is served only on the `bedrock-runtime` endpoint, which `bedrock_claude` does not call), while Opus 5.5 and Sonnet 5.5 access can depend on the AWS account and region.
 The Bedrock starter config defaults to Opus 5.5 with commented alternatives, so confirm access, or switch to its `fable` alternative or `id: anthropic.claude-sonnet-5`.
 
 ## Ollama Context Size
@@ -484,15 +552,70 @@ Set `tool_call_probability` to `1` to call the shell tool on every turn or `0` t
 Set `chars_per_second` to `0` to stream without pacing delays for maximum throughput.
 Changing `seed` changes the response length, split point, and tool-call choice, which stay the same for a given conversation history.
 
+## Claude Through OpenRouter
+
+Use `provider: anthropic` with OpenRouter's Messages endpoint and set `context_window` to enable planning for Claude [native compaction](history.md#native-compaction).
+Use Anthropic's ID (`claude-opus-5-5`), not OpenRouter's slug (`anthropic/claude-opus-5.5`), so MindRoom selects the correct Claude capabilities.
+Set `base_url` to `https://openrouter.ai/api` without `/v1` because the Anthropic SDK appends it.
+Always set a model-specific OpenRouter `api_key`; without it, MindRoom can send your shared Anthropic key to OpenRouter.
+Any `ANTHROPIC_CUSTOM_HEADERS` are also sent to OpenRouter, even with a model-specific key.
+Put OpenRouter routing fields (`provider`, `models`, and `fallbacks`) under `extra_kwargs.request_params.extra_body`.
+Do not change an existing thread's OpenRouter `provider.order` or `provider.only` pin to an upstream that cannot read earlier signed thinking: OpenRouter returns HTTP 400 in that case, while unpinned requests stay on a compatible upstream.
+This route uses the partner limits of 5 MiB per base64 image and 16 MB of inline media per request.
+The `provider: openrouter` route uses Chat Completions and keeps text compaction.
+
+```yaml
+models:
+  openrouter_claude:
+    provider: anthropic
+    id: claude-opus-5-5
+    context_window: 1000000
+    extra_kwargs:
+      base_url: https://openrouter.ai/api
+      api_key: ${OPENROUTER_API_KEY}
+```
+
+## GPT Through OpenRouter Responses
+
+Use `provider: openai` with `api: responses`, OpenRouter's `https://openrouter.ai/api/v1` endpoint, an `openai/` GPT model ID (GPT-5.3 Codex, GPT-5.4, or GPT-6), and `context_window` to enable OpenAI Responses [native compaction](history.md#native-compaction) through OpenRouter.
+Always set a model-specific OpenRouter `api_key`; without it, MindRoom can send your shared OpenAI key to OpenRouter.
+OpenRouter rejects `store: true` on this endpoint, so MindRoom sends `store: false` unless you set `store` yourself.
+OpenRouter binds encrypted compaction checkpoints and encrypted reasoning to the upstream provider that created them (for example OpenAI, Azure, or Amazon Bedrock).
+OpenRouter's routing answers HTTP 400 when the request's `provider` preferences exclude the upstream that created earlier encrypted items, and HTTP 429 while that upstream is rate-limited.
+After such a 400, or a 429 that outlasts the transient retries, MindRoom drops the encrypted state once and resends the full history with the same `provider` preferences, and the upstream that answers may compact it again.
+A transient failure of that resend is retried only as often as the request has transient retries left.
+On a very long thread whose full stored history exceeds the context window, you may need `/compact` after an upstream switch.
+To restrict routing to one provider at the cost of failover, set `provider: {only: [openai]}` under `extra_kwargs.request_params.extra_body` (`order` with `allow_fallbacks: false` can still admit other providers). One provider slug can still match several of that provider's endpoints.
+Model-rerouting fields (`models`, `model`, `route`, `preset`, or `@preset/` model IDs) turn native compaction off.
+The `provider: openrouter` route uses Chat Completions and keeps text compaction.
+
+```yaml
+models:
+  sol_native:
+    provider: openai
+    api: responses
+    id: openai/gpt-6.2-sol
+    api_key: ${OPENROUTER_API_KEY}
+    context_window: 1050000
+    extra_kwargs:
+      base_url: https://openrouter.ai/api/v1
+      # Optional: restrict routing to one provider at the cost of failover
+      # request_params:
+      #   extra_body:
+      #     provider:
+      #       only: [openai]
+```
+
 ## Extra Kwargs
 
 `extra_kwargs` sets provider-specific options for the model's requests and API client.
 Each provider accepts only the keys in the table below.
 A model with any other key, including a misspelled key or a retired Agno model setting such as `retries`, fails config validation with an `Unsupported extra_kwargs` error that names the model and the unknown keys and lists the accepted ones; remove or correct those keys.
+A null, empty, or whitespace-only `base_url`, `project_id`, `region`, `location`, or `aws_region` never fails this check on any provider, since it sets nothing.
 `max_retries` is not accepted, since MindRoom retries failed requests itself (see [Retries](#retries)); a model that sets it fails config validation with an error that says to remove it.
 `role_map` is not accepted either: Chat Completions requests send the system prompt as `developer` to OpenAI's own API and as `system` to every other endpoint, including an OpenAI-compatible server such as vLLM or llama.cpp set as `provider: openai` with its `base_url`, so remove it.
 
-- `base_url`, a string, sends requests to a custom endpoint, such as an OpenAI-compatible server.
+- `base_url`, a string, sends requests to a custom endpoint, such as an OpenAI-compatible server or, on `anthropic`, an Anthropic-compatible gateway's root URL without a `/v1` suffix, because the Claude client appends its own API path; `client_params.base_url` wins when both are set, and either left empty or null sets no endpoint.
 - `api_key` is the same as the model's `api_key` field.
 - `request_params` holds request body fields that MindRoom merges over its own.
 - `extra_body` adds JSON body fields, for example for [OpenRouter provider routing](#openrouter-provider-routing).
@@ -509,25 +632,28 @@ A model with any other key, including a misspelled key or a retired Agno model s
 | `cerebras` | `api_key`, `base_url`, `client_params`, `default_headers`, `default_query`, `extra_body`, `extra_headers`, `extra_query`, `max_completion_tokens`, `parallel_tool_calls`, `repetition_penalty`, `request_params`, `strict_output`, `temperature`, `timeout`, `top_k`, `top_p` |
 | `openai` with Responses | `api_key`, `base_url`, `cache_system_prompt`, `client_params`, `default_headers`, `default_query`, `extra_body`, `extra_headers`, `extra_query`, `include`, `max_output_tokens`, `max_tool_calls`, `metadata`, `organization`, `parallel_tool_calls`, `reasoning`, `reasoning_effort`, `reasoning_summary`, `request_params`, `service_tier`, `store`, `strict_output`, `temperature`, `timeout`, `top_p`, `truncation`, `user`, `verbosity` |
 | `codex` | The Responses keys without `max_output_tokens` and `temperature`, which the Codex endpoint rejects, plus `codex_home`, `default_instructions`, `prompt_cache_key`, and `session_id` |
-| `anthropic` | `api_key`, `auth_token`, `betas`, `cache_system_prompt`, `client_params`, `context_management`, `default_headers`, `extended_cache_time`, `max_tokens`, `output_config`, `request_params`, `stop_sequences`, `temperature`, `thinking`, `timeout`, `top_k`, `top_p` |
-| `vertexai_claude` | The `anthropic` keys without `auth_token`, plus `base_url`, `project_id`, and `region` |
-| `bedrock_claude` | The `anthropic` keys without `auth_token`, plus `aws_access_key`, `aws_profile`, `aws_region`, `aws_secret_key`, and `aws_session_token` |
+| `anthropic` | `api_key`, `auth_token`, `base_url`, `betas`, `cache_system_prompt`, `client_params`, `context_management`, `default_headers`, `extended_cache_time`, `max_tokens`, `output_config`, `request_params`, `stop_sequences`, `temperature`, `thinking`, `timeout`, `top_k`, `top_p` |
+| `claude_code` | `api_key`, `cli_path`, `effort` |
+| `vertexai_claude` | The `anthropic` keys without `auth_token`, plus `project_id` and `region` |
+| `bedrock_claude` | The `anthropic` keys without `auth_token` and `base_url`, plus `aws_access_key`, `aws_profile`, `aws_region`, `aws_secret_key`, and `aws_session_token` |
 | `google`, `gemini` | `api_key`, `cached_content`, `client_params`, `frequency_penalty`, `generation_config`, `generative_model_kwargs`, `include_thoughts`, `location`, `logprobs`, `max_output_tokens`, `presence_penalty`, `project_id`, `safety_settings`, `search`, `seed`, `stop_sequences`, `temperature`, `thinking_budget`, `thinking_level`, `timeout`, `top_k`, `top_p`, `vertexai` |
 | `ollama` | `api_key`, `client_params`, `format`, `keep_alive`, `options`, `request_params`, `think`, `timeout` |
 | `synthetic` | `chars_per_second`, `chunk_chars`, `max_response_chars`, `min_response_chars`, `seed`, `tool_call_probability` (see [Built-In Synthetic Model](#built-in-synthetic-model)) |
 
 On `deepseek`, `use_thinking`, a boolean that defaults to `true`, runs requests in DeepSeek's thinking mode, where the model reasons before it answers; set it to `false` to answer without thinking.
 An `ollama` model's `think` turns a thinking model's reasoning on (`true`) or off (`false`), or sets its effort (`low`, `medium`, or `high`) on models that take a level; unset leaves the choice to Ollama.
-A `google` or `gemini` model's `search: true` grounds its answers with Google Search, and search with tools needs a Gemini 3 or later model name on the Gemini API, such as `gemini-3.8-flash`: there the agent keeps its tools beside search, while other models, aliases such as `gemini-flash-latest`, and every Vertex AI model use search alone, in place of the agent's tools.
+A `google` or `gemini` model's `search: true` grounds its answers with Google Search, and search with tools needs a Gemini 3 or later model name on the Gemini API, such as `gemini-4-hydrogen`: there the agent keeps its tools beside search, while other models, aliases such as `gemini-flash-latest`, and every Vertex AI model use search alone, in place of the agent's tools.
+On the Gemini API, `google` and `gemini` models and the `gemini` tool send to API version `v1beta`, which serves the `-latest` aliases and preview models; set `extra_kwargs.client_params.http_options.api_version` to choose another version for a model.
 
 When a response reaches the model's output limit (`max_tokens` or the route's equivalent), its text is kept, but none of its tool calls run: the agent is asked to split the work into smaller tool calls, and a third such response ends the reply with an error.
 A Claude model whose `extra_kwargs` sets no `max_tokens` can write up to its maximum output on `anthropic`, 128,000 tokens for Claude 5 models, except Claude Sonnet 4.5 and models older than Claude 4.5, which write up to 8,192 tokens, as every model does on `bedrock_claude` and `vertexai_claude`, whose quotas count the requested output when a request starts; set `max_tokens` to choose another limit.
 
 Some models reject sampling controls:
 
-- Claude Opus 4.7, Opus 4.8, Mythos Preview, and every Claude 5 and 5.x model reject non-default `temperature`, `top_p`, and `top_k`, so MindRoom omits them on Anthropic, Bedrock, and Vertex requests.
-- MindRoom also omits those controls for direct Gemini 3.8 Flash, Gemini 3.6 Flash, and Gemini 3.5 Flash-Lite requests.
-- [GPT-6 Astra and GPT-6.1 Sol do not support `temperature`, `top_p`, or `top_logprobs`](https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters), and GPT-6.1 Terra and GPT-6 Luna reject them unless reasoning effort is `none`; leave them out of these models' `extra_kwargs`.
+- Claude API version `2026-10-21`, which MindRoom sends on Anthropic, Bedrock, and Vertex requests, rejects `temperature`, `top_p`, and `top_k` on every model, so MindRoom omits them there, from `request_params` too, and logs a warning once per model that sets them; a Claude model's `extra_kwargs` still accepts them, and they have no effect.
+  Bedrock serves `2026-10-21` only for Claude 4.7 and later, so a `bedrock_claude` model older than 4.7, such as `anthropic.claude-haiku-4-5`, keeps API version `2023-06-01` and its sampling controls.
+- MindRoom also omits those controls for direct Gemini 4 Carbon, Argon, and Hydrogen, Gemini 3.8 Flash, Gemini 3.6 Flash, and Gemini 3.5 Flash-Lite requests.
+- [GPT-6.2 Astra and GPT-6.2 Sol do not support `temperature`, `top_p`, or `top_logprobs`](https://developers.openai.com/api/docs/guides/latest-model#update-api-and-model-parameters), and GPT-6.1 Terra and GPT-6 Luna reject them unless reasoning effort is `none`; leave them out of these models' `extra_kwargs`.
 
 ## Prompt Caching
 
@@ -604,7 +730,7 @@ Before each retry it waits as long as the provider's `Retry-After` or Azure's `r
 SDK retry settings in `client_params`, such as `max_retries` or Gemini's `http_options.retry_options`, have no effect; the Gemini SDK still resends on its own after a dropped connection and during a file upload's transfer.
 A request that still fails ends the turn with "⏱️ Rate limited. Please wait a moment and try again." for a rate limit, or "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly." otherwise.
 A request larger than the account's tokens-per-minute limit, which OpenAI rejects as "Request too large", is not retried, since only a smaller request can pass; it ends the turn with "⚠️ This request is larger than the account's tokens-per-minute limit. Start a new thread or compact the conversation, then try again."
-A request that OpenAI, Anthropic, Gemini, or Moonshot refuses because the account has no credit left or reached its monthly spend or usage limit, that Z.ai refuses because the account has no balance or its plan or package expired, or that any provider answers with HTTP `402 Payment Required` is not retried either, and the turn ends with an error that shows the provider's message, such as "⚠️ Error: You exceeded your current quota, please check your plan and billing details."
+A request that OpenAI, Anthropic, Gemini, or Moonshot refuses because the account has no credit left or reached its monthly spend or usage limit, that Z.ai refuses because the account has no balance or its plan or package expired, that OpenRouter refuses because the key reached its credit limit, or that any provider answers with HTTP `402 Payment Required` is not retried either, and the turn ends with "💳 The AI budget for this MindRoom is used up or its plan has expired (<provider>), so I can't answer right now. Add credit, renew the plan, or raise the spending limit (from the dashboard or with the AI provider), then try again." The provider's own message is in the `agent_error` log line, which carries `error_code` `quota_exhausted`.
 
 ## Stalled Streams
 
@@ -632,41 +758,84 @@ models:
     stream_idle_timeout_seconds: 1800  # longest wait for a queued request plus model load
   deep_thinker:
     provider: openrouter
-    id: openai/gpt-6-astra
+    id: openai/gpt-6.2-astra
     stream_idle_timeout_seconds: 0  # never cut off long silent reasoning
 ```
 
+## Reasoning Levels
+
+A `reasoning` block lets one model entry run at several reasoning levels, so `sol` and `sol_high` need not be two entries:
+
+```yaml
+models:
+  sol:
+    provider: codex
+    id: gpt-6.2-sol
+    display_name: Sol
+    reasoning:
+      levels: [low, medium, high, xhigh]  # what clients offer, in this order
+      default: high                       # what plain `sol` runs at
+```
+
+Write `name@level` wherever a model name is accepted to run that model at one of its levels: agent, team, and router `model`, `room_models`, `!model sol@xhigh`, `!room_model sol@low`, a client's model picker, `run_subagent`, scheduled tasks, and the `thread_model` tool.
+`sol@high` here is the same as `sol`, and a level the model does not list is rejected with the levels that model supports.
+A reply at a non-default level shows its model as `<display name> (<level>)`, such as `Sol (xhigh)`.
+`!model list` and the `thread_model` tool's `list_models()` show each model's levels and default.
+
+MindRoom sends the level in the setting the provider reads, and the block wins over the same key in `extra_kwargs`:
+
+| Provider | A level `L` | `off` |
+|----------|-------------|-------|
+| `openai`, `codex`, `azure`, `openrouter`, `llama_cpp`, `kimi` | `reasoning_effort: L` | `reasoning_effort: none` |
+| `zai` | `reasoning_effort: L` | no `off` level |
+| `deepseek` | `reasoning_effort: L`, `use_thinking: true` | `use_thinking: false` |
+| `anthropic`, `vertexai_claude`, `bedrock_claude` | `output_config.effort: L`, and an authored `thinking: {type: disabled}` is dropped | `thinking: {type: disabled}`, and an authored `output_config.effort` is dropped |
+| `claude_code` | `effort: L` (no `minimal` level) | no `off` level |
+| `google` | `thinking_level: L` | `thinking_budget: 0` |
+| `ollama` | `think: L` | `think: false` |
+
+Write `off` in quotes, as in `levels: ["off", low, high]` or `default: "off"`, because YAML reads a bare `off` as false.
+`groq`, `cerebras`, and `synthetic` take no level, so a `reasoning` block on them fails config load.
+Z.ai has no setting MindRoom can switch thinking off with, so listing `off` for a `zai` model fails config load too; set `extra_kwargs.extra_body.thinking` yourself on a separate model entry.
+MindRoom does not know which levels each model accepts, so list only levels the model supports; a level it rejects fails the reply with the provider's error, like a wrong `extra_kwargs` value.
+Claude 5 models reject disabled thinking, so do not list `off` for them.
+`request_params` and `extra_body` still win over the block.
+
+To replace per-level entries such as `opus` and `opus_high`, add a `reasoning` block to `opus`, point references at `opus@high`, and delete `opus_high`.
+Thread and room overrides that named the deleted entry, or a level later removed from `levels`, are ignored like any override naming a removed model, so room-level model selection applies again.
+
 ## Hot Reload
 
-After a successful config reload, changes to a model definition, including its provider options, model ID, and `context_window`, apply from the next agent, team, or router response without restarting the bot.
+After a successful config reload, changes to a model definition, including its provider options, model ID, and `context_window`, apply from the next agent or team reply and the next routing decision without restarting the bot.
 Agents with voice calls enabled can still restart, because their call runtime keeps its configuration between responses.
 
 ## Model Overrides in Chat
 
-Each agent, team, and the router normally answers with its own configured `model` (`router.model` for the router).
+Each agent and team normally answers with its own configured `model`, and [routing](router.md) picks a responder with `router.model`.
 Users can change that per thread or per room, and the most specific choice wins:
 
 1. An explicit model for one run, such as a delegated child run.
 2. The thread override set with `!model`, the `thread_model` tool, or a client's model picker.
-3. The runtime room default set with `!room_model`.
+3. The room's `model` [room setting](threads.md#room-settings), set with `!room_model` or in a client's room settings.
 4. The authored room default in `room_models`.
 5. The entity's configured model.
 
 Thread and room overrides name models from the `models:` section and survive restarts.
 A Matrix client's model picker lists the configured models and changes the thread override like `!model`.
-The picker works in encrypted and unencrypted rooms when the router and at least one agent you may address are joined; teams alone do not qualify.
-It shows each model's key, display name, provider, model ID, and icon, never API keys, hosts, local paths, or `extra_kwargs`.
+The picker works in encrypted and unencrypted rooms when at least one agent you may address is joined; teams alone do not qualify.
+It shows each model's key, display name, provider, model ID, icon, and [reasoning levels](#reasoning-levels), never API keys, hosts, local paths, or `extra_kwargs`.
 Catalogs with more than 256 models or over 64 KiB are not offered to the picker; `!model` still works.
 The client protocol is described in [Model Selection Protocol](../architecture/matrix.md#model-selection-protocol).
 
 ### `!model`
 
-Show or switch the model that the agents, teams, and router you may address use in the current thread.
+Show or switch the model that the agents and teams you may address, and routing, use in the current thread.
 
 ```
 !model
 !model list
 !model opus
+!model sol@high
 !model reset
 ```
 
@@ -678,7 +847,7 @@ Other threads and rooms are unaffected.
 
 ### `!room_model`
 
-Show or switch the default model for every agent, team, and the router in the current room.
+Show or switch the default model for every agent and team, and for routing, in the current room.
 
 ```
 !room_model
@@ -687,11 +856,12 @@ Show or switch the default model for every agent, team, and the router in the cu
 !room_model reset
 ```
 
-`!room_model` and `!room_model list` show the current runtime override and available model names to authorized room members.
+`!room_model` and `!room_model list` show the current override and available model names to authorized room members.
 Setting and resetting require a Matrix room admin; other users get `❌ Room admin only.`
-`!room_model opus` stores a room override without modifying `config.yaml`, keyed by Matrix room ID, so it survives restarts and room-alias changes.
+`!room_model opus` sets the room's `model` [room setting](threads.md#room-settings) without modifying `config.yaml`, so it survives restarts and room-alias changes.
+When no MindRoom account in the room may send state events, the command changes nothing and answers `I need moderator rights in this room to change the room model.`
 The new default applies to later turns; a turn in progress or waiting for approval keeps the model it started with.
-`!room_model reset` removes the runtime override so `room_models` or each entity's configured model applies again.
+`!room_model reset` removes the override so `room_models` or each entity's configured model applies again.
 
 To set an authored room default in `config.yaml`, map room keys or Matrix room IDs to model names with `room_models` (default `{}`):
 
@@ -713,9 +883,9 @@ agents:
       - thread_model
 ```
 
-- `list_models()` returns every configured model name with its provider and model ID and works outside a thread.
+- `list_models()` returns every configured model name with its provider, model ID, and any `reasoning` block, and works outside a thread.
 - `get_thread_model()` returns an `overrides` map from each entity with an active thread override to its model, plus the available model names; an override naming a model since removed from `models` is ignored and reported under `stale_overrides`.
-- `switch_thread_model(model_name, when)` accepts a configured model name and rejects unknown names with the available list.
+- `switch_thread_model(model_name, when)` accepts a configured model name or `name@level` and rejects unknown names with the available list.
   `when` is `next-turn` (default), which keeps the current response on its model, or `after-toolcall`, which continues the current response with the new model after the tool call.
 - `reset_thread_model()` removes the thread override so room-level selection applies again.
 

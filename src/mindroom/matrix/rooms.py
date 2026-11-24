@@ -209,7 +209,7 @@ async def _reconcile_joined_existing_room(
 
 
 def _alias_target_problem(state_events: list[dict[str, Any]], router_user_id: str, room_alias: str) -> str | None:
-    """Return why a readable room is not the router's room for one managed alias, or None when it is."""
+    """Return why a readable room is not the owner account's room for one managed alias, or None when it is."""
     state = {(event["type"], event["state_key"]): event for event in state_events}
     create_event = state.get(("m.room.create", ""), {})
     create_content = create_event.get("content")
@@ -218,7 +218,7 @@ def _alias_target_problem(state_events: list[dict[str, Any]], router_user_id: st
     if create_event.get("sender") != router_user_id or additional_creators not in ([], [router_user_id]):
         return f"created by {create_event.get('sender')}, additional creators {additional_creators}"
     # Any account may point an alias at any room, and members with enough power may publish it there,
-    # so only the canonical alias the router set when creating the room binds the alias to it.
+    # so only the canonical alias the owner account set when creating the room binds the alias to it.
     canonical_event = state.get(("m.room.canonical_alias", ""), {})
     canonical_content = canonical_event.get("content")
     if (
@@ -226,7 +226,7 @@ def _alias_target_problem(state_events: list[dict[str, Any]], router_user_id: st
         or not isinstance(canonical_content, dict)
         or canonical_content.get("alias") != room_alias
     ):
-        return f"its canonical alias is not {room_alias} as set by the router"
+        return f"its canonical alias is not {room_alias} as set by the owner account"
     return None
 
 
@@ -252,13 +252,13 @@ async def _verify_alias_target(
     room_id: str,
     room_alias: str,
 ) -> str | _AliasResolution:
-    """Return an unrecorded alias target when the router created it for this alias, or how to proceed instead."""
+    """Return an unrecorded alias target when the owner account created it for this alias, or how to proceed instead."""
     response = await _get_room_state(client, room_id, room_alias)
     if response is None:
         return _AliasResolution.RETRY_LATER
     if isinstance(response, nio.RoomGetStateError):
-        # The router can read every room it created and is still joined to, so a denial is definitive.
-        problem = f"its state is not readable by the router ({response.status_code})"
+        # The owner account can read every room it created and is still joined to, so a denial is definitive.
+        problem = f"its state is not readable by the owner account ({response.status_code})"
     else:
         problem = _alias_target_problem(response.events, str(client.user_id), room_alias)
     if problem is None:
@@ -268,13 +268,13 @@ async def _verify_alias_target(
         room_alias=room_alias,
         room_id=room_id,
         reason=problem,
-        hint="The alias points at a room the router did not create for it, so MindRoom does not adopt that room.",
+        hint="The alias points at a room the owner account did not create for it, so MindRoom does not adopt it.",
     )
     return _AliasResolution.CREATE_WITHOUT_ALIAS
 
 
 async def _republish_missing_alias(client: nio.AsyncClient, room_alias: str, room_id: str) -> bool:
-    """Point a deleted managed alias back at its recorded room, returning False only when the router lost the room."""
+    """Point a deleted managed alias back at its recorded room; False only when the owner account lost the room."""
     response = await _get_room_state(client, room_id, room_alias)
     if isinstance(response, nio.RoomGetStateError):
         return False
@@ -375,7 +375,7 @@ async def _ensure_room_exists(
             logger.info("managed_room_state_updated", room_key=room_key, room_id=resolution, room_alias=full_alias)
         return resolution
 
-    # Either the alias is missing and the router lost any recorded room, or another account holds the alias
+    # Either the alias is missing and the owner account lost any recorded room, or another account holds the alias
     if existing_room is not None:
         # Remove stale entry from state
         logger.debug("managed_room_state_entry_removed", room_key=room_key)
@@ -554,7 +554,7 @@ async def _ensure_root_space_exists(
         joined_space = space_room_id in client.rooms or space_room_id in joined_room_ids
         if not joined_space and await join_room(client, space_room_id) is not RoomJoinOutcome.JOINED:
             logger.warning(
-                "Resolved existing root space but router could not join it; skipping reconciliation",
+                "Resolved existing root space but the owner account could not join it; skipping reconciliation",
                 space_room_id=space_room_id,
                 space_alias=full_alias,
             )
@@ -624,7 +624,7 @@ async def ensure_root_space(
 
 
 async def _is_server_emoji_room(client: nio.AsyncClient, room_id: str, room_alias: str) -> bool:
-    """Return whether a room the router made for the alias is a server emoji room, and not one made for another use."""
+    """Return whether a room the owner account made for the alias is a server emoji room, not one made for another use."""
     response = await _get_room_state(client, room_id, room_alias)
     if not isinstance(response, nio.RoomGetStateResponse):
         return False
@@ -649,7 +649,7 @@ async def _ensure_server_emoji_room_exists(
     alias_localpart: str,
     full_alias: str,
 ) -> str | None:
-    """Return the server emoji room, joining the router's room for the alias or creating it."""
+    """Return the server emoji room, joining the owner account's room for the alias or creating it."""
     known_room_id = matrix_state.matrix_state_for_runtime(runtime_paths).server_emoji_room_id
     joined_room_ids = await get_joined_rooms(client) or []
     # Resolving the alias even for a joined room publishes it again when someone deleted it.
@@ -818,8 +818,8 @@ def _dm_cache_key(client: nio.AsyncClient, room_id: str) -> tuple[str, str]:
     return (str(client.user_id or ""), room_id)
 
 
-async def _get_direct_room_ids(client: nio.AsyncClient) -> set[str]:
-    """Get DM room IDs from the user's ``m.direct`` account data.
+async def _get_direct_room_ids(client: nio.AsyncClient) -> set[str] | None:
+    """Get DM room IDs from the user's ``m.direct`` account data, or ``None`` when the read fails.
 
     Results are cached per user for ``_DIRECT_ROOMS_TTL`` seconds so that
     newly created DM rooms are picked up without a restart.
@@ -835,15 +835,21 @@ async def _get_direct_room_ids(client: nio.AsyncClient) -> set[str]:
             return room_ids
 
     response = await client.list_direct_rooms()
-    if isinstance(response, nio.DirectRoomsResponse):
+    transport = response.transport_response
+    # nio parses a non-JSON error body, such as a proxy's 502 page, as an empty m.direct list.
+    if (
+        isinstance(response, nio.DirectRoomsResponse)
+        and isinstance(transport, aiohttp.ClientResponse)
+        and transport.status == 200
+    ):
         direct_room_ids = {room_id for room_ids in response.rooms.values() for room_id in room_ids}
-        _DIRECT_ROOMS_CACHE[user_id] = (time.monotonic(), direct_room_ids)
-        return direct_room_ids
-    if isinstance(response, nio.DirectRoomsErrorResponse) and response.status_code == "M_NOT_FOUND":
+    elif isinstance(response, nio.DirectRoomsErrorResponse) and response.status_code == "M_NOT_FOUND":
         # No m.direct account data is a stable empty state for this user.
-        _DIRECT_ROOMS_CACHE[user_id] = (time.monotonic(), set())
-
-    return set()
+        direct_room_ids = set()
+    else:
+        return None
+    _DIRECT_ROOMS_CACHE[user_id] = (time.monotonic(), direct_room_ids)
+    return direct_room_ids
 
 
 def _is_two_member_group_room(client: nio.AsyncClient, room_id: str) -> bool:
@@ -875,7 +881,7 @@ def _has_is_direct_marker(state_events: list[dict[str, Any]]) -> bool:
     return False
 
 
-async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
+async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool | None:
     """Check if a room is a Direct Message (DM) room.
 
     Detection uses multiple signals in this order:
@@ -888,7 +894,8 @@ async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
         room_id: The room ID to check
 
     Returns:
-        True if the room is a DM room, False otherwise
+        True if the room is a DM room, False if it is not, and None when the ``m.direct`` read or the room state read
+        failed and the other signals do not mark the room as a DM, since the unread source alone may mark it
 
     """
     cache_key = _dm_cache_key(client, room_id)
@@ -899,7 +906,7 @@ async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
             return is_dm
 
     direct_room_ids = await _get_direct_room_ids(client)
-    if room_id in direct_room_ids:
+    if direct_room_ids is not None and room_id in direct_room_ids:
         _DM_ROOM_CACHE[cache_key] = (time.monotonic(), True)
         return True
 
@@ -911,16 +918,19 @@ async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
     # Get the room state events, specifically member events.
     response = await client.room_get_state(room_id)
     if not isinstance(response, nio.RoomGetStateResponse):
-        return False
+        return None
 
     is_dm = _has_is_direct_marker(response.events)
+    # After a failed m.direct read only a marked room is known; nothing is cached, so the next call reads it again.
+    if direct_room_ids is None:
+        return is_dm or None
     _DM_ROOM_CACHE[cache_key] = (time.monotonic(), is_dm)
     return is_dm
 
 
 async def filter_non_dm_rooms(client: nio.AsyncClient, room_ids: list[str]) -> list[str]:
-    """Return rooms from *room_ids* that are not DM rooms."""
-    return [room_id for room_id in room_ids if not await is_dm_room(client, room_id)]
+    """Return rooms from *room_ids* that are not DM rooms, leaving out rooms whose DM status is unknown."""
+    return [room_id for room_id in room_ids if await is_dm_room(client, room_id) is False]
 
 
 async def _leave_room(
@@ -958,9 +968,13 @@ async def leave_non_dm_rooms(
     *,
     leave_room_action: Callable[[str], Awaitable[bool]] | None = None,
 ) -> None:
-    """Leave non-DM rooms and settle each departure before continuing."""
+    """Leave non-DM rooms, settling each departure before continuing, and skip rooms whose DM status is unknown."""
     for room_id in room_ids:
-        if await is_dm_room(client, room_id):
+        is_dm = await is_dm_room(client, room_id)
+        if is_dm is None:
+            logger.warning("dm_room_status_unknown_leave_skipped", room_id=room_id)
+            continue
+        if is_dm:
             logger.debug("dm_room_preserved", room_id=room_id)
             continue
         operation = asyncio.create_task(

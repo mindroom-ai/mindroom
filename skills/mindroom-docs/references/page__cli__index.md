@@ -232,7 +232,7 @@ For hosted MindRoom Chat, `mindroom run` runs this setup interactively on first 
 | --- | --- |
 | `--path`, `-p` | Where to write `config.yaml`; `.env` goes in the same directory. Defaults to the auto-detected location, usually `~/.mindroom/config.yaml`. |
 | `--matrix-server` | Where MindRoom creates Matrix users and rooms: `mindroom.chat` (hosted, default) or `self-hosted` (your own homeserver). |
-| `--provider` | Default model provider: `anthropic`, `azure`, `bedrock_claude`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`; defaults to `openai`, except that `self-hosted` in a terminal asks. |
+| `--provider` | Default model provider: `anthropic`, `azure`, `bedrock_claude`, `claude_code`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`. Omitting it in an interactive terminal (without `--no-input` or `--print`) runs the provider auto-detection wizard for both `mindroom.chat` and `self-hosted`; piped `self-hosted` still prompts for the preset, while non-interactive `mindroom.chat` defaults to `openai`. |
 | `--print` | Print the generated `config.yaml` with syntax highlighting without writing `config.yaml`, `.env`, or starter workspace files. |
 | `--no-input` | Never prompt: keep an existing `config.yaml` unchanged, create anything missing, and use `openai` unless `--provider` is given. |
 | `--force` | Overwrite without asking: replaces `config.yaml`, `.env` (including API keys and pairing credentials), the Mind starter workspace files such as `MEMORY.md` and `USER.md`, and the `AGENTS.md` beside the config; back up anything you want to keep first. |
@@ -260,7 +260,8 @@ Some presets need a local login or server before MindRoom can answer:
 
 - `codex`: run `codex login` first; see [Codex Models](https://docs.mindroom.chat/configuration/models/#codex-models-with-chatgpt-login) for the generated models.
 - `kimi`: run `kimi` and `/login` first; see [Kimi Models](https://docs.mindroom.chat/configuration/models/#kimi-models-with-kimi-code-login).
-- `ollama`: generates `gemma4` as `default` and `qwen3.8:27b` as `qwen3_8_27b`, each loaded with a 32,768-token context (see [Ollama Context Size](https://docs.mindroom.chat/configuration/models/#ollama-context-size) to change it), with `OLLAMA_HOST=http://localhost:11434`; pull both models first with `ollama pull gemma4` and `ollama pull qwen3.8:27b`.
+- `claude_code`: run `claude auth login` first; see [Claude Models with a Claude Subscription](https://docs.mindroom.chat/configuration/models/#claude-models-with-a-claude-subscription).
+- `ollama`: in an interactive terminal with Ollama running and chat models already pulled, lets you pick from your pulled models; otherwise generates `gemma4` as `default` and `qwen3.8:27b` as `qwen3_8_27b`, each loaded with a 32,768-token context (see [Ollama Context Size](https://docs.mindroom.chat/configuration/models/#ollama-context-size) to change it), with `OLLAMA_HOST=http://localhost:11434` (pull both models first with `ollama pull gemma4` and `ollama pull qwen3.8:27b`).
 - `llama.cpp`: generates Unsloth GGUF models for a llama.cpp server at `http://localhost:8080/v1`; start it with one of the configured model refs:
 
 ```bash
@@ -318,6 +319,7 @@ It checks, in one pass:
   Doctor also warns about each environment variable a model needs but nothing sets, such as a missing key, Bedrock region, or Azure endpoint, as `config validate` does.
   Doctor checks the key the runtime uses, whether it comes from the environment or was saved in the dashboard, and names its source (see [Credentials from the Environment](https://docs.mindroom.chat/oauth-framework/#credentials-from-the-environment)).
   Doctor skips the key check and reports it as not checked for a model that uses a custom endpoint, meaning its config sets an endpoint or headers (such as `base_url` or `default_headers`) or its provider's endpoint variable (such as `OPENAI_BASE_URL`) is set.
+  For `claude_code` models, doctor starts Claude Code without sending it a prompt; see [Claude Models with a Claude Subscription](https://docs.mindroom.chat/configuration/models/#claude-models-with-a-claude-subscription) for what the check reports.
 - **Memory config**: the memory LLM and embedder are reachable (Ollama, OpenAI embeddings, sentence-transformers).
 - **Matrix homeserver**: the homeserver answers `/_matrix/client/versions`.
 - **Pairing**: on hosted installs, whether this machine is paired with MindRoom Chat; before the first run it passes with `Not paired yet`, because `mindroom run` pairs automatically.
@@ -640,52 +642,45 @@ mindroom local-stack-setup --synapse-dir /path/to/mindroom/local/matrix
  Start local Synapse + MindRoom Chat using Docker only.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --synapse-dir                                 PATH                 Directory           │
-│                                                                    containing Synapse  │
-│                                                                    docker-compose.yml  │
-│                                                                    (core MindRoom      │
-│                                                                    repo:               │
-│                                                                    local/matrix).      │
-│                                                                    [default:           │
-│                                                                    local/matrix]       │
-│ --homeserver-url                              TEXT                 Homeserver URL that │
-│                                                                    MindRoom Chat and   │
-│                                                                    MindRoom should     │
-│                                                                    use.                │
-│                                                                    [default:           │
-│                                                                    http://localhost:8… │
-│ --server-name                                 TEXT                 Matrix server name  │
-│                                                                    (default: inferred  │
-│                                                                    from                │
-│                                                                    --homeserver-url    │
-│                                                                    hostname).          │
-│ --cinny-port                                  INTEGER RANGE        Local host port for │
-│                                               [1<=x<=65535]        the MindRoom Chat   │
-│                                                                    container.          │
-│                                                                    [default: 8080]     │
-│ --cinny-image                                 TEXT                 Docker image for    │
-│                                                                    MindRoom Chat.      │
-│                                                                    [default:           │
-│                                                                    ghcr.io/mindroom-a… │
-│ --cinny-container-n…                          TEXT                 Container name for  │
-│                                                                    MindRoom Chat       │
-│                                                                    (legacy default     │
-│                                                                    retained for        │
-│                                                                    compatibility).     │
-│                                                                    [default:           │
-│                                                                    mindroom-cinny-loc… │
-│ --skip-synapse                                                     Skip starting       │
-│                                                                    Synapse (assume it  │
-│                                                                    is already          │
-│                                                                    running).           │
-│ --persist-env             --no-persist-env                         Persist Matrix      │
-│                                                                    local dev settings  │
-│                                                                    to .env next to     │
-│                                                                    config.yaml.        │
-│                                                                    [default:           │
-│                                                                    persist-env]        │
-│ --help                -h                                           Show this message   │
-│                                                                    and exit.           │
+│ --synapse-dir                                 PATH                Directory containing │
+│                                                                   Synapse              │
+│                                                                   docker-compose.yml   │
+│                                                                   (core MindRoom repo: │
+│                                                                   local/matrix).       │
+│                                                                   [default:            │
+│                                                                   local/matrix]        │
+│ --homeserver-url                              TEXT                Homeserver URL that  │
+│                                                                   MindRoom Chat and    │
+│                                                                   MindRoom should use. │
+│                                                                   [default:            │
+│                                                                   http://localhost:80… │
+│ --server-name                                 TEXT                Matrix server name   │
+│                                                                   (default: inferred   │
+│                                                                   from                 │
+│                                                                   --homeserver-url     │
+│                                                                   hostname).           │
+│ --chat-port                                   INTEGER RANGE       Local host port for  │
+│                                               [1<=x<=65535]       the MindRoom Chat    │
+│                                                                   container.           │
+│                                                                   [default: 8080]      │
+│ --chat-image                                  TEXT                Docker image for     │
+│                                                                   MindRoom Chat.       │
+│                                                                   [default:            │
+│                                                                   ghcr.io/mindroom-ai… │
+│ --chat-container-na…                          TEXT                Container name for   │
+│                                                                   MindRoom Chat.       │
+│                                                                   [default:            │
+│                                                                   mindroom-chat-local] │
+│ --skip-synapse                                                    Skip starting        │
+│                                                                   Synapse (assume it   │
+│                                                                   is already running). │
+│ --persist-env             --no-persist-env                        Persist Matrix local │
+│                                                                   dev settings to .env │
+│                                                                   next to config.yaml. │
+│                                                                   [default:            │
+│                                                                   persist-env]         │
+│ --help                -h                                          Show this message    │
+│                                                                   and exit.            │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 
@@ -770,7 +765,7 @@ Use `--allow-app` to save app choices at the same time.
 │ --help          -h            Show this message and exit.                              │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ Pairing ──────────────────────────────────────────────────────────────────────────────╮
-│ *  --code                        TEXT  Short-lived code returned by !desktop setup.    │
+│ *  --code                        TEXT  Short-lived code returned by /desktop setup.    │
 │                                        [required]                                      │
 │ *  --controller-user-id          TEXT  Pinned cloud controller Matrix user. [required] │
 │ *  --controller-device-id        TEXT  Pinned cloud controller device. [required]      │
@@ -1077,7 +1072,7 @@ Use `--force` to overwrite existing files after changing avatar prompts or style
 
 ### avatars sync
 
-Apply configured room and root-Space avatars to Matrix using the router account.
+Apply configured room and root-Space avatars to Matrix using the owner account.
 Existing Matrix avatars are kept unless you pass `--force`.
 
 <!-- CODE:START -->
@@ -1097,7 +1092,7 @@ Existing Matrix avatars are kept unless you pass `--force`.
 
  Sync room and root-space avatars to Matrix.
 
- Uses the router account that `mindroom run` initialized.
+ Uses the owner account that `mindroom run` initialized.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
 │ --force            Replace existing Matrix room and root-space avatars.                │

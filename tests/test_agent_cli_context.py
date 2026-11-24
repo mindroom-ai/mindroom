@@ -21,6 +21,7 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.skills import Skill
 from tests.test_agent_cli_authority import _runtime_context
 from tests.turn_model_helpers import turn_model
 
@@ -119,6 +120,43 @@ def test_the_knowledge_document_lists_each_base_the_agent_s_search_reaches(tmp_p
     assert documents["knowledge"] == "handbook: The team handbook.\nrunbooks: Operations runbooks."
 
 
+def test_the_bootstrap_names_each_skill_and_its_document_says_where_its_files_live(tmp_path: Path) -> None:
+    """A minimal agent learns its skills by name from the prompt and reads each as `skill:<name>`.
+
+    A workspace skill's directory is relative to the workspace, where Bash starts, so a worker's mount finds it.
+    """
+    build = _minimal_build(_runtime_context(tmp_path))
+    review = build.surface.output_file_policy.workspace_root / "skills" / "code-review"
+    tdd = tmp_path / "configured" / "tdd"
+    skills = (
+        Skill(
+            name="code-review",
+            description="Review a diff.",
+            instructions="Read the whole diff first.",
+            source_path=review,
+        ),
+        Skill(
+            name="tdd",
+            description="Test first.",
+            instructions="Write the failing test.",
+            source_path=tdd,
+        ),
+    )
+    build = replace(build, surface=replace(build.surface, skills=skills))
+
+    turn = minimal_turn(build, session_preamble="", transient_memory="", system_enrichment=(), transient_enrichment=())
+
+    system = system_text(turn.system_messages)
+    assert "Skills: `code-review`, `tdd`; read one with `mindroom-agent context read skill:<name>`." in system
+    assert "Read the whole diff first." not in system
+    review_document = turn.context_documents["skill:code-review"]
+    assert review_document.startswith("code-review\nDirectory: skills/code-review\n")
+    assert review_document.endswith("Read the whole diff first.")
+    assert turn.context_documents["skill:tdd"].startswith(f"tdd\nDirectory: {tdd.as_posix()}\n")
+    assert turn.context_documents["skill:tdd"].endswith("Write the failing test.")
+    assert not any(name.startswith("skill-") for name in turn.context_documents)
+
+
 def test_a_catalog_runs_under_its_own_agent_s_runtime_context(tmp_path: Path) -> None:
     """An agent's generated functions run under its catalog's runtime context, so that context must be the agent's."""
     runtime = _runtime_context(tmp_path)
@@ -137,7 +175,7 @@ async def test_a_catalog_for_another_requester_names_the_recovery_command(tmp_pa
     runtime = _runtime_context(tmp_path)
     build = _minimal_build(runtime)
     session = ConversationSession(session_id="session", kind="agent", owner_id="helper")
-    with tool_runtime_context(runtime), pytest.raises(MinimalModeUnavailableError, match="!mode helper standard"):
+    with tool_runtime_context(runtime), pytest.raises(MinimalModeUnavailableError, match="/mode helper standard"):
         await prepare_minimal_catalog(
             build,
             run=RunContext(run_id="run", user_id="@mallory:example.test", session=session),
@@ -184,4 +222,4 @@ async def test_a_catalog_whose_toolkits_fail_names_why_before_the_recovery_comma
             storage=RunStorage(None, session, None),
             delegation_depth=0,
         )
-    assert str(raised.value) == f"{text}. Return to standard mode with `!mode helper standard`."
+    assert str(raised.value) == f"{text}. Return to standard mode with `/mode helper standard`."

@@ -44,11 +44,13 @@ from mindroom.llm.provider import (
 from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.mid_turn import QueuedMessage
+from mindroom.matrix.large_messages import calculate_event_size
 from mindroom.path_confinement import open_directory_within_root
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.providers.assistant_turn import stamp_model
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
+from mindroom.providers.openai.build import build_provider
+from mindroom.providers.openai.chat import ChatAdapter
 from mindroom.providers.registry import build_model_provider
 from mindroom.providers.tool_policy import disables_tools
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -59,8 +61,8 @@ from mindroom.skill_learning import library
 from mindroom.skill_learning import runner as runner_module
 from mindroom.skill_learning.capture import CapturedRequest, SkillReviewCapture, capture_final_request
 from mindroom.skill_learning.reviewer import review_conversation
-from mindroom.skill_learning.runner import SkillReviewRunner
-from mindroom.skill_learning.tools import ReviewProgress, SkillTools, load_skill_catalog
+from mindroom.skill_learning.runner import SkillReviewRunner, _notice_files
+from mindroom.skill_learning.tools import ReviewFile, ReviewProgress, SkillTools, load_skill_catalog
 from mindroom.skill_learning.transcript import conversation_messages, count_model_replies, render_transcript
 from mindroom.token_counting.counts import count
 from mindroom.token_counting.families import openai_model_counter
@@ -79,6 +81,8 @@ from tests.fakes.request_sizing import PlainRequestSizing
 from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.fakes.token_counter import fake_token_counter
 from tests.providers.golden_support import SentRequest, httpx2_transport, streamed_reply
+from tests.providers.openai_family_support import provider_runtime
+from tests.tool_job_helpers import NewerMessageWaits
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
@@ -1203,6 +1207,21 @@ async def test_reviews_start_at_the_interval_and_post_a_notice(tmp_path: Path, m
     assert (sent_client, room_id) == (client, "!room:example.test")
     assert content["msgtype"] == "m.notice"
     assert content["body"] == "💾 Skill review: created `deploy-checks`"
+    learned_lines = LEARNED.splitlines()
+    assert content["io.mindroom.skill_review"] == {
+        "changes": {"deploy-checks": "created"},
+        "files": [
+            {
+                "skill": "deploy-checks",
+                "path": "deploy-checks/SKILL.md",
+                "action": "created",
+                "added": len(learned_lines),
+                "removed": 0,
+                "diff": f"@@ -0,0 +1,{len(learned_lines)} @@\n" + "".join(f"+{line}\n" for line in learned_lines),
+                "diff_truncated": False,
+            },
+        ],
+    }
     assert content["m.relates_to"]["event_id"] == "$thread"
     # Like approval events, clients without threads see the notice as a reply to the thread's newest event.
     assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$thread-latest"
@@ -1669,7 +1688,8 @@ async def test_the_review_forks_the_final_request_and_runs_only_skill_tools(tmp_
     deploy_calls: list[str] = []
     model = _model()
     capture = SkillReviewCapture()
-    settings = ModelRequest(messages=(), deferred_tools=DeferredTools(names=frozenset({"shell"})))
+    deferred = DeferredTools(names=frozenset({"shell"}))
+    settings = ModelRequest(messages=(), deferred_tools=deferred, prompt_hold=tmp_path / "hold.json")
     tools = _agent_tools(config, paths, shell_calls, deploy_calls=deploy_calls)
     await _answer(model, capture, tools, settings=settings)
     model.script = [
@@ -1688,7 +1708,9 @@ async def test_the_review_forks_the_final_request_and_runs_only_skill_tools(tmp_
     assert forked.tools == sent.tools
     assert "deploy" in {tool.name for tool in forked.tools}
     assert forked.deferred_tools == sent.deferred_tools == settings.deferred_tools
-    assert replace(forked, messages=(), tools=()) == replace(sent, messages=(), tools=())
+    # It reads the system prompt the conversation holds and never writes it: the conversation may have moved on.
+    assert (sent.prompt_hold_pin, forked.prompt_hold_pin) == (None, [])
+    assert replace(forked, messages=(), tools=()) == replace(sent, messages=(), tools=(), prompt_hold_pin=[])
     assert shell_calls == deploy_calls == []
     assert denied[-1] == (
         "This tool is not available during a skill review; only skill_manage, get_skill_instructions, "
@@ -1720,23 +1742,51 @@ async def test_a_forked_review_logs_only_the_requests_it_made(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_the_fork_offers_the_run_s_own_definitions_without_the_wait_budget_of_its_jobs(tmp_path: Path) -> None:
-    """A reply whose calls can become jobs offers their wait budget; the fork offers the definitions its run declares.
+async def test_the_fork_resends_the_final_request_as_sent_so_the_provider_reads_its_prompt_cache(
+    tmp_path: Path,
+) -> None:
+    """The fork's body repeats the body of the response's final request, wait budgets included, then adds the review.
 
-    The review answers its calls with its own skill functions, which take no wait budget, so skill_manage writes
-    the skill instead of refusing an argument it does not accept.
+    The provider reads its prompt cache by prefix, tools first, so one other tool definition makes it write the whole
+    conversation again. The review runs its skill functions itself, so a wait budget the model passes never applies.
     """
     config, paths = _learning_agent_with_a_skill(tmp_path)
     model = _model()
     capture = SkillReviewCapture()
     tools = _agent_tools(config, paths, [])
     await _answer(model, capture, tools, managed=frozenset(tool.name for tool in tools))
-    model.script = [("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED})]
+    model.script = [
+        ("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED, "background_after": 0}),
+    ]
     await _review(config, paths, captured=capture.latest)
     sent, forked = model.received[:2]
-    offered = {tool.name: tool for tool in sent.tools}
-    assert "background_after" in offered["skill_manage"].parameters["properties"]
-    assert forked.tools == tuple(sorted((tool.definition() for tool in tools), key=lambda tool: tool.name))
+    assert "background_after" in {tool.name: tool for tool in sent.tools}["skill_manage"].parameters["properties"]
+    claude = build_provider(
+        ModelConfig(provider="openrouter", id="anthropic/claude-opus-5.5", extra_kwargs={"api_key": "test"}),
+        provider_runtime(paths),
+    )
+    assert isinstance(claude, ChatAdapter)
+    main, fork = claude._request_kwargs(sent), claude._request_kwargs(forked)
+    assert {key: value for key, value in fork.items() if key != "messages"} == {
+        key: value for key, value in main.items() if key != "messages"
+    }
+    assert any("cache_control" in tool for tool in main["tools"])
+    # The system prompt keeps its marker, and the conversation reads the same up to the answer and the review prompt.
+    system, *conversation = main["messages"]
+    assert fork["messages"][0] == system
+    assert "cache_control" in system["content"][0]
+    replayed = fork["messages"][1:]
+    assert json.dumps(_without_cache_markers(replayed[: len(conversation)])) == json.dumps(
+        _without_cache_markers(conversation),
+    )
+    assert [message["role"] for message in replayed[len(conversation) :]] == ["assistant", "user"]
+    # The fork's markers sit on those two new messages, right after the last message the final request marked.
+    assert ["cache_control" in json.dumps(message) for message in fork["messages"][1:]] == [
+        *[False] * len(conversation),
+        True,
+        True,
+    ]
+    assert "cache_control" in json.dumps(conversation[-1])
     assert (_skills_root(config, paths) / "deploy-checks/SKILL.md").exists()
 
 
@@ -2002,7 +2052,7 @@ async def test_a_review_runs_in_a_fresh_context(tmp_path: Path, monkeypatch: pyt
     model = _model(("skill_manage", {"action": "create", "name": "deploy-checks", "content": LEARNED}))
     notice = "Pause tool use and summarize before handling the newer message."
     install_model_providers(monkeypatch, {"default": model})
-    with queued_message_signal_context(_PendingMessage()):
+    with queued_message_signal_context(NewerMessageWaits()):
         await _review_due(config, paths)
     assert len(model.requests) == 2
     assert all(notice not in content for request in model.requests for content in request)
@@ -2032,17 +2082,6 @@ async def test_a_replay_reviews_on_the_model_the_response_used(tmp_path: Path) -
         await _review(config, paths, captured=unforkable)
     assert load.call_args.args[2] == "thread"
     assert len(replay.requests) == 1
-
-
-@dataclass
-class _PendingMessage:
-    """A response's queued-message state with one newer human message waiting."""
-
-    def has_pending_human_messages(self) -> bool:
-        return True
-
-    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
-        return (QueuedMessage("$pending", None),)
 
 
 @pytest.mark.asyncio
@@ -2180,3 +2219,111 @@ def test_a_skill_created_again_never_inherits_a_deleted_skills_ownership(tmp_pat
     recreated = library.read_skill_file(root, "deploy-checks")
     assert recreated is not None
     assert not recreated.learned
+
+
+@pytest.mark.asyncio
+async def test_a_review_records_each_files_content_before_its_first_and_after_its_last_change(tmp_path: Path) -> None:
+    """The notice compares each file as it was before the review touched it with how the review left it."""
+    config, paths = _learner(tmp_path)
+    root = _skills_root(config, paths)
+    library.create_skill(root, "deploy-checks", LEARNED, reserved_names=frozenset(), learner=True)
+    library.write_skill_file(root, "deploy-checks", "references/old.md", "Old.\n", expected_digest=None, learner=True)
+    catalog = load_skill_catalog(config, paths, "mind", root)
+    progress = ReviewProgress()
+    tools = SkillTools(root, dict(catalog.entries), catalog.reserved_names, progress=progress)
+    await tools.get_skill_instructions("deploy-checks")
+    for old, new in (("1. Run the smoke test.", "1. Run smoke."), ("1. Run smoke.", "1. Run smoke.\n2. Retry.")):
+        assert json.loads(await tools.skill_manage("patch", "deploy-checks", old_string=old, new_string=new))["success"]
+    for file_path in ("references/new.md", "references/temp.md"):
+        written = await tools.skill_manage("write_file", "deploy-checks", file_path=file_path, file_content="New.\n")
+        assert json.loads(written)["success"]
+    assert json.loads(await tools.skill_manage("remove_file", "deploy-checks", file_path="references/temp.md"))[
+        "success"
+    ]
+    await tools.get_skill_reference("deploy-checks", "references/old.md")
+    assert json.loads(await tools.skill_manage("remove_file", "deploy-checks", file_path="references/old.md"))[
+        "success"
+    ]
+    refused = await tools.skill_manage("write_file", "deploy-checks", file_path="SKILL.md", file_content="x")
+    assert not json.loads(refused)["success"]
+
+    assert progress.files == {
+        ("deploy-checks", "SKILL.md"): ReviewFile(
+            "deploy-checks",
+            LEARNED,
+            LEARNED.replace("1. Run the smoke test.", "1. Run smoke.\n2. Retry."),
+        ),
+        ("deploy-checks", "references/new.md"): ReviewFile("deploy-checks", None, "New.\n"),
+        ("deploy-checks", "references/temp.md"): ReviewFile("deploy-checks", None, None),
+        ("deploy-checks", "references/old.md"): ReviewFile("deploy-checks", "Old.\n", None),
+    }
+    assert _notice_files(progress.files) == [
+        {
+            "skill": "deploy-checks",
+            "path": "deploy-checks/SKILL.md",
+            "action": "updated",
+            "added": 2,
+            "removed": 1,
+            "diff": "@@ -6,3 +6,4 @@\n     learned: true\n ---\n-1. Run the smoke test.\n+1. Run smoke.\n+2. Retry.\n",
+            "diff_truncated": False,
+        },
+        {
+            "skill": "deploy-checks",
+            "path": "deploy-checks/references/new.md",
+            "action": "created",
+            "added": 1,
+            "removed": 0,
+            "diff": "@@ -0,0 +1 @@\n+New.\n",
+            "diff_truncated": False,
+        },
+        {
+            "skill": "deploy-checks",
+            "path": "deploy-checks/references/old.md",
+            "action": "removed",
+            "added": 0,
+            "removed": 1,
+            "diff": "@@ -1 +0,0 @@\n-Old.\n",
+            "diff_truncated": False,
+        },
+    ]
+
+
+def test_notice_diffs_stop_at_line_boundaries_within_their_budgets() -> None:
+    """Each diff keeps whole lines within 4,000 characters, all diffs share 12,000, and the counts stay exact."""
+    big = "".join(f"{line:09d}\n" for line in range(1_000))
+    files = {("big", f"references/{index}.md"): ReviewFile("big", None, big) for index in range(5)}
+    entries = _notice_files(files)
+    full = "@@ -0,0 +1,1000 @@\n" + "".join(f"+{line}\n" for line in big.splitlines())
+    diffs = [entry["diff"] for entry in entries if "diff" in entry]
+    assert all(full.startswith(diff) and diff.endswith("\n") for diff in diffs)
+    # Serialized, the hunk header takes 22 characters and each line 14, so 284 lines fill a file's 4,000 at 3,998; the
+    # 6 left of the total after three files fit nothing more.
+    assert [len(diff) for diff in diffs] == [19 + 284 * 11] * 3
+    assert "diff" not in entries[3]
+    assert "diff" not in entries[4]
+    assert all(entry["diff_truncated"] for entry in entries)
+    assert all((entry["added"], entry["removed"]) == (1_000, 0) for entry in entries)
+    assert [entry["path"] for entry in entries] == [f"big/references/{index}.md" for index in range(5)]
+
+
+def test_notice_diff_budgets_count_what_the_event_serializes() -> None:
+    """Characters JSON escapes, like non-ASCII text, quotes, and control characters, count at their escaped size."""
+    content = ("漢" * 60 + '"\\\x01\n') * 200
+    files = {("big", f"references/{index}.md"): ReviewFile("big", None, content) for index in range(5)}
+    entries = _notice_files(files)
+    assert "diff" in entries[0]
+    assert all(entry["diff_truncated"] for entry in entries)
+    notice = {"changes": {"big": "updated"}, "files": entries}
+    assert calculate_event_size(notice) < 16_000
+
+
+def test_notice_diffs_show_a_changed_final_newline_and_other_line_separators() -> None:
+    """Lines split on newlines only, so a final newline or a vertical tab becoming a newline is a changed line."""
+    files = {
+        ("notes", "a.md"): ReviewFile("notes", "text", "text\n"),
+        ("notes", "b.md"): ReviewFile("notes", "a\vb\n", "a\nb\n"),
+    }
+    assert [(entry["added"], entry["removed"], entry["diff"]) for entry in _notice_files(files)] == [
+        (1, 1, "@@ -1 +1 @@\n-text\n\\ No newline at end of file\n+text\n"),
+        (2, 1, "@@ -1 +1,2 @@\n-a\vb\n+a\n+b\n"),
+    ]

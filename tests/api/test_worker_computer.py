@@ -535,3 +535,34 @@ def test_computer_startup_requires_nonroot_effective_identity(
         with TestClient(app):
             assert isinstance(app.state.worker_computer, WorkerComputerRuntime) is enabled
             assert prepared == [True]
+
+
+@pytest.mark.parametrize(
+    "worker_key",
+    ["v1:default:shared:writer", "v1:default:user:~@alice:example.org"],
+)
+def test_computer_flag_leaves_shared_and_user_workers_their_browser(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_key: str,
+) -> None:
+    """Only a user_agent worker can be a Computer, so a deployment-wide flag keeps other workers' browser working."""
+
+    async def prepare(_app: FastAPI) -> None:
+        return None
+
+    monkeypatch.setattr(sandbox_runner_app, "prepare_script_worker_before_serving", prepare)
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_COMPUTER_ENABLED": "true",
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": worker_key,
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": str(tmp_path),
+        },
+    )
+    app = FastAPI(lifespan=sandbox_runner_app._lifespan)
+    initialize_sandbox_runner_app(app, paths, config=Config(), runner_token=RUNNER_TOKEN)
+    with TestClient(app):
+        assert app.state.worker_computer is None
+        assert isinstance(app.state.worker_browser, WorkerBrowserRuntime)

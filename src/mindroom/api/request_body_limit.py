@@ -20,12 +20,14 @@ _TOO_LARGE_DETAIL = f"Request body exceeds {_MAX_REQUEST_BODY_BYTES} bytes"
 class RequestBodyLimitMiddleware:
     """Answer 413 once a request body exceeds the limit, whether declared up front or streamed."""
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp, *, knowledge_uploads: bool = True) -> None:
+        """Limit ``app``'s request bodies; ``knowledge_uploads`` leaves the API's knowledge uploads to their own limit."""
         self.app = app
+        self.knowledge_uploads = knowledge_uploads
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Pass through requests whose bodies stay within the limit."""
-        if scope["type"] != "http" or _KNOWLEDGE_UPLOAD_PATH.fullmatch(scope["path"]):
+        if scope["type"] != "http" or (self.knowledge_uploads and _KNOWLEDGE_UPLOAD_PATH.fullmatch(scope["path"])):
             await self.app(scope, receive, send)
             return
         declared = next((value for name, value in scope["headers"] if name == b"content-length"), b"")

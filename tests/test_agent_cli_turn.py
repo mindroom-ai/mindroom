@@ -161,6 +161,16 @@ async def test_outer_shell_cli_nested_shell_cli_mutation_and_late_rejection(
     assert catalog.run.session_state["count"] == 1
 
 
+def test_cli_operations_select_filesystem_by_its_other_names() -> None:
+    """A call, a description, and a search naming file or coding address the catalog's filesystem toolkit."""
+    call = ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="coding", function="read_file")
+    describe = ToolDescribeOperation(operation="tools.describe", toolkit="file", function="read_file")
+    search = ToolSearchOperation(operation="tools.search", query="read", toolkit="coding")
+
+    assert (call.toolkit, describe.toolkit, search.toolkit) == ("filesystem", "filesystem", "filesystem")
+    assert ToolSearchOperation(operation="tools.search", query="read").toolkit is None
+
+
 @pytest.mark.asyncio
 async def test_native_shell_call_admits_cli_calls_only_while_it_runs(tmp_path: Path) -> None:
     """A standard-mode shell call opens the response's CLI window and environment around its own work."""
@@ -1763,6 +1773,46 @@ async def test_live_call_retains_frozen_arguments_and_bounds_terminal_output(
     else:
         assert outcome == "original"
     await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_cli_preserves_plugin_result_fields_beside_a_saved_output(tmp_path: Path) -> None:
+    from mindroom.tool_system.output_files import saved_tool_output_receipt  # noqa: PLC0415
+
+    result = {
+        "finding": "needs-review",
+        "mindroom_tool_output": saved_tool_output_receipt(path="findings.txt", byte_count=10, output_format="text"),
+    }
+
+    async def inspect_findings():
+        return result
+
+    async def authorize(key, arguments):
+        return None
+
+    catalog = await _catalog(tmp_path, [_toolkit("analysis", inspect_findings)])
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
+        catalog=catalog,
+        authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
+    )
+    try:
+        async with owner._window("bash"):
+            queued = await owner.operation(
+                window="bash",
+                operation=ToolCallOperation(
+                    operation="tools.call",
+                    call_id=uuid4(),
+                    toolkit="analysis",
+                    function="inspect_findings",
+                ),
+            )
+            receipt = await settled_receipt(owner, queued["call_id"])
+        assert receipt["status"] == "completed"
+        assert receipt["outcome"] == str(result)
+    finally:
+        await owner.close()
 
 
 @pytest.mark.asyncio

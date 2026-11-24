@@ -121,7 +121,7 @@ class TeamStreamPresentation:
     consensus: str = ""
     tool_trace: list[ToolTraceEntry] = field(default_factory=list)
     tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker, init=False)
-    # The slots, a member id or None for the consensus, whose next text a hidden tool call separates.
+    # The slots, a member id or None for the consensus, whose next text a tool call or a new member run separates.
     separate_next_slots: set[str | None] = field(default_factory=set, init=False, repr=False)
     # The member run whose deltas last gave each member slot text.
     _last_text_run: dict[str, str] = field(default_factory=dict, init=False, repr=False)
@@ -162,7 +162,7 @@ class TeamStreamPresentation:
         """Restore a durable structured snapshot without interpreting its rendered Markdown.
 
         The snapshot must hold the slots of ``config_names`` in order, and every tool call of ``tool_trace`` one of
-        them; a hidden tool call separates only slot text written before it. A snapshot an earlier release stored as
+        them; a call or a new run separates only slot text written before it. A snapshot an earlier release stored as
         version 2 restores as the version 3 it stands for (``upgrade_v2_team_snapshot``).
         """
         if state is not None and state.get("kind") == "team_stream" and state.get("version") == 2:
@@ -193,10 +193,8 @@ class TeamStreamPresentation:
         ):
             raise RuntimeError(_INVALID_SNAPSHOT)
         slots = cast("list[str | None]", separators)
-        if (
-            len(slots) != len(set(slots))
-            or (show_tool_calls and slots)
-            or any(not (consensus if slot is None else per_member[slot]) for slot in slots)
+        if len(slots) != len(set(slots)) or any(
+            not (consensus if slot is None else per_member[slot]) for slot in slots
         ):
             raise RuntimeError(_INVALID_SNAPSHOT)
         restored = cls(
@@ -227,7 +225,7 @@ class TeamStreamPresentation:
             ],
             "consensus": self.consensus,
         }
-        if not self.show_tool_calls and self.separate_next_slots:
+        if self.separate_next_slots:
             document_slots = [*self.member_ids, None]
             state["separate_next_slots"] = [slot for slot in document_slots if slot in self.separate_next_slots]
         return state
@@ -258,10 +256,13 @@ class TeamStreamPresentation:
         self._append_text(None, content, separate=separate)
 
     def _append_text(self, member_id: str | None, content: object | None, *, separate: bool) -> None:
-        """Append to a slot; text after a hidden tool call in that slot starts a paragraph of its own."""
-        separate = separate or member_id in self.separate_next_slots
-        self._set_slot_text(member_id, append_stream_text(self._slot_text(member_id), content, separate=separate))
-        if content:
+        """Append to a slot; text after a tool call or another run's text in that slot starts a paragraph of its own."""
+        text = self._slot_text(member_id)
+        if separate and text and content:
+            self.separate_next_slots.add(member_id)
+        separate = member_id in self.separate_next_slots
+        self._set_slot_text(member_id, append_stream_text(text, content, separate=separate))
+        if str(content or "").strip("\r\n"):
             self.separate_next_slots.discard(member_id)
 
     def _slot_text(self, member_id: str | None) -> str:
@@ -298,8 +299,8 @@ class TeamStreamPresentation:
             return
         self.tool_trace.append(trace_entry)
         if self.show_tool_calls:
-            self._set_slot_text(member_id, self._slot_text(member_id) + marker)
-        elif self._slot_text(member_id):
+            self._set_slot_text(member_id, append_stream_text(self._slot_text(member_id), marker, marker=True))
+        if self._slot_text(member_id):
             self.separate_next_slots.add(member_id)
         self._align_tool_trace_with_document()
 

@@ -26,6 +26,7 @@ from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.models import WorkerHandle
 from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteResponse
 from tests.browser_lifecycle_helpers import LifecycleBrowser
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -366,11 +367,11 @@ async def test_headless_cancellation_drains_profile_before_reuse(
     first = browser_processes[0]
     first.pause_at = "new_page"
     active = asyncio.create_task(_call(client, payload, action="open", targetUrl="https://1.1.1.1/blocked"))
-    await asyncio.wait_for(first.reached.wait(), timeout=2)
+    await asyncio.wait_for(first.reached.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     first.pause_at = "context_close"
     first.reached.clear()
     active.cancel()
-    await asyncio.wait_for(first.reached.wait(), timeout=2)
+    await asyncio.wait_for(first.reached.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     active.cancel()
     first.proceed.set()
     with pytest.raises(asyncio.CancelledError):

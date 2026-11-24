@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
 import yaml
 
@@ -75,6 +76,7 @@ def _runtime() -> _Runtime:
     runtime = _Runtime(orchestrator)
     for name in TOOLS:
         runtime.clients[name] = make_matrix_client_mock(user_id=f"@{name}:localhost")
+        runtime.clients[name].room_leave = AsyncMock(return_value=nio.RoomLeaveResponse())
         runtime.bots[name] = bot = MagicMock(running=True, client=runtime.clients[name])
         bot.hook_context.send_message = AsyncMock(return_value="$origin-notice")
         bot.conversation_reader = make_conversation_reader_mock()
@@ -91,6 +93,7 @@ def _data(
     contacts: bool = True,
     accept_invites: bool = True,
     contact_tools: tuple[str, ...] = (),
+    remote_agents: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     data = _with_template()
     agent = data["personal_agents"]["mind"]["agent"]
@@ -98,7 +101,11 @@ def _data(
     agent["include_default_tools"] = False
     agent["accept_invites"] = accept_invites
     if contacts:
-        agent["contacts"] = {"rules": ["Never share keys."], "tools": list(contact_tools)}
+        agent["contacts"] = {
+            "rules": ["Never share keys."],
+            "tools": list(contact_tools),
+            "remote_agents": list(remote_agents),
+        }
     data["personal_rooms"] = {"agent": "mind", "onboarding_rooms": ["lobby"]}
     return data
 
@@ -265,6 +272,8 @@ async def test_request_records_pending_and_posts_notice_with_txn_id(tmp_path: Pa
     assert send.await_args.kwargs == {"transaction_id": f"contact-request-{record.id}"}
     assert content["msgtype"] == "m.notice"
     assert content[SKIP_MENTIONS_KEY] is True
+    # The notice asks for a reply, so MindRoom Chat lists it as a conversation and marks its room unread.
+    assert content["io.mindroom.conversation"] is True
     assert "m.relates_to" not in content
     for text in (
         OWNER,
@@ -410,6 +419,21 @@ async def test_asking_again_with_the_same_rules_and_tools_posts_a_notice_that_ne
     assert (again.id, again.notice_event_id) == (stored.id, "$late")
     assert only_rules == stored
     send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_asking_again_under_a_toolkits_other_name_is_the_same_request(tmp_path: Path) -> None:
+    """A request naming coding stores filesystem, so the same call again is a repeat that posts the missing notice."""
+    config, paths = _setup(tmp_path, tools=["coding", "calculator", "matrix_message"])
+    runtime = _runtime()
+    with _delivered(None), pytest.raises(ValueError, match=r"could not be posted"):
+        await _request(config, paths, runtime, tools=["coding"])
+
+    with _delivered("$late"):
+        again = await _request(config, paths, runtime, tools=["coding"])
+
+    assert again.requester_side.tools == ["filesystem"]
+    assert (again.notice_event_id, _stored(paths)) == ("$late", [again])
 
 
 @pytest.mark.asyncio

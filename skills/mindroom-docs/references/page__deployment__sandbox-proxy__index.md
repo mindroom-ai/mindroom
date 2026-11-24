@@ -45,7 +45,7 @@ services:
       - MINDROOM_SANDBOX_PROXY_URL=http://sandbox-relay:8766
       - MINDROOM_SANDBOX_PROXY_TOKEN=${MINDROOM_SANDBOX_PROXY_TOKEN}
       - MINDROOM_SANDBOX_EXECUTION_MODE=selective
-      - MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python,coding
+      - MINDROOM_SANDBOX_PROXY_TOOLS=shell,filesystem,python
     networks:
       - mindroom-network
 
@@ -120,7 +120,7 @@ docker run -d \
 export MINDROOM_WORKER_BACKEND=static_runner
 export MINDROOM_SANDBOX_PROXY_URL=http://localhost:8766
 export MINDROOM_SANDBOX_EXECUTION_MODE=selective
-export MINDROOM_SANDBOX_PROXY_TOOLS=shell,file,python,coding
+export MINDROOM_SANDBOX_PROXY_TOOLS=shell,filesystem,python
 mindroom run
 ```
 
@@ -167,15 +167,15 @@ Then route tools into workers and choose a [worker scope](#worker-scopes):
 
 ```yaml
 defaults:
-  worker_tools: [shell, file, python]
+  worker_tools: [shell, filesystem, python]
   worker_scope: shared
 
 agents:
   code:
-    tools: [shell, file, python]
+    tools: [shell, filesystem, python]
 
   research:
-    tools: [shell, file, python]
+    tools: [shell, filesystem, python]
 ```
 
 To verify, ask two agents to run `hostname`, then list the worker containers:
@@ -254,11 +254,11 @@ When both are omitted, the [execution mode](#execution-modes) environment settin
 
 ```yaml
 defaults:
-  worker_tools: [shell, file]        # route shell and file through workers for all agents
+  worker_tools: [shell, filesystem]        # route shell and filesystem through workers for all agents
 
 agents:
   code:
-    tools: [file, shell, calculator]
+    tools: [filesystem, shell, calculator]
     # inherits worker_tools from defaults
 
   research:
@@ -266,13 +266,13 @@ agents:
     worker_tools: []                 # run everything in the primary runtime
 
   untrusted:
-    tools: [shell, file, python]
-    worker_tools: [shell, file, python]
+    tools: [shell, filesystem, python]
+    worker_tools: [shell, filesystem, python]
 ```
 
 
 
-The tools that default to workers when no list is set are `browser_mcp`, `coding`, `docker`, `file`, `python`, and `shell`.
+The tools that default to workers when no list is set are `browser_mcp`, `docker`, `filesystem`, `python`, and `shell`.
 Any other registered tool can be listed in `worker_tools`, except tools that need the primary runtime or room context, which stay in the primary runtime even when listed.
 These include the Matrix, scheduling, todo, attachment, and thread tools, `gmail` and the other Google tools, `github`, `atlassian`, `slack`, `spotify`, `homeassistant`, `reasoning`, `daytona`, `e2b`, `mem0`, `claude_agent`, `config_manager`, and `oauth_connections`, plus `browserbase`, `composio`, `duckdb`, `pandas`, `sql`, and `zep`, which keep a session, connection, or other state between calls.
 The built-in `memory`, `delegate`, `self_config`, `agent_manager`, and `contacts` tools and configured MCP `mcp_<server_id>` tools also always run in the primary runtime.
@@ -297,6 +297,7 @@ When routing is requested but cannot be satisfied, tool calls fail instead of ru
 `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS=true` lets tools that default to workers run locally when `static_runner` routing is requested without a proxy URL.
 It never bypasses dedicated Docker or Kubernetes workers or a configured proxy URL.
 Do not set it in hosted or multi-tenant deployments.
+Neither it nor a local execution mode lets `shell` run commands in the primary runtime; that needs [`defaults.allow_shell_without_worker: true`](https://docs.mindroom.chat/configuration/agents/#defaults).
 
 ## Worker scopes
 
@@ -325,10 +326,11 @@ What a worker can see depends on the backend:
 
 - **Local execution** shares the primary process filesystem.
 - **The Kubernetes chart's `static_runner` sidecar** sees every agent's state directory, including the whole `private_instances` directory, and every shared directory; a Compose or host-container runner sees only what you mount into it, so the examples above see only scratch storage.
+  Set `MINDROOM_STATIC_RUNNER_AGENT_STORAGE=true` on the primary when its `static_runner` mounts the agents' storage, as the Kubernetes chart does; only then may people in a room type in the [terminals](https://docs.mindroom.chat/tools/execution-and-coding/#terminal) of agents with `terminals: type` whose shell runs there, and change the [workspace files](https://docs.mindroom.chat/workspace-files/) of agents whose writing tools run there; otherwise they only watch and read them.
 - **Dedicated Docker and Kubernetes workers** mount only the workspaces listed in the [scope table](#worker-scopes), the shared directories of the agents they serve, their own scratch space, and read-only assigned knowledge, never the sessions or memory beside the workspaces.
   For private agents they mount only the private root (`private.root`), never the state root around it.
 
-`shell`, `file`, `python`, and `coding` use the agent's workspace as their default working directory (`base_dir`); this is a convenience, not a boundary.
+`shell`, `filesystem`, and `python` use the agent's workspace as their default working directory (`base_dir`); this is a convenience, not a boundary.
 
 A missing or linked workspace is not mounted.
 Assigned knowledge that is missing, reached through a link, or inside another agent's workspace, a private instance, a shared directory the worker does not mount, or a worker root is not mounted either, and the worker sees an empty knowledge folder.
@@ -367,7 +369,7 @@ A plugin's [`tool:environment` hook](https://docs.mindroom.chat/hooks/#shell-com
 For worker-routed `shell` and `python` calls with a resolved workspace, MindRoom sets `HOME`, `MINDROOM_AGENT_WORKSPACE`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and `XDG_STATE_HOME` to the workspace or directories under it.
 `XDG_CACHE_HOME`, `PIP_CACHE_DIR`, `UV_CACHE_DIR`, and `PYTHONPYCACHEPREFIX` point at the worker cache directory when a worker root exists, and `VIRTUAL_ENV` stays on the worker's environment.
 Neither passthrough nor `.mindroom/worker-env.sh` can redirect these variables.
-As a result `pwd`, `~`, `Path.home()`, attachment `mindroom_output_path` saves, and relative paths in the `file` and `coding` tools all refer to the same workspace.
+As a result `pwd`, `~`, `Path.home()`, attachment `mindroom_output_path` saves, and relative paths in the `filesystem` tool all refer to the same workspace.
 For example, after `get_attachment("att_...", mindroom_output_path="incoming/file.txt")`, worker-routed shell can read both `incoming/file.txt` and `~/incoming/file.txt`.
 
 ### Workspace env hook (`.mindroom/worker-env.sh`)
@@ -436,7 +438,7 @@ Do not put upstream API tokens in `extra_env_passthrough` or `.mindroom/worker-e
 Stopping a response also stops its in-flight worker calls, such as `run_shell_command` and `run_python_code`.
 With [background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) enabled, a call that continues as a job stops when its job is cancelled instead.
 Tools that run inside the runner process itself, such as `file` under the runner's `inprocess` execution mode, and persistent browser actions finish before the stop takes effect.
-A shell command stops at its `timeout`; without one, a background job's command runs until it ends or the job is cancelled, and any other command stops after 120 seconds.
+By default a shell call waits at most 120 seconds in the foreground: calls with `timeout` <= 120 stop inline; a top-level background job runs on until completion, its `timeout`, or job cancellation; and any other turn-scoped call (including subagents and minimal-mode turns) moves to the background on the worker with a live `.mindroom/shell/` log and stops automatically when `timeout` expires or when the turn ends.
 A runner or worker restart stops running commands; see the [shell tool](https://docs.mindroom.chat/tools/execution-and-coding/#shell).
 
 ## Browsers in workers
@@ -453,7 +455,7 @@ An explicit `target: host` uses the worker even when `default_target: desktop` i
 ## Worker tool results
 
 Worker-routed tools can return images, audio, video, and files.
-The worker downloads public HTTP(S) media URLs itself, following at most five redirects, and refuses local and metadata-service destinations; the primary runtime never reads a worker path or follows a media URL from the result.
+The worker downloads public HTTP(S) media URLs itself, following at most ten redirects and giving up on a URL after 30 seconds, and refuses local and metadata-service destinations; the primary runtime never reads a worker path or follows a media URL from the result.
 Each result may contain at most eight media items, 10 MiB per item, and 20 MiB of media in total, plus at most 4,194,304 characters of text and 64 KiB of JSON metadata.
 Unsupported resources or oversized results produce a tool error.
 
@@ -485,12 +487,13 @@ Unsupported resources or oversized results produce a tool error.
 | `MINDROOM_SANDBOX_EXECUTION_MODE` | `selective`, `all`, or `off`; see [Execution modes](#execution-modes) | _(unset)_ |
 | `MINDROOM_SANDBOX_PROXY_TOOLS` | Comma-separated tools to route when no `worker_tools` list is set | `*` for `all` or an unset mode with a proxy URL, otherwise empty |
 | `MINDROOM_UNSAFE_ALLOW_LOCAL_EXECUTION_TOOLS` | Let worker-default tools run locally when `static_runner` routing is requested without a proxy URL | `false` |
-| `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | Time limit for a proxy call that is not a background job, and for every `browser_mcp` call; a `run_shell_command` call waits at least its `timeout` plus 30 seconds, and a `browser` call at least 150 seconds | `120` |
+| `MINDROOM_STATIC_RUNNER_AGENT_STORAGE` | `true` when the `static_runner` mounts the agents' storage; see [Filesystem isolation and agent data](#filesystem-isolation-and-agent-data) | `false` |
+| `MINDROOM_SANDBOX_PROXY_TIMEOUT_SECONDS` | Time limit for a proxy call that is not an unscoped background job, and for every `browser_mcp` call; an auto-backgrounding `run_shell_command` call waits at most 150 seconds (`min(timeout, 120) + 30`), an unscoped `run_shell_command` call waits at least its `timeout` plus 30 seconds, a `browser` call at least 150 seconds, and a `trafilatura` `crawl_website` or `extract_batch` call at least 210 seconds | `120` |
 | `MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES` | Largest attachment saved into a worker workspace with `get_attachment(..., mindroom_output_path=...)`, and largest Atlassian `confluence_download_attachment` download; values above the 64 MiB attachment limit have no effect | `67108864` (64 MiB) |
 | `MINDROOM_SANDBOX_CREDENTIAL_LEASE_TTL_SECONDS` | Credential lease lifetime | `60` |
 | `MINDROOM_SANDBOX_CREDENTIAL_POLICY_JSON` | JSON mapping tool selectors to credential services | `{}` |
 | `MINDROOM_WORKER_COMPUTER_ENABLED` | Enable the [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) persistent browser and display | `false` |
-| `MINDROOM_COMPUTER_ALLOWED_ORIGINS` | JSON list of Chat origins allowed to open worker computers, and to call client sessions and [plugin HTTP routes](https://docs.mindroom.chat/plugins/#http-routes) | `[]` |
+| `MINDROOM_COMPUTER_ALLOWED_ORIGINS` | JSON list of Chat origins allowed to open worker computers, and to call client sessions, [plugin HTTP routes](https://docs.mindroom.chat/plugins/#http-routes), and the terminal routes | `[]` |
 
 The Helm chart sets the Kubernetes backend variables.
 To deploy that backend without Helm, see [Worker settings](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings).
@@ -523,6 +526,6 @@ To deploy that backend without Helm, see [Worker settings](https://docs.mindroom
 | `MINDROOM_SANDBOX_RUNNER_MODE` | Set to `true` to run as a sandbox runner | `false` |
 | `MINDROOM_SANDBOX_PROXY_TOKEN` | Runner bearer token; dedicated workers receive their derived token automatically | _(required)_ |
 | `MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE` | `inprocess`, `subprocess` (a fresh process per call), or `forkserver` (a fresh forked process per call from a warm template) | `inprocess`; dedicated workers use `forkserver` |
-| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Per-call timeout for `subprocess` and `forkserver` execution, except for a background job's call; it also limits every `browser_mcp` call in a dedicated worker, job or not | `120` |
+| `MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS` | Per-call timeout for `subprocess` and `forkserver` execution, except for an unscoped background job's call, which has none; a scoped auto-backgrounding `run_shell_command` call gets at least `min(timeout, 120) + 30` seconds (bounded even inside a subagent job), an unscoped `run_shell_command` call gets at least its `timeout` plus 30 seconds, a `trafilatura` `crawl_website` or `extract_batch` call at least 210 seconds, and, job or not, a `browser` call in a dedicated worker that keeps a [browser session](#browsers-in-workers) or runs Worker Computer at least 150 seconds; it also limits every `browser_mcp` call in a dedicated worker, job or not | `120` |
 | `MINDROOM_STORAGE_PATH` | Writable directory for the tool registry and worker-local caches, such as `/app/workspace/.mindroom`; startup fails if it is not writable | `mindroom_data` next to the config |
 | `MINDROOM_CONFIG_PATH` | Config used for requests that carry no [live config snapshot](#live-config-snapshots) | _(optional)_ |

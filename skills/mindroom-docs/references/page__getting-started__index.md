@@ -31,13 +31,18 @@ Before you start:
 uvx mindroom run
 ```
 
-When no config exists and MindRoom runs in a terminal, it asks a few setup questions:
+When no config exists and MindRoom runs in a terminal, it checks for local logins (`claude`, `codex`, `kimi`), provider API keys in your environment, and running local Ollama chat models, then asks a few setup questions:
 
-1. Pick a model provider from the menu (default OpenAI).
-2. For Anthropic, OpenAI, or OpenRouter, paste the API key; input is hidden.
-   Press Enter to skip, then connect the provider later through the [dashboard](https://docs.mindroom.chat/dashboard/#connect-your-ai-provider), or add the key to `~/.mindroom/.env` and restart `mindroom run`.
-   MindRoom does not ask when the key is already set in your environment.
-   Other presets print their remaining step instead, such as `codex login`, `ollama pull`, or the Azure, Bedrock, or Vertex AI settings to add to `~/.mindroom/.env` before restarting.
+1. Pick a model provider from the menu.
+   Detected logins, keys, and running Ollama models appear at the top; when both Claude Code and Codex are signed in, `Claude + Codex` is offered as the recommended combined preset and lets you pick `Mind`'s default model (`Claude Sonnet 5.5`, `Codex Sol`, or `Claude Opus 5.5`).
+   When nothing is detected, the default menu starts with OpenAI.
+2. Finish provider setup when needed:
+   - For Anthropic, OpenAI, or OpenRouter, paste the API key (input is hidden).
+     MindRoom verifies it with a cheap, non-billable check (unless a custom endpoint variable such as `OPENAI_BASE_URL` is set) and lets you retry or press Enter to skip, then connect later through the [dashboard](https://docs.mindroom.chat/dashboard/#connect-your-ai-provider) or by editing `~/.mindroom/.env` and restarting `mindroom run`.
+     MindRoom does not ask when the key is already set in your environment.
+   - For `codex` or `claude_code` when the CLI is installed but signed out, MindRoom offers to run `codex login` or `claude auth login` inline.
+   - For `ollama` when local chat models are already pulled, pick the default model directly from your pulled models.
+   - Other presets print their remaining step instead, such as `ollama pull` or the Azure, Bedrock, or Vertex AI settings to add to `~/.mindroom/.env` before restarting.
 
 MindRoom then writes `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted Matrix defaults (`MATRIX_HOMESERVER=https://mindroom.chat`) and a starter `Mind` agent in a `Personal` room.
 
@@ -65,7 +70,7 @@ See [`mindroom service`](https://docs.mindroom.chat/cli/#service) for when the q
 - **Preflight check:** `uvx mindroom doctor` checks config, API keys, Matrix connectivity, pairing, and storage in one pass; see [doctor](https://docs.mindroom.chat/cli/#doctor).
 
 See [Hosted Matrix + Local Backend](https://docs.mindroom.chat/deployment/hosted-matrix/) for what runs where and the credential and trust model.
-To run worker-routed execution tools such as `coding`, `docker`, `file`, `python`, and `shell` in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
+To run worker-routed execution tools such as `docker`, `filesystem`, `python`, and `shell` in dedicated Docker workers on the same machine, see [Sandbox Proxy Isolation](https://docs.mindroom.chat/deployment/sandbox-proxy/).
 
 
 
@@ -93,7 +98,7 @@ uvx mindroom run
 ```
 
 The generated `.env` lists the credentials the chosen preset needs; set them before running.
-See [`config init`](https://docs.mindroom.chat/cli/#config-init) for every option and the extra steps for the `codex`, `kimi`, `ollama`, and `llama.cpp` presets, and [Model Environment Variables](https://docs.mindroom.chat/configuration/models/#environment-variables) for each provider's credentials.
+See [`config init`](https://docs.mindroom.chat/cli/#config-init) for every option and the extra steps for the `codex`, `kimi`, `claude_code`, `ollama`, and `llama.cpp` presets, and [Model Environment Variables](https://docs.mindroom.chat/configuration/models/#environment-variables) for each provider's credentials.
 
 
 
@@ -171,7 +176,7 @@ Prerequisites:
     source .venv/bin/activate
     ```
 
-    Install Node.js 24 and [Bun](https://bun.sh/) to build missing dashboard assets on first run, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
+    Install Node.js 24 and [Bun](https://bun.sh/) 1.4 or newer to build missing dashboard assets on first run, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
     Without assets and Bun, the API is available but the dashboard is not.
 
 ### Configuration
@@ -193,7 +198,7 @@ agents:
 models:
   default:
     provider: openai
-    id: gpt-6-astra
+    id: gpt-6.2-astra
 
 defaults:
   tools: [scheduler]
@@ -237,7 +242,7 @@ See [Environment Variables](https://docs.mindroom.chat/configuration/#environmen
 
 ### Matrix account provisioning
 
-MindRoom creates a Matrix account for each agent, team, and the router.
+MindRoom creates a Matrix account for each agent and team, and one account of its own that administers the rooms in `config.yaml`.
 Configure one way for it to do so: hosted provisioning, `MATRIX_REGISTRATION_TOKEN`, `MATRIX_REGISTRATION_SHARED_SECRET`, an [application service](https://docs.mindroom.chat/matrix/#agent-users), or intentionally open registration.
 If registration fails, check the selected credentials and the homeserver's registration policy.
 

@@ -19,7 +19,7 @@ agents:
     role: A helpful assistant with file and web access
     model: sonnet
     tools:
-      - file
+      - filesystem
       - shell
       - github
       - duckduckgo
@@ -46,7 +46,7 @@ defaults:
 agents:
   code:
     tools:
-      - file                               # no inline settings
+      - filesystem                         # no inline settings
       - shell:                             # this agent only
           extra_env_passthrough: "DAWARICH_*"
   research:
@@ -130,6 +130,7 @@ The built-in usage instructions that `daytona`, `gmail`, `google_calendar`, `rea
 
 - [Execution & Coding](https://docs.mindroom.chat/tools/execution-and-coding/) - Local files, shell, Python, coding helpers, and worker-routed execution tools.
 - [Background Python Scripts](https://docs.mindroom.chat/tools/background-scripts/) - Long-running Python scripts that call the agent's tools and wake it when something changes.
+- [Workflows](https://docs.mindroom.chat/tools/workflows/) - Python scripts that run in the background, run agents, call the agent's tools, and return one report.
 - [Worker Computer](https://docs.mindroom.chat/tools/worker-computer/) - A visible browser in the agent's worker that the user can watch and control.
 - [Desktop Bridge](https://docs.mindroom.chat/tools/desktop/) - Operate allowlisted apps, read selected folders, and run approved commands on a local computer.
 - [Minimal Agent Mode](https://docs.mindroom.chat/tools/agent-cli/) - One Bash tool instead of full tool schemas, to cut tokens per request.
@@ -139,7 +140,7 @@ The built-in usage instructions that `daytona`, `gmail`, `google_calendar`, `rea
 - [Research Sources](https://docs.mindroom.chat/tools/research-sources/) - ArXiv, Google Scholar, Wikipedia, PubMed, and Hacker News.
 - [AI & Generation](https://docs.mindroom.chat/tools/ai-and-generation/) - Image, video, speech, and transcription APIs.
 - [Media & Content](https://docs.mindroom.chat/tools/media-and-content/) - Media processing, brand/media retrieval, and Spotify.
-- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging and voice messages, thread tags, resolution, moves, summaries, stopping other agents' replies, model overrides, low-level Matrix API access, and attachment-aware workflows.
+- [Matrix & Attachments](https://docs.mindroom.chat/tools/matrix-and-attachments/) - Matrix-native messaging and voice messages, thread tags, resolution, snoozing, moves, summaries, stopping other agents' replies, model overrides, low-level Matrix API access, a personal agent reading Matrix as its owner, and attachment-aware workflows.
 - [Matrix Message Tool](https://docs.mindroom.chat/tools/matrix-message/) - Send, read, edit, and react to messages with `matrix_message`.
 - [Agent Chat UI Actions](https://docs.mindroom.chat/tools/chat-ui/) - Bounded requests to reveal an agent computer, open Settings, open Members, or show an [interactive canvas](https://docs.mindroom.chat/canvases/) in MindRoom Chat.
 - [Messaging & Social](https://docs.mindroom.chat/tools/messaging-and-social/) - Email, chat, and social/community integrations.

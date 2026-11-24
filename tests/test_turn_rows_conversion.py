@@ -34,7 +34,7 @@ from mindroom.event_journal.legacy_turn_rows import (
 )
 from mindroom.reply_lifecycle import ApprovalFailureKind, ReplyState
 from mindroom.response_sources import ResponseSources
-from mindroom.turn_record import PreparedVoiceSource, SourceVisibleEcho, TurnRecord
+from mindroom.turn_record import PreparedVoiceSource, TurnRecord
 from tests import test_event_journal_store as journal_tests
 from tests.conftest import postgres_journal_schema_url
 from tests.reply_span_helpers import paused_for_approval
@@ -347,7 +347,6 @@ _OBSERVABLES = (
     "is_handled",
     "turn_record",
     "visible_echo",
-    "finalized_echo",
     "pending_intent",
     "record_for_response",
     "prepared_voice",
@@ -368,9 +367,7 @@ async def _observe_event(store: EventJournalStore, event_id: str) -> dict[str, A
             observed["pending_intent"] = True
     echo = await read(store, turn_rows.visible_echo, event_id)
     if echo is not None:
-        observed["visible_echo"] = echo.event_id
-        if echo.is_fallback is not None:
-            observed["finalized_echo"] = {"event_id": echo.event_id, "is_fallback": echo.is_fallback}
+        observed["visible_echo"] = echo
     if (owner := await read(store, turn_rows.turn_for_response_event, event_id)) is not None:
         observed["record_for_response"] = record_json(owner)
     if (voice := await read(store, turn_rows.prepared_voice, event_id)) is not None:
@@ -639,7 +636,7 @@ async def test_a_legacy_echo_reaches_every_source_and_is_not_an_answer(journal: 
     upgraded = journal.upgraded()
 
     for source in ("$text", "$voice"):
-        assert await read(upgraded, turn_rows.visible_echo, source) == SourceVisibleEcho("$echo", is_fallback=False)
+        assert await read(upgraded, turn_rows.visible_echo, source) == "$echo"
     routing = await read(upgraded, turn_rows.get_turn_record, "$v2")
     assert routing.response_event_id is None
     assert not routing.completed

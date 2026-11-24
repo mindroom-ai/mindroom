@@ -1,5 +1,6 @@
 """End a request the model's safeguards refused with a typed error instead of a finished turn.
 
+A safety filter's stop counts as a refusal: OpenRouter, for one, reports Claude's ``refusal`` as ``content_filter``.
 Adapters report a turn's usage before completing it, so the refused request's usage reaches the caller and the
 request log first; the error carries it too, for a caller that reads only the finished turn. The error is final: no
 stage retries the request or resends it without its media.
@@ -22,10 +23,10 @@ __all__ = ["refusal_stream"]
 
 
 async def refusal_stream(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
-    """Stream ``request``, raising ``ModelSafeguardRefusal`` in place of a turn that completed as a refusal."""
+    """Stream ``request``, raising ``ModelSafeguardRefusal`` in place of a turn a refusal or safety filter ended."""
     events = inner.stream(request)
     async with closing_async_stream(events):
         async for event in events:
-            if isinstance(event, TurnCompleted) and event.stop_reason == "refusal":
+            if isinstance(event, TurnCompleted) and event.stop_reason in {"refusal", "content_filter"}:
                 raise ModelSafeguardRefusal(provider=inner.identity.provider, usage=event.message.metrics)
             yield event

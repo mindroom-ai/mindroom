@@ -258,6 +258,29 @@ describe("contacts page", () => {
     ]);
   });
 
+  it("names another deployment's agent by its Matrix ID alone", async () => {
+    const remote = "@mindroom_mind_dana:other.org";
+    installApi(
+      page([
+        contact({
+          other: {
+            kind: "remote_agent",
+            id: remote,
+            owner: null,
+            display_name: remote,
+          },
+        }),
+      ]),
+    );
+    render(<Contacts />);
+    const card = await screen.findByRole("article", { name: remote });
+    expect(
+      within(card).getByText(
+        `${remote}, an agent of another MindRoom deployment`,
+      ),
+    ).toBeVisible();
+  });
+
   it("tells someone asked in person that no agent of theirs takes part", async () => {
     installApi(
       page([
@@ -567,5 +590,43 @@ describe("contacts page", () => {
       ),
     ).toBeVisible();
     expect(within(card).queryByRole("button")).toBeNull();
+  });
+
+  it("tells the asker of another deployment's agent who answers, and lets them clear its decline", async () => {
+    const remote = "@mindroom_mind_dana:other.org";
+    const other = {
+      kind: "remote_agent" as const,
+      id: remote,
+      owner: null,
+      display_name: remote,
+    };
+    installApi(
+      page([
+        contact({ id: "sent", side: "requester", other }),
+        contact({ id: "no", status: "declined", side: "requester", other }),
+      ]),
+    );
+    render(<Contacts />);
+    const [pending, declined] = await screen.findAllByRole("article", {
+      name: remote,
+    });
+    expect(
+      within(pending).getByText(
+        `Waiting for the owner of ${remote} to answer.`,
+      ),
+    ).toBeVisible();
+    expect(
+      within(pending).getByRole("button", { name: "Withdraw…" }),
+    ).toBeVisible();
+    expect(
+      within(declined).getByText(
+        `The owner of ${remote} declined. Remove it to ask again; their side refuses until they remove their decline.`,
+      ),
+    ).toBeVisible();
+    expect(
+      within(declined).getByRole("button", { name: "Remove…" }),
+    ).toBeVisible();
+    expect(pending).not.toHaveTextContent("null");
+    expect(declined).not.toHaveTextContent("null");
   });
 });

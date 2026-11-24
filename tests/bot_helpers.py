@@ -18,7 +18,6 @@ from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import (
-    ROUTER_AGENT_NAME,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     RuntimePaths,
     resolve_runtime_paths,
@@ -154,21 +153,11 @@ async def _run_orchestrator_start_until_ready(
 ) -> None:
     """Run start() until readiness, then explicitly shut the runtime down."""
     ready = asyncio.Event()
-    start_sync = orchestrator.fleet.start_sync
 
     def mark_ready() -> None:
         ready.set()
 
-    def start_sync_and_publish_router_readiness(bots: list[AgentBot]) -> None:
-        # Stand in for the router's first sync, which publishes its reply memberships.
-        start_sync(bots)
-        if any(bot.agent_name == ROUTER_AGENT_NAME for bot in bots):
-            orchestrator._router_reply_memberships_live_sync_ready.set()
-
-    with (
-        patch("mindroom.orchestrator.set_runtime_ready", side_effect=mark_ready),
-        patch.object(orchestrator.fleet, "start_sync", side_effect=start_sync_and_publish_router_readiness),
-    ):
+    with patch("mindroom.orchestrator.set_runtime_ready", side_effect=mark_ready):
         runtime_task = asyncio.create_task(orchestrator.start())
         try:
             await asyncio.wait_for(ready.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
@@ -188,6 +177,36 @@ async def _run_orchestrator_start_until_ready(
 def _make_matrix_client_mock() -> AsyncMock:
     """Return one Matrix client mock with safe thread-history defaults."""
     return make_matrix_client_mock()
+
+
+def install_sub_room(client: AsyncMock, agent_id: str, room_id: str = "!test:localhost") -> None:
+    """Make ``room_id`` a sub-room of `design`, which also lists `planning`, with the agent in all three."""
+    room = nio.MatrixRoom(room_id, agent_id)
+    design = nio.MatrixRoom("!design:localhost", agent_id)
+    design.name = "design"
+    design.children.update({room_id, "!planning:localhost"})
+    planning = nio.MatrixRoom("!planning:localhost", agent_id)
+    planning.name = "planning"
+    client.rooms = {listed.room_id: listed for listed in (room, design, planning)}
+
+    async def state_event(
+        state_room_id: str,
+        event_type: str,
+        state_key: str = "",
+    ) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
+        if event_type == "m.space.parent" and (state_room_id, state_key) in {
+            (room_id, design.room_id),
+            (planning.room_id, design.room_id),
+        }:
+            return nio.RoomGetStateEventResponse(
+                {"via": ["localhost"], "canonical": True},
+                event_type,
+                state_key,
+                state_room_id,
+            )
+        return nio.RoomGetStateEventError("not found", "M_NOT_FOUND")
+
+    client.room_get_state_event = AsyncMock(side_effect=state_event)
 
 
 def owned_matrix_login(client: object, session: object | None = None) -> SimpleNamespace:
@@ -461,6 +480,7 @@ def _mock_managed_bot() -> MagicMock:
     """Return a lightweight managed-bot double for orchestrator reload tests."""
     bot = MagicMock()
     bot.refresh_presence = AsyncMock()
+    bot.refresh_server_state = AsyncMock()
     bot.recover_pending_turn_journal_events = AsyncMock()
     return bot
 

@@ -51,10 +51,11 @@ _DETACHED_EXECUTION_IDENTITY_ALLOWLIST = {
     "src/mindroom/tool_system/runtime_context.py",
     "src/mindroom/tool_system/worker_routing.py",
 }
-# Runners without a Matrix conversation: the OpenAI-compatible API, the MCP gateway, and an API turn's delegated child.
+# Runners without a Matrix conversation: the OpenAI-compatible API, headless runs, the MCP gateway, and their delegated children.
 _DETACHED_TOOL_SCOPE_ALLOWLIST = {
     "src/mindroom/ai.py",
     "src/mindroom/api/openai_compat.py",
+    "src/mindroom/headless.py",
     "src/mindroom/mcp_gateway/tools.py",
     "src/mindroom/tool_system/runtime_context.py",
 }
@@ -238,6 +239,8 @@ def _collect_execution_identity_keyword_violations() -> list[str]:
                 ("src/mindroom/approval/tool_owners.py", "context.resolve_worker_target"),
                 ("src/mindroom/agent_cli/response_owner.py", "runtime.resolve_worker_target"),
                 ("src/mindroom/custom_tools/dynamic_workflow.py", "context.resolve_worker_target"),
+                ("src/mindroom/custom_tools/workflow.py", "context.resolve_worker_target"),
+                ("src/mindroom/plugin_testing.py", "context.resolve_worker_target"),
                 ("src/mindroom/tools/approved_egress.py", "context.resolve_worker_target"),
             }
             if (relative_path, ast.unparse(node.func)) in bound_target_calls:

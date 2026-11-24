@@ -26,7 +26,6 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids
-from tests.scheduling_helpers import serve_full_room_state
 
 
 def _runtime_bound_config(config: Config) -> Config:
@@ -50,7 +49,6 @@ def _test_room(config: Config, *agent_names: str) -> nio.MatrixRoom:
 
 
 def _allow_schedule_state_persistence(client: AsyncMock, room_id: str) -> None:
-    serve_full_room_state(client, room_id)
     client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse("$scheduled-state", room_id))
 
 

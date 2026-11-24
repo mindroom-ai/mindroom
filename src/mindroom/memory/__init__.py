@@ -1,9 +1,11 @@
 """Memory management for MindRoom agents and teams."""
 
-from mindroom.memory._entrypoint_snapshots import ConversationRef
+from mindroom.memory._entrypoint_snapshots import (
+    ConversationRef,
+    entrypoint_snapshot_path,
+    stamp_entrypoint_snapshot,
+)
 from mindroom.memory._file_backend import (
-    entrypoint_tokens,
-    entrypoint_withholds_lines,
     read_scope_memory_files,
     refresh_agent_memory_search,
     write_scope_markdown_file,
@@ -37,14 +39,14 @@ __all__ = [
     "build_memory_prompt_parts",
     "conversation_entrypoint_preamble",
     "delete_agent_memory",
-    "entrypoint_tokens",
-    "entrypoint_withholds_lines",
+    "entrypoint_snapshot_path",
     "get_agent_memory",
     "list_all_agent_memories",
     "read_scope_memory_files",
     "redact_memory_text",
     "refresh_agent_memory_search",
     "search_agent_memories",
+    "stamp_entrypoint_snapshot",
     "store_conversation_memory",
     "strip_user_turn_time_prefix",
     "update_agent_memory",

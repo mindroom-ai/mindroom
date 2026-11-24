@@ -6,6 +6,7 @@ import fnmatch
 from collections.abc import Mapping  # noqa: TC003 - public annotations support typing.get_type_hints().
 from types import MappingProxyType
 from typing import cast
+from urllib.parse import urlparse
 
 __all__ = [
     "AWS_ENV_BY_KEY",
@@ -19,10 +20,15 @@ __all__ = [
     "DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY",
     "EGRESS_BROKER_ENV_BY_KEY",
     "ENV_TEMPLATE_PLACEHOLDERS",
+    "KUBERNETES_POD_CPU_LIMIT_ENV",
+    "KUBERNETES_POD_LIMIT_ENV_NAMES",
+    "KUBERNETES_POD_MEMORY_LIMIT_BYTES_ENV",
     "KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY",
     "MATRIX_APPSERVICE_TOKEN_ENV",
     "MATRIX_APPSERVICE_TOKEN_FILE_ENV",
     "MATRIX_MANAGED_ACCOUNT_AUTH_ENV",
+    "MATRIX_USER_APPSERVICE_TOKEN_ENV",
+    "MATRIX_USER_APPSERVICE_TOKEN_FILE_ENV",
     "SANDBOX_RUNTIME_ENV_BY_KEY",
     "SANDBOX_STARTUP_MANIFEST_PATH_ENV",
     "SESSION_STORAGE_PATH_ENV",
@@ -32,6 +38,7 @@ __all__ = [
     "WORKER_BACKEND_ENV",
     "WORKER_COMPUTER_ENABLED_ENV",
     "credentials_encryption_key_value",
+    "is_credential_free_proxy_url",
     "is_isolated_worker_runtime_env_name",
     "is_public_worker_startup_env_name",
     "is_runtime_control_env_name",
@@ -48,7 +55,9 @@ __all__ = [
     "sandbox_runner_startup_process_env",
     "sandbox_shell_system_env",
     "sandbox_subprocess_system_env",
+    "sandbox_worker_extra_env",
     "shell_passthrough_env",
+    "strip_authenticated_proxy_env",
     "worker_extra_env",
 ]
 
@@ -62,6 +71,9 @@ SHARED_CREDENTIALS_PATH_ENV = "MINDROOM_SHARED_CREDENTIALS_PATH"
 MATRIX_MANAGED_ACCOUNT_AUTH_ENV = "MATRIX_MANAGED_ACCOUNT_AUTH"
 MATRIX_APPSERVICE_TOKEN_ENV = "MATRIX_APPSERVICE_TOKEN"  # noqa: S105 - environment variable name
 MATRIX_APPSERVICE_TOKEN_FILE_ENV = "MATRIX_APPSERVICE_TOKEN_FILE"  # noqa: S105 - environment variable name
+# The application-service token that lets an agent act in Matrix as the person it belongs to; only the primary reads it.
+MATRIX_USER_APPSERVICE_TOKEN_ENV = "MATRIX_USER_APPSERVICE_TOKEN"  # noqa: S105 - environment variable name
+MATRIX_USER_APPSERVICE_TOKEN_FILE_ENV = "MATRIX_USER_APPSERVICE_TOKEN_FILE"  # noqa: S105 - environment variable name
 AWS_ENV_BY_KEY: Mapping[str, str] = MappingProxyType(
     {
         "access_key": "AWS_ACCESS_KEY_ID",
@@ -148,12 +160,14 @@ KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY: Mapping[str, str] = MappingProxyTyp
         "storage_subpath_prefix": "MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX",
         "idle_timeout": "MINDROOM_KUBERNETES_WORKER_IDLE_TIMEOUT_SECONDS",
         "ready_timeout": "MINDROOM_KUBERNETES_WORKER_READY_TIMEOUT_SECONDS",
+        "setup_timeout": "MINDROOM_KUBERNETES_WORKER_SETUP_TIMEOUT_SECONDS",
         "name_prefix": "MINDROOM_KUBERNETES_WORKER_NAME_PREFIX",
         "node_name": "MINDROOM_KUBERNETES_WORKER_NODE_NAME",
         "colocate_with_control_plane_node": "MINDROOM_KUBERNETES_WORKER_COLOCATE_WITH_CONTROL_PLANE_NODE",
         "reconcile_pod_templates": "MINDROOM_KUBERNETES_WORKER_RECONCILE_POD_TEMPLATES",
         "extra_env_json": "MINDROOM_KUBERNETES_WORKER_ENV_JSON",
         "extra_labels_json": "MINDROOM_KUBERNETES_WORKER_LABELS_JSON",
+        "tailnet_ssh_release_id": "MINDROOM_KUBERNETES_WORKER_TAILNET_SSH_RELEASE_ID",
         "extra_annotations_json": "MINDROOM_KUBERNETES_WORKER_ANNOTATIONS_JSON",
         "extra_containers_json": "MINDROOM_KUBERNETES_WORKER_EXTRA_CONTAINERS_JSON",
         "extra_volumes_json": "MINDROOM_KUBERNETES_WORKER_EXTRA_VOLUMES_JSON",
@@ -169,6 +183,9 @@ KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY: Mapping[str, str] = MappingProxyTyp
         "enable_service_links": "MINDROOM_KUBERNETES_WORKER_ENABLE_SERVICE_LINKS",
         "auth_secret_name": "MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME",
         "seccomp_profile_json": "MINDROOM_KUBERNETES_WORKER_SECCOMP_PROFILE_JSON",
+        "named_worker_idle_timeout": "MINDROOM_KUBERNETES_NAMED_WORKER_IDLE_TIMEOUT_SECONDS",
+        "named_worker_max_age": "MINDROOM_KUBERNETES_NAMED_WORKER_MAX_AGE_SECONDS",
+        "named_workers_max": "MINDROOM_KUBERNETES_NAMED_WORKERS_MAX",
     },
 )
 
@@ -266,6 +283,9 @@ _ISOLATED_RUNTIME_ENV_EXTRA_KEYS = frozenset(
 COMPUTER_ALLOWED_ORIGINS_ENV = "MINDROOM_COMPUTER_ALLOWED_ORIGINS"
 CONNECTIONS_ALLOWED_ORIGINS_ENV = "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS"
 WORKER_COMPUTER_ENABLED_ENV = "MINDROOM_WORKER_COMPUTER_ENABLED"
+KUBERNETES_POD_CPU_LIMIT_ENV = "MINDROOM_KUBERNETES_POD_CPU_LIMIT"
+KUBERNETES_POD_MEMORY_LIMIT_BYTES_ENV = "MINDROOM_KUBERNETES_POD_MEMORY_LIMIT_BYTES"
+KUBERNETES_POD_LIMIT_ENV_NAMES = frozenset({KUBERNETES_POD_CPU_LIMIT_ENV, KUBERNETES_POD_MEMORY_LIMIT_BYTES_ENV})
 
 _PUBLIC_WORKER_SANDBOX_STARTUP_ENV_NAMES = frozenset(
     {
@@ -325,9 +345,14 @@ _RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
         SESSION_STORAGE_PATH_ENV,
         "MINDROOM_EVENT_CACHE_DATABASE_URL",
         "MINDROOM_LOCAL_CLIENT_ID",
+        "MINDROOM_SMTP_URL",
         MATRIX_APPSERVICE_TOKEN_ENV,
         MATRIX_APPSERVICE_TOKEN_FILE_ENV,
         MATRIX_MANAGED_ACCOUNT_AUTH_ENV,
+        MATRIX_USER_APPSERVICE_TOKEN_ENV,
+        MATRIX_USER_APPSERVICE_TOKEN_FILE_ENV,
+        KUBERNETES_POD_CPU_LIMIT_ENV,
+        KUBERNETES_POD_MEMORY_LIMIT_BYTES_ENV,
         SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
         SANDBOX_STARTUP_MANIFEST_PATH_ENV,
     },
@@ -335,12 +360,16 @@ _RUNTIME_STARTUP_EXCLUDED_NAMES = frozenset(
 _RUNTIME_STARTUP_SECRET_SUFFIXES = ("_API_KEY", "_API_KEYS", "_PASSWORD", "_SECRET", "_TOKEN")
 _RUNTIME_DATABASE_URL_NAMES = frozenset({"DATABASE_URL"})
 _RUNTIME_DATABASE_URL_SUFFIXES = ("_DATABASE_URL",)
+TAILNET_SSH_SECRET_ENV_NAMES = frozenset(
+    {"MINDROOM_TAILNET_SSH_GATEWAY_TOKEN", "TAILNET_SSH_GATEWAY_TOKEN", "TAILNET_SSH_AUTH_KEY", "TS_AUTHKEY"},
+)
 _EXECUTION_RUNTIME_EXCLUDED_NAMES = frozenset(
     {
         *_RUNTIME_STARTUP_EXCLUDED_NAMES,
         "MINDROOM_API_KEY",
         "MINDROOM_LOCAL_CLIENT_SECRET",
         "MINDROOM_PLATFORM_SSO_SECRET",
+        *TAILNET_SSH_SECRET_ENV_NAMES,
     },
 )
 _NON_SANDBOX_RUNTIME_CONTROL_ENV_NAMES = frozenset(
@@ -349,13 +378,19 @@ _NON_SANDBOX_RUNTIME_CONTROL_ENV_NAMES = frozenset(
         COMPUTER_ALLOWED_ORIGINS_ENV,
         CONNECTIONS_ALLOWED_ORIGINS_ENV,
         CONTROL_STATE_PATH_ENV,
+        KUBERNETES_POD_CPU_LIMIT_ENV,
+        KUBERNETES_POD_MEMORY_LIMIT_BYTES_ENV,
         SESSION_STORAGE_PATH_ENV,
         "MINDROOM_API_KEY",
         "MINDROOM_LOCAL_CLIENT_SECRET",
         "MINDROOM_PLATFORM_SSO_SECRET",
+        "MINDROOM_SMTP_URL",
+        *TAILNET_SSH_SECRET_ENV_NAMES,
         MATRIX_APPSERVICE_TOKEN_ENV,
         MATRIX_APPSERVICE_TOKEN_FILE_ENV,
         MATRIX_MANAGED_ACCOUNT_AUTH_ENV,
+        MATRIX_USER_APPSERVICE_TOKEN_ENV,
+        MATRIX_USER_APPSERVICE_TOKEN_FILE_ENV,
     },
 )
 _SANDBOX_SUBPROCESS_SYSTEM_ENV_NAMES = frozenset(
@@ -550,6 +585,81 @@ def sandbox_shell_system_env(env: Mapping[str, str]) -> Mapping[str, str]:
         "Mapping[str, str]",
         MappingProxyType({key: value for key, value in env.items() if key in _SANDBOX_SHELL_SYSTEM_ENV_NAMES}),
     )
+
+
+_SANDBOX_PROXY_URL_ENV_NAMES = frozenset(
+    {
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    },
+)
+_PROXY_URL_ENV_LOWER_NAMES = frozenset({"http_proxy", "https_proxy", "all_proxy"})
+_SANDBOX_SAFE_EXTRA_ENV_NAMES = frozenset(
+    {
+        "NO_PROXY",
+        "no_proxy",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "CURL_CA_BUNDLE",
+        "REQUESTS_CA_BUNDLE",
+        "GIT_SSL_CAINFO",
+        "NODE_EXTRA_CA_CERTS",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        SANDBOX_RUNTIME_ENV_BY_KEY["runner_subprocess_timeout_seconds"],
+    },
+)
+
+
+_ALLOWED_PROXY_URL_SCHEMES = frozenset({"http", "https", "socks5", "socks5h"})
+
+
+def is_credential_free_proxy_url(value: str) -> bool:
+    """Return whether ``value`` parses as a credential-free proxy URL with an allowed scheme."""
+    stripped = value.strip()
+    if not stripped or any(ch.isspace() for ch in stripped):
+        return False
+    target = stripped if "://" in stripped else f"http://{stripped}"
+    try:
+        parsed = urlparse(target)
+        _ = parsed.port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme.lower() in _ALLOWED_PROXY_URL_SCHEMES
+        and bool(parsed.hostname)
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path in {"", "/"}
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
+def sandbox_worker_extra_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Return only safe, credential-free infrastructure extra env vars for sandboxed worker pods."""
+    return {
+        key: value
+        for key, value in worker_extra_env(env).items()
+        if key in _SANDBOX_SAFE_EXTRA_ENV_NAMES
+        or (key in _SANDBOX_PROXY_URL_ENV_NAMES and is_credential_free_proxy_url(value))
+    }
+
+
+def strip_authenticated_proxy_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Strip any proxy env var (case-insensitive) carrying credentials or an unparseable value."""
+    return {
+        key: value
+        for key, value in env.items()
+        if key.lower() not in _PROXY_URL_ENV_LOWER_NAMES or is_credential_free_proxy_url(value)
+    }
 
 
 def sandbox_subprocess_system_env(env: Mapping[str, str]) -> Mapping[str, str]:

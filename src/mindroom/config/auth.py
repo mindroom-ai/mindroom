@@ -14,7 +14,7 @@ class AuthorizationConfig(BaseModel):
 
     config_command_enabled: bool = Field(
         default=False,
-        description="Enable the chat !config command for platform administrators.",
+        description="Enable the chat /config command for platform administrators.",
     )
     aliases: dict[str, list[str]] = Field(
         default_factory=dict,

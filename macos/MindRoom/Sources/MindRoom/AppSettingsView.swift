@@ -3,6 +3,7 @@ import SwiftUI
 struct AppSettingsView: View {
     @ObservedObject var runner: MindRoomCommandRunner
     @ObservedObject var chatPreferences: ChatWebsitePreferences
+    @ObservedObject var desktop = DesktopControlStore.shared
     @State private var startAtLogin = LoginItemController.shared.isEnabled
     @State private var loginTitle = LoginItemController.shared.menuTitle
     @State private var errorMessage: String?
@@ -20,10 +21,12 @@ struct AppSettingsView: View {
             }
             AppSectionCard {
                 Toggle("Open menu bar app at login", isOn: Binding(
-                    get: { startAtLogin },
+                    get: { startAtLogin || desktop.fullControl },
                     set: { _ in toggleLogin() }
-                )).disabled(!LoginItemController.shared.canToggle)
-                Text("Starts quietly in the menu bar. Local agents have their own background service; computer access starts only when you choose.")
+                )).disabled(!LoginItemController.shared.canToggle || desktop.fullControl)
+                Text(desktop.fullControl
+                     ? "Full control of this Mac needs MindRoom to open at login. Turn full control off in Computer access to change this."
+                     : "Starts quietly in the menu bar. Local agents have their own background service; computer access starts only when you choose.")
                     .font(.callout).foregroundStyle(.secondary)
                 if !LoginItemController.shared.canToggle {
                     Text(loginTitle).font(.callout)

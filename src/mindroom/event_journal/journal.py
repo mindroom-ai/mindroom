@@ -19,6 +19,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
+from mindroom.constants import ROUTE_REVISION_KEY, ROUTER_AGENT_NAME
 from mindroom.event_journal.history_recovery import (
     HistoryRecoveryOutcome,
     HistoryRecoveryState,
@@ -38,8 +39,10 @@ from . import (
     turn_rows,
 )
 from .identity import agent_of_principal, decode_thread_id, encode_thread_id
-from .membership_state import claim_membership_epoch
+from .membership_state import claim_active_membership_epoch as claim_active
+from .membership_state import claim_membership_epoch, current_membership_epoch, projection_generation
 from .models import (
+    RUNTIME_SOURCE_KINDS,
     TURN_BACKED_KINDS,
     AdmissionFacts,
     AdmissionResult,
@@ -66,6 +69,8 @@ from .projection import ProjectedEvent, is_redacted, project, scrub_redacted_pro
 from .schema import PENDING_STATE, SETTLED_STATE
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.turn_record import TurnRecord
 
     from .backend import Row, Transaction
@@ -293,13 +298,18 @@ def _apply_membership_effect(
     ):
         raise IngestionBatchIntegrityError
     state = _claim_membership_state(transaction, principal_id, room_id)
-    if admission.membership != "join" and admission.previous_membership == "join":
+    # The owner account's principal is the approval ledger: it sends no card, and no departure advances its epoch.
+    fences = agent_of_principal(principal_id) != ROUTER_AGENT_NAME
+    if fences and admission.membership != "join" and admission.previous_membership == "join":
         if state.departure_fenced:
             raise IngestionBatchIntegrityError
         _advance_membership_epoch(transaction, principal_id, room_id)
+    elif admission.membership != "join" and admission.previous_membership == "join":
+        # The owner account still reads rooms it stewards, and a rejoin can show it another slice of history.
+        _drop_room_projection(transaction, principal_id, room_id)
     transaction.execute(
         "UPDATE room_membership SET departure_fenced = ? WHERE principal_id = ? AND room_id = ?",
-        (int(admission.membership != "join"), principal_id, room_id),
+        (int(fences and admission.membership != "join"), principal_id, room_id),
     )
     transaction.execute(
         """
@@ -409,13 +419,14 @@ def read_generation(transaction: Transaction) -> str | None:
     return None if row is None else str(row["generation"])
 
 
-def _room_history_recovery_from_row(room_id: str, row: Row) -> RoomHistoryRecovery:
+def _room_history_recovery_from_row(room_id: str, row: Row, generation: int) -> RoomHistoryRecovery:
     """Decode one durable recovery row into its transport-neutral value."""
     return RoomHistoryRecovery(
         room_id=room_id,
         state=HistoryRecoveryState(str(row["state"])),
         revision=int(row["revision"]),
         attempted_policy_rank=int(row["attempted_policy_rank"]),
+        projection_generation=generation,
     )
 
 
@@ -432,7 +443,9 @@ def room_history_recovery(
         """,
         (principal_id, room_id, _REPAIRED_RECOVERY_STATE),
     )
-    return None if row is None else _room_history_recovery_from_row(room_id, row)
+    if row is None:
+        return None
+    return _room_history_recovery_from_row(room_id, row, projection_generation(transaction, principal_id, room_id))
 
 
 def _record_room_history_recovery(
@@ -460,7 +473,7 @@ def _record_room_history_recovery(
     if row is None:
         msg = f"Room history recovery for {room_id!r} is missing immediately after it was written"
         raise RuntimeError(msg)
-    return _room_history_recovery_from_row(room_id, row)
+    return _room_history_recovery_from_row(room_id, row, projection_generation(transaction, principal_id, room_id))
 
 
 def _claim_room_history_recovery(
@@ -579,13 +592,15 @@ def install_hydration_chunk(
     room_id: str,
     events: tuple[ProjectedEvent, ...],
     expected_membership_epoch: int,
+    expected_projection_generation: int,
 ) -> bool:
-    """Project one chunk only while its membership epoch is current."""
+    """Project one chunk only while its membership epoch and projection generation are current."""
     if not claim_membership_epoch(
         transaction,
         principal_id,
         room_id=room_id,
         expected_membership_epoch=expected_membership_epoch,
+        expected_projection_generation=expected_projection_generation,
     ):
         return False
     _project_walked(transaction, principal_id, events, membership_epoch=expected_membership_epoch)
@@ -605,6 +620,7 @@ def _claim_recovery(
         principal_id,
         room_id=recovery.room_id,
         expected_membership_epoch=expected_membership_epoch,
+        expected_projection_generation=recovery.projection_generation,
     ) and _claim_room_history_recovery(transaction, principal_id, recovery)
 
 
@@ -627,19 +643,6 @@ def _project_walked(
         )
 
 
-def current_membership_epoch(
-    transaction: Transaction,
-    principal_id: str,
-    room_id: str,
-) -> int:
-    """Return the room's current membership epoch, starting at zero."""
-    row = transaction.fetchone(
-        "SELECT membership_epoch FROM room_membership WHERE principal_id = ? AND room_id = ?",
-        (principal_id, room_id),
-    )
-    return 0 if row is None else int(row["membership_epoch"])
-
-
 def ingestion_membership_position(
     transaction: Transaction,
     principal_id: str,
@@ -656,6 +659,20 @@ def ingestion_membership_position(
     if membership not in {"join", "leave"} or type(epoch) is not int or epoch < 0:
         raise IngestionBatchIntegrityError
     return RoomMembershipPosition(membership, epoch)
+
+
+def _drop_room_projection(transaction: Transaction, principal_id: str, room_id: str) -> None:
+    """Drop the conversations one membership of a room projected, with their hydration and recovery state."""
+    for table in (
+        "conversation_hydration",
+        "visible_messages",
+        "unresolved_edits",
+        "room_history_recovery",
+    ):
+        transaction.execute(
+            f"DELETE FROM {table} WHERE principal_id = ? AND room_id = ?",  # noqa: S608 - a fixed table list
+            (principal_id, room_id),
+        )
 
 
 def _advance_membership_epoch(
@@ -689,16 +706,7 @@ def _advance_membership_epoch(
         """,
         (principal_id, room_id, epoch),
     )
-    for table in (
-        "conversation_hydration",
-        "visible_messages",
-        "unresolved_edits",
-        "room_history_recovery",
-    ):
-        transaction.execute(
-            f"DELETE FROM {table} WHERE principal_id = ? AND room_id = ?",  # noqa: S608 - a fixed table list
-            (principal_id, room_id),
-        )
+    _drop_room_projection(transaction, principal_id, room_id)
     # A delivery that was never attempted was written for the conversation this
     # bot was in before it left, and nothing outside this process has seen it.
     # Sending it now would answer the previous membership inside the new one.
@@ -744,9 +752,9 @@ def _advance_membership_epoch(
         """,
         (principal_id, room_id),
     )
-    # Approval cards are authored by the router principal, while the paused
+    # Approval cards are kept by the bookkeeping principal, while the paused
     # run belongs to the responding entity principal. Decide its calls and keep
-    # the router's terminal Matrix edit debt before this fence removes it.
+    # the cards' terminal Matrix edit debt before this fence removes it.
     approval_cards.expire_for_departed_responder(
         transaction,
         principal_id,
@@ -914,6 +922,8 @@ def admit_snapshotting_source(
 
     Batch admission snapshots only the actionable events it admits, after their disposition, so it calls ``_admit``.
     """
+    if event.kind is EventKind.COMPACTION and claim_active(transaction, principal_id, room_id=event.room_id) is None:
+        return AdmissionResult.MEMBERSHIP_FENCED
     result = _admit(transaction, principal_id, event, projected)
     if result is AdmissionResult.ADMITTED:
         _snapshot_interactive_source(transaction, principal_id, event)
@@ -1188,10 +1198,23 @@ def _pending_rows(
     cursor_params: tuple[object, ...] = () if after_receipt_order is None else (after_receipt_order,)
     room_clause = "" if room_id is None else " AND events.room_id = ?"
     room_params: tuple[object, ...] = () if room_id is None else (room_id,)
-    continuation_joins = f"""
-        LEFT JOIN ({approval_continuations.HELD_SOURCES})
+    # The rows of `LEFT JOIN (HELD_SOURCES)`, as two LEFT JOINs: SQLite cannot
+    # flatten a join on the right of a LEFT JOIN, so that form builds every
+    # principal's held sources, and an index over them, on each page with a
+    # pending row. The EXISTS keeps out a pending source no continuation holds.
+    continuation_joins = """
+        LEFT JOIN reply_span_sources AS held_source
           ON held_source.principal_id = events.principal_id
          AND held_source.event_id = events.event_id
+         AND held_source.role = 'pending'
+         AND EXISTS (
+             SELECT 1 FROM approval_continuations AS holder
+             WHERE holder.principal_id = held_source.principal_id
+               AND holder.span_id = held_source.span_id
+         )
+        LEFT JOIN approval_continuations AS continuations
+          ON continuations.principal_id = held_source.principal_id
+         AND continuations.span_id = held_source.span_id
         LEFT JOIN reply_spans AS claim_span
           ON claim_span.principal_id = continuations.principal_id
          AND claim_span.span_id = continuations.claim_span_id
@@ -1328,6 +1351,19 @@ def load(
     return None if row is None else _journal_event(row)
 
 
+def revise_pending(transaction: Transaction, principal_id: str, event_id: str, content: Mapping[str, object]) -> None:
+    """Store the content its sender edited a pending message to, which names that edit under ``ROUTE_REVISION_KEY``.
+
+    Its row keeps the kind it was admitted as, which a redelivery is matched against.
+    """
+    stored = load(transaction, principal_id, event_id)
+    if stored is not None:
+        transaction.execute(
+            "UPDATE journal_events SET source_json = ? WHERE principal_id = ? AND event_id = ? AND state = 'pending'",
+            (json.dumps({**stored.source, "content": content}), principal_id, event_id),
+        )
+
+
 def is_pending(transaction: Transaction, principal_id: str, event_id: str) -> bool:
     """Return whether one event still owes semantic work."""
     row = transaction.fetchone(
@@ -1452,6 +1488,31 @@ def _settle(transaction: Transaction, principal_id: str, event_id: str) -> None:
     )
 
 
+def settle_runtime_sources_of(transaction: Transaction, ends: Callable[[str], bool]) -> None:
+    """Settle the pending runtime sources of every principal whose entity ``ends`` names: it has no bot any more.
+
+    Only the entity's own runtime runs such a source, so its row would wait for an owner that never comes. One an
+    approval continuation holds is that approval's to settle, and replays if the entity returns before it does.
+    """
+    kinds = tuple(sorted(kind.value for kind in RUNTIME_SOURCE_KINDS))
+    # Placeholders are generated, values are still bound.
+    owed = f"state = 'pending' AND kind IN ({', '.join('?' for _ in kinds)})"
+    unheld = transaction.fetchall(
+        f"""
+        SELECT principal_id, event_id FROM journal_events WHERE {owed}
+          AND NOT EXISTS (
+              SELECT 1 FROM {approval_continuations.HELD_SOURCES}
+              WHERE held_source.principal_id = journal_events.principal_id
+                AND held_source.event_id = journal_events.event_id
+          )
+        """,  # noqa: S608
+        kinds,
+    )
+    for principal_id, event_id in ((str(row["principal_id"]), str(row["event_id"])) for row in unheld):
+        if ends(agent_of_principal(principal_id)):
+            _settle(transaction, principal_id, event_id)
+
+
 def settle_many(transaction: Transaction, principal_id: str, event_ids: tuple[str, ...]) -> None:
     """Settle several events that one terminal turn accounted for."""
     for event_id in event_ids:
@@ -1512,11 +1573,15 @@ def _journal_event(row: Row) -> JournalEvent:
     if not isinstance(source, dict):
         msg = f"Journal event {row['event_id']!r} has a non-object source"
         raise TypeError(msg)
+    kind, content = EventKind(row["kind"]), source.get("content")
+    if kind in (EventKind.MESSAGE, EventKind.MEDIA) and isinstance(content, dict) and ROUTE_REVISION_KEY in content:
+        # A waiting message replays as what its sender edited it to (revise_pending): a file event only for a long text.
+        kind = EventKind.MEDIA if content.get("msgtype") == "m.file" else EventKind.MESSAGE
     return JournalEvent(
         event_id=row["event_id"],
         room_id=row["room_id"],
         thread_id=decode_thread_id(row["thread_id"]),
-        kind=EventKind(row["kind"]),
+        kind=kind,
         sender=row["sender"],
         origin_server_ts=int(row["origin_server_ts"]),
         source=source,

@@ -91,7 +91,7 @@ Not included:
 
 ## [`openclaw_compat`]
 
-`openclaw_compat` is a preset that belongs in an agent's `tools:` list and expands to `shell`, `coding`, `duckduckgo`, `website`, `browser`, `scheduler`, and `matrix_message`.
+`openclaw_compat` is a preset that belongs in an agent's `tools:` list and expands to `shell`, `filesystem`, `duckduckgo`, `website`, `browser`, `scheduler`, and `matrix_message`.
 `matrix_message` also enables `attachments` and `matrix_room`, so the agent gets all nine tools.
 The preset has no callable functions of its own, and listing it next to one of its member tools does not create duplicates.
 
@@ -110,7 +110,7 @@ Use [knowledge bases](knowledge.md) only for non-memory documents that should be
 
 ## Context and history
 
-Preloaded `context_files` are capped by `defaults.max_preload_chars` (default `50000`); see [File-Based Context Loading](configuration/agents.md#file-based-context-loading) for what gets dropped when a workspace exceeds it.
+Each preloaded context file is limited on its own by `defaults.max_preload_file_chars` (default `30000`); see [File-Based Context Loading](configuration/agents.md#file-based-context-loading) for where a longer file is cut.
 How much conversation history each reply sees is set by `num_history_runs`, `num_history_messages`, and `compaction`; see [History & Compaction](configuration/history.md).
 
 ## Room conversations instead of threads

@@ -1,4 +1,4 @@
-"""Newer human messages that release a reply's waits, and child tool cancellation checkpoints."""
+"""Newer human messages that release a reply's waits, the reply's running tool calls, and cancellation checkpoints."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
 
 class _PendingHumanMessages(Protocol):
@@ -21,24 +21,43 @@ class _PendingHumanMessages(Protocol):
 
 
 @dataclass
+class ReplyToolCalls:
+    """The tool calls one reply runs now, and how many of them do nothing but wait on background jobs."""
+
+    # Called when a call ends, so the reply's waits look again at the messages waiting for it.
+    on_change: Callable[[], None]
+    running: int = 0
+    waiting: int = 0
+
+    def only_waiting(self) -> bool:
+        """Return whether every running call waits on jobs, and one at least does: the reply does no work now."""
+        return 0 < self.waiting == self.running
+
+
+@dataclass
 class JobControl:
     """Prevent future tool entry after explicit cancellation."""
 
     cancelled: bool = False
     shutdown: bool = False
+    # Set by a Stop of the reply that started the job, which then gets no further approval.
+    reply_stopped: bool = False
+    # The managed job this control belongs to; a worker's run-as-job control belongs to none.
+    job_id: str | None = None
 
     def cancel(self, *, shutdown: bool = False) -> None:
         """Prevent tool entry even when the operation catches task cancellation; the first cause stands."""
         if not self.cancelled:
             self.cancelled, self.shutdown = True, shutdown
 
-    def checkpoint(self) -> None:
-        """Fail on cancellation without creating waiters on another event loop."""
-        if self.cancelled:
+    def checkpoint(self, *, approval: bool = False) -> None:
+        """Fail on cancellation, or on an approval step after the reply's Stop, without event-loop waiters."""
+        if self.cancelled or (approval and self.reply_stopped):
             raise asyncio.CancelledError
 
 
 _pending_human: ContextVar[_PendingHumanMessages | None] = ContextVar("job_pending_human_messages", default=None)
+_reply_calls: ContextVar[ReplyToolCalls | None] = ContextVar("job_reply_tool_calls", default=None)
 _control: ContextVar[JobControl | None] = ContextVar("job_control", default=None)
 
 
@@ -48,13 +67,48 @@ def current_pending_human_messages() -> _PendingHumanMessages | None:
 
 
 @contextmanager
-def pending_human_messages_context(messages: _PendingHumanMessages | None) -> Iterator[None]:
-    """Bind the waiting human messages of one response lifecycle, or clear them for background work."""
+def pending_human_messages_context(
+    messages: _PendingHumanMessages | None,
+    *,
+    calls: ReplyToolCalls | None = None,
+) -> Iterator[None]:
+    """Bind the waiting human messages and the running tool calls of one reply, or clear both for background work."""
     token = _pending_human.set(messages)
+    calls_token = _reply_calls.set(calls)
     try:
         yield
     finally:
+        _reply_calls.reset(calls_token)
         _pending_human.reset(token)
+
+
+@contextmanager
+def counted_tool_call() -> Iterator[None]:
+    """Count one tool call of the running reply while it runs."""
+    calls = _reply_calls.get()
+    if calls is None:
+        yield
+        return
+    calls.running += 1
+    try:
+        yield
+    finally:
+        calls.running -= 1
+        calls.on_change()
+
+
+@contextmanager
+def waiting_on_jobs() -> Iterator[None]:
+    """Mark the running call as doing nothing but waiting on background jobs while it waits."""
+    calls = _reply_calls.get()
+    if calls is None:
+        yield
+        return
+    calls.waiting += 1
+    try:
+        yield
+    finally:
+        calls.waiting -= 1
 
 
 @contextmanager
@@ -67,11 +121,17 @@ def job_control_context(control: JobControl) -> Iterator[None]:
         _control.reset(token)
 
 
-def job_checkpoint() -> None:
-    """Enforce the active job's cancellation immediately before tool execution."""
+def job_checkpoint(*, approval: bool = False) -> None:
+    """Enforce the active job's cancellation immediately before tool execution, or its reply's Stop at an approval."""
     control = _control.get()
     if control is not None:
-        control.checkpoint()
+        control.checkpoint(approval=approval)
+
+
+def current_job_id() -> str | None:
+    """Return the ID of the managed job this task runs in, None outside one."""
+    control = _control.get()
+    return None if control is None else control.job_id
 
 
 def job_owns_execution() -> bool:

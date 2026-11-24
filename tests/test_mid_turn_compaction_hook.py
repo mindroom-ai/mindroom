@@ -10,10 +10,12 @@ from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks, SendRequest
 from mindroom.agent_loop.run import run_agent
 from mindroom.config.models import CompactionConfig, ModelConfig
 from mindroom.history import mid_turn_compaction
+from mindroom.history.conversation_text import own_thread_message
 from mindroom.history.mid_turn_compaction import mid_turn_compaction_hook
 from mindroom.history.summary_message import is_compaction_summary
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import DeferredTools, ModelRequest, NativeCompactionReplay
+from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.providers.openai.responses_wire import ResponsesWire, responses_request_kwargs
 from mindroom.providers.openai.settings import ResponsesSettings
 from mindroom.providers.pipeline.wrapped import WrappedProvider
@@ -300,3 +302,40 @@ async def test_tools_the_request_defers_stay_out_of_its_size(
     assert record.content == "done"
     # The 80,000-character definition alone exceeds the 4,000-token window; deferred, the request fits.
     assert len(summaries) == (0 if deferred else 1)
+
+
+@pytest.mark.asyncio
+async def test_a_fold_without_a_bound_prompt_keeps_the_question_after_the_agents_own_thread_message(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An approval resume binds no prompt id; its fold keeps the question, not the agent's own message before it.
+
+    The own message is a user message in the request, so the summary reads it as the assistant's and folds it.
+    """
+    config, runtime_paths = _small_window_config(tmp_path)
+    summarizer = summary_model("SUMMARY")
+    install_model_providers(monkeypatch, {"summary": summarizer})
+    model = ScriptedModel([calls(tool_call("probe", "call_1")), answer("done")])
+    own = render_msg_tag(sender="@agent:localhost", body="mockup.png", event_id="$sent", sent_by_you=True)
+
+    _, record = await collect(
+        run_agent(
+            spec(model, toolkit(probe)),
+            [own_thread_message(own), Message(role="user", content="Did it work?")],
+            ctx=context(),
+            hooks=LoopHooks(before_request=(_run_local_hook(config, runtime_paths, model),)),
+            persist=None,
+            request_template=EMPTY_REQUEST,
+        ),
+    )
+
+    assert record.content == "done"
+    folded = model.requests[1].messages
+    assert is_compaction_summary(folded[-1])
+    assert [message.content for message in folded if message.role == "user" and not is_compaction_summary(message)] == [
+        "Did it work?",
+    ]
+    (summary_request,) = summarizer.requests
+    summary_input = "\n".join(str(message.content) for message in summary_request.messages)
+    assert '<message role="assistant">\nmockup.png\n</message>' in summary_input

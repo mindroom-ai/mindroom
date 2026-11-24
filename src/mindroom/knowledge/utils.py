@@ -24,14 +24,15 @@ from mindroom.knowledge.registry import (
     get_published_index,
     refresh_target_for_published_index_key,
 )
-from mindroom.knowledge.rerank import create_reranker
+from mindroom.knowledge.rerank import build_reranker
 from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.logging_config import get_logger
 from mindroom.runtime_protocols import SupportsConfigOrchestrator  # noqa: TC001
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
+    from mindroom.config.knowledge import RerankerConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -42,6 +43,7 @@ __all__ = [
     "KnowledgeAccessSupport",
     "KnowledgeAvailabilityDetail",
     "KnowledgeBaseAccessResolution",
+    "configured_reranker",
     "format_knowledge_availability_notice",
     "knowledge_runtime_identity",
     "resolve_agent_knowledge_access",
@@ -298,7 +300,7 @@ def resolve_agent_knowledge_access(
         agent_name,
         base_ids,
         resolved_bases,
-        reranker=_configured_reranker(config, runtime_paths),
+        reranker=configured_reranker(config, runtime_paths),
     )
 
 
@@ -344,19 +346,30 @@ async def resolve_agent_knowledge_access_async(
         agent_name,
         base_ids,
         resolved_bases,
-        reranker=await asyncio.to_thread(_configured_reranker, config, runtime_paths),
+        reranker=configured_reranker(config, runtime_paths),
     )
 
 
-def _configured_reranker(config: Config, runtime_paths: RuntimePaths) -> Reranker | None:
-    """Return the configured knowledge reranker, or None when none is configured or it cannot be built."""
-    if config.knowledge_reranker is None:
-        return None
-    try:
-        return create_reranker(config.knowledge_reranker, runtime_paths)
-    except Exception:
-        logger.warning("Knowledge reranker unavailable; searches keep their ranking", exc_info=True)
-        return None
+@dataclass(frozen=True)
+class _DeferredReranker:
+    """The configured reranker, built each time it scores.
+
+    A slow build, such as the first install of the sentence-transformers extra, then counts against the caller's
+    deadline; a search that finds a build of the same config running waits for it, and a failed build fails that
+    scoring, which keeps the search order.
+    """
+
+    config: RerankerConfig
+    runtime_paths: RuntimePaths
+
+    async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
+        reranker = await build_reranker(self.config, self.runtime_paths)
+        return await reranker.ascore(query, documents)
+
+
+def configured_reranker(config: Config, runtime_paths: RuntimePaths) -> Reranker | None:
+    """Return the configured reranker, built when it scores, or None when none is configured."""
+    return None if config.reranker is None else _DeferredReranker(config.reranker, runtime_paths)
 
 
 def _merge_agent_knowledge_resolutions(

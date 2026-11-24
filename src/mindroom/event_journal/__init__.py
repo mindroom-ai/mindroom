@@ -15,8 +15,8 @@ from mindroom.event_journal.history_recovery import (
 from mindroom.interactive_models import InteractiveSelection
 
 from .approval_calls import (
-    DEFAULT_ROUTER_MANAGED_ROOM_REASON,
     JOB_ENDED_REASON,
+    REPLY_STOPPED_REASON,
     ApprovalCall,
     ApprovalDecision,
     BackgroundApprovalDecision,
@@ -41,6 +41,7 @@ from .approval_continuations import (
 from .identity import decode_thread_id, delivery_transaction_id, encode_thread_id
 from .journal import validate_ingestion_batch_admission
 from .models import (
+    RUNTIME_SOURCE_KINDS,
     TURN_BACKED_KINDS,
     AdmissionFacts,
     AdmissionResult,
@@ -88,7 +89,7 @@ from .scheduled_approvals import (
     scheduled_call_run_id,
 )
 from .store import EventJournalStore, PrincipalStore, ToolJobStore
-from .tool_jobs import SavedToolJob, ToolJobExistsError, ToolJobOwnershipLostError
+from .tool_jobs import SavedToolJob, ToolJobExistsError, ToolJobOwnershipLostError, ToolJobSnapshotUpdate
 from .turn_rows import TurnRecordStore
 from .views import (
     ApprovalDeliveryView,
@@ -102,8 +103,9 @@ from .views import (
 )
 
 __all__ = [
-    "DEFAULT_ROUTER_MANAGED_ROOM_REASON",
     "JOB_ENDED_REASON",
+    "REPLY_STOPPED_REASON",
+    "RUNTIME_SOURCE_KINDS",
     "SCHEDULED_APPROVAL_WINDOW_NS",
     "TIMEOUT_REASON",
     "TURN_BACKED_KINDS",
@@ -174,6 +176,7 @@ __all__ = [
     "SemanticConsumer",
     "ToolJobExistsError",
     "ToolJobOwnershipLostError",
+    "ToolJobSnapshotUpdate",
     "ToolJobStore",
     "TurnRecordStore",
     "UnreadableMatrixDelivery",

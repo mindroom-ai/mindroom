@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Protocol
 import aiohttp
 import nio
 
+from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.logging_config import get_logger
 from mindroom.matrix_rtc.events import (
     CALL_MEMBER_EVENT_TYPE,
@@ -25,7 +26,7 @@ from mindroom.matrix_rtc.events import (
     build_membership_content,
     membership_state_key,
 )
-from mindroom.matrix_rtc.frame_keys import FrameKeyManager
+from mindroom.matrix_rtc.frame_keys import _USE_KEY_DELAY_MS, FrameKeyManager
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine
@@ -73,6 +74,10 @@ class VoiceBridgeLike(Protocol):
         """Restrict media input and output to the current Matrix call roster."""
         ...
 
+    def vacate_roster(self) -> None:
+        """Keep the last roster's media after the Matrix roster emptied, ending once it leaves the SFU."""
+        ...
+
     async def connect(self, grant: SfuGrant) -> None:
         """Connect to the SFU with the granted credentials."""
         ...
@@ -113,10 +118,13 @@ class CallSessionDeps:
     bridge: VoiceBridgeLike
     key_transport: _FrameKeyTransportLike
     fetch_grant: Callable[[], Coroutine[None, None, SfuGrant]]
-    agent_options: CallVoiceAgentOptions
+    #: Prepares the voice agent while the session joins the call's media.
+    prepare_agent: Callable[[], Coroutine[None, None, CallVoiceAgentOptions]]
     livekit_service_url: str
     start_is_allowed: Callable[[], bool]
     clock_ms: Callable[[], int] = lambda: int(time.time() * 1000)
+    #: Frame-key timing (grace and activation delay); a wall-clock jump cannot shorten it.
+    monotonic_ms: Callable[[], int] = lambda: int(time.monotonic() * 1000)
     #: Awaited once after the session fully stopped (transcript finalization).
     on_stopped: Callable[[], Coroutine[None, None, None]] | None = None
     #: Publish a safe, actionable failure notice into the Matrix room.
@@ -142,8 +150,13 @@ class CallSession:
     _key_distribution_retry_scheduled: bool = field(default=False, init=False)
     _key_distribution_wakeup_scheduled: bool = field(default=False, init=False)
     _key_retry_attempt: int = field(default=0, init=False)
+    _applied_key_generation: int = field(default=-1, init=False)
+    _agent_options: CallVoiceAgentOptions | None = field(default=None, init=False)
     _undelivered_key_device_ids: frozenset[str] = field(default_factory=frozenset, init=False)
     _reported_failure_codes: set[str] = field(default_factory=set, init=False)
+    _preparing_agent: asyncio.Task[CallVoiceAgentOptions] | None = field(default=None, init=False)
+    #: When each start step finished, in ``time.monotonic()`` seconds.
+    start_stages: dict[str, float] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         """Initialize the frame-key manager from the client identity."""
@@ -165,11 +178,31 @@ class CallSession:
         return f"{client.user_id}:{required_device_id(client)}"
 
     async def start(self, members: list[CallMember]) -> None:
-        """Join the call: connect media, publish membership, distribute keys."""
+        """Join the call: connect media, publish membership, distribute keys, then start the voice agent.
+
+        The voice agent is prepared while the media steps, which hold most of a join's wait, run.
+        """
         self._members = members
         self._sync_bridge_participants()
+        stages = self.start_stages
+
+        def prepared(task: asyncio.Task[CallVoiceAgentOptions]) -> None:
+            stages["agent_prepared"] = time.monotonic()
+            # A join that fails in a media step never awaits the preparation, so take its failure here.
+            if not task.cancelled():
+                task.exception()
+
+        preparing: asyncio.Task[CallVoiceAgentOptions] | None = None
         try:
+            # A caller whose access went while the service was discovered gets no agent built.
+            self._require_start_allowed()
+            preparing = self._preparing_agent = asyncio.create_task(
+                self.deps.prepare_agent(),
+                name=f"matrix_rtc_prepare_agent_{self.room_id}",
+            )
+            preparing.add_done_callback(prepared)
             grant = await self.deps.fetch_grant()
+            stages["sfu_granted"] = time.monotonic()
             self._require_start_allowed()
             try:
                 await self.deps.bridge.connect(grant)
@@ -178,31 +211,63 @@ class CallSession:
                 # manager's join guard handles them as an ordinary failed join.
                 msg = f"LiveKit SFU connect failed: {error}"
                 raise CallJoinError(msg) from error
+            stages["sfu_connected"] = time.monotonic()
             self._require_start_allowed()
             await self._publish_membership(initial=True)
+            stages["membership_published"] = time.monotonic()
             self._require_start_allowed()
             if self.e2ee_enabled:
                 await self._distribute_keys()
+                stages["keys_sent"] = time.monotonic()
                 self._require_start_allowed()
             self._spawn(self._membership_refresh_loop())
+            # Shielded: a cancelled start leaves the media at once instead of after an agent build drains.
+            options = self._agent_options = await asyncio.shield(preparing)
             self._require_start_allowed()
             try:
-                await self.deps.bridge.start_agent(self.deps.agent_options)
+                await self.deps.bridge.start_agent(options)
             except Exception as error:
                 if isinstance(error, CallJoinError):
                     raise
                 msg = f"Voice agent start failed: {error}"
                 raise CallJoinError(msg) from error
+            stages["agent_started"] = time.monotonic()
             self._require_start_allowed()
-        except BaseException:
-            await self.stop()
+        except BaseException as error:
+            await self._end_failed_start(error, preparing)
             raise
         logger.info("call_joined", room_id=self.room_id, identity=self._local_identity)
 
+    async def _end_failed_start(
+        self,
+        error: BaseException,
+        preparing: asyncio.Task[CallVoiceAgentOptions] | None,
+    ) -> None:
+        """Leave the media first, then wait out the agent preparation, whose failure decides the outcome."""
+        if preparing is not None:
+            preparing.cancel()
+        try:
+            await self.stop()
+        finally:
+            if preparing is not None:
+                # The real agent build finishes before it takes a cancellation, and none may outlive the start.
+                # Awaited directly, so a cancellation arriving now still finds the wait running.
+                await wait_for_future_until_complete(asyncio.gather(preparing, return_exceptions=True))
+        if not isinstance(error, Exception) or isinstance(error, CallStartRevokedError) or preparing is None:
+            return
+        failure = None if preparing.cancelled() else preparing.exception()
+        if failure is not None and failure is not error:
+            # An agent that cannot start is skipped, whatever media step failed after its preparation did.
+            raise failure
+
     def _require_start_allowed(self) -> None:
-        """Abort before the next call-start side effect when ownership was revoked."""
-        if not self.deps.start_is_allowed():
+        """Abort before the next call-start side effect when ownership was revoked or the agent's preparation failed."""
+        if self._stopped or not self.deps.start_is_allowed():
             raise CallStartRevokedError
+        preparing = self._preparing_agent
+        if preparing is not None and preparing.done():
+            # Raises the preparation's failure, so a call whose agent cannot start publishes nothing more.
+            preparing.result()
 
     async def on_members_changed(self, members: list[CallMember]) -> None:
         """React to remote membership changes (key rotation/sharing)."""
@@ -215,6 +280,11 @@ class CallSession:
         # A roster change is a fresh delivery opportunity: restart the backoff.
         self._key_retry_attempt = 0
         await self._distribute_keys()
+
+    def vacate_roster(self) -> None:
+        """Keep this roster's media and frame keys while the caller's lapsed membership returns."""
+        if not self._stopped:
+            self.deps.bridge.vacate_roster()
 
     def on_key_received(self, received: ReceivedFrameKey) -> bool:
         """Install a current participant's frame key and report roster admission."""
@@ -231,6 +301,10 @@ class CallSession:
         if member is None:
             return False
         participant_identity = f"{member.user_id}:{member.device_id}"
+        if participant_identity == self._local_identity:
+            # A colon in a server or device ID can make another device's identity read as ours.
+            logger.warning("call_frame_key_aliases_own_identity", room_id=self.room_id, user_id=member.user_id)
+            return True
         inbound = self._key_manager.receive(
             received,
             participant_identity=participant_identity,
@@ -304,34 +378,40 @@ class CallSession:
             if self._stopped:
                 return
             members = list(self._members)
-            distribution = self._key_manager.update_memberships(members, self.deps.clock_ms())
+            distribution = self._key_manager.update_memberships(members, self.deps.monotonic_ms())
             if distribution is None:
                 return
             delivered: list[CallMember] = []
-            if distribution.targets:
-                self._key_manager.mark_exposed(distribution)
-                delivered = await self.deps.key_transport.send_key(
-                    room_id=self.room_id,
-                    key_base64=distribution.key_base64,
-                    key_index=distribution.key_index,
-                    targets=list(distribution.targets),
+            raised = True
+            try:
+                if distribution.targets:
+                    self._key_manager.mark_exposed(distribution)
+                    delivered = await self.deps.key_transport.send_key(
+                        room_id=self.room_id,
+                        key_base64=distribution.key_base64,
+                        key_index=distribution.key_index,
+                        targets=list(distribution.targets),
+                    )
+                raised = False
+            finally:
+                first_attempt = self._key_manager.mark_distributed(distribution, tuple(delivered))
+                delivered_members = set(delivered)
+                undelivered_device_ids = frozenset(
+                    target.device_id for target in distribution.targets if target not in delivered_members
                 )
-            self._key_manager.mark_distributed(distribution, tuple(delivered))
-            delivered_members = set(delivered)
-            undelivered_device_ids = frozenset(
-                target.device_id for target in distribution.targets if target not in delivered_members
-            )
-            if not undelivered_device_ids:
-                self._key_retry_attempt = 0
-                self._undelivered_key_device_ids = frozenset()
-            else:
-                self._schedule_key_distribution_retry(undelivered_device_ids)
-            if distribution.apply_after_ms <= 0:
-                self._apply_own_key(distribution.key, distribution.key_index)
-            else:
-                self._spawn(
-                    self._apply_own_key_later(distribution.key, distribution.key_index, distribution.apply_after_ms),
-                )
+                if not undelivered_device_ids:
+                    self._key_retry_attempt = 0
+                    self._undelivered_key_device_ids = frozenset()
+                else:
+                    self._schedule_key_distribution_retry(undelivered_device_ids)
+                # One deadline per key generation, fixed when its first send attempt ends. A raised send
+                # fixes it too (fail closed), so the old key still retires.
+                own_key = (distribution.key, distribution.key_index, distribution.generation)
+                if first_attempt and not self._stopped and (raised or distribution.generation):
+                    delay_ms = _USE_KEY_DELAY_MS if distribution.generation else 0
+                    self._spawn(self._apply_own_key_at(self.deps.monotonic_ms() + delay_ms, *own_key))
+            if first_attempt and distribution.generation == 0:
+                self._apply_own_key(*own_key)
 
     def _schedule_key_distribution_retry(
         self,
@@ -382,8 +462,24 @@ class CallSession:
         self._reported_failure_codes.add(code)
         self._spawn(self.deps.on_failure(message))
 
-    def _apply_own_key(self, key: bytes, key_index: int) -> None:
-        self.deps.bridge.set_frame_key(self._local_identity, key, key_index)
+    def _apply_own_key(self, key: bytes, key_index: int, generation: int) -> None:
+        # Only a newer generation applies, so an older key never takes slot 0 or our senders back.
+        if self._stopped or generation <= self._applied_key_generation:
+            return
+        try:
+            self.deps.bridge.set_frame_key(self._local_identity, key, key_index)
+        except Exception:
+            # Fail closed: end the call rather than keep sending on a key that should have retired.
+            logger.exception("call_own_key_install_failed", room_id=self.room_id, key_index=key_index)
+            self._stopped = True
+            options = self._agent_options
+            if options is None or options.on_session_terminated is None:
+                raise
+            if options.on_session_error is not None:
+                options.on_session_error("Encrypted call error: the agent left because it could not switch keys.")
+            options.on_session_terminated(True)
+            return
+        self._applied_key_generation = generation
 
     def _sync_bridge_participants(self) -> None:
         """Apply the authoritative Matrix call roster to the SFU bridge."""
@@ -391,10 +487,10 @@ class CallSession:
             frozenset(f"{member.user_id}:{member.device_id}" for member in self._members),
         )
 
-    async def _apply_own_key_later(self, key: bytes, key_index: int, delay_ms: int) -> None:
-        await asyncio.sleep(delay_ms / 1000)
-        if not self._stopped and self._key_manager.is_current_outbound_key(key, key_index):
-            self._apply_own_key(key, key_index)
+    async def _apply_own_key_at(self, deadline_ms: int, key: bytes, key_index: int, generation: int) -> None:
+        # Outside the distribution lock: a newer key's slow send cannot postpone this one.
+        await asyncio.sleep(max(0, deadline_ms - self.deps.monotonic_ms()) / 1000)
+        self._apply_own_key(key, key_index, generation)
 
     async def _publish_membership(self, *, initial: bool, expires_iteration: int | None = None) -> bool:
         """Publish or refresh our membership state event; returns success."""

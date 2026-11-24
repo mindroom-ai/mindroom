@@ -35,11 +35,12 @@ if TYPE_CHECKING:
     managed_init_args=(
         ToolManagedInitArg.RUNTIME_PATHS,
         ToolManagedInitArg.WORKER_TARGET,
+        ToolManagedInitArg.RUNTIME_CONFIG,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
         ToolManagedInitArg.WORKSPACE_IN_WORKER,
         ToolManagedInitArg.FILE_ACCESS,
     ),
-    function_names=("get_attachment", "list_attachments", "register_attachment", "view_file"),
+    function_names=("get_attachment", "inline_image", "list_attachments", "register_attachment", "view_file"),
 )
 def attachments_tools() -> type[AttachmentTools]:
     """Return attachments tools."""

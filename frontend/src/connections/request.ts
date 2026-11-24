@@ -16,8 +16,8 @@ export interface RequestErrorMessages {
   forbiddenDetail?: boolean;
 }
 
-// Conflicts, oversized bodies, and invalid bodies explain themselves.
-const USER_FACING_DETAIL_STATUSES = new Set([409, 413, 422]);
+// Conflicts, failed preconditions, oversized bodies, and invalid bodies explain themselves.
+const USER_FACING_DETAIL_STATUSES = new Set([409, 412, 413, 422]);
 
 /**
  * Read an error `detail` that is either a string or FastAPI's list of
@@ -74,6 +74,7 @@ export async function requestConnection<T>(
   method = "GET",
   body: object = {},
   messages: RequestErrorMessages = {},
+  headers: Record<string, string> = {},
 ): Promise<T> {
   const hasBody = method === "POST" || method === "PUT";
   let response: Response;
@@ -87,6 +88,7 @@ export async function requestConnection<T>(
           ? { "X-MindRoom-Connections-User": signedInUser }
           : {}),
         ...(hasBody ? { "Content-Type": "application/json" } : {}),
+        ...headers,
       },
       ...(hasBody ? { body: JSON.stringify(body) } : {}),
     });

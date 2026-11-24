@@ -2,15 +2,20 @@
 
 Every read takes a limit. There is no API that materializes a whole room,
 because the only thing standing between a busy room and an unbounded query is
-whether such a call exists to be made.
+whether such a call exists to be made. A thread's fingerprint reads all of one
+thread's rows, but only their IDs and refresh tokens, never their content.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from mindroom.matrix_identifiers import has_agent_username
+from mindroom.tool_system.events import tool_markers_in_text
+
 from .identity import agent_of_principal, decode_thread_id, encode_thread_id
-from .membership_state import claim_membership_epoch
+from .membership_state import claim_membership_epoch, projection_generation
 from .models import (
     ConversationCursor,
     ConversationPage,
@@ -146,7 +151,7 @@ def read_conversation(
     refresh_pending: list[RefreshRequest] = []
     for row in rows:
         if row["content_json"] is None:
-            refresh_pending.append(_refresh_request(row))
+            refresh_pending.append(_refresh_request(transaction, principal_id, row))
             continue
         messages.append(_visible_message(row))
     next_cursor = (
@@ -215,7 +220,7 @@ def read_room_after(
     kept = _rows_within_content_budget(sizes[:limit])
     rows = _load_rows(transaction, principal_id, room_id=room_id, sized=sizes[:kept])
     rows = rows[: _rows_within_decoded_budget(rows)]
-    pending = tuple(_refresh_request(row) for row in rows if row["content_json"] is None)
+    pending = tuple(_refresh_request(transaction, principal_id, row) for row in rows if row["content_json"] is None)
     first_pending = next((index for index, row in enumerate(rows) if row["content_json"] is None), len(rows))
     messages = tuple(_visible_message(row) for row in rows[:first_pending])
     return RoomPage(
@@ -252,6 +257,180 @@ def latest_room_cursor(transaction: Transaction, principal_id: str, *, room_id: 
     if row is None:
         return None
     return ConversationCursor(created_ts=int(row["created_ts"]), logical_event_id=row["logical_event_id"])
+
+
+# The largest root a room activity read loads for a thread's title. A title is
+# one cut line, but anyone who can post can make a root a resolved long-text
+# sidecar.
+_ROOM_ACTIVITY_TITLE_BYTES = 64 * 1024
+# The largest message that counts as a summary notice. A notice holds its
+# summary of at most 300 characters three times, and stored JSON escapes a
+# character outside the Basic Multilingual Plane to twelve bytes, so the longest
+# title takes about 12 KB.
+_ROOM_ACTIVITY_SUMMARY_BYTES = 16 * 1024
+# How many of a thread's newest summary notices a read loads. Anyone who can
+# post can name the key, so this and the size bound keep a read's summary
+# content to a few megabytes at most, however it decodes.
+_ROOM_ACTIVITY_SUMMARY_LIMIT = 5
+# Whether a row is a summary notice: small, and its content names the key.
+# CASE fixes the order on both backends, so no larger row is searched. A `_` in
+# the key also matches any character, so a caller checks the key it decodes.
+_SUMMARY_ROW = "CASE WHEN octet_length(content_json) > ? THEN 0 WHEN content_json LIKE ? THEN 1 ELSE 0 END"
+
+# The newest messages of a window, in any thread or none, without their content.
+_ROOM_ACTIVITY_ROWS_SQL = f"""
+    SELECT logical_event_id, thread_id, sender, created_ts, {_SUMMARY_ROW} AS is_summary
+    FROM visible_messages
+    WHERE principal_id = ? AND room_id = ? AND created_ts > ? AND created_ts <= ?
+    ORDER BY created_ts DESC, logical_event_id DESC
+    LIMIT ?
+"""  # noqa: S608 - a fixed clause, not input
+# One thread's newest messages in the thread index's order, which are summary
+# notices, and when each was last revised.
+_ROOM_ACTIVITY_TAIL_SQL = f"""
+    SELECT logical_event_id, revision_ts, {_SUMMARY_ROW} AS is_summary FROM visible_messages
+    WHERE principal_id = ? AND room_id = ? AND thread_id = ?
+    ORDER BY created_ts DESC, logical_event_id DESC
+    LIMIT ?
+"""  # noqa: S608 - a fixed clause, not input
+
+
+def _rows_by_id_sql(count: int) -> str:
+    """Return the query loading ``count`` messages named by ID, each no larger than a size bound."""
+    placeholders = ", ".join("?" for _ in range(count))
+    return f"""
+        SELECT {_PAGE_COLUMNS} FROM visible_messages
+        WHERE principal_id = ? AND room_id = ? AND logical_event_id IN ({placeholders})
+        AND octet_length(content_json) <= ?
+    """  # noqa: S608 - a fixed column list and generated placeholders, not input
+
+
+def _thread_summaries(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    thread_id: str,
+    summary_tail: int,
+    summary: tuple[int, str],
+) -> tuple[VisibleMessage, ...]:
+    """Return the most recently revised summary notices among one thread's newest ``summary_tail`` messages.
+
+    They are ordered by when they were last revised, oldest first, as the title
+    rules order them, so an old notice edited into the current title is kept.
+    """
+    flagged = [
+        row
+        for row in transaction.fetchall(
+            _ROOM_ACTIVITY_TAIL_SQL,
+            (*summary, principal_id, room_id, thread_id, summary_tail),
+        )
+        if row["is_summary"]
+    ]
+    flagged.sort(key=lambda row: (int(row["revision_ts"]), row["logical_event_id"]), reverse=True)
+    newest = [row["logical_event_id"] for row in flagged[:_ROOM_ACTIVITY_SUMMARY_LIMIT]]
+    if not newest:
+        return ()
+    rows = transaction.fetchall(
+        _rows_by_id_sql(len(newest)),
+        (principal_id, room_id, *newest, _ROOM_ACTIVITY_SUMMARY_BYTES),
+    )
+    return tuple(
+        sorted(
+            (_visible_message(row) for row in rows),
+            key=lambda message: (message.revision_ts, message.logical_event_id),
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _RecentMessage:
+    """One message of a room activity window, without its content."""
+
+    logical_event_id: str
+    sender: str
+    created_ts: int
+
+
+@dataclass(frozen=True, slots=True)
+class ThreadActivity:
+    """One thread's messages in a room activity window, and what its title can be read from."""
+
+    thread_id: str
+    # The window's messages in this thread other than summary notices, newest first.
+    recent: tuple[_RecentMessage, ...]
+    # The thread's root, unless it was redacted, awaits a refetch, or is too large for a title.
+    root: VisibleMessage | None
+    # The most recently revised summary notices among the thread's newest messages, oldest first.
+    summaries: tuple[VisibleMessage, ...]
+
+
+def room_thread_activity(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    since_ts: int,
+    until_ts: int,
+    exclude_thread_id: str | None,
+    thread_limit: int,
+    row_limit: int,
+    summary_tail: int,
+    summary_key: str,
+) -> tuple[ThreadActivity, ...]:
+    """Return the threads of a room with messages stamped after ``since_ts`` up to ``until_ts``, most recent first.
+
+    Only the newest ``row_limit`` messages of the window are counted, in any
+    thread or at the room level, so a busy window costs no more than that and
+    its oldest messages go uncounted. Room-level messages, ``exclude_thread_id``,
+    and summary notices, the messages of at most ``_ROOM_ACTIVITY_SUMMARY_BYTES``
+    whose content names ``summary_key``, are left out, and at most
+    ``thread_limit`` threads are returned. For each, the root, at most
+    ``_ROOM_ACTIVITY_TITLE_BYTES``, and the ``_ROOM_ACTIVITY_SUMMARY_LIMIT`` most
+    recently revised summary notices among its newest ``summary_tail`` messages
+    are loaded with their content; no other message's content is.
+    """
+    if min(thread_limit, row_limit, summary_tail) <= 0:
+        msg = "A room activity read requires positive limits"
+        raise ValueError(msg)
+    summary = (_ROOM_ACTIVITY_SUMMARY_BYTES, f'%"{summary_key}"%')
+    excluded = {encode_thread_id(None), encode_thread_id(exclude_thread_id)}
+    recent: dict[str, list[_RecentMessage]] = {}
+    for row in transaction.fetchall(
+        _ROOM_ACTIVITY_ROWS_SQL,
+        (*summary, principal_id, room_id, since_ts, until_ts, row_limit),
+    ):
+        thread_id = row["thread_id"]
+        if row["is_summary"] or thread_id in excluded or (thread_id not in recent and len(recent) == thread_limit):
+            continue
+        recent.setdefault(thread_id, []).append(
+            _RecentMessage(row["logical_event_id"], row["sender"], int(row["created_ts"])),
+        )
+    if not recent:
+        return ()
+    roots = {
+        row["logical_event_id"]: _visible_message(row)
+        for row in transaction.fetchall(
+            _rows_by_id_sql(len(recent)),
+            (principal_id, room_id, *recent, _ROOM_ACTIVITY_TITLE_BYTES),
+        )
+    }
+    return tuple(
+        ThreadActivity(
+            thread_id=thread_id,
+            recent=tuple(messages),
+            root=roots.get(thread_id),
+            summaries=_thread_summaries(
+                transaction,
+                principal_id,
+                room_id=room_id,
+                thread_id=thread_id,
+                summary_tail=summary_tail,
+                summary=summary,
+            ),
+        )
+        for thread_id, messages in recent.items()
+    )
 
 
 def _page_rows(
@@ -529,6 +708,41 @@ def conversation_is_complete(
     return row is not None and bool(row["complete"]) and row["recovery_state"] is None
 
 
+# A thread's hydration marker, and each of its rows' logical ID, visible revision, and refresh token.
+type ThreadFingerprint = tuple[tuple[object, ...], frozenset[tuple[str, str, int | None]]]
+
+
+def thread_fingerprint(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    room_id: str,
+    thread_id: str,
+) -> ThreadFingerprint | None:
+    """Return what a strict read of one thread depends on, loading no content, or None while no marker stands.
+
+    Every write to a visible message adds or removes its row, installs another revision, or sets or clears its refresh
+    token, which a redaction sets to its own receipt order. Without a marker a strict read walks the server again.
+    """
+    marker = _current_hydration(transaction, principal_id, room_id=room_id, thread_id=thread_id)
+    if marker is None:
+        return None
+    rows = transaction.fetchall(
+        """
+        SELECT logical_event_id, revision_event_id, refresh_token FROM visible_messages
+        WHERE principal_id = ? AND room_id = ? AND thread_id = ?
+        UNION ALL
+        SELECT logical_event_id, revision_event_id, refresh_token FROM visible_messages
+        WHERE principal_id = ? AND room_id = ? AND logical_event_id = ?
+        """,
+        (principal_id, room_id, encode_thread_id(thread_id), principal_id, room_id, thread_id),
+    )
+    return (
+        tuple(marker[column] for column in ("hydrated_epoch", "complete", "attempted_policy_rank", "recovery_state")),
+        frozenset((row["logical_event_id"], row["revision_event_id"], row["refresh_token"]) for row in rows),
+    )
+
+
 def conversation_hydration_coverage(
     transaction: Transaction,
     principal_id: str,
@@ -600,6 +814,7 @@ def mark_conversation_hydrated(
     complete: bool,
     attempted_policy_rank: int,
     expected_membership_epoch: int,
+    expected_projection_generation: int,
 ) -> bool:
     """Publish a completed hydration, unless membership moved under it.
 
@@ -620,6 +835,7 @@ def mark_conversation_hydrated(
         principal_id,
         room_id=room_id,
         expected_membership_epoch=expected_membership_epoch,
+        expected_projection_generation=expected_projection_generation,
     ):
         return False
     publish_conversation_hydration(
@@ -690,6 +906,10 @@ def revoke_room_hydration(transaction: Transaction, principal_id: str, *, room_i
 
 
 def _visible_message(row: Row) -> VisibleMessage:
+    content = decode_content(row["content_json"])
+    if has_agent_username(row["sender"]):
+        # A row stored by the release before tool markers left the text holds an upgraded agent's reply without them.
+        content = tool_markers_in_text(content)
     return VisibleMessage(
         logical_event_id=row["logical_event_id"],
         room_id=row["room_id"],
@@ -698,11 +918,11 @@ def _visible_message(row: Row) -> VisibleMessage:
         created_ts=int(row["created_ts"]),
         revision_event_id=row["revision_event_id"],
         revision_ts=int(row["revision_ts"]),
-        content=decode_content(row["content_json"]),
+        content=content,
     )
 
 
-def _refresh_request(row: Row) -> RefreshRequest:
+def _refresh_request(transaction: Transaction, principal_id: str, row: Row) -> RefreshRequest:
     return RefreshRequest(
         room_id=row["room_id"],
         thread_id=decode_thread_id(row["thread_id"]),
@@ -710,4 +930,5 @@ def _refresh_request(row: Row) -> RefreshRequest:
         revision_event_id=row["revision_event_id"],
         refresh_token=int(row["refresh_token"]),
         membership_epoch=int(row["membership_epoch"]),
+        projection_generation=projection_generation(transaction, principal_id, row["room_id"]),
     )

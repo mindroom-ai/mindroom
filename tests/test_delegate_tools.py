@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -28,7 +29,7 @@ from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
-from tests.access_schema_support import with_responder_access
+from tests.access_schema_support import refresh_memberships, with_responder_access
 from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
@@ -120,10 +121,15 @@ class TestDelegateTools:
         assert tuple(tools.functions) == DELEGATION_FUNCTIONS
         assert builtin_tool_registry().entries["delegate"].function_names == DELEGATION_FUNCTIONS
 
-    def test_schema_requires_task_and_allows_omitted_or_null_agent_name(self, tools: DelegateTools) -> None:
-        """The model must be able to request a self subagent using only its task."""
+    def test_schema_requires_task_and_title_and_allows_omitted_or_null_agent_name(self, tools: DelegateTools) -> None:
+        """The model must be able to request a self subagent using only its task and the title people see it by."""
         function = toolkit_offers(tools, "run_subagent")
-        assert function.parameters["required"] == ["task"]
+        assert function.parameters["required"] == ["task", "title"]
+        assert function.parameters["properties"]["title"]["type"] == "string"
+        # Existing positional calls such as run_subagent(task, "helper") still bind agent_name.
+        parameters = inspect.signature(DelegateTools.run_subagent).parameters
+        assert list(parameters)[1:3] == ["task", "agent_name"]
+        assert parameters["title"].kind is inspect.Parameter.KEYWORD_ONLY
         assert function.parameters["properties"]["agent_name"]["anyOf"] == [
             {"type": "string"},
             {"type": "null"},
@@ -310,7 +316,7 @@ class TestDelegateTools:
             room_id=grant_room_id,
         )
         memberships = AgentReplyMembershipIndex()
-        await memberships.refresh(config, runtime_paths, client)
+        await refresh_memberships(memberships, config, runtime_paths, client)
         tools = DelegateTools(
             agent_name="leader",
             runtime_paths=runtime_paths,

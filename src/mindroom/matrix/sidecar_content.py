@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Any
 
 _LONG_TEXT_METADATA_KEY = "io.mindroom.long_text"
-# What makes a sidecar preview an ``m.file`` event: the sidecar marker plus the file it points at.
+# What ties a sidecar preview, an ``m.file`` or a notice's ``m.notice``, to its sidecar: the marker and its file.
 # A visible layer has no edit wrapper of its own, so a nested ``m.new_content`` is dropped too.
 _SETTLED_DROPPED_KEYS = frozenset({_LONG_TEXT_METADATA_KEY, "url", "file", "filename", "info", "m.new_content"})
 

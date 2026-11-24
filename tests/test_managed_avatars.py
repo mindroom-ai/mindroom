@@ -164,6 +164,18 @@ async def test_downloaded_avatar_is_reencoded_as_256px_png(
 
 
 @pytest.mark.asyncio
+async def test_owner_account_wears_the_root_space_picture(
+    runtime_paths: constants_mod.RuntimePaths,
+    downloads: _FakeDownloads,
+) -> None:
+    """The owner account is shown as MindRoom, so its picture is the root Space's, not the router's."""
+    path = await managed_avatars._entity_avatar_path("agents", constants_mod.ROUTER_AGENT_NAME, runtime_paths)
+
+    assert path == await managed_avatars.root_space_avatar_path(runtime_paths)
+    assert "router" not in downloads.names
+
+
+@pytest.mark.asyncio
 async def test_unknown_entities_get_stable_non_identity_picks(
     runtime_paths: constants_mod.RuntimePaths,
     downloads: _FakeDownloads,

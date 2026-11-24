@@ -59,14 +59,14 @@ export interface ServicePaths {
 }
 
 // What the server needs before Agent Keys may use an account: the user saw that commands skip the tools' approvals.
-const REUSE_BODY = { acknowledge_approval_bypass: true };
+export const REUSE_BODY = { acknowledge_approval_bypass: true };
 
 /**
  * Asked before Agent Keys may use an account, or at more access; a second
  * click while it closes goes on only once. With `onAccessChange`, for a
  * service that offers read only, it also asks how much the account may do.
  */
-function AccountReuseDialog({
+export function AccountReuseDialog({
   open,
   title,
   description,

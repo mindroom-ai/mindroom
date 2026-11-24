@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from html import escape
 from typing import TYPE_CHECKING
@@ -9,17 +10,23 @@ from typing import TYPE_CHECKING
 from pydantic import BaseModel, Field
 
 from mindroom.agent_loop.helper import complete_prompt
+from mindroom.config.models import ModelTable, split_model_reference
 from mindroom.entity_resolution import resolve_room_scoped_value
 from mindroom.helper_usage import record_system_usage
 from mindroom.llm.provider import RequestOverrides
+from mindroom.logging_config import get_logger
 from mindroom.providers import registry as provider_registry
-from mindroom.thread_summary.state import THREAD_SUMMARY_MAX_LENGTH
+from mindroom.room_settings import ROOM_TEXT_SETTING_MAX_LENGTH, read_room_text_setting
+from mindroom.thread_summary.notices import normalize_thread_summary_text
 from mindroom.thread_tags import AUTOMATIC_THREAD_TAG_EXCLUSIONS, coerce_tag_name
 from mindroom.timing import timed
 from mindroom.tool_system.events import body_without_tool_markers
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
+
+    import nio
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -28,15 +35,31 @@ if TYPE_CHECKING:
 
 _MAX_INITIAL_TAGS = 3
 _MAX_MESSAGES_BEFORE_TRUNCATION = 50
-_TRUNCATION_SAMPLE_SIZE = 3
+_TRUNCATION_EDGE_COUNT = 5
+_TRUNCATION_MIDDLE_COUNT = 12
+_MAX_MESSAGE_CHARS = 600
+_CLIP_TAIL_CHARS = 250
+_CLIP_SEPARATOR = " … "
+# Each room's `thread_summary_model` setting that names no configured model, which is logged once.
+_unknown_room_models_logged: set[tuple[Path, str, str]] = set()
+# A new generated title over these after normalization goes back to the model; a person's pin may use
+# ``THREAD_SUMMARY_MAX_LENGTH``.
+GENERATED_TITLE_MAX_LENGTH = 80
+GENERATED_TITLE_MAX_WORDS = 6
+# One answer plus two retries that each see the rejected title and why.
+_TITLE_ATTEMPTS = 3
+
+logger = get_logger(__name__)
 
 
 class _ThreadSummary(BaseModel):
     """Structured thread summary response."""
 
-    summary: str = Field(
-        max_length=THREAD_SUMMARY_MAX_LENGTH,
-        description="One-line summary of the thread conversation",
+    title: str = Field(description="Short one-line title of the thread conversation")
+    # ``default_factory``: strict OpenAI schemas refuse a ``default`` keyword.
+    keep_current: bool = Field(
+        default_factory=bool,
+        description="True to keep the thread's current title, when one is shown",
     )
 
 
@@ -56,6 +79,20 @@ class GeneratedSummary:
 
     summary: str
     tags: tuple[str, ...] = ()
+    keep_current: bool = False
+
+
+def title_error(title: str) -> str | None:
+    """Return why a normalized title breaks the short-title limits, or None; emoji and dashes are not words."""
+    words = sum(any(char.isalnum() for char in token) for token in title.split())
+    if not title:
+        return "The title is empty."
+    if words > GENERATED_TITLE_MAX_WORDS or len(title) > GENERATED_TITLE_MAX_LENGTH:
+        return (
+            f"The title has {words} words and {len(title)} characters; the limit is "
+            f"{GENERATED_TITLE_MAX_WORDS} words and {GENERATED_TITLE_MAX_LENGTH} characters."
+        )
+    return None
 
 
 def _summary_provider(config: Config, runtime_paths: RuntimePaths, model_name: str) -> ModelProvider:
@@ -65,10 +102,14 @@ def _summary_provider(config: Config, runtime_paths: RuntimePaths, model_name: s
     the route keeps its provider's sampling default. Ollama authors sampling in ``options`` instead: it sends the
     value as ``options.temperature``, and keeps an authored ``options.temperature`` when the value is None.
     """
-    model_config = config.models.get(model_name)
+    # ``name@level`` runs ``name``, so the temperature comes off ``name`` and the table keeps reading the reference.
+    base_name, _level = split_model_reference(model_name)
+    model_config = config.models.get(base_name)
     if model_config is not None and model_config.extra_kwargs and "temperature" in model_config.extra_kwargs:
         extra_kwargs = {key: value for key, value in model_config.extra_kwargs.items() if key != "temperature"}
-        models = {**config.models, model_name: model_config.model_copy(update={"extra_kwargs": extra_kwargs})}
+        models = ModelTable(
+            {**config.models, base_name: model_config.model_copy(update={"extra_kwargs": extra_kwargs})},
+        )
         config = config.model_copy(update={"models": models})
     return provider_registry.build_model_provider(config, runtime_paths, model_name)
 
@@ -80,7 +121,7 @@ def resolve_thread_summary_model_name(
     *,
     entity_name: str | None = None,
 ) -> str:
-    """Return the model name for automatic thread summaries in one room.
+    """Return the configured model name for automatic thread summaries in one room.
 
     Precedence: room-scoped override (room ID, room key, or full alias) > responding
     entity's name as a ``room_thread_summary_models`` key (covers ad-hoc
@@ -96,22 +137,75 @@ def resolve_thread_summary_model_name(
 def _conversation_text(messages: Sequence[ResolvedVisibleMessage]) -> str:
     """Render a thread's ordinary messages as the summarizer reads them.
 
-    For threads exceeding ``_MAX_MESSAGES_BEFORE_TRUNCATION`` messages, samples
-    the first and last few messages with an omission note in between.
+    Threads at or under ``_MAX_MESSAGES_BEFORE_TRUNCATION`` messages are rendered
+    verbatim. Longer threads sample the first and last ``_TRUNCATION_EDGE_COUNT``
+    messages plus ``_TRUNCATION_MIDDLE_COUNT`` evenly spaced middle messages
+    with omission notes for each gap, clipping overlong bodies to
+    ``_MAX_MESSAGE_CHARS`` characters while keeping both head and tail.
     """
-    lines: list[str] = []
+    entries: list[tuple[str, str]] = []
     for message in messages:
         sender = message.sender or "unknown"
         body = body_without_tool_markers(message.body, message.content)
         if body:
-            lines.append(f"{sender}: {body}")
+            entries.append((sender, body))
 
-    if len(lines) > _MAX_MESSAGES_BEFORE_TRUNCATION:
-        n = _TRUNCATION_SAMPLE_SIZE
-        omitted = len(lines) - 2 * n
-        lines = [*lines[:n], f"[... {omitted} messages omitted ...]", *lines[-n:]]
+    total = len(entries)
+    if total <= _MAX_MESSAGES_BEFORE_TRUNCATION:
+        return "\n".join(f"{sender}: {body}" for sender, body in entries)
 
-    return "\n".join(lines)
+    edge = _TRUNCATION_EDGE_COUNT
+    span = total - 2 * edge + 1
+    middle_indices = [
+        edge - 1 + round(step * span / (_TRUNCATION_MIDDLE_COUNT + 1))
+        for step in range(1, _TRUNCATION_MIDDLE_COUNT + 1)
+    ]
+    selected = sorted({*range(edge), *middle_indices, *range(total - edge, total)})
+    head_chars = _MAX_MESSAGE_CHARS - _CLIP_TAIL_CHARS - len(_CLIP_SEPARATOR)
+    sampled: list[str] = []
+    prev = -1
+    for index in selected:
+        omitted = index - prev - 1
+        if omitted > 0:
+            unit = "message" if omitted == 1 else "messages"
+            sampled.append(f"[... {omitted} {unit} omitted ...]")
+        sender, body = entries[index]
+        stripped = body.strip()
+        if len(stripped) > _MAX_MESSAGE_CHARS:
+            head = stripped[:head_chars].rstrip()
+            tail = stripped[-_CLIP_TAIL_CHARS:].lstrip()
+            stripped = f"{head}{_CLIP_SEPARATOR}{tail}"
+        sampled.append(f"{sender}: {stripped}")
+        prev = index
+    return "\n".join(sampled)
+
+
+async def room_title_settings(
+    client: nio.AsyncClient,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    room_id: str,
+) -> tuple[str | None, str | None]:
+    """Return the room's title model, `name` or `name@level`, and its admins' extra title rules, read at once.
+
+    Each is None when unset or unreadable; a failed read logs. A `thread_summary_model` that names no configured model
+    is None too, logged once, so the configured summary model applies.
+    """
+    model_name, instructions = await asyncio.gather(
+        read_room_text_setting(client, room_id, "thread_summary_model"),
+        read_room_text_setting(
+            client,
+            room_id,
+            "thread_summary_instructions",
+            max_length=ROOM_TEXT_SETTING_MAX_LENGTH,
+        ),
+    )
+    if model_name is not None and model_name not in config.models:
+        if (seen := (runtime_paths.storage_root, room_id, model_name)) not in _unknown_room_models_logged:
+            _unknown_room_models_logged.add(seen)
+            logger.warning("Room thread summary model ignored", room_id=room_id, model=model_name)
+        model_name = None
+    return model_name, instructions
 
 
 @timed("thread_summary_generation")
@@ -122,8 +216,14 @@ async def generate_summary(
     *,
     model_name: str,
     tag_vocabulary: str | None,
+    room_instructions: str | None = None,
+    current_title: str | None = None,
 ) -> GeneratedSummary | None:
-    """Summarize a thread's ordinary messages with ``model_name``, plus one-shot tags from ``tag_vocabulary`` when given."""
+    """Summarize a thread's ordinary messages with ``model_name``, plus one-shot tags from ``tag_vocabulary`` when given.
+
+    ``room_instructions`` are the room admins' extra title rules, appended to the summary instructions.
+    ``current_title`` is shown after the thread, and the system rules let the model keep it unless the topic changed.
+    """
     provider = _summary_provider(config, runtime_paths, model_name)
     prompt = config.render_prompt(
         "THREAD_SUMMARY_USER_PROMPT_TEMPLATE",
@@ -134,22 +234,55 @@ async def generate_summary(
             else "(tags are not requested for this summary refresh)"
         ),
     )
-    response = await complete_prompt(
-        provider,
-        prompt,
-        instructions=[config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS")],
-        schema=_ThreadEnrichment if tag_vocabulary is not None else _ThreadSummary,
-        overrides=RequestOverrides(temperature=config.defaults.thread_summary_temperature),
-    )
-    await record_system_usage(response.usage, runtime_paths=runtime_paths, kind="thread_summary")
-    content = response.content
-    if tag_vocabulary is None:
-        return GeneratedSummary(summary=content.summary) if isinstance(content, _ThreadSummary) else None
-    if not isinstance(content, _ThreadEnrichment):
+    instructions = [
+        config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS")
+        if room_instructions is None
+        else config.render_prompt(
+            "THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE",
+            instructions=config.get_prompt("THREAD_SUMMARY_INSTRUCTIONS"),
+            room_instructions=room_instructions,
+        ),
+    ]
+    if current_title is not None:
+        # Appended in code, so a user prompt override without the placeholder keeps working.
+        current = config.render_prompt("THREAD_SUMMARY_CURRENT_TITLE_TEMPLATE", current_title=escape(current_title))
+        prompt = f"{prompt}\n\n{current}"
+        instructions.append(config.get_prompt("THREAD_SUMMARY_KEEP_INSTRUCTIONS"))
+    schema = _ThreadEnrichment if tag_vocabulary is not None else _ThreadSummary
+    request = prompt
+    error = None
+    for _attempt in range(_TITLE_ATTEMPTS):
+        response = await complete_prompt(
+            provider,
+            request,
+            instructions=instructions,
+            schema=schema,
+            overrides=RequestOverrides(temperature=config.defaults.thread_summary_temperature),
+        )
+        await record_system_usage(response.usage, runtime_paths=runtime_paths, kind="thread_summary")
+        content = response.content
+        if not isinstance(content, schema):
+            return None
+        # A kept title is the current one, so only a new title is checked.
+        if current_title is not None and content.keep_current:
+            break
+        error = title_error(normalize_thread_summary_text(content.title))
+        if error is None:
+            break
+        # The rejected answer and the reason go back with the same request, so any route can retry.
+        request = f"{prompt}\n\n" + config.render_prompt(
+            "THREAD_SUMMARY_REJECTED_TITLE_TEMPLATE",
+            rejected_title=escape(content.title),
+            error=error,
+        )
+    else:
+        logger.warning("Thread title rejected on every attempt", attempts=_TITLE_ATTEMPTS, error=error)
         return None
+    if not isinstance(content, _ThreadEnrichment):
+        return GeneratedSummary(summary=content.title, keep_current=content.keep_current)
     tags: list[str] = []
     for raw_tag in content.tags:
         tag = coerce_tag_name(raw_tag)
         if tag is not None and tag not in AUTOMATIC_THREAD_TAG_EXCLUSIONS and tag not in tags:
             tags.append(tag)
-    return GeneratedSummary(summary=content.summary, tags=tuple(tags))
+    return GeneratedSummary(summary=content.title, tags=tuple(tags), keep_current=content.keep_current)

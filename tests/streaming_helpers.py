@@ -52,11 +52,12 @@ class ReplyWrite:
     """One write the streamer asked the reply's records for.
 
     ``progress`` asks to send a progress edit and ``progress_delivered``
-    reports one that landed on ``event_id``. A ``terminal`` write edits
-    ``event_id``, or creates the reply when it is ``None``.
+    reports one that landed on ``event_id``; ``shown_live`` records what live
+    frames showed, sending nothing. A ``terminal`` write edits ``event_id``, or
+    creates the reply when it is ``None``.
     """
 
-    kind: Literal["create", "progress", "progress_delivered", "terminal"]
+    kind: Literal["create", "progress", "progress_delivered", "shown_live", "terminal"]
     progress: ProgressState
     content: dict[str, Any] | None = None
     display_text: str | None = None
@@ -113,9 +114,9 @@ class FakeReplyRecords:
         self.writes.append(ReplyWrite("terminal", progress, dict(content), display_text, event_id))
         return await self.edit(client, room_id, event_id, content, display_text)
 
-    async def progress_write_ahead(self, progress: ProgressState) -> ProgressPermission:
+    async def progress_write_ahead(self, progress: ProgressState, *, shown_live: bool = False) -> ProgressPermission:
         """Record one progress edit and answer it from the scripted permissions."""
-        self.writes.append(ReplyWrite("progress", progress))
+        self.writes.append(ReplyWrite("shown_live" if shown_live else "progress", progress))
         return self.progress_permissions.pop(0) if self.progress_permissions else ProgressPermission.SEND
 
     def progress_delivered(self, progress: ProgressState, event_id: str) -> None:

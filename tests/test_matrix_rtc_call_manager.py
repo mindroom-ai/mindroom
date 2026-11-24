@@ -69,7 +69,7 @@ from mindroom.matrix_rtc.call_origin import (
     CallOriginContext,
     _CallBriefMessage,
 )
-from mindroom.matrix_rtc.call_session import CallSession, CallSessionDeps, CallStartRevokedError
+from mindroom.matrix_rtc.call_session import CallJoinError, CallSession, CallSessionDeps, CallStartRevokedError
 from mindroom.matrix_rtc.call_tools import CallAgentTooling
 from mindroom.matrix_rtc.events import (
     CALL_ENCRYPTION_KEYS_EVENT_TYPE,
@@ -106,13 +106,14 @@ from mindroom.token_counting.counts import count
 from mindroom.token_counting.families import openai_model_counter
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, build_tool_execution_identity
 from mindroom.usage.stats import collect_admin_usage
+from tests.access_schema_support import refresh_memberships
 from tests.conftest import test_runtime_paths
 from tests.fakes.token_counter import fake_token_counter
 from tests.matrix_state_helpers import save_matrix_state
 from tests.providers.bare_adapter import bare_adapter
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Coroutine
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
@@ -121,6 +122,7 @@ BOT_USER = "@helper:example.org"
 BOT_DEVICE = "BOTDEV"
 ROOM_ID = "!room:example.org"
 SERVICE_URL = "https://rtc.example.org"
+FOREIGN_SERVICE_URL = "https://rtc.foreign.example"
 GRANT_ROOM_ID = "!grant:example.org"
 GRANT = SfuGrant(url="wss://sfu.example.org", jwt="jwt-token")
 
@@ -139,10 +141,16 @@ class FakeBridge:
         self.frame_keys: list[tuple[str, bytes, int]] = []
         self.agent_options: CallVoiceAgentOptions | None = None
         self.closed = False
+        self.roster_vacated = False
 
     def set_participant_identities(self, participant_identities: frozenset[str]) -> None:
         """Record the authoritative media roster."""
         self.participant_rosters.append(participant_identities)
+        self.roster_vacated = False
+
+    def vacate_roster(self) -> None:
+        """Record that the Matrix roster emptied while the session runs."""
+        self.roster_vacated = True
 
     async def connect(self, grant: SfuGrant) -> None:
         """Record the grant."""
@@ -260,6 +268,34 @@ def _remote_member_event(
     }
 
 
+def _caller_event(sdk: int, device: str, created_ts: int, service_url: str = SERVICE_URL) -> dict:
+    """Build one caller membership as SDK 41 or SDK 45 publishes it, so SDK 41 serves as each test's control."""
+    if sdk == 41:
+        return _remote_member_event(device=device, created_ts=created_ts, livekit_service_url=service_url)
+    user = "@alice:example.org"
+    return {
+        "type": CALL_MEMBER_EVENT_TYPE,
+        "state_key": membership_state_key(user, device),
+        "sender": user,
+        "origin_server_ts": created_ts,
+        # matrix-js-sdk 45.1.0 src/matrixrtc/MembershipManager.ts:1038-1059.
+        "content": {
+            "application": "m.call",
+            "call_id": "",
+            "scope": "m.room",
+            "device_id": device,
+            "membershipID": f"{user}:{device}",
+            "expires": 14_400_000,
+            "m.call.intent": "audio",
+            "focus_active": {"type": "livekit", "focus_selection": "multi_sfu"},
+            "foci_preferred": [{"type": "livekit", "livekit_service_url": service_url, "livekit_alias": ROOM_ID}],
+        },
+    }
+
+
+_BOTH_SDKS = pytest.mark.parametrize("sdk", [41, 45], ids=["sdk-41-control", "sdk-45"])
+
+
 def _room_member_event(user: str = "@alice:example.org", membership: str = "join") -> dict:
     return {
         "type": "m.room.member",
@@ -356,7 +392,7 @@ async def _grant_room_memberships(
         room_id=GRANT_ROOM_ID,
     )
     memberships = AgentReplyMembershipIndex()
-    await memberships.refresh(config, runtime_paths, client)
+    await refresh_memberships(memberships, config, runtime_paths, client)
     return memberships
 
 
@@ -530,6 +566,31 @@ async def _deliver(manager: CallManager, delivery: Awaitable[None]) -> None:
         await asyncio.gather(*tasks)
 
 
+async def _reconcile_roster(manager: CallManager, client: AsyncMock, room: nio.MatrixRoom, *call_events: dict) -> None:
+    """Serve one call roster as the room's state and reconcile it."""
+    client.room_get_state.return_value = _state_response(*call_events)
+    await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+
+
+async def _caller_leaves_sfu(manager: CallManager, bridge: FakeBridge) -> None:
+    """Report what the bridge sees once a caller whose roster emptied leaves the SFU: the held session ends."""
+    assert bridge.roster_vacated
+    assert bridge.agent_options is not None
+    assert bridge.agent_options.on_session_terminated is not None
+    bridge.agent_options.on_session_terminated(False)
+    await asyncio.gather(*list(manager._background_tasks))
+
+
+async def _wait_until(condition: Callable[[], bool]) -> None:
+    """Give the loop a bounded number of turns for a condition to hold."""
+    for _ in range(200):
+        if condition():
+            return
+        await asyncio.sleep(0)
+    msg = "the condition never held"
+    raise AssertionError(msg)
+
+
 def _call_state(manager: CallManager, room_id: str = ROOM_ID) -> _RoomCall:
     """Return the call state the manager tracks for one room, or an empty record when it tracks none."""
     return manager._rooms.get(room_id) or _RoomCall(_room(room_id=room_id))
@@ -571,6 +632,41 @@ def deliver_frame_keys(monkeypatch: pytest.MonkeyPatch) -> None:
         return targets
 
     monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
+
+
+def _sdk_45_frame_key_event(device_id: str, key: bytes, key_index: int) -> AuthenticatedToDeviceEvent:
+    """Build one decrypted inbound frame key event as SDK 45 sends it."""
+    event = _frame_key_event(device_id=device_id)
+    member_id = f"{event.sender}:{device_id}"
+    media_key = {"index": key_index, "key": base64.b64encode(key).decode("ascii")}
+    # matrix-js-sdk 45.1.0 src/matrixrtc/ToDeviceKeyTransport.ts:91-107.
+    event.source["content"] = {
+        "room_id": ROOM_ID,
+        "member_id": member_id,
+        "media_key": media_key,
+        "keys": media_key,
+        "member": {"id": member_id, "claimed_device_id": device_id},
+    }
+    return event
+
+
+@pytest.fixture
+def sent_frame_keys(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, bytes]]:
+    """Deliver every frame key, recording the device and key of each send."""
+    sent: list[tuple[str, bytes]] = []
+
+    async def send_key(
+        _self: object,
+        *,
+        key_base64: str,
+        targets: list[CallMember],
+        **_kwargs: object,
+    ) -> list[CallMember]:
+        sent.extend((target.device_id, base64.b64decode(key_base64)) for target in targets)
+        return targets
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.ToDeviceFrameKeyTransport.send_key", send_key)
+    return sent
 
 
 @pytest.fixture(autouse=True)
@@ -624,6 +720,90 @@ async def test_manager_joins_call_when_remote_member_appears(tmp_path: Path) -> 
     assert args[1] == CALL_MEMBER_EVENT_TYPE
     assert args[2]["device_id"] == BOT_DEVICE
     assert kwargs["state_key"] == membership_state_key(BOT_USER, BOT_DEVICE)
+
+
+@pytest.mark.asyncio
+@_BOTH_SDKS
+async def test_caller_on_the_trusted_service_starts_an_encrypted_call_under_either_sdk(
+    tmp_path: Path,
+    sent_frame_keys: list[tuple[str, bytes]],
+    sdk: int,
+) -> None:
+    """A lone caller on our service is joined, handed to the bridge and sent the agent's 16-byte key."""
+    client = _client()
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, clock_ms=lambda: 2_000)
+
+    try:
+        await _reconcile_roster(manager, client, _room(encrypted=True), _caller_event(sdk, "ALICEDEV", 1_000))
+
+        assert bridge.connected_grant == GRANT
+        assert bridge.agent_options is not None
+        assert bridge.participant_rosters == [frozenset({"@alice:example.org:ALICEDEV"})]
+        assert [(device, len(key)) for device, key in sent_frame_keys] == [("ALICEDEV", 16)]
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@_BOTH_SDKS
+async def test_oldest_member_on_a_foreign_service_blocks_the_call_under_either_sdk(tmp_path: Path, sdk: int) -> None:
+    """The oldest member decides the call's service: a foreign one keeps the agent out until everyone has left."""
+    client = _client()
+    manager = _manager(client, FakeBridge(), tmp_path, clock_ms=lambda: 2_000)
+    room = _room()
+    anchor = _caller_event(sdk, "ALICEDEV", 1_000, FOREIGN_SERVICE_URL)
+    younger = _caller_event(sdk, "ALICESECOND", 1_001)
+
+    try:
+        for roster in ([anchor], [anchor, younger], [younger]):
+            await _reconcile_roster(manager, client, room, *roster)
+            state = _call_state(manager)
+            assert state.session is None
+            assert state.retry_task is None
+            assert state.logical_call is not None
+            assert state.logical_call.join_block is not None
+        client.get_openid_token.assert_not_awaited()
+
+        await _reconcile_roster(manager, client, room)
+        await _reconcile_roster(manager, client, room, younger)
+        assert _call_state(manager).session is not None
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("anchor_sdk", [41, 45], ids=["sdk-41-anchor", "sdk-45-anchor"])
+@_BOTH_SDKS
+async def test_younger_device_on_a_foreign_service_is_a_full_call_member_under_either_sdk(
+    tmp_path: Path,
+    sent_frame_keys: list[tuple[str, bytes]],
+    anchor_sdk: int,
+    sdk: int,
+) -> None:
+    """Only the oldest member's focus is read, so a younger device naming another service shares media and keys."""
+    client = _client()
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, clock_ms=lambda: 2_000)
+    anchor = _caller_event(anchor_sdk, "ALICEDEV", 1_000)
+    younger = _caller_event(sdk, "ALICESECOND", 1_001, FOREIGN_SERVICE_URL)
+    key_event, received = _frame_key_event(device_id="ALICESECOND"), (b"A" * 16, 2)
+    if sdk == 45:
+        # matrix-js-sdk 45.1.0 src/matrixrtc/RTCEncryptionManager.ts:517-521 generates 32 bytes.
+        received = (bytes(range(32)), 5)
+        key_event = _sdk_45_frame_key_event("ALICESECOND", *received)
+
+    try:
+        await _reconcile_roster(manager, client, _room(encrypted=True), anchor, younger)
+        await _deliver(manager, manager.on_to_device_event(key_event))
+
+        assert bridge.connected_grant == GRANT
+        assert bridge.participant_rosters[-1] == {"@alice:example.org:ALICEDEV", "@alice:example.org:ALICESECOND"}
+        assert {(device, len(key)) for device, key in sent_frame_keys} == {("ALICEDEV", 16), ("ALICESECOND", 16)}
+        assert ("@alice:example.org:ALICESECOND", *received) in bridge.frame_keys
+        assert not bridge.closed
+    finally:
+        await manager.shutdown()
 
 
 @pytest.mark.asyncio
@@ -1627,7 +1807,7 @@ async def test_manager_accepts_call_member_authorized_by_grant_room(tmp_path: Pa
         room_id=ROOM_ID,
     )
     memberships = AgentReplyMembershipIndex()
-    await memberships.refresh(config, runtime_paths, client)
+    await refresh_memberships(memberships, config, runtime_paths, client)
     manager = _manager(
         client,
         bridge,
@@ -1701,7 +1881,7 @@ async def test_manager_starts_observed_call_after_grant_snapshot_becomes_ready(t
         members=[nio.RoomMember("@alice:example.org", None, None)],
         room_id=GRANT_ROOM_ID,
     )
-    await memberships.refresh(config, runtime_paths, client)
+    await refresh_memberships(memberships, config, runtime_paths, client)
     await manager.reconcile_reply_authorization()
 
     assert bridge.connected_grant is GRANT
@@ -1725,7 +1905,7 @@ async def test_manager_starts_observed_call_after_live_grant_join(tmp_path: Path
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[GRANT_ROOM_ID])
     client.joined_members.return_value = nio.JoinedMembersResponse(members=[], room_id=GRANT_ROOM_ID)
     memberships = AgentReplyMembershipIndex()
-    await memberships.refresh(config, runtime_paths, client)
+    await refresh_memberships(memberships, config, runtime_paths, client)
     manager = _manager(
         client,
         bridge,
@@ -2065,6 +2245,285 @@ async def test_reply_revocation_cancels_an_inflight_call_start(tmp_path: Path) -
     assert _call_state(manager).logical_call is None
 
 
+class _BlockedAgentBuild:
+    """A call agent build that waits until the test releases it, recording cancellation.
+
+    With ``drains``, a cancelled build still runs until released, as the real agent cache
+    finishes a build it accepted before the cancellation goes on.
+    """
+
+    def __init__(self, *, drains: bool = False) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.drains = drains
+
+    async def build_call_tools(self, **kwargs: object) -> CallAgentTooling:
+        self.started.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            if self.drains:
+                await self.release.wait()
+            raise
+        return CallAgentTooling(
+            tools=(),
+            instructions="You are Helper.",
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+        )
+
+
+@pytest.mark.asyncio
+async def test_live_agent_is_prepared_while_the_session_joins_the_call_media(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The agent and its live instructions are built while the SFU connect is in flight, not after the keys."""
+    prompt_built = asyncio.Event()
+
+    async def get_system_prompt() -> str:
+        prompt_built.set()
+        return "You are Helper."
+
+    async def fake_tools(**kwargs: object) -> CallAgentTooling:
+        return CallAgentTooling(
+            tools=(),
+            instructions="",
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+            responder=AsyncMock(return_value=CallAgentResponse("answer")),
+            get_system_prompt=get_system_prompt,
+        )
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = _BlockingConnectBridge()
+    manager = _manager(client, bridge, tmp_path, _live_config())
+
+    with capture_logs() as logs:
+        join = asyncio.create_task(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())))
+        await asyncio.wait_for(bridge.connect_started.wait(), timeout=1)
+        await asyncio.wait_for(prompt_built.wait(), timeout=1)
+        assert bridge.agent_options is None
+        bridge.release_connect.set()
+        await join
+
+    options = bridge.agent_options
+    assert isinstance(options, LiveVoiceAgentOptions)
+    assert (await options.get_instructions()).startswith("You are Helper.")
+    [timing] = [log for log in logs if log["event"] == "call_join_timing"]
+    stages = ("service_resolved", "agent_prepared", "sfu_granted", "sfu_connected", "membership_published")
+    assert all(timing[f"{stage}_ms"] <= timing["agent_started_ms"] for stage in stages)
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_agent_failure_during_the_sfu_connect_ends_the_join_before_its_membership(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An agent that cannot be materialized stops the media join it ran beside before the agent shows in the call."""
+    build_failed = asyncio.Event()
+
+    async def fail_tools(**_kwargs: object) -> CallAgentTooling:
+        build_failed.set()
+        msg = "prompt failed"
+        raise ValueError(msg)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fail_tools)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = _BlockingConnectBridge()
+    manager = _manager(client, bridge, tmp_path)
+
+    join = asyncio.create_task(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())))
+    await asyncio.wait_for(bridge.connect_started.wait(), timeout=1)
+    await asyncio.wait_for(build_failed.wait(), timeout=1)
+    bridge.release_connect.set()
+    await join
+
+    assert bridge.closes == 1
+    assert bridge.agent_options is None
+    # Only the leave's empty membership is written: the agent never joined the call's roster.
+    assert [call.args[2] for call in client.room_put_state.await_args_list] == [{}]
+    assert _call_state(manager).session is None
+    assert _call_state(manager).retry_task is None
+    assert _call_state(manager).logical_call is not None
+    assert _call_state(manager).logical_call.join_block is not None
+
+
+@pytest.mark.asyncio
+async def test_media_join_failure_cancels_the_agent_build_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A failed SFU grant cancels the agent build running beside it, closes the bridge, and retries the join."""
+    build = _BlockedAgentBuild()
+
+    async def offline_grant(*_args: object, **_kwargs: object) -> SfuGrant:
+        await build.started.wait()
+        msg = "authorization service offline"
+        raise httpx.ConnectError(msg)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", build.build_call_tools)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_backends.request_sfu_grant", offline_grant)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+
+    await asyncio.wait_for(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())), timeout=1)
+
+    await asyncio.wait_for(build.cancelled.wait(), timeout=1)
+    assert bridge.closed
+    assert bridge.connected_grant is None
+    assert _call_state(manager).session is None
+    assert _call_state(manager).retry_task is not None
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_reply_revocation_cancels_the_agent_build_of_a_starting_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Revocation does not wait for a call's agent build: it cancels the build and leaves the joined media."""
+    build = _BlockedAgentBuild()
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", build.build_call_tools)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    config = _config()
+    memberships = await _grant_room_memberships(config, client, tmp_path)
+    manager = _manager(client, bridge, tmp_path, config, agent_reply_memberships=memberships)
+
+    join = asyncio.create_task(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())))
+    await asyncio.wait_for(build.started.wait(), timeout=1)
+    _leave_grant_room(memberships, config)
+    try:
+        await asyncio.wait_for(manager.revoke_reply_authorization(), timeout=1)
+    finally:
+        build.release.set()
+        await join
+
+    assert build.cancelled.is_set()
+    assert bridge.closed
+    assert bridge.agent_options is None
+    assert _call_state(manager).session is None
+    assert _call_state(manager).logical_call is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_revocation_leaves_the_media_before_a_draining_agent_build_finishes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A revoked call whose media already joined leaves it at once, and its start ends only once the build has."""
+    build = _BlockedAgentBuild(drains=True)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", build.build_call_tools)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    config = _config()
+    memberships = await _grant_room_memberships(config, client, tmp_path)
+    manager = _manager(client, bridge, tmp_path, config, agent_reply_memberships=memberships)
+
+    join = asyncio.create_task(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())))
+    await asyncio.wait_for(build.started.wait(), timeout=1)
+    await _wait_until(lambda: bridge.connected_grant is not None)
+    _leave_grant_room(memberships, config)
+    revoke = asyncio.create_task(manager.revoke_reply_authorization())
+    try:
+        await asyncio.wait_for(build.cancelled.wait(), timeout=1)
+        await _wait_until(lambda: bridge.closed)
+        assert not revoke.done()
+    finally:
+        build.release.set()
+    await asyncio.wait_for(revoke, timeout=1)
+    await join
+
+    assert bridge.agent_options is None
+    assert _call_state(manager).session is None
+    assert _call_state(manager).logical_call is None
+
+
+@pytest.mark.asyncio
+async def test_shutdown_waits_for_the_agent_build_of_a_failed_join(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A join whose media failed closes it at once, and shutdown returns only after its agent build drained."""
+    build = _BlockedAgentBuild(drains=True)
+
+    async def offline_grant(*_args: object, **_kwargs: object) -> SfuGrant:
+        await build.started.wait()
+        msg = "authorization service offline"
+        raise httpx.ConnectError(msg)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", build.build_call_tools)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_backends.request_sfu_grant", offline_grant)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+
+    join = asyncio.create_task(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())))
+    await asyncio.wait_for(build.cancelled.wait(), timeout=1)
+    await _wait_until(lambda: bridge.closed)
+    shutdown = asyncio.create_task(manager.shutdown())
+    try:
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert not join.done()
+        assert not shutdown.done()
+    finally:
+        build.release.set()
+    await asyncio.wait_for(shutdown, timeout=1)
+    await asyncio.gather(join, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_agent_that_failed_before_a_media_error_is_skipped_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A media failure after the agent's preparation already failed does not turn the unstartable call into a retry."""
+    build_failed = asyncio.Event()
+
+    async def fail_tools(**_kwargs: object) -> CallAgentTooling:
+        build_failed.set()
+        msg = "prompt failed"
+        raise ValueError(msg)
+
+    async def grant_after_the_failure(*_args: object, **_kwargs: object) -> SfuGrant:
+        await build_failed.wait()
+        await asyncio.sleep(0)
+        msg = "authorization service offline"
+        raise httpx.ConnectError(msg)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fail_tools)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_backends.request_sfu_grant", grant_after_the_failure)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+
+    await asyncio.wait_for(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())), timeout=1)
+    await _wait_until(lambda: bridge.closed)
+    await _wait_until(
+        lambda: (
+            _call_state(manager).logical_call is not None and _call_state(manager).logical_call.join_block is not None
+        ),
+    )
+
+    assert _call_state(manager).session is None
+    assert _call_state(manager).retry_task is None
+    await manager.shutdown()
+
+
 @dataclass
 class _ManagerBot:
     """A fleet member whose call work runs on a real call manager, as `AgentBot` runs it."""
@@ -2114,7 +2573,7 @@ async def test_a_call_a_ready_grant_room_allows_restarts_after_each_loss_of_auth
     membership_sync = AgentReplyMembershipSync(memberships, lambda: [bot])
 
     async def refresh() -> None:
-        await memberships.refresh(config, test_runtime_paths(tmp_path), client)
+        await refresh_memberships(memberships, config, test_runtime_paths(tmp_path), client)
         await membership_sync.apply_grant_change()
 
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
@@ -2158,7 +2617,7 @@ async def test_a_refresh_a_new_loss_of_authority_overtook_starts_no_call(tmp_pat
     membership_sync.invalidate(config, reason="sync_loop_started")
     await bot.settle()
 
-    await memberships.refresh(config, test_runtime_paths(tmp_path), client)
+    await refresh_memberships(memberships, config, test_runtime_paths(tmp_path), client)
     membership_sync.invalidate(config, reason="uncertain_sync_response")
     state_reads = client.room_get_state.await_count
     await membership_sync.apply_grant_change()
@@ -2184,6 +2643,9 @@ async def test_a_batch_of_loss_records_ends_a_denied_call_once(tmp_path: Path, *
     manager = _manager(client, bridge, tmp_path, config, agent_reply_memberships=memberships)
     bot = _ManagerBot(manager)
     membership_sync = AgentReplyMembershipSync(memberships, lambda: [bot])
+    # Only an account whose receive loop has caught up observes rooms, so only its lost history revokes.
+    membership_sync.observer_loop_started(config, BOT_USER)
+    membership_sync.observer_frame_settled(BOT_USER)
     call = asyncio.create_task(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())))
     await asyncio.wait_for(bridge.connect_started.wait(), timeout=1)
     if not starting:
@@ -2197,6 +2659,7 @@ async def test_a_batch_of_loss_records_ends_a_denied_call_once(tmp_path: Path, *
             test_runtime_paths(tmp_path),
             IngestionRecordAdmission(disposition=IngestionRecordDisposition.HISTORY_LOSS, room_id=ROOM_ID),
             None,
+            observer_user_id=BOT_USER,
         )
     assert len(bot.tasks) == 3
     await bot.settle()
@@ -2205,6 +2668,126 @@ async def test_a_batch_of_loss_records_ends_a_denied_call_once(tmp_path: Path, *
 
     assert bridge.closes == 1
     assert _call_state(manager).session is None
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_manager_uses_reloaded_call_profile_on_next_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An idle call manager picks up an edited live profile on the next call without restarting."""
+    tooling_kwargs: dict[str, object] = {}
+
+    async def fake_tools(**kwargs: object) -> CallAgentTooling:
+        tooling_kwargs.update(kwargs)
+        return CallAgentTooling(
+            tools=(),
+            instructions="",
+            responder=AsyncMock(return_value=CallAgentResponse("ok")),
+            get_system_prompt=AsyncMock(return_value="System prompt."),
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+        )
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_backends.get_api_key_for_service",
+        lambda service, _paths: "sk-live" if service == "openai_live" else None,
+    )
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, _live_config(agent_model="old-model"))
+
+    reloaded = _live_config(agent_model="local")
+    reloaded.calls.profiles["live"].voice = "cedar"
+    manager.update_config(reloaded)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    options = bridge.agent_options
+    assert isinstance(options, LiveVoiceAgentOptions)
+    assert options.voice == "cedar"
+    assert tooling_kwargs["active_model_name"] == "local"
+    assert tooling_kwargs["config"] is reloaded
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_update_config_retries_waiting_caller_after_missing_credential_is_fixed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Fixing a broken call credential retries a waiting caller blocked by the earlier config failure."""
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_backends.get_api_key_for_service",
+        lambda service, _paths: "sk-openai" if service == "openai" else None,
+    )
+    room = _room()
+    client = _client()
+    client.rooms = {ROOM_ID: room}
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, _config(credentials_service="missing"))
+
+    await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+    logical_call = _call_state(manager).logical_call
+    assert logical_call is not None
+    assert logical_call.join_block == "config"
+    assert bridge.connected_grant is None
+
+    # A reload with the credential still missing fails and blocks as a config failure again.
+    still_missing = _config(credentials_service="missing")
+    still_missing.agents["helper"].display_name = "Helper Renamed"
+    manager.update_config(still_missing)
+    await asyncio.gather(*list(manager._background_tasks))
+    assert bridge.connected_grant is None
+    assert logical_call.join_block == "config"
+
+    # Fixing the credential clears the config block and connects the still-waiting caller.
+    manager.update_config(_config(credentials_service="openai"))
+    await asyncio.gather(*list(manager._background_tasks))
+    while tasks := tuple(manager._reconcile_tasks.values()):
+        await asyncio.gather(*tasks)
+
+    assert bridge.connected_grant is not None
+    assert _call_state(manager).session is not None
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_update_config_does_not_reopen_deliberately_ended_session(tmp_path: Path) -> None:
+    """Editing a call profile must not reopen a call session that ended non-retryably."""
+    room = _room()
+    client = _client()
+    client.rooms = {ROOM_ID: room}
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridges: list[FakeBridge] = []
+    manager = _manager(client, FakeBridge(), tmp_path, _config(), bridge_factory=_bridge_per_session(bridges))
+
+    await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+    assert len(bridges) == 1
+    assert bridges[0].connected_grant is not None
+    assert bridges[0].agent_options is not None
+    assert bridges[0].agent_options.on_session_terminated is not None
+
+    bridges[0].agent_options.on_session_terminated(False)
+    await asyncio.gather(*list(manager._background_tasks))
+    logical_call = _call_state(manager).logical_call
+    assert bridges[0].closed
+    assert _call_state(manager).session is None
+    assert logical_call is not None
+    assert logical_call.join_block == "terminal"
+
+    reloaded = _config()
+    reloaded.calls.profiles["realtime"].voice = "cedar"
+    manager.update_config(reloaded)
+    await asyncio.gather(*list(manager._background_tasks))
+    while tasks := tuple(manager._reconcile_tasks.values()):
+        await asyncio.gather(*tasks)
+
+    assert len(bridges) == 1
+    assert _call_state(manager).session is None
+    assert logical_call.join_block == "terminal"
     await manager.shutdown()
 
 
@@ -3313,9 +3896,64 @@ def _record_two_minute_exchange(bridge: FakeBridge) -> None:
     assert isinstance(on_turn, MethodType)
     transcript = on_turn.__self__
     assert isinstance(transcript, CallTranscript)
-    on_turn("user", "Book the train")
-    on_turn("assistant", "Booked")
-    transcript.started_at -= timedelta(minutes=2)
+    transcript._started_monotonic -= 120
+    started = transcript.started_at.timestamp()
+    on_turn("user", "Book the train", started + 5.5)
+    on_turn("assistant", "Booked", started + 11.5)
+
+
+class _SlowStartBridge(FakeBridge):
+    """Takes 30 seconds, on the transcript's clock, to start the voice agent."""
+
+    async def start_agent(self, options: CallVoiceAgentOptions) -> None:
+        await super().start_agent(options)
+        transcript = cast("MethodType", options.on_conversation_turn).__self__
+        transcript.started_at -= timedelta(seconds=30)
+        transcript._started_monotonic -= 30
+
+
+@pytest.mark.asyncio
+async def test_call_clock_starts_once_the_agent_listens(tmp_path: Path) -> None:
+    """Joining time before the agent can hear the caller is not part of the call's timeline."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = _SlowStartBridge()
+    manager = _manager(client, bridge, tmp_path)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    assert bridge.agent_options is not None
+    transcript = cast("MethodType", bridge.agent_options.on_conversation_turn).__self__
+    assert isinstance(transcript, CallTranscript)
+    assert transcript.elapsed_seconds() < 5
+    assert time.time() - transcript.started_at.timestamp() < 5
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_call_in_progress_is_read_live_until_it_ends(tmp_path: Path) -> None:
+    """What the caller and the agent said is read under their user IDs while the call runs, and nothing after it ends."""
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(), _agent_call_state_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    assert manager.live_call(ROOM_ID) is None
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    _record_two_minute_exchange(bridge)
+
+    live = manager.live_call(ROOM_ID)
+
+    assert manager.watches(ROOM_ID)
+    assert live is not None
+    assert (live.caller_id, live.agent_id, live.agent_display_name) == ("@alice:example.org", BOT_USER, "Helper")
+    assert [(speaker, text) for speaker, text, _ in live.spoken] == [
+        ("@alice:example.org", "Book the train"),
+        (BOT_USER, "Booked"),
+    ]
+    assert [spoken_at - live.started_at for _, _, spoken_at in live.spoken] == [pytest.approx(5.5), pytest.approx(11.5)]
+    client.room_get_state.return_value = _state_response()
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    assert manager.live_call(ROOM_ID) is None
+    await manager.shutdown()
 
 
 async def _drain_background_tasks(manager: CallManager) -> None:
@@ -3355,8 +3993,10 @@ async def test_call_stop_posts_transcript_to_validated_origin(
     assert post.await_args.kwargs["origin"] == _ORIGIN_CONTEXT.origin
     body = post.await_args.kwargs["writeback"].body
     assert body.startswith("📞 Voice call · 2 min")
-    assert "@alice:example.org (Alice): Book the train" in body
-    assert "Helper: Booked" in body
+    assert "[0:05] @alice:example.org (Alice): Book the train" in body
+    assert "[0:11] Helper: Booked" in body
+    turns = post.await_args.kwargs["writeback"].transcript["turns"]
+    assert [(turn["sender"], turn["offset_seconds"]) for turn in turns] == [("@alice:example.org", 5), (BOT_USER, 11)]
     await manager.shutdown()
 
 
@@ -3492,7 +4132,22 @@ def _member(
     )
 
 
-def _session(client: AsyncMock, bridge: FakeBridge, transport: FakeKeyTransport, clock: list[int]) -> CallSession:
+def _prepared(options: CallVoiceAgentOptions) -> Callable[[], Coroutine[None, None, CallVoiceAgentOptions]]:
+    """Return a session's agent preparation that yields ``options`` at once."""
+
+    async def prepare_agent() -> CallVoiceAgentOptions:
+        return options
+
+    return prepare_agent
+
+
+def _session(
+    client: AsyncMock,
+    bridge: FakeBridge,
+    transport: FakeKeyTransport,
+    clock: list[int],
+    monotonic: list[int] | None = None,
+) -> CallSession:
     async def fetch_grant() -> SfuGrant:
         return GRANT
 
@@ -3505,12 +4160,49 @@ def _session(client: AsyncMock, bridge: FakeBridge, transport: FakeKeyTransport,
             bridge=bridge,
             key_transport=transport,
             fetch_grant=fetch_grant,
-            agent_options=VoiceAgentOptions(instructions="hi", model="gpt-realtime-2.1", api_key="sk-test"),
+            prepare_agent=_prepared(VoiceAgentOptions(instructions="hi", model="gpt-realtime-2.1", api_key="sk-test")),
             livekit_service_url=SERVICE_URL,
             start_is_allowed=lambda: True,
             clock_ms=lambda: clock[0],
+            monotonic_ms=lambda: (clock if monotonic is None else monotonic)[0],
         ),
     )
+
+
+@pytest.mark.asyncio
+async def test_failed_start_cancelled_as_it_turns_to_its_preparation_still_waits_for_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancellation landing right after the media left still waits for the draining agent build."""
+    session = _session(_client(), FakeBridge(), FakeKeyTransport(), [0])
+    release = asyncio.Event()
+
+    async def draining_build() -> CallVoiceAgentOptions:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+            raise
+        raise AssertionError
+
+    async def left_at_once() -> None:
+        return None
+
+    monkeypatch.setattr(session, "stop", left_at_once)
+    preparing = asyncio.create_task(draining_build())
+    await asyncio.sleep(0)
+    ending = asyncio.create_task(session._end_failed_start(CallJoinError("SFU connect failed"), preparing))
+    await asyncio.sleep(0)
+    ending.cancel()
+    try:
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert not ending.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(ending, timeout=1)
+    assert preparing.cancelled()
 
 
 @pytest.mark.asyncio
@@ -3869,8 +4561,10 @@ async def test_manager_skips_call_when_same_agent_materialization_fails(
 
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
 
-    assert bridge.connected_grant is None
     assert bridge.agent_options is None
+    # The media join that ran while the agent was being prepared is torn down.
+    assert bridge.closed
+    assert client.room_put_state.await_args_list[-1].args[2] == {}
     assert _call_state(manager).session is None
     assert _call_state(manager).retry_task is None
     assert _call_state(manager).retry_attempts is None
@@ -4223,6 +4917,64 @@ async def test_manager_retries_transient_focus_discovery_failure(
 
 
 @pytest.mark.asyncio
+async def test_discovered_livekit_service_is_reused_for_joins_shortly_after(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Joins within the discovery's maximum age skip the well-known read; an older discovery is read again."""
+    discovered: dict[tuple[str, bool, bool], tuple[str, float]] = {}
+    monkeypatch.setattr("mindroom.matrix_rtc.focus._discovered_service_urls", discovered)
+    reads: list[str] = []
+
+    async def read_well_known(server_name: str, **_kwargs: object) -> str:
+        reads.append(server_name)
+        return SERVICE_URL
+
+    monkeypatch.setattr("mindroom.matrix_rtc.focus._read_livekit_service_url", read_well_known)
+    members = [_member("@alice:example.org", "ALICEDEV")]
+
+    async def resolve() -> str | None:
+        return await resolve_livekit_service(members, user_id=BOT_USER, configured_url=None, ssl_verify=True)
+
+    assert await resolve() == SERVICE_URL
+    assert await resolve() == SERVICE_URL
+    assert reads == ["example.org"]
+
+    [(key, (url, _read_at))] = discovered.items()
+    discovered[key] = (url, time.monotonic() - 601)
+    assert await resolve() == SERVICE_URL
+    assert reads == ["example.org", "example.org"]
+
+
+@pytest.mark.asyncio
+async def test_remembered_livekit_service_is_reread_when_a_caller_follows_a_changed_well_known(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A remembered discovery that differs from the caller's focus is read again before the call is refused."""
+    well_known = [SERVICE_URL]
+    reads: list[str] = []
+
+    async def read_well_known(server_name: str, **_kwargs: object) -> str:
+        reads.append(server_name)
+        return well_known[-1]
+
+    monkeypatch.setattr("mindroom.matrix_rtc.focus._read_livekit_service_url", read_well_known)
+
+    async def resolve(advertised_url: str) -> str | None:
+        return await resolve_livekit_service(
+            [_member("@alice:example.org", "ALICEDEV", livekit_service_url=advertised_url)],
+            user_id=BOT_USER,
+            configured_url=None,
+            ssl_verify=True,
+        )
+
+    assert await resolve(SERVICE_URL) == SERVICE_URL
+    well_known.append("https://rtc2.example.org")
+    assert await resolve("https://rtc2.example.org") == "https://rtc2.example.org"
+    assert len(reads) == 2
+    # The old focus is refused once a fresh read confirms the well-known no longer names it.
+    assert await resolve(SERVICE_URL) is None
+    assert len(reads) == 3
+
+
+@pytest.mark.asyncio
 async def test_manager_does_not_retry_invalid_sfu_grant(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -4413,21 +5165,191 @@ async def test_shutdown_drains_retry_during_reconciliation(
 
 @pytest.mark.asyncio
 async def test_call_member_expiry_reconciles_without_a_new_event(tmp_path: Path) -> None:
-    """An expired membership cannot keep a media session alive indefinitely."""
-    clock_values = iter((1_000, 1_000, 1_000, 1_001))
+    """An expired membership cannot keep a media session alive once the caller's media is gone too."""
+    now_ms = [1_000]
     call_event = _remote_member_event(created_ts=1_000, expires_ms=1)
     client = _client()
     client.room_get_state.return_value = _state_response(call_event)
     bridge = FakeBridge()
-    manager = _manager(client, bridge, tmp_path, clock_ms=lambda: next(clock_values))
+    manager = _manager(client, bridge, tmp_path, clock_ms=lambda: now_ms[0])
 
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    now_ms[0] = 1_001
     for _ in range(20):
-        if bridge.closed:
+        if bridge.roster_vacated:
             break
         await asyncio.sleep(0.001)
 
+    # The caller is still in the room, so the session waits for the bridge's SFU verdict.
+    assert bridge.roster_vacated
+    assert not bridge.closed
+    await _caller_leaves_sfu(manager, bridge)
     assert bridge.closed
+    await manager.shutdown()
+
+
+def _lapsed_membership_state(*, created_ts: int) -> nio.RoomGetStateResponse:
+    """Alice is still in the room, but her call membership is empty: her delayed leave event fired."""
+    lapsed = {**_remote_member_event(created_ts=created_ts), "content": {}}
+    return nio.RoomGetStateResponse([lapsed, _room_member_event()], ROOM_ID)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("deliver_frame_keys")
+async def test_lapsed_caller_membership_keeps_the_call_and_its_frame_keys(tmp_path: Path) -> None:
+    """A caller whose membership lapsed while their media stayed in the SFU keeps talking to the same session.
+
+    Leaving would start a new session that misses the frame key the caller rotated meanwhile.
+    """
+    joined_ts = int(time.time() * 1000)
+    room = _room(encrypted=True)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(created_ts=joined_ts))
+    bridges: list[FakeBridge] = []
+
+    def bridge_factory(_identity: str, _e2ee: bool) -> FakeBridge:
+        bridges.append(FakeBridge())
+        return bridges[-1]
+
+    manager = _manager(client, FakeBridge(), tmp_path, bridge_factory=bridge_factory)
+    await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+    [bridge] = bridges
+    session = _call_state(manager).session
+    assert session is not None
+
+    client.room_get_state.return_value = _lapsed_membership_state(created_ts=joined_ts)
+    await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+    assert bridge.roster_vacated
+    assert not bridge.closed
+    assert _call_state(manager).session is session
+
+    # The caller rotates its key when its own membership lapses; the held roster still admits it.
+    await _deliver(manager, manager.on_to_device_event(_frame_key_event()))
+    assert ("@alice:example.org:ALICEDEV", b"A" * 16, 2) in bridge.frame_keys
+
+    client.room_get_state.return_value = _state_response(_remote_member_event(created_ts=joined_ts + 8_000))
+    await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+    assert not bridge.roster_vacated
+    assert bridge.participant_rosters[-1] == frozenset({"@alice:example.org:ALICEDEV"})
+    assert _call_state(manager).session is session
+    assert len(bridges) == 1
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_roster_gap_ends_the_call_after_its_grace(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A caller whose membership never returns cannot hold the agent in the call."""
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager._ROSTER_GAP_GRACE_MS", 5)
+    joined_ts = int(time.time() * 1000)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(created_ts=joined_ts))
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    client.room_get_state.return_value = _lapsed_membership_state(created_ts=joined_ts)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    assert bridge.roster_vacated
+    assert not bridge.closed
+
+    for _ in range(200):
+        if bridge.closed:
+            break
+        await asyncio.sleep(0.005)
+        while tasks := tuple(manager._reconcile_tasks.values()):
+            await asyncio.gather(*tasks)
+    assert bridge.closed
+    assert _call_state(manager).logical_call is None
+    await manager.shutdown()
+
+
+async def _never_answers(_room_id: str) -> nio.RoomGetStateResponse:
+    """Hang like a state read whose connection nio keeps retrying."""
+    await asyncio.Event().wait()
+    raise AssertionError
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["error", "hang"])
+async def test_roster_gap_deadline_ends_the_call_when_room_state_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    """An unreachable homeserver cannot keep a call whose roster already emptied past its grace."""
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager._STATE_FETCH_TIMEOUT_S", 0.01)
+    now_ms = [int(time.time() * 1000)]
+    joined_ts = now_ms[0]
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(created_ts=joined_ts))
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, clock_ms=lambda: now_ms[0])
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    client.room_get_state.return_value = _lapsed_membership_state(created_ts=joined_ts)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    assert bridge.roster_vacated
+
+    if failure == "error":
+        client.room_get_state.return_value = nio.RoomGetStateError("503 upstream unavailable")
+    else:
+        client.room_get_state.side_effect = _never_answers
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    assert not bridge.closed
+
+    now_ms[0] += 60_000
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    assert bridge.closed
+    assert _call_state(manager).logical_call is None
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_caller_who_leaves_the_room_during_a_roster_gap_ends_the_call(tmp_path: Path) -> None:
+    """Only a caller still in the room holds a lapsed call; leaving the room ends it at once."""
+    joined_ts = int(time.time() * 1000)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(created_ts=joined_ts))
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    client.room_get_state.return_value = _lapsed_membership_state(created_ts=joined_ts)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    assert not bridge.closed
+
+    lapsed = {**_remote_member_event(created_ts=joined_ts), "content": {}}
+    client.room_get_state.return_value = nio.RoomGetStateResponse(
+        [lapsed, _room_member_event(membership="leave")],
+        ROOM_ID,
+    )
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    assert bridge.closed
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_hang_up_ends_a_held_call_when_the_caller_leaves_the_sfu(tmp_path: Path) -> None:
+    """A caller who hangs up leaves the SFU right after their membership, which ends the held session."""
+    joined_ts = int(time.time() * 1000)
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event(created_ts=joined_ts))
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    client.room_get_state.return_value = _lapsed_membership_state(created_ts=joined_ts)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+    await _caller_leaves_sfu(manager, bridge)
+
+    assert bridge.closed
+    assert _call_state(manager).session is None
+    # The bot cleared its own membership state event on leave.
+    final_args, final_kwargs = client.room_put_state.await_args_list[-1]
+    assert final_args[2] == {}
+    assert final_kwargs["state_key"] == membership_state_key(BOT_USER, BOT_DEVICE)
+    await manager.shutdown()
 
 
 @pytest.mark.asyncio
@@ -4569,6 +5491,7 @@ async def test_call_retries_reuse_per_call_session_id(
             room.room_id,
             requester_id=members[0].user_id,
             session_id=logical_call.agent_session_id,
+            call_config=manager._call_config,
         )
         return next(results)
 
@@ -4881,7 +5804,7 @@ async def test_nonretryable_terminal_close_stays_quarantined_until_next_call(tmp
     assert _call_state(manager).session is None
     logical_call = _call_state(manager).logical_call
     assert logical_call is not None
-    assert logical_call.join_blocked
+    assert logical_call.join_block is not None
 
     client.room_get_state.return_value = _state_response()
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
@@ -4923,7 +5846,7 @@ async def test_nonretryable_terminal_close_reopens_when_the_caller_rejoins(tmp_p
     rejoined_call = _call_state(manager).logical_call
     assert rejoined_call is not None
     assert rejoined_call is not abandoned_call
-    assert not rejoined_call.join_blocked
+    assert rejoined_call.join_block is None
     await manager.shutdown()
 
 
@@ -5001,7 +5924,7 @@ def _plain_session(
             bridge=bridge,
             key_transport=FakeKeyTransport(),
             fetch_grant=fetch_grant,
-            agent_options=VoiceAgentOptions(instructions="x", model="m", api_key="k"),
+            prepare_agent=_prepared(VoiceAgentOptions(instructions="x", model="m", api_key="k")),
             livekit_service_url=SERVICE_URL,
             start_is_allowed=lambda: True,
             on_stopped=on_stopped,  # type: ignore[arg-type]
@@ -5339,7 +6262,7 @@ async def test_key_distribution_serializes_roster_change_after_inflight_send() -
 async def test_rapid_roster_changes_preserve_key_activation_deadline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A pending key stays delayed and is skipped if another rotation supersedes it."""
+    """A pending key keeps its own deadline; a newer rotation neither cancels nor delays it."""
     release_delays = asyncio.Event()
     delays: list[float] = []
     real_sleep = asyncio.sleep
@@ -5372,12 +6295,511 @@ async def test_rapid_roster_changes_preserve_key_activation_deadline(
     await real_sleep(0)
 
     assert [key_index for _, _, key_index in bridge.frame_keys] == [0]
-    assert delays == [1.0, 0.5, 1.0]
+    assert delays == [1.0, 1.0]
     release_delays.set()
     for _ in range(5):
         await real_sleep(0)
 
-    assert [key_index for _, _, key_index in bridge.frame_keys] == [0, 2]
+    assert [key_index for _, _, key_index in bridge.frame_keys] == [0, 1, 2]
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_retry_during_slow_partial_leave_rotation_keeps_that_rotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A device the leave rotation missed gets the same key again; the rotation still activates."""
+    release_delays = asyncio.Event()
+    real_sleep = asyncio.sleep
+
+    async def controlled_sleep(_seconds: float) -> None:
+        await release_delays.wait()
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", controlled_sleep)
+    clock = [0]
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+    charlie = _member("@charlie:example.org", "CHARLIEDEV")
+
+    class SlowPartialRotationTransport(FakeKeyTransport):
+        async def send_key(
+            self,
+            *,
+            room_id: str,
+            key_base64: str,
+            key_index: int,
+            targets: list[CallMember],
+        ) -> list[CallMember]:
+            await super().send_key(room_id=room_id, key_base64=key_base64, key_index=key_index, targets=targets)
+            if key_index == 1 and bob in targets and len(targets) > 1:
+                clock[0] += 10_500
+                return [member for member in targets if member != bob]
+            return targets
+
+    transport = SlowPartialRotationTransport()
+    bridge = FakeBridge()
+    session = _session(_client(), bridge, transport, clock)
+
+    session._members = [alice, bob, charlie]
+    await session._distribute_keys()
+    clock[0] = 1_000
+    session._members = [alice, bob]
+    await session._distribute_keys()
+    # The delivery retry (or an inbound-key wakeup) runs before the rotation activates.
+    await session._distribute_keys()
+
+    assert [sent["key_index"] for sent in transport.sent] == [0, 1, 1]
+    assert transport.sent[2]["targets"] == [bob]
+    release_delays.set()
+    for _ in range(5):
+        await real_sleep(0)
+    assert {key_index for _, _, key_index in bridge.frame_keys} == {0, 1}
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_wall_clock_jump_cannot_shorten_the_rotation_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The activation deadline runs on monotonic time, so a forward clock correction changes nothing."""
+    release_delays = asyncio.Event()
+    delays: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def controlled_sleep(seconds: float) -> None:
+        delays.append(seconds)
+        await release_delays.wait()
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", controlled_sleep)
+    wall = [0]
+    monotonic = [0]
+    bridge = FakeBridge()
+    session = _session(_client(), bridge, FakeKeyTransport(), wall, monotonic)
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+    charlie = _member("@charlie:example.org", "CHARLIEDEV")
+
+    session._members = [alice]
+    await session._distribute_keys()
+    wall[0] = monotonic[0] = 10_001
+    session._members = [alice, bob]
+    await session._distribute_keys()
+    wall[0] += 2_000
+    session._members = [alice, bob, charlie]
+    await session._distribute_keys()
+    await real_sleep(0)
+
+    assert [key_index for _, _, key_index in bridge.frame_keys] == [0]
+    assert delays == [1.0]
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_reshare_after_slow_rotation_send_keeps_the_rotation_delay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rotated key activates one delay after its own send returns, even if a re-share follows at once."""
+    release_delays = asyncio.Event()
+    delays: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def controlled_sleep(seconds: float) -> None:
+        delays.append(seconds)
+        await release_delays.wait()
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", controlled_sleep)
+    clock = [0]
+
+    class SlowRotationTransport(FakeKeyTransport):
+        async def send_key(
+            self,
+            *,
+            room_id: str,
+            key_base64: str,
+            key_index: int,
+            targets: list[CallMember],
+        ) -> list[CallMember]:
+            if key_index == 1 and len(targets) > 1:  # only the rotation's own send is slow
+                clock[0] += 1_200
+            return await super().send_key(
+                room_id=room_id,
+                key_base64=key_base64,
+                key_index=key_index,
+                targets=targets,
+            )
+
+    bridge = FakeBridge()
+    session = _session(_client(), bridge, SlowRotationTransport(), clock)
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+    charlie = _member("@charlie:example.org", "CHARLIEDEV")
+
+    session._members = [alice]
+    await session._distribute_keys()
+    clock[0] = 10_001
+    session._members = [alice, bob]
+    await session._distribute_keys()
+    session._members = [alice, bob, charlie]
+    await session._distribute_keys()
+    await real_sleep(0)
+
+    assert [key_index for _, _, key_index in bridge.frame_keys] == [0]
+    assert delays == [1.0]
+    release_delays.set()
+    for _ in range(5):
+        await real_sleep(0)
+
+    assert {key_index for _, _, key_index in bridge.frame_keys} == {0, 1}
+    await session.stop()
+
+
+def _own_indices(bridge: FakeBridge) -> list[int]:
+    return [key_index for identity, _, key_index in bridge.frame_keys if identity == f"{BOT_USER}:{BOT_DEVICE}"]
+
+
+class _HeldKeyTransport(FakeKeyTransport):
+    """Holds the send of one key index open until released, or raises for it."""
+
+    def __init__(self, *, hold: int | None = None, fail: int | None = None) -> None:
+        super().__init__()
+        self.hold, self.fail = hold, fail
+        self.release = asyncio.Event()
+
+    async def send_key(
+        self,
+        *,
+        room_id: str,
+        key_base64: str,
+        key_index: int,
+        targets: list[CallMember],
+    ) -> list[CallMember]:
+        if key_index == self.fail:
+            msg = "send failed"
+            raise OSError(msg)
+        if key_index == self.hold:
+            await self.release.wait()
+        return await super().send_key(room_id=room_id, key_base64=key_base64, key_index=key_index, targets=targets)
+
+
+@pytest.mark.asyncio
+async def test_newer_rotation_cannot_postpone_an_older_keys_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A leave rotation switches at its own deadline even while a later joiner's rotation is still sending."""
+    real_sleep = asyncio.sleep
+
+    async def elapsed_sleep(_seconds: float) -> None:
+        for _ in range(3):
+            await real_sleep(0)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", elapsed_sleep)
+    clock = [0]
+    transport = _HeldKeyTransport(hold=2)
+    bridge = FakeBridge()
+    session = _session(_client(), bridge, transport, clock)
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+    charlie = _member("@charlie:example.org", "CHARLIEDEV")
+    dave = _member("@dave:example.org", "DAVEDEV")
+
+    session._members = [alice, bob, charlie]
+    await session._distribute_keys()
+    clock[0] = 1_000
+    session._members = [alice, bob]  # charlie left: rotate to K1, whose send took past the grace
+    await session._distribute_keys()
+    clock[0] = 11_500
+    session._members = [alice, bob, dave]  # a genuine late joiner: rotate to K2, whose send stays open
+    k2 = asyncio.create_task(session._distribute_keys())
+    for _ in range(10):
+        await real_sleep(0)
+
+    assert [sent["key_index"] for sent in transport.sent] == [0, 1]
+    assert _own_indices(bridge) == [0, 1]
+    transport.release.set()
+    await k2
+    for _ in range(10):
+        await real_sleep(0)
+    assert _own_indices(bridge) == [0, 1, 2]
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_older_keys_timer_after_a_newer_key_applied_is_a_no_op(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A late timer for an older key never overwrites the agent's slot 0 or moves its senders back."""
+    timers: list[asyncio.Event] = []
+    real_sleep = asyncio.sleep
+
+    async def held_sleep(_seconds: float) -> None:
+        timer = asyncio.Event()
+        timers.append(timer)
+        await timer.wait()
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", held_sleep)
+    bridge = FakeBridge()
+    session = _session(_client(), bridge, FakeKeyTransport(), [0])
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+
+    session._members = [alice, bob]
+    await session._distribute_keys()
+    session._members = [alice]
+    await session._distribute_keys()
+    session._members = []
+    await session._distribute_keys()
+    await real_sleep(0)
+    assert len(timers) == 2
+    timers[1].set()
+    for _ in range(5):
+        await real_sleep(0)
+    timers[0].set()
+    for _ in range(5):
+        await real_sleep(0)
+
+    assert _own_indices(bridge) == [0, 2]
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_raised_leave_rotation_send_still_retires_the_old_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rotation whose send raised still activates after the delay: callers hear silence, never the old key."""
+    real_sleep = asyncio.sleep
+
+    async def elapsed_sleep(_seconds: float) -> None:
+        await real_sleep(0)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", elapsed_sleep)
+    bridge = FakeBridge()
+    session = _session(_client(), bridge, _HeldKeyTransport(fail=1), [0])
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+
+    session._members = [alice, bob]
+    await session._distribute_keys()
+    session._members = [alice]
+    with pytest.raises(OSError, match="send failed"):
+        await session._distribute_keys()
+    for _ in range(5):
+        await real_sleep(0)
+
+    assert _own_indices(bridge) == [0, 1]
+    await session.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("late_ms", "expected_sleep"),
+    [(1_200, 0.0), (300, 0.7)],
+)
+async def test_timer_dispatched_late_waits_only_the_rest_of_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    late_ms: int,
+    expected_sleep: float,
+) -> None:
+    """The deadline is fixed when the send ends, not when the timer task first runs."""
+    delays: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def recorded_sleep(seconds: float) -> None:
+        delays.append(seconds)
+        await real_sleep(0)
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", recorded_sleep)
+    clock = [0]
+    bridge = FakeBridge()
+    session = _session(_client(), bridge, FakeKeyTransport(), clock)
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+
+    session._members = [alice, bob]
+    await session._distribute_keys()
+    session._members = [alice]
+    await session._distribute_keys()
+    clock[0] += late_ms  # the loop was busy before the timer task first ran
+    for _ in range(5):
+        await real_sleep(0)
+
+    assert delays == [pytest.approx(expected_sleep)]
+    assert _own_indices(bridge) == [0, 1]
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_timer_woken_late_applies_once_without_sleeping_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A timer that started on time but woke late applies the key at once."""
+    wake = asyncio.Event()
+    delays: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def late_sleep(seconds: float) -> None:
+        delays.append(seconds)
+        await wake.wait()
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", late_sleep)
+    clock = [0]
+    bridge = FakeBridge()
+    session = _session(_client(), bridge, FakeKeyTransport(), clock)
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+
+    session._members = [alice, bob]
+    await session._distribute_keys()
+    session._members = [alice]
+    await session._distribute_keys()
+    await real_sleep(0)
+    clock[0] += 5_000
+    wake.set()
+    for _ in range(5):
+        await real_sleep(0)
+
+    assert delays == [1.0]
+    assert _own_indices(bridge) == [0, 1]
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_inbound_key_aliasing_the_agents_identity_is_dropped() -> None:
+    """An admitted device whose ``user_id:device_id`` string equals ours cannot install a key as us."""
+    bridge = FakeBridge()
+    session = _session(_client(), bridge, FakeKeyTransport(), [1_000])
+    user, _, server = BOT_USER.partition(":")
+    alias = _member(user, f"{server}:{BOT_DEVICE}")
+    assert f"{alias.user_id}:{alias.device_id}" == f"{BOT_USER}:{BOT_DEVICE}"
+    await session.start([_member("@alice:example.org", "ALICEDEV"), alias])
+    bridge.frame_keys.clear()
+
+    accepted = session.on_key_received(
+        ReceivedFrameKey(
+            user_id=alias.user_id,
+            claimed_device_id=alias.device_id,
+            key_base64="QUFBQUFBQUFBQUFBQUFBQQ==",
+            key_index=2,
+            received_at_ms=1_500,
+        ),
+    )
+
+    assert accepted is True
+    assert bridge.frame_keys == []
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_own_key_install_failure_ends_the_session_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If the bridge cannot install our new key, the call ends instead of sending on a retired key."""
+    timers: list[asyncio.Event] = []
+    real_sleep = asyncio.sleep
+
+    async def held_sleep(_seconds: float) -> None:
+        timer = asyncio.Event()
+        timers.append(timer)
+        await timer.wait()
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", held_sleep)
+
+    class FailingBridge(FakeBridge):
+        def set_frame_key(self, participant_identity: str, key: bytes, key_index: int) -> None:
+            if key_index == 2:
+                msg = "install failed"
+                raise RuntimeError(msg)
+            super().set_frame_key(participant_identity, key, key_index)
+
+    bridge = FailingBridge()
+    session = _session(_client(), bridge, FakeKeyTransport(), [0])
+    errors: list[str] = []
+    terminated: list[bool] = []
+    session._agent_options = VoiceAgentOptions(
+        instructions="hi",
+        model="gpt-realtime-2.1",
+        api_key="sk-test",
+        on_session_error=errors.append,
+        on_session_terminated=terminated.append,
+    )
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+    charlie = _member("@charlie:example.org", "CHARLIEDEV")
+
+    session._members = [alice, bob, charlie]
+    await session._distribute_keys()
+    session._members = [alice, bob]
+    await session._distribute_keys()
+    session._members = [alice]
+    await session._distribute_keys()
+    await real_sleep(0)
+    timers[1].set()  # generation 2 is due first; its install fails
+    for _ in range(5):
+        await real_sleep(0)
+    timers[0].set()  # the older generation 1 must not install afterwards
+    for _ in range(5):
+        await real_sleep(0)
+    await session.on_members_changed([alice, charlie])
+
+    assert _own_indices(bridge) == [0]
+    assert len(errors) == 1
+    assert terminated == [True]
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_raised_send_schedules_the_delivery_retry_and_re_raises() -> None:
+    """A raised send counts as undelivered, schedules the retry, and its exception propagates unchanged."""
+    session = _session(_client(), FakeBridge(), _HeldKeyTransport(fail=1), [0])
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+
+    session._members = [alice, bob]
+    await session._distribute_keys()
+    session._members = [alice]
+    with pytest.raises(OSError, match="send failed"):
+        await session._distribute_keys()
+
+    assert session._key_distribution_retry_scheduled
+    await session.stop()
+
+
+@pytest.mark.asyncio
+async def test_send_finishing_after_stop_arms_nothing() -> None:
+    """A rotation send that returns after stop() spawns no timer and installs nothing."""
+    transport = _HeldKeyTransport(hold=1)
+    bridge = FakeBridge()
+    session = _session(_client(), bridge, transport, [0])
+    alice = _member("@alice:example.org", "ALICEDEV")
+    bob = _member("@bob:example.org", "BOBDEV")
+
+    session._members = [alice, bob]
+    await session._distribute_keys()
+    session._members = [alice]
+    rotation = asyncio.create_task(session._distribute_keys())
+    await asyncio.sleep(0)
+    await session.stop()
+    transport.release.set()
+    await rotation
+
+    assert session._tasks == set()
+    assert _own_indices(bridge) == [0]
+
+
+@pytest.mark.asyncio
+async def test_key_generation_orders_activation_across_index_wrap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """After 256 rotations index 0 is the newest key, and the old index-255 key cannot come back."""
+    timers: list[asyncio.Event] = []
+    real_sleep = asyncio.sleep
+
+    async def held_sleep(_seconds: float) -> None:
+        timer = asyncio.Event()
+        timers.append(timer)
+        await timer.wait()
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_session.asyncio.sleep", held_sleep)
+    bridge = FakeBridge()
+    session = _session(_client(), bridge, FakeKeyTransport(), [0])
+    for created_ts in range(257):
+        session._members = [_member("@alice:example.org", "ALICEDEV", created_ts=created_ts)]
+        await session._distribute_keys()
+    await real_sleep(0)
+    assert len(timers) == 256
+    timers[255].set()  # generation 256, wire index 0
+    for _ in range(5):
+        await real_sleep(0)
+    timers[254].set()  # generation 255, wire index 255: older
+    for _ in range(5):
+        await real_sleep(0)
+
+    assert _own_indices(bridge) == [0, 0]
     await session.stop()
 
 

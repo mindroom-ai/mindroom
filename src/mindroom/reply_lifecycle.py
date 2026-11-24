@@ -67,7 +67,7 @@ class SpanOutcome(StrEnum):
 
 # Outcomes after which the span's sources are still pending, so a retry or
 # replay claims the reply again.
-_SOURCES_PENDING_OUTCOMES = frozenset({SpanOutcome.RELEASED, SpanOutcome.SUPERSEDED, SpanOutcome.LOST})
+SOURCES_PENDING_OUTCOMES = frozenset({SpanOutcome.RELEASED, SpanOutcome.SUPERSEDED, SpanOutcome.LOST})
 
 
 class Outcome(StrEnum):
@@ -712,7 +712,7 @@ def claim(request: ClaimRequest, context: ClaimContext) -> Transition:  # noqa: 
         request.driving_edit_id is not None
         and last is not None
         and last.ended
-        and last.outcome not in _SOURCES_PENDING_OUTCOMES
+        and last.outcome not in SOURCES_PENDING_OUTCOMES
     ):
         # A retry of the edit the last span already answered, as a sync
         # restart retries a regeneration that finished: nothing runs again.
@@ -754,7 +754,7 @@ def _regeneration(
     """
     if reply.state is ReplyState.GONE or reply.approval_id is not None:
         return _unchanged(Outcome.DUPLICATE, reply)
-    if last is not None and last.kind is SpanKind.REGENERATION and last.outcome in _SOURCES_PENDING_OUTCOMES:
+    if last is not None and last.kind is SpanKind.REGENERATION and last.outcome in SOURCES_PENDING_OUTCOMES:
         rollback = _kept_answer(reply, last)
     else:
         rollback = _rollback_of(reply) if reply.terminal else None
@@ -823,17 +823,22 @@ def write_ahead(
     active_generation: str,
     durable_write_debt: bool,
     now_ns: int,
+    shown_live: bool = False,
 ) -> Transition:
-    """Record the presentation of the next direct progress edit before it is sent.
+    """Record the presentation of the next direct progress edit before it is sent, or what live frames showed.
 
     While an earlier durable write of the reply is unresolved the edit waits:
     sent later, that write would replace newer progress with what it shows.
+    Once a Stop is recorded no edit is sent, because only the Stop's note may
+    follow it; what frames already showed is still recorded, for that note to keep.
     """
     if span.bot_generation != active_generation:
         return _unchanged(Outcome.STALE, reply)
     stale = _stale_span(reply, span)
     if stale is not None:
         return stale
+    if reply.unapplied_stop and not shown_live:
+        return _unchanged(Outcome.STOPPED, reply)
     if durable_write_debt:
         return _unchanged(Outcome.DEFERRED, reply)
     updated, _ = _next_sequence(confirm_progress(reply, previous))
@@ -1475,7 +1480,7 @@ def sources_settled_without_reply(reply: Reply, span: Span, *, now_ns: int) -> T
         return _unchanged(Outcome.DUPLICATE, reply)
     # A selection's first span waits, unended, for its claim to make it current.
     awaiting_claim = not span.ended and reply.current_span_id is None and span.span_id == reply.last_span_id
-    if not (span.span_id == reply.current_span_id or span.outcome in _SOURCES_PENDING_OUTCOMES or awaiting_claim):
+    if not (span.span_id == reply.current_span_id or span.outcome in SOURCES_PENDING_OUTCOMES or awaiting_claim):
         return _unchanged(Outcome.STALE, reply)
     effects = _settle_sources(reply, span, answered=False)
     if (kept := _kept_answer(reply, span)) is not None:
@@ -1556,7 +1561,7 @@ def sources_deleted(reply: Reply, span: Span | None, *, now_ns: int) -> Transiti
     current = span if live else None
     if reply.approval_id is None:
         # A regeneration a restart or retry left waiting for its replay still holds the answer it would replace.
-        waiting = span if not live and span is not None and span.outcome in _SOURCES_PENDING_OUTCOMES else None
+        waiting = span if not live and span is not None and span.outcome in SOURCES_PENDING_OUTCOMES else None
         regeneration = current or waiting
         kept = None if regeneration is None else _kept_answer(reply, regeneration)
         if regeneration is not None and kept is not None:
@@ -1637,7 +1642,7 @@ def owner_lost(reply: Reply, last: Span, facts: OwnerLostFacts, *, now_ns: int) 
     if reply.state is not ReplyState.ACTIVE:
         return _unchanged(Outcome.DUPLICATE, reply)
     orphaned = (last.outcome is None and last.bot_generation != facts.active_generation) or (
-        last.outcome in _SOURCES_PENDING_OUTCOMES and not facts.sources_pending
+        last.outcome in SOURCES_PENDING_OUTCOMES and not facts.sources_pending
     )
     if not orphaned:
         return _unchanged(Outcome.DUPLICATE, reply)

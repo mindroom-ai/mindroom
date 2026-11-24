@@ -28,11 +28,12 @@ from mindroom.agent_loop.run import (
     run_agent,
     started_run_fields,
 )
-from mindroom.agent_loop.tools import PreparedTools, sorted_specs
+from mindroom.agent_loop.tools import PreparedTools, sorted_specs, tool_result_content
 from mindroom.history.request_messages import build_resume_request
 from mindroom.llm.events import RunFinished, TextDelta, ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
+from mindroom.llm.usage import team_run_usage
 from mindroom.logging_config import get_logger
 from mindroom.teams.delegate_tools import DELEGATION_TOOLS, answer_delegation, delegate_functions
 from mindroom.tool_system.context_bound_streams import callback_event_stream, closing_async_stream
@@ -171,18 +172,8 @@ def team_usage_runs(record: TeamRunRecord) -> list[tuple[AnyRunRecord, RunMetric
 
 
 def team_usage(record: TeamRunRecord) -> RunMetrics | None:
-    """Return the turn's usage, the sum over ``team_usage_runs``, within the leader's duration.
-
-    Members run inside the leader's window, so summing durations would double-count wall clock; token sums are
-    disjoint.
-    """
-    metrics = [run_metrics for _, run_metrics in team_usage_runs(record)]
-    if not metrics:
-        return None
-    total = sum(metrics[1:], metrics[0])
-    if len(metrics) > 1 and record.metrics is not None:
-        total.duration = record.metrics.duration
-    return total
+    """Return the turn's usage, the sum over ``team_usage_runs``, within the leader's duration (``team_run_usage``)."""
+    return team_run_usage(record.metrics, (member.metrics for member in record.ended_member_runs))
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,7 +268,7 @@ def _answer_delegation(
     for index in reversed(range(len(messages))):
         message = messages[index]
         if message.role == "tool" and message.tool_call_id == call.tool_call_id:
-            messages[index] = replace(message, content=call.result)
+            messages[index] = replace(message, content=tool_result_content(call.result, is_error=call.is_error))
             return
 
 

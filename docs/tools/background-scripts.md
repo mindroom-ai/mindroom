@@ -58,7 +58,7 @@ Each run keeps the limits and `allowed_tools` value in effect when it started.
 
 ### Which tools a script can call and when it needs approval
 
-- A non-empty `allowed_tools` list restricts the script to those toolkits, and their functions run without approval.
+- A non-empty `allowed_tools` list restricts the script to those toolkits, and their functions run without approval, except a function whose [approval alias](../plugins.md#approval-aliases) judges it as a function that would still need approval.
 - An empty list lets the script call every eligible toolkit on the agent, but each call waits for approval unless a `tool_approval` rule auto-approves it.
 - Unknown or ineligible toolkit names, including `*`, make `start_script` fail with an error.
 - The `browser`, `script`, `agent_manager`, `claude_agent`, `compact_context`, `contacts`, `delegate`, `dynamic_tools`, `dynamic_workflow`, `memory`, `self_config`, `skill_manage`, and `slack` toolkits are never available to scripts, even when the agent has them.

@@ -14,7 +14,8 @@ from nio import TimelineEventProvenance
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from tests.conftest import start_call_manager
+from tests.access_schema_support import refresh_memberships
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, start_call_manager
 from tests.test_bot_ready_hook import (
     _FRESH_SEMANTIC_FACTS,
     _REPLAY_FACTS,
@@ -82,13 +83,18 @@ async def _router_and_agent(tmp_path: Path, calls: _Calls) -> tuple[AgentBot, Ag
     agent = _agent_bot(tmp_path, agent_name="code", orchestrator=cast("ReadyRuntime", router.orchestrator))
     router.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     router.client = _grant_room_client(router, GRANT_ROOM_ID)
-    await router._runtime_view.agent_reply_memberships.refresh(router.config, router.runtime_paths, router.client)
+    await refresh_memberships(
+        router._runtime_view.agent_reply_memberships,
+        router.config,
+        router.runtime_paths,
+        router.client,
+    )
     managers = {bot.agent_name: calls.observe(bot.agent_name, await start_call_manager(bot)) for bot in (router, agent)}
     return router, agent, managers
 
 
 async def _settle() -> None:
-    assert await wait_for_background_tasks(timeout=1)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS)
 
 
 async def _admit_live_join(router: AgentBot, facts: AdmissionFacts = _FRESH_SEMANTIC_FACTS) -> None:
@@ -232,7 +238,7 @@ async def test_router_stop_leaves_another_bots_call_start_running(tmp_path: Path
     assert not held.cancelled.is_set()
 
     held.release.set()
-    assert await wait_for_background_tasks(timeout=1, owner=agent._runtime_view)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=agent._runtime_view)
     assert held.finished.is_set()
 
 
@@ -256,7 +262,7 @@ async def test_router_stop_leaves_another_bots_fence_revocation_running(tmp_path
     await router.stop()
     hold.set()
 
-    assert await wait_for_background_tasks(timeout=1, owner=agent._runtime_view)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=agent._runtime_view)
     assert "code" in calls.ops("revoked")
 
 
@@ -282,7 +288,11 @@ async def test_a_draining_bot_starts_no_invite_or_call_work_but_still_revokes(
     assert calls.ops("reconcile") == (["router"] if draining else ["code", "router"])
     assert invites.await_count == (0 if draining else 1)
 
-    router.invalidate_agent_reply_memberships(reason="uncertain_sync_response")
+    router.orchestrator.agent_reply_membership_sync._invalidate_observer(
+        router.config,
+        router.matrix_id.full_id,
+        reason="uncertain_sync_response",
+    )
     await _settle()
     assert calls.ops("revoked") == ["code", "code", "router", "router"]
 

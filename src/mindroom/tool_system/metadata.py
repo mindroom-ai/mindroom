@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import functools
 import math
 import os
 import re
@@ -10,12 +9,14 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-from mindroom.config.legacy_fields import retired_tool_override
+from mindroom.config.legacy_fields import retired_file_setting, retired_tool_override
+from mindroom.config.tool_aliases import TOOL_ALIASES, canonical_tool_name
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.file_access import agent_file_access
 from mindroom.logging_config import get_logger
 from mindroom.shared_directories.paths import shared_directory_roots
+from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.declarations import (
     ConfigField,
@@ -38,9 +39,10 @@ from mindroom.tool_system.worker_routing import (
     supports_tool_name_for_worker_scope,
     unsupported_shared_only_integration_message,
 )
+from mindroom.workers.named import named_workers_refusal
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Mapping
+    from collections.abc import Callable, Collection, Iterable, Mapping
 
     from mindroom.config.main import Config
     from mindroom.config.models import FileAccess
@@ -581,11 +583,27 @@ def _build_managed_tool_init_kwargs(
     worker_target: ResolvedWorkerTarget | None,
     runtime_config: Config | None,
     tool_output_workspace_root: Path | None,
+    saved_output_dir: Path | None,
     workspace_in_worker: bool | None,
     agent_state_root: Path | None,
+    in_sandbox_request: bool,
 ) -> dict[str, object]:
-    """Build declared MindRoom-managed constructor kwargs for one tool."""
+    """Build declared MindRoom-managed constructor kwargs for one tool.
+
+    Path tools working in a workdir can read ``saved_output_dir``, the saved outputs whose receipts name files there.
+    """
     execution_identity = worker_target.execution_identity if worker_target is not None else None
+    agent_name = worker_target.routing_agent_name if worker_target is not None else None
+    saved_outputs = (
+        (SharedDirectoryRoot(path=saved_output_dir, writable=False, label="the saved tool outputs directory"),)
+        if saved_output_dir
+        else ()
+    )
+
+    def path_tool_roots() -> tuple[SharedDirectoryRoot, ...]:
+        # Shared directories change during a response, so path tools resolve them on each call.
+        return (*shared_directory_roots(runtime_config, runtime_paths, agent_name), *saved_outputs)
+
     managed_values: dict[ToolManagedInitArg, Callable[[], object]] = {
         ToolManagedInitArg.RUNTIME_PATHS: lambda: runtime_paths,
         ToolManagedInitArg.CREDENTIALS_MANAGER: lambda: credentials_manager,
@@ -600,16 +618,11 @@ def _build_managed_tool_init_kwargs(
         ToolManagedInitArg.CURRENT_ROOM_ID: lambda: (
             execution_identity.room_id if execution_identity is not None else None
         ),
-        ToolManagedInitArg.AGENT_NAME: lambda: worker_target.routing_agent_name if worker_target is not None else None,
+        ToolManagedInitArg.AGENT_NAME: lambda: agent_name,
         ToolManagedInitArg.FILE_ACCESS: lambda: _managed_file_access(runtime_config, worker_target),
         ToolManagedInitArg.AGENT_STATE_ROOT: lambda: agent_state_root,
-        # Shared directories change during a response, so path tools resolve them on each call.
-        ToolManagedInitArg.SHARED_DIRECTORY_ROOTS: lambda: functools.partial(
-            shared_directory_roots,
-            runtime_config,
-            runtime_paths,
-            worker_target.routing_agent_name if worker_target is not None else None,
-        ),
+        ToolManagedInitArg.SHARED_DIRECTORY_ROOTS: lambda: path_tool_roots,
+        ToolManagedInitArg.IN_SANDBOX_REQUEST: lambda: in_sandbox_request,
     }
     return {init_arg.value: managed_values[init_arg]() for init_arg in metadata.managed_init_args}
 
@@ -683,6 +696,44 @@ class _ToolSettings:
     credentials_manager: CredentialsManager | None
 
 
+def offered_functions(
+    metadata: ToolMetadata,
+    settings: Mapping[str, object],
+    *,
+    validate_filters: bool = False,
+) -> tuple[frozenset[str] | None, bool]:
+    """Return the toolkit's functions its settings leave on, and whether one it names as writing is among them.
+
+    A function stays on by Agno's ``all`` or ``enable_<function>``, then the filters. The functions are None when the
+    toolkit declares no function names, as a plugin or MCP server may, and no allowlist names them. A toolkit that
+    names no writing functions writes when it runs code. Request filter validation only when the declared functions
+    and enable flags predict what the constructor registers, as they do for shell.
+    """
+    values = {config_field.name: config_field.default for config_field in metadata.config_fields or ()} | dict(settings)
+    include, exclude = (
+        _normalize_string_array_override(values.get(name), preserve_empty_list=True)
+        for name in ("include_tools", "exclude_tools")
+    )
+
+    def offered(names: Iterable[str], *, validate: bool = False) -> frozenset[str]:
+        enabled = frozenset(name for name in names if values.get("all") or values.get(f"enable_{name}", True))
+        if validate:
+            filtered = _offered_function_names(
+                enabled,
+                include_tools=include,
+                exclude_tools=exclude,
+                declared_functions=frozenset(metadata.function_names or ()),
+            )
+            return enabled if filtered is None else filtered
+        return frozenset(name for name in enabled if tool_name_allowed(name, include=include, exclude=exclude))
+
+    available = metadata.function_names or include
+    functions = None if available is None else offered(available, validate=validate_filters)
+    if not metadata.workspace_writers:
+        return functions, metadata.executes_code
+    return functions, bool(offered(metadata.workspace_writers))
+
+
 def resolve_tool_settings(
     tool_name: str,
     runtime_paths: RuntimePaths,
@@ -709,17 +760,39 @@ def resolve_tool_settings(
         tool_metadata=tools.entries,
     )
     resolved_credentials_manager = _resolve_tool_credentials_manager(metadata, runtime_paths, credentials_manager)
-    stored_credentials = (
-        load_scoped_credentials(
-            tool_name,
+
+    def stored(service: str) -> dict[str, Any] | None:
+        if resolved_credentials_manager is None:
+            return None
+        return load_scoped_credentials(
+            service,
             credentials_manager=resolved_credentials_manager,
             worker_target=worker_target,
             allowed_shared_services=allowed_shared_services,
             primary_built_tool=primary_owns_tool_settings(tool_name, tools, runtime_paths=runtime_paths),
         )
-        if resolved_credentials_manager is not None
-        else None
-    )
+
+    stored_credentials = stored(tool_name)
+    # LEGACY_COMPAT: Dashboard settings stored for the file and coding tools.
+    # Legacy format: a stored settings document under service file or coding, saved from the Tools dashboard, holding
+    #   Agno FileTools switches or an include_tools or exclude_tools filter.
+    # Last legacy release: v2026.11.447; replacement: unreleased; the filesystem toolkit reads service filesystem.
+    # Handling: Refuse to resolve the toolkit's settings while such a document holds any setting, so the toolkit is
+    #   not built and grants no workspace write until the operator deletes it; the dashboard reads and deletes it
+    #   in the store read here.
+    # Coverage:
+    #   tests/api/test_plugin_room_agents.py::test_settings_stored_under_an_old_name_stop_the_toolkit_and_its_workspace_grant;
+    #   tests/test_credentials.py::test_dashboard_deletes_old_name_settings_from_the_store_the_toolkit_build_reads.
+    for alias, name in TOOL_ALIASES.items():
+        if name == tool_name and any(not key.startswith("_") for key in stored(alias) or ()):
+            msg = (
+                f"{tool_name}: settings stored under '{alias}' no longer apply; "
+                f"delete them, and save any you still want under '{tool_name}'."
+            )
+            raise ToolConfigOverrideError(msg)
+    if tool_name == "filesystem" and (retired := retired_file_setting(stored_credentials or {})) is not None:
+        msg = f"{tool_name}: stored setting {retired[0]} was removed; {retired[1]}."
+        raise ToolConfigOverrideError(msg)
     credentials = {**(stored_credentials or {}), **(credential_overrides or {})}
     safe_tool_init_overrides = sanitize_tool_init_overrides(
         tool_name,
@@ -759,6 +832,7 @@ def get_tool_by_name(
     agent_state_root: Path | None = None,
     tool_output_auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
     workspace_in_worker: bool | None = None,
+    in_sandbox_request: bool = False,
     worker_target: ResolvedWorkerTarget | None,
 ) -> AnyToolkit:
     """Get a tool instance by its name in ``tools``, the registry of the config the caller acts for.
@@ -771,7 +845,9 @@ def get_tool_by_name(
     worker runtimes leave it unset because their own storage root is the state they own.
     ``workspace_in_worker`` says whether the agent's workspace-path tools run in a worker, where attachments are saved;
     None follows the sandbox settings for those tools.
+    ``in_sandbox_request`` is set only by the sandbox runner building a toolkit for the request it executes.
     """
+    tool_name = canonical_tool_name(tool_name)
     factory = tools.factory(tool_name)
     metadata = tools.entries[tool_name]
     routed = (
@@ -798,8 +874,18 @@ def get_tool_by_name(
             configure_toolkit_functions,
             toolkit_function_names,
         )
-        from mindroom.tool_system.output_files import ToolOutputFilePolicy  # noqa: PLC0415
+        from mindroom.tool_system.output_files import ToolOutputFilePolicy, current_tool_workdir  # noqa: PLC0415
 
+        output_file_policy = (
+            ToolOutputFilePolicy.from_runtime(
+                tool_output_workspace_root,
+                runtime_paths,
+                auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
+                tools_use_workdir=current_tool_workdir() is not None,
+            )
+            if tool_output_workspace_root is not None
+            else None
+        )
         settings = resolve_tool_settings(
             tool_name,
             runtime_paths,
@@ -821,9 +907,16 @@ def get_tool_by_name(
         init_kwargs = dict(settings.values)
         extra_env_passthrough = init_kwargs.get("extra_env_passthrough")
         proxy_tool_init_overrides = dict(settings.tool_init_overrides or {})
-        shell_path_prepend = init_kwargs.get("shell_path_prepend")
-        if tool_name == "shell" and isinstance(shell_path_prepend, str):
-            proxy_tool_init_overrides["shell_path_prepend"] = shell_path_prepend
+        if tool_name == "shell":
+            shell_path_prepend = init_kwargs.get("shell_path_prepend")
+            if isinstance(shell_path_prepend, str):
+                proxy_tool_init_overrides["shell_path_prepend"] = shell_path_prepend
+            init_kwargs["allow_without_worker"] = (
+                runtime_config is not None and runtime_config.defaults.allow_shell_without_worker
+            )
+            init_kwargs["named_workers"] = (
+                routed and named_workers_refusal(routing_agent_name, runtime_config, runtime_paths) is None
+            )
         init_kwargs.update(
             _build_managed_tool_init_kwargs(
                 metadata,
@@ -833,27 +926,30 @@ def get_tool_by_name(
                 worker_target=worker_target,
                 runtime_config=runtime_config,
                 tool_output_workspace_root=tool_output_workspace_root,
+                saved_output_dir=(
+                    output_file_policy.saved_output_dir
+                    if output_file_policy is not None and output_file_policy.tools_use_workdir
+                    else None
+                ),
                 workspace_in_worker=workspace_in_worker,
                 agent_state_root=agent_state_root,
+                in_sandbox_request=in_sandbox_request,
             ),
         )
         include_tools, exclude_tools = _pop_implicit_toolkit_filters(metadata, init_kwargs)
         with optional_dependency_environment():
             toolkit = cast("Any", tool_class)(**init_kwargs)
+        available = toolkit_function_names(toolkit)
+        declared = frozenset(metadata.function_names or ())
+        unknown_aliases = sorted(set(metadata.approval_aliases) - set(available) - declared)
+        if unknown_aliases:
+            msg = f"Tool '{tool_name}' declares approval aliases for functions it does not have: {', '.join(unknown_aliases)}"
+            raise ToolMetadataValidationError(msg)
         offered = _offered_function_names(
-            toolkit_function_names(toolkit),
+            available,
             include_tools=include_tools,
             exclude_tools=exclude_tools,
-            declared_functions=frozenset(metadata.function_names or ()),
-        )
-        output_file_policy = (
-            ToolOutputFilePolicy.from_runtime(
-                tool_output_workspace_root,
-                runtime_paths,
-                auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
-            )
-            if tool_output_workspace_root is not None
-            else None
+            declared_functions=declared,
         )
         configure_toolkit_functions(
             toolkit,
@@ -1060,7 +1156,8 @@ def export_tools_metadata(tool_metadata: Mapping[str, ToolMetadata]) -> list[dic
     tools: list[dict[str, Any]] = []
 
     for metadata in tool_metadata.values():
-        tool_dict = asdict(metadata)
+        # asdict copies every value deeply, which code such as a judge bound to a lock cannot survive.
+        tool_dict = asdict(replace(metadata, factory=None, approval_aliases={}))
         tool_dict["category"] = metadata.category.value
         tool_dict["status"] = metadata.status.value
         tool_dict["setup_type"] = metadata.setup_type.value
@@ -1072,13 +1169,17 @@ def export_tools_metadata(tool_metadata: Mapping[str, ToolMetadata]) -> list[dic
             tool_dict.pop("oauth_fallback_fields", None)
         if not metadata.requires_primary_runtime:
             tool_dict.pop("requires_primary_runtime", None)
+        tool_dict.pop("approval_aliases", None)
         tool_dict.pop("authored_override_validator", None)
         tool_dict.pop("managed_init_args", None)
         tool_dict.pop("worker_inert_agent_functions", None)
+        tool_dict.pop("workspace_writers", None)
         tool_dict.pop("supports_toolkit_filters", None)
         tool_dict.pop("factory", None)
         tool_dict.pop("mcp_server_id", None)
         tool_dict.pop("dependency_extra", None)
+        if aliases := sorted(alias for alias, name in TOOL_ALIASES.items() if name == metadata.name):
+            tool_dict["aliases"] = aliases
         tools.append(tool_dict)
 
     tools.sort(key=lambda tool: (tool["category"], tool["name"]))

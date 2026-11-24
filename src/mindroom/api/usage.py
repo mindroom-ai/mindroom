@@ -16,9 +16,10 @@ from mindroom.api.usage_export import (
     context_is_current,
     usage_export_runner,
 )
+from mindroom.usage.provider_limits import get_provider_usage_snapshot
 from mindroom.usage.stats import UsageReport, collect_admin_usage, collect_private_usage
 
-__all__ = ["get_private_usage", "get_usage", "get_usage_export", "router"]
+__all__ = ["get_private_usage", "get_provider_limits", "get_usage", "get_usage_export", "router"]
 
 router = APIRouter(prefix="/api/usage", tags=["usage"])
 
@@ -107,3 +108,23 @@ def get_private_usage(
     )
     response.headers["Cache-Control"] = "no-store"
     return _report_payload(report)
+
+
+@router.get("/provider-limits", dependencies=[Depends(verify_user)], response_model=None)
+async def get_provider_limits(
+    request: Request,
+    response: Response,
+    refresh: bool = False,
+) -> dict[str, object] | Response:
+    """Return per-account provider usage limits and 7-day token/cost aggregates."""
+    try:
+        config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    except HTTPException:
+        return Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, headers={"Cache-Control": "no-store"})
+    snapshot = await get_provider_usage_snapshot(
+        config=config,
+        runtime_paths=runtime_paths,
+        force_refresh=refresh,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return snapshot.to_dict()

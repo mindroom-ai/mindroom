@@ -28,6 +28,9 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
 
 _MIND_TEMPLATE_DIR = Path(__file__).resolve().parent / "cli" / "templates" / "mind_data"
+MIND_WORKSPACE_TEMPLATE = "mind"
+# The built-in starter files an agent loads as context, in prompt order; MEMORY.md is file memory's own.
+MIND_TEMPLATE_CONTEXT_FILES = ("SOUL.md", "AGENTS.md", "USER.md", "IDENTITY.md", "TOOLS.md", "HEARTBEAT.md")
 
 # Agent builds now run on worker threads (#1260), so concurrent scaffolding of
 # the same workspace must not interleave template copies or link reconciliation.
@@ -242,11 +245,14 @@ def _copy_workspace_template(
 def ensure_workspace_template(
     workspace_path: Path,
     *,
-    template: str,
+    template: str | Path,
     force: bool = False,
 ) -> None:
-    """Create the built-in Mind workspace template used by config init."""
-    if template != "mind":
+    """Copy a template directory into a workspace, or the built-in Mind starter files config init uses."""
+    if isinstance(template, Path):
+        _copy_workspace_template(workspace_path, template_dir=template, force=force)
+        return
+    if template != MIND_WORKSPACE_TEMPLATE:
         msg = f"Unsupported workspace template: {template}"
         raise ValueError(msg)
     _copy_workspace_template(workspace_path, template_dir=_MIND_TEMPLATE_DIR, force=force)

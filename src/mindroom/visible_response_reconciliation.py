@@ -5,7 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY, VISIBLE_ROUTER_VOICE_ECHO_KEY
+from mindroom.constants import (
+    STREAM_STATUS_COMPLETED,
+    STREAM_STATUS_KEY,
+    STREAM_STATUS_PENDING,
+    VISIBLE_ROUTER_VOICE_ECHO_KEY,
+)
 from mindroom.delivery_gateway import SendTextRequest
 from mindroom.matrix.room_history_reads import find_response_event_ids_via_room_messages
 from mindroom.model_selection import command_result_content_to_dict
@@ -14,7 +19,7 @@ from mindroom.turn_record import canonicalize_turn_record
 from mindroom.turn_store import SourcePreparation
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     import nio
     import structlog
@@ -60,7 +65,6 @@ class VisibleResponseReconciler:
         handled_turn: TurnRecord,
         *,
         room_id: str,
-        excluded_event_ids: Collection[str] = (),
     ) -> str | None:
         """Return the durable visible response owned by a replayed turn."""
         incomplete_records = [
@@ -72,7 +76,6 @@ class VisibleResponseReconciler:
         response_event_ids = {
             record.response_event_id for record in incomplete_records if record.response_event_id is not None
         }
-        response_event_ids.difference_update(excluded_event_ids)
         if len(response_event_ids) > 1:
             msg = "Recovered coalesced turn has conflicting visible response event IDs"
             raise RuntimeError(msg)
@@ -99,7 +102,6 @@ class VisibleResponseReconciler:
                     response_source_filter=response_source_is_terminal,
                 ),
             )
-            terminal_response_event_ids.difference_update(excluded_event_ids)
             if len(terminal_response_event_ids) > 1:
                 msg = "Recovered turn has multiple terminal visible Matrix responses"
                 raise RuntimeError(msg)
@@ -117,7 +119,6 @@ class VisibleResponseReconciler:
                     response_source_filter=response_source_is_canonical,
                 ),
             )
-            response_event_ids.difference_update(excluded_event_ids)
             self.deps.logger.info(
                 "dispatch_recovery_response_lookup",
                 room_id=room_id,
@@ -235,19 +236,24 @@ class VisibleResponseReconciler:
         target: MessageTarget,
         response_text: str,
         delivery_turn_id: str,
+        ai_run_content: Mapping[str, Any],
     ) -> tuple[str | None, str | None]:
         """Send an interactive selection's acknowledgement, which creates the reply its answer then edits.
 
         Returns the acknowledgement's event and the span it created for the
         answer to adopt. A retry resolves to the row its first
         attempt recorded, so it neither sends nor creates a second reply.
+        ``ai_run_content`` is the provisional run metadata naming the model the answer runs.
         """
         replies = self.deps.replies
         event_id = await self.deps.delivery_gateway.send_text(
             SendTextRequest(
                 target=target,
                 response_text=response_text,
-                # It echoes the member's selected value, which may name agents.
+                # The answer edits this message, so clients show it working, and on which model, as they do a
+                # Thinking placeholder.
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING, **ai_run_content},
+                # A placeholder mentions no one.
                 skip_mentions=True,
                 reply_write=await replies.acknowledgement(
                     pending=tuple(dict.fromkeys((delivery_turn_id, *handled_turn.source_event_ids))),
@@ -274,7 +280,6 @@ class VisibleResponseReconciler:
         *,
         requester_id: str,
         target: MessageTarget,
-        excluded_event_ids: Collection[str] = (),
     ) -> tuple[TurnRecord | None, str | None]:
         """Persist one non-model delivery intent and recover any visible event."""
         tracked_turn = self.deps.turn_store.attach_response_context(
@@ -289,11 +294,7 @@ class VisibleResponseReconciler:
         if pending_turn is None or await self.settle_deleted_sources(pending_turn, room_id=target.room_id):
             return None, None
         recovered_response_event_id = (
-            await self.recovered_response_event_id(
-                pending_turn.record,
-                room_id=target.room_id,
-                excluded_event_ids=excluded_event_ids,
-            )
+            await self.recovered_response_event_id(pending_turn.record, room_id=target.room_id)
             if pending_turn.resumes_response
             else None
         )

@@ -13,7 +13,7 @@ import math
 import secrets
 import weakref
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -21,29 +21,39 @@ from typing import TYPE_CHECKING, Any, cast
 import httpx
 
 from mindroom.browser.call_limit import browser_request_budget_seconds
+from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.constants import EXECUTION_ENV_TOOL_NAMES, RETAINED_MEDIA_MAX_BYTES, build_execution_tool_env
 from mindroom.egress_broker.env import egress_agent_scope, egress_broker_enabled
-from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.runtime_env_policy import KUBERNETES_POD_LIMIT_ENV_NAMES, SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.shell.background_scope import current_shell_background_scope
 from mindroom.shell.execution import shell_request_budget_seconds
 from mindroom.timing import reply_timing_binding
 from mindroom.tool_system.declarations import SupportsPrimaryCallPlacement
 from mindroom.tool_system.dedicated_threads import WORKER_PROXY_CALL_EXECUTOR
 from mindroom.tool_system.media_transport import decode_media_result, is_media_result_envelope
-from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, normalize_output_path_argument
+from mindroom.tool_system.progress import report_tool_metadata
 from mindroom.tool_system.runtime_context import (
     WorkerProgressEvent,
     WorkerProgressPump,
+    get_call_output_stream,
+    get_call_progress_sink,
+    get_tool_runtime_context,
     get_worker_progress_pump,
+    note_call_cancelled_never_ran,
+    note_call_refusal,
 )
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
 from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_proxy_client import (
+    STOP_CONFIRMATION_SECONDS,
     WorkerCallCancellation,
     WorkerProxyClientConfig,
     execute_worker_proxy_request,
     post_worker_proxy_request,
     record_proxy_response_failure_for_worker,
     to_json_compatible,
+    worker_request_headers,
 )
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
@@ -51,8 +61,23 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
     subagent_worker_key,
 )
+from mindroom.trafilatura_call_limit import trafilatura_request_budget_seconds
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
-from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerReadyProgress, WorkerSpec
+from mindroom.workers.models import (
+    ProgressSink,
+    WorkerHandle,
+    WorkerReadyProgress,
+    WorkerSpec,
+    normalize_sandbox_runner_api_root,
+    worker_api_root,
+)
+from mindroom.workers.named import (
+    NamedWorkerCall,
+    NamedWorkerError,
+    ensure_named_worker,
+    named_worker_call,
+    sandbox_mount_relative_path,
+)
 from mindroom.workers.placements import placement_for_session
 from mindroom.workers.protocol import (
     WORKER_PROTOCOL_VERSION,
@@ -77,6 +102,7 @@ if TYPE_CHECKING:
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.workers.backend import WorkerBackend
     from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
+    from mindroom.workers.models import WorkerSandboxConfig
     from mindroom.workers.runtime import PrimaryWorkerManagerLease
 
 _DEFAULT_SANDBOX_PROXY_TIMEOUT_SECONDS = 120.0
@@ -231,7 +257,7 @@ def _read_proxy_tools(
         return None
     if not raw_value:
         return set()
-    return {part.strip() for part in raw_value.split(",") if part.strip()}
+    return {canonical_tool_name(part.strip()) for part in raw_value.split(",") if part.strip()}
 
 
 def _read_credential_policy(runtime_paths: RuntimePaths) -> dict[str, tuple[str, ...]]:
@@ -270,12 +296,13 @@ def sandbox_proxy_config(runtime_paths: RuntimePaths) -> _SandboxProxyConfig:
     )
 
 
-def _worker_proxy_client_config(
+def worker_proxy_client_config(
     proxy_config: _SandboxProxyConfig,
     runtime_paths: RuntimePaths,
     *,
     request_budget_seconds: float = 0.0,
 ) -> WorkerProxyClientConfig:
+    """Return how a request reaches its worker or the shared runner under these proxy settings."""
     return WorkerProxyClientConfig(
         proxy_url=proxy_config.proxy_url,
         proxy_token=proxy_config.proxy_token,
@@ -287,7 +314,7 @@ def _worker_proxy_client_config(
     )
 
 
-def _worker_route(
+def worker_route(
     *,
     runtime_paths: RuntimePaths,
     runtime_config: Config | None,
@@ -297,12 +324,45 @@ def _worker_route(
     worker_manager: WorkerBackend,
     base_dir: str | None,
     progress_sink: ProgressSink | None = None,
+    start: bool = True,
+    named: NamedWorkerCall | None = None,
 ) -> tuple[WorkerRoute, WorkerHandle | None]:
     """Return the route of one request, ensuring the dedicated worker that serves it.
 
     ``base_dir`` is the calling agent's tool workspace in this primary's paths; a request that names a worker
     carries it relative to the shared storage root, which the worker mounts at its own path.
+    Without ``start``, a dedicated worker is never started, only looked up and marked used: its handle, None while
+    its backend knows none. The shared runner starts nothing, so its worker is ensured either way.
+    ``named`` routes the request to the worker its call names instead of the agent's normal worker.
     """
+    route, worker_handle, _admitted_sandbox = _worker_route_with_sandbox(
+        runtime_paths=runtime_paths,
+        runtime_config=runtime_config,
+        tool_name=tool_name,
+        function_name=function_name,
+        worker_target=worker_target,
+        worker_manager=worker_manager,
+        base_dir=base_dir,
+        progress_sink=progress_sink,
+        start=start,
+        named=named,
+    )
+    return route, worker_handle
+
+
+def _worker_route_with_sandbox(
+    *,
+    runtime_paths: RuntimePaths,
+    runtime_config: Config | None,
+    tool_name: str,
+    function_name: str,
+    worker_target: ResolvedWorkerTarget | None,
+    worker_manager: WorkerBackend,
+    base_dir: str | None,
+    progress_sink: ProgressSink | None = None,
+    start: bool = True,
+    named: NamedWorkerCall | None = None,
+) -> tuple[WorkerRoute, WorkerHandle | None, WorkerSandboxConfig | None]:
     worker_scope = worker_target.worker_scope if worker_target is not None else None
     execution_identity = worker_target.execution_identity if worker_target is not None else None
     routing_agent_name = worker_target.routing_agent_name if worker_target is not None else None
@@ -340,18 +400,32 @@ def _worker_route(
             raise RuntimeError(msg)
         private_agent_names = worker_target.private_agent_names if worker_scope == "user_agent" else None
         spec = WorkerSpec(worker_target.worker_key, private_agent_names=private_agent_names)
-    placement = placement_for_session(execution_identity.session_id) if execution_identity is not None else None
-    # Placements exist only on a dedicated backend (``delegation.workers``), where every call has a worker spec.
-    if placement is not None and spec is not None:
-        # The subagent's own worker serves its normal worker's workspaces and credentials, in a runtime of its own.
-        spec = replace(
+    # A call is placed only on a dedicated backend (``delegation.workers``, ``workers.named``), where every call has a
+    # worker spec; a stored target's placement reaches here only through relays and worker services, which need one
+    # too.
+    worker_handle = None
+    if spec is not None:
+        # The runner launches a streamed command itself, without the runtime that a worker's setup prepares.
+        streamed = tool_name == "shell" and get_call_output_stream() is not None
+        spec = replace(_placed_worker_spec(spec, worker_target, named), wait_for_setup=not streamed)
+        worker_handle, spec = _ensure_route_worker(
             spec,
-            worker_key=subagent_worker_key(spec.worker_key, placement.subagent_id),
-            state_scope_worker_key=spec.worker_key,
-            resource_profile=placement.resource_profile,
+            named=named,
+            worker_manager=worker_manager,
+            runtime_paths=runtime_paths,
+            runtime_config=runtime_config,
+            private_agent_names=private_agent_names,
+            progress_sink=progress_sink,
+            start=start,
         )
     worker_key = spec.worker_key if spec is not None else None
-    worker_handle = worker_manager.ensure_worker(spec, progress_sink=progress_sink) if spec is not None else None
+    route_base_dir = _resolve_route_base_dir(
+        base_dir,
+        spec=spec,
+        runtime_paths=runtime_paths,
+        runtime_config=runtime_config,
+        private_agent_names=private_agent_names,
+    )
     route = WorkerRoute(
         protocol=WORKER_PROTOCOL_VERSION,
         worker_key=worker_key,
@@ -362,13 +436,88 @@ def _worker_route(
         ),
         private_agent_names=sorted(private_agent_names) if private_agent_names is not None else None,
         config_snapshot=runner_config_snapshot(runtime_paths, runtime_config),
-        base_dir=_route_base_dir(
-            base_dir,
-            shared_storage_root=runtime_paths.storage_root,
-            keyed=worker_key is not None,
-        ),
+        base_dir=route_base_dir,
     )
-    return route, worker_handle
+    return route, worker_handle, spec.sandbox if spec is not None else None
+
+
+def _ensure_route_worker(
+    spec: WorkerSpec,
+    *,
+    named: NamedWorkerCall | None,
+    worker_manager: WorkerBackend,
+    runtime_paths: RuntimePaths,
+    runtime_config: Config | None,
+    private_agent_names: frozenset[str] | None,
+    progress_sink: ProgressSink | None,
+    start: bool,
+) -> tuple[WorkerHandle | None, WorkerSpec]:
+    if named is not None:
+        if named.sandbox is not None and named.sandbox.mount_dir is not None:
+            sandbox_mount_relative_path(
+                storage_root=runtime_paths.storage_root,
+                worker_key=spec.state_scope_worker_key or spec.worker_key,
+                private_agent_names=private_agent_names,
+                config=runtime_config,
+                sandbox=named.sandbox,
+                validate=True,
+            )
+        return ensure_named_worker(worker_manager, spec, named, progress_sink=progress_sink)
+    if start or not worker_backend_kind(runtime_paths).dedicated:
+        return worker_manager.ensure_worker(spec, progress_sink=progress_sink), spec
+    return worker_manager.touch_worker(spec.worker_key), spec
+
+
+def _resolve_route_base_dir(
+    base_dir: str | None,
+    *,
+    spec: WorkerSpec | None,
+    runtime_paths: RuntimePaths,
+    runtime_config: Config | None,
+    private_agent_names: frozenset[str] | None,
+) -> str | None:
+    if spec is not None and spec.sandbox is not None:
+        sandbox_rel = sandbox_mount_relative_path(
+            storage_root=runtime_paths.storage_root,
+            worker_key=spec.state_scope_worker_key or spec.worker_key,
+            private_agent_names=private_agent_names,
+            config=runtime_config,
+            sandbox=spec.sandbox,
+            validate=False,
+        )
+        return sandbox_rel.as_posix() if sandbox_rel is not None else None
+    return _route_base_dir(
+        base_dir,
+        shared_storage_root=runtime_paths.storage_root,
+        keyed=spec is not None,
+    )
+
+
+def _placed_worker_spec(
+    normal_spec: WorkerSpec,
+    worker_target: ResolvedWorkerTarget | None,
+    named: NamedWorkerCall | None,
+) -> WorkerSpec:
+    """Return the spec of the worker a call runs in: its normal worker, or the worker of its own it is placed in.
+
+    Either worker of its own serves the normal worker's workspaces and credentials, in a runtime of its own.
+    """
+    if named is not None:
+        # The worker a call names, whatever worker its session is placed in.
+        return named.worker_spec(normal_spec)
+    execution_identity = worker_target.execution_identity if worker_target is not None else None
+    # A target a subagent's turn resolved keeps that turn's placement; otherwise the running attempt's applies.
+    placement = (worker_target.placement if worker_target is not None else None) or (
+        placement_for_session(execution_identity.session_id) if execution_identity is not None else None
+    )
+    if placement is None:
+        return normal_spec
+    return replace(
+        normal_spec,
+        worker_key=subagent_worker_key(normal_spec.worker_key, placement.subagent_id),
+        state_scope_worker_key=normal_spec.worker_key,
+        resource_profile=placement.resource_profile,
+    )
 
 
 def _route_base_dir(base_dir: str | None, *, shared_storage_root: Path, keyed: bool) -> str | None:
@@ -396,7 +545,7 @@ def runner_config_snapshot(runtime_paths: RuntimePaths, runtime_config: Config |
     return worker_config_snapshot(runtime_config)
 
 
-def _lease_worker_manager(runtime_paths: RuntimePaths, proxy_config: _SandboxProxyConfig) -> PrimaryWorkerManagerLease:
+def lease_worker_manager(runtime_paths: RuntimePaths, proxy_config: _SandboxProxyConfig) -> PrimaryWorkerManagerLease:
     """Borrow the primary worker manager for one request under these proxy settings."""
     return lease_primary_worker_manager(
         runtime_paths,
@@ -447,8 +596,8 @@ def save_attachment_to_worker(
         raise RuntimeError(msg)
 
     proxy_config = sandbox_proxy_config(runtime_paths)
-    with _lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
-        route, worker_handle = _worker_route(
+    with lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
+        route, worker_handle = worker_route(
             runtime_paths=runtime_paths,
             runtime_config=runtime_config,
             tool_name="attachments",
@@ -459,7 +608,7 @@ def save_attachment_to_worker(
         )
         sha256 = hashlib.sha256(payload_bytes).hexdigest()
         response = post_worker_proxy_request(
-            config=_worker_proxy_client_config(proxy_config, runtime_paths),
+            config=worker_proxy_client_config(proxy_config, runtime_paths),
             request=SaveAttachmentRequest(
                 **dict(route),
                 attachment_id=attachment_id,
@@ -504,8 +653,8 @@ def view_file_from_worker(
 ) -> ToolValue:
     """View one file in the selected worker, for an agent whose workspace tools run in a worker."""
     proxy_config = sandbox_proxy_config(runtime_paths)
-    with _lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
-        route, worker_handle = _worker_route(
+    with lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
+        route, worker_handle = worker_route(
             runtime_paths=runtime_paths,
             runtime_config=runtime_config,
             tool_name="attachments",
@@ -520,7 +669,7 @@ def view_file_from_worker(
                 path = Path(path).relative_to(workspace_root).as_posix()
 
         response = post_worker_proxy_request(
-            config=_worker_proxy_client_config(proxy_config, runtime_paths),
+            config=worker_proxy_client_config(proxy_config, runtime_paths),
             request=ViewFileRequest(**dict(route), path=path),
             response_model=ViewFileResponse,
             worker_handle=worker_handle,
@@ -553,16 +702,36 @@ def view_file_from_worker(
         return result
 
 
+def _format_worker_progress(progress: WorkerReadyProgress, *, worker_name: str | None) -> str | None:
+    """Format one worker warmup milestone for a CLI call receipt."""
+    target = f"worker {worker_name}" if worker_name else "worker"
+    if progress.phase == "cold_start":
+        return f"starting {target}..."
+    if progress.phase == "waiting":
+        return f"starting {target}... ({max(1, int(progress.elapsed_seconds))}s)"
+    if progress.phase == "preparing":
+        return f"{target}: preparing ({max(1, int(progress.elapsed_seconds))}s)"
+    if progress.phase == "ready":
+        return f"{target} ready ({max(1, int(progress.elapsed_seconds))}s)"
+    return None
+
+
 def _make_progress_sink(
     pump: WorkerProgressPump | None,
     *,
     reply_timing: ReplyTimingBinding | None,
     tool_name: str,
     function_name: str,
+    call_progress: Callable[[str], None] | None = None,
+    worker_name: str | None = None,
 ) -> ProgressSink:
     def sink(progress: WorkerReadyProgress) -> None:
         if reply_timing is not None and progress.phase in {"ready", "failed"}:
             reply_timing.note_worker_wait(progress.elapsed_seconds)
+        if call_progress is not None:
+            message = _format_worker_progress(progress, worker_name=worker_name)
+            if message is not None:
+                call_progress(message)
         if pump is None or pump.shutdown.is_set() or pump.loop.is_closed():
             return
         event = WorkerProgressEvent(
@@ -716,68 +885,125 @@ def _worker_call_arguments(
     return [_worker_argument_value(arg) for arg in args], cast("dict[str, object]", _worker_argument_value(kwargs))
 
 
-def _call_proxy_sync(
+def _reject_sandbox_output_path(
     *,
-    runtime_paths: RuntimePaths,
-    tool_name: str,
-    function_name: str,
-    args: tuple[object, ...],
-    kwargs: dict[str, object],
-    credentials_manager: CredentialsManager | None,
-    function_entrypoint: Callable[..., object],
-    tool_config_overrides: dict[str, object] | None,
-    tool_init_overrides: dict[str, object] | None,
-    execution_env: dict[str, str] | None,
-    extra_env_passthrough: str | None,
-    worker_target: ResolvedWorkerTarget | None,
-    runtime_config: Config | None,
-    tools: ToolRegistry,
-    cancellation: WorkerCallCancellation | None = None,
+    has_output_path: bool,
+    sandbox: WorkerSandboxConfig | None,
+) -> None:
+    if not has_output_path or sandbox is None:
+        return
+    msg = (
+        "mindroom_output_path is not supported in a sandboxed named worker; "
+        "write to a file inside mount_dir or capture stdout directly."
+    )
+    raise NamedWorkerError(msg)
+
+
+def _sandbox_agent_workspace_output_path(saved_path: str, mount_dir: str) -> str:
+    """Rewrite one runner-saved relative output path from ``mount_dir``-relative to agent-workspace-relative."""
+    normalized = saved_path.removeprefix("./")
+    if not normalized or Path(normalized).is_absolute():
+        return saved_path
+    return f"{mount_dir}/{normalized}"
+
+
+def _format_named_worker_result(
+    result: object,
+    *,
+    header: str,
+    admitted_sandbox: WorkerSandboxConfig | None,
 ) -> object:
-    metadata = tools.get(tool_name)
-    wire_args, wire_kwargs = _worker_call_arguments(
-        args,
-        kwargs,
-        entrypoint=function_entrypoint,
-        inert_agent=metadata is not None and function_name in metadata.worker_inert_agent_functions,
-    )
-    proxy_config = sandbox_proxy_config(runtime_paths)
-    # A streamed reply shows the worker's warmup; a streamed or collected reply keeps how long the call waited for it.
-    pump = get_worker_progress_pump()
-    reply_timing = reply_timing_binding()
-    progress_sink = (
-        _make_progress_sink(
-            pump,
-            reply_timing=reply_timing,
-            tool_name=tool_name,
-            function_name=function_name,
-        )
-        if pump is not None or reply_timing is not None
-        else None
-    )
+    """Prepend the named-worker header and rewrite sandboxed saved-output receipt paths."""
+    if isinstance(result, str):
+        return f"{header}\n{result}"
+    # The runner can save its shell result before it gets here. The preview has the same exit line,
+    # and a sandboxed mount_dir saves relative to that mount rather than the agent workspace root.
+    if not isinstance(result, dict):
+        return result
+    saved = result.get("mindroom_tool_output")
+    if not (isinstance(saved, dict) and saved.get("status") == "saved_to_file"):
+        return result
+    updated_saved = dict(saved)
+    preview = saved.get("preview")
+    if isinstance(preview, str):
+        updated_saved["preview"] = f"{header}\n{preview}"
+    if admitted_sandbox is not None and admitted_sandbox.mount_dir is not None:
+        saved_path = saved.get("path")
+        if isinstance(saved_path, str):
+            updated_saved["path"] = _sandbox_agent_workspace_output_path(saved_path, admitted_sandbox.mount_dir)
+    if updated_saved != saved:
+        return {**result, "mindroom_tool_output": updated_saved}
+    return result
+
+
+def _build_execute_request(
+    stand_ins: WorkerStandIns,
+    *,
+    worker_manager: WorkerBackend,
+    function_name: str,
+    wire_args: list[object],
+    wire_kwargs: dict[str, object],
+    progress_sink: ProgressSink | None = None,
+    start: bool = True,
+    include_execution_env: bool = True,
+    named: NamedWorkerCall | None = None,
+) -> tuple[ExecuteRequest, WorkerHandle | None, WorkerSandboxConfig | None]:
+    """Build one call that ``stand_ins`` sends, unsent, and return it with its worker handle and admitted sandbox.
+
+    That worker starts unless ``start`` is False, and is the worker ``named`` asks for, as ``worker_route`` describes.
+    """
+    runtime_paths = stand_ins.runtime_paths
+    tool_name = stand_ins.tool_name
+    worker_target = stand_ins.worker_target
+    runtime_config = stand_ins.runtime_config
     # The tool's workspace travels as the request's workspace, which the worker confines before acting in it.
-    init_overrides = dict(tool_init_overrides or {})
+    has_output_path = normalize_output_path_argument(wire_kwargs.get(OUTPUT_PATH_ARGUMENT)) is not None
+    _reject_sandbox_output_path(
+        has_output_path=has_output_path,
+        sandbox=named.sandbox if named is not None else None,
+    )
+    init_overrides = dict(stand_ins.tool_init_overrides or {})
     base_dir = init_overrides.pop("base_dir", None)
-    with _lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
-        route, worker_handle = _worker_route(
-            runtime_paths=runtime_paths,
-            runtime_config=runtime_config,
-            tool_name=tool_name,
-            function_name=function_name,
-            worker_target=worker_target,
-            worker_manager=worker_manager,
-            base_dir=str(base_dir) if base_dir is not None else None,
-            progress_sink=progress_sink,
-        )
+    route, worker_handle, admitted_sandbox = _worker_route_with_sandbox(
+        runtime_paths=runtime_paths,
+        runtime_config=runtime_config,
+        tool_name=tool_name,
+        function_name=function_name,
+        worker_target=worker_target,
+        worker_manager=worker_manager,
+        base_dir=str(base_dir) if base_dir is not None else None,
+        progress_sink=progress_sink,
+        start=start,
+        named=named,
+    )
+    _reject_sandbox_output_path(has_output_path=has_output_path, sandbox=admitted_sandbox)
+    sandboxed = admitted_sandbox is not None
+    config_overrides = dict(stand_ins.tool_config_overrides or {})
+    if sandboxed:
+        call_environment = ToolEnvironment()
+        execution_env: dict[str, str] = {}
+        extra_env_passthrough = None
+        config_overrides.pop("extra_env_passthrough", None)
+        init_overrides.pop("extra_env_passthrough", None)
+    else:
         # A shell call's own environment, plugin hooks' changes and a response's CLI grant, travels with each command;
         # the runner passes a variable on only when told to, so the call's pass-through patterns join the configured ones.
-        call_environment = current_tool_environment() if tool_name == "shell" else ToolEnvironment()
-        execution_env = call_environment.applied(execution_env or {}, runtime_paths.process_env)
-        extra_env_passthrough = ",".join(filter(None, (extra_env_passthrough, *call_environment.pass_through))) or None
+        call_environment = (
+            current_tool_environment() if tool_name == "shell" and include_execution_env else ToolEnvironment()
+        )
+        execution_env = (
+            call_environment.applied(stand_ins.execution_env or {}, runtime_paths.process_env)
+            if include_execution_env
+            else {}
+        )
+        extra_env_passthrough = (
+            ",".join(filter(None, (stand_ins.extra_env_passthrough, *call_environment.pass_through))) or None
+        )
         agent_name = worker_target.routing_agent_name if worker_target is not None else None
         # Only an agent that opted into Agent Keys gets the broker env; a call without a configured agent never does.
         if (
-            tool_name in EXECUTION_ENV_TOOL_NAMES
+            include_execution_env
+            and tool_name in EXECUTION_ENV_TOOL_NAMES
             and egress_broker_enabled(runtime_paths)
             and runtime_config is not None
             and agent_name is not None
@@ -795,49 +1021,141 @@ def _call_proxy_sync(
                     call_env=execution_env,
                 ),
             }
-        request = ExecuteRequest(
-            **dict(route),
+    request = ExecuteRequest(
+        **dict(route),
+        tool_name=tool_name,
+        function_name=function_name,
+        args=wire_args,
+        kwargs=wire_kwargs,
+        tool_config_overrides=cast("dict[str, Any]", to_json_compatible(config_overrides)),
+        tool_init_overrides=cast("dict[str, Any]", to_json_compatible(init_overrides)),
+        execution_env=execution_env,
+        # The call's set and removed names apply over the worker's own environment and workspace script too,
+        # except where the worker's own composition changes them; a set name takes its value from execution_env.
+        environment=CallEnvironment(
+            set_names=sorted(
+                name
+                for name, value in call_environment.values.items()
+                if value is not None and name not in KUBERNETES_POD_LIMIT_ENV_NAMES
+            ),
+            unset_names=sorted(call_environment.removed),
+            path_prepend=list(call_environment.path_prepend),
+        ),
+        extra_env_passthrough=extra_env_passthrough,
+        sandbox=sandboxed,
+    )
+    return request, worker_handle, admitted_sandbox
+
+
+def _call_proxy_sync(
+    *,
+    stand_ins: WorkerStandIns,
+    function_name: str,
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+    function_entrypoint: Callable[..., object],
+    cancellation: WorkerCallCancellation | None = None,
+    named: NamedWorkerCall | None = None,
+) -> object:
+    runtime_paths = stand_ins.runtime_paths
+    tool_name = stand_ins.tool_name
+    metadata = stand_ins.tools.get(tool_name)
+    # A call for a worker that fails before it is sent never started, which a caller that stores results reads.
+    report_tool_metadata(not_started=True)
+    wire_args, wire_kwargs = _worker_call_arguments(
+        args,
+        kwargs,
+        entrypoint=function_entrypoint,
+        inert_agent=metadata is not None and function_name in metadata.worker_inert_agent_functions,
+    )
+    proxy_config = sandbox_proxy_config(runtime_paths)
+    # A streamed reply shows the worker's warmup; a streamed or collected reply keeps how long the call waited for it.
+    pump = get_worker_progress_pump()
+    reply_timing = reply_timing_binding()
+    call_progress = get_call_progress_sink()
+    progress_sink = (
+        _make_progress_sink(
+            pump,
+            reply_timing=reply_timing,
             tool_name=tool_name,
             function_name=function_name,
-            args=wire_args,
-            kwargs=wire_kwargs,
-            tool_config_overrides=cast("dict[str, Any]", to_json_compatible(tool_config_overrides or {})),
-            tool_init_overrides=cast("dict[str, Any]", to_json_compatible(init_overrides)),
-            execution_env=execution_env,
-            # The call's set and removed names apply over the worker's own environment and workspace script too,
-            # except where the worker's own composition changes them; a set name takes its value from execution_env.
-            environment=CallEnvironment(
-                set_names=sorted(name for name, value in call_environment.values.items() if value is not None),
-                unset_names=sorted(call_environment.removed),
-                path_prepend=list(call_environment.path_prepend),
-            ),
-            extra_env_passthrough=extra_env_passthrough,
+            call_progress=call_progress,
+            worker_name=named.name if named is not None else None,
         )
+        if pump is not None or reply_timing is not None or call_progress is not None
+        else None
+    )
+    with lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
+        request, worker_handle, admitted_sandbox = _build_execute_request(
+            stand_ins,
+            worker_manager=worker_manager,
+            function_name=function_name,
+            wire_args=wire_args,
+            wire_kwargs=wire_kwargs,
+            progress_sink=progress_sink,
+            named=named,
+        )
+        # A CLI call that asked for its command's raw output (`workers run`) gets it as frames while it runs.
+        stream = get_call_output_stream() if tool_name == "shell" else None
+        shell_scope = (
+            current_shell_background_scope()
+            if (tool_name, function_name) == ("shell", "run_shell_command") and stream is None
+            else None
+        )
+        header = None
+        on_frame = None
+        if stream is not None:
+            request = request.model_copy(update={"stream_io": True})
+
+            def on_frame(frame: dict[str, object]) -> None:
+                nonlocal header
+                if frame.get("t") == "started":
+                    # The frame that says the command runs also says whether its worker is a new start, as the
+                    # result does; asked only now, so a call that fails before its command runs does not use it up.
+                    header = named.header(worker_handle) if named is not None and worker_handle is not None else None
+                    frame = {**frame, "header": header}
+                stream.put(frame)
+
         result = execute_worker_proxy_request(
-            config=_worker_proxy_client_config(
+            config=worker_proxy_client_config(
                 proxy_config,
                 runtime_paths,
                 request_budget_seconds=max(
-                    shell_request_budget_seconds(tool_name, function_name, wire_kwargs),
+                    shell_request_budget_seconds(
+                        tool_name,
+                        function_name,
+                        wire_kwargs,
+                        auto_background=shell_scope is not None,
+                    ),
                     browser_request_budget_seconds(tool_name, function_name),
+                    trafilatura_request_budget_seconds(tool_name, function_name),
                 ),
             ),
             request=request,
-            credentials_manager=credentials_manager,
-            worker_target=worker_target,
+            credentials_manager=None if request.sandbox else stand_ins.credentials_manager,
+            worker_target=stand_ins.worker_target,
             worker_handle=worker_handle,
             worker_manager=worker_manager,
             client_factory=httpx.Client,
             # Leased tool settings come from the primary stores the dashboard saves them to.
             primary_built_service=functools.partial(
                 primary_owns_tool_settings,
-                tools=tools,
+                tools=stand_ins.tools,
                 runtime_paths=runtime_paths,
             ),
             worker_grantable_credentials=(
-                runtime_config.get_worker_grantable_credentials() if runtime_config is not None else None
+                None
+                if request.sandbox
+                else (
+                    stand_ins.runtime_config.get_worker_grantable_credentials()
+                    if stand_ins.runtime_config is not None
+                    else None
+                )
             ),
             cancellation=cancellation,
+            stream=stream,
+            on_frame=on_frame,
+            shell_scope=shell_scope,
         )
         # Deferred: it loads the attachment store and the provider registry, which the slim tool registry must not.
         from mindroom.tool_system.media_attachments import finalize_tool_media  # noqa: PLC0415
@@ -845,7 +1163,42 @@ def _call_proxy_sync(
         if tool_name == "browser_mcp" or is_media_result_envelope(result):
             decoded = decode_media_result(result)
             return finalize_tool_media(decoded) if isinstance(decoded, ToolValue) else decoded
+        if named is not None and worker_handle is not None:
+            return _format_named_worker_result(
+                result,
+                header=header or named.header(worker_handle),
+                admitted_sandbox=admitted_sandbox,
+            )
         return result
+
+
+def _named_worker_call(
+    stand_ins: WorkerStandIns,
+    local: Callable[..., object],
+    args: tuple[object, ...],
+    kwargs: dict[str, object],
+) -> NamedWorkerCall | None:
+    """Return the named worker a shell call asks to run in, or None for the worker its agent's calls normally reach."""
+    if stand_ins.tool_name != "shell":
+        return None
+    try:
+        arguments = inspect.signature(local).bind(*args, **_authored_arguments(kwargs)).arguments
+    except TypeError:
+        # The worker's own validation answers a call its function cannot take, as for every other tool.
+        return None
+    worker_target = stand_ins.worker_target
+    context = get_tool_runtime_context()
+    return named_worker_call(
+        arguments.get("worker"),
+        arguments.get("resource_profile"),
+        sandbox=arguments.get("sandbox"),
+        mount_dir=arguments.get("mount_dir"),
+        mount_read_only=arguments.get("mount_read_only"),
+        agent_name=worker_target.routing_agent_name if worker_target is not None else None,
+        config=stand_ins.runtime_config,
+        runtime_paths=stand_ins.runtime_paths,
+        turn_id=context.turn_id if context is not None else None,
+    )
 
 
 async def _run_sync_tool_call(call: Callable[[], object]) -> object:
@@ -864,70 +1217,78 @@ async def _run_in_worker_proxy_executor(call: Callable[[], object]) -> object:
     return await run_async_entrypoint_blocking_call(call, executor=WORKER_PROXY_CALL_EXECUTOR)
 
 
-def _worker_stand_in(
-    function_name: str,
-    local: Callable[..., object],
-    *,
-    tool_name: str,
-    runtime_paths: RuntimePaths,
-    credentials_manager: CredentialsManager | None,
-    tool_config_overrides: dict[str, object] | None = None,
-    tool_init_overrides: dict[str, object] | None = None,
-    execution_env: dict[str, str] | None = None,
-    extra_env_passthrough: str | None = None,
-    worker_target: ResolvedWorkerTarget | None = None,
-    runtime_config: Config | None = None,
-    primary_placement: weakref.ref[SupportsPrimaryCallPlacement] | None = None,
-    tools: ToolRegistry,
-) -> Callable[..., object]:
-    """Return ``local``'s stand-in sending each call to the worker, except one its toolkit keeps here.
+@dataclass(frozen=True, eq=False)
+class WorkerStandIns:
+    """The stand-ins that send the calls of one toolkit, built to run in a worker, there, and what each call carries.
 
-    ``local`` is the finished entrypoint: output files, then validation, then the function. A call goes to the worker
-    with its arguments as sent, where the worker's own finished function handles and validates them; a call the
-    toolkit (``primary_placement``, when it places calls) keeps here runs ``local``. A synchronous function keeps the
-    completion ownership its own body has; an async one keeps prompt cancellation.
+    Given a function's name and finished entrypoint, it returns the stand-in that sends that function's calls there.
+    ``runtime_config`` is the config the toolkit was built from; each call carries the parts runners need from it.
+    ``tools`` is the registry the toolkit was built from.
     """
-    # The toolkit being adapted, which the stand-in keeps for as long as its function lives.
-    placement = None if primary_placement is None else primary_placement()
-    local_is_async = inspect.iscoroutinefunction(local)
-    run_blocking = _run_in_worker_proxy_executor if local_is_async else _run_sync_tool_call
 
-    @functools.wraps(local)
-    async def proxy_entrypoint(*args: object, **kwargs: object) -> object:
-        if placement is not None and placement.runs_on_primary(
-            function_name,
-            inspect.signature(local).bind(*args, **_authored_arguments(kwargs)).arguments,
-        ):
-            if local_is_async:
-                return await cast("Callable[..., Awaitable[object]]", local)(*args, **kwargs)
-            return await _run_sync_tool_call(functools.partial(local, *args, **kwargs))
-        cancellation = WorkerCallCancellation()
-        call = functools.partial(
-            _call_proxy_sync,
-            function_entrypoint=local,
-            runtime_paths=runtime_paths,
-            tool_name=tool_name,
-            function_name=function_name,
-            args=args,
-            kwargs=dict(kwargs),
-            credentials_manager=credentials_manager,
-            tool_config_overrides=tool_config_overrides,
-            tool_init_overrides=tool_init_overrides,
-            execution_env=execution_env,
-            extra_env_passthrough=extra_env_passthrough,
-            worker_target=worker_target,
-            runtime_config=runtime_config,
-            tools=tools,
-            cancellation=cancellation,
-        )
-        try:
-            return await run_blocking(call)
-        except asyncio.CancelledError:
-            # The blocking request keeps running after this await is cancelled; stop it at the worker too.
-            cancellation.cancel()
-            raise
+    tool_name: str
+    runtime_paths: RuntimePaths
+    credentials_manager: CredentialsManager | None
+    tools: ToolRegistry
+    tool_config_overrides: dict[str, object] | None = None
+    tool_init_overrides: dict[str, object] | None = None
+    execution_env: dict[str, str] | None = None
+    extra_env_passthrough: str | None = None
+    worker_target: ResolvedWorkerTarget | None = None
+    runtime_config: Config | None = None
+    # The toolkit, when it keeps some calls here; weak, because the toolkit keeps its stand-ins as long as it lives.
+    primary_placement: weakref.ref[SupportsPrimaryCallPlacement] | None = None
 
-    return proxy_entrypoint
+    def __call__(self, function_name: str, local: Callable[..., object]) -> Callable[..., object]:
+        """Return ``local``'s stand-in sending each call to the worker, except one its toolkit keeps here.
+
+        ``local`` is the finished entrypoint: output files, then validation, then the function. A call goes to the
+        worker with its arguments as sent, where the worker's own finished function handles and validates them; a call
+        the toolkit (``primary_placement``, when it places calls) keeps here runs ``local``. A synchronous function
+        keeps the completion ownership its own body has; an async one keeps prompt cancellation.
+        """
+        # The toolkit being adapted, which the stand-in keeps for as long as its function lives.
+        placement = None if self.primary_placement is None else self.primary_placement()
+        local_is_async = inspect.iscoroutinefunction(local)
+        run_blocking = _run_in_worker_proxy_executor if local_is_async else _run_sync_tool_call
+
+        @functools.wraps(local)
+        async def proxy_entrypoint(*args: object, **kwargs: object) -> object:
+            if placement is not None and placement.runs_on_primary(
+                function_name,
+                inspect.signature(local).bind(*args, **_authored_arguments(kwargs)).arguments,
+            ):
+                if local_is_async:
+                    return await cast("Callable[..., Awaitable[object]]", local)(*args, **kwargs)
+                return await _run_sync_tool_call(functools.partial(local, *args, **kwargs))
+            cancellation = WorkerCallCancellation()
+            try:
+                call = functools.partial(
+                    _call_proxy_sync,
+                    stand_ins=self,
+                    function_name=function_name,
+                    args=args,
+                    kwargs=dict(kwargs),
+                    function_entrypoint=local,
+                    cancellation=cancellation,
+                    # Read here, in the call's own context, which names the reply that owns the worker.
+                    named=_named_worker_call(self, local, args, kwargs),
+                )
+                return await run_blocking(call)
+            except NamedWorkerError:
+                note_call_refusal()
+                raise
+            except asyncio.CancelledError:
+                # The blocking request keeps running after this await is cancelled; stop it at the worker too.
+                if cancellation.cancel():
+                    note_call_cancelled_never_ran()
+                elif self.tool_name == "shell" and (stream := get_call_output_stream()) is not None:
+                    # The exit of a streamed command says its stop took effect, which its caller's cancel reports.
+                    with suppress(TimeoutError):
+                        await asyncio.wait_for(stream.ended.wait(), STOP_CONFIRMATION_SECONDS)
+                raise
+
+        return proxy_entrypoint
 
 
 def worker_stand_ins(
@@ -942,18 +1303,13 @@ def worker_stand_ins(
     worker_target: ResolvedWorkerTarget | None = None,
     runtime_config: Config | None = None,
     tools: ToolRegistry,
-) -> Callable[[str, Callable[..., object]], Callable[..., object]]:
-    """Return the factory of the stand-ins that send the calls of ``toolkit``, built to run in a worker, there.
-
-    Given a function's name and finished entrypoint, the factory returns the stand-in that sends its calls there.
-    ``runtime_config`` is the config the toolkit was built from; each call carries the parts runners need from it.
-    ``tools`` is the registry the toolkit was built from.
-    """
-    return functools.partial(
-        _worker_stand_in,
+) -> WorkerStandIns:
+    """Return the stand-ins that send the calls of ``toolkit``, built to run in a worker, there."""
+    return WorkerStandIns(
         tool_name=tool_name,
         runtime_paths=runtime_paths,
         credentials_manager=credentials_manager,
+        tools=tools,
         tool_config_overrides=tool_config_overrides,
         tool_init_overrides=tool_init_overrides,
         execution_env=_execution_env_payload(
@@ -964,7 +1320,77 @@ def worker_stand_ins(
         extra_env_passthrough=extra_env_passthrough,
         worker_target=worker_target,
         runtime_config=runtime_config,
-        # Weak, because the toolkit keeps this factory as long as it lives; a strong reference would keep it forever.
         primary_placement=weakref.ref(toolkit) if isinstance(toolkit, SupportsPrimaryCallPlacement) else None,
-        tools=tools,
     )
+
+
+@dataclass(frozen=True)
+class WorkerCall:
+    """A call as its worker would receive it, unsent, and how to reach that worker's sandbox runner."""
+
+    request: ExecuteRequest
+    # The runner's API root, such as ``http://worker:8766/api/sandbox-runner``, under which it serves each operation.
+    api_root: str
+    headers: dict[str, str] = field(repr=False)
+    handle: WorkerHandle | None = field(repr=False, compare=False)
+
+
+def worker_call(
+    stand_ins: WorkerStandIns,
+    function_name: str,
+    *,
+    start: bool = True,
+    include_execution_env: bool = True,
+) -> WorkerCall | None:
+    """Build the call of ``function_name`` that ``stand_ins`` would send, without sending it.
+
+    The request carries no arguments, nor what sending adds: the job flag, the cancellation id, and a credential lease.
+    Otherwise it is the request a sent call carries, for the worker that would serve it. That worker starts unless
+    ``start`` is False; then a dedicated worker is only marked used, as ``worker_route`` describes, and the answer
+    is None while it is not running. Worker-wide sessions omit the call environment and scoped broker credentials.
+    """
+    runtime_paths = stand_ins.runtime_paths
+    proxy_config = sandbox_proxy_config(runtime_paths)
+    with lease_worker_manager(runtime_paths, proxy_config) as worker_manager:
+        request, worker_handle, _admitted_sandbox = _build_execute_request(
+            stand_ins,
+            worker_manager=worker_manager,
+            function_name=function_name,
+            wire_args=[],
+            wire_kwargs={},
+            start=start,
+            include_execution_env=include_execution_env,
+        )
+    if worker_backend_kind(runtime_paths).dedicated and (worker_handle is None or worker_handle.status != "ready"):
+        return None
+    # Without a worker of its own, the call goes to the shared runner, whose URL its route has already required.
+    api_root = (
+        worker_api_root(worker_handle)
+        if worker_handle is not None
+        else normalize_sandbox_runner_api_root(proxy_config.proxy_url or "")
+    )
+    headers = worker_request_headers(worker_handle, config=worker_proxy_client_config(proxy_config, runtime_paths))
+    return WorkerCall(request, api_root, headers, worker_handle)
+
+
+__all__ = [
+    "INLINE_ATTACHMENT_BYTES_ENV",
+    "ToolPlacement",
+    "WorkerAttachmentSaveReceipt",
+    "WorkerCall",
+    "WorkerStandIns",
+    "decode_attachment_save_bytes",
+    "inline_attachment_byte_limit",
+    "lease_worker_manager",
+    "primary_owns_tool_settings",
+    "runner_config_snapshot",
+    "sandbox_proxy_config",
+    "save_attachment_to_worker",
+    "to_json_compatible",
+    "tool_placement",
+    "view_file_from_worker",
+    "worker_call",
+    "worker_proxy_client_config",
+    "worker_route",
+    "worker_stand_ins",
+]

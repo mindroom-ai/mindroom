@@ -89,6 +89,7 @@ def test_sliding_config_preserves_discovery_explicit_rooms_and_extensions() -> N
             ["m.room.avatar", ""],
             ["m.room.encryption", ""],
             ["m.room.member", "$LAZY"],
+            ["m.space.child", "*"],
         ],
     }
     assert sliding.lists == {"mindroom": {"ranges": [[0, 99]], **room_config}}
@@ -142,7 +143,7 @@ class TestSlidingBot(ThreadingBehaviorTestBase):
         assert session is not None
         try:
             assert session._sliding is not None
-            request = json.loads(session._sliding.request()[2])
+            request = json.loads(session._sliding.request(0)[2])
             assert request["conn_id"] == "mindroom-general"
             assert request["room_subscriptions"]["!outside:example.org"]["timeline_limit"] == 17
         finally:
@@ -185,23 +186,23 @@ class TestSlidingBot(ThreadingBehaviorTestBase):
             assert joined
             left = True
 
-        monkeypatch.setattr(bot, "join_configured_rooms", join_rooms)
-        monkeypatch.setattr(bot, "leave_unconfigured_rooms", leave_rooms)
+        monkeypatch.setattr(bot._room_lifecycle, "join_configured_rooms", join_rooms)
+        monkeypatch.setattr(bot._room_lifecycle, "leave_unconfigured_rooms", leave_rooms)
         try:
             await bot.ensure_rooms()
             assert left
             if mode == "sliding":
                 assert session._sliding is not None
-                request = json.loads(session._sliding.request()[2])
+                request = json.loads(session._sliding.request(0)[2])
                 assert set(request["room_subscriptions"]) == {"!outside:example.org"}
                 assert request["room_subscriptions"]["!outside:example.org"]["timeline_limit"] == 19
                 assert ["m.room.member", "$LAZY"] in request["room_subscriptions"]["!outside:example.org"][
                     "required_state"
                 ]
-                monkeypatch.setattr(bot, "join_configured_rooms", AsyncMock())
+                monkeypatch.setattr(bot._room_lifecycle, "join_configured_rooms", AsyncMock())
                 bot.rooms = []
                 await bot.ensure_rooms()
-                assert json.loads(session._sliding.request()[2])["room_subscriptions"] == {}
+                assert json.loads(session._sliding.request(0)[2])["room_subscriptions"] == {}
             else:
                 assert session.config.sliding is None
         finally:
@@ -234,8 +235,8 @@ class TestSlidingBot(ThreadingBehaviorTestBase):
             config=DurableSyncConfig(sliding=SlidingSyncConfig(room_subscriptions={"!old:example.org": {}})),
         )
         bot._ingestion_session = session
-        monkeypatch.setattr(bot, "join_configured_rooms", AsyncMock())
-        monkeypatch.setattr(bot, "leave_unconfigured_rooms", AsyncMock())
+        monkeypatch.setattr(bot._room_lifecycle, "join_configured_rooms", AsyncMock())
+        monkeypatch.setattr(bot._room_lifecycle, "leave_unconfigured_rooms", AsyncMock())
         for method in ("ensure_rooms_exist", "link_root_space", "_ensure_room_invitations"):
             monkeypatch.setattr(orchestrator._rooms, method, AsyncMock())
         monkeypatch.setattr(orchestrator, "refresh_agent_reply_memberships", AsyncMock())
@@ -255,7 +256,7 @@ class TestSlidingBot(ThreadingBehaviorTestBase):
             assert bot._ingestion_session is session
             assert bot.rooms == ["!outside:example.org"]
             assert session._sliding is not None
-            subscriptions = json.loads(session._sliding.request()[2])["room_subscriptions"]
+            subscriptions = json.loads(session._sliding.request(0)[2])["room_subscriptions"]
             assert set(subscriptions) == {"!outside:example.org"}
             assert subscriptions["!outside:example.org"]["timeline_limit"] == 29
         finally:

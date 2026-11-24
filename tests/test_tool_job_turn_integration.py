@@ -90,7 +90,7 @@ async def test_consumed_results_leave_no_receipts_in_session_state(tmp_path: Pat
     try:
         with (
             tool_runtime_context(context),
-            patch.object(runtime, "acknowledge_wait", wraps=runtime.acknowledge_wait) as acknowledge,
+            patch.object(runtime, "acknowledge_waits", wraps=runtime.acknowledge_waits) as acknowledge,
         ):
             runs = [await run_turn(topic) for topic in topics]
         session = storage.load_session(context.session_id)
@@ -105,7 +105,9 @@ async def test_consumed_results_leave_no_receipts_in_session_state(tmp_path: Pat
         # Each call returned its outcome as its own result, so none of them became a job to list.
         with tool_runtime_context(context):
             assert json.loads(await JobTools(paths).job("list")) == []
-        assert sorted(call.args[0] for call in acknowledge.await_args_list) == sorted(job.job_id for job in jobs)
+        assert sorted(wait.job_id for call in acknowledge.await_args_list for wait in call.args[0]) == sorted(
+            job.job_id for job in jobs
+        )
         assert pending_outcomes(runtime) == []
     finally:
         await runtime.shutdown()

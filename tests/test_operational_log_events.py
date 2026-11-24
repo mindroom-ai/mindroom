@@ -7,6 +7,7 @@ import sqlite3
 from contextlib import closing
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -15,15 +16,17 @@ from structlog.testing import capture_logs
 from mindroom import event_loop_stall
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST
 from mindroom.agent_loop.run import run_agent
+from mindroom.api import sandbox_forkserver, sandbox_runner
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.event_loop_stall import EventLoopStallDetector
 from mindroom.hooks import HookRegistry
-from mindroom.llm.errors import RateLimited
+from mindroom.llm.errors import QUOTA_EXHAUSTED, RateLimited
 from mindroom.llm.provider import ModelRequest
 from mindroom.matrix.decrypt_failure import handle_decrypt_failure
 from mindroom.matrix.sync_diagnostics import SyncStallDiagnostics
 from mindroom.oauth.credential_lifecycle import refresh_oauth_credentials_with_result
 from mindroom.oauth.providers import OAuthRefreshRejectedError
+from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.pipeline import retry
 from mindroom.providers.pipeline.wrapped import WrappedProvider
 from mindroom.session_storage.agent_storage import prepare_conversation_database
@@ -31,7 +34,8 @@ from mindroom.session_storage.schema import TableNames
 from tests.agent_loop.helpers import collect, context, spec, toolkit
 from tests.agent_tool_helpers import tool_policy
 from tests.fakes.scripted_model import ScriptedModel, calls, tool_call
-from tests.providers.test_provider_pipeline import _drain, _ScriptedProvider, _transient, _turn
+from tests.providers.bare_adapter import drain
+from tests.providers.test_provider_pipeline import _ScriptedProvider, _transient, _turn
 from tests.session_storage.agno_layout import recorded_owner
 from tests.test_decrypt_failure import _megolm_event, _mock_client, _mock_room
 from tests.test_decrypt_failure import _runtime_paths as _decrypt_runtime_paths
@@ -81,7 +85,7 @@ _STABLE_EVENTS = {
         "max_retries",
         "delay_seconds",
     },
-    "agent_error": {"agent", "error_type", "error"},
+    "agent_error": {"agent", "error_type", "error", "error_code", "status_code", "provider"},
     "oauth_credentials_refresh_failed": {
         "provider_id",
         "credential_service",
@@ -121,7 +125,10 @@ _STABLE_EVENTS = {
         "outcome",
         "wait_ms",
         "pod_ready_ms",
+        "healthy_ms",
     },
+    "sandbox_worker_eager_setup_failed": {"error"},
+    "sandbox_forkserver_plugin_preload_failed": {"error"},
 }
 _STABLE_EVENT_LEVELS = {
     "event_loop_scheduler_lag_summary": "info",
@@ -138,6 +145,8 @@ _STABLE_EVENT_LEVELS = {
     "matrix_event_decryption_failed": "warning",
     "conversation_converted": "info",
     "worker_cold_start": "info",
+    "sandbox_worker_eager_setup_failed": "warning",
+    "sandbox_forkserver_plugin_preload_failed": "warning",
 }
 
 
@@ -256,7 +265,7 @@ async def test_provider_request_retried_keeps_its_name_and_fields_for_either_rea
     provider = WrappedProvider(inner, partial(retry.retrying_stream, idle_timeout_seconds=0.05))
 
     with capture_logs() as logs:
-        await _drain(provider, ModelRequest(messages=[]))
+        await drain(provider, ModelRequest(messages=[]))
 
     entry = _assert_logged(logs, "provider_request_retried")
     assert (entry["reason"], entry["status_code"]) == (reason, status_code)
@@ -268,6 +277,22 @@ def test_agent_error_keeps_its_name_and_fields() -> None:
         get_user_friendly_error_message(RateLimited("slow down", provider="Scripted"), "general")
 
     assert _assert_logged(logs, "agent_error")["error_type"] == "RateLimited"
+
+
+def test_agent_error_names_a_refused_accounts_error_code() -> None:
+    """A provider error logs its MindRoom code, status, and provider; any other error logs them as null."""
+    quota = classify_provider_error("Insufficient credits", provider="Scripted", status_code=402)
+    with capture_logs() as logs:
+        get_user_friendly_error_message(quota, "general")
+        get_user_friendly_error_message(RuntimeError("boom"), "general")
+
+    provider_entry, other_entry = [entry for entry in logs if entry["event"] == "agent_error"]
+    assert (provider_entry["error_code"], provider_entry["status_code"], provider_entry["provider"]) == (
+        QUOTA_EXHAUSTED,
+        402,
+        "Scripted",
+    )
+    assert (other_entry["error_code"], other_entry["status_code"], other_entry["provider"]) == (None, None, None)
 
 
 @pytest.mark.asyncio
@@ -328,3 +353,36 @@ def test_worker_cold_start_keeps_its_name_and_fields() -> None:
         backend.ensure_worker(_spec(_TEST_SCOPED_WORKER_KEY_A), now=10.0)
 
     _assert_logged(logs, "worker_cold_start")
+
+
+@pytest.mark.asyncio
+async def test_sandbox_worker_eager_setup_failed_keeps_its_name_and_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A worker whose own setup fails logs the pinned warning and stays up."""
+    app = SimpleNamespace(state=SimpleNamespace())
+
+    def on_a_full_disk(*_args: object, **_kwargs: object) -> None:
+        msg = "No space left on device"
+        raise OSError(msg)
+
+    monkeypatch.setattr(sandbox_runner, "ensure_local_worker_state_locked", on_a_full_disk)
+
+    with capture_logs() as logs:
+        await sandbox_runner._eager_worker_setup(app, _decrypt_runtime_paths(tmp_path))
+
+    assert _assert_logged(logs, "sandbox_worker_eager_setup_failed")["error"] == "No space left on device"
+    assert app.state.worker_setup == "failed"
+
+
+def test_sandbox_forkserver_plugin_preload_failed_keeps_its_name_and_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A worker that gives its plugin preload up logs the pinned warning, once."""
+    monkeypatch.setattr(sandbox_forkserver, "_preloading_forkserver", None)
+    sandbox_forkserver.start_preloading_forkserver("{}")
+
+    with capture_logs() as logs:
+        sandbox_forkserver.abandon_preload("ImportError: No module named 'missing'")
+        sandbox_forkserver.abandon_preload("again")
+
+    assert _assert_logged(logs, "sandbox_forkserver_plugin_preload_failed")["error"].startswith("ImportError")

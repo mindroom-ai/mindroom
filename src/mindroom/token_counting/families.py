@@ -19,7 +19,14 @@ import tiktoken.model
 from mindroom.llm.provider import ModelIdentity, TokenCounter
 from mindroom.logging_config import get_logger
 
-__all__ = ["counter_for_model", "finish_loading", "load_o200k", "openai_model_counter", "start_loading_o200k"]
+__all__ = [
+    "counter_for_model",
+    "finish_loading",
+    "load_o200k",
+    "o200k_counter",
+    "openai_model_counter",
+    "start_loading_o200k",
+]
 
 logger = get_logger(__name__)
 
@@ -99,9 +106,8 @@ def _load_in_background(name: str) -> None:
         encoder.retry_at = time.monotonic() + _RETRY_SECONDS
         encoder.started = False
         logger.warning(
-            f"{name} did not load; token estimates use a quarter token per character, and compaction input, a "
-            "compaction summary before it is stored, and the MEMORY.md preload their bytes, until a retry in five "
-            "minutes loads it",
+            f"{name} did not load; token estimates use a quarter token per character, and compaction input and a "
+            "compaction summary before it is stored their bytes, until a retry in five minutes loads it",
             exc_info=True,
         )
 
@@ -207,6 +213,11 @@ def counter_for_model(
         estimate=partial(_scaled_o200k_tokens, _margin(served)),
         pdf_page_tokens=_GEMINI_PDF_PAGE_TOKENS if "gemini" in served else None,
     )
+
+
+def o200k_counter() -> TokenCounter:
+    """Return a counter of plain o200k_base tokens, for a budget set in them rather than in a model's own tokens."""
+    return TokenCounter(estimate=partial(_encoding_tokens, _O200K))
 
 
 def openai_model_counter(model_id: str) -> TokenCounter:

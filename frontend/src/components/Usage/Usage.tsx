@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { fetchUsage } from "@/services/usageService";
 import type { TokenTotals, UsageReport } from "@/types/usage";
+import { ProviderLimits } from "./ProviderLimits";
 import { UsageActivity } from "./UsageActivity";
 import { UsageDetail } from "./UsageDetail";
 import {
@@ -84,6 +85,7 @@ function UsageReportView({ report }: { report: UsageReport }) {
           Some usage could not be read. Totals and breakdowns may be incomplete.
         </p>
       )}
+      <ProviderLimits />
       <section aria-label="All-time recorded usage" className="space-y-3">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <h2 className="text-sm font-medium text-muted-foreground">

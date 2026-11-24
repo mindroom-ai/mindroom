@@ -11,9 +11,11 @@ if TYPE_CHECKING:
 
 __all__ = (
     "ANTHROPIC_BASE_URL_DEFAULT",
+    "ANTHROPIC_OPENROUTER_BASE_URL",
     "AZURE_OPENAI_API_VERSION_DEFAULT",
     "CARTESIA_TTS",
     "CEREBRAS_HOST_DEFAULT",
+    "CLAUDE_BEDROCK_UNCHECKED_THINKING_MODELS",
     "CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES",
     "CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES",
     "CLAUDE_PREFIX_CHECKED_THINKING_MODELS",
@@ -62,6 +64,7 @@ __all__ = (
     "OPENROUTER_OPENAI_EMBEDDING_SMALL",
     "OPENROUTER_OPENAI_LUNA",
     "OPENROUTER_OPENAI_TRANSCRIPTION",
+    "OPENROUTER_SYSTEM_UPDATE_MODELS",
     "REPLICATE_VIDEO",
     "SAAS_MODEL_PRESETS",
     "SENTENCE_TRANSFORMERS_DEFAULT",
@@ -96,10 +99,12 @@ class ModelPreset:
         return config
 
 
-_ANTHROPIC_FABLE = "claude-fable-5-1"
+_ANTHROPIC_FABLE = "claude-fable-5-2"
 _ANTHROPIC_OPUS = "claude-opus-5-5"
 _ANTHROPIC_SONNET = "claude-sonnet-5-5"
 _ANTHROPIC_HAIKU = "claude-haiku-5-5"
+# The context window Claude Code gives a model id without its ``[1m]`` suffix.
+_CLAUDE_CODE_CONTEXT_WINDOW = 200_000
 # Prefixes also cover newer point releases (claude-sonnet-5 matches claude-sonnet-5-5).
 CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES = (
     "claude-sonnet-4-6",
@@ -108,13 +113,22 @@ CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES = (
     "claude-opus-4-7",
     "claude-opus-4-8",
     "claude-opus-5",
+    "claude-haiku-5",
     "claude-fable-5",
     "claude-mythos-5",
     "claude-mythos-preview",
 )
 # Claude models that reject forced tool use on every request
 # (https://platform.claude.com/docs/en/build-with-claude/thinking#limits-and-feature-compatibility).
-CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES = (_ANTHROPIC_OPUS, _ANTHROPIC_SONNET, _ANTHROPIC_FABLE, "claude-mythos-5-1")
+# Literal ids, because a model keeps the rule after the preferred defaults move on from it.
+CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES = (
+    "claude-fable-5-1",
+    "claude-fable-5-2",
+    "claude-mythos-5-1",
+    "claude-mythos-5-2",
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+)
 # Claude models that predate tool_search_tool_regex_20251119 (Opus 4.1 and
 # earlier — a closed set, so new releases take the native tool-search path
 # without a list update). Prefixes cover the aliases plus the dated
@@ -130,18 +144,20 @@ TOOL_SEARCH_UNSUPPORTED_MODEL_ID_PREFIXES = (
     "claude-sonnet-4-20250514",
     "claude-sonnet-4@",
 )
+# Claude in Amazon Bedrock (the bedrock-mantle endpoint `bedrock_claude` calls) does not serve Fable 5.2, which
+# Bedrock offers on its bedrock-runtime endpoint only, so this route keeps Fable 5.1.
 _AWS_BEDROCK_CLAUDE_FABLE = "anthropic.claude-fable-5-1"
 _AWS_BEDROCK_CLAUDE_OPUS = "anthropic.claude-opus-5-5"
 _AWS_BEDROCK_CLAUDE_SONNET = "anthropic.claude-sonnet-5-5"
 _AWS_BEDROCK_CLAUDE_HAIKU = "anthropic.claude-haiku-5-5"
-_CODEX_GPT = "gpt-6.1-sol"
+_CODEX_GPT = "gpt-6.2-sol"
 CODEX_GPT_ALIAS = "gpt-5.6"
 CODEX_GPT_ENDPOINT = "gpt-5.6-sol"
 # Just under the Codex catalog's 95% effective budget (258,400) of its 272k context window.
 _CODEX_CONTEXT_WINDOW = 258_000
 _KIMI = "k3.1-pro"
-_OPENAI_GPT = "gpt-6-astra"
-OPENAI_GPT_SOL = "gpt-6.1-sol"
+_OPENAI_GPT = "gpt-6.2-astra"
+OPENAI_GPT_SOL = "gpt-6.2-sol"
 OPENAI_GPT_LUNA = "gpt-6-luna"
 # The Decisions API serves only this model, so it does not follow the Luna default.
 OPENAI_DECISIONS_MODEL = "gpt-6-luna"
@@ -160,13 +176,20 @@ OPENAI_TOOL_SEARCH_MIN_GPT_VERSION = (5, 4)
 OPENAI_AVATAR_PROMPT = _OPENAI_GPT
 _AZURE_OPENAI_DEFAULT_DEPLOYMENT = "your-azure-openai-deployment"
 
-_GOOGLE_GEMINI_FLASH = "gemini-3.8-flash"
-_GOOGLE_GEMINI_LITE = "gemini-3.5-flash-lite"
+_GOOGLE_GEMINI_HYDROGEN = "gemini-4-hydrogen"
 GOOGLE_IMAGE = "gemini-nano-banana-2.1"
 GOOGLE_VEO = "veo-3.1-generate-001"
 # Direct Gemini API models whose requests keep the provider's sampling defaults. Literal ids, like the Claude lists
 # below, because a model keeps its sampling rule after the preferred defaults move on from it.
-GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = ("gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite")
+GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES = (
+    "gemini-4-carbon",
+    "gemini-4-neon",
+    "gemini-4-argon",
+    "gemini-4-hydrogen",
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+)
 # The Claude models that reject non-default temperature, top_p, and top_k on every request, Claude 4.7 and later plus
 # Mythos Preview (https://platform.claude.com/docs/en/build-with-claude/thinking#sampling-parameters), by the start of
 # their hyphenated and dotted ids; newer generations join them. Literal ids, because a model keeps the rule after the
@@ -188,7 +211,19 @@ CLAUDE_PROVIDER_DEFAULT_SAMPLING_MODELS = (
 # The Claude models whose API checks each replayed thinking block against the system prompt, tools, and messages sent
 # before it (https://platform.claude.com/docs/en/build-with-claude/preserved-thinking); newer generations join them.
 # Literal ids, because a model keeps the check after the preferred defaults move on from it.
-CLAUDE_PREFIX_CHECKED_THINKING_MODELS = ("claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5")
+CLAUDE_PREFIX_CHECKED_THINKING_MODELS = (
+    "claude-fable-5-1",
+    "claude-fable-5-2",
+    "claude-mythos-5-1",
+    "claude-mythos-5-2",
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
+)
+# The checked models whose replayed thinking Bedrock does not check
+# (https://platform.claude.com/docs/en/build-with-claude/preserved-thinking#feature-availability), so their earlier
+# turns keep their thinking there.
+CLAUDE_BEDROCK_UNCHECKED_THINKING_MODELS = ("claude-mythos-5-1",)
 
 
 def claude_rejects_sampling_controls(model_id: str) -> bool:
@@ -209,12 +244,15 @@ def openai_rejects_sampling_controls(model_id: str) -> bool:
     return model_id.casefold().rsplit("/", 1)[-1].startswith(_OPENAI_PROVIDER_DEFAULT_SAMPLING_MODEL_PREFIXES)
 
 
-_OPENROUTER_CLAUDE_FABLE = "anthropic/claude-fable-5.1"
+_OPENROUTER_CLAUDE_FABLE = "anthropic/claude-fable-5.2"
 _OPENROUTER_CLAUDE_OPUS = "anthropic/claude-opus-5.5"
 _OPENROUTER_CLAUDE_SONNET = "anthropic/claude-sonnet-5.5"
+# OpenRouter models proven to take a system message inside the conversation, keep it in place, and follow it over the
+# earlier system prompt (``providers/pipeline/prompt_hold.py``); a model joins once the same probes pass for it, so
+# the ids are literal, unmoved by the preferred defaults.
+OPENROUTER_SYSTEM_UPDATE_MODELS = frozenset({"anthropic/claude-opus-5.5"})
 _OPENROUTER_CLAUDE_HAIKU = "anthropic/claude-haiku-5.5"
-_OPENROUTER_GEMINI_FLASH = f"google/{_GOOGLE_GEMINI_FLASH}"
-_OPENROUTER_GEMINI_LITE = f"google/{_GOOGLE_GEMINI_LITE}"
+_OPENROUTER_GEMINI_HYDROGEN = f"google/{_GOOGLE_GEMINI_HYDROGEN}"
 _OPENROUTER_OPENAI_GPT = f"openai/{_OPENAI_GPT}"
 _OPENROUTER_OPENAI_SOL = f"openai/{OPENAI_GPT_SOL}"
 OPENROUTER_OPENAI_LUNA = f"openai/{OPENAI_GPT_LUNA}"
@@ -224,7 +262,7 @@ _OPENROUTER_NEMOTRON = "nvidia/nemotron-3.5-super-vl"
 _OPENROUTER_DEEPSEEK = "deepseek/deepseek-v4.1-flash-1017"
 _OPENROUTER_GLM = "z-ai/glm-5.3"
 _OPENROUTER_KIMI = "moonshotai/kimi-k3.1-pro"
-_OPENROUTER_TENCENT_HY4 = "tencent/hy4-preview"
+_OPENROUTER_TENCENT_HY4 = "tencent/hy4"
 
 # The public endpoints of the hosted providers; Groq's and Cerebras's are hosts their routes append an API path to.
 OPENAI_BASE_URL_DEFAULT = "https://api.openai.com/v1"
@@ -233,6 +271,8 @@ OPENAI_BASE_URL_DEFAULT = "https://api.openai.com/v1"
 # stable, checked 2026-10-27); Azure's later GA releases are the undated v1 API.
 AZURE_OPENAI_API_VERSION_DEFAULT = "2024-10-21"
 ANTHROPIC_BASE_URL_DEFAULT = "https://api.anthropic.com"
+# Messages endpoint root; the Anthropic SDK appends /v1.
+ANTHROPIC_OPENROUTER_BASE_URL = "https://openrouter.ai/api"
 DEEPSEEK_BASE_URL_DEFAULT = "https://api.deepseek.com"
 GROQ_HOST_DEFAULT = "https://api.groq.com"
 CEREBRAS_HOST_DEFAULT = "https://api.cerebras.ai"
@@ -261,7 +301,7 @@ SENTENCE_TRANSFORMERS_DEFAULT = "sentence-transformers/all-MiniLM-L6-v2"
 OPENAI_TRANSCRIPTION = "gpt-transcribe"
 OPENROUTER_OPENAI_TRANSCRIPTION = f"openai/{OPENAI_TRANSCRIPTION}"
 OPENAI_TTS = "gpt-realtime-2.1-mini"
-OPENAI_IMAGE = "gpt-image-2.5-sunburst"
+OPENAI_IMAGE = "gpt-image-2.6-sunburst"
 OPENAI_AVATAR_IMAGE = OPENAI_IMAGE
 
 GROQ_TRANSCRIPTION = "whisper-large-v3"
@@ -277,6 +317,12 @@ CONFIG_INIT_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
         "anthropic": ModelPreset("anthropic", _ANTHROPIC_SONNET, 1_000_000),
         "bedrock_claude": ModelPreset("bedrock_claude", _AWS_BEDROCK_CLAUDE_OPUS, 1_000_000),
         "azure": ModelPreset("azure", _AZURE_OPENAI_DEFAULT_DEPLOYMENT),
+        "claude_code": ModelPreset(
+            "claude_code",
+            _ANTHROPIC_SONNET,
+            _CLAUDE_CODE_CONTEXT_WINDOW,
+            display_name="Claude Sonnet 5.5",
+        ),
         "codex": ModelPreset("codex", _CODEX_GPT, _CODEX_CONTEXT_WINDOW, reasoning_effort="medium", display_name="Sol"),
         "kimi": ModelPreset("kimi", _KIMI, 1_048_576),
         "llama_cpp": ModelPreset("llama_cpp", LLAMA_CPP_GEMMA, 128_000),
@@ -310,8 +356,7 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
             ("fable", ModelPreset("openrouter", _OPENROUTER_CLAUDE_FABLE, 1_000_000)),
             ("opus", ModelPreset("openrouter", _OPENROUTER_CLAUDE_OPUS, 1_000_000)),
             ("haiku", ModelPreset("openrouter", _OPENROUTER_CLAUDE_HAIKU, 1_000_000)),
-            ("gemini_flash", ModelPreset("openrouter", _OPENROUTER_GEMINI_FLASH, 1_048_576)),
-            ("gemini_lite", ModelPreset("openrouter", _OPENROUTER_GEMINI_LITE, 1_048_576)),
+            ("gemini_hydrogen", ModelPreset("openrouter", _OPENROUTER_GEMINI_HYDROGEN, 1_048_576)),
             ("deepseek", ModelPreset("openrouter", _OPENROUTER_DEEPSEEK, 1_048_576)),
             ("glm", ModelPreset("openrouter", _OPENROUTER_GLM, 1_048_576)),
             ("kimi", ModelPreset("openrouter", _OPENROUTER_KIMI, 1_048_576)),
@@ -329,6 +374,26 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
 # Extra named models that config init writes next to `models.default`.
 CONFIG_INIT_ADDITIONAL_MODELS: Mapping[str, tuple[tuple[str, ModelPreset], ...]] = MappingProxyType(
     {
+        "claude_code": (
+            (
+                "opus",
+                ModelPreset(
+                    "claude_code",
+                    _ANTHROPIC_OPUS,
+                    _CLAUDE_CODE_CONTEXT_WINDOW,
+                    display_name="Claude Opus 5.5",
+                ),
+            ),
+            (
+                "haiku",
+                ModelPreset(
+                    "claude_code",
+                    _ANTHROPIC_HAIKU,
+                    _CLAUDE_CODE_CONTEXT_WINDOW,
+                    display_name="Claude Haiku 5.5",
+                ),
+            ),
+        ),
         "codex": (
             (
                 "astra",
@@ -357,11 +422,11 @@ CONFIG_INIT_ADDITIONAL_MODELS: Mapping[str, tuple[tuple[str, ModelPreset], ...]]
 )
 
 # Additional model that config init assigns to the router and thread summaries (with their one-shot tags).
-CONFIG_INIT_HELPER_MODELS: Mapping[str, str] = MappingProxyType({"codex": "luna"})
+CONFIG_INIT_HELPER_MODELS: Mapping[str, str] = MappingProxyType({"claude_code": "haiku", "codex": "luna"})
 
 SAAS_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
     {
-        "default": ModelPreset("openrouter", _OPENROUTER_GEMINI_FLASH, 1_048_576),
+        "default": ModelPreset("openrouter", _OPENROUTER_GEMINI_HYDROGEN, 1_048_576),
         "astra": ModelPreset("openrouter", _OPENROUTER_OPENAI_GPT, 1_050_000),
         "sol": ModelPreset("openrouter", _OPENROUTER_OPENAI_SOL, 1_050_000),
         "luna": ModelPreset("openrouter", OPENROUTER_OPENAI_LUNA, 1_050_000),
@@ -369,8 +434,7 @@ SAAS_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
         "opus": ModelPreset("openrouter", _OPENROUTER_CLAUDE_OPUS, 1_000_000),
         "sonnet": ModelPreset("openrouter", _OPENROUTER_CLAUDE_SONNET, 1_000_000),
         "haiku": ModelPreset("openrouter", _OPENROUTER_CLAUDE_HAIKU, 1_000_000),
-        "gemini_flash": ModelPreset("openrouter", _OPENROUTER_GEMINI_FLASH, 1_048_576),
-        "gemini_lite": ModelPreset("openrouter", _OPENROUTER_GEMINI_LITE, 1_048_576),
+        "gemini_hydrogen": ModelPreset("openrouter", _OPENROUTER_GEMINI_HYDROGEN, 1_048_576),
         "deepseek": ModelPreset("openrouter", _OPENROUTER_DEEPSEEK, 1_048_576),
         "glm": ModelPreset("openrouter", _OPENROUTER_GLM, 1_048_576),
         "kimi": ModelPreset("openrouter", _OPENROUTER_KIMI, 1_048_576),

@@ -6,9 +6,9 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-    from contextlib import AbstractAsyncContextManager
+    from collections.abc import Awaitable, Callable, Mapping
 
+    import httpx
     from fastapi import FastAPI
 
     from mindroom.agent_cli.session import TurnToolRegistry
@@ -17,20 +17,25 @@ if TYPE_CHECKING:
     from mindroom.api.client_sessions import ClientSessionStore
     from mindroom.api.computers import ComputerRuntime
     from mindroom.api.config_lifecycle import ApiState
+    from mindroom.api.dictation import DictationLimiter
     from mindroom.api.mcp_gateway import GatewayRuntime
     from mindroom.api.usage_export import UsageExportRunner
     from mindroom.bot import AgentBot
     from mindroom.budgets.monitor import BudgetMonitor
+    from mindroom.call_transcripts.service import AgentCallRoom, CallTranscriptService
     from mindroom.config.reload_status import ConfigReloadStatus
-    from mindroom.external_triggers.store import TriggerDeliverySnapshot
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.matrix.history_visibility import RoomHistory
+    from mindroom.matrix.room_reconciliation import RoomStateSnapshot
     from mindroom.response_activity import ActiveResponseIdentity, ActiveScriptRunInfo
     from mindroom.response_admission import ResponseAdmissionGate
     from mindroom.scheduling.runtime import ScheduledTaskRuntime
     from mindroom.script_runs.broker import ScriptToolBroker
+    from mindroom.tailnet_ssh.links import GatewayStatus
     from mindroom.thread_export.workspace_sync import WorkspaceThreadExportRunner
     from mindroom.worker_computer.sessions import ComputerSessionStore
     from mindroom.workers.backend import WorkerBackend
+    from mindroom.workflow_runs.engine import WorkflowEngine
 
 
 @dataclass(frozen=True)
@@ -42,6 +47,8 @@ class EmbeddedRuntime:
 
     knowledge_refresh_scheduler: KnowledgeRefreshScheduler
     agent_reply_memberships: AgentReplyMembershipIndex
+    # Brings those grants current for an access check through the runtime's one refresh, refreshing only when needed.
+    refresh_agent_reply_memberships_when_needed: Callable[[], Awaitable[None]]
     response_admission_gate: ResponseAdmissionGate
     budget_monitor: BudgetMonitor
     # The scheduled-task owner, whose bots back schedule edits the router may not write.
@@ -55,19 +62,24 @@ class EmbeddedRuntime:
     config_reload_status: Callable[[], ConfigReloadStatus]
     agent_cli_registry: TurnToolRegistry
     script_broker: ScriptToolBroker
+    workflow_engine: WorkflowEngine
     script_worker_keepalive: Callable[[WorkerBackend], None]
+    # The call transcript service while `calls.transcripts.enabled` is on, the same one each time; None while off.
+    call_transcripts: Callable[[], CallTranscriptService | None]
+    # A room as the agent answering calls in it reads it, with that agent's call there; None if no agent answers there.
+    agent_call_room: Callable[[str], AgentCallRoom | None]
 
 
 @dataclass(frozen=True)
 class ExternalTriggerRuntime:
     """Runtime objects needed to deliver accepted external triggers, bound per published config generation."""
 
-    client: object
-    conversation_reader: object
+    # The running bot of a trigger's target entity, None while it does not run.
+    # It posts the trigger it answers, under its own run phase and the runtime's admission gate.
+    target_bot: Callable[[str], AgentBot | None]
     config_generation: int
-    is_trigger_snapshot_ready: Callable[[TriggerDeliverySnapshot], Awaitable[bool]]
-    # The router bot's fence: delivery runs as the router, under its run phase and the runtime's admission gate.
-    admission_fence: Callable[[], AbstractAsyncContextManager[None]]
+    # Optional callback to wake the reactive trigger delivery loop after durable event-source enqueue.
+    on_reactive_event: Callable[[], None] | None = None
 
 
 @dataclass
@@ -89,10 +101,21 @@ class _MindroomAppState:
     openai_responses: set[ActiveResponseIdentity] = field(default_factory=set)
     mcp_gateway_runtime: GatewayRuntime | None = None
     computer_sessions: ComputerSessionStore | None = None
+    # The tailnet SSH gateway's last report, held while its listener serves; None while tailnet SSH is off.
+    tailnet_ssh_status: GatewayStatus | None = None
     client_sessions: ClientSessionStore | None = None
-    # Bound while `mindroom run` serves this app; plugin routes read live room membership through it.
-    room_members: Callable[[str], Awaitable[frozenset[str]]] | None = None
+    # Bound while `mindroom run` serves this app; plugin routes read live room membership through it, each joined
+    # user with their display name in the room, and read a room's state, whether it is a direct message, and where a
+    # member's view of its history begins, None once that member is not joined.
+    room_members: Callable[[str], Awaitable[Mapping[str, str | None]]] | None = None
+    room_state: Callable[[str], Awaitable[RoomStateSnapshot]] | None = None
+    room_direct: Callable[[str], Awaitable[bool]] | None = None
+    room_history: Callable[[str, str], Awaitable[RoomHistory | None]] | None = None
+    # The runtime's live bots, among which plugin routes pick a room's steward and poster.
+    room_bots: Mapping[str, AgentBot] | None = None
     usage_export_runner: UsageExportRunner | None = None
+    dictation_http_client: httpx.AsyncClient | None = None
+    dictation_limiter: DictationLimiter | None = None
 
     @property
     def runtime(self) -> EmbeddedRuntime:

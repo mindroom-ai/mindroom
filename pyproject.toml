@@ -15,13 +15,15 @@ classifiers = [
 ]
 dynamic = [ "version" ]
 dependencies = [
-  "agno==3.0.9",
+  "agno==3.2.1",
   "aiohttp>=3.13.3",
-  # Claude SDK 2 moves requests to API version 2026-10-21, a migration of its own.
-  "anthropic>=1.17,<2",
+  "anthropic>=2.11,<3",
   "anyio>=4.10",
-  "authlib>=1.6",
+  # Authlib 1.8 moved its HTTPX client to httpx2, which oauth/providers.py now uses.
+  "authlib>=1.9.9",
   "certifi>=2026.4.22",
+  # Click 8.5 drops `typer.Argument(help=...)` text from Typer 0.25's `--help`.
+  "click<8.5",
   "cron-descriptor>=1.4.5",
   "croniter>=6",
   "cryptography>=47",
@@ -29,7 +31,8 @@ dependencies = [
   "docstring-parser>=0.18",
   "fastapi>=0.136.3",
   "google-auth>=2.40.3",
-  "google-genai>=2",
+  # 3.x sends through httpx2 and defaults the Gemini Developer API to v1; our clients keep v1beta (providers/gemini).
+  "google-genai>=3.6",
   "h11>=0.16",
   "httpx>=0.27",
   # 2.15.1 stops a long-lived client's TLS handshakes from growing slower on Linux.
@@ -43,7 +46,7 @@ dependencies = [
   "mcp[cli]>=2.3,<3",
   "mdit-py-plugins>=0.5",
   # Owned to-device transport requires the durable NIO API.
-  "mindroom-nio[e2e]==1.3",
+  "mindroom-nio[e2e]==1.4.4",
   "ollama>=0.6.1",
   # 3.30 returns a streamed Chat Completions connection to the pool.
   "openai>=3.30",
@@ -52,7 +55,8 @@ dependencies = [
   "pydantic>=2.12.5",
   "pydantic-settings>=2.10.1",
   "pygments>=2.20",
-  "pyjwt>=2.13",
+  # 2.14 adds the JWKS refresh cooldown that trusted-upstream auth turns off.
+  "pyjwt>=2.14",
   # Request sizing reads a PDF attachment's page count (token_counting/requests.py).
   "pypdf>=6.21.4",
   "python-dotenv>=1",
@@ -60,12 +64,15 @@ dependencies = [
   "pyyaml>=6",
   "questionary>=2.1.1",
   "referencing>=0.37",
+  "regex>=2024.11.6",
   "rich",
   "segno>=1.6.6",
   "starlette>=1.3.1",
   "structlog>=24.1",
   "tiktoken>=0.12",
-  "typer>=0.24",
+  # 0.26 vendors Click, which breaks retrying an invalid `click.Choice` prompt; later releases also rerender `--help`
+  # (`{arg}` usage from 0.27, `<bool>` beside every flag by 0.29), which changes our CLI docs.
+  "typer>=0.24,<0.26",
   "uvicorn>=0.35",
   "watchfiles>=1",
   "websockets>=14",
@@ -80,11 +87,11 @@ agentql = [
 ]
 airflow = []
 apify = [
-  "apify-client>=1.12.2; platform_machine!='aarch64'",
+  "apify-client>=1.12.2",
 ]
 approved_egress = []
 arxiv = [
-  "arxiv",
+  "arxiv>=4.1",
 ]
 atlassian = []
 attachments = []
@@ -132,7 +139,7 @@ chromadb = [
   "chromadb>=1.5.8",
 ]
 claude_agent = [
-  "claude-agent-sdk>=0.2.140",
+  "claude-agent-sdk>=0.2.181",
 ]
 clickup = [
   "requests",
@@ -147,7 +154,8 @@ config_manager = [
   "pyyaml>=6",
 ]
 confluence = [
-  "atlassian-python-api",
+  # tools/agno_compat_confluence.py builds on the v1 client in atlassian.confluence.server, new in 5.
+  "atlassian-python-api>=5.0.5",
 ]
 contacts = []
 crawl4ai = [
@@ -160,7 +168,7 @@ custom_api = [
   "requests",
 ]
 daytona = [
-  "daytona",
+  "daytona<1",
 ]
 delegate = []
 discord = [
@@ -186,6 +194,7 @@ eleven_labs = [
   "elevenlabs",
 ]
 email = []
+email_invite = []
 exa = [
   "exa-py",
 ]
@@ -198,6 +207,7 @@ file_generation = [
   "python-docx>=1.2",
   "reportlab",
 ]
+filesystem = []
 financial_datasets_api = [
   "requests",
 ]
@@ -211,8 +221,8 @@ giphy = [
   "httpx>=0.27",
 ]
 github = [
-  # PyGithub 2.9 injects URL metadata into dictionary responses, breaking Agno's numeric language parser.
-  "pygithub>=2.5,<2.9",
+  # 2.10 adds GithubRetry.max_rate_limit_wait, which the provider-failure retry copy carries over.
+  "pygithub>=2.10",
 ]
 gmail = [
   "google-api-python-client>=2.178",
@@ -248,6 +258,8 @@ google_maps = [
   "googlemaps",
 ]
 google_scholar = [
+  # scholarly imports bibtexparser.bibdatabase, which bibtexparser 2 removed.
+  "bibtexparser<2",
   "scholarly",
 ]
 google_sheets = [
@@ -281,13 +293,13 @@ jira = [
   "jira>=3.10.5",
 ]
 knowledge_graph = [
-  "graphiti-core[falkordblite]==0.31.1",
+  "graphiti-core[falkordblite]==0.31.2",
   # C parser for FalkorDB replies; redis-py parses large ones in pure Python on the event loop otherwise.
   "hiredis",
   "psutil",
 ]
 kubernetes = [
-  "kubernetes>=28.1",
+  "kubernetes>=37",
 ]
 linear = [
   "requests",
@@ -300,12 +312,15 @@ lumalabs = [
 ]
 matrix_api = []
 matrix_calls = [
-  # 1.8.9 runs on OpenAI SDK 3 and pins the livekit 1.1.21 audio mixer the call tests cover.
-  "livekit-agents[openai]>=1.8.9",
+  # 1.8.9 runs on OpenAI SDK 3. Each release pins livekit exactly (1.8.9 to 1.8.10 on 1.1.21, 1.8.11 on 1.2.0), and the
+  # call tests cover the audio mixer of the locked one. 1.8.12 changes GPT Live delegation events and transcript
+  # delivery, which the call agent does not follow yet.
+  "livekit-agents[openai]>=1.8.9,<1.8.12",
 ]
 matrix-e2ee = []
 matrix_message = []
 matrix_room = []
+matrix_user = []
 matrix_voice_message = []
 mem0 = [
   "mem0ai>=2.2.1",
@@ -343,6 +358,8 @@ openai = [
 ]
 openbb = [
   "openbb",
+  "polars",
+  "pyarrow",
 ]
 openclaw_compat = []
 openweather = [
@@ -425,9 +442,12 @@ tavily = [
 telegram = [
   "pytelegrambotapi>=4.32",
 ]
+temporary_secrets = []
+terminal = []
 thread_model = []
 thread_move = []
 thread_resolution = []
+thread_snooze = []
 thread_summary = []
 thread_tags = []
 todo = []
@@ -440,6 +460,7 @@ trafilatura = [
 trello = [
   "py-trello",
 ]
+triggers = []
 twilio = [
   "twilio",
 ]
@@ -463,6 +484,7 @@ whatsapp = [
 wikipedia = [
   "wikipedia",
 ]
+workflow = []
 x = [
   "tweepy",
 ]
@@ -476,7 +498,8 @@ zendesk = [
   "requests",
 ]
 zep = [
-  "zep-cloud>=3.3",
+  # Agno 3.2.1 ZepTools calls user.add, which zep-cloud 4 removed.
+  "zep-cloud>=3.3,<4",
 ]
 zoom = [
   "requests",
@@ -516,7 +539,8 @@ dev = [
   "requests>=2.32.4",
   "ruff>=0.12.5",
   "tach>=0.34.1",
-  "ty>=0.0.17",
+  # 0.0.107 renamed the rules the [tool.ty] overrides and ignore comments use.
+  "ty>=0.0.107",
   "vulture>=2.16",
   "zensical",
 ]
@@ -529,7 +553,7 @@ desktop-helper = [
   "mindroom-nio[e2e]",
   "pillow>=10.2",
   "pyautogui>=0.9.54",
-  "pyinstaller==6.16",
+  "pyinstaller==6.22.3",
   "pyobjc-framework-applicationservices>=12.2.1; sys_platform=='darwin'",
   "pyobjc-framework-cocoa>=12.2.1; sys_platform=='darwin'",
   "pyobjc-framework-screencapturekit>=12.2.1; sys_platform=='darwin'",
@@ -550,11 +574,6 @@ version_scheme = "no-guess-dev"
 
 [tool.uv]
 override-dependencies = [
-  # crawl4ai 0.8.6 declares lxml~=5.3, which caps lxml below 6.
-  # The locked lxml 5.4.0 has no cp314 Linux wheels.
-  # On Python 3.14 it source-builds against libxml2/libxslt, so use lxml 6.1+ there.
-  "lxml>=5.3,<6; python_version < '3.14'",
-  "lxml>=6.1.0; python_version >= '3.14'",
   # composio-core 0.7.21 declares Pillow<11,>=10.2.0.
   # The locked Pillow 10.4.0 has no cp314 Linux wheels.
   # On Python 3.14 it source-builds against zlib, so use Pillow 11.x there.
@@ -591,6 +610,8 @@ build-constraint-dependencies = [
 [tool.ruff]
 target-version = "py313"
 line-length = 120
+extend-exclude = ["tests/workflow_examples"]
+force-exclude = true
 [tool.ruff.lint]
 select = [
   "ALL",
@@ -635,6 +656,9 @@ per-file-ignores.".github/scripts/*" = [
 per-file-ignores."cluster/k8s/kind/*" = [
   "INP001", # Part of an implicit namespace package (namespace package for python -m invocation)
 ]
+per-file-ignores."tests/fixtures/*/*.py" = [
+  "INP001", # Example plugins under test fixtures load by path, never as packages
+]
 per-file-ignores."src/mindroom/tools/*" = [
   "PLC0415", # `import` should be at the top-level of a file"
 ]
@@ -655,7 +679,7 @@ python-version = "3.13"
 # arguments).
 [[tool.ty.overrides]]
 include = [ "tests/" ]
-rules = { call-non-callable = "ignore", invalid-argument-type = "ignore", invalid-assignment = "ignore", invalid-return-type = "ignore", no-matching-overload = "ignore", not-iterable = "ignore", not-subscriptable = "ignore", too-many-positional-arguments = "ignore", unresolved-attribute = "ignore", unsupported-operator = "ignore" }
+rules = { invalid-argument-type = "ignore", invalid-assignment = "ignore", invalid-explicit-return = "ignore", invalid-implicit-return = "ignore", missing-attribute = "ignore", missing-union-attribute = "ignore", no-matching-overload = "ignore", not-callable = "ignore", not-iterable = "ignore", not-subscriptable = "ignore", too-many-positional-arguments = "ignore", unsupported-operator = "ignore" }
 
 # The macOS accessibility backend imports pyobjc, declared
 # `sys_platform=='darwin'` and so genuinely absent everywhere else. Checking on
@@ -670,7 +694,7 @@ rules = { call-non-callable = "ignore", invalid-argument-type = "ignore", invali
 # directives deleted.
 [[tool.ty.overrides]]
 include = [ "src/mindroom/desktop/" ]
-rules = { unresolved-import = "ignore", unused-ignore-comment = "ignore" }
+rules = { import-not-found = "ignore", unused-ignore-comment = "ignore" }
 [tool.ty.rules]
 deprecated = "ignore"  # FastAPI on_event deprecation; refactor to lifespan separately
 [tool.ty.src]

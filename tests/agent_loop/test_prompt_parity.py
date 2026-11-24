@@ -11,8 +11,20 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, PromptSpec, render_instructions, render_system_messages
-from mindroom.llm.messages import Message
+from mindroom.agent_loop.build import prompt_for_turn
+from mindroom.agent_loop.prompt import (
+    MARKDOWN_OUTPUT_FORMAT,
+    MATRIX_MARKDOWN_OUTPUT_FORMAT,
+    PromptSpec,
+    render_instructions,
+    render_system_messages,
+)
+from mindroom.agents import create_agent
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.llm.messages import Message, system_text
+from mindroom.tool_system.plugins import config_plugins
 from tests.agno_parity.golden_files import render
 from tests.agno_parity.prompt_scenarios import (
     FIXTURE_DIR,
@@ -22,6 +34,9 @@ from tests.agno_parity.prompt_scenarios import (
     record_scenario,
     regenerated_golden,
 )
+from tests.conftest import bind_runtime_paths, install_model_providers, test_runtime_paths
+from tests.fakes.scripted_model import ScriptedModel
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -109,3 +124,98 @@ def test_empty_sections_and_parts_add_nothing() -> None:
     assert stable.content == "<your_role>\nRole.\n</your_role>"
     [turn] = render_system_messages(PromptSpec(role=" ", instructions=(), turn_context="Today."))
     assert turn.content == "Today."
+
+
+def test_agent_markdown_format_uses_matrix_rules_only_inside_matrix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Matrix agents receive Matrix Markdown rules; outside-Matrix agents receive generic Markdown guidance."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    role="General assistant",
+                    rooms=[],
+                    include_default_tools=False,
+                    markdown=True,
+                ),
+                "plain": AgentConfig(
+                    display_name="PlainAgent",
+                    role="Plain assistant",
+                    rooms=[],
+                    include_default_tools=False,
+                    markdown=False,
+                ),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
+        ),
+        runtime_paths,
+    )
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+    plugins = config_plugins(config, runtime_paths)
+
+    matrix_build = create_agent(
+        "general",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        model=turn_model(config, runtime_paths, "general"),
+        knowledge=None,
+        plugins=plugins,
+        outside_matrix=False,
+    )
+    outside_build = create_agent(
+        "general",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        model=turn_model(config, runtime_paths, "general"),
+        knowledge=None,
+        plugins=plugins,
+        outside_matrix=True,
+    )
+    plain_build = create_agent(
+        "plain",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        model=turn_model(config, runtime_paths, "plain"),
+        knowledge=None,
+        plugins=plugins,
+        outside_matrix=False,
+    )
+
+    matrix_text = system_text(prompt_for_turn(matrix_build))
+    outside_text = system_text(prompt_for_turn(outside_build))
+    plain_text = system_text(prompt_for_turn(plain_build))
+
+    assert MATRIX_MARKDOWN_OUTPUT_FORMAT in matrix_text
+    assert "blank lines around inner Markdown" in matrix_text
+    assert "<span data-mx-spoiler>...</span>" in matrix_text
+    assert "<https://matrix.to/#/!room_id>" in matrix_text
+    assert "<https://matrix.to/#/!room_id/$event_id>" in matrix_text
+    assert "never wrap links in backticks" in matrix_text
+    assert (
+        "everything up through your last tool call (thoughts, tool calls, and earlier output) folds away" in matrix_text
+    )
+    assert "self-contained final answer after your last tool call" in matrix_text
+    assert MARKDOWN_OUTPUT_FORMAT in outside_text
+    assert MATRIX_MARKDOWN_OUTPUT_FORMAT not in outside_text
+    assert "Mermaid fences" not in outside_text
+    assert "<span data-mx-spoiler>" not in outside_text
+    assert "<https://matrix.to/#/!room_id>" not in outside_text
+    assert (
+        "everything up through your last tool call (thoughts, tool calls, and earlier output) folds away"
+        not in outside_text
+    )
+    assert "self-contained final answer after your last tool call" not in outside_text
+    assert MARKDOWN_OUTPUT_FORMAT not in plain_text
+    assert (
+        "everything up through your last tool call (thoughts, tool calls, and earlier output) folds away"
+        not in plain_text
+    )
+    assert "self-contained final answer after your last tool call" not in plain_text

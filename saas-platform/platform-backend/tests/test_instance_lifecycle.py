@@ -26,6 +26,7 @@ from backend.services.instance_lifecycle import (
 )
 from backend.services.provisioner_service import (
     InstanceClaimLostError,
+    allowed_openrouter_limit_usd,
     provision_instance,
     revoke_instance_openrouter_key,
     set_instance_openrouter_key_disabled,
@@ -2494,3 +2495,68 @@ async def test_stopped_instance_clears_a_deleted_key_when_lowering_its_limit(pla
     platform.limit_key.assert_awaited_once()
     platform.start.assert_not_awaited()
     platform.provision.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_missing_key_never_clears_the_replacement_another_run_recorded(platform: Platform) -> None:
+    platform.db.tables["subscriptions"].append(_subscription("active", tier="byok"))
+    platform.db.tables["instances"].append(_instance("stopped", tier="pro", **_pro_key()))
+
+    async def replaced_meanwhile(*_args: object, **_kwargs: object) -> None:
+        platform.instance()["openrouter_key_hash"] = "key_hash_replacement"
+        msg = "key gone"
+        raise OpenRouterKeyNotFoundError(msg)
+
+    platform.limit_key.side_effect = replaced_meanwhile
+    delete = Mock()
+    with patch(f"{SERVICE}.delete_openrouter_key", delete):
+        summary = await reconcile_subscription_instances(SUBSCRIPTION_ID)
+
+    assert summary.errors == []
+    assert platform.instance()["openrouter_key_hash"] == "key_hash_replacement"
+    delete.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("status", "trial_ends_at", "now", "expected_multiple"),
+    [
+        pytest.param(
+            "active", "2026-11-04T00:00:00+00:00", datetime(2026, 11, 30, 23, tzinfo=UTC), 2, id="trial-month"
+        ),
+        pytest.param("active", "2026-11-04T00:00:00+00:00", datetime(2026, 12, 1, tzinfo=UTC), 1, id="next-month"),
+        pytest.param("active", None, datetime(2026, 11, 10, tzinfo=UTC), 1, id="no-trial"),
+        pytest.param("trialing", "2026-11-20T00:00:00+00:00", datetime(2026, 11, 10, tzinfo=UTC), 1, id="not-active"),
+    ],
+)
+def test_allowed_openrouter_limit_doubles_only_in_the_month_a_paid_trial_ended(
+    status: str, trial_ends_at: str | None, now: datetime, expected_multiple: int
+) -> None:
+    subscription = _subscription(status, trial_ends_at=trial_ends_at)
+    budget = get_plan_details("hobby").included_ai_budget_usd
+
+    assert allowed_openrouter_limit_usd("hobby", subscription, now=now) == expected_multiple * budget
+
+
+@pytest.mark.asyncio
+async def test_converted_trial_key_gets_the_doubled_limit_until_the_next_calendar_month(platform: Platform) -> None:
+    # A customer who used the trial budget converted to paid; OpenRouter still counts the trial's usage this month.
+    budget = get_plan_details("hobby").included_ai_budget_usd
+    trial_end = datetime(2026, 11, 4, tzinfo=UTC)
+    platform.db.tables["subscriptions"].append(_subscription("active", trial_ends_at=trial_end.isoformat()))
+    platform.db.tables["instances"].append(_instance("running"))
+
+    def record_limit(_sb: Any, instance: dict[str, Any], limit: int) -> None:  # noqa: ANN401
+        platform.db.row("instances", instance_id=instance["instance_id"])["openrouter_key_limit_usd"] = limit
+
+    platform.limit_key.side_effect = record_limit
+    with patch(f"{SERVICE}.datetime") as clock:
+        clock.now.return_value = trial_end + timedelta(days=6)
+        await reconcile_subscription_instances(SUBSCRIPTION_ID, now=trial_end + timedelta(days=6))
+        assert platform.instance()["openrouter_key_limit_usd"] == 2 * budget
+
+        clock.now.return_value = datetime(2026, 12, 1, 1, tzinfo=UTC)
+        await reconcile_subscription_instances(SUBSCRIPTION_ID)
+        assert platform.instance()["openrouter_key_limit_usd"] == budget
+
+    platform.provision.assert_not_awaited()
+    assert platform.limit_key.await_count == 2

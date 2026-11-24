@@ -2,7 +2,17 @@
 
 from __future__ import annotations
 
-from mindroom.knowledge.readers import Document, FixedSizeChunking
+import re
+
+from mindroom.knowledge.readers import Document, DocumentChunking, FixedSizeChunking
+
+
+def _legacy_clean_text(text: str) -> str:
+    """Collapse each whitespace run, line breaks included, to one space, as every indexed chunk has so far.
+
+    Agno 3.2 keeps line breaks, which would change the text and id of every chunk a refresh rewrites.
+    """
+    return re.sub(r"\s+", " ", text)
 
 
 class SafeFixedSizeChunking(FixedSizeChunking):
@@ -20,6 +30,10 @@ class SafeFixedSizeChunking(FixedSizeChunking):
             msg = "min_chunk_fill_ratio must be in the range (0, 1]"
             raise ValueError(msg)
         self.min_chunk_fill_ratio = min_chunk_fill_ratio
+
+    def clean_text(self, text: str) -> str:
+        """Clean text as every indexed chunk has been cleaned (``_legacy_clean_text``)."""
+        return _legacy_clean_text(text)
 
     def _min_chunk_size(self) -> int:
         """Return the shortest chunk a whitespace-aligned split may produce."""
@@ -70,3 +84,19 @@ class SafeFixedSizeChunking(FixedSizeChunking):
             chunk_number += 1
 
         return chunked_documents
+
+
+class LegacyFixedSizeChunking(FixedSizeChunking):
+    """Agno's fixed-size chunking for JSON files, cleaning text as every indexed chunk has been."""
+
+    def clean_text(self, text: str) -> str:
+        """Clean the document with ``_legacy_clean_text``."""
+        return _legacy_clean_text(text)
+
+
+class LegacyDocumentChunking(DocumentChunking):
+    """Agno's paragraph chunking for PDF, DOCX, and PPTX files, cleaning paragraphs as every indexed chunk has been."""
+
+    def clean_text(self, text: str) -> str:
+        """Clean one paragraph with ``_legacy_clean_text``."""
+        return _legacy_clean_text(text)

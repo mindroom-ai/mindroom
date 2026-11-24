@@ -14,8 +14,10 @@ back, so a deleted run's number is never reused.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import sqlite3
+import threading
 from collections import defaultdict
 from contextlib import closing, contextmanager
 from contextvars import ContextVar
@@ -32,8 +34,10 @@ from mindroom.constants import (
     MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY,
     MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
 )
+from mindroom.delegation.cost import receipts_metadata, stored_receipts, subagent_cost_metadata
 from mindroom.history.types import HistoryScope, ScopeSummary, owner_scope
-from mindroom.llm.runs import RunStatus, TeamRunRecord
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunStatus, TeamRunRecord, ToolExecution
 from mindroom.session_storage.codec import RunColumns, decode_json, run_columns, run_kind, run_record
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.schema import (
@@ -44,13 +48,13 @@ from mindroom.session_storage.schema import (
     usage_upsert_sql,
 )
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
+from mindroom.sqlite_utils import begun
 from mindroom.usage.storage import helper_usage_snapshot, run_usage_snapshot
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Iterable, Iterator, Mapping, Sequence
     from pathlib import Path
 
-    from mindroom.llm.messages import Message
     from mindroom.llm.runs import AnyRunRecord, RunRecord
     from mindroom.llm.usage import HelperUsage
     from mindroom.session_storage.types import SessionKind
@@ -64,6 +68,10 @@ _RECORD_COLUMNS = tuple(field.name for field in fields(RunColumns))
 
 # What a full save did: wrote the run, wrote nothing because a cut removed it, or wrote nothing because it is final.
 type SaveOutcome = Literal["written", "removed", "final"]
+# What the latest save in this process of each unfinished run left in its rows, by database and run id (``_Rows``),
+# with the lock each save of the database holds from reading its entry until it commits or rolls back.
+_WRITTEN: dict[Path, tuple[threading.Lock, dict[str, _Rows]]] = {}
+_WRITTEN_PER_DATABASE = 64
 
 
 def connect_conversation_database(path: Path, *, timeout: float = BUSY_TIMEOUT_SECONDS) -> sqlite3.Connection:
@@ -102,22 +110,6 @@ def connect_by_name(path: Path, *, timeout: float = BUSY_TIMEOUT_SECONDS) -> sql
     return connection
 
 
-@contextmanager
-def begun(connection: sqlite3.Connection, *, write: bool) -> Iterator[None]:
-    """Run the block as one transaction on ``connection``, committing when it exits normally.
-
-    A write takes the write lock first. A block that fails or is interrupted rolls back at once rather than
-    leaving that to a close: a cursor still alive keeps the connection, and with it the write lock, open past its close.
-    """
-    connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
-    try:
-        yield
-    except BaseException:
-        connection.rollback()
-        raise
-    connection.commit()
-
-
 @dataclass(frozen=True, slots=True)
 class ConversationStore:
     """One conversation database; it holds no connection, so there is nothing to close.
@@ -150,6 +142,15 @@ class ConversationStore:
                 (session_id,),
             ).fetchone()
         return None if row is None else decoded_mapping(row[0])
+
+    def has_session(self, session_id: str) -> bool:
+        """Return whether session ``session_id`` has a stored row, without reading its state or runs."""
+        with self.transaction(write=False) as connection:
+            row = connection.execute(
+                f"SELECT 1 FROM {quote_identifier(self.names.sessions)} WHERE session_id = ?",  # noqa: S608
+                (session_id,),
+            ).fetchone()
+        return row is not None
 
     def load_session(self, session_id: str) -> ConversationSession | None:
         """Load one session with the runs a reply reasons over, or None when it is missing.
@@ -245,7 +246,7 @@ class ConversationStore:
         as the store does (``_mirror``).
         """
         usage = run_usage_snapshot(run) if record_usage else None
-        return self._save(session, run.to_dict(), run_kind(run), usage=usage, state=state)
+        return self._save(session, _stored_dict(run), run_kind(run), usage=usage, state=state)
 
     def save_interrupted_record(
         self,
@@ -260,7 +261,7 @@ class ConversationStore:
         answer; a visible run keeps its ``seq``, so replay order does not change.
         """
         kind = run_kind(record)
-        outcome = self._save(session, record.to_dict(), kind, usage=None, state=state, interrupted=True)
+        outcome = self._save(session, _stored_dict(record), kind, usage=None, state=state, interrupted=True)
         return cast("Literal['written', 'removed']", outcome)
 
     def _save(
@@ -277,23 +278,30 @@ class ConversationStore:
 
         The run is then mirrored in ``session``.
         """
-        with self.transaction(write=True) as connection:
-            created = ensure_session_row(connection, self.names, session)
-            saved = _write_run(connection, self.names, session.session_id, data, kind, interrupted=interrupted)
-            if usage is not None and saved.outcome != "final":
-                _record_usage(
-                    connection,
-                    self.names,
-                    session.session_id,
-                    data["run_id"],
-                    usage,
-                    created_at=saved.created_at,
-                    updated_at=saved.updated_at,
-                )
-            elif saved.moved and data["status"] not in _NON_VISIBLE:
-                # A finished run new to the log, or finished after the turns it waited for, is news to the readers too.
-                _move_update_time(connection, self.names, session.session_id, saved.updated_at)
-            stored = self._write_state(connection, session, created, state)
+        lock, written = _WRITTEN.setdefault(self.path.resolve(), (threading.Lock(), {}))
+        with lock:
+            try:
+                with self.transaction(write=True) as connection:
+                    created = ensure_session_row(connection, self.names, session)
+                    saved = _write_run(connection, self.names, session.session_id, data, kind, interrupted, written)
+                    if usage is not None and saved.outcome != "final":
+                        _record_usage(
+                            connection,
+                            self.names,
+                            session.session_id,
+                            data["run_id"],
+                            usage,
+                            created_at=saved.created_at,
+                            updated_at=saved.updated_at,
+                        )
+                    elif saved.moved and data["status"] not in _NON_VISIBLE:
+                        # A finished run new to the log, or finished after the turns it waited for, is news to readers too.
+                        _move_update_time(connection, self.names, session.session_id, saved.updated_at)
+                    stored = self._write_state(connection, session, created, state)
+            except BaseException:
+                # The rows may not hold what this write recorded, so the run's next save writes every row.
+                written.pop(data["run_id"], None)
+                raise
         _record_stored_state(session, stored)
         _mirror(session, saved)
         if created is not None:
@@ -359,7 +367,10 @@ class ConversationStore:
             if row is None:
                 return False
             parent_run_id, scope_key, status, seq, stored = row
+            # A patch that carries receipts, as a delegation state's does, merges them into the row's.
             metadata = {**(decoded_mapping(stored) or {}), **changes}
+            if patched := stored_receipts(changes):
+                metadata.update(receipts_metadata(stored_receipts(decoded_mapping(stored)), patched))
             connection.execute(f"UPDATE {runs} SET metadata = ? WHERE run_id = ?", (json.dumps(metadata), run_id))  # noqa: S608
             if parent_run_id is None and status not in _NON_VISIBLE:
                 _join_covering_row(connection, self.names, session_id, scope_key, seq, metadata)
@@ -522,6 +533,31 @@ class _Saved:
     stored: AnyRunRecord | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _Rows:
+    """What a save of an unfinished run left in its rows, so the run's next save in this process sends only changes.
+
+    It holds the run's ``seq``, each message row's ``ord`` and data digest by id, and each tool row's data digest. Each
+    save of the run takes it out before writing and records its own before committing, holding the database's lock in
+    ``_WRITTEN`` until it commits or, rolled back, drops it, so it exists only while the save that recorded it is the
+    run's latest; a deleted run has no row, and a fold that recreates one moves its ``seq``. Other processes do not
+    write a running run's rows.
+    """
+
+    seq: int
+    messages: dict[str, tuple[int, bytes]]
+    tools: list[bytes]
+
+
+def _digest(text: str) -> bytes:
+    return hashlib.blake2b(text.encode(), digest_size=16).digest()
+
+
+def _stored_dict(run: AnyRunRecord) -> dict[str, Any]:
+    """Return ``run.to_dict()`` without the history copies its messages carry, which no save stores."""
+    return replace(run, messages=[message for message in run.messages if not message.from_history]).to_dict()
+
+
 class _StoredRow(NamedTuple):
     """What a save reads of a run's stored row, or of its team run's."""
 
@@ -529,6 +565,7 @@ class _StoredRow(NamedTuple):
     status: str
     seq: int
     created_at: int
+    metadata: str | None
 
 
 def _mirror(session: ConversationSession, saved: _Saved) -> None:
@@ -620,7 +657,7 @@ def persist_to(
     """
 
     async def persist(record: AnyRunRecord) -> None:
-        data, kind, usage = record.to_dict(), run_kind(record), run_usage_snapshot(record, kind=usage_kind)
+        data, kind, usage = _stored_dict(record), run_kind(record), run_usage_snapshot(record, kind=usage_kind)
         turn = replays is None or replays(record)
 
         def save(opened: ConversationStore, state: dict[str, Any]) -> None:
@@ -802,17 +839,22 @@ def _write_run(
     session_id: str,
     data: dict[str, Any],
     kind: SessionKind,
-    *,
     interrupted: bool,
+    written: dict[str, _Rows],
 ) -> _Saved:
-    """Write one run from its stored dict by ``ConversationStore.save_run``'s rules; an interrupted one is not final."""
+    """Write one run from its stored dict by ``ConversationStore.save_run``'s rules; an interrupted one is not final.
+
+    ``written`` holds what this process's latest saves of the database's unfinished runs left in their rows
+    (``_Rows``); only rows that differ from the run's entry are written, and the entry is replaced by this save's.
+    """
     run_id, parent_run_id, now = data["run_id"], data.get("parent_run_id"), int(time())
+    known = written.pop(run_id, None)
     if is_removed(connection, names, session_id, run_id, parent_run_id):
         return _Saved(run_id, "removed", data.get("created_at") or now, now)
     rows = {
         row[0]: _StoredRow(*row[1:])
         for row in connection.execute(
-            f"SELECT run_id, parent_run_id, status, seq, created_at FROM {quote_identifier(names.log_runs)} "  # noqa: S608
+            f"SELECT run_id, parent_run_id, status, seq, created_at, metadata FROM {quote_identifier(names.log_runs)} "  # noqa: S608
             "WHERE session_id = ? AND run_id IN (?, ?)",
             (session_id, run_id, parent_run_id),
         )
@@ -831,11 +873,61 @@ def _write_run(
         # A top-level run saved visible over its paused, cancelled, or errored row finished after the turns it awaited.
         moved = parent_run_id is None and stored.status in _NON_VISIBLE and data["status"] not in _NON_VISIBLE
         created_at, seq = stored.created_at, _next_seq(connection, names) if moved else stored.seq
-    upsert_run(connection, names, session_id, data, kind, seq=seq, created_at=created_at, updated_at=now)
-    set_visible_messages(connection, names, run_id, data["messages"], data["status"])
+    # Every save of a run stores what its turn's subagents cost so far: the record's, its stored row's, the context's.
+    kept = decoded_mapping(stored.metadata) if stored is not None else None
+    if cost := subagent_cost_metadata(data.get("metadata"), kept):
+        data = {**data, "metadata": {**(data.get("metadata") or {}), **cost}}
+    if stored is None or known is None or known.seq != stored.seq:
+        known = None
+    columns, tools = upsert_run(
+        connection,
+        names,
+        session_id,
+        data,
+        kind,
+        seq=seq,
+        created_at=created_at,
+        updated_at=now,
+        known=known,
+    )
+    messages = set_visible_messages(connection, names, run_id, data["messages"], data["status"], known=known)
     _adopt_requester(connection, names, session_id, data.get("user_id"))
-    [written] = _read_runs(connection, names, "run.run_id = ?", (run_id,))
-    return _Saved(run_id, "written", created_at, now, moved, written)
+    if stored is None or (kind == "team" and data["status"] == RunStatus.paused.value):
+        # A new row can be another session's that holds the id, and a paused team run's copy holds its paused member
+        # runs, which only a read of the log finds.
+        [copied] = _read_runs(connection, names, "run.run_id = ?", (run_id,))
+    else:
+        copied = _written_copy(connection, names, session_id, data, columns, messages, tools)
+    if data["status"] in _NON_VISIBLE:
+        if len(written) >= _WRITTEN_PER_DATABASE:
+            written.pop(next(iter(written)))
+        digests = {message_id: (place, digest) for message_id, (place, _, digest) in messages.items()}
+        written[run_id] = _Rows(seq, digests, [digest for _, digest in tools])
+    return _Saved(run_id, "written", created_at, now, moved, copied)
+
+
+def _written_copy(
+    connection: sqlite3.Connection,
+    names: TableNames,
+    session_id: str,
+    data: Mapping[str, Any],
+    columns: RunColumns,
+    messages: dict[str, tuple[int, str, bytes]],
+    tools: list[tuple[str, bytes]],
+) -> AnyRunRecord:
+    """Return the run just written to its stored row as a read of it returns it, decoded from the JSON the save wrote.
+
+    Its message rows are ``messages`` less the ones a fold flagged, and its tool rows are ``tools``.
+    """
+    run_id, table = data["run_id"], quote_identifier(names.log_messages)
+    folded_sql = f"SELECT message_id FROM {table} WHERE run_id = ? AND folded_by IS NOT NULL"  # noqa: S608
+    folded = {message_id for (message_id,) in connection.execute(folded_sql, (run_id,))}
+    record = run_record(run_id, session_id, data.get("parent_run_id"), columns, [], [])
+    record.messages = [
+        Message.from_dict(json.loads(text)) for message_id, (_, text, _) in messages.items() if message_id not in folded
+    ]
+    record.tools = [ToolExecution.from_dict(json.loads(text)) for text, _ in tools] if columns.has_tools else None
+    return record
 
 
 def upsert_run(
@@ -848,12 +940,14 @@ def upsert_run(
     seq: int,
     created_at: int,
     updated_at: int,
-) -> None:
-    """Upsert the row and the tool rows of the run whose stored dict is ``data``.
+    known: _Rows | None = None,
+) -> tuple[RunColumns, list[tuple[str, bytes]]]:
+    """Upsert the row and the tool rows of the run whose stored dict is ``data``; return its columns and tool rows.
 
     A stored row keeps its ``session_id`` and ``created_at``. An update rather than a replace, which would cascade the
     run's message rows away. Tool rows are keyed by their place in the list, so a save that appends a tool execution
-    writes that one row; changed rows are rewritten and rows past the list's end deleted.
+    writes that one row; changed rows are rewritten and rows past the list's end deleted. A tool row whose data digest
+    ``known``, what the run's previous save left, holds at its place is not sent. Each tool row is its JSON and digest.
     """
     written = ("parent_run_id", *_RECORD_COLUMNS, "seq", "updated_at")
     run_id, parent_run_id, columns = data["run_id"], data.get("parent_run_id"), run_columns(data, kind)
@@ -863,13 +957,20 @@ def upsert_run(
         f"ON CONFLICT(run_id) DO UPDATE SET {', '.join(f'{column} = excluded.{column}' for column in written)}",
         (run_id, session_id, created_at, parent_run_id, *astuple(columns), seq, updated_at),
     )
-    tools, table = data.get("tools") or [], quote_identifier(names.log_tools)
+    tools = [(text, _digest(text)) for text in map(json.dumps, data.get("tools") or [])]
+    stored = known.tools if known is not None else []
+    table = quote_identifier(names.log_tools)
     connection.executemany(
         f"INSERT INTO {table} (run_id, ord, data) VALUES (?, ?, ?) ON CONFLICT(run_id, ord) "  # noqa: S608
         "DO UPDATE SET data = excluded.data WHERE data IS NOT excluded.data",
-        [(run_id, position, json.dumps(tool)) for position, tool in enumerate(tools)],
+        [
+            (run_id, position, text)
+            for position, (text, digest) in enumerate(tools)
+            if position >= len(stored) or stored[position] != digest
+        ],
     )
     connection.execute(f"DELETE FROM {table} WHERE run_id = ? AND ord >= ?", (run_id, len(tools)))  # noqa: S608
+    return columns, tools
 
 
 def _join_covering_row(
@@ -912,12 +1013,14 @@ def set_visible_messages(
     run_id: str,
     messages: Sequence[Mapping[str, Any]],
     status: str,
-) -> None:
+    known: _Rows | None = None,
+) -> dict[str, tuple[int, str, bytes]]:
     """Make the replay view of run ``run_id``, saved with ``status``, its message dicts, rewriting changed rows only.
 
     History copies are never stored, and system messages only while the run is paused, for its continuation. A row a
     fold took stays as it is, so it never replays again, and an unfolded row the list no longer holds is deleted. A
-    list holding one message id twice raises rather than keeping one copy.
+    list holding one message id twice raises rather than keeping one copy. A row whose place and data digest ``known``,
+    what the run's previous save left, holds is not sent. Returns each stored message's place, JSON, and digest by id.
     """
     paused = status == RunStatus.paused.value
     kept = [
@@ -927,18 +1030,30 @@ def set_visible_messages(
     if len(set(ids)) < len(ids):
         msg = f"Run {run_id!r} holds a message id twice"
         raise ValueError(msg)
+    rows = {
+        message["id"]: (position, text, _digest(text))
+        for position, (message, text) in enumerate(zip(kept, map(json.dumps, kept), strict=True))
+    }
+    stored = known.messages if known is not None else {}
     table = quote_identifier(names.log_messages)
     connection.executemany(
         f"INSERT INTO {table} (run_id, message_id, ord, data) VALUES (?, ?, ?, ?) ON CONFLICT(run_id, message_id) "  # noqa: S608
         "DO UPDATE SET ord = excluded.ord, data = excluded.data "
         "WHERE folded_by IS NULL AND (ord, data) IS NOT (excluded.ord, excluded.data)",
-        [(run_id, message["id"], position, json.dumps(message)) for position, message in enumerate(kept)],
+        [
+            (run_id, message_id, position, text)
+            for message_id, (position, text, digest) in rows.items()
+            if stored.get(message_id) != (position, digest)
+        ],
     )
-    connection.execute(
-        f"DELETE FROM {table} WHERE run_id = ? AND folded_by IS NULL "  # noqa: S608
-        "AND message_id NOT IN (SELECT value FROM json_each(?))",
-        (run_id, json.dumps(ids)),
-    )
+    # The previous save's unfolded rows are all the run's unfolded rows; when the list still holds each, none goes.
+    if known is None or not stored.keys() <= rows.keys():
+        connection.execute(
+            f"DELETE FROM {table} WHERE run_id = ? AND folded_by IS NULL "  # noqa: S608
+            "AND message_id NOT IN (SELECT value FROM json_each(?))",
+            (run_id, json.dumps(ids)),
+        )
+    return rows
 
 
 def _read_runs(

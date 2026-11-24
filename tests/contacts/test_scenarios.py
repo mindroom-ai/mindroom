@@ -121,6 +121,7 @@ class _Homeserver:
         client.room_send = AsyncMock(side_effect=partial(self._send, user_id))
         client.joined_rooms = AsyncMock(side_effect=lambda: nio.JoinedRoomsResponse(rooms=sorted(self.joined(user_id))))
         client.joined_members = AsyncMock(side_effect=self._joined_members)
+        client.room_get_state = AsyncMock(side_effect=partial(self._state, user_id))
         return client
 
     async def membership(self, user_id: str, room_id: str, membership: str) -> bool:
@@ -171,6 +172,17 @@ class _Homeserver:
     async def _joined_members(self, room_id: str) -> nio.JoinedMembersResponse:
         members = [nio.RoomMember(user_id, "", "") for user_id in sorted(self.rooms[room_id].members)]
         return nio.JoinedMembersResponse(members, room_id)
+
+    async def _state(self, reader: str, room_id: str) -> nio.RoomGetStateResponse | nio.RoomGetStateError:
+        room = self.rooms.get(room_id)
+        if room is None or reader not in room.members:
+            return nio.RoomGetStateError("not a member", "M_FORBIDDEN")
+        memberships = {**dict.fromkeys(room.invited, "invite"), **dict.fromkeys(room.members, "join")}
+        events = [
+            {"type": "m.room.member", "state_key": user_id, "content": {"membership": membership}}
+            for user_id, membership in memberships.items()
+        ]
+        return nio.RoomGetStateResponse(events, room_id)
 
 
 @dataclass

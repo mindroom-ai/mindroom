@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from itertools import zip_longest
 from typing import TYPE_CHECKING, Protocol
 
+from mindroom.knowledge.retrieval import Candidate, Selection, retrieve
 from mindroom.logging_config import get_logger
 from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.authoring import tool
@@ -99,19 +100,6 @@ def _interleave(results_by_source: list[list[SearchHit]], limit: int) -> list[Se
     return [hit for rank in zip_longest(*results_by_source) for hit in rank if hit is not None][: max(limit, 0)]
 
 
-async def _reranked(reranker: Reranker, query: str, hits: list[SearchHit], limit: int) -> list[SearchHit]:
-    """Return the ``limit`` hits the reranker scores highest, or the hits as given when reranking fails."""
-    if not hits:
-        return []
-    try:
-        scores = await reranker.ascore(query, [hit.content for hit in hits])
-    except Exception:
-        logger.warning("Knowledge reranking failed; keeping search order", exc_info=True)
-        return hits[:limit]
-    order = sorted(range(len(hits)), key=lambda index: -scores[index])
-    return [hits[index] for index in order[:limit]]
-
-
 @dataclass(frozen=True)
 class AgentKnowledge:
     """The knowledge sources one agent searches through ``search_knowledge_base``."""
@@ -142,14 +130,10 @@ class AgentKnowledge:
                 logger.warning("Knowledge source search failed", base_id=source.description.base_id, exc_info=exc)
         if first_error is not None and not answered:
             raise first_error
-        if self.reranker is None:
-            return _interleave(answered, effective_limit)
-        return await _reranked(
-            self.reranker,
-            query,
-            _interleave(answered, source_limit * len(answered)),
-            effective_limit,
-        )
+        # Scores of different sources are not comparable, and a selection by limit reads none.
+        candidates = [Candidate(hit, hit.content, 0.0) for hit in _interleave(answered, source_limit * len(answered))]
+        selected = await retrieve(query, candidates, Selection(effective_limit), reranker=self.reranker)
+        return [candidate.item for candidate in selected]
 
     async def _search_tool_result(self, query: str) -> str:
         """Return what ``search_knowledge_base`` tells the model: the hits, no-result text, or the failure's type."""

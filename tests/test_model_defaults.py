@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 import yaml
@@ -11,6 +12,9 @@ import yaml
 from mindroom import model_defaults
 from mindroom.config.main import Config
 from mindroom.providers.anthropic.wire import checks_thinking_prefix
+
+if TYPE_CHECKING:
+    from mindroom.providers.anthropic.settings import ClaudeRouteKind
 
 
 def test_default_model_strings_are_not_redeclared_in_source() -> None:
@@ -97,27 +101,30 @@ def test_saas_default_config_is_generated_from_config_init() -> None:
     assert list(generated["agents"]) == ["mind"]
     # An explicit worker_tools list would override the chart's sandbox routing for execution tools.
     assert "worker_tools" not in generated["defaults"]
+    assert "allow_shell_without_worker" not in generated["defaults"]
     # The platform upgrades hosted instances, so tenants must not be told to update themselves.
     assert "update_awareness" not in yaml.dump(generated)
     # `script` would run in the primary pod, and tenants cannot log in to matrix-mcp.
     assert "mcp_servers" not in generated
-    assert not {"script", "mcp_matrix_mcp"} & {
+    # Hosted tenants get thread_snooze only when someone adds it.
+    assert not {"script", "mcp_matrix_mcp", "thread_snooze"} & {
         tool["name"] if isinstance(tool, dict) else tool for tool in generated["agents"]["mind"]["tools"]
     }
     # Hosted agents learn workspace skills by default.
     assert all(agent["skill_learning"] == {"enabled": True} for agent in generated["agents"].values())
 
 
-def test_saas_default_uses_current_gemini_flash() -> None:
-    """The SaaS default and named Flash preset should use the current Gemini Flash model."""
-    expected_model = "google/gemini-3.8-flash"
+def test_saas_default_uses_current_gemini_hydrogen() -> None:
+    """The SaaS default and named Hydrogen preset should use the current Gemini 4 Hydrogen model."""
+    expected_model = "google/gemini-4-hydrogen"
     superseded_models = {
         "google/gemini-3-flash-preview",
         "google/gemini-3.5-flash",
+        "google/gemini-3.8-flash",
     }
 
     assert model_defaults.SAAS_MODEL_PRESETS["default"].id == expected_model
-    assert model_defaults.SAAS_MODEL_PRESETS["gemini_flash"].id == expected_model
+    assert model_defaults.SAAS_MODEL_PRESETS["gemini_hydrogen"].id == expected_model
     assert superseded_models.isdisjoint(preset.id for preset in model_defaults.SAAS_MODEL_PRESETS.values())
 
 
@@ -128,7 +135,7 @@ def test_anthropic_frontier_presets_use_current_models() -> None:
     openrouter_alternatives = dict(model_defaults.CONFIG_INIT_MODEL_ALTERNATIVES["openrouter"])
     vertex_alternatives = dict(model_defaults.CONFIG_INIT_MODEL_ALTERNATIVES["vertexai_claude"])
 
-    assert anthropic_alternatives["fable"] == model_defaults.ModelPreset("anthropic", "claude-fable-5-1", 1_000_000)
+    assert anthropic_alternatives["fable"] == model_defaults.ModelPreset("anthropic", "claude-fable-5-2", 1_000_000)
     assert anthropic_alternatives["opus"] == model_defaults.ModelPreset("anthropic", "claude-opus-5-5", 1_000_000)
     assert model_defaults.CONFIG_INIT_MODEL_PRESETS["bedrock_claude"] == model_defaults.ModelPreset(
         "bedrock_claude",
@@ -142,7 +149,7 @@ def test_anthropic_frontier_presets_use_current_models() -> None:
     )
     assert openrouter_alternatives["fable"] == model_defaults.ModelPreset(
         "openrouter",
-        "anthropic/claude-fable-5.1",
+        "anthropic/claude-fable-5.2",
         1_000_000,
     )
     assert openrouter_alternatives["opus"] == model_defaults.ModelPreset(
@@ -152,7 +159,7 @@ def test_anthropic_frontier_presets_use_current_models() -> None:
     )
     assert vertex_alternatives["fable"] == model_defaults.ModelPreset(
         "vertexai_claude",
-        "claude-fable-5-1",
+        "claude-fable-5-2",
         1_000_000,
     )
     assert vertex_alternatives["opus"] == model_defaults.ModelPreset(
@@ -162,7 +169,7 @@ def test_anthropic_frontier_presets_use_current_models() -> None:
     )
     assert model_defaults.SAAS_MODEL_PRESETS["fable"] == model_defaults.ModelPreset(
         "openrouter",
-        "anthropic/claude-fable-5.1",
+        "anthropic/claude-fable-5.2",
         1_000_000,
     )
     assert model_defaults.SAAS_MODEL_PRESETS["opus"] == model_defaults.ModelPreset(
@@ -174,7 +181,14 @@ def test_anthropic_frontier_presets_use_current_models() -> None:
 
 def test_native_compaction_covers_current_claude_models() -> None:
     """Every current Claude default must take the native compaction path."""
-    for model_id in ("claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-opus-5", "claude-sonnet-5"):
+    for model_id in (
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+        "claude-fable-5-2",
+        "claude-opus-5",
+        "claude-sonnet-5",
+    ):
         assert model_id.startswith(model_defaults.CLAUDE_NATIVE_COMPACTION_MODEL_PREFIXES)
 
 
@@ -194,13 +208,12 @@ def _current_presets() -> list[model_defaults.ModelPreset]:
 
 def test_thinking_prefix_check_covers_current_claude_models() -> None:
     """Every Claude preset on a Claude wire must pass `checks_thinking_prefix`, so a default bump cannot leave one out."""
-    claude_ids = {
-        preset.id
-        for preset in _current_presets()
-        if preset.provider in {"anthropic", "vertexai_claude", "bedrock_claude"}
+    routes: tuple[ClaudeRouteKind, ...] = ("anthropic", "vertexai_claude", "bedrock_claude")
+    claude_presets = {
+        (preset.id, route) for preset in _current_presets() for route in routes if preset.provider == route
     }
-    assert len(claude_ids) >= 6
-    assert [model_id for model_id in sorted(claude_ids) if not checks_thinking_prefix(model_id)] == []
+    assert len(claude_presets) >= 6
+    assert [preset for preset in sorted(claude_presets) if not checks_thinking_prefix(*preset)] == []
 
 
 def test_sampling_rule_covers_current_claude_models() -> None:
@@ -222,6 +235,10 @@ def test_current_google_and_openrouter_specialist_models() -> None:
     assert model_defaults.GOOGLE_IMAGE == "gemini-nano-banana-2.1"
     assert model_defaults.GOOGLE_VEO == "veo-3.1-generate-001"
     assert model_defaults.GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES == (
+        "gemini-4-carbon",
+        "gemini-4-neon",
+        "gemini-4-argon",
+        "gemini-4-hydrogen",
         "gemini-3.8-flash",
         "gemini-3.6-flash",
         "gemini-3.5-flash-lite",
@@ -239,16 +256,13 @@ def test_current_google_and_openrouter_specialist_models() -> None:
         "claude-haiku-5-5",
         "claude-haiku-5.5",
     )
-    assert openrouter_alternatives["gemini_flash"] == model_defaults.ModelPreset(
+    assert openrouter_alternatives["gemini_hydrogen"] == model_defaults.ModelPreset(
         "openrouter",
-        "google/gemini-3.8-flash",
+        "google/gemini-4-hydrogen",
         1_048_576,
     )
-    assert openrouter_alternatives["gemini_lite"] == model_defaults.ModelPreset(
-        "openrouter",
-        "google/gemini-3.5-flash-lite",
-        1_048_576,
-    )
+    assert "gemini_lite" not in openrouter_alternatives
+    assert "gemini_lite" not in model_defaults.SAAS_MODEL_PRESETS
     assert openrouter_alternatives["kimi"] == model_defaults.ModelPreset(
         "openrouter",
         "moonshotai/kimi-k3.1-pro",
@@ -260,9 +274,9 @@ def test_current_generation_media_models() -> None:
     """Built-in media tools should use the current provider model IDs."""
     assert model_defaults.OPENAI_TRANSCRIPTION == "gpt-transcribe"
     assert model_defaults.OPENAI_TTS == "gpt-realtime-2.1-mini"
-    assert model_defaults.OPENAI_AVATAR_IMAGE == "gpt-image-2.5-sunburst"
-    assert model_defaults.OPENAI_AVATAR_PROMPT == "gpt-6-astra"
-    assert model_defaults.OPENAI_IMAGE == "gpt-image-2.5-sunburst"
+    assert model_defaults.OPENAI_AVATAR_IMAGE == "gpt-image-2.6-sunburst"
+    assert model_defaults.OPENAI_AVATAR_PROMPT == "gpt-6.2-astra"
+    assert model_defaults.OPENAI_IMAGE == "gpt-image-2.6-sunburst"
     assert model_defaults.GROQ_TTS == "canopylabs/orpheus-v1-english"
     assert model_defaults.ELEVENLABS_TTS == "eleven_v4"
 
@@ -293,12 +307,12 @@ def test_openai_presets_use_current_models() -> None:
 
     assert model_defaults.CONFIG_INIT_MODEL_PRESETS["openai"] == model_defaults.ModelPreset(
         "openai",
-        "gpt-6-astra",
+        "gpt-6.2-astra",
         1_050_000,
     )
     assert model_defaults.CONFIG_INIT_MODEL_PRESETS["codex"] == model_defaults.ModelPreset(
         "codex",
-        "gpt-6.1-sol",
+        "gpt-6.2-sol",
         258_000,
         reasoning_effort="medium",
         display_name="Sol",
@@ -306,7 +320,7 @@ def test_openai_presets_use_current_models() -> None:
     assert dict(model_defaults.CONFIG_INIT_ADDITIONAL_MODELS["codex"]) == {
         "astra": model_defaults.ModelPreset(
             "codex",
-            "gpt-6-astra",
+            "gpt-6.2-astra",
             258_000,
             reasoning_effort="medium",
             display_name="Astra",
@@ -314,6 +328,27 @@ def test_openai_presets_use_current_models() -> None:
         "luna": model_defaults.ModelPreset("codex", "gpt-6-luna", 258_000, reasoning_effort="low", display_name="Luna"),
     }
     assert model_defaults.CONFIG_INIT_HELPER_MODELS["codex"] == "luna"
+    assert model_defaults.CONFIG_INIT_MODEL_PRESETS["claude_code"] == model_defaults.ModelPreset(
+        "claude_code",
+        "claude-sonnet-5-5",
+        200_000,
+        display_name="Claude Sonnet 5.5",
+    )
+    assert dict(model_defaults.CONFIG_INIT_ADDITIONAL_MODELS["claude_code"]) == {
+        "opus": model_defaults.ModelPreset(
+            "claude_code",
+            "claude-opus-5-5",
+            200_000,
+            display_name="Claude Opus 5.5",
+        ),
+        "haiku": model_defaults.ModelPreset(
+            "claude_code",
+            "claude-haiku-5-5",
+            200_000,
+            display_name="Claude Haiku 5.5",
+        ),
+    }
+    assert model_defaults.CONFIG_INIT_HELPER_MODELS["claude_code"] == "haiku"
     assert dict(model_defaults.CONFIG_INIT_ADDITIONAL_MODELS["codex"])["luna"].to_config_dict() == {
         "provider": "codex",
         "id": "gpt-6-luna",
@@ -322,12 +357,12 @@ def test_openai_presets_use_current_models() -> None:
         "extra_kwargs": {"reasoning_effort": "low"},
     }
     assert openai_alternatives == {
-        "openai_sol": model_defaults.ModelPreset("openai", "gpt-6.1-sol", 1_050_000),
+        "openai_sol": model_defaults.ModelPreset("openai", "gpt-6.2-sol", 1_050_000),
         "openai_luna": model_defaults.ModelPreset("openai", "gpt-6-luna", 1_050_000),
     }
     assert model_defaults.SAAS_MODEL_PRESETS["sol"] == model_defaults.ModelPreset(
         "openrouter",
-        "openai/gpt-6.1-sol",
+        "openai/gpt-6.2-sol",
         1_050_000,
     )
     assert model_defaults.SAAS_MODEL_PRESETS["luna"] == model_defaults.ModelPreset(

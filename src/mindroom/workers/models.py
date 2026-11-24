@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal, get_args
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
     from uuid import UUID
 
     from mindroom.agent_policy import ResolvedAgentPolicy
@@ -15,9 +16,14 @@ if TYPE_CHECKING:
     from mindroom.workers.backend import WorkerBackend
 
 WorkerStatus = Literal["starting", "ready", "idle", "failed"]
-WorkerReadyPhase = Literal["cold_start", "waiting", "ready", "failed"]
+WorkerReadyPhase = Literal["cold_start", "waiting", "preparing", "ready", "failed"]
 ScriptResourceProfileName = Literal["small", "standard", "large"]
 SCRIPT_RESOURCE_PROFILE_NAMES: frozenset[ScriptResourceProfileName] = frozenset(get_args(ScriptResourceProfileName))
+# The port a worker's sshd listens on, and the label on a container whose launch passed the tailnet SSH rule.
+WORKER_SSH_PORT = 2222
+LABEL_TAILNET_SSH = "mindroom.ai/tailnet-ssh"
+LABEL_TAILNET_SSH_RELEASE = "mindroom.ai/tailnet-ssh-release"
+LABEL_WORKER_SANDBOX = "mindroom.ai/worker-sandbox"
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +56,16 @@ class WorkerLaunchConfig:
     tool_validation_snapshot: Mapping[str, Mapping[str, object]] = field(compare=False, repr=False)
     grantable_credentials: frozenset[str] = field(compare=False)
     digest: str
+    # The configured paths of the enabled plugins whose manifests set ``worker_preload``.
+    worker_preload_plugins: tuple[str, ...] = field(default=(), compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerSandboxConfig:
+    """Sandbox isolation for a named worker: optional workspace-relative directory mount and read-only flag."""
+
+    mount_dir: str | None = None
+    mount_read_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +74,8 @@ class WorkerSpec:
 
     A dedicated backend provisions it from the applied launch it reads inside the worker's lock.
     ``mirror_grantable_credentials`` mirrors the launch's grantable credentials into the worker; scripts mirror none.
+    ``wait_for_setup`` is False for a caller that needs the worker to answer and not its tool runtime: one that only
+    shows the worker, or a streamed command. It says nothing about the worker, so it is left out of comparisons.
     """
 
     worker_key: str
@@ -65,6 +83,20 @@ class WorkerSpec:
     mirror_grantable_credentials: bool = True
     state_scope_worker_key: str | None = None
     resource_profile: ScriptResourceProfileName | None = None
+    sandbox: WorkerSandboxConfig | None = None
+    wait_for_setup: bool = field(default=True, compare=False)
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerSshEndpoint:
+    """Where a worker launched with the tailnet SSH mark serves sshd.
+
+    ``projection_dir`` is the primary's path to the worker's ``.runtime/ssh``, which sshd reads its files from.
+    """
+
+    host: str
+    port: int
+    projection_dir: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +116,10 @@ class WorkerHandle:
     failure_count: int = 0
     failure_reason: str | None = None
     debug_metadata: dict[str, str] = field(default_factory=dict)
+    ssh_endpoint: WorkerSshEndpoint | None = None
+    # What the backend runs the worker as, when it can tell one from its replacement under the same key, which may
+    # count its starts from one again; a failure names it, so a late one never stops the replacement.
+    incarnation: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +162,7 @@ SANDBOX_RUNNER_API_ROOT = "/api/sandbox-runner"
 _API_ROUTES = {
     "script-run": "scripts/run",
     "execute-cancel": "execute/cancel",
+    "shell-scope-kill": "execute/shell-scope/kill",
 }
 
 
@@ -149,16 +186,18 @@ def worker_api_endpoint(
         "script-run",
         "scripts",
         "execute-cancel",
+        "shell-scope-kill",
     ],
 ) -> str:
     """Return the API endpoint for one worker operation."""
-    api_root = handle.debug_metadata.get("api_root")
-    if api_root is None:
-        api_root = handle.endpoint.removesuffix("/execute").rstrip("/")
-
     if operation == "execute":
         return handle.endpoint
-    return f"{api_root}/{_API_ROUTES.get(operation, operation)}"
+    return f"{worker_api_root(handle)}/{_API_ROUTES.get(operation, operation)}"
+
+
+def worker_api_root(handle: WorkerHandle) -> str:
+    """Return the root of one worker's sandbox runner API, under which it serves each operation."""
+    return handle.debug_metadata.get("api_root", handle.endpoint.removesuffix("/execute").rstrip("/"))
 
 
 def process_worker_key(base_worker_key: str, *, process_id: UUID) -> str:

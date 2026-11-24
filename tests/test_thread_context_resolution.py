@@ -1325,7 +1325,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
         observed_targets = []
 
-        async def fake_plan(_room: object, _event: object, dispatch: object, **_kwargs: object) -> DispatchPlan:
+        async def fake_plan(_room: object, dispatch: object, **_kwargs: object) -> DispatchPlan:
             observed_targets.append(dispatch.target)
             assert dispatch.context.is_thread is False
             assert dispatch.context.thread_id is None
@@ -1393,7 +1393,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         resolver = unwrap_extracted_collaborator(bot._conversation_resolver)
         observed_policy_targets = []
 
-        async def fake_plan(_room: object, _event: object, dispatch: object, **_kwargs: object) -> DispatchPlan:
+        async def fake_plan(_room: object, dispatch: object, **_kwargs: object) -> DispatchPlan:
             observed_policy_targets.append(dispatch.target)
             assert dispatch.context.is_thread is True
             assert dispatch.context.thread_id == "$thread_root:localhost"

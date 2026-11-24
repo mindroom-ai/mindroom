@@ -72,6 +72,8 @@ class SpanRegistry:
         # cancellations that reached them first (registration recheck).
         self._expected: set[str] = set()
         self._cancel_on_start: dict[str, TaskCancelSource | None] = {}
+        # Spans a Stop reached while their scope is open, whose calls start no background job.
+        self._stopped: set[str] = set()
 
     def register(self, span_id: str, task: asyncio.Task[object]) -> None:
         """Remember the task that executes one span, cancelling it at once if a Stop already reached the span."""
@@ -121,3 +123,13 @@ class SpanRegistry:
         """Stop expecting a span: its scope exited, or its claim did not open it."""
         self._expected.discard(span_id)
         self._cancel_on_start.pop(span_id, None)
+        self._stopped.discard(span_id)
+
+    def stop(self, span_id: str) -> None:
+        """Note that a Stop reached a span this instance runs, until its scope exits."""
+        if span_id in self.claimed_span_ids():
+            self._stopped.add(span_id)
+
+    def stopped(self, span_id: str) -> bool:
+        """Return whether a Stop reached the span."""
+        return span_id in self._stopped

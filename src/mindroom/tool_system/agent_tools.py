@@ -7,8 +7,11 @@ from typing import TYPE_CHECKING
 
 from mindroom.config.models import EffectiveToolConfig
 from mindroom.config.resolution import agent_policy, agent_tool_facts, expanded_tool_names
-from mindroom.tool_system.declarations import MATRIX_ROOM_RUNTIME_TOOL_NAMES
-from mindroom.tool_system.metadata import validate_authored_tool_entry_overrides
+from mindroom.tool_system.metadata import (
+    offered_functions,
+    resolve_tool_settings,
+    validate_authored_tool_entry_overrides,
+)
 from mindroom.tool_system.registry import builtin_tool_registry
 
 if TYPE_CHECKING:
@@ -16,21 +19,21 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.config.resolution import AgentToolFacts
+    from mindroom.constants import RuntimePaths
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.sandbox_proxy import ToolPlacement
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
+
+# The functions of a toolkit that needs a room which work without one, all a turn without a room offers of it.
+_ROOMLESS_FUNCTIONS = {"attachments": frozenset({"view_file"})}
 
 
-def turn_room_flags(execution_identity: ToolExecutionIdentity | None) -> tuple[bool, bool]:
-    """Return whether a turn under ``execution_identity`` keeps room-context toolkits and adds the Matrix room ones.
+def turn_keeps_room_tools(execution_identity: ToolExecutionIdentity | None) -> bool:
+    """Return whether a turn under ``execution_identity`` keeps room-context toolkits.
 
-    A build without an identity keeps room-context toolkits, a turn without a room hides them, and only a Matrix room
-    turn adds the Matrix room runtime toolkits.
+    A build without an identity keeps them, and a turn without a room offers only their functions that need none.
     """
-    if execution_identity is None:
-        return True, False
-    in_room = execution_identity.room_id is not None
-    return in_room, in_room and execution_identity.channel == "matrix"
+    return execution_identity is None or execution_identity.room_id is not None
 
 
 def _expanded_entry(entry: EffectiveToolConfig, tool_name: str) -> EffectiveToolConfig:
@@ -135,15 +138,14 @@ class AgentTools:
         *,
         depth: int = 0,
         room_tools: bool = True,
-        matrix_room_tools: bool = False,
         deferred: Iterable[str] | None = None,
         portable_search: bool = False,
     ) -> tuple[EffectiveToolConfig, ...]:
         """Return the toolkits a turn may build, in the order it builds them.
 
         ``deferred`` limits which authored deferred toolkits attach, and None attaches all of them; deferred toolkits
-        marked ``initial`` always attach. ``room_tools`` keeps the toolkits that need a room, ``matrix_room_tools`` adds
-        the Matrix room runtime toolkits, and ``portable_search`` adds the deferred-tool search when anything defers.
+        marked ``initial`` always attach. ``room_tools`` keeps the toolkits that need a room, and ``portable_search``
+        adds the deferred-tool search when anything defers.
         Which candidates a build actually offers also depends on filters and construction, which the build owns.
         """
         deferred_entries = [entry for entry in self._available_authored() if entry.defer]
@@ -168,12 +170,9 @@ class AgentTools:
         injected = list(self.facts.injected)
         if portable_search and deferred_names:
             injected.append("dynamic_tools")
-        if matrix_room_tools:
-            entries = [entry for entry in entries if entry.name not in MATRIX_ROOM_RUNTIME_TOOL_NAMES]
-            injected.extend(MATRIX_ROOM_RUNTIME_TOOL_NAMES)
         names = [entry.name for entry in entries]
         for tool_name in injected:
-            if tool_name in names or (tool_name not in MATRIX_ROOM_RUNTIME_TOOL_NAMES and tool_name in deferred_names):
+            if tool_name in names or tool_name in deferred_names:
                 continue
             entries.append(
                 EffectiveToolConfig(
@@ -194,22 +193,48 @@ class AgentTools:
             and (room_tools or not self._needs_room(entry.name))
         )
 
+    def functions_for(
+        self,
+        entry: EffectiveToolConfig,
+        paths: RuntimePaths,
+        target: ResolvedWorkerTarget,
+        *,
+        validate_filters: bool = False,
+    ) -> tuple[frozenset[str] | None, bool]:
+        """Return a candidate's configured functions and write access without building the toolkit."""
+        allowed = self.config.get_worker_grantable_credentials() if target.worker_scope is not None else None
+        settings = resolve_tool_settings(
+            entry.name,
+            paths,
+            tools=self.tools,
+            worker_target=target,
+            allowed_shared_services=allowed,
+            tool_config_overrides=entry.tool_config_overrides,
+        )
+        return offered_functions(self.tools.entries[entry.name], settings.values, validate_filters=validate_filters)
+
     def toolkit_names(self, candidates: Iterable[EffectiveToolConfig]) -> list[str]:
         """Return the toolkits ``candidates`` name for the agent CLI and subagent tool lists; a preset has no functions."""
         return [entry.name for entry in candidates if not self.config.is_tool_preset(entry.name)]
 
     def _needs_room(self, tool_name: str) -> bool:
         metadata = self.tools.get(tool_name)
-        return metadata is not None and metadata.requires_room_context
+        return metadata is not None and metadata.requires_room_context and tool_name not in _ROOMLESS_FUNCTIONS
+
+
+def offered_without_room(tool_name: str, function_name: str) -> bool:
+    """Return whether a turn without a room offers ``function_name`` of a candidate toolkit ``tool_name`` builds."""
+    functions = _ROOMLESS_FUNCTIONS.get(tool_name)
+    return functions is None or function_name in functions
 
 
 def room_turn_offers(config: Config, agent_name: str, tool_name: str) -> bool:
-    """Return whether a Matrix room turn of ``agent_name`` offers the built-in ``tool_name``.
+    """Return whether a room turn of ``agent_name`` offers the built-in ``tool_name``.
 
     Invalid tool settings offer nothing.
     """
     try:
-        candidates = resolve_agent_tools(config, agent_name, builtin_tool_registry()).candidates(matrix_room_tools=True)
+        candidates = resolve_agent_tools(config, agent_name, builtin_tool_registry()).candidates()
     except ValueError:
         return False
     return any(entry.name == tool_name for entry in candidates)

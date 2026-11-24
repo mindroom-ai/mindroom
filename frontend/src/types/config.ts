@@ -7,10 +7,7 @@ export type MemorySearchMode = "keyword" | "semantic";
 export type WorkerScope = "shared" | "user" | "user_agent";
 export type PrivateWorkerScope = Exclude<WorkerScope, "shared">;
 export type AgentPolicySource =
-  | "private.per"
-  | "agent.worker_scope"
-  | "defaults.worker_scope"
-  | "unscoped";
+  "private.per" | "agent.worker_scope" | "defaults.worker_scope" | "unscoped";
 export type AgentPoliciesByAgent = Record<string, AgentPolicy>;
 const DEFAULT_PRIVATE_KNOWLEDGE_PATH = "memory";
 export const SHARED_CONTEXT_FILE_PLACEHOLDER = "SOUL.md";
@@ -27,6 +24,9 @@ export interface BudgetsConfig {
   fallback_model: string;
 }
 
+export type ReasoningLevel =
+  "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
 export interface ModelConfig {
   provider: ProviderType;
   id: string;
@@ -39,6 +39,7 @@ export interface ModelConfig {
   api_key?: string | null; // Model-specific key from config.yaml
   extra_kwargs?: Record<string, unknown>; // Additional provider-specific parameters
   pricing?: ModelPricing | null; // Used to measure spend against budgets
+  reasoning?: { levels: ReasoningLevel[]; default: ReasoningLevel } | null; // `name@level` picks a level
 }
 
 export interface MemoryConfig {
@@ -51,10 +52,6 @@ export interface MemoryConfig {
       host?: string;
       dimensions?: number;
     };
-  };
-  file?: {
-    max_entrypoint_lines?: number;
-    max_entrypoint_tokens?: number;
   };
   search?: {
     mode?: MemorySearchMode;
@@ -343,6 +340,7 @@ export interface VoiceLLMConfig {
 
 export interface VoiceConfig {
   enabled: boolean;
+  dictation?: boolean | null;
   visible_router_echo: boolean;
   stt: VoiceSTTConfig;
   intelligence: VoiceLLMConfig;

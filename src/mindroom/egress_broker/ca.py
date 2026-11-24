@@ -22,7 +22,7 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from mindroom.atomic_file import atomic_write_bytes_at
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
 __all__ = [
     "BrokerCA",
@@ -332,12 +332,30 @@ def _publish_unless_current(directory_fd: int, filename: str, content: bytes) ->
         atomic_write_bytes_at(directory_fd, filename, content, file_mode=0o644, temp_prefix=f".{filename}.")
 
 
-def materialize_ca_bundle(ca_pem: str, directory: Path) -> tuple[Path, Path]:
+def _readable_ca_file(path: Path) -> str:
+    """Return a CA file's text ending in a newline; empty when the file cannot be read."""
+    try:
+        text = path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return ""
+    return text if not text or text.endswith("\n") else f"{text}\n"
+
+
+def materialize_ca_bundle(
+    ca_pem: str,
+    directory: Path,
+    *,
+    kept_bundles: Sequence[Path] = (),
+    kept_node_extra: Path | None = None,
+) -> tuple[Path, Path]:
     """Materialize CA bundle files in the given directory, which is created with mode 0700 if missing.
 
     Returns (combined_bundle, broker_ca_only) where:
-    - combined_bundle: system roots followed by broker CA
-    - broker_ca_only: just the broker CA
+    - combined_bundle: system roots, the certificates of `kept_bundles`, then the broker CA
+    - broker_ca_only: the certificates of `kept_node_extra`, then the broker CA
+
+    `kept_bundles` and `kept_node_extra` are CA files the commands trusted before these files replace them; one
+    that cannot be read is left out.
 
     File names: bundle-<fingerprint[:16]>.pem and ca-<fingerprint[:16]>.pem.
     Idempotent: existing files are reused only when their content matches,
@@ -353,21 +371,24 @@ def materialize_ca_bundle(ca_pem: str, directory: Path) -> tuple[Path, Path]:
     # Try ssl.get_default_verify_paths().cafile first, fall back to certifi
     default_paths = ssl.get_default_verify_paths()
     if default_paths.cafile and Path(default_paths.cafile).exists():
-        system_roots = Path(default_paths.cafile).read_text()
+        system_roots_path = Path(default_paths.cafile)
     else:
-        system_roots = Path(certifi.where()).read_text()
+        system_roots_path = Path(certifi.where())
+    system_roots = system_roots_path.read_text()
 
-    # Ensure system roots ends with newline before appending broker CA
+    # Ensure system roots ends with newline before appending the kept bundles and the broker CA
     combined = system_roots
     if not combined.endswith("\n"):
         combined += "\n"
+    combined += "".join(_readable_ca_file(path) for path in dict.fromkeys(kept_bundles) if path != system_roots_path)
     combined += ca_pem
+    node_extra = (_readable_ca_file(kept_node_extra) if kept_node_extra is not None else "") + ca_pem
 
     # Ensure directory exists
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        _publish_unless_current(directory_fd, ca_only_path.name, ca_pem.encode("utf-8"))
+        _publish_unless_current(directory_fd, ca_only_path.name, node_extra.encode("utf-8"))
         _publish_unless_current(directory_fd, combined_path.name, combined.encode("utf-8"))
     finally:
         os.close(directory_fd)

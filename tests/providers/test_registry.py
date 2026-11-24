@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, get_args
 
+import anthropic
 import httpx
 import pytest
+from anthropic.lib.credentials import StaticToken
 from google.oauth2.credentials import Credentials
 from pydantic import ValidationError
 from structlog.testing import capture_logs
@@ -24,13 +27,15 @@ from mindroom.config.main import Config, iter_config_validation_messages
 from mindroom.config.models import DebugConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
-from mindroom.llm.errors import MALFORMED_TOOL_CALL, ModelSafeguardRefusal, ProviderError
+from mindroom.llm.errors import MALFORMED_TOOL_CALL, MISSING_API_KEY, ModelSafeguardRefusal, ProviderError
 from mindroom.llm.media import Image
 from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
 from mindroom.llm.provider import ModelRequest, ToolSpec, TurnCompleted, UsageReported, complete
+from mindroom.llm.request_context import bind_request_headers
 from mindroom.providers import names
 from mindroom.providers.anthropic.messages import ClaudeProvider
 from mindroom.providers.anthropic.settings import ClaudeRouteKind
+from mindroom.providers.claude_code.adapter import ClaudeCodeProvider
 from mindroom.providers.gemini.adapter import GeminiProvider
 from mindroom.providers.identity import model_identity
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
@@ -43,7 +48,7 @@ from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_G
 from mindroom.providers.registry import build_model_provider, stream_idle_timeout_seconds
 from mindroom.providers.synthetic_adapter import SyntheticProvider
 from tests.agno_parity.golden_files import render
-from tests.providers.bare_adapter import bare_adapter
+from tests.providers.bare_adapter import bare_adapter, drain_into
 from tests.providers.golden_support import (
     FIXTURE_ROOT,
     Wire,
@@ -58,8 +63,10 @@ from tests.providers.golden_support import (
 from tests.providers.openai_family_support import write_cli_logins
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import ModelProvider, StreamEvent
+    from mindroom.llm.provider import StreamEvent
 
 _GOOGLE_TOKEN = "parity-google-token"  # noqa: S105 - synthetic SDK credential
 _BAD_REQUEST = {"type": "error", "error": {"type": "invalid_request_error", "message": "bad", "code": 400}}
@@ -88,12 +95,6 @@ def runtime_paths(tmp_path: Path) -> RuntimePaths:
 
 def _user(text: str = "Hi", **media: Any) -> Message:  # noqa: ANN401 - media fields
     return Message(role="user", content=text, **media)
-
-
-async def _collect(provider: ModelProvider, request: ModelRequest, events: list[StreamEvent]) -> None:
-    """Append each event of one request to ``events``, which keeps them when the request fails."""
-    async for event in provider.stream(request):
-        events.append(event)  # noqa: PERF401 - a comprehension would lose the events when the stream raises
 
 
 def _texts(gemini_body: dict[str, Any]) -> list[str]:
@@ -177,6 +178,11 @@ _ROUTES: dict[str, tuple[dict[str, Any], type, str]] = {
     "deepseek": ({"provider": "deepseek", "id": "deepseek-flash"}, ChatAdapter, "DeepSeek"),
     "zai": ({"provider": "zai", "id": "glm-5.3"}, ChatAdapter, "ZAI"),
     "synthetic": ({"provider": "synthetic", "id": "lorem-ipsum"}, SyntheticProvider, "Synthetic"),
+    "claude_code": (
+        {"provider": "claude_code", "id": "claude-sonnet-5-5", "extra_kwargs": {"effort": "low"}},
+        ClaudeCodeProvider,
+        "Anthropic (Claude Code)",
+    ),
 }
 
 
@@ -281,7 +287,7 @@ def test_config_load_rejects_an_unknown_provider_at_its_model() -> None:
     assert iter_config_validation_messages(info.value) == [
         (
             "models → default → provider",
-            "Unknown provider 'opneai': use one of anthropic, azure, bedrock_claude, cerebras, codex, "
+            "Unknown provider 'opneai': use one of anthropic, azure, bedrock_claude, cerebras, claude_code, codex, "
             "deepseek, google, groq, kimi, llama_cpp, ollama, openai, openrouter, synthetic, vertexai_claude, zai",
         ),
     ]
@@ -314,7 +320,7 @@ def test_every_model_name_config_load_accepts_builds(name: str, runtime_paths: R
 def test_config_accepts_exactly_the_providers_the_registry_builds() -> None:
     claude_routes = frozenset(get_args(ClaudeRouteKind.__value__))
 
-    assert OPENAI_FAMILY_PROVIDERS | claude_routes | {"google", "ollama", "synthetic"} == PROVIDER_ROUTES
+    assert OPENAI_FAMILY_PROVIDERS | claude_routes | {"claude_code", "google", "ollama", "synthetic"} == PROVIDER_ROUTES
 
 
 def test_the_dashboard_provider_fixture_lists_exactly_the_values_config_load_accepts() -> None:
@@ -647,6 +653,146 @@ async def test_a_model_with_an_auth_token_never_sends_the_shared_key(runtime_pat
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("extra_kwargs", "custom_headers", "bound", "sent"),
+    [
+        ({}, None, {}, {"x-api-key": "sk-shared"}),
+        ({"default_headers": {"X-Api-Key": "gw"}}, None, {}, {"x-api-key": "gw"}),
+        ({}, "X-Api-Key: gw", {}, {"x-api-key": "gw"}),
+        ({}, None, {"x-api-key": "gw"}, {"x-api-key": "gw"}),
+        ({"auth_token": "tok"}, None, {"X-Api-Key": "gw"}, {"authorization": "Bearer tok", "x-api-key": "gw"}),
+        (
+            {"api_key": "sk-own", "default_headers": {"Authorization": "Bearer gwt"}},
+            None,
+            {},
+            {"authorization": "Bearer gwt", "x-api-key": "sk-own"},
+        ),
+        (
+            {"auth_token": "tok", "client_params": {"api_key": "sk-own"}},
+            None,
+            {},
+            {"authorization": "Bearer tok", "x-api-key": "sk-own"},
+        ),
+    ],
+    ids=[
+        "shared-key",
+        "config-gateway",
+        "env-gateway",
+        "callback-gateway",
+        "token-and-callback",
+        "key-and-header",
+        "both",
+    ],
+)
+async def test_a_claude_key_goes_out_as_x_api_key_which_a_gateway_key_replaces(
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_kwargs: dict[str, Any],
+    custom_headers: str | None,
+    bound: dict[str, str],
+    sent: dict[str, str],
+) -> None:
+    """The direct route sends its key in ``X-Api-Key``, as SDK 1 did, and never the process env's credentials."""
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("anthropic", {"api_key": "sk-shared"})
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-process")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok-process")
+    _forbid_client_copies(monkeypatch, anthropic.AsyncAnthropic)
+    if custom_headers is not None:
+        monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", custom_headers)
+    model_config = ModelConfig(provider="anthropic", id="claude-sonnet-5-5", extra_kwargs=extra_kwargs)
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with bind_request_headers(lambda: bound), pytest.raises(ProviderError):
+        await complete(
+            build_model_provider(Config(models={"target": model_config}), runtime_paths, "target"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    headers = wire.requests[0].headers
+    assert {name: headers[name] for name in ("authorization", "x-api-key") if name in headers} == sent
+
+
+def _forbid_client_copies(monkeypatch: pytest.MonkeyPatch, client_class: type) -> None:
+    """Fail a copy of the client, which would rediscover the SDK's own credential beside the moved key."""
+
+    def copy(*_args: object, **_kwargs: object) -> None:
+        msg = "an adapted Claude client must not be copied"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(client_class, "copy", copy)
+    monkeypatch.setattr(client_class, "with_options", copy)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("environment", "client_params", "sent"),
+    [
+        ({"ANTHROPIC_AUTH_TOKEN": "tok-env"}, {}, {"authorization": "Bearer tok-env"}),
+        ({"ANTHROPIC_API_KEY": "sk-env"}, {}, {"x-api-key": "sk-env"}),
+        (
+            {"ANTHROPIC_API_KEY": "sk-env", "ANTHROPIC_AUTH_TOKEN": "tok-env"},
+            {},
+            {"authorization": "Bearer tok-env", "x-api-key": "sk-env"},
+        ),
+        ({}, {}, None),
+        ({}, {"auth_token": "tok", "credentials": StaticToken("tok-provider")}, {"authorization": "Bearer tok"}),
+    ],
+    ids=["env-token", "env-key", "env-key-and-token", "no-credential", "token-beside-provider"],
+)
+async def test_a_claude_model_without_a_resolved_key_authenticates_as_its_sdk_would(
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    environment: dict[str, str],
+    client_params: dict[str, Any],
+    sent: dict[str, str] | None,
+) -> None:
+    """The SDK finds an ambient credential itself, an env key goes out as ``X-Api-Key``, and a token beats a provider."""
+    for name in [name for name in os.environ if name.startswith("ANTHROPIC_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))  # no SDK profile to discover
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    extra_kwargs = {"client_params": client_params}
+    model_config = ModelConfig(provider="anthropic", id="claude-sonnet-5-5", extra_kwargs=extra_kwargs)
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError) as raised:
+        await complete(
+            build_model_provider(Config(models={"target": model_config}), runtime_paths, "target"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    if sent is None:
+        assert (raised.value.code, wire.requests) == (MISSING_API_KEY, [])
+        return
+    headers = wire.requests[0].headers
+    assert {name: headers[name] for name in ("authorization", "x-api-key") if name in headers} == sent
+
+
+@pytest.mark.asyncio
+async def test_a_blank_openai_compatible_key_never_falls_back_to_the_shared_one(
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+) -> None:
+    """A custom endpoint's explicitly empty ``client_params.api_key`` keeps the shared OpenAI key local."""
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("openai", {"api_key": "sk-shared"})
+    extra_kwargs = {"base_url": "https://llm.example/v1", "client_params": {"api_key": ""}}
+    model_config = ModelConfig(provider="openai", id="gpt-6-luna", extra_kwargs=extra_kwargs)
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(
+            build_model_provider(Config(models={"target": model_config}), runtime_paths, "target"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    assert wire.requests == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("shared_key_in", ["credentials", "environment"])
 async def test_an_azure_model_with_an_ad_token_never_sends_the_shared_key(
     runtime_paths: RuntimePaths,
@@ -714,6 +860,116 @@ async def test_routes_without_api_keys_never_send_a_configured_one(
         )
 
     assert all("sk-config" not in value for value in wire.requests[0].headers.values())
+
+
+# --- Reasoning levels on the wire ---------------------------------------------------------------------------
+
+
+_LEVELS = {"levels": ["low", "high"], "default": "low"}
+
+
+@pytest.mark.parametrize(("reference", "level"), [("target", "low"), ("target@high", "high")])
+def test_claude_code_reasoning_level_overrides_authored_effort(
+    runtime_paths: RuntimePaths,
+    reference: str,
+    level: str,
+) -> None:
+    """Claude Code uses the selected reasoning level, not an authored effort for the same model."""
+    model = ModelConfig(provider="claude_code", id="m", reasoning=_LEVELS, extra_kwargs={"effort": "max"})
+    provider = build_model_provider(Config(models={"target": model}), runtime_paths, reference)
+
+    assert provider.model_params["effort"] == level
+
+
+@pytest.mark.parametrize("level", ["off", "minimal"])
+def test_claude_code_rejects_unavailable_reasoning_levels(runtime_paths: RuntimePaths, level: str) -> None:
+    """A configured level Claude Code cannot represent fails instead of silently choosing another effort."""
+    model = ModelConfig(provider="claude_code", id="m", reasoning={"levels": [level], "default": level})
+
+    with pytest.raises(ValueError, match=rf"provider claude_code has no {level} level"):
+        build_model_provider(Config(models={"target": model}), runtime_paths, "target")
+
+
+def _sends(body: Any, expected: Any) -> bool:  # noqa: ANN401 - JSON values
+    """Return whether ``body`` carries every value of ``expected``, recursing into objects."""
+    if isinstance(expected, dict):
+        return isinstance(body, dict) and all(
+            key in body and _sends(body[key], value) for key, value in expected.items()
+        )
+    return body == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "expected"),
+    [
+        ("codex", lambda level: {"reasoning": {"effort": level, "summary": "auto"}}),
+        ("openrouter", lambda level: {"reasoning_effort": level}),
+        ("anthropic", lambda level: {"output_config": {"effort": level}}),
+        ("google", lambda level: {"generationConfig": {"thinkingConfig": {"thinking_level": level.upper()}}}),
+    ],
+    ids=["codex", "openrouter", "anthropic", "google"],
+)
+async def test_a_model_reference_at_a_level_sends_that_level(
+    provider: str,
+    expected: Callable[[str], dict[str, Any]],
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+    tmp_path: Path,
+) -> None:
+    """``name@level`` sends the level the route reads, where plain ``name`` sends the default."""
+    extra_kwargs: dict[str, Any] = {
+        "codex": {"codex_home": write_cli_logins(tmp_path)["<codex_home>"]},
+        "google": {
+            "client_params": {"http_options": {"httpx_async_client": httpx.AsyncClient(transport=wire.transport)}},
+        },
+    }.get(provider, {})
+    model = ModelConfig(provider=provider, id="m", api_key="sk-config", reasoning=_LEVELS, extra_kwargs=extra_kwargs)
+    config = Config(models={"target": model})
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    for reference in ("target", "target@high"):
+        with pytest.raises(ProviderError):
+            await complete(build_model_provider(config, runtime_paths, reference), ModelRequest(messages=[_user()]))
+
+    assert _sends(wire.body(0), expected("low")), wire.body(0)
+    assert _sends(wire.body(1), expected("high")), wire.body(1)
+
+
+@pytest.mark.asyncio
+async def test_claude_off_sends_disabled_thinking_without_an_effort(runtime_paths: RuntimePaths, wire: Wire) -> None:
+    levels = {"levels": ["off", "high"], "default": "high"}
+    authored = {"output_config": {"effort": "xhigh"}}
+    model = ModelConfig(provider="anthropic", id="m", api_key="sk-config", reasoning=levels, extra_kwargs=authored)
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(
+            build_model_provider(Config(models={"target": model}), runtime_paths, "target@off"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    assert _sends(wire.body(), {"thinking": {"type": "disabled"}}), wire.body()
+    assert "output_config" not in wire.body()
+
+
+@pytest.mark.asyncio
+async def test_a_model_reference_at_a_level_uses_the_dashboard_key_of_its_model(
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+) -> None:
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("model:target", {"api_key": "sk-dashboard"})
+    model = ModelConfig(provider="openai", api="chat_completions", id="m", api_key="sk-config", reasoning=_LEVELS)
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(
+            build_model_provider(Config(models={"target": model}), runtime_paths, "target@high"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    assert wire.requests[0].headers["authorization"] == "Bearer sk-dashboard"
+    assert wire.body()["reasoning_effort"] == "high"
 
 
 # --- One golden per family, through the registry ------------------------------------------------------------
@@ -871,7 +1127,7 @@ async def test_a_refusal_fails_the_request_once_and_its_usage_is_counted(
     events: list[StreamEvent] = []
 
     with capture_logs() as logs, pytest.raises(ModelSafeguardRefusal) as raised:
-        await _collect(provider, request, events)
+        await drain_into(events, provider, request)
 
     assert len(wire.requests) == 1
     assert (raised.value.provider, raised.value.retryable) == ("Anthropic", False)

@@ -14,9 +14,11 @@ from mindroom.llm.usage import add_usage
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+    from pathlib import Path
 
     from pydantic import BaseModel
 
+    from mindroom.llm.errors import ProviderError
     from mindroom.llm.messages import Message
     from mindroom.llm.usage import MessageMetrics
 
@@ -48,7 +50,13 @@ class Capabilities:
     """What a provider route supports, so policy code stops probing adapter classes.
 
     ``url_media`` holds the media kinds whose URLs the route sends for the provider to fetch; the pipeline downloads
-    the URLs of every other kind (``providers/pipeline/remote_media.py``).
+    the URLs of every other kind (``providers/pipeline/remote_media.py``). ``system_updates`` is set on a route that
+    sends a system prompt update (``providers/pipeline/prompt_hold.py``) as a system message where it stands in the
+    conversation, which its model follows over the earlier system prompt; it tells whether a request caches its system
+    prompt, without which an update keeps no prefix. ``sticky_replay_recovery`` returns a copy of a failed request
+    without provider-encrypted replay state when a sticky-upstream failure calls for resending it that way, else None;
+    the answer to that retry records the route's ``replay_reset_scope``, from which the route's replay and its size
+    read where encrypted state starts over (``native_compaction.native_replay``).
     """
 
     structured_output: StructuredOutput = "json_mode"
@@ -57,6 +65,9 @@ class Capabilities:
     native_tool_search: bool = False
     native_compaction: bool = False
     provider_default_sampling: bool = False
+    system_updates: Callable[[ModelRequest], bool] | None = None
+    sticky_replay_recovery: Callable[[ModelRequest, ProviderError], ModelRequest | None] | None = None
+    replay_reset_scope: str | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -168,8 +179,15 @@ class ModelRequest:
     ``deferred_tools`` are the tools kept out of the rendered prompt and how tool search reaches them.
     ``portable_replay`` replays history explicitly instead of continuing provider-stored state, and
     ``native_compaction`` turns on provider-side compaction for routes that support it.
+    ``strip_encrypted_replay`` replays the history without provider-encrypted state, which the pipeline sets on the
+    resend after a sticky-upstream failure (``Capabilities.sticky_replay_recovery``), with the ``retry_budget``
+    the retry stage has left for a request it already sent that way.
     The adapter awaits ``on_send`` with the body it hands its SDK just before sending it, without request options such
     as headers, query parameters, or timeouts; the request log sets it.
+    ``prompt_hold`` is the file that holds the system prompt of the request's conversation, which the pipeline sends
+    in place of the request's own while the conversation's prompt cache is warm (``providers/pipeline/prompt_hold.py``);
+    None sends the request's own. A request with a ``prompt_hold_pin``, the list every request of a fork or a resumed
+    run shares, never writes that file: the run's first request puts what it read there, and all send the same prompt.
     """
 
     messages: Sequence[Message]
@@ -180,7 +198,12 @@ class ModelRequest:
     deferred_tools: DeferredTools = DeferredTools()
     portable_replay: bool = False
     native_compaction: NativeCompactionReplay | None = None
+    strip_encrypted_replay: bool = False
+    # The retry stage's internal budget, typed ``object`` to keep ``providers.pipeline`` out of this module.
+    retry_budget: object | None = None
     on_send: Callable[[Mapping[str, Any]], Awaitable[None]] = _unobserved
+    prompt_hold: Path | None = None
+    prompt_hold_pin: list[dict[str, Any] | None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,8 +218,8 @@ class ReasoningDelta:
     """A piece of the assistant's reasoning text."""
 
     text: str
-    # When the model began this reasoning, on the ``time.monotonic`` clock, from a provider that sends reasoning only
-    # once the model has finished it; None when reasoning arrives while the model produces it.
+    # When the model began this reasoning, on the ``time.monotonic`` clock, from a provider that may send reasoning
+    # only once the model has finished it; None starts the thought when its first piece arrives.
     started_at: float | None = None
 
 

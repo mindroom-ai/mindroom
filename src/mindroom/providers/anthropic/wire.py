@@ -18,10 +18,14 @@ from typing import TYPE_CHECKING, Any
 from anthropic.types.beta import BetaMessage, BetaUsage
 
 from mindroom.llm.media import canonical_mime_type, file_text, image_format, is_text_mime_type
-from mindroom.llm.messages import Message, ToolResultView, system_texts, tool_result_view
+from mindroom.llm.messages import Message, ToolResultView, stored_tool_call, system_texts, tool_result_view
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.logging_config import get_logger
-from mindroom.model_defaults import CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES, CLAUDE_PREFIX_CHECKED_THINKING_MODELS
+from mindroom.model_defaults import (
+    CLAUDE_BEDROCK_UNCHECKED_THINKING_MODELS,
+    CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES,
+    CLAUDE_PREFIX_CHECKED_THINKING_MODELS,
+)
 from mindroom.providers.anthropic.repairs import replay_safe_blocks
 from mindroom.providers.anthropic.stored_turns import replayed_blocks
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY, as_dict
@@ -38,6 +42,7 @@ if TYPE_CHECKING:
 
     from mindroom.llm.media import File, Image
     from mindroom.llm.provider import StopReason, ToolSpec
+    from mindroom.providers.anthropic.settings import ClaudeRouteKind
 
 logger = get_logger(__name__)
 
@@ -128,9 +133,12 @@ def supports_forced_tool_use(model_id: str, *, manual_thinking: bool) -> bool:
     return not manual_thinking and not _core_model_id(model_id).startswith(CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES)
 
 
-def checks_thinking_prefix(model_id: str) -> bool:
-    """Return whether the API rejects or drops this model's replayed thinking once the context before it changed."""
-    return _core_model_id(model_id).startswith(CLAUDE_PREFIX_CHECKED_THINKING_MODELS)
+def checks_thinking_prefix(model_id: str, route: ClaudeRouteKind) -> bool:
+    """Return whether the route rejects or drops this model's replayed thinking once the context before it changed."""
+    core_id = _core_model_id(model_id)
+    if route == "bedrock_claude" and core_id.startswith(CLAUDE_BEDROCK_UNCHECKED_THINKING_MODELS):
+        return False
+    return core_id.startswith(CLAUDE_PREFIX_CHECKED_THINKING_MODELS)
 
 
 def stop_reason_of(raw: str | None) -> StopReason | None:
@@ -226,11 +234,30 @@ def _answers_tool_calls(turn: dict[str, Any]) -> bool:
 
 def _user_blocks(message: Message, provider: str) -> list[Any]:
     content = message.content or ""
-    blocks: list[Any] = [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
-    media = [_image_block(image, provider) for image in message.images or ()]
+    blocks: list[Any] = [{"type": "text", "text": content}] if isinstance(content, str) else _without_citations(content)
+    media = [image_block(image, provider) for image in message.images or ()]
     media += [_document_block(file, provider) for file in message.files or ()]
     # Audio and video are not Claude inputs; the media fallback replaces them with a note before the request.
     return blocks + [block for block in media if block is not None]
+
+
+def _without_citations(blocks: list[Any]) -> list[Any]:
+    """Return a user turn's blocks without the ``citations`` of their text, in search and tool results too.
+
+    API version 2026-10-21 rejects cited text in a user message; a document's or search result's citation setting
+    is no text block's and stays.
+    """
+    shaped: list[Any] = []
+    for item in blocks:
+        block = as_dict(item)
+        kind = None if block is None else block.get("type")
+        if block is not None and kind == "text" and isinstance(block.get("citations"), list):
+            shaped.append({key: value for key, value in block.items() if key != "citations"})
+        elif block is not None and kind in {"search_result", "tool_result"} and isinstance(block.get("content"), list):
+            shaped.append({**block, "content": _without_citations(block["content"])})
+        else:
+            shaped.append(item)
+    return shaped
 
 
 def _image_media_type(image: Image, data: bytes | None) -> str | None:
@@ -246,7 +273,8 @@ def _image_media_type(image: Image, data: bytes | None) -> str | None:
     return None if detected is None else _IMAGE_MEDIA_TYPES.get(detected)
 
 
-def _image_block(image: Image, provider: str) -> dict[str, Any] | None:
+def image_block(image: Image, provider: str) -> dict[str, Any] | None:
+    """Return the base64 ``image`` block of ``image``, or None for one that is empty or of an unknown type."""
     data = image.content
     if data is None and image.filepath is not None:
         data = read_media_bytes(image.filepath, media_id=image.id, kind="image", provider=provider)
@@ -292,14 +320,18 @@ def _tool_result_block(result: ToolResultView) -> dict[str, Any]:
     # writer produced.
     # Last legacy release: v2026.10.498 ran that writer; v2026.10.499 replaced it with owned writers that store string
     # content.
-    # Handling: each block is sent as stored, and any other item as a text block.
+    # Handling: each block is sent as stored, its text without citations, and any other item as a text block.
     # Coverage: tests/providers/test_anthropic_family_replay.py::test_a_tool_result_stored_as_a_list_keeps_its_blocks,
     # tests/providers/test_request_tokens.py::test_claude_counts_a_tool_result_stored_as_a_list_by_its_blocks
     if isinstance(result.content, list):
-        payload = [
-            block if (block := as_dict(item)) is not None and block.get("type") else {"type": "text", "text": str(item)}
-            for item in result.content
-        ]
+        payload = _without_citations(
+            [
+                block
+                if (block := as_dict(item)) is not None and block.get("type")
+                else {"type": "text", "text": str(item)}
+                for item in result.content
+            ],
+        )
     tool_result: dict[str, Any] = {"type": "tool_result", "tool_use_id": result.call_id, "content": payload}
     if result.is_error:
         tool_result["is_error"] = True
@@ -497,11 +529,7 @@ def tool_call_from_block(block: ToolUseBlock | BetaToolUseBlock) -> dict[str, An
 
 def _tool_call(block: dict[str, Any]) -> dict[str, Any]:
     """Return a ``tool_use`` block as the stored tool-call dict; a cut-off block keeps the arguments that parsed."""
-    return {
-        "id": block["id"],
-        "type": "function",
-        "function": {"name": block["name"], "arguments": json.dumps(block["input"])},
-    }
+    return stored_tool_call(block["id"], block["name"], json.dumps(block["input"]))
 
 
 def assistant_message_from_response(
@@ -543,6 +571,7 @@ __all__ = [
     "claude_body_parts",
     "format_claude_messages",
     "format_claude_tools",
+    "image_block",
     "parse_claude_usage",
     "stop_reason_of",
     "supports_forced_tool_use",

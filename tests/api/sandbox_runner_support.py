@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
 
 from mindroom.api import sandbox_runner
@@ -25,6 +27,11 @@ def execute_call(
     **fields: Any,  # noqa: ANN401
 ) -> sandbox_runner._ExecuteCall:
     """Return one execute call whose route is prepared like the endpoint's, or bound to ``prepared_worker``."""
+    # Every runner runs in runner mode, as its startup sets it.
+    runtime_paths = replace(
+        runtime_paths,
+        process_env=MappingProxyType({**runtime_paths.process_env, "MINDROOM_SANDBOX_RUNNER_MODE": "true"}),
+    )
     config = config if config is not None else sandbox_runner._runtime_config_or_empty(runtime_paths)
     request = ExecuteRequest(protocol=WORKER_PROTOCOL_VERSION, **fields)
     if prepared_worker is None:

@@ -210,7 +210,46 @@ final class DesktopControlPresentationTests: XCTestCase {
         XCTAssertEqual(value.startActionTitle, "Start Access")
     }
 
-    func testPendingShellCommandShowsApprovalStateAndBlocksEmergencyReset() {
+    func testFullControlIsNamedOnlyWhileControlReachesTheComputer() {
+        let saved = status(bridge: "control", helper: "running", config: "ready", apps: ["primary-screen"])
+        XCTAssertEqual(saved.accessModeLabel(controlRemainingSeconds: 125), "Control · 2m 5s")
+        let computer = DesktopStatus(
+            config: saved.config, pairing: saved.pairing, helper: saved.helper, bridge: saved.bridge,
+            authority: DesktopAuthorityStatus(
+                controlAvailable: true, leaseRemainingSeconds: 0, leaseExpiresAtMilliseconds: nil, controlScope: "computer"
+            ),
+            permissions: saved.permissions, browser: saved.browser, apps: saved.apps, capabilities: saved.capabilities
+        )
+
+        XCTAssertEqual(computer.accessModeLabel(controlRemainingSeconds: 0), "Full control")
+    }
+
+    func testPairingIdentityNamesEveryPartyAndExistsOnlyForASavedConnection() {
+        let paired = status(
+            bridge: "stopped", helper: "running", config: "ready", requesterIDs: ["@a:example.org"], agentNames: ["one", "two"]
+        )
+
+        XCTAssertNotNil(paired.pairingIdentity)
+        XCTAssertEqual(paired.pairingIdentity, status(
+            bridge: "control", helper: "running", config: "ready", apps: ["primary-screen"], shellEnabled: true,
+            requesterIDs: ["@a:example.org"], agentNames: ["one", "two"]
+        ).pairingIdentity, "Saved access and the running bridge are not part of who is paired")
+        for other in [
+            status(bridge: "stopped", helper: "running", config: "ready", requesterIDs: ["@a:example.org", "one"], agentNames: ["two"]),
+            status(bridge: "stopped", helper: "running", config: "ready", requesterIDs: ["@a:example.org"], agentNames: ["one"]),
+        ] {
+            XCTAssertNotEqual(other.pairingIdentity, paired.pairingIdentity)
+        }
+        for unpaired in [
+            status(bridge: "stopped", helper: "running", config: "ready", enabled: false),
+            status(bridge: "stopped", helper: "running", config: "ready", session: .missing),
+            status(bridge: "stopped", helper: "running"),
+        ] {
+            XCTAssertNil(unpaired.pairingIdentity)
+        }
+    }
+
+    func testPendingShellCommandShowsApprovalState() {
         let request = shellRequest()
         let pending = status(
             bridge: "observe_only", helper: "running", config: "ready", apps: ["com.apple.TextEdit"],
@@ -219,7 +258,6 @@ final class DesktopControlPresentationTests: XCTestCase {
 
         XCTAssertEqual(pending.shellApprovalState, .pending(request))
         XCTAssertEqual(pending.shellApprovalState.label, "Shell command waiting for approval")
-        XCTAssertTrue(pending.hasBridgeWorkInFlight)
         // Shell commands can change the account, so the connection is never labelled observe-only.
         XCTAssertEqual(pending.accessModeLabel(controlRemainingSeconds: 0), "Apps observe only")
         let shellOnly = status(
@@ -228,7 +266,6 @@ final class DesktopControlPresentationTests: XCTestCase {
         )
         XCTAssertEqual(shellOnly.accessModeLabel(controlRemainingSeconds: 0), "Access on")
         XCTAssertEqual(shellOnly.shellApprovalState, .askEachTime)
-        XCTAssertFalse(shellOnly.hasBridgeWorkInFlight)
         let appsOnly = status(bridge: "control", helper: "running", config: "ready", apps: ["com.apple.TextEdit"])
         XCTAssertEqual(appsOnly.accessModeLabel(controlRemainingSeconds: 125), "Control · 2m 5s")
         XCTAssertEqual(appsOnly.shellApprovalState, .off)
@@ -237,7 +274,6 @@ final class DesktopControlPresentationTests: XCTestCase {
             bridge: "observe_only", helper: "running", config: "ready", shellEnabled: true,
             shell: DesktopShellStatus(enabled: true, autoApproveRemainingSeconds: 251, activeRequestID: "shell-2")
         )
-        XCTAssertTrue(running.hasBridgeWorkInFlight)
         XCTAssertEqual(running.shellApprovalState, .autoApprove(seconds: 251))
         XCTAssertEqual(running.shellApprovalState.label, "Shell auto-approval · 4m 11s left")
         XCTAssertTrue(running.shell.hasRevocableWork)

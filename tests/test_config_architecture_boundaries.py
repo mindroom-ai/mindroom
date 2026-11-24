@@ -235,7 +235,11 @@ def test_response_runner_delegates_lifecycle_coordination() -> None:
     """ResponseRunner should delegate lock and queued-turn state to response_lifecycle."""
     tree = ast.parse(RESPONSE_RUNNER_MODULE.read_text(encoding="utf-8"))
     forbidden_names = {
+        "_Conversation",
         "_QueuedMessageState",
+        "_conversation_for",
+        "_conversation_for_key",
+        "_conversations",
         "_get_or_create_queued_signal",
         "_response_lifecycle_lock",
         "_response_lifecycle_locks",

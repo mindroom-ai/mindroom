@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import stat
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,16 +18,6 @@ _WATCH_SCAN_INTERVAL_SECONDS = 1.0
 _WATCH_TREE_DEBOUNCE_SECONDS = 1.0
 _IGNORED_TREE_PARTS = {"__pycache__", ".ruff_cache", ".mypy_cache", ".pytest_cache", ".git"}
 _IGNORED_TREE_SUFFIXES = (".pyc", ".pyo", ".swp", ".swo", "~", ".tmp")
-
-
-def _is_relevant_path(path: Path) -> bool:
-    """Return whether one tree entry should participate in change snapshots."""
-    if not path.is_file():
-        return False
-    if any(part in _IGNORED_TREE_PARTS for part in path.parts):
-        return False
-    name = path.name
-    return not (name.endswith(_IGNORED_TREE_SUFFIXES) or name.startswith(".#"))
 
 
 def _paths_mtime_snapshot(paths: Iterable[Path | str]) -> dict[Path, int]:
@@ -108,18 +100,20 @@ async def watch_paths(
 
 
 def _tree_snapshot(root_path: Path) -> dict[Path, int]:
-    """Return the current mtime snapshot for one directory tree."""
-    if not root_path.exists():
-        return {}
-
+    """Return the current mtime snapshot of one directory tree's files, never entering an ignored directory."""
     snapshot: dict[Path, int] = {}
-    for path in root_path.rglob("*"):
-        if not _is_relevant_path(path):
-            continue
-        try:
-            snapshot[path] = path.stat().st_mtime_ns
-        except (OSError, PermissionError):
-            continue
+    for directory, subdirectories, names in os.walk(root_path):
+        subdirectories[:] = [name for name in subdirectories if name not in _IGNORED_TREE_PARTS]
+        for name in names:
+            if name in _IGNORED_TREE_PARTS or name.endswith(_IGNORED_TREE_SUFFIXES) or name.startswith(".#"):
+                continue
+            path = Path(directory, name)
+            try:
+                status = path.stat()
+            except OSError:
+                continue
+            if stat.S_ISREG(status.st_mode):
+                snapshot[path] = status.st_mtime_ns
     return snapshot
 
 

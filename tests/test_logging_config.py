@@ -3,21 +3,29 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import io
 import json
 import logging
 import logging.config
 import os
+import pickle
+import socket
 import subprocess
 import sys
 import threading
 import time
 import warnings
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING, NoReturn, cast
 
 import aiohttp
+import httpx
 import nio
 import pytest
+import structlog
+import uvicorn
 from agno.utils import log as agno_log
+from fastapi import FastAPI, WebSocket
 from mem0 import AsyncMemory
 
 from mindroom import logging_config
@@ -35,7 +43,7 @@ from mindroom.message_target import MessageTarget
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
     from typing import TextIO
 
@@ -604,6 +612,129 @@ def test_logged_tracebacks_omit_frame_locals(
     assert _FRAME_LOCAL_CREDENTIAL not in output
 
 
+@pytest.mark.parametrize(
+    "wrapper_class",
+    [structlog.stdlib.BoundLogger, structlog.BoundLogger],
+    ids=["stdlib-wrapper", "generic-wrapper"],
+)
+def test_logs_an_exceptions_traceback_once_through_stdlib_loggers(
+    capsys: pytest.CaptureFixture[str],
+    wrapper_class: type[structlog.BoundLoggerBase],
+) -> None:
+    """A program that hands MindRoom's records to stdlib loggers gets each traceback once."""
+    configure_default_logging()
+    logging.getLogger().addHandler(logging.StreamHandler(sys.stderr))
+    structlog.configure(wrapper_class=wrapper_class, logger_factory=structlog.stdlib.LoggerFactory())
+
+    try:
+        _raise_secret_value_error()
+    except ValueError:
+        get_logger("tests.logging").exception("test_exception")
+
+    captured = capsys.readouterr()
+    output = captured.out + captured.err
+    assert output.count("Traceback (most recent call last):") == 1
+    assert "_raise_secret_value_error" in output
+    assert "api-secret" not in output
+
+
+@pytest.mark.parametrize(
+    "structlog_setup",
+    [
+        pytest.param(structlog.reset_defaults, id="structlog-defaults"),
+        pytest.param(lambda: structlog.configure(wrapper_class=structlog.stdlib.BoundLogger), id="stdlib-wrapper"),
+        pytest.param(lambda: structlog.configure(wrapper_class=structlog.BoundLogger), id="generic-wrapper"),
+        pytest.param(
+            lambda: structlog.configure(
+                wrapper_class=structlog.stdlib.BoundLogger,
+                logger_factory=lambda *args: logging.LoggerAdapter(logging.getLogger(*args)),
+            ),
+            id="logger-adapter",
+        ),
+        pytest.param(
+            lambda: structlog.configure(
+                processors=[structlog.processors.dict_tracebacks, structlog.processors.JSONRenderer()],
+            ),
+            id="own-processors",
+        ),
+    ],
+)
+def test_library_logging_keeps_mindroom_records_redacted_whatever_structlog_does(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    structlog_setup: Callable[[], None],
+) -> None:
+    """A program's structlog setup neither undoes the redaction of MindRoom's records nor adds a raw traceback."""
+    monkeypatch.setattr(logging_config, "_library_logging", False)
+    logging_config.use_library_logging()
+    structlog_setup()
+    logging.getLogger().addHandler(logging.StreamHandler(sys.stderr))
+
+    try:
+        _raise_with_credential_in_frame(_FRAME_LOCAL_CREDENTIAL)
+    except ValueError:
+        get_logger("tests.library").exception("test_exception", api_key="api-secret")
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.count("Traceback (most recent call last):") == 1
+    assert "git failed with GIT_CONFIG_VALUE_0 configured" in captured.err
+    assert _FRAME_LOCAL_CREDENTIAL not in captured.err
+    assert "api-secret" not in captured.err
+
+
+@pytest.mark.parametrize(
+    ("level", "expected"),
+    [
+        (logging.DEBUG, ["mindroom_debug", "mindroom_info", "mindroom_warning"]),
+        (logging.WARNING, ["mindroom_warning"]),
+    ],
+)
+def test_library_logging_follows_the_programs_logging_level(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    level: int,
+    expected: list[str],
+) -> None:
+    """MindRoom's records, `%`-style arguments filled in, reach the program's own handlers at its root level."""
+    monkeypatch.setattr(logging_config, "_library_logging", False)
+    logging_config.use_library_logging()
+    logging.getLogger().addHandler(logging.StreamHandler(sys.stderr))
+    logging.getLogger().setLevel(level)
+
+    for method in ("debug", "info", "warning"):
+        getattr(get_logger("tests.library"), method)("mindroom_%s", method)
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    events = ["mindroom_debug", "mindroom_info", "mindroom_warning"]
+    assert [event for event in events if event in captured.err] == expected
+
+
+def test_a_logger_survives_pickling_and_copying() -> None:
+    """A logger pickles and copies, as structlog's own loggers do."""
+    logger = get_logger("tests.library")
+
+    for clone in (pickle.loads(pickle.dumps(logger)), copy.copy(logger), copy.deepcopy(logger)):  # noqa: S301
+        clone.info("copied")
+
+
+def test_library_logging_renders_no_record_below_the_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A debug record that nothing shows, such as one holding a full prompt, is never rendered or redacted."""
+    monkeypatch.setattr(logging_config, "_library_logging", False)
+    logging_config.use_library_logging()
+    rendered: list[str] = []
+
+    class _Prompt:
+        def __repr__(self) -> str:
+            rendered.append("prompt")
+            return "prompt"
+
+    get_logger("tests.library").debug("Prepared agent full prompt", full_prompt=_Prompt())
+
+    assert rendered == []
+
+
 def test_knowledge_refresh_subprocess_failure_omits_frame_locals() -> None:
     """The refresh child's failure traceback omits frame locals, and the failure it reports carries none either."""
     request = {"base_id": "docs", "config_data": {"GIT_CONFIG_VALUE_0": _FRAME_LOCAL_CREDENTIAL}}
@@ -772,7 +903,7 @@ def test_subprocess_logging_appends_to_the_parent_log_file(
 
 
 class _StallingLogStream:
-    """A log file stream whose writes wait while `writable` is clear, like a network file system that stalls."""
+    """A log stream whose writes wait while `writable` is clear, like a network file system or stderr reader that stalls."""
 
     def __init__(self, stream: TextIO) -> None:
         self._stream = stream
@@ -791,6 +922,12 @@ class _StallingLogStream:
 
     def close(self) -> None:
         self._stream.close()
+
+    def isatty(self) -> bool:
+        return False
+
+    def getvalue(self) -> str:
+        return cast("io.StringIO", self._stream).getvalue()
 
 
 @pytest.fixture
@@ -874,7 +1011,7 @@ def test_stalled_log_file_notes_the_records_it_dropped_past_its_queue_limit(
 
     def log_during_stall(first_index: int) -> None:
         """Log seven records: one stalls in the write, two fill the queue, and four are dropped."""
-        monkeypatch.setattr(logging_config, "_MAX_QUEUED_LOG_FILE_RECORDS", 2)
+        monkeypatch.setattr(logging_config, "_MAX_QUEUED_LOG_RECORDS", 2)
         log_stream.writable.clear()
         log_stream.stalled.clear()
         try:
@@ -883,7 +1020,7 @@ def test_stalled_log_file_notes_the_records_it_dropped_past_its_queue_limit(
             for index in range(first_index + 1, first_index + 6):
                 logger.info("logged_during_stall", index=index)
             # Room below the cap does not resume the file until the writer has caught up.
-            monkeypatch.setattr(logging_config, "_MAX_QUEUED_LOG_FILE_RECORDS", 10)
+            monkeypatch.setattr(logging_config, "_MAX_QUEUED_LOG_RECORDS", 10)
             logger.info("logged_during_stall", index=first_index + 6)
         finally:
             log_stream.writable.set()
@@ -898,7 +1035,7 @@ def test_stalled_log_file_notes_the_records_it_dropped_past_its_queue_limit(
     logging.shutdown()
 
     records = [json.loads(line) for line in log_file.read_text().splitlines()]
-    note = ("Log file dropped records while its writes were stalled", None, 4)
+    note = ("Log output dropped records while its writes were stalled", None, 4)
     assert [(record["event"], record.get("index"), record.get("dropped_records")) for record in records] == [
         ("Logging initialized", None, None),
         ("logged_during_stall", 0, None),
@@ -912,9 +1049,176 @@ def test_stalled_log_file_notes_the_records_it_dropped_past_its_queue_limit(
         note,
     ]
     assert records[5]["room_id"] == "!room:example.org"
-    assert {(record["logger"], record["level"], "room_id" in record) for record in (records[4], records[9])} == {
-        ("mindroom.logging_config", "warning", False),
-    }
+    assert {
+        (record["logger"], record["level"], record["log_output"], "room_id" in record)
+        for record in (records[4], records[9])
+    } == {("mindroom.logging_config", "warning", "log file", False)}
+
+
+def _wait_for_stream_lines(stream: _StallingLogStream, count: int) -> None:
+    deadline = time.monotonic() + SETTLE_TIMEOUT_SECONDS
+    while len(stream.getvalue().splitlines()) < count:
+        assert time.monotonic() < deadline, f"stream never reached {count} lines"
+        time.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_stalled_stderr_leaves_the_event_loop_running_and_notes_the_records_it_dropped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stderr write that hangs, as behind a slow log reader, blocks neither the loop nor the file, and stderr catches up.
+
+    From the queue limit until the writer has caught up, records skip stderr only, and a note there says how many.
+    """
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    stderr = _StallingLogStream(io.StringIO())
+    monkeypatch.setattr(sys, "stderr", stderr)
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    log_file = current_log_file()
+    assert log_file is not None
+    _wait_for_stream_lines(stderr, 1)
+    monkeypatch.setattr(logging_config, "_MAX_QUEUED_LOG_RECORDS", 3)
+    logger = get_logger("tests.logging")
+    stderr.writable.clear()
+    # A write on the logging thread would hold the loop until this timer frees it.
+    unstall = threading.Timer(10, stderr.writable.set)
+    unstall.start()
+    try:
+        started = time.monotonic()
+        for index in range(8):
+            logger.info("logged_during_stall", index=index)
+            if index == 0:
+                assert stderr.stalled.wait(SETTLE_TIMEOUT_SECONDS)
+            # One record at a time keeps the file's own queue below the limit.
+            _wait_for_log_lines(log_file, index + 2)
+            await asyncio.sleep(0)
+        assert time.monotonic() - started < 5
+        assert not stderr.writable.is_set()
+    finally:
+        unstall.cancel()
+        stderr.writable.set()
+    # One record stalled in the write and three filled the queue; the other four were dropped.
+    _wait_for_stream_lines(stderr, 5)
+    logger.info("logged_after_stall")
+    logging.shutdown()
+
+    records = [json.loads(line) for line in stderr.getvalue().splitlines()]
+    assert [(record["event"], record.get("index"), record.get("dropped_records")) for record in records] == [
+        ("Logging initialized", None, None),
+        ("logged_during_stall", 0, None),
+        ("logged_during_stall", 1, None),
+        ("logged_during_stall", 2, None),
+        ("logged_during_stall", 3, None),
+        ("Log output dropped records while its writes were stalled", None, 4),
+        ("logged_after_stall", None, None),
+    ]
+    assert records[5]["log_output"] == "stderr"
+    file_records = [json.loads(line) for line in log_file.read_text().splitlines()]
+    assert [(record["event"], record.get("index")) for record in file_records] == [
+        ("Logging initialized", None),
+        *[("logged_during_stall", index) for index in range(8)],
+        ("logged_after_stall", None),
+    ]
+
+
+def test_stderr_stays_off_the_logging_thread_after_another_logging_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A later `dictConfig`, like uvicorn's, drains stderr and leaves its next writes to the writer thread."""
+    monkeypatch.setenv("MINDROOM_LOG_FORMAT", "json")
+    stderr = _StallingLogStream(io.StringIO())
+    monkeypatch.setattr(sys, "stderr", stderr)
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    logging.config.dictConfig({"version": 1, "disable_existing_loggers": False})
+    # The `dictConfig` closed the handler, which wrote every record it had queued.
+    assert len(stderr.getvalue().splitlines()) == 1
+    stderr.writable.clear()
+    unstall = threading.Timer(10, stderr.writable.set)
+    unstall.start()
+    try:
+        started = time.monotonic()
+        get_logger("tests.logging").info("logged_after_another_config")
+        assert stderr.stalled.wait(SETTLE_TIMEOUT_SECONDS)
+        assert time.monotonic() - started < 5
+        assert not stderr.writable.is_set()
+    finally:
+        unstall.cancel()
+        stderr.writable.set()
+    # The `dictConfig` also took the handler off the list `logging.shutdown` closes.
+    for handler in logging.getLogger().handlers:
+        handler.close()
+
+    events = [json.loads(line)["event"] for line in stderr.getvalue().splitlines()]
+    assert events == ["Logging initialized", "logged_after_another_config"]
+
+
+def test_records_logged_before_an_uncaught_exception_precede_its_traceback(tmp_path: Path) -> None:
+    """The writer thread writes its queued records before Python prints the traceback that ends the program."""
+    child = """
+import sys
+from pathlib import Path
+
+from mindroom.constants import RuntimePaths
+from mindroom.logging_config import get_logger, setup_logging
+
+root = Path(sys.argv[1])
+setup_logging(
+    runtime_paths=RuntimePaths(
+        config_path=root / "config.yaml",
+        config_dir=root,
+        env_path=root / ".env",
+        storage_root=root / "mindroom_data",
+    ),
+)
+for index in range(2000):
+    get_logger("tests.child").info("logged_before_exception", index=index)
+raise RuntimeError("uncaught_after_logging")
+"""
+
+    result = subprocess.run(
+        [sys.executable, "-c", child, str(tmp_path)],
+        env={**os.environ, "MINDROOM_LOG_FORMAT": "json"},
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 1
+    lines = result.stderr.splitlines()
+    traceback_start = lines.index("Traceback (most recent call last):")
+    records = [json.loads(line) for line in lines[:traceback_start]]
+    assert [record["event"] for record in records] == ["Logging initialized"] + ["logged_before_exception"] * 2000
+    assert lines[-1] == "RuntimeError: uncaught_after_logging"
+
+
+def test_stalled_log_file_does_not_hold_back_an_uncaught_exception_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stalling_log_files: list[_StallingLogStream],
+) -> None:
+    """The exception hook writes queued stderr records only, so a stalled log file cannot delay the traceback."""
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    [log_stream] = stalling_log_files
+    log_stream.writable.clear()
+    hooked: list[type[BaseException]] = []
+    monkeypatch.setattr(logging_config, "_previous_excepthook", lambda exc_type, *_: hooked.append(exc_type))
+    try:
+        get_logger("tests.logging").info("logged_during_file_stall")
+        assert log_stream.stalled.wait(SETTLE_TIMEOUT_SECONDS)
+        hook = threading.Thread(
+            target=logging_config._flush_logs_before_excepthook,
+            args=(RuntimeError, RuntimeError(), None),
+        )
+        hook.start()
+        hook.join(SETTLE_TIMEOUT_SECONDS)
+        assert not hook.is_alive()
+        assert hooked == [RuntimeError]
+    finally:
+        log_stream.writable.set()
+    logging.shutdown()
 
 
 def test_log_file_keeps_its_records_after_another_logging_config(tmp_path: Path) -> None:
@@ -988,3 +1292,101 @@ def test_log_file_writer_survives_a_failed_reopen(
     assert "Stale file handle" in capsys.readouterr().err
     events = [json.loads(line)["event"] for line in log_file.read_text().splitlines()]
     assert events == ["Logging initialized", "logged_after_failed_reopen"]
+
+
+@pytest.mark.asyncio
+async def test_api_request_logs_record_paths_without_their_query(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The API's request lines name each path, but leave out a query such as an OAuth callback's code."""
+    setup_logging(level="INFO", runtime_paths=_runtime_paths(tmp_path))
+    app = FastAPI()
+
+    @app.get("/api/oauth/{provider_id}/callback")
+    async def callback(provider_id: str) -> str:
+        return provider_id
+
+    @app.get("/api/health")
+    async def health() -> str:
+        return "ok"
+
+    @app.websocket("/api/stream")
+    async def stream(websocket: WebSocket) -> None:
+        await websocket.accept()
+        await websocket.close()
+
+    listener = socket.create_server(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    # Built after `setup_logging`, as for `mindroom run`, so uvicorn's own logging config is the last one applied.
+    server = uvicorn.Server(uvicorn.Config(app, log_level="info", ws="websockets-sansio"))
+    serving = asyncio.create_task(server.serve(sockets=[listener]))
+    try:
+        # The socket already listens, so requests wait in its backlog until the server starts accepting.
+        async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as client:
+            callback_response = await client.get(
+                "/api/oauth/google_drive/callback",
+                params={"code": "authorization-code-value", "state": "state-value"},
+            )
+            health_response = await client.get("/api/health")
+        async with (
+            aiohttp.ClientSession() as session,
+            session.ws_connect(f"ws://127.0.0.1:{port}/api/stream?token=websocket-token-value") as websocket,
+        ):
+            await websocket.receive()
+    finally:
+        server.should_exit = True
+        await serving
+
+    assert (callback_response.status_code, health_response.status_code) == (200, 200)
+    captured = capsys.readouterr()
+    request_log = captured.out + captured.err
+    assert '"GET /api/oauth/google_drive/callback HTTP/1.1" 200' in request_log
+    assert '"GET /api/health HTTP/1.1" 200' in request_log
+    assert '"WebSocket /api/stream" [accepted]' in request_log
+    for secret in ("authorization-code-value", "state-value", "websocket-token-value"):
+        assert secret not in request_log
+
+
+@pytest.mark.parametrize("ws", ["websockets-sansio", "websockets"])
+@pytest.mark.asyncio
+async def test_debug_logs_leave_out_websocket_headers_and_frames(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    ws: str,
+) -> None:
+    """At DEBUG, a WebSocket's handshake headers and frame contents stay out of the logs; its other records stay."""
+    setup_logging(level="DEBUG", runtime_paths=_runtime_paths(tmp_path))
+    app = FastAPI()
+
+    @app.websocket("/api/stream")
+    async def stream(websocket: WebSocket) -> None:
+        await websocket.accept()
+        await websocket.receive_text()
+        await websocket.send_text("reply-value")
+        await websocket.close()
+
+    listener = socket.create_server(("127.0.0.1", 0))
+    port = listener.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, log_level="debug", ws=ws))
+    serving = asyncio.create_task(server.serve(sockets=[listener]))
+    try:
+        async with (
+            aiohttp.ClientSession() as session,
+            session.ws_connect(
+                f"ws://127.0.0.1:{port}/api/stream?token=query-value",
+                headers={"Authorization": "Bearer authorization-value", "Cookie": "session=cookie-value"},
+            ) as websocket,
+        ):
+            await websocket.send_str("frame-value")
+            assert (await websocket.receive()).data == "reply-value"
+    finally:
+        server.should_exit = True
+        await serving
+
+    captured = capsys.readouterr()
+    debug_log = captured.out + captured.err
+    assert '"WebSocket /api/stream" [accepted]' in debug_log
+    assert "= connection is OPEN" in debug_log
+    for secret in ("query-value", "authorization-value", "cookie-value", "frame-value", "reply-value"):
+        assert secret not in debug_log

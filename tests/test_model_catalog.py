@@ -49,6 +49,32 @@ async def test_catalog_allowlist_and_live_metadata_revision(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+async def test_catalog_entries_carry_reasoning_levels(tmp_path: Path) -> None:
+    """A model with levels lists them and its default; the revision follows them."""
+    catalog = ModelCatalog(client=AsyncMock(spec=nio.AsyncClient), runtime_paths=test_runtime_paths(tmp_path))
+    reasoning = {"levels": ["low", "high"], "default": "low"}
+    config = Config.model_validate(
+        {"models": {"sol": {"provider": "codex", "id": "gpt-6.2-sol", "reasoning": reasoning}}},
+    )
+
+    entries, revision = await catalog.snapshot(config)
+
+    assert entries == [
+        {
+            "key": "sol",
+            "display_name": "sol",
+            "provider": "codex",
+            "id": "gpt-6.2-sol",
+            "reasoning_levels": ["low", "high"],
+            "reasoning_default": "low",
+        },
+    ]
+    assert config.models["sol"].reasoning is not None
+    config.models["sol"].reasoning.levels.append("xhigh")
+    assert (await catalog.snapshot(config))[1] != revision
+
+
+@pytest.mark.asyncio
 async def test_icons_are_content_cached_and_matrix_only(tmp_path: Path) -> None:
     """Concurrent matching bytes upload once; new bytes publish a new Matrix URI."""
     paths = test_runtime_paths(tmp_path)

@@ -15,7 +15,6 @@ from urllib.parse import urlparse
 
 import httpx
 import typer
-from rich.markup import escape
 
 from mindroom import constants
 from mindroom.config.resolution import memory_backend
@@ -42,10 +41,12 @@ from mindroom.matrix.provisioning_env import (
     provisioning_url_from_env,
     registration_token_from_env,
 )
-from mindroom.providers.credentials import model_uses_own_credential
+from mindroom.providers.credentials import model_uses_own_credential, unset_api_key_variable
 from mindroom.providers.key_checks import PROVIDER_KEY_CHECKS
+from mindroom.providers.key_checks import provider_endpoint_variables as _endpoint_variables
 from mindroom.providers.names import provider_route
 from mindroom.providers.ollama.settings import ollama_client_options
+from mindroom.providers.reasoning import apply_reasoning_level
 from mindroom.runtime_env_policy import VERTEXAI_CLAUDE_ENV_BY_KEY
 from mindroom.startup_errors import PermanentStartupError
 
@@ -55,6 +56,7 @@ from .config import (
     console,
     find_missing_env_variables,
     load_config_quiet,
+    print_literal,
 )
 
 if TYPE_CHECKING:
@@ -82,7 +84,7 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
 
     runtime_paths = activate_cli_runtime(path=config_path, storage_path=storage_path)
     config_path = runtime_paths.config_path
-    console.print(f"[dim]Config directory: {runtime_paths.config_dir}[/dim]")
+    print_literal("[dim]Config directory:[/dim] ", runtime_paths.config_dir)
 
     # Open the credential store before the checks so a failure to open it is reported once, here.
     # Credential-store failures must not abort the remaining diagnostics, but
@@ -90,7 +92,7 @@ def doctor(config_path: Path | None = None, storage_path: Path | None = None) ->
     try:
         get_runtime_credentials_manager(runtime_paths)
     except (OSError, ValueError) as exc:
-        console.print(f"[yellow]![/yellow] Could not open the credential store ({exc})")
+        print_literal("[yellow]![/yellow] ", f"Could not open the credential store ({exc})")
         add((0, 0, 1))
 
     # 1. Config file exists
@@ -156,9 +158,9 @@ def _check_e2ee_stores(runtime_paths: RuntimePaths) -> tuple[int, int, int]:
         return 1, 0, 0
 
     for key, account in missing:
-        console.print(
-            f"[yellow]⚠[/yellow] Encryption store missing for {key} "
-            f"(@{account.username}:{account.domain}, device {account.device_id}); "
+        print_literal(
+            "[yellow]⚠[/yellow] ",
+            f"Encryption store missing for {key} (@{account.username}:{account.domain}, device {account.device_id}); "
             "that bot does not start until its store is restored from a backup",
         )
     return 0, 0, len(missing)
@@ -173,12 +175,12 @@ def _run_doctor_step[T](message: str, check: Callable[[], T]) -> T:
 def _check_config_exists(config_path: Path) -> tuple[int, int, int]:
     """Check config file exists. Returns (passed, failed, warnings)."""
     if config_path.is_file():
-        console.print(f"[green]✓[/green] Config file: {config_path}")
+        print_literal("[green]✓[/green] Config file: ", config_path)
         return 1, 0, 0
     if config_path.exists():
-        console.print(f"[red]✗[/red] Config path is not a file: {config_path}")
+        print_literal("[red]✗[/red] Config path is not a file: ", config_path)
         return 0, 1, 0
-    console.print(f"[red]✗[/red] Config file not found: {config_path}")
+    print_literal("[red]✗[/red] Config file not found: ", config_path)
     return 0, 1, 0
 
 
@@ -192,12 +194,11 @@ def _check_config_valid(runtime_paths: RuntimePaths) -> tuple[Config | None, int
         config = load_config_quiet(runtime_paths=runtime_paths)
     except CONFIG_LOAD_USER_ERROR_TYPES as exc:
         issues = "; ".join(f"{location}: {message}" for location, message in iter_config_validation_messages(exc))
-        # A message can quote a config key, which may contain brackets Rich reads as markup.
-        console.print(f"[red]✗[/red] Config invalid: {escape(issues)}")
+        print_literal("[red]✗[/red] Config invalid: ", issues)
         return None, 0, 1, 0
     if reference_issues := automation_reference_issues(config, runtime_paths):
         # The config loads, so the remaining checks still run against it.
-        console.print(f"[red]✗[/red] Config invalid: {escape('; '.join(reference_issues))}")
+        print_literal("[red]✗[/red] Config invalid: ", "; ".join(reference_issues))
         return config, 0, 1, 0
     agents = len(config.agents)
     teams = len(config.teams)
@@ -255,22 +256,6 @@ def _endpoint_settings(value: object, path: str) -> list[str]:
     return found
 
 
-def _endpoint_variables(env_key: str, runtime_paths: RuntimePaths) -> list[str]:
-    """Return the set endpoint variables of ``env_key``'s provider family, such as ``OPENAI_BASE_URL``.
-
-    Each is read as providers read it, so its ``<NAME>_FILE`` variable sets it and a blank export does not hide ``.env``.
-    """
-    family = env_key.removesuffix("API_KEY")
-    names = {name.removesuffix("_FILE") for name in (*runtime_paths.process_env, *runtime_paths.env_file_values)}
-    return sorted(
-        name
-        for name in names
-        if name.startswith(family)
-        and name.endswith(("_URL", "_HOST", "_ENDPOINT", "_API_BASE"))
-        and runtime_paths.first_env_value((name,))
-    )
-
-
 def _report_key_not_checked(subject: str, provider: str, key_name: str, reasons: Sequence[str]) -> bool:
     """Print that ``key_name`` is not checked, and return True, when ``reasons`` may redirect or replace it.
 
@@ -278,10 +263,8 @@ def _report_key_not_checked(subject: str, provider: str, key_name: str, reasons:
     """
     if not reasons or provider_route(provider) not in PROVIDER_KEY_CHECKS:
         return False
-    # A setting path holds the model's settings' keys, which may contain brackets Rich reads as markup.
-    listed = escape(", ".join(reasons))
     effect = "may send it elsewhere or send another key in its place"
-    console.print(f"[yellow]![/yellow] {subject}: {key_name} not checked: {listed} {effect}")
+    print_literal("[yellow]![/yellow] ", f"{subject}: {key_name} not checked: {', '.join(reasons)} {effect}")
     return True
 
 
@@ -434,13 +417,13 @@ def _ollama_options(subject: str, read: Callable[[], Mapping[str, Any]]) -> Mapp
     try:
         return read()
     except (OSError, ValueError) as exc:
-        console.print(f"[yellow]![/yellow] {escape(subject)}: could not read its Ollama settings ({escape(str(exc))})")
+        print_literal("[yellow]![/yellow] ", f"{subject}: could not read its Ollama settings ({exc})")
         return None
 
 
 def _ollama_host(options: Mapping[str, Any]) -> str:
     """Return the server ``options`` reach, as doctor prints it; without a host the Ollama SDK reads ``OLLAMA_HOST``."""
-    return escape(str(options.get("host") or "OLLAMA_HOST or the Ollama SDK default"))
+    return str(options.get("host") or "OLLAMA_HOST or the Ollama SDK default")
 
 
 def _ollama_reachable(options: Mapping[str, Any]) -> tuple[bool | None, str]:
@@ -467,7 +450,12 @@ def _ollama_model_options(config: Config, model_name: str, runtime_paths: Runtim
     from mindroom.providers.ollama.adapter import build_provider  # noqa: PLC0415 - loads the Ollama SDK
     from mindroom.providers.registry import configured_model  # noqa: PLC0415 - loads every provider family
 
-    return build_provider(configured_model(config, runtime_paths, model_name), runtime_paths).client_options()
+    model_config = configured_model(config, runtime_paths, model_name)
+    if variable := unset_api_key_variable(model_config, runtime_paths):
+        # The reference itself must not reach the server as a key.
+        msg = f"{variable} not set"
+        raise ValueError(msg)
+    return build_provider(model_config, runtime_paths).client_options()
 
 
 def _mem0_ollama_options(config: Config, runtime_paths: RuntimePaths) -> dict[str, Any]:
@@ -518,7 +506,7 @@ def _check_ollama_models(config: Config, runtime_paths: RuntimePaths) -> tuple[i
         else:
             names.append(name)
     for names, options in probes:
-        subject = escape(", ".join(f"models.{name}" for name in names))
+        subject = ", ".join(f"models.{name}" for name in names)
         p, f, w = _check_ollama_server(f"{subject}: ollama", options)
         passed += p
         failed += f
@@ -538,7 +526,7 @@ def _check_providers(config: Config, runtime_paths: RuntimePaths) -> tuple[int, 
     # A variable a model reads but nothing sets is reported once, as `config validate` reports it.
     missing = find_missing_env_variables(config, runtime_paths)
     for variable in missing:
-        console.print(f"[yellow]![/yellow] {variable.message}")
+        print_literal("[yellow]![/yellow] ", variable.message)
 
     passed = 0
     failed = 0
@@ -561,12 +549,12 @@ def _print_validation(
 ) -> tuple[int, int, int]:
     """Print a tri-state validation result. Returns (passed, failed, warnings)."""
     if valid is True:
-        console.print(f"[green]✓[/green] {pass_msg}")
+        print_literal("[green]✓[/green] ", pass_msg)
         return 1, 0, 0
     if valid is False:
-        console.print(f"[red]✗[/red] {fail_msg} ({detail})")
+        print_literal("[red]✗[/red] ", f"{fail_msg} ({detail})")
         return 0, 1, 0
-    console.print(f"[yellow]![/yellow] {warn_msg} ({detail})")
+    print_literal("[yellow]![/yellow] ", f"{warn_msg} ({detail})")
     return 0, 0, 1
 
 
@@ -595,11 +583,55 @@ def _check_single_provider(provider: str, config: Config, runtime_paths: Runtime
     if provider == "ollama":
         return _check_ollama_models(config, runtime_paths)
 
+    if provider == "claude_code":
+        return _check_claude_code(config, runtime_paths)
+
     env_key = env_key_for_provider(provider)
     if not env_key:
         return 0, 0, 0
 
     return _check_shared_key(provider, env_key, config, runtime_paths)
+
+
+def _check_claude_code(config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
+    """Check each Claude Code executable the ``claude_code`` models run. Returns (passed, failed, warnings).
+
+    Claude Code is started as a request would start it and closed without a prompt, so the check spends nothing of
+    the subscription and reads no credential.
+    """
+    from mindroom.providers.claude_code.builder import build_provider  # noqa: PLC0415 - loads the provider families
+
+    passed = failed = warnings = 0
+    checked: set[str | None] = set()
+    for model_config in config.models.values():
+        if provider_route(model_config.provider) != "claude_code":
+            continue
+        try:
+            provider = build_provider(
+                apply_reasoning_level(model_config),
+                runtime_paths,
+                execution_identity=None,
+                auto_install=False,
+            )
+            if provider.cli_path in checked:
+                continue
+            checked.add(provider.cli_path)
+            asyncio.run(provider.preflight())
+        except (ProviderError, ValueError, ImportError) as exc:
+            # A process that did not start may start the next time. A refusal, a wrong setting, or a missing or
+            # unfit Claude Agent SDK needs the user.
+            valid, detail = (None if isinstance(exc, ProviderError) and exc.retryable else False), str(exc)
+        else:
+            valid, detail = True, ""
+        p, f, w = _print_validation(
+            valid,
+            detail,
+            "claude_code: Claude Code is signed in to a Claude subscription",
+            "claude_code: Claude Code cannot answer",
+            "claude_code: could not check Claude Code",
+        )
+        passed, failed, warnings = passed + p, failed + f, warnings + w
+    return passed, failed, warnings
 
 
 def _check_shared_key(provider: str, env_key: str, config: Config, runtime_paths: RuntimePaths) -> tuple[int, int, int]:
@@ -673,16 +705,13 @@ def _check_default_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tu
     if (options := _ollama_options("Memory LLM", partial(_mem0_ollama_options, config, runtime_paths))) is None:
         return 0, 0, 1
     ollama_host = _ollama_host(options)
-    console.print(
-        "[yellow]![/yellow] Memory LLM not configured"
-        f" (defaults to ollama at {ollama_host};"
-        " see memory/config.py fallback)",
+    print_literal(
+        "[yellow]![/yellow] ",
+        f"Memory LLM not configured (defaults to ollama at {ollama_host}; see memory/config.py fallback)",
     )
     valid, detail = _ollama_reachable(options)
     if valid is not True:
-        console.print(
-            f"[red]✗[/red] Default Ollama for memory LLM unreachable ({ollama_host}: {detail})",
-        )
+        print_literal("[red]✗[/red] ", f"Default Ollama for memory LLM unreachable ({ollama_host}: {detail})")
         return 0, 1, 0
     return 0, 0, 1
 
@@ -698,8 +727,7 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
         return (0, 0, 1) if options is None else _check_ollama_server("Memory LLM: ollama", options)
 
     llm_model = config.memory.llm.config.get("model", "default")
-    # The model is free-form config text, which may contain brackets Rich reads as markup.
-    subject = escape(f"Memory LLM ({llm_provider}/{llm_model})")
+    subject = f"Memory LLM ({llm_provider}/{llm_model})"
     env_key = env_key_for_provider(llm_provider)
     # Mem0 uses an explicit memory.llm.config.api_key instead of the shared key.
     if configured_key := config.memory.llm.config.get("api_key"):
@@ -709,7 +737,7 @@ def _check_memory_llm(config: Config, runtime_paths: RuntimePaths) -> tuple[int,
     else:
         api_key, key_name = None, "API key"
     if env_key and not api_key:
-        console.print(f"[yellow]![/yellow] {subject}: {env_key} not set")
+        print_literal("[yellow]![/yellow] ", f"{subject}: {env_key} not set")
         return 0, 0, 1
     # Any endpoint setting or variable skips the check, whichever key it is, and so does an OPENROUTER_API_KEY in the
     # process environment, which Mem0's OpenAI client, for openai and openrouter alike, sends to OpenRouter in place of
@@ -810,21 +838,21 @@ def _check_matrix_homeserver(runtime_paths: RuntimePaths, config: Config | None 
     try:
         response = httpx.get(url, timeout=5, verify=constants.runtime_matrix_ssl_verify(runtime_paths=runtime_paths))
     except httpx.TransportError as exc:
-        console.print(f"[red]✗[/red] Matrix homeserver unreachable: {homeserver} ({exc})")
+        print_literal("[red]✗[/red] ", f"Matrix homeserver unreachable: {homeserver} ({exc})")
         return 0, 1, 0
     if response_has_matrix_versions(response):
         sliding_configured = config is not None and config.matrix_sync.mode == "sliding"
         if sliding_configured and not response_advertises_sliding_sync(response):
-            console.print(
-                f"[red]✗[/red] Matrix homeserver does not advertise MSC4186 Simplified Sliding Sync"
-                f" ({MSC4186_UNSTABLE_FEATURE}): {homeserver}."
-                " Set matrix_sync.mode: classic or upgrade the homeserver.",
+            print_literal(
+                "[red]✗[/red] ",
+                f"Matrix homeserver does not advertise MSC4186 Simplified Sliding Sync ({MSC4186_UNSTABLE_FEATURE}): "
+                f"{homeserver}. Set matrix_sync.mode: classic or upgrade the homeserver.",
             )
             return 0, 1, 0
-        console.print(f"[green]✓[/green] Matrix homeserver: {homeserver}")
+        print_literal("[green]✓[/green] Matrix homeserver: ", homeserver)
         return 1, 0, 0
     detail = f"HTTP {response.status_code}" if not response.is_success else "returned invalid /versions payload"
-    console.print(f"[red]✗[/red] Matrix homeserver {detail}: {homeserver}")
+    print_literal("[red]✗[/red] ", f"Matrix homeserver {detail}: {homeserver}")
     return 0, 1, 0
 
 
@@ -841,7 +869,7 @@ def _check_pairing(runtime_paths: RuntimePaths) -> tuple[int, int, int]:
         required = local_pairing_required(runtime_paths)
         paired = local_provisioning_client_credentials_from_env(runtime_paths) is not None
     except ValueError as exc:
-        console.print(f"[red]✗[/red] Pairing: {escape(str(exc))}")
+        print_literal("[red]✗[/red] Pairing: ", exc)
         return 0, 1, 0
     if required:
         console.print(
@@ -864,7 +892,7 @@ def _check_storage_writable(runtime_paths: RuntimePaths) -> tuple[int, int, int]
         os.close(fd)
         Path(tmp).unlink()
     except OSError as exc:
-        console.print(f"[red]✗[/red] Storage not writable: {storage} ({exc})")
+        print_literal("[red]✗[/red] ", f"Storage not writable: {storage} ({exc})")
         return 0, 1, 0
-    console.print(f"[green]✓[/green] Storage writable: {storage}/")
+    print_literal("[green]✓[/green] Storage writable: ", f"{storage}/")
     return 1, 0, 0

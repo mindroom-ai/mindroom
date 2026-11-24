@@ -150,6 +150,7 @@ from tests.cpu_budget_helpers import cpu_budget
 from tests.knowledge_test_support import (
     _config,
     _FakeEmbedder,
+    _wait_until,
     collection_meta,
     patch_vector_store,  # noqa: F401  # requested via pytestmark below
     publish,
@@ -163,7 +164,7 @@ from tests.runtime_fakes import bind_test_embedded_runtime
 pytestmark = pytest.mark.usefixtures("patch_vector_store")
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine, Iterable, Mapping, Sequence
+    from collections.abc import AsyncIterator, Coroutine, Iterable, Mapping, Sequence
     from typing import IO
 
     from mindroom.constants import RuntimePaths
@@ -291,16 +292,6 @@ def _source_has_vectors(manager: KnowledgeManager, relative_path: str) -> bool:
     return published.exists() and any(
         row["metadata"].get("source_path") == relative_path for row in stored_rows(published)
     )
-
-
-async def _wait_until(condition: Callable[[], bool], failure: str) -> None:
-    """Poll `condition` until it holds, and fail with `failure` if the settle deadline passes first."""
-    try:
-        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
-            while not condition():  # noqa: ASYNC110 - the states polled here are plain attributes
-                await asyncio.sleep(0.01)
-    except TimeoutError:
-        pytest.fail(failure)
 
 
 def _test_indexing_settings(base_id: str = "docs") -> IndexingSettings:
@@ -1007,6 +998,74 @@ def test_refresh_scheduler_module_exports_one_concrete_scheduler_name() -> None:
     assert not hasattr(knowledge_refresh_scheduler, "StandaloneKnowledgeRefreshScheduler")
     assert not hasattr(knowledge_refresh_scheduler, "OrchestratorKnowledgeRefreshScheduler")
     assert not hasattr(knowledge_refresh_scheduler, "PerBindingKnowledgeRefreshScheduler")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("mode", "indexed_count"), [("semantic", 1), ("files", 0)])
+async def test_refresh_publishes_a_base_holding_a_file_whose_name_is_not_utf8(
+    tmp_path: Path,
+    mode: str,
+    indexed_count: int,
+) -> None:
+    """A file whose name is not valid UTF-8 is left out, and the rest of the base still refreshes and publishes."""
+    docs_path = tmp_path / "docs"
+    docs_path.mkdir()
+    (docs_path / "guide.md").write_text("plain guide", encoding="utf-8")
+    (docs_path / os.fsdecode(b"odd-\xff.md")).write_text("odd guide", encoding="utf-8")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], modes={"docs": mode})
+    runtime_paths = runtime_paths_for(config)
+
+    result = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+
+    assert result.index_published is True
+    assert result.availability is KnowledgeAvailability.READY
+    assert result.indexed_count == indexed_count
+
+
+def _seed_git_remote(tmp_path: Path, files: Mapping[str, str]) -> Path:
+    """Commit ``files`` on ``main`` and return a bare clone a Git-backed base can sync from."""
+    remote_work = tmp_path / "remote-work"
+    remote_work.mkdir()
+    for name, content in files.items():
+        (remote_work / name).write_text(content, encoding="utf-8")
+    for args in (
+        ("init", "-b", "main"),
+        ("add", "."),
+        ("-c", "user.email=tests@example.com", "-c", "user.name=MindRoom Tests", "commit", "-m", "seed"),
+    ):
+        subprocess.run(["git", *args], cwd=remote_work, check=True, capture_output=True)
+    remote_bare = tmp_path / "remote.git"
+    subprocess.run(["git", "clone", "--bare", str(remote_work), str(remote_bare)], check=True, capture_output=True)
+    return remote_bare
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tracked_name", "indexed_count"),
+    [(os.fsdecode(b"odd-\xff.md"), 1), ("a\rb.md", 2)],
+    ids=["not-utf8", "carriage-return"],
+)
+async def test_git_refresh_and_forced_reindex_of_a_checkout_tracking_an_unusual_name(
+    tmp_path: Path,
+    tracked_name: str,
+    indexed_count: int,
+) -> None:
+    """A tracked name that is not valid UTF-8 is left out, one holding a carriage return is indexed, and the checkout publishes.
+
+    A forced reindex of a checkout already at the remote revision lists the tracked files itself: its sync finds nothing new and lists none.
+    """
+    remote_bare = _seed_git_remote(tmp_path, {"guide.md": "plain guide", tracked_name: "unusual guide"})
+    docs_path = tmp_path / "checkout"
+    git_config = KnowledgeGitConfig(repo_url=str(remote_bare), branch="main")
+    config = _config(tmp_path, bases={"docs": docs_path}, agent_bases=["docs"], git_configs={"docs": git_config})
+    runtime_paths = runtime_paths_for(config)
+
+    first = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths)
+    second = await refresh_knowledge_binding("docs", config=config, runtime_paths=runtime_paths, force_reindex=True)
+
+    assert first.index_published is second.index_published is True
+    assert first.availability is second.availability is KnowledgeAvailability.READY
+    assert first.indexed_count == second.indexed_count == indexed_count
 
 
 @pytest.mark.asyncio
@@ -2213,7 +2272,7 @@ def test_listing_targets_never_walk_out_through_parent_traversal(tmp_path: Path)
     (tmp_path / "secret.md").write_text("secret outside root", encoding="utf-8")
     target = knowledge_file_listing_module._ListingTarget(root / "..", "dir")
 
-    with knowledge_file_listing_module._pinned_directory(root) as root_fd:
+    with knowledge_file_listing_module.pinned_canonical_directory(root) as root_fd:
         assert list(knowledge_file_listing_module._iter_target_files(root_fd, target, root)) == []
 
 
@@ -6664,8 +6723,12 @@ async def test_successful_refresh_subprocess_drains_its_process_group(
 
 @pytest.mark.skipif(os.name == "nt", reason="process groups require POSIX")
 @pytest.mark.asyncio
-async def test_terminate_refresh_subprocess_kills_surviving_process_group_member(tmp_path: Path) -> None:
+async def test_terminate_refresh_subprocess_kills_surviving_process_group_member(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A Git-like grandchild that ignores SIGTERM must not outlive its refresh leader."""
+    monkeypatch.setattr(knowledge_refresh_runner, "_TERMINATE_GRACE_SECONDS", 0.2)
     descendant_lock_path = tmp_path / "descendant.lock"
     ready_read_fd, ready_write_fd = os.pipe()
     script = f"""
@@ -6705,6 +6768,55 @@ time.sleep(60)
         await knowledge_refresh_runner._terminate_refresh_subprocess(process)
 
         assert file_locks.file_lock_is_held(descendant_lock_path) is False
+    finally:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        await process.wait()
+        os.close(ready_read_fd)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="process groups require POSIX")
+@pytest.mark.asyncio
+async def test_terminate_refresh_subprocess_gives_a_child_time_after_its_leader_exits(tmp_path: Path) -> None:
+    """A child that finishes its work on SIGTERM gets the grace period, though its leader exits at once."""
+    marker = tmp_path / "finished"
+    ready_read_fd, ready_write_fd = os.pipe()
+    script = f"""
+import os
+import signal
+import time
+
+if os.fork() == 0:
+    def finish(*_args):
+        time.sleep(0.3)
+        open({str(marker)!r}, "w").close()
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, finish)
+    os.write({ready_write_fd}, b"1")
+    time.sleep(60)
+    os._exit(0)
+
+os.close({ready_write_fd})
+signal.signal(signal.SIGTERM, lambda *_args: os._exit(0))
+time.sleep(60)
+"""
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        script,
+        start_new_session=True,
+        pass_fds=(ready_write_fd,),
+    )
+    os.close(ready_write_fd)
+    try:
+        assert (
+            await asyncio.wait_for(asyncio.to_thread(os.read, ready_read_fd, 1), timeout=SETTLE_TIMEOUT_SECONDS) == b"1"
+        )
+
+        await knowledge_refresh_runner._terminate_refresh_subprocess(process)
+
+        assert marker.exists()
     finally:
         with suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
@@ -9000,8 +9112,6 @@ async def test_linked_worktree_checkout_is_refused_and_not_listed(tmp_path: Path
     Earlier releases ran Git in such a checkout, which let whoever could write
     the pointer choose the repository whose config and hooks Git executed.
     """
-    remote_work = tmp_path / "remote-work"
-    remote_work.mkdir()
 
     async def _git(cwd: Path, *args: str) -> None:
         await asyncio.to_thread(
@@ -9013,20 +9123,7 @@ async def test_linked_worktree_checkout_is_refused_and_not_listed(tmp_path: Path
             text=True,
         )
 
-    await _git(remote_work, "init", "-b", "main")
-    await _git(remote_work, "config", "user.email", "tests@example.com")
-    await _git(remote_work, "config", "user.name", "MindRoom Tests")
-    (remote_work / "doc.md").write_text("worktree checkout content", encoding="utf-8")
-    await _git(remote_work, "add", "doc.md")
-    await _git(remote_work, "commit", "-m", "main")
-    remote_bare = tmp_path / "remote.git"
-    await asyncio.to_thread(
-        subprocess.run,
-        ["git", "clone", "--bare", str(remote_work), str(remote_bare)],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    remote_bare = _seed_git_remote(tmp_path, {"doc.md": "worktree checkout content"})
     seed_checkout = tmp_path / "seed-checkout"
     await asyncio.to_thread(
         subprocess.run,

@@ -27,7 +27,10 @@ from mindroom.logging_config import get_logger
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
+    from mindroom.reply_lifecycle import ReplyState
+
     from .approval_calls import CallKey
+    from .approval_continuations import ApprovalContinuation
     from .backend import Transaction
 
 logger = get_logger(__name__)
@@ -41,6 +44,14 @@ class PausedReply:
     approval_id: str
     room_id: str
     thread_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class EndedApproval:
+    """A paused reply's approval that ended: its continuation, and the state its end left the reply in."""
+
+    continuation: ApprovalContinuation
+    reply_state: ReplyState | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,9 +69,16 @@ class _Paused:
 
 
 @dataclass(frozen=True, slots=True)
+class _Freed:
+    principal_id: str
+    approval_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class _Ended:
     principal_id: str
     approval_id: str
+    approval: EndedApproval | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,9 +97,19 @@ def paused(transaction: Transaction, reply: PausedReply) -> None:
     transaction.signal(_Paused(reply))
 
 
-def ended(transaction: Transaction, principal_id: str, approval_id: str) -> None:
-    """Record that the paused reply of ``approval_id`` is gone."""
-    transaction.signal(_Ended(principal_id, approval_id))
+def ended(
+    transaction: Transaction,
+    principal_id: str,
+    approval_id: str,
+    approval: EndedApproval | None,
+) -> None:
+    """Record that the paused reply of ``approval_id`` is gone, with what ended it when the continuation was there."""
+    transaction.signal(_Ended(principal_id, approval_id, approval))
+
+
+def freed(transaction: Transaction, principal_id: str, approval_id: str) -> None:
+    """Record that another principal's write made the sources the paused reply of ``approval_id`` holds runnable."""
+    transaction.signal(_Freed(principal_id, approval_id))
 
 
 def decided(transaction: Transaction, call: CallKey, card: DecidedCard | None) -> None:
@@ -149,6 +177,12 @@ class _Listener:
 class _PausedReplyListener(_Listener):
     paused: Callable[[PausedReply], None] = field(kw_only=True)
     ended: Callable[[str], None] = field(kw_only=True)
+    freed: Callable[[str], None] = field(kw_only=True)
+
+
+@dataclass(eq=False, slots=True)
+class _EndedApprovalListener(_Listener):
+    ended: Callable[[EndedApproval], None] = field(kw_only=True)
 
 
 @dataclass(eq=False, slots=True)
@@ -167,6 +201,7 @@ class ApprovalSignals:
 
     _paused: dict[str, dict[str, PausedReply]] = field(default_factory=dict, init=False, repr=False)
     _paused_listeners: dict[str, list[_PausedReplyListener]] = field(default_factory=dict, init=False, repr=False)
+    _ended_listeners: list[_EndedApprovalListener] = field(default_factory=list, init=False, repr=False)
     _decided_listeners: list[_DecidedCardListener] = field(default_factory=list, init=False, repr=False)
     # One wake-up per detached call someone waits on.
     _wakeups: dict[CallKey, _Wakeup] = field(default_factory=dict, init=False, repr=False)
@@ -185,8 +220,19 @@ class ApprovalSignals:
     def _apply(self, signal: object) -> list[tuple[_Listener, Callable[[], None]]]:
         if isinstance(signal, _Paused):
             return self._add(signal.reply)
+        if isinstance(signal, _Freed):
+            # The principal's listeners hear the room whose replay has to go back for the freed sources.
+            reply = self._paused.get(signal.principal_id, {}).get(signal.approval_id)
+            listeners = self._paused_listeners.get(signal.principal_id, ()) if reply else ()
+            return [(listener, partial(listener.freed, reply.room_id)) for listener in listeners if reply]
         if isinstance(signal, _Ended):
-            return self._remove(signal.principal_id, signal.approval_id)
+            approval = signal.approval
+            ended = (
+                []
+                if approval is None
+                else [(listener, partial(listener.ended, approval)) for listener in self._ended_listeners]
+            )
+            return [*self._remove(signal.principal_id, signal.approval_id), *ended]
         if isinstance(signal, _Loaded):
             current = {reply.approval_id: reply for reply in signal.replies}
             known = [reply for replies in self._paused.values() for reply in replies.values()]
@@ -231,13 +277,16 @@ class ApprovalSignals:
         *,
         paused: Callable[[PausedReply], None],
         ended: Callable[[str], None],
+        freed: Callable[[str], None] = lambda _room_id: None,
     ) -> Callable[[], None]:
         """Report each paused reply of ``principal_id`` as it pauses and ends; return how to stop listening.
+
+        ``freed`` hears the room of a paused reply whose sources another principal's write made runnable.
 
         The replies paused now are reported before this returns, in the same step that registers the listener, so
         no change falls between them.
         """
-        listener = _PausedReplyListener(asyncio.get_running_loop(), paused=paused, ended=ended)
+        listener = _PausedReplyListener(asyncio.get_running_loop(), paused=paused, ended=ended, freed=freed)
         with self._lock:
             current = tuple(self._paused.get(principal_id, {}).values())
             self._paused_listeners.setdefault(principal_id, []).append(listener)
@@ -250,6 +299,20 @@ class ApprovalSignals:
                 listeners = self._paused_listeners.get(principal_id, [])
                 if listener in listeners:
                     listeners.remove(listener)
+
+        return stop
+
+    def follow_ended_approvals(self, ended: Callable[[EndedApproval], None]) -> Callable[[], None]:
+        """Report each paused reply's approval as it ends, of every principal; return how to stop listening."""
+        listener = _EndedApprovalListener(asyncio.get_running_loop(), ended=ended)
+        with self._lock:
+            self._ended_listeners.append(listener)
+
+        def stop() -> None:
+            with self._lock:
+                listener.active = False
+                if listener in self._ended_listeners:
+                    self._ended_listeners.remove(listener)
 
         return stop
 

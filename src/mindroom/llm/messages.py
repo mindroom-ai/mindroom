@@ -58,6 +58,9 @@ AGGREGATE_USAGE_KEY = "mindroom_aggregate_usage"
 # ``Message.provider_data`` key marking an assistant message that answered another request than the one its caller
 # sent, such as a retry without the media the provider rejected, so its usage sizes no request of the caller's.
 REWRITTEN_ATTEMPT_KEY = "mindroom_attempt_rewritten"
+# ``Message.provider_data`` key holding the text a response streamed before it was cut off, on the assistant message
+# without content that stands for it in its run; recovery of a run its user stopped keeps that text.
+CUT_OFF_TEXT_KEY = "mindroom_cut_off_text"
 # ``Message.provider_data`` key naming the model that answered an assistant message, ``{"id": ..., "provider": ...}``,
 # which ``model_provenance`` builds for every writer and ``read_model_provenance`` reads for usage attribution
 # (``usage/storage.py``, ``agent_loop/helper.py``). It also tells a run's own model messages from the replies its
@@ -104,8 +107,14 @@ def usage_sums_attempts(provider_data: Mapping[str, object] | None) -> bool:
     return (provider_data or {}).get(AGGREGATE_USAGE_KEY) is True
 
 
+# ``Message.provider_data`` key naming the Matrix media ``msgtype`` a thread-context message shows, whose body may be the
+# file's name.
+MEDIA_MSGTYPE_KEY = "mindroom_media_msgtype"
 # ``Message.provider_data`` key marking a queued-message notice MindRoom wrote, which tells the model a newer message waits.
 QUEUED_MESSAGE_NOTICE_MARKER_KEY = "mindroom_queued_message_notice"
+# ``Message.provider_data`` key marking a system prompt update, which only ``providers/pipeline/prompt_hold.py`` adds
+# to a request and no run stores; the Chat wire sends it as a system message where it stands.
+PROMPT_UPDATE_KEY = "mindroom_prompt_update"
 
 
 def is_queued_notice_message(message: Message) -> bool:
@@ -120,6 +129,14 @@ def is_queued_notice_message(message: Message) -> bool:
     # Handling: such a notice reads as a notice, as one marked ``True`` does; both replay alike, so no row is rewritten.
     # Coverage: tests/test_agent_turn_runtime.py::test_a_notice_an_earlier_release_stored_replays_as_it_is_stored
     return marker is True or marker == "persisted"
+
+
+MEDIA_FOLLOW_UP_TEXT = "The tool call above generated the attached media."
+
+
+def is_media_follow_up(message: Message) -> bool:
+    """Return whether a stored message is a media follow-up the agent loop wrote, which no person said."""
+    return message.role == "user" and message.content == MEDIA_FOLLOW_UP_TEXT
 
 
 def is_own_model_message(message: Message) -> bool:
@@ -407,20 +424,31 @@ def tool_result_view(message: Message) -> ToolResultView:
     )
 
 
+def stored_tool_call(call_id: str, name: str | None, arguments: str) -> dict[str, Any]:
+    """Return a plain stored call, leaving its serialized arguments unchanged."""
+    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}
+
+
 __all__ = [
     "AGGREGATE_USAGE_KEY",
+    "CUT_OFF_TEXT_KEY",
+    "MEDIA_FOLLOW_UP_TEXT",
+    "MEDIA_MSGTYPE_KEY",
     "MODEL_PROVENANCE_KEY",
+    "PROMPT_UPDATE_KEY",
     "QUEUED_MESSAGE_NOTICE_MARKER_KEY",
     "REWRITTEN_ATTEMPT_KEY",
     "Message",
     "ModelProvenance",
     "ToolResultView",
+    "is_media_follow_up",
     "is_own_model_message",
     "is_queued_notice_message",
     "media_items",
     "model_provenance",
     "read_model_provenance",
     "stable_serialize",
+    "stored_tool_call",
     "system_text",
     "system_texts",
     "tool_result_view",

@@ -75,3 +75,54 @@ export interface UsageReport {
 export type UsagePollResult =
   | { status: "pending"; retryAfterMs: number }
   | { status: "ready"; report: UsageReport };
+
+export type ProviderLimitWindowKind = "session" | "weekly" | "monthly";
+
+export type ProviderUnavailableReason =
+  | "unsupported"
+  | "not_signed_in"
+  | "probe_failed";
+
+export interface ProviderLimitWindow {
+  id: string;
+  kind: ProviderLimitWindowKind;
+  label: string;
+  used_percent: number;
+  remaining_percent: number;
+  window_duration_mins?: number;
+  resets_at?: string;
+  detail?: string;
+}
+
+export interface ProviderLimitAccount {
+  id: string;
+  provider: string;
+  display_name: string;
+  account_label?: string;
+  plan?: string;
+  model_keys: string[];
+  windows: ProviderLimitWindow[];
+  unavailable_reason?: ProviderUnavailableReason;
+  checked_at?: string;
+  stale: boolean;
+  tokens_7d: number;
+  cost_usd_7d: number | null;
+  cost_estimated: boolean;
+}
+
+export interface ProviderUsageDailyRow {
+  day: string;
+  by_account: Record<string, number>;
+  unattributed_tokens: number;
+}
+
+export interface ProviderUsageSnapshot {
+  version: 1;
+  request_id?: string;
+  checked_at: string;
+  partial: boolean;
+  accounts: ProviderLimitAccount[];
+  daily_7d: ProviderUsageDailyRow[];
+  unattributed_tokens_7d: number;
+  unattributed_cost_usd_7d: number | null;
+}

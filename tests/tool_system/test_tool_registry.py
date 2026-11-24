@@ -16,14 +16,16 @@ from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.tool_system import plugin_imports
 from mindroom.tool_system import plugins as plugins_module
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.plugins import candidate_tool_registry, config_plugins
+from mindroom.tool_system.plugins import candidate_tool_registry, config_plugins, refresh_plugins
 from tests.conftest import runtime_paths_for
 from tests.test_plugins import (
     _bind_runtime_paths,
     _bump_mtime,
+    _forgetting_modules,
     _publish,
     _tool_plugin_source,
     _write_broken_tool_plugin,
+    _write_package_helper_plugin,
     _write_working_tool_plugin,
 )
 
@@ -256,3 +258,74 @@ def test_validating_a_candidate_never_disturbs_live_modules_another_thread_impor
     assert sys.modules[helpers_name] is live_helpers
     assert not skipped
     assert "p_tool" in tools
+
+
+class _SignalingLock:
+    """Wrap the plugin lock, setting ``waiting`` whenever a thread must wait for another thread to release it."""
+
+    def __init__(self, lock: threading.RLock, waiting: threading.Event) -> None:
+        self._lock = lock
+        self._waiting = waiting
+
+    def __enter__(self) -> None:
+        if not self._lock.acquire(blocking=False):
+            self._waiting.set()
+            self._lock.acquire()
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self._lock.release()
+
+
+@pytest.mark.parametrize(("first", "second"), [("check", "load"), ("load", "check")])
+def test_a_candidate_check_and_a_live_load_of_a_package_plugin_never_interleave(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first: str,
+    second: str,
+) -> None:
+    """Whichever starts first, the live load keeps the helper module the plugin's tools module imports by absolute name.
+
+    The check reports the tools that helper module registers.
+    """
+    plugin_root = _write_package_helper_plugin(tmp_path, monkeypatch)
+    config = _bind_runtime_paths(Config(plugins=["demo_pkg"]), tmp_path / "config.yaml")
+    runtime_paths = runtime_paths_for(config)
+    tools_path = plugin_root / "tools.py"
+    tools_path.write_text(
+        "import sys\nsys.modules['mindroom_test_candidate_probe'].entered()\n" + tools_path.read_text(),
+        encoding="utf-8",
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    # Set once the second operation either finished or waits for the first one to finish.
+    settled = threading.Event()
+
+    def block_the_first_execution() -> None:
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(10)
+
+    probe = ModuleType("mindroom_test_candidate_probe")
+    probe.entered = block_the_first_execution
+    monkeypatch.setitem(sys.modules, probe.__name__, probe)
+    monkeypatch.setattr(plugins_module, "_PLUGIN_LOCK", _SignalingLock(plugins_module._PLUGIN_LOCK, settled))
+    operations = {"check": candidate_tool_registry, "load": refresh_plugins}
+
+    def run_second() -> object:
+        result = operations[second](config, runtime_paths)
+        settled.set()
+        return result
+
+    with _forgetting_modules("demo_pkg"), ThreadPoolExecutor(max_workers=2) as pool:
+        first_run = pool.submit(operations[first], config, runtime_paths)
+        assert entered.wait(10)
+        second_run = pool.submit(run_second)
+        assert settled.wait(10)
+        release.set()
+        results = {first: first_run.result(timeout=10), second: second_run.result(timeout=10)}
+        installed_helpers = sys.modules.get("demo_pkg.helpers")
+
+    tools, skipped = results["check"]
+    assert installed_helpers is plugins_module._PUBLISHED.modules["demo_pkg.helpers"]
+    assert not skipped
+    assert "helper_tool" in tools

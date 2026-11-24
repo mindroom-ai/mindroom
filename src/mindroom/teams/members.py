@@ -12,10 +12,10 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 from mindroom.agent_loop.build import appended_context, prompt_for_turn, tool_owners_by_agent
+from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, MATRIX_MARKDOWN_OUTPUT_FORMAT
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import toolkit_instructions
 from mindroom.agents import create_agent, team_background_jobs
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
 from mindroom.logging_config import get_logger
 from mindroom.loop_hooks import HookTurn, agent_loop_hooks
@@ -78,7 +78,7 @@ def resolve_exact_team_members(
     execution_identity: ToolExecutionIdentity | None,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     active_model_names: Mapping[str, str],
-    include_openai_compat_guidance: bool = False,
+    outside_matrix: bool = False,
     unavailable_bases: dict[str, KnowledgeAvailabilityDetail] | None = None,
     supports_native_tool_approval: bool = False,
     required_tool_names: Mapping[str, tuple[str, ...]] | None = None,
@@ -118,7 +118,7 @@ def resolve_exact_team_members(
             knowledge=knowledge[agent_name],
             plugins=plugins,
             include_interactive_questions=False,
-            include_openai_compat_guidance=include_openai_compat_guidance,
+            outside_matrix=outside_matrix,
             refresh_scheduler=refresh_scheduler,
             supports_native_tool_approval=supports_native_tool_approval,
             required_tool_names=(required_tool_names or {}).get(agent_name, ()),
@@ -131,11 +131,6 @@ def resolve_exact_team_members(
         plugins=plugins,
         build=build,
     )
-
-
-def requested_team_agent_names(agent_names: Sequence[str]) -> list[str]:
-    """Return the requested team members, excluding router placeholders."""
-    return [name for name in agent_names if name != ROUTER_AGENT_NAME]
 
 
 def resolve_team_members(
@@ -154,7 +149,7 @@ def resolve_team_members(
     The orchestrator says which shared agents are running now; a requested member that is not, or that this request
     may not reach, rejects the set with a ``ValueError`` naming it under ``reason_prefix``, before anything resolves.
     """
-    requested_agent_names = requested_team_agent_names(agent_names)
+    requested_agent_names = list(agent_names)
     materializable_agent_names = resolve_team_materializable_agent_names(
         config,
         resolve_live_shared_agent_names(orchestrator),
@@ -302,7 +297,7 @@ def _leader_identity(
     *,
     display_name: str,
     team_purpose: str,
-    include_openai_compat_guidance: bool,
+    outside_matrix: bool,
 ) -> str:
     """Render the leader's identity for its channel, as an agent's is rendered: Matrix, or the OpenAI-compatible API."""
     matrix_identity = render_prompt_template(
@@ -310,7 +305,7 @@ def _leader_identity(
         display_name=display_name,
         team_purpose=team_purpose,
     )
-    if not include_openai_compat_guidance:
+    if not outside_matrix:
         return matrix_identity
     return openai_compat_identity(
         config.prompts,
@@ -338,13 +333,13 @@ def build_team_spec(
     configured_team_name: str | None,
     timezone: str,
     system_enrichment: str = "",
-    include_openai_compat_guidance: bool = False,
+    outside_matrix: bool = False,
 ) -> BuiltTeam:
     """Build the team the leader loop runs: its model, prompt, job controls, call budget, and members.
 
     The leader is named by the team's label (``materialized_team_label``) and identified by the history scope of
     ``scope_context``. The leader prompt opens with the team's identity, the configured team's name and purpose or the
-    ad hoc team's label, in the OpenAI-compatible API's form with ``include_openai_compat_guidance``, then holds each
+    ad hoc team's label, in the OpenAI-compatible API's form with ``outside_matrix``, then holds each
     member's authored role and the leader's tool instructions in offer order, then the date and session context in
     ``timezone`` with ``system_enrichment`` appended; the team's own history settings and call budget come from the
     configured team ``configured_team_name``, or the defaults when it is None for an ad hoc one.
@@ -379,9 +374,10 @@ def build_team_spec(
             config,
             display_name=label if team_config is None else team_config.display_name,
             team_purpose="" if team_config is None else f"Team purpose: {team_config.role}\n",
-            include_openai_compat_guidance=include_openai_compat_guidance,
+            outside_matrix=outside_matrix,
         ),
         markdown=config.defaults.markdown,
+        markdown_format=MARKDOWN_OUTPUT_FORMAT if outside_matrix else MATRIX_MARKDOWN_OUTPUT_FORMAT,
         tool_instructions=toolkit_instructions(leader.toolkits),
         turn_context=turn_context,
     )
@@ -400,7 +396,6 @@ __all__ = [
     "allow_direct_private_team_agents",
     "build_team_spec",
     "materialized_team_label",
-    "requested_team_agent_names",
     "resolve_exact_team_members",
     "resolve_team_members",
 ]

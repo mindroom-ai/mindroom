@@ -9,6 +9,9 @@ from pathlib import Path
 
 from mindroom.background_tasks import run_coroutine_until_complete
 
+# Openbox silently falls back to the stock rc.xml, root menu included, if this file fails to load.
+_OPENBOX_CONFIG = Path(__file__).with_name("openbox_rc.xml")
+
 
 class WorkerDisplay:
     """Own the display children without changing the runner environment."""
@@ -79,6 +82,8 @@ class WorkerDisplay:
             manager = await asyncio.create_subprocess_exec(
                 "openbox",
                 "--sm-disable",
+                "--config-file",
+                str(_OPENBOX_CONFIG),
                 env=env,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,

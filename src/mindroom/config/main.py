@@ -24,6 +24,7 @@ from pydantic import (
 
 from mindroom import yaml_io
 from mindroom.access_policy import resolve_responder_access
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.agent_policy import (
     PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
     PolicyInputs,
@@ -41,16 +42,24 @@ from mindroom.config.budgets import BudgetsConfig  # noqa: TC001
 from mindroom.config.calls import CallsConfig, CascadedCallProfile, LiveCallProfile
 from mindroom.config.contacts import CONTACT_CONTROL_TOOLS
 from mindroom.config.egress_broker import EgressBrokerConfig
+from mindroom.config.email_invites import EmailInvitesConfig
 from mindroom.config.external_trigger_policy import ExternalTriggerPolicyConfig
 from mindroom.config.generated_agents import GeneratedAgentInfo, expand_generated_agents
 from mindroom.config.judgment import LLMJudgmentConfig
-from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeRerankerConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig, RerankerConfig
 from mindroom.config.knowledge_graph import KnowledgeGraphConfig
 from mindroom.config.legacy_access import (
     AccessMigrationError,
     migrate_access_config_data,
     persist_access_migration,
     validate_access_migration_source,
+)
+from mindroom.config.legacy_fields import (
+    RETIRED_PROMPT_NAMES,
+    approval_rule_a_file_rename_escapes,
+    drop_retired_fields,
+    rename_legacy_knowledge_reranker,
+    retired_trigger_approval_error,
 )
 from mindroom.config.matrix import (
     EventJournalConfig,
@@ -66,8 +75,11 @@ from mindroom.config.models import (
     DebugConfig,
     DefaultsConfig,
     ModelConfig,
+    ModelTable,
     RouterConfig,
     ToolConfigEntry,
+    reject_unmergeable_spellings,
+    unsupported_level_message,
 )
 from mindroom.config.personal_agents import (
     PersonalAgentInstance,
@@ -95,6 +107,7 @@ from mindroom.config.resolution import (
 from mindroom.config.resolution import cheap_model as agent_cheap_model
 from mindroom.config.schema_hints import DashboardJsonSchema, dashboard_hint, redact_config_for_display
 from mindroom.config.slack import SlackConfig
+from mindroom.config.tailnet_ssh import TailnetSshConfig
 from mindroom.config.validation import TimezoneName  # noqa: TC001
 from mindroom.config.voice import VoiceConfig
 from mindroom.config.yaml_includes import (
@@ -140,8 +153,7 @@ from mindroom.matrix_identifiers import (
 from mindroom.mcp.config import MCPServerConfig, normalize_mcp_server_id
 from mindroom.prompt_templates import render_prompt_template, validate_prompt_template_fields
 from mindroom.prompts import PROMPT_DEFAULT_NAMES, PROMPT_DEFAULTS
-from mindroom.room_reply_modes import resolve_room_reply_mode_override
-from mindroom.room_thread_modes import resolve_room_thread_mode_override
+from mindroom.room_settings import REPLY_MODE, THREAD_MODE, resolve_room_setting
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.worker_routing import unsupported_shared_only_integration_names
@@ -155,6 +167,7 @@ if TYPE_CHECKING:
     from mindroom.agent_policy import AgentPolicySeed, ResolvedAgentPolicy
     from mindroom.config.agent import RoomReplyMode
     from mindroom.config.personal_agents import PersonalAgentRoster
+    from mindroom.room_settings import RoomThreadMode, SettingRead
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.worker_routing import WorkerScope
 
@@ -199,6 +212,7 @@ _OPTIONAL_SECTION_NAMES = (
     "external_trigger_policy",
     "matrix_sync",
     "tool_approval",
+    "tailnet_ssh",
 )
 
 
@@ -407,9 +421,12 @@ class Config(BaseModel):
         default_factory=dict,
         description="Knowledge base configurations keyed by base ID",
     )
-    knowledge_reranker: KnowledgeRerankerConfig | None = Field(
+    reranker: RerankerConfig | None = Field(
         default=None,
-        description="Optional reranker for search_knowledge_base results; searches keep hybrid ranking without one",
+        description=(
+            "Optional reranker for search_knowledge_base results, and for memory searches with memory.search.rerank; "
+            "searches keep hybrid ranking without one"
+        ),
     )
     mcp_servers: dict[str, MCPServerConfig] = Field(
         default_factory=dict,
@@ -419,10 +436,19 @@ class Config(BaseModel):
         default_factory=ExternalTriggerPolicyConfig,
         description="Global policy for tool-managed signed external triggers",
     )
-    models: dict[str, ModelConfig] = Field(default_factory=dict, description="Model configurations")
+    # Validating the default turns it into a ``ModelTable`` too, so an omitted ``models`` still reads references.
+    models: dict[str, ModelConfig] = Field(
+        default_factory=dict,
+        validate_default=True,
+        description="Model configurations",
+    )
     tool_approval: ToolApprovalConfig = Field(
         default_factory=ToolApprovalConfig,
         description="Tool-approval rules for agent-initiated tool calls",
+    )
+    email_invites: EmailInvitesConfig = Field(
+        default_factory=EmailInvitesConfig,
+        description="Invites to a room by email through the email_invite tool",
     )
     router: RouterConfig = Field(default_factory=RouterConfig, description="Router configuration")
     personal_agents: dict[str, PersonalAgentTemplateConfig] = Field(
@@ -452,6 +478,10 @@ class Config(BaseModel):
     slack: SlackConfig = Field(
         default_factory=SlackConfig,
         description="Slack integration: how Slack workspace members map to Matrix users",
+    )
+    tailnet_ssh: TailnetSshConfig = Field(
+        default_factory=TailnetSshConfig,
+        description="Tailnet SSH credentials for users of the operator-managed tailnet",
     )
     timezone: TimezoneName = Field(
         default="UTC",
@@ -485,20 +515,28 @@ class Config(BaseModel):
 
     @field_validator("models")
     @classmethod
-    def validate_model_names(cls, models: dict[str, ModelConfig]) -> dict[str, ModelConfig]:
-        """Reject an empty model name, or one with a character its dashboard key ``model:<name>`` cannot carry."""
+    def validate_model_names(cls, models: dict[str, ModelConfig]) -> ModelTable:
+        """Reject an empty model name, or one with a character its dashboard key ``model:<name>`` cannot carry.
+
+        The names cannot carry ``@``, so the returned table reads ``name@level`` as the model at that level.
+        """
         invalid = sorted(name for name in models if not SERVICE_NAME_PATTERN.fullmatch(name))
         if invalid:
             keys = ", ".join(f"models.{name}" for name in invalid)
             msg = f"Model names can only include {SERVICE_NAME_CHARACTERS}; rename {keys} and update every reference"
             raise ValueError(msg)
-        return models
+        return ModelTable(models)
+
+    def _unknown_model_message(self, label: str, model: str, fallback: str | None = None) -> str:
+        if reason := unsupported_level_message(self.models, model):
+            return f"{label}: {reason}"
+        return fallback if fallback is not None else f"Unknown {label}: {model!r}"
 
     @model_validator(mode="after")
     def validate_budgets(self) -> Config:
         """Require a configured fallback model for budgets."""
         if self.budgets is not None and self.budgets.fallback_model not in self.models:
-            msg = f"Unknown budgets fallback_model: {self.budgets.fallback_model!r}"
+            msg = self._unknown_model_message("budgets fallback_model", self.budgets.fallback_model)
             raise ValueError(msg)
         return self
 
@@ -507,7 +545,7 @@ class Config(BaseModel):
         """Require the auto-flush extractor model to name a configured model."""
         extractor_model = self.memory.auto_flush.extractor.model
         if extractor_model is not None and extractor_model not in self.models:
-            msg = f"Unknown memory.auto_flush.extractor.model: {extractor_model!r}"
+            msg = self._unknown_model_message("memory.auto_flush.extractor.model", extractor_model)
             raise ValueError(msg)
         return self
 
@@ -557,10 +595,10 @@ class Config(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def normalize_root_config(cls, data: object) -> object:
-        """Replace explicit YAML nulls in optional root sections and migrate retired access settings."""
+        """Replace explicit YAML nulls in optional root sections and migrate retired settings."""
         if not isinstance(data, dict):
             return data
-        normalized = cast("dict[str, Any]", data.copy())
+        normalized = rename_legacy_knowledge_reranker(cast("dict[str, Any]", data.copy()))
         for name in _OPTIONAL_SECTION_NAMES:
             if normalized.get(name) is None:
                 normalized[name] = {}
@@ -575,6 +613,12 @@ class Config(BaseModel):
         if not isinstance(value, list):
             return value
         return [{"path": plugin_entry} if isinstance(plugin_entry, str) else plugin_entry for plugin_entry in value]
+
+    @field_validator("prompts", mode="before")
+    @classmethod
+    def drop_retired_prompt_overrides(cls, value: object) -> object:
+        """Drop overrides of retired prompts, before unknown names are rejected."""
+        return drop_retired_fields(value, RETIRED_PROMPT_NAMES)
 
     @field_validator("prompts")
     @classmethod
@@ -625,6 +669,17 @@ class Config(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def validate_tool_spellings_across_layers(self) -> Config:
+        """Refuse a default and an agent entry that name one toolkit differently unless both are plain."""
+        defaults = {entry.name: entry for entry in self.defaults.tools}
+        for agent_name, agent in self.agents.items():
+            for entry in agent.tools if agent.include_default_tools else ():
+                default = defaults.get(entry.name)
+                if default is not None and len({*default.spellings, *entry.spellings}) > 1:
+                    reject_unmergeable_spellings(entry, default, scope=f"agents.{agent_name}.tools and defaults.tools")
+        return self
+
+    @model_validator(mode="after")
     def validate_egress_service_agents(self) -> Config:
         """Ensure each egress service's `agents` list names configured agents."""
         for name, service in self.egress_broker.services.items():
@@ -641,6 +696,18 @@ class Config(BaseModel):
         if unknown_agents:
             msg = f"calls.agents references unknown agent(s): {', '.join(unknown_agents)}"
             raise ValueError(msg)
+
+        for profile_name, profile in sorted(self.calls.profiles.items()):
+            field, model = (
+                ("model", profile.model)
+                if isinstance(profile, CascadedCallProfile)
+                else ("agent_model", profile.agent_model)
+                if isinstance(profile, LiveCallProfile)
+                else (None, None)
+            )
+            if field is not None and (reason := unsupported_level_message(self.models, model)):
+                msg = f"calls.profiles.{profile_name}.{field}: {reason}"
+                raise ValueError(msg)
 
         invalid_models = sorted(
             f"{profile_name} -> {profile.model}"
@@ -662,6 +729,15 @@ class Config(BaseModel):
         )
         if invalid_live_models:
             msg = "calls.profiles references unknown Live agent model(s): " + ", ".join(invalid_live_models)
+            raise ValueError(msg)
+
+        notes_model = self.calls.transcripts.notes_model
+        if notes_model is not None and notes_model not in self.models:
+            msg = self._unknown_model_message(
+                "calls.transcripts.notes_model",
+                notes_model,
+                f"calls.transcripts.notes_model references unknown model: {notes_model}",
+            )
             raise ValueError(msg)
 
         self._reject_call_agents_sharing_a_room(lambda room: room)
@@ -742,6 +818,10 @@ class Config(BaseModel):
     def validate_compaction_model_references(self) -> Config:
         """Ensure explicit compaction model and fallback_model references are statically valid."""
         references = self._explicit_compaction_model_references()
+        for label, model in references:
+            if reason := unsupported_level_message(self.models, model):
+                msg = f"{label}: {reason}"
+                raise ValueError(msg)
         invalid_references = sorted(f"{label} -> {model}" for label, model in references if model not in self.models)
         if invalid_references:
             msg = "Compaction model references unknown models: " + ", ".join(invalid_references)
@@ -1207,7 +1287,7 @@ class Config(BaseModel):
 
     def runtime_model_dump(self) -> dict[str, Any]:
         """Serialize authored config plus the agents generated from personal_agents templates."""
-        payload = cast("dict[str, Any]", self.model_dump(exclude_unset=True))
+        payload = self.model_dump(exclude_unset=True)
         knowledge_bases = payload.get("knowledge_bases")
         if isinstance(knowledge_bases, dict):
             for base_id in self._runtime_knowledge_base_overlays:
@@ -1391,6 +1471,10 @@ class Config(BaseModel):
             references.append(("defaults.thread_summary_model", self.defaults.thread_summary_model))
         if self.voice.enabled:
             references.append(("voice.intelligence.model", self.voice.intelligence.model))
+        for path, model in references:
+            if reason := unsupported_level_message(self.models, model):
+                msg = f"{path}: {reason}"
+                raise ConfigRuntimeValidationError(msg)
         unknown = [f"{path}: {model!r}" for path, model in references if model not in self.models]
         if unknown:
             available = ", ".join(sorted(self.models)) or "none"
@@ -1481,6 +1565,57 @@ class Config(BaseModel):
                 tools=tools,
             )
         self._validate_listen_tools(tools)
+        self._validate_tailnet_ssh_tools(tools)
+        # why-lazy: catalog pulls runtime tool registry paths and loads agents+tools at config import.
+        from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
+
+        elsewhere = {
+            function
+            for name in tools
+            if name != "filesystem" and (metadata := tools.get(name)) is not None
+            for function in metadata.function_names or ()
+        }
+        globs = [rule.match for rule in self.tool_approval.rules]
+        if (escaped := approval_rule_a_file_rename_escapes(globs, elsewhere)) is not None:
+            msg = f"{escaped}, which another rule or the default now decides; rewrite the rules for the new names."
+            raise ToolConfigOverrideError(msg)
+        if (
+            any(entry.name == "triggers" for _, entry in entries)
+            and (
+                trigger_error := retired_trigger_approval_error(
+                    self.tool_approval.rules,
+                    self.tool_approval.default,
+                    self.tool_approval.timeout_days,
+                )
+            )
+            is not None
+        ):
+            raise ToolConfigOverrideError(trigger_error)
+
+    def _validate_tailnet_ssh_tools(self, tools: ToolRegistry) -> None:
+        """Refuse an SSH opt-in when the turn can offer another toolkit's shell instead."""
+        # why-lazy: config loads before the runtime tool registry and its dependencies.
+        from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
+        from mindroom.tool_system.catalog import ToolConfigOverrideError  # noqa: PLC0415
+
+        for name, agent in self.agents.items():
+            if not agent.tailnet_ssh:
+                continue
+            entries = resolve_agent_tools(self, name, tools).candidates()
+            shell_index = next((i for i, entry in enumerate(entries) if entry.name == "shell"), None)
+            if shell_index is None:
+                continue
+            # Native functions beat MCP regardless of order. Stored settings can re-enable a declared function.
+            for entry in entries[:shell_index]:
+                metadata = tools.entries[entry.name]
+                if metadata.mcp_server_id is not None:
+                    continue
+                if not metadata.function_names or SHELL_FUNCTION in metadata.function_names:
+                    msg = (
+                        f"agents.{name}.tailnet_ssh: Toolkit {entry.name!r} can take precedence for {SHELL_FUNCTION}. "
+                        "List 'shell' first."
+                    )
+                    raise ToolConfigOverrideError(msg)
 
     def _validate_listen_tools(self, tools: ToolRegistry) -> None:
         """Reject a ``listen.tools`` entry whose toolkit this config cannot build, posts, or the agent's tools leave out.
@@ -1625,7 +1760,11 @@ class Config(BaseModel):
         """Reject automations an agent lists but cannot run, or that name an unknown model."""
         for automation in self.defaults.automations:
             if automation.model is not None and automation.model not in self.models:
-                msg = f"defaults.automations {automation.name!r} uses unknown model {automation.model!r}"
+                msg = self._unknown_model_message(
+                    f"defaults.automations {automation.name!r}",
+                    automation.model,
+                    f"defaults.automations {automation.name!r} uses unknown model {automation.model!r}",
+                )
                 raise ValueError(msg)
         for agent_name, agent in self.agents.items():
             for automation in agent.automations or []:
@@ -1633,7 +1772,11 @@ class Config(BaseModel):
                     msg = f"Agent {agent_name!r} {reason}"
                     raise ValueError(msg)
                 if automation.model is not None and automation.model not in self.models:
-                    msg = f"Agent {agent_name!r} automation {automation.name!r} uses unknown model {automation.model!r}"
+                    msg = self._unknown_model_message(
+                        f"Agent {agent_name!r} automation {automation.name!r}",
+                        automation.model,
+                        f"Agent {agent_name!r} automation {automation.name!r} uses unknown model {automation.model!r}",
+                    )
                     raise ValueError(msg)
         return self
 
@@ -1661,6 +1804,10 @@ class Config(BaseModel):
             all_room_aliases.update(team_config.rooms)
         return all_room_aliases
 
+    def needs_owner_account(self) -> bool:
+        """Return whether this config has a room (the root Space links only those) or the emoji room for the owner."""
+        return bool(self.get_all_configured_rooms()) or self.server_emoji.enabled
+
     def managed_room_keys(self) -> set[str]:
         """Return configured room keys, excluding Matrix room IDs (`!…`) and aliases (`#…`)."""
         return {room_key for room_key in self.get_all_configured_rooms() if is_managed_room_key(room_key)}
@@ -1670,15 +1817,20 @@ class Config(BaseModel):
         entity_name: str,
         runtime_paths: RuntimePaths,
         room_id: str | None = None,
+        read: SettingRead[RoomThreadMode] | None = None,
     ) -> Literal["thread", "room"]:
         """Get effective thread mode for an agent, team, or router.
 
-        Agents use their explicit per-agent setting.
+        The room's `thread_mode` setting decides for every entity when set: ``read`` is the setting a refresh just
+        found, to decide by; without it, the runtime's copy of the setting.
+        Otherwise agents use their explicit per-agent setting.
         Teams inherit a mode only when all member agents share it.
         Router inherits a mode only when all relevant configured agents share it.
         In ambiguous cases, default to "thread".
         """
-        runtime_room_override = resolve_room_thread_mode_override(runtime_paths, room_id)
+        runtime_room_override = (
+            resolve_room_setting(THREAD_MODE, runtime_paths, room_id) if read is None else read.value
+        )
         if runtime_room_override is not None:
             return runtime_room_override
 
@@ -1694,9 +1846,17 @@ class Config(BaseModel):
         member_modes = {resolve_agent_thread_mode(self.agents[name], room_id, runtime_paths) for name in member_names}
         return next(iter(member_modes)) if len(member_modes) == 1 else "thread"
 
-    def get_room_reply_mode(self, runtime_paths: RuntimePaths, room_id: str) -> RoomReplyMode:
-        """Return one room's reply mode: its `!reply_mode` override, else its `rooms` entry, else `auto`."""
-        runtime_room_override = resolve_room_reply_mode_override(runtime_paths, room_id)
+    def get_room_reply_mode(
+        self,
+        runtime_paths: RuntimePaths,
+        room_id: str,
+        read: SettingRead[RoomReplyMode] | None = None,
+    ) -> RoomReplyMode:
+        """Return one room's reply mode: its `reply_mode` room setting, else its `rooms` entry, else `auto`.
+
+        ``read`` is the setting a refresh just found, to decide by; without it, the runtime's copy of the setting.
+        """
+        runtime_room_override = resolve_room_setting(REPLY_MODE, runtime_paths, room_id) if read is None else read.value
         if runtime_room_override is not None:
             return runtime_room_override
         room = resolve_room_scoped_value(self.rooms, room_id, runtime_paths)
@@ -1706,7 +1866,7 @@ class Config(BaseModel):
     def validate_agent_helper_models(self) -> Config:
         """Validate dedicated judgment and skill-review model aliases for opted-in agents."""
         if self.defaults.cheap_model is not None and self.defaults.cheap_model not in self.models:
-            msg = f"Unknown defaults.cheap_model: {self.defaults.cheap_model!r}"
+            msg = self._unknown_model_message("defaults.cheap_model", self.defaults.cheap_model)
             raise ValueError(msg)
         for agent_name, agent in self.agents.items():
             for settings in (agent.participation, agent.mid_turn, agent.cold_cache, agent.contacts):
@@ -1714,7 +1874,7 @@ class Config(BaseModel):
                     continue
                 judgment = settings.judgment
                 if isinstance(judgment, LLMJudgmentConfig) and judgment.model not in self.models:
-                    msg = f"Unknown judgment model for agent {agent_name!r}: {judgment.model!r}"
+                    msg = self._unknown_model_message(f"judgment model for agent {agent_name!r}", judgment.model)
                     raise ValueError(msg)
             cheap_model = agent_cheap_model(self, agent_name)
             # An inherited default is checked only where an agent uses it.
@@ -1727,18 +1887,18 @@ class Config(BaseModel):
                 )
                 raise ValueError(msg)
             if agent.listen is not None and agent.listen.model is not None and agent.listen.model not in self.models:
-                msg = f"Unknown listen model for agent {agent_name!r}: {agent.listen.model!r}"
+                msg = self._unknown_model_message(f"listen model for agent {agent_name!r}", agent.listen.model)
                 raise ValueError(msg)
             review_model = agent.skill_learning.model
             if review_model is not None and review_model not in self.models:
-                msg = f"Unknown skill_learning model for agent {agent_name!r}: {review_model!r}"
+                msg = self._unknown_model_message(f"skill_learning model for agent {agent_name!r}", review_model)
                 raise ValueError(msg)
         return self
 
     def _validate_cheap_model(self, agent_name: str, agent_model: str, cheap_model: str) -> None:
         """Keep a cheap-model turn from compacting history the agent model still needs."""
         if cheap_model not in self.models:
-            msg = f"Unknown cheap_model for agent {agent_name!r}: {cheap_model!r}"
+            msg = self._unknown_model_message(f"cheap_model for agent {agent_name!r}", cheap_model)
             raise ValueError(msg)
         if cheap_model == agent_model:
             msg = f"cheap_model must differ from the model of agent {agent_name!r}"
@@ -1760,7 +1920,10 @@ class Config(BaseModel):
         """Validate that every knowledge base's chunk context model is a configured model."""
         for base_id, base in self.knowledge_bases.items():
             if base.chunk_context_model is not None and base.chunk_context_model not in self.models:
-                msg = f"Unknown chunk_context_model for knowledge base {base_id!r}: {base.chunk_context_model!r}"
+                msg = self._unknown_model_message(
+                    f"chunk_context_model for knowledge base {base_id!r}",
+                    base.chunk_context_model,
+                )
                 raise ValueError(msg)
         return self
 
@@ -1778,7 +1941,7 @@ class Config(BaseModel):
             msg = "knowledge_graph.model is required when an agent enables knowledge_graph"
             raise ValueError(msg)
         if settings.model not in self.models:
-            msg = f"Unknown knowledge_graph model: {settings.model!r}"
+            msg = self._unknown_model_message("knowledge_graph model", settings.model)
             raise ValueError(msg)
         return self
 

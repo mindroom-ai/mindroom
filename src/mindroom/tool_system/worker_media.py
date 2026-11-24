@@ -8,26 +8,13 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-import httpx
-from httpx._utils import get_environment_proxies
-
 from mindroom.llm.media import Audio, File, Image, Video, canonical_mime_type, named_by_resource, url_file_name
-from mindroom.server_fetch_url import ServerFetchHTTPTransport, ServerFetchUrlError, validate_server_fetch_url
+from mindroom.public_fetch import PublicFetchError, fetch_public_url_sync
 from mindroom.tool_system import media_transport
 from mindroom.tool_system.agno_toolkits import read_tool_value
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 
 type _Media = Image | Audio | Video | File
-
-
-class _WorkerMediaProxyTransport(httpx.HTTPTransport):
-    """Validate media destinations before forwarding through configured egress."""
-
-    def handle_request(self, request: httpx.Request) -> httpx.Response:
-        """Check every origin and redirect before sending it to the worker proxy."""
-        # The configured proxy owns its final connection and hostname grant policy.
-        validate_server_fetch_url(str(request.url))
-        return super().handle_request(request)
 
 
 def _read_file(path: str | Path, limit: int) -> bytes:
@@ -41,48 +28,6 @@ def _read_file(path: str | Path, limit: int) -> bytes:
             return stream.read(limit + 1)
     finally:
         os.close(descriptor)
-
-
-def _read_url(url: str, limit: int) -> tuple[bytes, str | None]:
-    # HTTPX disables environment proxy discovery with an explicit transport.
-    # Reuse its routing map so scheme selection and NO_PROXY keep their semantics.
-    mounts = {
-        pattern: None if proxy is None else _WorkerMediaProxyTransport(proxy=proxy)
-        for pattern, proxy in get_environment_proxies().items()
-    }
-    with httpx.Client(
-        transport=ServerFetchHTTPTransport(),
-        mounts=mounts,
-        trust_env=False,
-        headers={"Accept-Encoding": "identity"},
-        follow_redirects=False,
-        max_redirects=5,
-        timeout=30,
-    ) as client:
-        request = client.build_request("GET", url)
-        for _ in range(client.max_redirects + 1):
-            response = client.send(request, stream=True)
-            try:
-                if response.next_request is not None:
-                    # HTTPX automatic redirects read the whole intermediate body.
-                    request = response.next_request
-                    continue
-                response.raise_for_status()
-                encoding = response.headers.get("content-encoding", "")
-                if any(value.strip().lower() not in {"", "identity"} for value in encoding.split(",")):
-                    msg = "Worker media requires identity content encoding."
-                    raise ValueError(msg)
-                content = bytearray()
-                for chunk in response.iter_raw(chunk_size=64 * 1024):
-                    if len(content) + len(chunk) > limit:
-                        msg = "Worker media exceeds the byte limit."
-                        raise ValueError(msg)
-                    content.extend(chunk)
-                return bytes(content), canonical_mime_type(response.headers.get("content-type"))
-            finally:
-                response.close()
-        msg = "Exceeded maximum allowed redirects."
-        raise httpx.TooManyRedirects(msg, request=request)
 
 
 def _resource_name(media: _Media) -> str:
@@ -102,12 +47,17 @@ def _materialize_media(media: _Media, limit: int) -> tuple[_Media, int]:
         elif media.filepath is not None:
             content = _read_file(media.filepath, limit)
         elif media.url is not None:
-            content, declared_mime = _read_url(media.url, limit)
+            # Proxy-only workers reach the internet through their egress proxy, which owns its hostname grants.
+            fetched = fetch_public_url_sync(media.url, max_bytes=limit, use_env_proxy=True)
+            content, declared_mime = fetched.content, canonical_mime_type(fetched.content_type)
         else:
             msg = "Worker media has no content source."
             raise ValueError(msg)
-    except (OSError, httpx.HTTPError, ServerFetchUrlError):
+    except OSError:
         msg = "Unable to read worker media resource."
+        raise ValueError(msg) from None
+    except PublicFetchError as error:
+        msg = f"Unable to read worker media resource: {error}"
         raise ValueError(msg) from None
     if isinstance(content, str):
         content = content.encode("utf-8")

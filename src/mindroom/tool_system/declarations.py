@@ -2,24 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
-
-
-MATRIX_ROOM_RUNTIME_TOOL_NAMES = ("invite_router",)
-
-
-def is_matrix_room_runtime_function(registered_toolkit: str | None, function_name: str) -> bool:
-    """Return whether a function is a Matrix room recovery action, which no approval rule gates.
-
-    It is one of the reserved functions, offered by the registered tool of its own name; no plugin or MCP tool may
-    register that name, and no other tool may offer a function of it.
-    """
-    return function_name in MATRIX_ROOM_RUNTIME_TOOL_NAMES and registered_toolkit == function_name
+    from collections.abc import Callable, Mapping, Sequence
 
 
 @runtime_checkable
@@ -98,6 +86,7 @@ class ToolManagedInitArg(str, Enum):
     FILE_ACCESS = "file_access"
     AGENT_STATE_ROOT = "agent_state_root"
     SHARED_DIRECTORY_ROOTS = "shared_directory_roots"
+    IN_SANDBOX_REQUEST = "in_sandbox_request"
 
 
 @dataclass
@@ -122,6 +111,19 @@ class ConfigField:
         """Keep a password field out of tool entries: only saved settings or the environment may set a secret."""
         if self.type == "password":
             self.authored_override = False
+
+
+@dataclass(frozen=True)
+class ApprovalAlias:
+    """Calls of a toolkit's function that do what calls of ``judged_as`` do, so ``judged_as``'s rules judge them too.
+
+    ``judge`` returns the arguments of each call of ``judged_as`` one call amounts to, read from that call's arguments
+    alone, since an approval covers exactly those: an empty list for a call that amounts to none, and None when its
+    arguments cannot tell, which asks for approval whenever ``judged_as``'s rules may.
+    """
+
+    judged_as: str
+    judge: Callable[[Mapping[str, object]], Sequence[Mapping[str, object]] | None]
 
 
 @dataclass(frozen=True)
@@ -181,6 +183,11 @@ class ToolMetadata:
     docs_url: str | None = None
     helper_text: str | None = None
     function_names: tuple[str, ...] = ()
+    # The toolkit's functions that change the workspace's files, by writing them or by running code there. A toolkit
+    # that names none and runs code counts as changing them through every function.
+    workspace_writers: tuple[str, ...] = ()
+    # The toolkit's functions, by name, whose calls another function's approval rules judge too.
+    approval_aliases: Mapping[str, ApprovalAlias] = field(default_factory=dict)
     # SDK functions that accept, but never use, an injected Agent or Team.
     worker_inert_agent_functions: tuple[str, ...] = ()
     managed_init_args: tuple[ToolManagedInitArg, ...] = ()

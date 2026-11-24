@@ -13,7 +13,6 @@ import pytest
 
 from mindroom import interactive
 from mindroom.approval import manager as approval_manager
-from mindroom.approval import transport as approval_transport
 from mindroom.approval.inbound import maybe_handle_tool_approval_reply
 from mindroom.approval.tool_approval import (
     ApprovalActionResult,
@@ -54,7 +53,6 @@ from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_runner import ResponseRunner
 from mindroom.response_sources import Owned, ResponseSources
 from mindroom.response_turn import PausedAttempt
-from mindroom.room_thread_modes import set_room_thread_mode_override
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN, RuntimeShutdownIntent
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -72,6 +70,7 @@ from tests.bot_helpers import (
 )
 from tests.conftest import (
     activate_interactive_prompt,
+    approval_transport_for_test,
     handle_card_response_for_test,
     initialize_approval_store_for_test,
     install_relation_lookup,
@@ -90,6 +89,7 @@ from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.journal_helpers import admit_dispatch_event
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
+from tests.room_settings_helpers import set_room_thread_mode_override
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
@@ -637,7 +637,7 @@ class TestAgentBot(AgentBotTestBase):
             mock_agent_user,
             agent_name=ROUTER_AGENT_NAME,
             user_id="@mindroom_router:localhost",
-            display_name="RouterAgent",
+            display_name="MindRoom",
         )
         bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = MagicMock()
@@ -659,7 +659,7 @@ class TestAgentBot(AgentBotTestBase):
             await _dispatch_reaction(bot, room, event)
 
         assert seen == []
-        resolve_pending.assert_awaited_once_with(bot.client, room.room_id, event, enabled=True)
+        resolve_pending.assert_awaited_once_with(bot.client, bot.runtime_paths, event, room.room_id)
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("enforce_turn_authorization")
@@ -676,7 +676,7 @@ class TestAgentBot(AgentBotTestBase):
             mock_agent_user,
             agent_name=ROUTER_AGENT_NAME,
             user_id="@mindroom_router:localhost",
-            display_name="RouterAgent",
+            display_name="MindRoom",
         )
         bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths_for(config))
         bot.client = make_matrix_client_mock()
@@ -1075,10 +1075,9 @@ class TestAgentBot(AgentBotTestBase):
             _request: ResponseRequest,
             *,
             team: object,
-            resolved_target: MessageTarget,
             participation: object,
         ) -> SourceFate:
-            del team, resolved_target, participation
+            del team, participation
             older_entered.set()
             await release_older.wait()
             return Owned()
@@ -1137,10 +1136,10 @@ class TestAgentBot(AgentBotTestBase):
         )
         await _start_selection_response(bot, prepare_forever, target=target)
         await asyncio.wait_for(preparation_started.wait(), timeout=1.0)
-        assert bot._response_runner.has_active_response_for_target(target)
+        assert bot._response_runner.lifecycle_coordinator.has_active_response_for_target(target)
 
         assert await bot._response_runner.inbox.drain_inbox_responses(cancel_after_seconds=0.01) is False
-        assert not bot._response_runner.has_active_response_for_target(target)
+        assert not bot._response_runner.lifecycle_coordinator.has_active_response_for_target(target)
 
     @pytest.mark.asyncio
     async def test_interactive_postresponse_settlement_failure_does_not_run_prestart_cleanup(
@@ -1493,6 +1492,7 @@ class TestAgentBot(AgentBotTestBase):
                 _room_id: str,
                 _thread_id: str | None,
                 content: dict[str, Any],
+                _sender_entity: str,
             ) -> dict[str, Any]:
                 return content
 
@@ -1505,8 +1505,8 @@ class TestAgentBot(AgentBotTestBase):
                 send_approval_delivery=send_delivery,
                 resolve_approval_delivery=AsyncMock(return_value=None),
                 cards=first._journal_store.principal(router_principal_id),
-                transport_sender_id=lambda: "@mindroom_router:localhost",
-                transport_device_id=lambda: "DEVICE",
+                sender_bot=lambda _entity_name, _room_id: object(),
+                sender_device_id=AsyncMock(return_value="DEVICE"),
             )
         source = InboundEvent(
             event_id="$source",
@@ -1581,8 +1581,8 @@ class TestAgentBot(AgentBotTestBase):
                 send_approval_delivery=send_delivery,
                 resolve_approval_delivery=AsyncMock(return_value=None),
                 cards=restarted._journal_store.principal(router_principal_id),
-                transport_sender_id=lambda: "@mindroom_router:localhost",
-                transport_device_id=lambda: "DEVICE",
+                sender_bot=lambda _entity_name, _room_id: object(),
+                sender_device_id=AsyncMock(return_value="DEVICE"),
                 wake_continuation_sources=AsyncMock(
                     side_effect=lambda _entity_name, room_id, source_ids: restarted.retry_approval_sources(
                         room_id,
@@ -1686,9 +1686,10 @@ class TestAgentBot(AgentBotTestBase):
         async def response() -> None:
             response_entered.set()
 
-        lifecycle_lock = unwrap_extracted_collaborator(
+        conversation = unwrap_extracted_collaborator(
             bot._response_runner,
-        ).lifecycle_coordinator._response_lifecycle_lock(target)
+        ).lifecycle_coordinator._conversation_for(target)
+        lifecycle_lock = conversation.lock
         lock_owned_by_test = False
         if failure_stage == "acquire":
             acquisition_error = RuntimeError("simulated lifecycle acquisition failure")
@@ -1698,6 +1699,7 @@ class TestAgentBot(AgentBotTestBase):
 
             acquire_patch = patch.object(lifecycle_lock, "acquire", new=fail_acquire)
         else:
+            conversation.begin_response_turn()
             await lifecycle_lock.acquire()
             lock_owned_by_test = True
             acquire_patch = nullcontext()
@@ -1716,11 +1718,13 @@ class TestAgentBot(AgentBotTestBase):
             retry_dispatch_sources.assert_called_with(target.room_id, ("$reaction",))
             if lock_owned_by_test:
                 lifecycle_lock.release()
+                conversation.finish_response_turn()
                 lock_owned_by_test = False
-            assert not bot._response_runner.has_active_response_for_target(target)
+            assert not bot._response_runner.lifecycle_coordinator.has_active_response_for_target(target)
         finally:
             if lock_owned_by_test:
                 lifecycle_lock.release()
+                conversation.finish_response_turn()
             await bot._response_runner.inbox.drain_inbox_responses()
 
     @pytest.mark.asyncio
@@ -1752,9 +1756,13 @@ class TestAgentBot(AgentBotTestBase):
             newer_lock_attempted,
             newer_entered,
         ) = (asyncio.Event() for _ in range(6))
-        lifecycle_lock = unwrap_extracted_collaborator(
-            bot._response_runner,
-        ).lifecycle_coordinator._response_lifecycle_lock(target)
+        lifecycle_lock = (
+            unwrap_extracted_collaborator(
+                bot._response_runner,
+            )
+            .lifecycle_coordinator._conversation_for(target)
+            .lock
+        )
         acquire_lifecycle_lock = lifecycle_lock.acquire
 
         async def tracked_acquire() -> bool:
@@ -1778,10 +1786,9 @@ class TestAgentBot(AgentBotTestBase):
             request: ResponseRequest,
             *,
             team: object,
-            resolved_target: MessageTarget,
             participation: object,
         ) -> SourceFate:
-            del team, resolved_target, participation
+            del team, participation
             if request.prompt == "interactive":
                 interactive_entered.set()
                 await release_interactive.wait()
@@ -1857,11 +1864,10 @@ class TestAgentBot(AgentBotTestBase):
             request: ResponseRequest,
             *,
             team: object,
-            resolved_target: MessageTarget,
             participation: object,
         ) -> SourceFate:
             del team, participation
-            resolved_targets.append(resolved_target)
+            resolved_targets.append(request.response_envelope.target)
             await record_turn_answered(bot, request)
             return Owned()
 
@@ -1915,10 +1921,9 @@ class TestAgentBot(AgentBotTestBase):
             request: ResponseRequest,
             *,
             team: object,
-            resolved_target: MessageTarget,
             participation: object,
         ) -> SourceFate:
-            del team, resolved_target, participation
+            del team, participation
             captured_requests.append(request)
             return Owned()
 
@@ -2029,33 +2034,34 @@ class TestAgentBot(AgentBotTestBase):
         assert bot._coalescing_gate.lanes.all_settled()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("router_is_ready_but_unserved", [False, True])
-    async def test_unverifiable_or_unserved_approval_action_does_not_block_later_room_events(
+    @pytest.mark.parametrize("room_has_reader", [False, True])
+    async def test_unverifiable_or_unreadable_approval_action_does_not_block_later_room_events(
         self,
         mock_agent_user: AgentMatrixUser,
         tmp_path: Path,
         *,
-        router_is_ready_but_unserved: bool,
+        room_has_reader: bool,
     ) -> None:
-        """An unbound approval action settles before the room lane advances."""
+        """An unbound approval action settles before the room lane advances, with a bot that reads the room or none."""
         config = self._config_for_storage(tmp_path)
         runtime_paths = runtime_paths_for(config)
         bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths)
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
         dispatched: list[str] = []
-        router = (
+        not_found = nio.RoomGetEventError("not found", status_code="M_NOT_FOUND")
+        reader = (
             MagicMock(
                 running=True,
-                client=MagicMock(room_get_event=AsyncMock()),
-                approval_room_ids=frozenset(),
+                client=MagicMock(room_get_event=AsyncMock(return_value=not_found)),
+                approval_room_ids=frozenset({"!test:localhost"}),
             )
-            if router_is_ready_but_unserved
+            if room_has_reader
             else None
         )
 
         try:
             cards = bot._journal_store.principal("router@shared")
-            transport = approval_transport.ApprovalMatrixTransport(bot_provider=lambda _name: router)
+            transport = approval_transport_for_test(lambda _name: reader)
             initialize_approval_store_for_test(
                 runtime_paths,
                 cards=cards,
@@ -2097,12 +2103,11 @@ class TestAgentBot(AgentBotTestBase):
 
         assert dispatched == [ignored.event_id, later.event_id]
         assert await bot._journal_dispatcher.store.pending() == ()
-        if router is None:
-            warning.assert_called_once()
-            assert warning.call_args.args == ("unverifiable_legacy_approval_action_ignored",)
-        else:
+        if reader is None:
             warning.assert_not_called()
-            router.client.room_get_event.assert_not_awaited()
+        else:
+            warning.assert_called_once()
+            assert warning.call_args.args == ("unverifiable_approval_action_ignored",)
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("enforce_turn_authorization")
@@ -2130,7 +2135,7 @@ class TestAgentBot(AgentBotTestBase):
             mock_agent_user,
             agent_name=ROUTER_AGENT_NAME,
             user_id="@mindroom_router:localhost",
-            display_name="RouterAgent",
+            display_name="MindRoom",
         )
         bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths)
         room = nio.MatrixRoom("!test:localhost", bot.matrix_id.full_id)
@@ -2214,7 +2219,7 @@ class TestAgentBot(AgentBotTestBase):
             mock_agent_user,
             agent_name=ROUTER_AGENT_NAME,
             user_id="@mindroom_router:localhost",
-            display_name="RouterAgent",
+            display_name="MindRoom",
         )
         bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()
@@ -2338,7 +2343,7 @@ class TestAgentBot(AgentBotTestBase):
             mock_agent_user,
             agent_name=ROUTER_AGENT_NAME,
             user_id="@mindroom_router:localhost",
-            display_name="RouterAgent",
+            display_name="MindRoom",
         )
         bot = make_test_agent_bot(router_user, config=config, runtime_paths=runtime_paths)
         bot.client = make_matrix_client_mock()

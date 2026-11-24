@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
 from googleapiclient.errors import HttpError
@@ -17,7 +16,6 @@ from mindroom.oauth.google import google_oauth_provider
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
-    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
@@ -25,78 +23,6 @@ logger = get_logger(__name__)
 _GOOGLE_DOCS_URL_ID_PATTERN = re.compile(
     r"^https?://docs\.google\.com/document/(?:u/\d+/)?d/([A-Za-z0-9_-]+)(?:[/?#]|$)",
 )
-_FORMAT_FIELD_PATH_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
-_FORMAT_OPERATION_TYPES = frozenset(
-    {
-        "paragraph_style",
-        "text_style",
-        "native_list",
-        "remove_native_list",
-        "hyperlink",
-    },
-)
-_FORMAT_RANGE_PROPERTIES: dict[str, object] = {
-    "start_index": {"type": "integer", "minimum": 1},
-    "end_index": {"type": "integer", "minimum": 2},
-}
-_STYLE_OPERATION_PROPERTIES: dict[str, object] = {
-    **_FORMAT_RANGE_PROPERTIES,
-    "style": {"type": "object", "additionalProperties": True},
-    "fields": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-}
-
-
-def _format_operation_schema(
-    operation_type: str,
-    properties: dict[str, object],
-    required: list[str],
-) -> dict[str, object]:
-    return {
-        "type": "object",
-        "properties": {"type": {"type": "string", "enum": [operation_type]}, **properties},
-        "required": ["type", "start_index", "end_index", *required],
-        "additionalProperties": False,
-    }
-
-
-_FORMAT_DOCUMENT_PARAMETERS: dict[str, object] = {
-    "type": "object",
-    "properties": {
-        "document_id": {"type": "string", "description": "Google Docs document ID or edit URL."},
-        "tab_id": {"type": "string", "description": "Immutable ID of the tab to format."},
-        "expected_revision_id": {"type": "string", "description": "Revision ID from the preceding document read."},
-        "operations": {
-            "type": "array",
-            "minItems": 1,
-            "items": {
-                "oneOf": [
-                    _format_operation_schema("paragraph_style", _STYLE_OPERATION_PROPERTIES, ["style", "fields"]),
-                    _format_operation_schema("text_style", _STYLE_OPERATION_PROPERTIES, ["style", "fields"]),
-                    _format_operation_schema(
-                        "native_list",
-                        {**_FORMAT_RANGE_PROPERTIES, "bullet_preset": {"type": "string"}},
-                        ["bullet_preset"],
-                    ),
-                    _format_operation_schema("remove_native_list", _FORMAT_RANGE_PROPERTIES, []),
-                    _format_operation_schema(
-                        "hyperlink",
-                        {**_FORMAT_RANGE_PROPERTIES, "url": {"type": "string"}},
-                        ["url"],
-                    ),
-                ],
-            },
-        },
-    },
-    "required": ["document_id", "tab_id", "expected_revision_id", "operations"],
-    "additionalProperties": False,
-}
-
-
-class _FormattingOperationError(ValueError):
-    """Identify which operation failed formatting validation."""
-
-    def __init__(self, index: int, error: Exception) -> None:
-        super().__init__(f"operations[{index}]: {error}")
 
 
 def _document_url(document_id: str) -> str:
@@ -107,196 +33,6 @@ def _normalize_document_id(value: str) -> str:
     document_id = value.strip()
     match = _GOOGLE_DOCS_URL_ID_PATTERN.match(document_id)
     return match.group(1) if match else document_id
-
-
-def _formatting_range(operation: dict[str, object], tab_id: str) -> dict[str, object]:
-    start_index = operation["start_index"]
-    end_index = operation["end_index"]
-    if (
-        not isinstance(start_index, int)
-        or isinstance(start_index, bool)
-        or not isinstance(end_index, int)
-        or isinstance(end_index, bool)
-        or start_index < 1
-        or end_index <= start_index
-    ):
-        msg = "range must use integer start_index and end_index with 1 <= start_index < end_index"
-        raise ValueError(msg)
-    return {"startIndex": start_index, "endIndex": end_index, "tabId": tab_id}
-
-
-def _formatting_fields(operation: dict[str, object]) -> str:
-    fields = operation["fields"]
-    if not isinstance(fields, list):
-        msg = "style fields must be a list"
-        raise TypeError(msg)
-    fields = cast("list[object]", fields)
-    if not fields:
-        msg = "style fields must not be empty"
-        raise ValueError(msg)
-    if not all(isinstance(field, str) for field in fields):
-        msg = "style fields must contain strings"
-        raise TypeError(msg)
-    field_paths = [cast("str", field).strip() for field in fields]
-    if any(not _FORMAT_FIELD_PATH_PATTERN.fullmatch(field_path) for field_path in field_paths):
-        msg = "style fields must be explicit dotted paths"
-        raise ValueError(msg)
-    return ",".join(field_paths)
-
-
-def _formatting_style(operation: dict[str, object]) -> dict[str, object]:
-    style = operation["style"]
-    if not isinstance(style, dict):
-        msg = "style must be an object"
-        raise TypeError(msg)
-    style = cast("dict[str, object]", style)
-    if any(not isinstance(key, str) for key in style):
-        msg = "style must use string field names"
-        raise ValueError(msg)
-    return dict(style)
-
-
-def _require_operation_keys(operation: dict[str, object], expected: set[str]) -> None:
-    actual = set(operation)
-    missing = sorted(expected - actual)
-    unexpected = sorted(actual - expected)
-    if missing or unexpected:
-        details = []
-        if missing:
-            details.append(f"missing fields: {', '.join(missing)}")
-        if unexpected:
-            details.append(f"unexpected fields: {', '.join(unexpected)}")
-        msg = "; ".join(details)
-        raise ValueError(msg)
-
-
-def _formatting_request(operation: object, tab_id: str) -> dict[str, object]:
-    if not isinstance(operation, dict):
-        msg = "operation must be an object"
-        raise TypeError(msg)
-    operation = cast("dict[str, object]", operation)
-    operation_type = operation.get("type")
-    if not isinstance(operation_type, str) or operation_type not in _FORMAT_OPERATION_TYPES:
-        msg = "operation type is not supported"
-        raise ValueError(msg)
-
-    if operation_type == "paragraph_style":
-        _require_operation_keys(operation, {"type", "start_index", "end_index", "style", "fields"})
-        return {
-            "updateParagraphStyle": {
-                "range": _formatting_range(operation, tab_id),
-                "paragraphStyle": _formatting_style(operation),
-                "fields": _formatting_fields(operation),
-            },
-        }
-
-    if operation_type == "text_style":
-        _require_operation_keys(operation, {"type", "start_index", "end_index", "style", "fields"})
-        style = _formatting_style(operation)
-        fields = _formatting_fields(operation)
-        if "link" in style or any(field == "link" or field.startswith("link.") for field in fields.split(",")):
-            msg = "text_style cannot set links; use hyperlink"
-            raise ValueError(msg)
-        return {
-            "updateTextStyle": {
-                "range": _formatting_range(operation, tab_id),
-                "textStyle": style,
-                "fields": fields,
-            },
-        }
-
-    if operation_type == "native_list":
-        _require_operation_keys(operation, {"type", "start_index", "end_index", "bullet_preset"})
-        bullet_preset = operation["bullet_preset"]
-        if not isinstance(bullet_preset, str) or not bullet_preset.strip():
-            msg = "native_list requires a non-empty bullet_preset"
-            raise ValueError(msg)
-        return {
-            "createParagraphBullets": {
-                "range": _formatting_range(operation, tab_id),
-                "bulletPreset": bullet_preset,
-            },
-        }
-
-    if operation_type == "remove_native_list":
-        _require_operation_keys(operation, {"type", "start_index", "end_index"})
-        return {"deleteParagraphBullets": {"range": _formatting_range(operation, tab_id)}}
-
-    _require_operation_keys(operation, {"type", "start_index", "end_index", "url"})
-    url = operation["url"]
-    if not isinstance(url, str) or not url.strip():
-        msg = "hyperlink requires a non-empty url"
-        raise ValueError(msg)
-    url = url.strip()
-    return {
-        "updateTextStyle": {
-            "range": _formatting_range(operation, tab_id),
-            "textStyle": {"link": {"url": url}},
-            "fields": "link",
-        },
-    }
-
-
-def _formatting_target(
-    document_id: str,
-    tab_id: str,
-    expected_revision_id: str,
-) -> tuple[str, str, str]:
-    if not isinstance(document_id, str):
-        msg = "document_id must be a string"
-        raise TypeError(msg)
-    if not isinstance(tab_id, str):
-        msg = "tab_id must be a string"
-        raise TypeError(msg)
-    if not isinstance(expected_revision_id, str):
-        msg = "expected_revision_id must be a string"
-        raise TypeError(msg)
-
-    document_id = _normalize_document_id(document_id)
-    tab_id = tab_id.strip()
-    expected_revision_id = expected_revision_id.strip()
-    if not document_id:
-        msg = "document_id must not be empty"
-        raise ValueError(msg)
-    if not tab_id:
-        msg = "tab_id must not be empty"
-        raise ValueError(msg)
-    if not expected_revision_id:
-        msg = "expected_revision_id must not be empty"
-        raise ValueError(msg)
-    return document_id, tab_id, expected_revision_id
-
-
-def _formatting_requests(operations: object, tab_id: str) -> list[dict[str, object]]:
-    if not isinstance(operations, list):
-        msg = "operations must be a list"
-        raise TypeError(msg)
-    if not operations:
-        msg = "operations must not be empty"
-        raise ValueError(msg)
-    requests = []
-    for index, operation in enumerate(operations):
-        try:
-            requests.append(_formatting_request(operation, tab_id))
-        except (TypeError, ValueError) as exc:
-            raise _FormattingOperationError(index, exc) from None
-    return requests
-
-
-def _format_document_http_error(exc: HttpError) -> str:
-    """Return a sanitized formatting failure with safe stale-revision guidance."""
-    result = google_http_error_result("Google Docs", "format_document", exc)
-    if exc.resp.status != 400:
-        return result
-    message = cast("str", json.loads(result)["error"])
-    return json.dumps(
-        {
-            "error": (
-                f"{message}. If the document may have changed, read it again and retry with its current revisionId; "
-                "otherwise correct the formatting operation."
-            ),
-        },
-    )
 
 
 class GoogleDocsTools(GoogleApiToolkit):
@@ -317,12 +53,8 @@ class GoogleDocsTools(GoogleApiToolkit):
         create_document: bool = True,
         read_document: bool = True,
         edit_document: bool = True,
-        format_document: bool = False,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
-        if format_document and not read_document:
-            msg = "Google Docs format_document requires read_document"
-            raise ValueError(msg)
         tools = []
         if create_document:
             tools.append(self.google_docs_create_document)
@@ -333,10 +65,9 @@ class GoogleDocsTools(GoogleApiToolkit):
                 [
                     self.google_docs_insert_text,
                     self.google_docs_replace_text,
+                    self.google_docs_batch_update,
                 ],
             )
-        if format_document:
-            tools.append(self.google_docs_format_document)
         super().__init__(
             name="google_docs",
             tools=tools,
@@ -347,26 +78,11 @@ class GoogleDocsTools(GoogleApiToolkit):
             **kwargs,
         )
 
-    def offered_function(self, function: ToolFunction) -> ToolFunction:
-        """Give the formatting operation its explicit model-facing schema."""
-        if function.name != "google_docs_format_document":
-            return function
-        return replace(function, parameters=_FORMAT_DOCUMENT_PARAMETERS)
-
-    def _batch_update(
-        self,
-        document_id: str,
-        requests: list[dict[str, object]],
-        *,
-        write_control: dict[str, object] | None = None,
-    ) -> dict[str, object]:
+    def _batch_update(self, document_id: str, requests: list[dict[str, Any]]) -> dict[str, object]:
         service = self._google_api_service()
-        body: dict[str, object] = {"requests": requests}
-        if write_control is not None:
-            body["writeControl"] = write_control
         return cast(
             "dict[str, object]",
-            service.documents().batchUpdate(documentId=document_id, body=body).execute(),
+            service.documents().batchUpdate(documentId=document_id, body={"requests": requests}).execute(),
         )
 
     def google_docs_create_document(self, title: str, initial_text: str = "") -> str:
@@ -554,56 +270,40 @@ class GoogleDocsTools(GoogleApiToolkit):
         except HttpError as exc:
             return google_http_error_result("Google Docs", "replace_text", exc)
 
-    def google_docs_format_document(
-        self,
-        document_id: str,
-        tab_id: str,
-        expected_revision_id: str,
-        operations: list[dict[str, object]],
-    ) -> str:
-        """Apply supported formatting operations to one Google Doc tab at one exact revision.
+    def google_docs_batch_update(self, document_id: str, requests: list[dict[str, Any]]) -> str:
+        """Apply Google Docs API batchUpdate requests to a document, in order and all or none.
 
-        Supported operations are paragraph_style, text_style, native_list,
-        remove_native_list, and hyperlink. Every operation has type,
-        start_index, and end_index. paragraph_style and text_style also take
-        style and fields, native_list takes bullet_preset, and hyperlink takes
-        url. Style fields are explicit dotted Docs field paths, and an empty
-        style resets the listed fields. Run native_list operations after all
-        index-dependent operations, in descending start-index order when there
-        are several, because creating lists can shift later indexes.
+        Use this for what the text functions cannot do, such as tables, headings, text and paragraph styles,
+        lists, links, page breaks, headers, footers, footnotes, and images from a public URL.
+        A request can also delete what is in the document, as deleteContentRange does.
+        Each request is one Docs API Request object, for example
+        {"updateParagraphStyle": {"range": {"startIndex": 1, "endIndex": 6, "tabId": "t.0"},
+        "paragraphStyle": {"namedStyleType": "HEADING_1"}, "fields": "namedStyleType"}}.
+        Indexes are the UTF-16 positions google_docs_get_document reports within one tab, and a range or location
+        without a tabId is in the first tab.
+        Each request sees the document as the requests before it left it, so make several edits from the end of
+        the document toward its start.
 
         Args:
             document_id: Google Docs document ID.
-            tab_id: Immutable Google Docs tab ID to format.
-            expected_revision_id: Revision ID returned by a preceding document read.
-            operations: Supported formatting operations for ranges in the named tab.
+            requests: Docs API batchUpdate Request objects.
 
         Returns:
-            JSON containing the atomic Google Docs batch-update response and edit URL.
+            JSON containing one reply per request in the Google Docs batch-update response.
 
         """
+        document_id = _normalize_document_id(document_id)
+        if not document_id:
+            return json.dumps({"error": "Google Docs document_id must not be empty"})
+        if not requests:
+            return json.dumps({"error": "Google Docs requests must not be empty"})
         try:
-            document_id, tab_id, expected_revision_id = _formatting_target(
-                document_id,
-                tab_id,
-                expected_revision_id,
-            )
-            requests = _formatting_requests(operations, tab_id)
-        except (TypeError, ValueError) as exc:
-            return json.dumps({"error": f"Google Docs formatting {exc}"})
-
-        try:
-            response = self._batch_update(
-                document_id,
-                requests,
-                write_control={"requiredRevisionId": expected_revision_id},
-            )
+            response = self._batch_update(document_id, requests)
             return json.dumps(
                 {
                     "update": response,
                     "documentUrl": _document_url(document_id),
-                    "tabId": tab_id,
                 },
             )
         except HttpError as exc:
-            return _format_document_http_error(exc)
+            return google_http_error_result("Google Docs", "batch_update", exc)

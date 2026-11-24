@@ -4,23 +4,27 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING
 
 import nio
+from fastapi import HTTPException
 
 from mindroom.api.app_state import ensure_app_state
-from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
-from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.entity_resolution import MissingManagedEntityAccountError, entity_identity_registry
+from mindroom.matrix.joined_members import read_joined_members
+from mindroom.room_agent_access import admit_room_agent, room_execution_identity
 from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
-from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
+from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 from mindroom.worker_computer.sessions import ComputerError, ComputerTarget
 from mindroom.workers.backend_kinds import worker_backend_kind
 from mindroom.workers.models import WorkerSpec
 from mindroom.workers.runtime import configured_primary_worker_manager_identity
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot
@@ -35,40 +39,41 @@ async def _authorize_computer(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    client: nio.AsyncClient,
+    client: Callable[[], nio.AsyncClient | None],
     memberships: AgentReplyMembershipIndex,
+    refresh_memberships: Callable[[], Awaitable[None]],
 ) -> ComputerTarget:
-    """Require exact live room membership, responder access, and ordinary browser routing."""
+    """Require exact live room membership, responder access, and ordinary browser routing.
+
+    ``client`` returns the target agent's own client while its bot runs, which reads the room's members.
+    """
+
+    async def joined_members() -> frozenset[str]:
+        own = client()
+        if own is None:
+            raise ComputerError(503, "Computer authorization runtime is unavailable.")
+        try:
+            response = await read_joined_members(own, room_id)
+        except nio.LocalProtocolError:
+            # The bot closed this client as it stopped; the next request reads through its replacement.
+            response = None
+        if not isinstance(response, nio.JoinedMembersResponse):
+            raise ComputerError(503, "Authoritative room membership is unavailable.")
+        return frozenset(member.user_id for member in response.members)
+
     try:
-        name = entity_identity_registry(config, runtime_paths).current_entity_name_for_user_id(
-            agent_user_id,
-            include_router=False,
-        )
-    except MissingManagedEntityAccountError:
-        raise ComputerError(503, "Agent identities are not ready.") from None
-    if name is None or name not in config.agents:
-        raise ComputerError(403, "The selected user is not a current agent.")
-    response = await client.joined_members(room_id)
-    if not isinstance(response, nio.JoinedMembersResponse):
-        raise ComputerError(503, "Authoritative room membership is unavailable.")
-    joined = {member.user_id for member in response.members}
-    if requester_id not in joined or agent_user_id not in joined:
-        raise ComputerError(403, "Requester and agent must both be joined to this room.")
-    await memberships.refresh(config, runtime_paths, client)
-    try:
-        allowed = is_sender_allowed_for_responder(
+        name = await admit_room_agent(
             requester_id,
-            name,
             room_id,
-            config,
-            runtime_paths,
-            memberships,
-            require_resolved_membership=True,
+            agent_user_id,
+            joined_members,
+            config=config,
+            runtime_paths=runtime_paths,
+            memberships=memberships,
+            refresh_memberships=refresh_memberships,
         )
-    except ReplyMembershipPendingError:
-        raise ComputerError(503, "Responder membership policy is unresolved.") from None
-    if not allowed:
-        raise ComputerError(403, "Requester cannot use this agent.")
+    except HTTPException as error:
+        raise ComputerError(error.status_code, error.detail) from None
     return _resolve_target(requester_id, room_id, agent_user_id, name, config, runtime_paths)
 
 
@@ -85,11 +90,7 @@ def _computer_browser_provider(agent_name: str, config: Config, runtime_paths: R
         raise ComputerError(409, "Computer requires exactly one browser provider and explicit user_agent worker scope.")
     provider = providers[0]
 
-    # Match normal toolkit placement without adding heavy tool imports to API startup.
-    from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
-    from mindroom.tool_system.plugins import config_plugins  # noqa: PLC0415
-    from mindroom.tool_system.sandbox_proxy import tool_placement  # noqa: PLC0415
-
+    # Match normal toolkit placement.
     tools = config_plugins(config, runtime_paths).tools
     if not resolve_agent_tools(config, agent_name, tools).runs_in_worker(
         provider,
@@ -118,16 +119,7 @@ def _resolve_target(
     runtime_paths: RuntimePaths,
 ) -> ComputerTarget:
     _computer_browser_provider(name, config, runtime_paths)
-    identity = build_tool_execution_identity(
-        channel="matrix",
-        agent_name=name,
-        runtime_paths=runtime_paths,
-        requester_id=requester_id,
-        room_id=room_id,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=None,
-    )
+    identity = room_execution_identity(name, requester_id, room_id, config, runtime_paths)
     target = build_agent_toolkit_worker_target(
         "user_agent",
         name,
@@ -143,7 +135,7 @@ def _resolve_target(
         requester_id,
         room_id,
         agent_user_id,
-        WorkerSpec(target.worker_key, private_agent_names=target.private_agent_names),
+        WorkerSpec(target.worker_key, private_agent_names=target.private_agent_names, wait_for_setup=False),
         fingerprint,
     )
 
@@ -154,6 +146,7 @@ class ComputerRuntimeCoordinator:
 
     runtime_paths: RuntimePaths
     agent_reply_memberships: AgentReplyMembershipIndex
+    refresh_agent_reply_memberships_when_needed: Callable[[], Awaitable[None]]
     api_enabled: bool = True
 
     def bind_if_ready(self, config: Config, bots: Mapping[str, AgentBot]) -> None:
@@ -163,22 +156,24 @@ class ComputerRuntimeCoordinator:
         if not self.runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV):
             self.unbind()
             return
-        router_bot = bots.get(ROUTER_AGENT_NAME)
-        if router_bot is None or router_bot.client is None or not router_bot.running:
+        if not any(bot.running for bot in bots.values()):
             self.unbind()
             return
 
+        def agent_client(agent_user_id: str) -> nio.AsyncClient | None:
+            clients = (bot.client for bot in bots.values() if bot.running and bot.client is not None)
+            return next((client for client in clients if client.user_id == agent_user_id), None)
+
         async def authorize(requester_id: str, room_id: str, agent_user_id: str) -> ComputerTarget:
-            if router_bot.client is None or not router_bot.running:
-                raise ComputerError(503, "Computer authorization runtime is unavailable.")
             return await _authorize_computer(
                 requester_id,
                 room_id,
                 agent_user_id,
                 config=config,
                 runtime_paths=self.runtime_paths,
-                client=router_bot.client,
+                client=partial(agent_client, agent_user_id),
                 memberships=self.agent_reply_memberships,
+                refresh_memberships=self.refresh_agent_reply_memberships_when_needed,
             )
 
         from mindroom.api import config_lifecycle, main  # noqa: PLC0415

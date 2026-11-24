@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import pytest
 
+from mindroom import redaction
 from mindroom.llm.events import ReportedCall, ToolCallOrigin
 from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.message_builder import markdown_to_html
@@ -14,12 +15,14 @@ from mindroom.tool_system.events import (
     StreamingToolTracker,
     ToolTraceEntry,
     _format_tool_started,
+    append_stream_text,
     build_tool_trace_content,
     complete_pending_tool_block,
     deserialize_tool_trace,
     ensure_visible_tool_marker_spacing,
     format_tool_combined,
     format_tool_completed_event,
+    message_tool_trace,
     serialize_tool_trace,
     with_stored_calls,
 )
@@ -105,8 +108,7 @@ def test_format_tool_started_uses_plain_marker_and_truncates() -> None:
         tool_index=1,
     )
 
-    assert text.startswith("\n\n🔧 `save_file` [1]")
-    assert text.endswith("\n\n")
+    assert text == "🔧 `save_file` [1] ⏳"
     assert "🔧" in text
     assert "`save_file`" in text
     assert "[1]" in text
@@ -123,8 +125,7 @@ def test_format_tool_combined_with_result() -> None:
     """Combined formatting should produce a completed plain marker and trace metadata."""
     text, trace = format_tool_combined("run_shell_command", {"cmd": "pwd"}, "/app", tool_index=2)
 
-    assert text.startswith("\n\n🔧 `run_shell_command` [2]")
-    assert text.endswith("\n\n")
+    assert text == "🔧 `run_shell_command` [2]"
     assert "<validation>" not in text
     assert "`run_shell_command`" in text
     assert "[2]" in text
@@ -177,8 +178,7 @@ def test_format_tool_combined_truncates_long_result() -> None:
     """Combined formatting should truncate long results."""
     text, trace = format_tool_combined("run_shell_command", {}, "done " + ("y" * 5000))
 
-    assert text.startswith("\n\n🔧 `run_shell_command`")
-    assert text.endswith("\n\n")
+    assert text == "🔧 `run_shell_command`"
     assert trace.type == "tool_call_completed"
     assert trace.result_preview is not None
     assert trace.truncated is True
@@ -283,7 +283,7 @@ def test_format_tool_combined_with_none_result() -> None:
     """Combined formatting should handle missing results."""
     text, trace = format_tool_combined("save_file", {}, None, tool_index=1)
 
-    assert text == "\n\n🔧 `save_file` [1]\n\n"
+    assert text == "🔧 `save_file` [1]"
     assert trace.type == "tool_call_completed"
     assert trace.tool_name == "save_file"
     assert trace.result_preview is None
@@ -294,10 +294,69 @@ def test_format_tool_combined_with_empty_string_result() -> None:
     """Combined formatting should treat empty results as no-result."""
     text, trace = format_tool_combined("save_file", {"file": "a.py"}, "", tool_index=1)
 
-    assert text == "\n\n🔧 `save_file` [1]\n\n"
+    assert text == "🔧 `save_file` [1]"
     assert trace.type == "tool_call_completed"
     assert trace.result_preview is None
     assert trace.truncated is False
+
+
+@pytest.mark.parametrize(
+    ("existing", "delta", "expected"),
+    [
+        ("Before", "After", "Before\n\nAfter"),
+        ("Before\n", "After", "Before\n\nAfter"),
+        ("Before\n\n\n", "After", "Before\n\n\nAfter"),
+        ("Before\r\n", "After", "Before\r\n\nAfter"),
+        ("Before\r\n\r\n", "After", "Before\r\n\r\nAfter"),
+        ("Before\n\r\n", "After", "Before\n\r\nAfter"),
+        ("Before\r", "After", "Before\r\n\nAfter"),
+        ("Before", "\nAfter", "Before\n\nAfter"),
+        ("Before", "\r\n\r\n\nAfter", "Before\n\nAfter"),
+        ("Before", "\r\n", "Before"),
+        ("", "\nAfter", "\nAfter"),
+    ],
+)
+def test_separated_stream_text_starts_one_blank_line_below_the_text_before_it(
+    existing: str,
+    delta: str,
+    expected: str,
+) -> None:
+    """A separated delta adds only the newlines a blank line still lacks, in place of the ones it opens with."""
+    assert append_stream_text(existing, delta, separate=True) == expected
+
+
+@pytest.mark.parametrize(
+    ("existing", "expected"),
+    [
+        ("", "🔧 `read` [1] ⏳"),
+        ("Doc", "Doc\n\n🔧 `read` [1] ⏳"),
+        ("Doc\n\n", "Doc\n\n🔧 `read` [1] ⏳"),
+        ("Doc\r\n", "Doc\r\n\n🔧 `read` [1] ⏳"),
+        ("Doc\r\n\r\n", "Doc\r\n\r\n\n🔧 `read` [1] ⏳"),
+        ("Doc\n\r\n", "Doc\n\r\n\n🔧 `read` [1] ⏳"),
+    ],
+)
+def test_a_tool_marker_stands_below_an_lf_blank_line(existing: str, expected: str) -> None:
+    """A CRLF blank line does not serve a marker: Matrix gets it as a v3 position only below an LF one."""
+    assert append_stream_text(existing, "🔧 `read` [1] ⏳", marker=True) == expected
+
+
+@pytest.mark.parametrize(
+    "deltas",
+    [
+        ["🔧 `read` [1]", " is literal."],
+        ["```\n🔧 `x` [1]", "\n```"],
+        ["🔧 `x` [1]", "\n", "next"],
+        ["🔧 `x` [1] ⏳\r\n", "\r\nnext"],
+    ],
+)
+def test_stream_text_that_looks_like_a_marker_joins_as_any_other_text(deltas: list[str]) -> None:
+    """Only a caller that appended a tool call separates the next delta; the look of the text before it never does."""
+    text = ""
+    for delta in deltas:
+        text = append_stream_text(text, delta)
+
+    assert text == "".join(deltas)
 
 
 def test_complete_pending_tool_block_replaces_pending() -> None:
@@ -544,7 +603,7 @@ def test_build_tool_trace_content_redacts_raw_trace_entries() -> None:
 def test_format_tool_started_with_empty_args() -> None:
     """Tool start formatting should handle empty argument maps."""
     text, trace = _format_tool_started("save_file", {}, tool_index=1)
-    assert text == "\n\n🔧 `save_file` [1] ⏳\n\n"
+    assert text == "🔧 `save_file` [1] ⏳"
     assert trace.type == "tool_call_started"
     assert trace.tool_name == "save_file"
     assert trace.args_preview is None
@@ -592,14 +651,46 @@ def test_format_tool_started_redacts_top_level_key_value_secret_args() -> None:
     assert "value=***redacted***" in trace.args_preview
 
 
-def test_format_tool_started_survives_structured_redaction_failure() -> None:
+def test_format_tool_started_survives_structured_redaction_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """A failed argument redaction must not abort tool event formatting."""
+
+    def raise_redaction_error(_value: str) -> str:
+        raise RuntimeError
+
+    monkeypatch.setattr(redaction, "_redact_secret_assignments", raise_redaction_error)
     _text, trace = _format_tool_started(
         "run_shell",
-        {"command": "password=\n  hunter2"},
+        {"command": "password=hunter2"},
     )
 
     assert trace.args_preview == "command=[redaction failed]"
+
+
+def test_serializing_a_trace_again_redacts_each_preview_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live frames serialize the whole trace every tick, so a preview already redacted is not redacted again."""
+    redacted: list[str] = []
+    redact = redaction._redact_sensitive_text_fail_closed
+
+    def counting_redact(value: str, *, max_length: int | None) -> str:
+        redacted.append(value)
+        return redact(value, max_length=max_length)
+
+    monkeypatch.setattr(redaction, "_redact_sensitive_text_fail_closed", counting_redact)
+    trace = [
+        ToolTraceEntry(
+            type="tool_call_completed",
+            tool_name="run_shell",
+            args_preview="command=export API_KEY=hunter2-every-tick",
+            result_preview="exported API_KEY for every tick",
+        ),
+    ]
+
+    first = serialize_tool_trace(trace)
+    second = serialize_tool_trace(trace)
+
+    assert first == second
+    assert "hunter2-every-tick" not in str(first[0]["args_preview"])
+    assert len(redacted) == 2
 
 
 def test_complete_pending_tool_block_roundtrip_with_marker_id() -> None:
@@ -661,7 +752,7 @@ def test_format_tool_completed_event_formats_its_trace() -> None:
 
 
 def test_durable_tool_trace_round_trip_keeps_internal_identity_private() -> None:
-    """Restart state keeps exact call and member identity without exposing it to Matrix clients."""
+    """Restart state keeps exact call and member identity; Matrix clients see only the call's id."""
     trace = ToolTraceEntry(
         type="tool_call_started",
         tool_name="inspect",
@@ -685,10 +776,38 @@ def test_durable_tool_trace_round_trip_keeps_internal_identity_private() -> None
     )
     assert public is not None
     public_event = public[_TOOL_TRACE_KEY]["events"][0]
-    assert "tool_call_id" not in public_event
-    assert "member_id" not in public_event
+    assert public_event == {
+        "type": "tool_call_started",
+        "tool_name": "inspect",
+        "args_preview": "path=report.txt",
+        "tool_call_id": "call-1",
+    }
     assert restored[0].tool_call_id == "call-1"
     assert restored[0].member_id == "general"
+
+
+def test_public_tool_trace_marks_only_a_completed_call_that_did_not_succeed() -> None:
+    """Matrix clients read ``is_error``, which a call that worked or still runs never carries, and read it back."""
+    failed = ToolTraceEntry(
+        type="tool_call_completed",
+        tool_name="schedule",
+        result_preview="Missing when",
+        is_error=True,
+    )
+    worked = ToolTraceEntry(type="tool_call_completed", tool_name="read_file", result_preview="notes")
+    running = ToolTraceEntry(type="tool_call_started", tool_name="shell", is_error=True)
+
+    payload = build_tool_trace_content([failed, worked, running])
+
+    assert payload is not None
+    events = payload[_TOOL_TRACE_KEY]["events"]
+    assert events[0]["is_error"] is True
+    assert "is_error" not in events[1]
+    assert "is_error" not in events[2]
+    assert [entry.is_error for entry in message_tool_trace(payload) or []] == [True, False, False]
+    assert serialize_tool_trace([worked]) == (
+        {"type": "tool_call_completed", "tool_name": "read_file", "result_preview": "notes"},
+    )
 
 
 @pytest.mark.parametrize(("scope_key", "member_id"), [("team", None), ("agent:code-review", "code-review")])
@@ -702,8 +821,8 @@ def test_a_trace_entry_stored_with_a_scope_key_reads_as_its_member(scope_key: st
     assert "scope_key" not in serialize_tool_trace([restored], include_internal=True)[0]
 
 
-def test_durable_tool_trace_keeps_a_failed_calls_flag_private() -> None:
-    """Restart state keeps which call failed, Matrix clients never see it, and an entry stored without it did not fail."""
+def test_a_failed_calls_flag_reaches_restart_state_and_matrix_clients() -> None:
+    """Restart state and Matrix clients both see which call failed, and an entry stored without it did not fail."""
     failed = ToolTraceEntry(
         type="tool_call_completed",
         tool_name="fetch",
@@ -717,7 +836,7 @@ def test_durable_tool_trace_keeps_a_failed_calls_flag_private() -> None:
 
     assert durable[0]["is_error"] is True
     assert public is not None
-    assert "is_error" not in public[_TOOL_TRACE_KEY]["events"][0]
+    assert public[_TOOL_TRACE_KEY]["events"][0]["is_error"] is True
     assert deserialize_tool_trace(durable)[0].is_error is True
     assert deserialize_tool_trace([{"type": "tool_call_completed", "tool_name": "fetch"}])[0].is_error is False
 

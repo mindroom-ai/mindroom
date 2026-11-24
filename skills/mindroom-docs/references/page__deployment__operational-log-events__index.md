@@ -9,7 +9,7 @@ See also [Routing & Responder Selection](https://docs.mindroom.chat/configuratio
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/health` | Liveness. Returns `200` with `{"status": "healthy", ...}`, or `503` with `"status": "unhealthy"` once startup is ready and an agent, team, or router has stopped syncing with Matrix |
+| GET | `/api/health` | Liveness. Returns `200` with `{"status": "healthy", ...}`, or `503` with `"status": "unhealthy"` once startup is ready and an agent, team, or the owner account has stopped syncing with Matrix |
 | GET | `/api/ready` | Readiness. Returns `{"status": "ready"}` when startup has finished, otherwise `503` with `{"status": "<phase>", "detail": "..."}` |
 
 Use `/api/health` for startup and liveness probes and `/api/ready` for readiness probes in container orchestrators.
@@ -34,7 +34,8 @@ The `/api/ready` phases are:
 
 While `mindroom run` waits for hosted pairing approval, or converts conversation storage on the first start after an upgrade, only these two endpoints answer: `/api/health` returns `200` and `/api/ready` returns `503` with phase `starting` and detail `Waiting for local pairing approval` or `Converting conversation storage`.
 
-When an agent, team, or router receives no Matrix sync for 120 seconds, MindRoom restarts that entity's sync loop on its own.
+When an agent, team, or the owner account receives no Matrix sync for 120 seconds after its sync loop's first response, MindRoom restarts that entity's sync loop on its own.
+Until a sync loop's first response, including after such a restart, the limit is [`MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS`](https://docs.mindroom.chat/configuration/#matrix) (default `600`) instead.
 After 180 seconds without a sync, `/api/health` returns `503` and lists the entity in `stale_sync_entities`.
 While an entity is still making progress on a large backlog of received events, both wait up to [`MINDROOM_MATRIX_INGESTION_GRACE_SECONDS`](https://docs.mindroom.chat/configuration/#matrix).
 Set the liveness probe's `failureThreshold` high enough that the sync-loop restart can recover before the container is restarted.
@@ -60,7 +61,7 @@ The thresholds are starting points to tune against your own baseline, and the qu
 
 ### `event_loop_scheduler_lag_summary`
 
-All agents, teams, and the router share one event loop.
+All agents, teams, and the owner account share one event loop.
 Every 60 seconds MindRoom logs how late a heartbeat scheduled every 50 ms actually ran.
 
 | Field | Meaning |
@@ -97,7 +98,7 @@ Memory held by objects that become garbage while frozen, such as agents a config
 
 ### `event_loop_stall_detected`
 
-Logged when the shared event loop has run no heartbeat for `MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS` (default `5`), so every agent, team, and router is frozen until it ends.
+Logged when the shared event loop has run no heartbeat for `MINDROOM_EVENT_LOOP_STALL_THRESHOLD_SECONDS` (default `5`), so every agent, team, and the owner account is frozen until it ends.
 While the stall lasts, an `event_loop_stall_ongoing` record with the same fields follows every 30 seconds.
 
 | Field | Meaning |
@@ -125,7 +126,7 @@ Sum `stall_duration_seconds` over a window to see how long agents were frozen in
 
 ### `matrix_sync_stall_diagnostics`
 
-Logged when one agent, team, or router goes 90 seconds without Matrix sync progress, and repeated at most every 90 seconds while the stall lasts.
+Logged when one agent, team, or the owner account goes 90 seconds without Matrix sync progress, and repeated at most every 90 seconds while the stall lasts.
 It shows where that entity's sync and event-processing tasks are waiting, without message content, and does not affect health or readiness.
 
 | Field | Meaning |
@@ -237,7 +238,7 @@ A call stopped together with its turn logs `error_type` `CancelledError`.
 | `error_message` | The error's message, with credentials redacted |
 | `duration_ms` | Milliseconds from the call's start until it failed |
 | `correlation_id` | ID shared by the tool calls that answer one message |
-| `channel` | `matrix`, `openai_compat`, `mcp`, or `null` |
+| `channel` | `matrix`, `openai_compat`, `headless`, `mcp`, or `null` |
 
 Count it grouped by `tool_name` and alert when one tool fails far more often than usual.
 Failures that share a `correlation_id` came from a single turn, and `error_type` and `error_message` give the cause.
@@ -252,15 +253,16 @@ A call to a ready worker logs nothing, and calls that wait for the same start sh
 |-------|---------|
 | `worker` | The worker's log ID, the hash other worker logs name it by and the end of its state directory name |
 | `backend` | `kubernetes` or `docker` |
-| `kind` | `script` for the worker of one [background script](https://docs.mindroom.chat/tools/background-scripts/) run, `subagent` for the [dedicated worker](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) of one subagent, otherwise `tool` |
+| `kind` | `script` for the worker of one [background script](https://docs.mindroom.chat/tools/background-scripts/) run, `subagent` for the [dedicated worker](https://docs.mindroom.chat/tools/agent-orchestration/#dedicated-workers) of one subagent, `named` for a [named worker](https://docs.mindroom.chat/tools/execution-and-coding/#named-workers), otherwise `tool` |
 | `scope` | The worker's [scope](https://docs.mindroom.chat/deployment/sandbox-proxy/#worker-scopes): `shared`, `user`, `user_agent`, or `unscoped` for an agent without `worker_scope` |
 | `agent_name` | Agent the worker serves, as its worker key spells it, or `null` for a `user` worker, which serves every agent on that scope |
 | `outcome` | `ready`, `timeout` for a worker that did not become ready within the backend's ready timeout, or `error` |
-| `wait_ms` | Milliseconds from finding the worker not ready until it answered its health check, or until its start failed |
-| `pod_ready_ms` | Kubernetes only: milliseconds from the same point until Kubernetes reported the worker's pod ready, which covers applying or scaling up its Deployment, scheduling, image pull, and container start; the rest of `wait_ms` is the first health check through the worker's Service |
+| `wait_ms` | Milliseconds from finding the worker not ready until the call could run in it, or until its start failed |
+| `pod_ready_ms` | Kubernetes only: milliseconds from the same point until Kubernetes reported the worker's pod ready, which covers applying or scaling up its Deployment, scheduling, image pull, and container start |
+| `healthy_ms` | Kubernetes only: milliseconds from the same point until the worker answered its health check through its Service; the rest of `wait_ms` is the wait for the worker to [prepare itself](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings), at most the setup timeout |
 
 ```json
-{"worker": "3f9c2a7b1d4e8f60", "backend": "kubernetes", "kind": "tool", "scope": "user_agent", "agent_name": "code", "outcome": "ready", "wait_ms": 14211.6, "pod_ready_ms": 13190.2, "event": "worker_cold_start", "logger": "mindroom.workers.progress", "level": "info", "timestamp": "2026-01-01T12:00:14.211Z"}
+{"worker": "3f9c2a7b1d4e8f60", "backend": "kubernetes", "kind": "tool", "scope": "user_agent", "agent_name": "code", "outcome": "ready", "wait_ms": 31870.4, "pod_ready_ms": 13190.2, "healthy_ms": 14211.6, "event": "worker_cold_start", "logger": "mindroom.workers.progress", "level": "info", "timestamp": "2026-01-01T12:00:31.870Z"}
 ```
 
 ```text
@@ -269,9 +271,45 @@ alert on  count of logs where event = "worker_cold_start" and outcome != "ready"
 ```
 
 A high `pod_ready_ms` points at scheduling or image pulls: check for pending worker pods, node scale-up, and the worker image pull policy.
-A large gap between `pod_ready_ms` and `wait_ms` points at the worker's Service or a network policy between the primary and its workers.
+A large gap between `pod_ready_ms` and `healthy_ms` points at the worker's Service or a network policy between the primary and its workers.
+A large gap between `healthy_ms` and `wait_ms` is the worker creating its Python environment and starting its tool runtime: check the worker's CPU limit, its storage, and how many workers started at once; a gap as long as the setup timeout means the setup did not finish, and the worker's [`sandbox_worker_eager_setup_failed`](#sandbox_worker_eager_setup_failed) record names the reason.
 Many `tool` records for the same `worker` mean it is used less often than its idle timeout, such as [`workers.kubernetes.idleTimeoutSeconds`](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings), so it scales down between uses.
 A `timeout` means the worker did not become ready within [`workers.kubernetes.readyTimeoutSeconds`](https://docs.mindroom.chat/deployment/kubernetes/#worker-settings) or `MINDROOM_DOCKER_WORKER_READY_TIMEOUT_SECONDS`; the call that waited fails, and for a tool call a [`tool_call_failed`](#tool_call_failed) record carries the error.
+
+### `sandbox_worker_eager_setup_failed`
+
+Logged by a Kubernetes worker, in its own pod's log, when the setup it runs at startup fails or does not finish within 180 seconds.
+The worker stays up: its first call prepares what is missing and reports its own error, so that call is as slow as it was before workers prepared themselves.
+A worker that was to import plugins ahead of its calls gives that up too, and also logs [`sandbox_forkserver_plugin_preload_failed`](#sandbox_forkserver_plugin_preload_failed).
+
+| Field | Meaning |
+|-------|---------|
+| `error` | The failure's message, or its exception type when it has none, such as `TimeoutError` for a setup that outlasted its limit |
+
+```json
+{"error": "No space left on device", "event": "sandbox_worker_eager_setup_failed", "logger": "mindroom.api.sandbox_runner", "level": "warning", "timestamp": "2026-01-01T12:00:00.000Z"}
+```
+
+Alert on any record.
+Check the worker's storage and its CPU limit, and how many workers started at once.
+A worker image without `uv`, or whose Python lacks a bundled pip wheel, logs this whenever a worker has to create its Python environment, because only `uv` creates it within a time limit; the first call then creates it, as before.
+
+### `sandbox_forkserver_plugin_preload_failed`
+
+Logged by a Kubernetes worker, in its own pod's log, once, when it gives up importing the plugins that set [`worker_preload`](https://docs.mindroom.chat/plugins/#importing-once-per-worker) ahead of its calls.
+The import raised, took longer than 60 seconds, or left a thread or an open file behind, the worker's own copy of a plugin does not set `worker_preload`, the worker's setup failed or took too long, or the process that held the imported plugins ended later.
+Calls still work, and each imports its plugins itself until the worker restarts.
+
+| Field | Meaning |
+|-------|---------|
+| `error` | Why the worker gave the preload up, which for an import that raised is the exception |
+
+```json
+{"error": "ImportError: No module named 'missing'", "event": "sandbox_forkserver_plugin_preload_failed", "logger": "mindroom.api.sandbox_forkserver", "level": "warning", "timestamp": "2026-01-01T12:00:00.000Z"}
+```
+
+Alert on any record, since every tool call in that worker pays the plugin's import time again.
+Fix what `error` names, or remove `worker_preload` from the plugin's manifest.
 
 ### `oauth_credentials_refresh_failed`
 
@@ -323,6 +361,9 @@ Logged each time an agent's or team's reply fails and the user gets an error mes
 | `agent` | Agent or team name |
 | `error_type` | Class name of the error that ended the reply |
 | `error` | The error's repr, with credentials redacted |
+| `error_code` | MindRoom's code for a provider error that its type alone does not tell apart, such as `quota_exhausted` or `missing_api_key`, otherwise `null` |
+| `status_code` | HTTP status of a provider error, `401` for a credential failure MindRoom found before sending a request, or `null` when there is none or the error is not a provider error |
+| `provider` | Provider name of the model route for a provider error, otherwise `null` |
 
 These `error_type` values are stable; any other value is the class name of an unexpected error and can change:
 
@@ -334,6 +375,14 @@ These `error_type` values are stable; any other value is the class name of an un
 - `ModelSafeguardRefusal`: the model's safeguards refused the request.
 - `ModelOutputLimitError`: the model's responses kept stopping at the output limit before their tool calls were complete.
 - `ProviderError`: any other provider rejection, such as an HTTP `403`, an HTTP `402`, an OpenAI, Anthropic, Gemini, or Moonshot account with no credit left or past its monthly spend or usage limit, or a Z.ai account with no balance or an expired plan or package.
+
+These `error_code` values are stable:
+
+- `quota_exhausted`: the provider refused the request over the account's billing, such as no credit left, a spend or usage limit reached, an expired plan, or any HTTP `402` (`error_type` `ProviderError`). MindRoom does not retry it. OpenRouter also sends a `402` while it settles earlier requests against a low balance, which a wait can let through.
+- `missing_api_key`: the model route has no credential set up (`error_type` `AuthenticationFailed`).
+
+An `AuthenticationFailed` with `error_code` `null` is any other credential failure: a key the provider rejected, such as a revoked key, a key whose environment variable is unset, or a missing or expired CLI login.
+Alert on `quota_exhausted` and on `AuthenticationFailed`: they usually last until someone changes the account, the key, or the login.
 
 Count it grouped by `error_type` and alert when one value is far more frequent than usual.
 `RateLimited` and `ProviderUnavailable` from many agents mean a provider is failing, while `InvalidRequest` or `ContextWindowExceeded` from one agent is more likely one conversation the provider cannot accept.

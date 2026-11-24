@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.config.memory import MemoryBackend, MemorySearchConfig
     from mindroom.config.models import FileAccess
+    from mindroom.config.room_activity import RoomActivityConfig
 
 # A deployment's approved-egress switch gives every agent that takes the default tools this tool.
 _APPROVED_EGRESS_TOOL_NAME = "approved_egress"
@@ -169,6 +170,14 @@ def memory_search(config: Config, name: str | None) -> MemorySearchConfig:
     # exclude_none keeps the "None inherits" tri-state; the deep copy keeps the record from aliasing memory.search.
     update = override.model_dump(exclude_none=True) if override is not None else {}
     return config.memory.search.model_copy(update=update, deep=True)
+
+
+def room_activity(config: Config, name: str) -> RoomActivityConfig:
+    """Return an agent's effective room-activity note settings; a name no agent has uses the defaults."""
+    agent = config.agents.get(name)
+    override = agent.room_activity if agent is not None else None
+    update = override.model_dump(exclude_none=True) if override is not None else {}
+    return config.defaults.room_activity.model_copy(update=update)
 
 
 def uses_knowledge_graph(config: Config, agent_name: str) -> bool:

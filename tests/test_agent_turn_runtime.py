@@ -30,7 +30,7 @@ from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, ModelConfig, ModelPricing
 from mindroom.constants import AI_RUN_METADATA_KEY
-from mindroom.dispatch_source import ScheduledHistoryBudget
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, ScheduledHistoryBudget
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.final_delivery import AwaitingApproval, Cancelled, Completed, FinalDeliveryOutcome
 from mindroom.history.interrupted_replay import is_interrupted_replay_run
@@ -77,10 +77,10 @@ from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.events import FailedReply
-from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.runtime_context import member_tool_scope, tool_runtime_context
 from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
 from tests.access_schema_support import with_current_room_member_access
-from tests.agent_tool_helpers import UnansweredCallTools
+from tests.agent_tool_helpers import UnansweredCallTools, tool_policy
 from tests.approval_continuation_helpers import RECEIPT_CALLS, RECEIPT_TEXT
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.bot_helpers import _hook_plugin, make_test_agent_bot, unique_room_send_responses
@@ -96,6 +96,7 @@ from tests.conftest import (
     make_visible_message,
     message_origin,
     patch_response_runner_module,
+    publish_hook_plugin,
     seed_session,
     test_runtime_paths,
     unwrap_extracted_collaborator,
@@ -104,6 +105,7 @@ from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer,
 from tests.fakes.summary_model import summary_model
 from tests.history_helpers import RecordingCompactionLifecycle
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.response_runner_helpers import streamed_answer
 from tests.scripted_agent_helpers import (
     ProcessCrash,
     crash_after_first_terminal_store,
@@ -368,11 +370,17 @@ class _QueuedState:
     def __init__(self, *, pending: bool) -> None:
         self.pending = pending
 
-    def has_pending_human_messages(self) -> bool:
+    def has_interrupting_messages(self) -> bool:
         return self.pending
 
-    def pending_message_snapshot(self) -> tuple[object, ...]:
+    def interrupting_snapshot(self) -> tuple[object, ...]:
         return ("$pending",) if self.pending else ()
+
+    def queued_snapshot(self) -> tuple[object, ...]:
+        return ()
+
+    def requester_steer_snapshot(self) -> tuple[object, ...]:
+        return ()
 
 
 @pytest.mark.asyncio
@@ -688,8 +696,8 @@ async def test_an_error_record_never_takes_an_earlier_reply_in_the_thread_for_it
 ) -> None:
     """A reply that fails on its first request records no partial text, though its input carries an earlier reply.
 
-    The thread's earlier reply reaches the run's input, and is stored with the run, as an assistant message no model
-    of this run answered.
+    The thread's earlier reply reaches the run's input, and is stored with the run, as a thread message from the
+    agent, so the run holds no assistant message a model of it did not answer.
     """
     reply = _reply(tmp_path, monkeypatch, [[_raising(RateLimited("slow down", provider="openai"))]])
     agent_id = entity_identity_registry(reply.config, reply.runtime_paths).current_ids["assistant"].full_id
@@ -704,8 +712,8 @@ async def test_an_error_record_never_takes_an_earlier_reply_in_the_thread_for_it
 
     assert "Rate limited" in text
     [failed] = replaced
-    stored_replies = [message for message in failed.messages if message.role == "assistant"]
-    assert ["green pixel" in str(message.content) for message in stored_replies] == [True]
+    assert [message.role for message in failed.messages if "green pixel" in str(message.content)] == ["user"]
+    assert not [message for message in failed.messages if message.role == "assistant"]
     assert reply.recorder.outcome == "interrupted"
     assert reply.recorder.assistant_text == ""
 
@@ -986,22 +994,32 @@ async def test_a_model_switch_continuation_keeps_the_one_notice_the_run_it_conti
 ) -> None:
     """The switched run stored the reply's notice, which the continuation replays; a later batch moves that copy last.
 
-    The copy stays replayed history, so the continuation stores no second notice.
+    The copy stays replayed history, so the continuation stores no second notice. The queue empties before the switch,
+    since a run whose request carried the notice runs no further call, and refills while the continuation's first
+    request streams: that request ends without a notice, the copy sits before the switch, so its call runs.
     """
+    queue = _QueuedState(pending=True)
+
+    async def queue_empties() -> None:
+        queue.pending = False
+
+    async def queue_refills() -> None:
+        queue.pending = True
+
     reply = _reply(
         tmp_path,
         monkeypatch,
         [
             calls(tool_call("touch", "call_1", label="a")),
-            calls(_switch_now("call_2")),
-            calls(tool_call("touch", "call_3", label="b")),
+            [Await(queue_empties), *calls(_switch_now("call_2"))],
+            [Await(queue_refills), *calls(tool_call("touch", "call_3", label="b"))],
             answer("ok"),
         ],
         tools=(PROBE_TOOL, "thread_model"),
     )
     with_current_room_member_access(reply.config)
 
-    with queued_message_signal_context(_QueuedState(pending=True)):
+    with queued_message_signal_context(queue):
         await _stream(reply)
 
     assert probe.calls == ["a", "b"]
@@ -1532,7 +1550,9 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
 ) -> None:
     """Without a job actor, participation decides first, the receipt joins next, and compaction sizes the result.
 
-    The rest of the hooks are wired. A reply with a job actor projects its job definitions before participation.
+    The checkpoint then saves what is sent, and saves again before a tool batch runs. The rest of the hooks are
+    wired. A reply with a job actor projects its job definitions before participation. Before them all stands the
+    hook that publishes a delegated child's usage, which does nothing in a reply.
     """
     reply = _reply(tmp_path, monkeypatch, [answer('{"action":"respond","reason":"Yes."}'), answer("ok")])
     captured: dict[str, Any] = {}
@@ -1548,10 +1568,13 @@ async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
 
     hooks = captured["hooks"]
     assert [function.__qualname__.split(".")[0] for function in hooks.before_request] == [
+        "child_usage_hook",
         "participation_hook",
         "approval_receipt_hook",
         "mid_turn_compaction_hook",
+        "checkpoint_hooks",
     ]
+    assert hooks.before_dispatch.__qualname__.split(".")[0] == "checkpoint_hooks"
     assert hooks.answer_tool_calls is not None
     assert hooks.rewrite_tool_calls is None
     # This agent offers no scheduler, so its calls run without the live-function binding step.
@@ -1669,6 +1692,41 @@ async def test_a_reply_posts_its_mid_turn_compaction_notices_and_seeds_no_earlie
     assert metadata is not None
     assert metadata["room_topic"] == "kept"
     assert [request["metrics"]["input_tokens"] for request in metadata[COMPACTED_REQUESTS_METADATA_KEY]] == [1_000_000]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_an_interrupted_record_leaves_out_the_calls_an_earlier_attempt_of_its_turn_folded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The record of a turn cut short in a later attempt quotes no call a fold of an earlier attempt summarized.
+
+    The stored folds name the attempt that made them, so only the turn's recorder knows them once another attempt runs.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [
+            # The first response reports a request far over the 4,000-token window, so the second request compacts.
+            calls(tool_call("touch", "call_1", label="FOLDED"), metrics=usage(1_000_000, 1)),
+            calls(_switch_now("call_2")),
+            [Await(_cancel_current_task)],
+        ],
+        tools=(PROBE_TOOL, "thread_model"),
+        context_window=4000,
+    )
+    install_model_providers(monkeypatch, {"summary": summary_model("SUMMARY")})
+
+    with pytest.raises(asyncio.CancelledError):
+        await _stream(reply)
+
+    [record] = [run for run in reply.storage.list_runs(SESSION_ID) if is_interrupted_replay_run(run)]
+    assert record.run_id != "run-1"
+    content = str(record.messages[-1].content)
+    assert "1 tool call(s) had finished" in content
+    assert "switch_thread_model" in content
+    assert "FOLDED" not in content
 
 
 @pytest.mark.asyncio
@@ -1792,8 +1850,8 @@ def _runner(reply: _Reply) -> ResponseRunner:
     return bot._response_runner
 
 
-def _request(prompt: str = "Hello") -> ResponseRequest:
-    """Return one admitted reply request for the thread the ``ai`` seam tests use."""
+def _request(prompt: str = "Hello", *, source_kind: str = "message") -> ResponseRequest:
+    """Return one admitted reply request for the thread the ``ai`` seam tests use, from a ``source_kind`` source."""
     target = MessageTarget.resolve(room_id=ROOM_ID, thread_id=THREAD_ID, reply_to_event_id=EVENT_ID)
     return ResponseRequest(
         thread_history=[],
@@ -1806,7 +1864,7 @@ def _request(prompt: str = "Hello") -> ResponseRequest:
             attachment_ids=(),
             mentioned_agents=(),
             agent_name="assistant",
-            origin=message_origin(sender_id=REQUESTER_ID, requester_id=REQUESTER_ID, source_kind="message"),
+            origin=message_origin(sender_id=REQUESTER_ID, requester_id=REQUESTER_ID, source_kind=source_kind),
         ),
         sources=ResponseSources(pending_event_ids=(EVENT_ID,), logical_source_event_ids=(EVENT_ID,)),
     )
@@ -1977,8 +2035,9 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
 
     await runner.generate_response(_request())
 
-    body = runner.deps.runtime.client.room_send.await_args.kwargs["content"]["body"]
-    assert body.split("\n\n")[-1].startswith("[assistant] ⚠️ Error: agent run ")
+    content = runner.deps.runtime.client.room_send.await_args.kwargs["content"]
+    body = content.get("m.new_content", content)["body"]
+    assert body.startswith("[assistant] ⚠️ Error: agent run ")
     assert body.endswith(" paused on ['touch'] without an approval to ask for")
     assert probe.calls == []
     session = reply.storage.load_session(SESSION_ID)
@@ -1989,6 +2048,107 @@ async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_a
     assert record.metadata["mindroom_original_status"] == "error"
     assert record.metadata["mindroom_replay_state"] == "interrupted"
     assert not record.requirements
+
+
+def _call_mirror(seen: list[tuple[str, bool, str | None]]) -> list[object]:
+    """Return before-call and after-call hooks that record whether each call's reply shows it, and its preview."""
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        seen.append(("before", ctx.shown, ctx.chat_preview()))
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        seen.append(("after", ctx.shown, ctx.chat_preview()))
+
+    return [before, after]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [True, False])
+@pytest.mark.parametrize("show_tool_calls", [True, False])
+@pytest.mark.usefixtures("probe")
+async def test_the_runner_tells_a_call_s_hooks_what_its_reply_shows_of_the_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
+    show_tool_calls: bool,
+) -> None:
+    """Through ``ResponseRunner``, a call's hooks read whether its reply shows it, and the preview its tool trace shows."""
+    seen: list[tuple[str, bool, str | None]] = []
+    reply = _reply(tmp_path, monkeypatch, [calls(tool_call("touch", "call-1", label="a")), answer("Touched.")])
+    reply.config.defaults.show_tool_calls = show_tool_calls
+    publish_hook_plugin(reply.config, reply.runtime_paths, "call-mirror", _call_mirror(seen))
+    runner = _runner(reply)
+
+    await _respond_through_runner(runner, _request(), streaming=streaming)
+
+    content = runner.deps.runtime.client.room_send.await_args.kwargs["content"]
+    trace = content.get("m.new_content", content).get("io.mindroom.tool_trace")
+    shown_previews = [] if trace is None else [event["args_preview"] for event in trace["events"]]
+    preview = "label=a" if show_tool_calls else None
+    assert shown_previews == ([preview] if show_tool_calls else [])
+    assert seen == [("before", show_tool_calls, preview), ("after", show_tool_calls, preview)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_the_runner_tells_a_silent_scheduled_task_s_calls_hooks_that_they_are_hidden(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A silent scheduled task shows no progress and may post no answer, so its calls read as hidden."""
+    seen: list[tuple[str, bool, str | None]] = []
+    reply = _reply(tmp_path, monkeypatch, [calls(tool_call("touch", "call-1", label="a")), answer("Touched.")])
+    publish_hook_plugin(reply.config, reply.runtime_paths, "call-mirror", _call_mirror(seen))
+
+    await _respond_through_runner(_runner(reply), _request(source_kind=SILENT_SCHEDULE_SOURCE_KIND), streaming=False)
+
+    assert seen == [("before", False, None), ("after", False, None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("show_tool_calls", "source_kind", "shown"),
+    [(True, "message", True), (False, "message", False), (True, SILENT_SCHEDULE_SOURCE_KIND, False)],
+)
+async def test_the_runner_tells_a_team_reply_s_calls_hooks_whether_the_reply_shows_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    show_tool_calls: bool,
+    source_kind: str,
+    shown: bool,
+) -> None:
+    """A member's call in a team's reply tells its hooks whether that reply shows it, as the turn's own calls do."""
+    seen: list[tuple[str, bool, str | None]] = []
+    reply = _reply(tmp_path, monkeypatch, [], tools=())
+    reply.config.defaults.show_tool_calls = show_tool_calls
+    publish_hook_plugin(reply.config, reply.runtime_paths, "call-mirror", _call_mirror(seen))
+    runner = _runner(reply)
+    policy = tool_policy(HookRegistry.empty())
+
+    async def touch(**kwargs: object) -> str:
+        return f"touched {kwargs['label']}"
+
+    async def touch_then_answer(*_args: object, **_kwargs: object) -> str:
+        # The member's call runs under the turn's context rebound to the member, as a team runs its members' calls.
+        with member_tool_scope("assistant", "default"):
+            await policy("touch", touch, {"label": "a"})
+        return "Touched."
+
+    with patch_response_runner_module(
+        team_response_stream=streamed_answer(touch_then_answer),
+        should_use_streaming=AsyncMock(return_value=False),
+        apply_post_response_effects=AsyncMock(),
+    ):
+        await runner.generate_team_response_helper(
+            _request(source_kind=source_kind),
+            member_names=["assistant"],
+            team_mode="coordinate",
+        )
+
+    preview = "label=a" if shown else None
+    assert seen == [("before", shown, preview), ("after", shown, preview)]
 
 
 @pytest.mark.asyncio

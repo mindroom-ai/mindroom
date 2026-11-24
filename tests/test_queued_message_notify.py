@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
@@ -15,21 +16,25 @@ from agno.media import Image
 from agno.tools.function import ToolResult
 from structlog.testing import capture_logs
 
+from mindroom import reply_lifecycle as rl
 from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
 from mindroom.agent_loop.run import run_agent
 from mindroom.ai_runtime import queued_message_signal_context, queued_notice_after_tool_batch
 from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.coalescing.batch import (
     CoalescingKey,
+    PreparedTurn,
     RequesterCoalescingOwner,
     active_follow_up_coalescing_key,
     build_prepared_turn,
 )
+from mindroom.coalescing.gate import CoalescingGate, ReadyPendingEvent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.judgment import LLMJudgmentConfig
 from mindroom.config.main import Config
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig
+from mindroom.config.participation import ParticipationConfig
 from mindroom.constants import THREAD_SUMMARY_CONTENT_KEY
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import PreparedIngress
@@ -42,6 +47,7 @@ from mindroom.dispatch_source import (
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
+from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.final_delivery import (
     Cancelled,
     Completed,
@@ -67,7 +73,7 @@ from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget, ResponseLifecycleKey
-from mindroom.mid_turn import QueuedMessage
+from mindroom.mid_turn import MidTurnGate, MidTurnMode, QueuedMessage
 from mindroom.post_response_effects import (
     PostResponseEffectsDeps,
     PostResponseEffectsSupport,
@@ -75,21 +81,30 @@ from mindroom.post_response_effects import (
     apply_post_response_effects,
 )
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
+from mindroom.reply_presentation import Presentation, encode_presentation
 from mindroom.reply_turn.locked_turn import LockedTurns
 from mindroom.reply_turn.request import ResponseRequest
-from mindroom.response_lifecycle import ResponseLifecycleCoordinator, _QueuedMessageState
-from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
+from mindroom.response_admission import ResponseAdmissionRefusedError
+from mindroom.response_lifecycle import ResponseLifecycleCoordinator, _Conversation
+from mindroom.response_payload_preparation import (
+    _STEER_CONTINUATION_LINE,
+    DispatchPayloadInputs,
+    ResponsePayloadPreparation,
+)
 from mindroom.response_runner import ResponseRunner, _PostLockRequestPreparationError
 from mindroom.response_sources import Owned, ResponseSources, SourceFate, Unclaimed, UnclaimedReason
 from mindroom.session_storage.agent_storage import create_agent_state_storage
 from mindroom.session_storage.store import ConversationStore, persist_to
 from mindroom.session_storage.types import ConversationSession, SessionKind
-from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction
+from mindroom.turn_policy import DispatchPlan, PreparedDispatch, ResponseAction, TurnPolicy
+from mindroom.turn_record import TurnRecord
+from mindroom.turn_store import TurnClaim
 from mindroom.turns.dispatch import TurnDispatcher
 from tests.access_schema_support import with_current_room_member_access
 from tests.agent_loop.helpers import collect, context, spec, toolkit
-from tests.bot_helpers import make_test_agent_bot
+from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     TEST_PASSWORD,
     bind_runtime_paths,
     install_model_providers,
@@ -101,6 +116,7 @@ from tests.conftest import (
     make_membership_stub,
     make_pending_event,
     message_origin,
+    patch_response_runner_module,
     request_envelope,
     runtime_paths_for,
     seed_session,
@@ -111,17 +127,20 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
-from tests.response_runner_helpers import streamed_answer
+from tests.response_runner_helpers import _noop_typing, streamed_answer
 from tests.runtime_fakes import ready_runtime
 from tests.turn_dispatch_helpers import dispatch_test_turn, nothing_else_queued, prepared_turn_recorder
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine
+    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
     from pathlib import Path
 
+    from mindroom.ai import ResponseTurnContext
     from mindroom.bot import AgentBot
     from mindroom.delivery_gateway import FinalDeliveryRequest
+    from mindroom.judgment.state import JudgmentRequest
     from mindroom.matrix.conversation_reads import ConversationReader
+    from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.turn_origin import TurnOrigin
 
 
@@ -135,6 +154,12 @@ class _NoopResponseLifecycle:
         **_kwargs: object,
     ) -> FinalDeliveryOutcome:
         return final_delivery_outcome
+
+    async def start_turn(self, **_kwargs: object) -> None:
+        return None
+
+    def turn(self, **_kwargs: object) -> nullcontext[None]:
+        return nullcontext()
 
 
 def _config(tmp_path: Path) -> Config:
@@ -286,7 +311,7 @@ def _reserved_follow_up_case(
     )
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = coordinator.lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal = lifecycle._conversation_for(target)
     queued_signal.begin_response_turn()
     reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
     assert reservation is not None
@@ -318,7 +343,7 @@ async def test_response_lifecycle_rejects_mismatched_locked_response_target() ->
     envelope = _envelope()
     mismatched_target = MessageTarget.resolve("!other:localhost", None, "$event")
 
-    async def locked_operation(_target: MessageTarget) -> SourceFate:
+    async def locked_operation() -> SourceFate:
         return Owned()
 
     with pytest.raises(ValueError, match=r"MessageEnvelope\.target"):
@@ -409,16 +434,22 @@ class _StaticQueuedState:
     def __init__(self, *, pending: bool) -> None:
         self.pending = pending
 
-    def has_pending_human_messages(self) -> bool:
+    def has_interrupting_messages(self) -> bool:
         return self.pending
 
-    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
-        return (QueuedMessage("$pending", None),) if self.has_pending_human_messages() else ()
+    def interrupting_snapshot(self) -> tuple[QueuedMessage, ...]:
+        return (QueuedMessage("$pending", None),) if self.pending else ()
+
+    def queued_snapshot(self) -> tuple[QueuedMessage, ...]:
+        return ()
+
+    def requester_steer_snapshot(self) -> tuple[QueuedMessage, ...]:
+        return ()
 
 
 def test_queued_message_state_tracks_source_event_ids_idempotently() -> None:
     """Queued-message state should track distinct source events, not anonymous increments."""
-    state = _QueuedMessageState()
+    state = _Conversation()
 
     assert state.add_waiting_human_message("$event")
     assert not state.add_waiting_human_message("$event")
@@ -896,12 +927,62 @@ async def _run_queued_summary(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("thread_summary_baselines")
+async def test_retitling_a_thread_summarizes_it_now_counting_the_message_just_posted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A thread titled again after a post is summarized at once, far short of its threshold, with the posted text in it."""
+    model = ScriptedModel([answer('{"title": "Launch plan call"}')])
+    install_model_providers(monkeypatch, {"default": model})
+    config = _config(tmp_path)
+    config.defaults.thread_summary_first_threshold = 50
+    runtime_paths = runtime_paths_for(config)
+    client = make_matrix_client_mock()
+    client.room_send.return_value = nio.RoomSendResponse(event_id="$summary", room_id="!room:localhost")
+    conversation_reader = make_conversation_reader_mock()
+    support = PostResponseEffectsSupport(
+        runtime=BotRuntimeState(orchestrator=ready_runtime(config, runtime_paths), client=client),
+        logger=MagicMock(),
+        runtime_paths=runtime_paths,
+        conversation_reader=conversation_reader,
+        membership=make_membership_stub(),
+        agent_name="router",
+    )
+    row = ResolvedVisibleMessage.synthetic(
+        sender=client.user_id,
+        body="Call ended · 2 min",
+        timestamp=1,
+        event_id="$thread",
+    )
+    serve_conversation_reader(conversation_reader, [row])
+    tasks: list[asyncio.Task[None]] = []
+
+    with patch(
+        "mindroom.post_response_effects.create_background_task",
+        side_effect=lambda coro, **_: tasks.append(asyncio.create_task(coro)),
+    ):
+        support.retitle_thread("!room:localhost", "$thread", event_id="$notes", body="We planned the launch.")
+        await asyncio.gather(*tasks)
+
+    (request,) = model.requests
+    assert summarized_lines(request) == [
+        f"{client.user_id}: Call ended · 2 min",
+        f"{client.user_id}: We planned the launch.",
+    ]
+    (sent,) = [call.kwargs["content"] for call in client.room_send.await_args_list]
+    assert sent["body"] == "Launch plan call"
+    assert sent["m.relates_to"]["event_id"] == "$thread"
+    assert sent[THREAD_SUMMARY_CONTENT_KEY]["message_count"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("thread_summary_baselines")
 async def test_post_response_effects_queues_summary_with_stale_hint_inside_margin(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A stale hint just below threshold should still reach the live summary check."""
-    model = ScriptedModel([answer('{"summary": "Summary"}')])
+    model = ScriptedModel([answer('{"title": "Summary"}')])
     install_model_providers(monkeypatch, {"default": model})
     config = _config(tmp_path)
     config.defaults.thread_summary_first_threshold = 5
@@ -944,7 +1025,7 @@ async def test_post_response_effects_queues_summary_with_entity_model_for_adhoc_
 ) -> None:
     """Ad-hoc invited rooms should inherit the responding entity's summary model override."""
     # Only "qwen" is served, so summarizing with the default model would fail to build it.
-    model = ScriptedModel([answer('{"summary": "Summary"}')])
+    model = ScriptedModel([answer('{"title": "Summary"}')])
     install_model_providers(monkeypatch, {"qwen": model})
     config = _config(tmp_path)
     config.defaults.thread_summary_first_threshold = 1
@@ -969,8 +1050,9 @@ async def test_generate_response_sets_queued_signal_for_human_ingress(tmp_path: 
     response_target = response_envelope.target
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = coordinator.lifecycle_coordinator
-    lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
-    queued_signal = lifecycle._get_or_create_queued_signal(response_target)
+    lifecycle_lock = lifecycle._conversation_for(response_target).lock
+    queued_signal = lifecycle._conversation_for(response_target)
+    queued_signal.begin_response_turn()
     await lifecycle_lock.acquire()
 
     try:
@@ -984,13 +1066,14 @@ async def test_generate_response_sets_queued_signal_for_human_ingress(tmp_path: 
                     _request(response_envelope),
                 ),
             )
-            await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
+            await asyncio.wait_for(queued_signal.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             lifecycle_lock.release()
             assert await task == Owned()
             mock_locked.assert_awaited_once()
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
+        queued_signal.finish_response_turn()
 
     assert not queued_signal.has_pending_human_messages()
 
@@ -1027,8 +1110,9 @@ async def test_generate_response_skips_signal_for_non_human_prompt_ingress(
     response_target = response_envelope.target
     coordinator = unwrap_extracted_collaborator(bot._turn_ingress.deps.response_runner)
     lifecycle = coordinator.lifecycle_coordinator
-    lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
-    queued_signal = lifecycle._get_or_create_queued_signal(response_target)
+    lifecycle_lock = lifecycle._conversation_for(response_target).lock
+    queued_signal = lifecycle._conversation_for(response_target)
+    queued_signal.begin_response_turn()
     await lifecycle_lock.acquire()
 
     try:
@@ -1049,8 +1133,100 @@ async def test_generate_response_skips_signal_for_non_human_prompt_ingress(
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
+        queued_signal.finish_response_turn()
 
     assert not queued_signal.has_pending_human_messages()
+
+
+@pytest.mark.asyncio
+async def test_replay_of_a_message_a_restart_cut_short_is_not_a_newer_message(tmp_path: Path) -> None:
+    """A restart replays the message whose reply it cut short; the turn that holds its thread meanwhile is not told."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = runner.lifecycle_coordinator
+    replayed = _envelope(source_event_id="$replayed")
+    live = _envelope(source_event_id="$live")
+    target = replayed.target
+    # An older instance was answering $replayed, still pending in the journal, when it stopped.
+    principal = bot.journal_principal()
+    await principal.admit(
+        InboundEvent(
+            event_id="$replayed",
+            room_id=target.room_id,
+            thread_id=target.resolved_thread_id,
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=1,
+            source={"event_id": "$replayed", "content": {"body": "hello"}},
+        ),
+    )
+    await principal.replies.write_generation("gen-old")
+    claimed = await principal.replies.claim(
+        rl.ClaimRequest(
+            span_id="span-1",
+            delivery_id="$replayed",
+            sources=ResponseSources(("$replayed",), ("$replayed",)),
+            bot_generation="gen-old",
+            now_ns=10,
+            new_reply_id="reply-1",
+            entity_name="general",
+            room_id=target.room_id,
+            thread_id=target.resolved_thread_id,
+            membership_epoch=0,
+            empty_presentation=encode_presentation(Presentation()),
+        ),
+    )
+    assert claimed.transition.reply is not None
+    await bot._take_over_replies()
+    # A second takeover before replay reclaims the reply, as a retried start does, still knows it continues.
+    await bot._take_over_replies()
+    assert lifecycle.continued_sources == frozenset({"$replayed"})
+
+    lifecycle_lock = lifecycle._conversation_for(target).lock
+    queued_signal = lifecycle._conversation_for(target)
+    # Another turn, such as the follow-up for the jobs the restart ended, holds the conversation.
+    queued_signal.begin_response_turn()
+    await lifecycle_lock.acquire()
+    try:
+        # Ingress: a live message is news, the replay is not.
+        notice = runner.lifecycle_coordinator.reserve_waiting_human_message(target=target, response_envelope=live)
+        assert notice is not None
+        notice.release()
+        assert (
+            runner.lifecycle_coordinator.reserve_waiting_human_message(target=target, response_envelope=replayed)
+            is None
+        )
+        # An interactive selection's reservation.
+        selection = await runner.lifecycle_coordinator.reserve_response_lifecycle(replayed)
+        assert queued_signal.pending_message_snapshot() == ()
+        await selection.release()
+        # Turn start: the replay waits for the lock unannounced.
+        waiting_for_lock = asyncio.Event()
+        acquire_lock = lifecycle_lock.acquire
+
+        async def acquire_after_notice_decision() -> bool:
+            waiting_for_lock.set()
+            return await acquire_lock()
+
+        with (
+            patch.object(ResponseRunner, "_run_locked_turn", new=AsyncMock(return_value=Owned())),
+            patch.object(lifecycle_lock, "acquire", new=acquire_after_notice_decision),
+        ):
+            task = asyncio.create_task(bot._response_runner.generate_response(_request(replayed)))
+            await asyncio.wait_for(waiting_for_lock.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+            assert queued_signal.pending_message_snapshot() == ()
+            lifecycle_lock.release()
+            assert await task == Owned()
+        # Once its sender edits the replay again, it carries something new.
+        runner.lifecycle_coordinator.note_edited_source("$replayed")
+        edited = runner.lifecycle_coordinator.reserve_waiting_human_message(target=target, response_envelope=replayed)
+        assert edited is not None
+        edited.release()
+    finally:
+        if lifecycle_lock.locked():
+            lifecycle_lock.release()
+        queued_signal.finish_response_turn()
 
 
 @pytest.mark.asyncio
@@ -1118,8 +1294,9 @@ async def test_generate_response_sets_queued_signal_for_trusted_router_relay(tmp
     response_target = response_envelope.target
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = coordinator.lifecycle_coordinator
-    lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
-    queued_signal = lifecycle._get_or_create_queued_signal(response_target)
+    lifecycle_lock = lifecycle._conversation_for(response_target).lock
+    queued_signal = lifecycle._conversation_for(response_target)
+    queued_signal.begin_response_turn()
     await lifecycle_lock.acquire()
 
     try:
@@ -1133,12 +1310,13 @@ async def test_generate_response_sets_queued_signal_for_trusted_router_relay(tmp
                     _request(response_envelope),
                 ),
             )
-            await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
+            await asyncio.wait_for(queued_signal.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             lifecycle_lock.release()
             assert await task == Owned()
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
+        queued_signal.finish_response_turn()
 
     assert not queued_signal.has_pending_human_messages()
 
@@ -1160,8 +1338,9 @@ async def test_generate_response_detects_active_turn_before_lock_is_held(tmp_pat
         # Each requester's turn returns a fate of its own, so each task is seen to run its own request.
         return Owned() if request.user_id == "first" else Unclaimed(UnclaimedReason.NOT_DUE)
 
+    conversation = coordinator.lifecycle_coordinator._conversation_for(first_envelope.target)
     with (
-        patch.object(coordinator.lifecycle_coordinator, "_response_lifecycle_lock", return_value=lock),
+        patch.object(conversation, "lock", lock),
         patch.object(ResponseRunner, "_run_locked_turn", new=fake_run_locked_turn),
     ):
         first_task = asyncio.create_task(
@@ -1192,7 +1371,9 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
     response_envelope = _envelope(source_kind=SCHEDULED_SOURCE_KIND)
     response_target = response_envelope.target
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    lifecycle_lock = coordinator.lifecycle_coordinator._response_lifecycle_lock(response_target)
+    queued_signal = coordinator.lifecycle_coordinator._conversation_for(response_target)
+    lifecycle_lock = queued_signal.lock
+    queued_signal.begin_response_turn()
     await lifecycle_lock.acquire()
     lifecycle_started = asyncio.Event()
     # Both handoffs this test observes are causal, not timed: the turn is known
@@ -1253,6 +1434,7 @@ async def test_generate_response_waits_for_lock_before_starting_placeholder_life
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
+        queued_signal.finish_response_turn()
 
 
 @pytest.mark.asyncio
@@ -1293,6 +1475,7 @@ async def test_refresh_model_history_after_lock_refreshes_empty_thread_history(t
     mock_fetch_thread_history.assert_awaited_once_with(
         "!room:localhost",
         "$thread",
+        requester_id="@user:localhost",
     )
     assert request.thread_history == fresh_history
 
@@ -1374,7 +1557,7 @@ async def test_generate_response_keeps_room_target_through_run_and_delivery(tmp_
     assert result == Owned()
     assert [target.resolved_thread_id for target in observed_run_targets] == [None]
     assert [target.resolved_thread_id for target in observed_delivery_targets] == [None]
-    lock_keys = set(coordinator.lifecycle_coordinator._response_lifecycle_locks)
+    lock_keys = set(coordinator.lifecycle_coordinator._conversations)
     assert ResponseLifecycleKey(room_id="!room:localhost", thread_id=None) in lock_keys
 
 
@@ -1437,9 +1620,83 @@ async def test_generate_response_keeps_locked_target_when_payload_preparation_re
     assert observed_run_targets == [stable_target]
     assert observed_delivery_targets == [stable_target]
     assert observed_lifecycle_targets == [stable_target]
-    lock_keys = set(coordinator.lifecycle_coordinator._response_lifecycle_locks)
+    lock_keys = set(coordinator.lifecycle_coordinator._conversations)
     assert ResponseLifecycleKey(room_id="!room:localhost", thread_id=None) in lock_keys
     assert ResponseLifecycleKey(room_id="!room:localhost", thread_id="$other_thread") not in lock_keys
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("returned_by", ["payload_preparation", "message_enrichment"])
+async def test_generate_response_answers_the_locked_event_when_preparation_returns_another_target(
+    tmp_path: Path,
+    returned_by: str,
+) -> None:
+    """A prepared envelope that answers another event, in the same conversation or not, never moves the reply."""
+    bot = _bot(tmp_path)
+    coordinator = unwrap_extracted_collaborator(bot._response_runner)
+    locked_target = MessageTarget.resolve("!room:localhost", None, "$event", room_mode=True)
+    if returned_by == "payload_preparation":
+        # The same conversation lock, another event to answer.
+        other_target = MessageTarget.resolve("!room:localhost", None, "$other_event", room_mode=True)
+        assert other_target.lifecycle_key == locked_target.lifecycle_key
+        payload_preparation = _payload_preparation(locked_target)
+    else:
+        # The message:enrich pass returns its dispatch's envelope, here one that was aimed at another thread.
+        other_target = MessageTarget.resolve("!room:localhost", "$other_thread", "$event")
+        payload_preparation = _payload_preparation(other_target)
+    prepared_targets: list[MessageTarget] = []
+    observed_run_targets: list[MessageTarget] = []
+    observed_delivery_targets: list[MessageTarget] = []
+    observed_lifecycle_targets: list[MessageTarget] = []
+    prepare = coordinator.deps.request_preparer.prepare
+
+    async def recording_prepare(request: ResponseRequest) -> ResponseRequest:
+        if returned_by == "payload_preparation":
+            envelope = _envelope(source_event_id="$event", target=other_target)
+            prepared = replace(request, response_envelope=envelope, payload_preparation=None)
+        else:
+            prepared = await prepare(request)
+        prepared_targets.append(prepared.response_envelope.target)
+        return prepared
+
+    async def fake_deliver_turn(turn: object, **_kwargs: object) -> FinalDeliveryOutcome:
+        observed_delivery_targets.append(cast("Any", turn).request.response_envelope.target)
+        return FinalDeliveryOutcome(
+            ending=Completed(),
+            event_id="$response",
+            is_visible_response=True,
+            final_visible_body="ok",
+            delivery_kind="sent",
+        )
+
+    def fake_build_lifecycle(request: object, **_kwargs: object) -> _NoopResponseLifecycle:
+        assert isinstance(request, ResponseRequest)
+        observed_lifecycle_targets.append(request.response_envelope.target)
+        return _NoopResponseLifecycle()
+
+    with (
+        patch.object(LockedTurns, "build_lifecycle", MagicMock(side_effect=fake_build_lifecycle)),
+        patch.object(coordinator.deps.request_preparer, "prepare", new=recording_prepare),
+        patch.object(
+            LockedTurns,
+            "_run_cancellable_response",
+            new=AsyncMock(side_effect=_recording_run_targets(observed_run_targets)),
+        ),
+        patch.object(coordinator, "_deliver_turn", new=AsyncMock(side_effect=fake_deliver_turn)),
+        patch("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=False)),
+    ):
+        result = await coordinator.generate_response(
+            _request(
+                _envelope(source_event_id="$event", target=locked_target),
+                payload_preparation=payload_preparation,
+            ),
+        )
+
+    assert result == Owned()
+    assert prepared_targets == [other_target]
+    assert observed_run_targets == [locked_target]
+    assert observed_delivery_targets == [locked_target]
+    assert observed_lifecycle_targets == [locked_target]
 
 
 @pytest.mark.asyncio
@@ -1490,7 +1747,7 @@ async def test_generate_team_response_keeps_room_target_through_run_and_delivery
     assert result == Owned()
     assert [target.resolved_thread_id for target in observed_run_targets] == [None]
     assert [target.resolved_thread_id for target in observed_delivery_targets] == [None]
-    lock_keys = set(coordinator.lifecycle_coordinator._response_lifecycle_locks)
+    lock_keys = set(coordinator.lifecycle_coordinator._conversations)
     assert ResponseLifecycleKey(room_id="!room:localhost", thread_id=None) in lock_keys
 
 
@@ -1558,7 +1815,7 @@ async def test_generate_team_response_keeps_locked_target_when_payload_preparati
     assert result == Owned()
     assert observed_run_targets == [stable_target]
     assert observed_delivery_targets == [stable_target]
-    lock_keys = set(coordinator.lifecycle_coordinator._response_lifecycle_locks)
+    lock_keys = set(coordinator.lifecycle_coordinator._conversations)
     assert ResponseLifecycleKey(room_id="!room:localhost", thread_id=None) in lock_keys
     assert ResponseLifecycleKey(room_id="!room:localhost", thread_id="$other_thread") not in lock_keys
 
@@ -1602,8 +1859,9 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
     response_target = response_envelope.target
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = coordinator.lifecycle_coordinator
-    lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
-    queued_signal = lifecycle._get_or_create_queued_signal(response_target)
+    lifecycle_lock = lifecycle._conversation_for(response_target).lock
+    queued_signal = lifecycle._conversation_for(response_target)
+    queued_signal.begin_response_turn()
     await lifecycle_lock.acquire()
 
     try:
@@ -1619,13 +1877,14 @@ async def test_generate_team_response_helper_sets_queued_signal(tmp_path: Path) 
                     team_mode="coordinate",
                 ),
             )
-            await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
+            await asyncio.wait_for(queued_signal.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             lifecycle_lock.release()
             assert await task == Owned()
             mock_locked.assert_awaited_once()
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
+        queued_signal.finish_response_turn()
 
     assert not queued_signal.has_pending_human_messages()
 
@@ -1640,8 +1899,8 @@ async def test_response_without_reservation_does_not_drain_human_backlog(tmp_pat
     response_target = response_envelope_b.target
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = coordinator.lifecycle_coordinator
-    lifecycle_lock = lifecycle._response_lifecycle_lock(response_target)
-    queued_signal = lifecycle._get_or_create_queued_signal(response_target)
+    lifecycle_lock = lifecycle._conversation_for(response_target).lock
+    queued_signal = lifecycle._conversation_for(response_target)
     observed_pending: list[bool] = []
     ran_sources: list[str] = []
     second_turn_started = asyncio.Event()
@@ -1664,11 +1923,12 @@ async def test_response_without_reservation_does_not_drain_human_backlog(tmp_pat
             )
         return await bot._response_runner.generate_response(request)
 
+    queued_signal.begin_response_turn()
     await lifecycle_lock.acquire()
     try:
         with patch.object(ResponseRunner, "_run_locked_turn", new=fake_locked):
             task_b = asyncio.create_task(respond(_request(response_envelope_b)))
-            await asyncio.wait_for(queued_signal.wait(), timeout=0.2)
+            await asyncio.wait_for(queued_signal.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             task_c = asyncio.create_task(respond(_request(response_envelope_c, prompt="hello again")))
             for _ in range(20):
                 if queued_signal.pending_human_messages == 2:
@@ -1677,7 +1937,7 @@ async def test_response_without_reservation_does_not_drain_human_backlog(tmp_pat
             assert queued_signal.pending_human_messages == 2
 
             lifecycle_lock.release()
-            await asyncio.wait_for(second_turn_started.wait(), timeout=0.2)
+            await asyncio.wait_for(second_turn_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
             assert observed_pending == [True]
 
             allow_turns_to_finish.set()
@@ -1686,6 +1946,7 @@ async def test_response_without_reservation_does_not_drain_human_backlog(tmp_pat
     finally:
         if lifecycle_lock.locked():
             lifecycle_lock.release()
+        queued_signal.finish_response_turn()
 
     assert observed_pending == [True, False]
     assert ran_sources == [response_envelope_b.source_event_id, response_envelope_c.source_event_id]
@@ -1701,13 +1962,13 @@ async def test_reserved_human_follow_up_reaches_active_turn_before_dispatch(tmp_
     response_target = active_envelope.target
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = coordinator.lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(response_target)
+    queued_signal = lifecycle._conversation_for(response_target)
     active_started = asyncio.Event()
     active_saw_follow_up = asyncio.Event()
     allow_active_to_finish = asyncio.Event()
     follow_up_observed_pending: list[bool] = []
 
-    async def active_operation(_target: MessageTarget) -> str:
+    async def active_operation() -> str:
         active_started.set()
         await queued_signal.wait()
         if queued_signal.has_pending_human_messages():
@@ -1715,7 +1976,7 @@ async def test_reserved_human_follow_up_reaches_active_turn_before_dispatch(tmp_
         await allow_active_to_finish.wait()
         return "$active-response"
 
-    async def follow_up_operation(_target: MessageTarget) -> str:
+    async def follow_up_operation() -> str:
         follow_up_observed_pending.append(queued_signal.has_pending_human_messages())
         return "$followup-response"
 
@@ -1727,14 +1988,14 @@ async def test_reserved_human_follow_up_reaches_active_turn_before_dispatch(tmp_
             locked_operation=active_operation,
         ),
     )
-    await asyncio.wait_for(active_started.wait(), timeout=0.2)
+    await asyncio.wait_for(active_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
     reservation = lifecycle.reserve_waiting_human_message(
         target=response_target,
         response_envelope=follow_up_envelope,
     )
     assert reservation is not None
-    await asyncio.wait_for(active_saw_follow_up.wait(), timeout=0.2)
+    await asyncio.wait_for(active_saw_follow_up.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     assert queued_signal.pending_human_messages == 1
     reservation.release()
 
@@ -1769,12 +2030,12 @@ async def test_response_lifecycle_reservations_clear_individual_notices(tmp_path
     release_active = asyncio.Event()
     follow_up_calls: list[str] = []
 
-    async def active_operation(_target: MessageTarget) -> str:
+    async def active_operation() -> str:
         active_started.set()
         await release_active.wait()
         return "$active-response"
 
-    async def follow_up_operation(source_event_id: str, _target: MessageTarget) -> str:
+    async def follow_up_operation(source_event_id: str) -> str:
         follow_up_calls.append(source_event_id)
         return f"$response-{source_event_id}"
 
@@ -1786,7 +2047,7 @@ async def test_response_lifecycle_reservations_clear_individual_notices(tmp_path
             locked_operation=active_operation,
         ),
     )
-    await asyncio.wait_for(active_started.wait(), timeout=0.2)
+    await asyncio.wait_for(active_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
     queued_items = []
     for source_event_id, sender_id in (
@@ -1813,10 +2074,7 @@ async def test_response_lifecycle_reservations_clear_individual_notices(tmp_path
                 target=target,
                 response_envelope=envelope,
                 pipeline_timing=None,
-                locked_operation=lambda locked_target, source_event_id=source_event_id: follow_up_operation(
-                    source_event_id,
-                    locked_target,
-                ),
+                locked_operation=lambda source_event_id=source_event_id: follow_up_operation(source_event_id),
             ),
         )
         for source_event_id, envelope, reservation in queued_items
@@ -1857,20 +2115,20 @@ async def test_non_human_lock_owner_does_not_clear_pending_human_notice(tmp_path
     observed_scheduled_pending: list[set[str]] = []
     observed_human_pending: list[set[str]] = []
 
-    async def active_operation(_target: MessageTarget) -> str:
+    async def active_operation() -> str:
         active_started.set()
         await release_active.wait()
         return "$active-response"
 
-    async def scheduled_operation(_target: MessageTarget) -> str:
+    async def scheduled_operation() -> str:
         observed_scheduled_pending.append(
-            {message.event_id for message in lifecycle._get_or_create_queued_signal(target).pending_message_snapshot()},
+            {message.event_id for message in lifecycle._conversation_for(target).pending_message_snapshot()},
         )
         return "$scheduled-response"
 
-    async def human_operation(_target: MessageTarget) -> str:
+    async def human_operation() -> str:
         observed_human_pending.append(
-            {message.event_id for message in lifecycle._get_or_create_queued_signal(target).pending_message_snapshot()},
+            {message.event_id for message in lifecycle._conversation_for(target).pending_message_snapshot()},
         )
         return "$human-response"
 
@@ -1882,7 +2140,7 @@ async def test_non_human_lock_owner_does_not_clear_pending_human_notice(tmp_path
             locked_operation=active_operation,
         ),
     )
-    await asyncio.wait_for(active_started.wait(), timeout=0.2)
+    await asyncio.wait_for(active_started.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
 
     human_reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=human_envelope)
     assert human_reservation is not None
@@ -1900,9 +2158,9 @@ async def test_non_human_lock_owner_does_not_clear_pending_human_notice(tmp_path
     assert await active_task == "$active-response"
     assert await scheduled_task == "$scheduled-response"
     assert observed_scheduled_pending == [{"$human"}]
-    assert {
-        message.event_id for message in lifecycle._get_or_create_queued_signal(target).pending_message_snapshot()
-    } == {"$human"}
+    assert {message.event_id for message in lifecycle._conversation_for(target).pending_message_snapshot()} == {
+        "$human",
+    }
     human_reservation.release()
 
     assert (
@@ -1932,6 +2190,7 @@ async def test_reserved_command_follow_up_cleanup_when_dispatch_returns(tmp_path
                 new=AsyncMock(return_value=case.dispatch),
             ),
             patch("mindroom.turn_policy.TurnPolicy.plan_turn", new=AsyncMock()) as mock_plan_turn,
+            patch("mindroom.turn_policy.TurnPolicy.aims_command_at_me", new=AsyncMock(return_value=False)),
         ):
             await dispatch_test_turn(
                 bot._turn_dispatcher,
@@ -2052,9 +2311,13 @@ async def test_reserved_follow_up_cleanup_when_route_returns_before_response(tmp
             ),
             patch(
                 "mindroom.turn_policy.TurnPolicy.plan_turn",
-                new=AsyncMock(return_value=DispatchPlan(kind="route", router_message="route this")),
+                new=AsyncMock(return_value=DispatchPlan(kind="route")),
             ),
-            patch("mindroom.turns.dispatch.execute_router_relay", new_callable=AsyncMock) as mock_route,
+            patch(
+                "mindroom.turns.dispatch.execute_router_relay",
+                new_callable=AsyncMock,
+                return_value=False,
+            ) as mock_route,
         ):
             await dispatch_test_turn(
                 bot._turn_dispatcher,
@@ -2170,7 +2433,7 @@ async def test_reserved_follow_up_cleanup_when_prepare_dispatch_raises(tmp_path:
     event = _prepared_text_event(event_id="$prepare")
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = coordinator.lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal = lifecycle._conversation_for(target)
     queued_signal.begin_response_turn()
     try:
         reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
@@ -2213,7 +2476,7 @@ async def test_reserved_follow_up_cleanup_when_handle_prepared_turn_fails_before
     event = _prepared_text_event(event_id="$handoff")
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = coordinator.lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal = lifecycle._conversation_for(target)
     queued_signal.begin_response_turn()
     try:
         reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
@@ -2248,7 +2511,7 @@ async def test_reserved_follow_up_cleanup_when_handle_prepared_turn_fails_before
 
 @pytest.mark.asyncio
 async def test_coalesced_batch_consumes_queued_notice_for_batch_thread(tmp_path: Path) -> None:
-    """A mixed batch should consume the notices for its single coalescing target before dispatch."""
+    """A mixed batch holds its notices across pre-lock dispatch and releases them on early exit."""
     bot = _bot(tmp_path)
     room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
     pre_target = MessageTarget.resolve(room.room_id, "$pre_stt_thread", "$typed")
@@ -2266,8 +2529,8 @@ async def test_coalesced_batch_consumes_queued_notice_for_batch_thread(tmp_path:
     )
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = coordinator.lifecycle_coordinator
-    pre_signal = lifecycle._get_or_create_queued_signal(pre_target)
-    post_signal = lifecycle._get_or_create_queued_signal(post_target)
+    pre_signal = lifecycle._conversation_for(pre_target)
+    post_signal = lifecycle._conversation_for(post_target)
     typed_event = _prepared_text_event(event_id="$typed")
     voice_event = replace(
         _prepared_text_event(event_id="$voice"),
@@ -2278,8 +2541,8 @@ async def test_coalesced_batch_consumes_queued_notice_for_batch_thread(tmp_path:
 
     async def capture_dispatch(*_args: object, **kwargs: object) -> None:
         del kwargs
-        assert pre_signal.pending_human_messages == 0
-        assert post_signal.pending_human_messages == 0
+        assert pre_signal.pending_human_messages == 1
+        assert post_signal.pending_human_messages == 1
         captured_dispatches.append("dispatched")
 
     pre_signal.begin_response_turn()
@@ -2327,7 +2590,7 @@ async def test_coalesced_batch_consumes_queued_notice_for_batch_thread(tmp_path:
 
 @pytest.mark.asyncio
 async def test_room_scoped_root_voice_consumes_final_target_queued_notice(tmp_path: Path) -> None:
-    """A room-scoped voice root should consume the notice for its final target root before dispatch."""
+    """A room-scoped voice root holds its notice across pre-lock dispatch and releases it on early exit."""
     bot = _bot(tmp_path)
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!room:localhost"
@@ -2351,12 +2614,12 @@ async def test_room_scoped_root_voice_consumes_final_target_queued_notice(tmp_pa
     )
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = coordinator.lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal = lifecycle._conversation_for(target)
     captured_dispatches: list[str] = []
 
     async def capture_dispatch(*_args: object, **kwargs: object) -> None:
         del kwargs
-        assert queued_signal.pending_human_messages == 0
+        assert queued_signal.pending_human_messages == 1
         captured_dispatches.append("dispatched")
 
     queued_signal.begin_response_turn()
@@ -2402,7 +2665,7 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
     event = _prepared_text_event(event_id="$cancelled")
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = coordinator.lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal = lifecycle._conversation_for(target)
     queued_signal.begin_response_turn()
     reserved_before_enqueue: list[int] = []
 
@@ -2421,7 +2684,6 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
                     room,
                     event,
                     facts=make_ingress_facts(event.sender),
-                    target=target,
                     envelope=envelope,
                     coalescing_thread_id="$thread",
                     ticket=ticket,
@@ -2437,6 +2699,47 @@ async def test_active_follow_up_reservation_cancelled_when_enqueue_is_cancelled(
     assert not queued_signal.has_pending_human_messages()
 
 
+def test_real_queued_notice_helper_forwards_mode_through_runner(tmp_path: Path) -> None:
+    """Ingress's helper hands the message's mode through the runner to the waiting entry; idle ingress waits for nothing."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$queued")
+    envelope = _envelope(source_event_id="$queued", target=target)
+    queued_signal = runner.lifecycle_coordinator._conversation_for(target)
+
+    assert (
+        runner.lifecycle_coordinator.reserve_waiting_human_message(
+            target=target,
+            response_envelope=envelope,
+            mode=MidTurnMode.QUEUE,
+        )
+        is None
+    )
+    assert queued_signal.pending_message_snapshot() == ()
+
+    queued_signal.begin_response_turn()
+    try:
+        reservation = runner.lifecycle_coordinator.reserve_waiting_human_message(
+            target=target,
+            response_envelope=envelope,
+            mode=MidTurnMode.QUEUE,
+        )
+        assert reservation is not None
+        # A caller that names no mode, as voice and other content-less ingress, keeps Auto.
+        later_target = MessageTarget.resolve("!room:localhost", "$thread", "$later")
+        later = replace(envelope, source_event_id="$later", target=later_target)
+        assert (
+            runner.lifecycle_coordinator.reserve_waiting_human_message(target=later.target, response_envelope=later)
+            is not None
+        )
+        assert [(message.event_id, message.mode) for message in queued_signal.pending_message_snapshot()] == [
+            ("$queued", MidTurnMode.QUEUE),
+            ("$later", MidTurnMode.AUTO),
+        ]
+    finally:
+        queued_signal.finish_response_turn()
+
+
 def test_queued_human_reservation_is_idempotent() -> None:
     """Reservation consume/cancel operations should clear the notice at most once."""
     target = MessageTarget.resolve("!room:localhost", "$thread", "$event")
@@ -2446,7 +2749,7 @@ def test_queued_human_reservation_is_idempotent() -> None:
         target=target,
     )
     lifecycle = ResponseLifecycleCoordinator()
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal = lifecycle._conversation_for(target)
     queued_signal.begin_response_turn()
     try:
         reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
@@ -2484,7 +2787,7 @@ def test_managed_message_does_not_reserve_queued_human_notice() -> None:
         ),
     )
     lifecycle = ResponseLifecycleCoordinator()
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal = lifecycle._conversation_for(target)
     queued_signal.begin_response_turn()
     try:
         reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
@@ -2506,17 +2809,17 @@ async def test_lifecycle_notice_is_cancelled_when_lock_wait_is_cancelled() -> No
         target=target,
     )
     lifecycle = ResponseLifecycleCoordinator()
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal = lifecycle._conversation_for(target)
     queued_signal.begin_response_turn()
     reservation = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope)
     assert reservation is not None
     assert queued_signal.pending_human_messages == 1
     reservation.release()
 
-    lock = lifecycle._response_lifecycle_lock(target)
+    lock = lifecycle._conversation_for(target).lock
     await lock.acquire()
 
-    async def locked_operation(_target: MessageTarget) -> SourceFate:
+    async def locked_operation() -> SourceFate:
         msg = "lock wait should be cancelled before the operation runs"
         raise AssertionError(msg)
 
@@ -2582,7 +2885,7 @@ async def test_coalesced_dispatch_never_creates_queued_signal(tmp_path: Path) ->
     assert not await bot._turn_store.is_handled(room.room_id, "$older")
     mock_plan.assert_not_awaited()
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
-    assert coordinator.lifecycle_coordinator._thread_queued_signals == {}
+    assert coordinator.lifecycle_coordinator._conversations == {}
 
 
 @pytest.mark.asyncio
@@ -2777,8 +3080,8 @@ async def _persist_notice_bearing_response(tmp_path: Path) -> str:
     envelope = _envelope(source_event_id="$event-1", target=target)
     response_1_ids: list[str] = []
 
-    async def response_1_operation(_target: MessageTarget) -> str:
-        lifecycle._get_or_create_queued_signal(target).add_waiting_human_message("$newer")
+    async def response_1_operation() -> str:
+        lifecycle._conversation_for(target).add_waiting_human_message("$newer")
         messages = [OwnedMessage(role="user", content="First request")]
         await _after_batch(messages, OwnedMessage(role="tool", content="First tool result"))
         notices = _notice_messages(messages)
@@ -2935,7 +3238,7 @@ async def test_response_runner_binds_agent_mid_turn_judge(  # noqa: PLR0915
 
     def queue_followup() -> str:
         """Queue a follow-up while the turn works."""
-        reservation = runner.reserve_waiting_human_message(
+        reservation = runner.lifecycle_coordinator.reserve_waiting_human_message(
             target=envelope.target,
             response_envelope=replace(envelope, source_event_id="$queued", body="Thanks"),
         )
@@ -2946,7 +3249,7 @@ async def test_response_runner_binds_agent_mid_turn_judge(  # noqa: PLR0915
 
     model = ScriptedModel([calls(tool_call("queue_followup", "call")), answer("Done")])
 
-    async def locked_operation(_target: MessageTarget) -> SourceFate:
+    async def locked_operation() -> SourceFate:
         await runner._prepare_request_after_lock(replace(request, payload_preparation=None))
         note_progress("I have located the requested file")
         await collect(
@@ -2996,3 +3299,1051 @@ async def test_response_runner_binds_agent_mid_turn_judge(  # noqa: PLR0915
     finally:
         for reservation in reservations:
             reservation.release()
+
+
+async def _judge_a_completed_batch() -> None:
+    """Run the judgment the running reply makes after a completed tool batch, which must tell it to wrap up."""
+    batch = [
+        OwnedMessage(role="user", content="Do the task"),
+        OwnedMessage(
+            role="assistant",
+            tool_calls=[{"id": "call", "type": "function", "function": {"name": "read", "arguments": "{}"}}],
+        ),
+        OwnedMessage(role="tool", content="Result", tool_call_id="call", tool_name="read"),
+    ]
+    await queued_notice_after_tool_batch(QUEUED_MESSAGE_NOTICE_TEXT)(batch, ())
+    assert is_queued_notice_message(batch[-1])
+
+
+@pytest.mark.asyncio
+async def test_explicit_steer_mark_survives_notice_release_and_edit_but_auto_verdict_does_not() -> None:  # noqa: PLR0915
+    """A requester's Steer keeps its bypass through release and edits; a judge's verdict covers only the text it read.
+
+    The kept reason belongs to the follow-up alone: another requester's later reply is not interrupted by it.
+    """
+    lifecycle = ResponseLifecycleCoordinator()
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$active")
+    queue = lifecycle._conversation_for(target)
+    alice, bob = "@alice:localhost", "@bob:localhost"
+    started, judge, judged, finish = asyncio.Event(), asyncio.Event(), asyncio.Event(), asyncio.Event()
+    attempted = {event_id: asyncio.Event() for event_id in ("$kept", "$later")}
+
+    def envelope(event_id: str, requester: str, body: str = "hello") -> MessageEnvelope:
+        return replace(
+            _envelope(source_event_id=event_id, target=target, requester_id=requester, sender_id=requester),
+            body=body,
+        )
+
+    def reserve(event_id: str, requester: str, mode: MidTurnMode) -> QueuedHumanNoticeReservation:
+        notice = lifecycle.reserve_waiting_human_message(
+            target=target,
+            response_envelope=envelope(event_id, requester, f"Message {event_id}"),
+            mode=mode,
+        )
+        assert notice is not None
+        return notice
+
+    def edit(notice: QueuedHumanNoticeReservation, event_id: str) -> None:
+        notice.update(envelope(event_id, alice, "Edited"), mentions_nobody=False)
+
+    async def acknowledge(event_id: str) -> None:
+        attempted[event_id].set()
+
+    def gate(*, verdict: bool, requester: str) -> MidTurnGate:
+        async def evaluate(_request: JudgmentRequest) -> bool | None:
+            return verdict
+
+        return MidTurnGate(active_text="Do the task", evaluate=evaluate, requester_id=requester, on_defer=acknowledge)
+
+    async def alices_reply() -> None:
+        started.set()
+        await judge.wait()
+        await _judge_a_completed_batch()
+        judged.set()
+        await finish.wait()
+
+    async def bobs_reply() -> None:
+        # Alice's Steer is another person's message to this reply, weighed as Auto by a judge that lets it wait.
+        assert queue.active_requester_id == bob
+        assert queue.requester_steer_snapshot() == ()
+        waiter = asyncio.create_task(queue.wait())
+        await attempted["$kept"].wait()
+        later = reserve("$later", bob, MidTurnMode.QUEUE)
+        # The wait acknowledges a message on its next look at the queue, so this one shows the verdict kept it.
+        await attempted["$later"].wait()
+        assert not waiter.done()
+        waiter.cancel()
+        await asyncio.gather(waiter, return_exceptions=True)
+        later.release()
+
+    reply = asyncio.create_task(
+        lifecycle.run_locked_response(
+            target=target,
+            response_envelope=envelope("$active", alice),
+            pipeline_timing=None,
+            locked_operation=alices_reply,
+            mid_turn_gate=gate(verdict=False, requester=alice),
+        ),
+    )
+    await asyncio.wait_for(started.wait(), SETTLE_TIMEOUT_SECONDS)
+    assert queue.active_requester_id == alice
+    steer = reserve("$steer", alice, MidTurnMode.STEER)
+    auto = reserve("$auto", alice, MidTurnMode.AUTO)
+    kept = reserve("$kept", alice, MidTurnMode.STEER)
+    assert queue.requester_steer_event_ids == {"$steer", "$kept"}
+    judge.set()
+    await asyncio.wait_for(judged.wait(), SETTLE_TIMEOUT_SECONDS)
+    assert queue.stopped_reply_event_ids == {"$steer", "$auto", "$kept"}
+    assert (steer.stopped_reply, auto.stopped_reply, kept.stopped_reply) == (True, True, True)
+
+    # An edit drops a verdict on the old text, but not the requester's explicit choice to Steer.
+    edit(steer, "$steer")
+    edit(kept, "$kept")
+    assert queue.stopped_reply_event_ids == {"$auto"}
+    assert (steer.stopped_reply, kept.stopped_reply) == (True, True)
+    steer.release()
+    auto.release()
+    assert (steer.stopped_reply, auto.stopped_reply) == (True, True)
+    edit(steer, "$steer")
+    edit(auto, "$auto")
+    assert (steer.stopped_reply, auto.stopped_reply) == (True, False)
+    assert queue.stopped_reply_event_ids == set()
+    assert queue.requester_steer_event_ids == {"$kept"}
+
+    finish.set()
+    await asyncio.wait_for(reply, SETTLE_TIMEOUT_SECONDS)
+    assert queue.active_requester_id is None
+    assert kept.stopped_reply
+    await asyncio.wait_for(
+        lifecycle.run_locked_response(
+            target=target,
+            response_envelope=envelope("$bob", bob),
+            pipeline_timing=None,
+            locked_operation=bobs_reply,
+            mid_turn_gate=gate(verdict=True, requester=bob),
+        ),
+        SETTLE_TIMEOUT_SECONDS,
+    )
+    kept.release()
+    assert kept.stopped_reply
+    assert (queue.stopped_reply_event_ids, queue.requester_steer_event_ids) == (set(), set())
+    assert not queue.has_pending_human_messages()
+
+
+async def _prepare_split_follow_up_turn(
+    bot: AgentBot,
+    runner: ResponseRunner,
+) -> tuple[PreparedTurn, QueuedHumanNoticeReservation, QueuedHumanNoticeReservation]:
+    """Reserve Alice's turn notice and Bob's held-back follow-up notice on one thread."""
+    lifecycle = runner.lifecycle_coordinator
+    room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
+    alice, bob = "@alice:localhost", "@bob:localhost"
+    room.users[alice] = MagicMock()
+    room.users[bob] = MagicMock()
+    room.users[bot.matrix_id.full_id] = MagicMock()
+    assert bot.client is not None
+    bot.client.rooms[room.room_id] = room
+    alice_target = MessageTarget.resolve(room.room_id, "$thread", "$alice")
+    bob_target = MessageTarget.resolve(room.room_id, "$thread", "$bob")
+    conversation = lifecycle._conversation_for(alice_target)
+    conversation.begin_response_turn()
+    turn_notice = lifecycle.reserve_waiting_human_message(
+        target=alice_target,
+        response_envelope=replace(
+            _envelope(
+                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+                source_event_id="$alice",
+                target=alice_target,
+            ),
+            origin=message_origin(sender_id=alice, requester_id=alice),
+        ),
+    )
+    queued_notice = lifecycle.reserve_waiting_human_message(
+        target=bob_target,
+        response_envelope=replace(
+            _envelope(
+                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+                source_event_id="$bob",
+                target=bob_target,
+            ),
+            origin=message_origin(sender_id=bob, requester_id=bob),
+        ),
+    )
+    assert turn_notice is not None
+    assert queued_notice is not None
+    conversation.finish_response_turn()
+    alice_event = PreparedIngress(
+        sender=alice,
+        event_id="$alice",
+        body="Hello from Alice",
+        source={
+            "event_id": "$alice",
+            "sender": alice,
+            "origin_server_ts": 1_000,
+            "content": {
+                "msgtype": "m.text",
+                "body": "Hello from Alice",
+                "m.relates_to": {
+                    "rel_type": "m.thread",
+                    "event_id": "$thread",
+                    "is_falling_back": True,
+                    "m.in_reply_to": {"event_id": "$thread"},
+                },
+            },
+        },
+        active_follow_up=True,
+    )
+    turn = build_prepared_turn(
+        active_follow_up_coalescing_key(room.room_id, "$thread"),
+        [
+            make_pending_event(
+                alice_event,
+                room,
+                source_kind=MESSAGE_SOURCE_KIND,
+                requester_user_id=alice,
+                active_follow_up=True,
+                notice=turn_notice,
+            ),
+        ],
+        queues_other_run=nothing_else_queued,
+        queued_follow_up_notices=(queued_notice,),
+    )
+    claim = await bot._turn_dispatcher.deps.turn_store.claim(TurnRecord.create(("$alice",), completed=False))
+    assert isinstance(claim, TurnClaim)
+    return replace(turn, claims=(claim,)), turn_notice, queued_notice
+
+
+async def _run_pre_lock_exit_case(
+    bot: AgentBot,
+    runner: ResponseRunner,
+    turn: PreparedTurn,
+    *,
+    exit_kind: str,
+    turn_notice: QueuedHumanNoticeReservation,
+    queued_notice: QueuedHumanNoticeReservation,
+) -> None:
+    """Exercise one pre-lock exit path through handle_prepared_turn."""
+    individual_plan = DispatchPlan(kind="respond", response_action=ResponseAction(kind="individual"))
+    if exit_kind == "ignore":
+        with patch.object(TurnPolicy, "plan_turn", new=AsyncMock(return_value=DispatchPlan(kind="ignore"))):
+            await bot._turn_dispatcher.handle_prepared_turn(turn)
+        return
+    if exit_kind == "reject":
+        reject_plan = DispatchPlan(
+            kind="respond",
+            response_action=ResponseAction(kind="reject", rejection_message="No"),
+        )
+        with (
+            patch.object(TurnPolicy, "plan_turn", new=AsyncMock(return_value=reject_plan)),
+            patch.object(
+                type(bot._turn_dispatcher.deps.visible_responses),
+                "deliver_recoverable_text",
+                new=AsyncMock(return_value="$reject"),
+            ),
+        ):
+            await bot._turn_dispatcher.handle_prepared_turn(turn)
+        return
+    if exit_kind == "route_other":
+        with (
+            patch.object(TurnPolicy, "plan_turn", new=AsyncMock(return_value=DispatchPlan(kind="route"))),
+            patch.object(TurnDispatcher, "_execute_route_plan", new=AsyncMock(return_value=False)),
+        ):
+            await bot._turn_dispatcher.handle_prepared_turn(turn)
+        return
+    if exit_kind == "merge_claims_failed":
+        with patch.object(type(bot._turn_dispatcher.deps.turn_store), "merge_claims", new=AsyncMock(return_value=None)):
+            await bot._turn_dispatcher.handle_prepared_turn(turn)
+        return
+    if exit_kind == "admission_refused":
+        real_generate = runner.generate_response
+
+        async def refuse_on_generate(request: ResponseRequest) -> SourceFate:
+            runner.deps.runtime.response_admission_gate.close()
+            return await real_generate(request)
+
+        with (
+            patch.object(TurnPolicy, "plan_turn", new=AsyncMock(return_value=individual_plan)),
+            patch.object(runner, "generate_response", side_effect=refuse_on_generate),
+            patch.object(
+                type(runner.deps.runtime),
+                "wait_for_admission_or_shutdown",
+                new=AsyncMock(return_value=False),
+            ),
+            pytest.raises(ResponseAdmissionRefusedError),
+        ):
+            await bot._turn_dispatcher.handle_prepared_turn(turn)
+        return
+    if exit_kind == "exception":
+        with (
+            patch.object(
+                bot._turn_dispatcher,
+                "_prepare_text_dispatch",
+                new=AsyncMock(side_effect=RuntimeError("prep boom")),
+            ),
+            pytest.raises(RuntimeError, match="prep boom"),
+        ):
+            await bot._turn_dispatcher.handle_prepared_turn(turn)
+        return
+    entered = asyncio.Event()
+
+    async def block_prepare(*_args: object, **_kwargs: object) -> object:
+        entered.set()
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    with patch.object(bot._turn_dispatcher, "_prepare_text_dispatch", side_effect=block_prepare):
+        task = asyncio.create_task(bot._turn_dispatcher.handle_prepared_turn(turn))
+        await asyncio.wait_for(entered.wait(), timeout=2.0)
+        assert turn_notice.active
+        assert not queued_notice.active
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exit_kind",
+    [
+        "ignore",
+        "reject",
+        "route_other",
+        "merge_claims_failed",
+        "admission_refused",
+        "exception",
+        "cancelled",
+    ],
+)
+async def test_pre_lock_early_exits_release_turn_notices_and_queued_follow_ups_release_at_gate_exit(
+    tmp_path: Path,
+    exit_kind: str,
+) -> None:
+    """Held-back follow-up notices release on gate exit, while turn notices stay held across prep and release on pre-lock exits."""
+    bot = _bot(tmp_path)
+    await bot._take_over_replies()
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = runner.lifecycle_coordinator
+    turn, turn_notice, queued_notice = await _prepare_split_follow_up_turn(bot, runner)
+    alice_target = MessageTarget.resolve("!room:localhost", "$thread", "$alice")
+    bob_target = MessageTarget.resolve("!room:localhost", "$thread", "$bob")
+    conversation = lifecycle._conversation_for(alice_target)
+    try:
+        with patch.object(
+            type(bot._turn_dispatcher.deps.resolver),
+            "fetch_thread_history",
+            new=AsyncMock(return_value=ThreadHistoryResult([], is_full_history=True)),
+        ):
+            await _run_pre_lock_exit_case(
+                bot,
+                runner,
+                turn,
+                exit_kind=exit_kind,
+                turn_notice=turn_notice,
+                queued_notice=queued_notice,
+            )
+        if runner.inbox._inbox_response_tasks:
+            await asyncio.gather(*list(runner.inbox._inbox_response_tasks), return_exceptions=True)
+        assert not turn_notice.active
+        assert not queued_notice.active
+        assert not lifecycle.has_waiting_messages_from(alice_target, "@alice:localhost")
+        assert not lifecycle.has_waiting_messages_from(bob_target, "@bob:localhost")
+    finally:
+        assert not conversation.has_pending_human_messages()
+
+
+@pytest.mark.asyncio
+async def test_lock_acquisition_releases_turn_notices_before_binding_requester() -> None:
+    """Lock acquisition releases the turn's own Steer notices before binding the active requester."""
+    lifecycle = ResponseLifecycleCoordinator()
+    alice = "@alice:localhost"
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$a1")
+    conversation = lifecycle._conversation_for(target)
+
+    def make_envelope(event_id: str, requester: str) -> MessageEnvelope:
+        return replace(
+            _envelope(source_event_id=event_id, target=MessageTarget.resolve("!room:localhost", "$thread", event_id)),
+            origin=message_origin(sender_id=requester, requester_id=requester),
+        )
+
+    conversation.begin_response_turn()
+    turn_notice = lifecycle.reserve_waiting_human_message(
+        target=target,
+        response_envelope=make_envelope("$a1", alice),
+        mode=MidTurnMode.STEER,
+    )
+    assert turn_notice is not None
+    conversation.finish_response_turn()
+
+    pending_when_binding: list[tuple[str | None, int]] = []
+    real_bind = conversation.bind_active_requester
+
+    def spy_bind(requester_id: str | None) -> None:
+        pending_when_binding.append((requester_id, conversation.pending_human_messages))
+        real_bind(requester_id)
+
+    async def locked_op() -> str:
+        assert conversation.active_requester_id == alice
+        assert conversation.pending_human_messages == 0
+        assert conversation.requester_steer_event_ids == set()
+        assert conversation.requester_steer_snapshot() == ()
+        assert not turn_notice.active
+        return "ok"
+
+    with patch.object(conversation, "bind_active_requester", side_effect=spy_bind):
+        result = await lifecycle.run_locked_response(
+            target=target,
+            response_envelope=make_envelope("$a1", alice),
+            pipeline_timing=None,
+            locked_operation=locked_op,
+            notices=(turn_notice,),
+        )
+
+    assert result == "ok"
+    assert pending_when_binding == [(alice, 0), (None, 0)]
+    assert not conversation.has_pending_human_messages()
+    assert conversation.requester_steer_event_ids == set()
+
+
+@pytest.mark.asyncio
+async def test_pre_lock_cancellation_in_run_locked_response_releases_notices_synchronously() -> None:
+    """Cancellation while waiting for the lock releases notices synchronously before reservation.release()."""
+    lifecycle = ResponseLifecycleCoordinator()
+    alice, bob = "@alice:localhost", "@bob:localhost"
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$c1")
+    conversation = lifecycle._conversation_for(target)
+
+    def make_envelope(event_id: str, requester: str) -> MessageEnvelope:
+        return replace(
+            _envelope(source_event_id=event_id, target=MessageTarget.resolve("!room:localhost", "$thread", event_id)),
+            origin=message_origin(sender_id=requester, requester_id=requester),
+        )
+
+    holder_started = asyncio.Event()
+    release_holder = asyncio.Event()
+
+    async def hold_lock() -> None:
+        holder_started.set()
+        await release_holder.wait()
+
+    holder_task = asyncio.create_task(
+        lifecycle.run_locked_response(
+            target=MessageTarget.resolve("!room:localhost", "$thread", "$hold"),
+            response_envelope=make_envelope("$hold", bob),
+            pipeline_timing=None,
+            locked_operation=hold_lock,
+        ),
+    )
+    await asyncio.wait_for(holder_started.wait(), timeout=2.0)
+    cancel_turn_notice = lifecycle.reserve_waiting_human_message(
+        target=target,
+        response_envelope=make_envelope("$c1", alice),
+    )
+    assert cancel_turn_notice is not None
+    try:
+        waiter_task = asyncio.create_task(
+            lifecycle.run_locked_response(
+                target=target,
+                response_envelope=make_envelope("$c1", alice),
+                pipeline_timing=None,
+                locked_operation=AsyncMock(),
+                notices=(cancel_turn_notice,),
+            ),
+        )
+        await asyncio.sleep(0)
+        waiter_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter_task
+        assert not cancel_turn_notice.active
+        assert not lifecycle.has_waiting_messages_from(target, alice)
+    finally:
+        release_holder.set()
+        await holder_task
+    assert not conversation.has_pending_human_messages()
+
+
+def _register_test_room(bot: AgentBot, *users: str) -> nio.MatrixRoom:
+    room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
+    for user in (*users, bot.matrix_id.full_id):
+        room.users[user] = MagicMock()
+    assert bot.client is not None
+    bot.client.rooms[room.room_id] = room
+    return room
+
+
+def _reserve_user_notice(
+    lifecycle: ResponseLifecycleCoordinator,
+    target: MessageTarget,
+    event_id: str,
+    user: str,
+    *,
+    mode: MidTurnMode = MidTurnMode.QUEUE,
+    dispatch_policy_source_kind: str = MESSAGE_SOURCE_KIND,
+) -> tuple[MessageEnvelope, QueuedHumanNoticeReservation]:
+    envelope = replace(
+        _envelope(
+            dispatch_policy_source_kind=dispatch_policy_source_kind,
+            source_event_id=event_id,
+            target=target,
+        ),
+        origin=message_origin(sender_id=user, requester_id=user),
+    )
+    notice = lifecycle.reserve_waiting_human_message(target=target, response_envelope=envelope, mode=mode)
+    assert notice is not None
+    return envelope, notice
+
+
+def _wrap_sync_result[**P, R](
+    fn: Callable[P, R],
+    on_result: Callable[[R], None],
+) -> Callable[P, R]:
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        result = fn(*args, **kwargs)
+        on_result(result)
+        return result
+
+    return wrapper
+
+
+def _wrap_async_call[**P, R](
+    fn: Callable[P, Awaitable[R]],
+    *,
+    on_enter: Callable[[], None] | None = None,
+    on_exit: Callable[[], None] | None = None,
+) -> Callable[P, Awaitable[R]]:
+    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        if on_enter is not None:
+            on_enter()
+        result = await fn(*args, **kwargs)
+        if on_exit is not None:
+            on_exit()
+        return result
+
+    return wrapper
+
+
+@pytest.mark.asyncio
+async def test_real_coalescing_gate_cancellation_preserves_detached_response_task_notices(tmp_path: Path) -> None:
+    """Cancelling a real CoalescingGate drain while response_task waits on the lock keeps the notice active."""
+    bot = _bot(tmp_path)
+    await bot._take_over_replies()
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = runner.lifecycle_coordinator
+    alice, bob = "@alice:localhost", "@bob:localhost"
+    room = _register_test_room(bot, alice, bob)
+    target = MessageTarget.resolve(room.room_id, "$thread", "$alice")
+    bob_target = MessageTarget.resolve(room.room_id, "$thread", "$bob")
+    conversation = lifecycle._conversation_for(target)
+    holder_entered, release_holder, alice_ran, task_registered = (
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+        asyncio.Event(),
+    )
+
+    async def hold_lock() -> None:
+        holder_entered.set()
+        await release_holder.wait()
+
+    holder_task = asyncio.create_task(
+        lifecycle.run_locked_response(
+            target=bob_target,
+            response_envelope=replace(
+                _envelope(source_event_id="$bob", target=bob_target),
+                origin=message_origin(sender_id=bob, requester_id=bob),
+            ),
+            pipeline_timing=None,
+            locked_operation=hold_lock,
+        ),
+    )
+    await asyncio.wait_for(holder_entered.wait(), timeout=2.0)
+    _, turn_notice = _reserve_user_notice(lifecycle, target, "$alice", alice)
+    claim = await bot._turn_dispatcher.deps.turn_store.claim(TurnRecord.create(("$alice",), completed=False))
+    assert isinstance(claim, TurnClaim)
+    pending_event = make_pending_event(
+        PreparedIngress(
+            sender=alice,
+            event_id="$alice",
+            body="Still waiting on lock",
+            source={
+                "event_id": "$alice",
+                "sender": alice,
+                "origin_server_ts": 1_000,
+                "content": {
+                    "msgtype": "m.text",
+                    "body": "Still waiting on lock",
+                    "m.relates_to": {
+                        "rel_type": "m.thread",
+                        "event_id": "$thread",
+                        "is_falling_back": True,
+                        "m.in_reply_to": {"event_id": "$thread"},
+                    },
+                },
+            },
+            active_follow_up=True,
+        ),
+        room,
+        source_kind=MESSAGE_SOURCE_KIND,
+        requester_user_id=alice,
+        active_follow_up=True,
+        notice=turn_notice,
+    )
+    pending_event.claim = claim
+    gate = CoalescingGate(
+        dispatch_turn=bot._turn_dispatcher.handle_prepared_turn,
+        debounce_seconds=lambda: 0.0,
+        is_shutting_down=lambda: False,
+    )
+
+    async def locked_turn(*_args: object, **_kwargs: object) -> Owned:
+        assert not turn_notice.active
+        assert not conversation.has_pending_human_messages()
+        alice_ran.set()
+        return Owned()
+
+    try:
+        with (
+            patch.object(
+                type(bot._turn_dispatcher.deps.resolver),
+                "fetch_thread_history",
+                new=AsyncMock(return_value=ThreadHistoryResult([], is_full_history=True)),
+            ),
+            patch.object(
+                TurnPolicy,
+                "plan_turn",
+                new=AsyncMock(
+                    return_value=DispatchPlan(kind="respond", response_action=ResponseAction(kind="individual")),
+                ),
+            ),
+            patch.object(
+                runner.inbox,
+                "track_inbox_response",
+                side_effect=_wrap_sync_result(runner.inbox.track_inbox_response, lambda _t: task_registered.set()),
+            ),
+            patch.object(ResponseRunner, "_run_locked_turn", new=AsyncMock(side_effect=locked_turn)),
+        ):
+            await gate.admit(
+                CoalescingKey(room.room_id, "$thread", RequesterCoalescingOwner(alice)),
+                ready_result=ReadyPendingEvent(pending_event=pending_event),
+            )
+            await asyncio.wait_for(task_registered.wait(), timeout=2.0)
+            await asyncio.sleep(0)
+            (response_task,) = tuple(runner.inbox._inbox_response_tasks)
+            assert pending_event.notice is None
+            assert not response_task.done()
+            drain_result = await gate.drain_all(ready_timeout_seconds=0.0)
+            assert drain_result.dispatch_cancelled_count == 1
+            assert not response_task.done()
+            assert turn_notice.active
+            assert lifecycle.has_waiting_messages_from(target, alice)
+            release_holder.set()
+            await asyncio.wait_for(holder_task, timeout=2.0)
+            await asyncio.wait_for(alice_ran.wait(), timeout=2.0)
+            await asyncio.wait_for(response_task, timeout=2.0)
+        assert not turn_notice.active
+        assert not conversation.has_pending_human_messages()
+    finally:
+        release_holder.set()
+        await asyncio.gather(holder_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_response_task_cancelled_before_first_step_releases_notices_via_done_callback(tmp_path: Path) -> None:
+    """Cancelling a detached response_task before its first step releases its notices via the done callback."""
+    bot = _bot(tmp_path)
+    await bot._take_over_replies()
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = runner.lifecycle_coordinator
+    turn, turn_notice, _queued_notice = await _prepare_split_follow_up_turn(bot, runner)
+    conversation = lifecycle._conversation_for(MessageTarget.resolve("!room:localhost", "$thread", "$alice"))
+    executed_action = False
+
+    def mark_executed() -> None:
+        nonlocal executed_action
+        executed_action = True
+
+    with (
+        patch.object(
+            type(bot._turn_dispatcher.deps.resolver),
+            "fetch_thread_history",
+            new=AsyncMock(return_value=ThreadHistoryResult([], is_full_history=True)),
+        ),
+        patch.object(
+            TurnPolicy,
+            "plan_turn",
+            new=AsyncMock(
+                return_value=DispatchPlan(kind="respond", response_action=ResponseAction(kind="individual")),
+            ),
+        ),
+        patch.object(
+            bot._turn_dispatcher,
+            "_execute_response_action",
+            side_effect=_wrap_async_call(bot._turn_dispatcher._execute_response_action, on_enter=mark_executed),
+        ),
+        patch.object(
+            runner.inbox,
+            "track_inbox_response",
+            side_effect=_wrap_sync_result(runner.inbox.track_inbox_response, lambda task: task.cancel()),
+        ),
+    ):
+        await bot._turn_dispatcher.handle_prepared_turn(turn)
+        if runner.inbox._inbox_response_tasks:
+            await asyncio.gather(*list(runner.inbox._inbox_response_tasks), return_exceptions=True)
+
+    assert not executed_action
+    assert not turn_notice.active
+    assert not conversation.has_pending_human_messages()
+
+
+@pytest.mark.asyncio
+async def test_held_back_message_edited_away_and_back_during_prep_does_not_rearm_notice(tmp_path: Path) -> None:
+    """Editing a held-back message away from this agent and back during the first turn's prep never re-arms a notice."""
+    bot = _bot(tmp_path)
+    await bot._take_over_replies()
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = runner.lifecycle_coordinator
+    alice, bob = "@alice:localhost", "@bob:localhost"
+    room = _register_test_room(bot, alice, bob)
+    key = active_follow_up_coalescing_key(room.room_id, "$thread")
+    alice_target = MessageTarget.resolve(room.room_id, "$thread", "$alice")
+    bob_target = MessageTarget.resolve(room.room_id, "$thread", "$bob")
+    conversation = lifecycle._conversation_for(alice_target)
+    conversation.begin_response_turn()
+    _, alice_notice = _reserve_user_notice(lifecycle, alice_target, "$alice", alice)
+    _, bob_notice = _reserve_user_notice(lifecycle, bob_target, "$bob", bob)
+    conversation.finish_response_turn()
+    alice_pending = make_pending_event(
+        PreparedIngress(
+            sender=alice,
+            event_id="$alice",
+            body="Alice message",
+            source={"event_id": "$alice", "sender": alice, "content": {"body": "Alice message"}},
+            server_timestamp=1_000,
+        ),
+        room,
+        source_kind=MESSAGE_SOURCE_KIND,
+        requester_user_id=alice,
+        active_follow_up=True,
+        notice=alice_notice,
+    )
+    bob_pending = make_pending_event(
+        PreparedIngress(
+            sender=bob,
+            event_id="$bob",
+            body="Bob message",
+            source={"event_id": "$bob", "sender": bob, "content": {"body": "Bob message"}},
+            server_timestamp=1_001,
+        ),
+        room,
+        source_kind=MESSAGE_SOURCE_KIND,
+        requester_user_id=bob,
+        active_follow_up=True,
+        notice=bob_notice,
+    )
+    claim = await bot._turn_dispatcher.deps.turn_store.claim(TurnRecord.create(("$alice",), completed=False))
+    assert isinstance(claim, TurnClaim)
+    turn = replace(
+        build_prepared_turn(
+            key,
+            [alice_pending],
+            queues_other_run=nothing_else_queued,
+            queued_follow_up_notices=(bob_notice,),
+        ),
+        claims=(claim,),
+    )
+    prep_entered, resume_prep = asyncio.Event(), asyncio.Event()
+
+    async def pause_prepare(*_args: object, **_kwargs: object) -> object:
+        prep_entered.set()
+        await resume_prep.wait()
+        return None
+
+    with patch.object(bot._turn_dispatcher, "_prepare_text_dispatch", side_effect=pause_prepare):
+        dispatch_task = asyncio.create_task(bot._turn_dispatcher.handle_prepared_turn(turn))
+        await asyncio.wait_for(prep_entered.wait(), timeout=2.0)
+        try:
+            # Held-back notice is already released on gate exit, so editing away keeps it non-None and inactive.
+            assert not bob_notice.active
+            with patch.object(TurnPolicy, "not_for_this_agent", return_value=True):
+                bot._turn_ingress._renew_queued_notice(room, key, bob_pending)
+            assert bob_pending.notice is bob_notice
+            assert not bob_pending.notice.active
+
+            # Even while a response turn is active, editing back to this agent must not re-arm a waiting notice.
+            conversation.begin_response_turn()
+            try:
+                with patch.object(TurnPolicy, "not_for_this_agent", return_value=False):
+                    bot._turn_ingress._renew_queued_notice(room, key, bob_pending)
+                assert bob_pending.notice is bob_notice
+                assert not bob_pending.notice.active
+                assert not lifecycle.has_waiting_messages_from(bob_target, bob)
+            finally:
+                conversation.finish_response_turn()
+        finally:
+            resume_prep.set()
+            await asyncio.wait_for(dispatch_task, timeout=2.0)
+    assert not conversation.has_pending_human_messages()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("had_participation", [True, False])
+async def test_late_latched_steer_under_lock_bypasses_participation_and_adds_carry_on_prompt(
+    tmp_path: Path,
+    *,
+    had_participation: bool,
+) -> None:
+    """A Steer latched onto a held notice during prep bypasses participation and adds the carry-on prompt under the lock."""
+    bot = _bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.matrix_id.full_id)
+    bot.config.agents["general"].participation = ParticipationConfig(debounce_seconds=30)
+    await bot._take_over_replies()
+    unique_room_send_responses(bot.client)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    lifecycle = runner.lifecycle_coordinator
+    alice = "@alice:localhost"
+    room = _register_test_room(bot, alice)
+    target = MessageTarget.resolve(room.room_id, "$thread", "$alice")
+    conversation = lifecycle._conversation_for(target)
+    # Reserve a Steer notice while an earlier non-alice reply ran (so stopped_reply is initially False at flush).
+    conversation.begin_response_turn()
+    envelope, notice = _reserve_user_notice(
+        lifecycle,
+        target,
+        "$alice",
+        alice,
+        mode=MidTurnMode.STEER,
+        dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
+    )
+    assert not notice.stopped_reply
+    conversation.finish_response_turn()
+    # Competing reply for Alice acquires the lock during pre-lock prep and latches Steer onto the held notice.
+    conversation.bind_active_requester(alice)
+    conversation.bind_active_requester(None)
+    assert notice.stopped_reply
+
+    payload_preparation = ResponsePayloadPreparation(
+        dispatch=PreparedDispatch(
+            requester_user_id=alice,
+            context=MessageContext(
+                am_i_mentioned=False,
+                is_thread=True,
+                thread_id="$thread",
+                thread_history=[],
+                mentioned_agents=[],
+                has_non_agent_mentions=False,
+            ),
+            target=target,
+            correlation_id="$alice",
+            envelope=envelope,
+            stopped_reply=False,
+        ),
+        prompt="Change plan now",
+        action_kind="individual",
+        payload_inputs=DispatchPayloadInputs(message_attachment_ids=(), trusted_attachment_ids=(), media_events=()),
+        target_member_names=None,
+        dispatch_started_at=0.0,
+        context_ready_monotonic=0.0,
+        routed_revision=None,
+    )
+    call_order: list[str] = []
+    captured_model_prompts: list[str] = []
+    decider = AsyncMock()
+
+    async def voice_echo() -> None:
+        call_order.append("voice_echo")
+
+    async def stream(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        captured_model_prompts.append(ctx.model_prompt or ctx.prompt)
+        yield "Updated reply"
+
+    request = ResponseRequest(
+        thread_history=ThreadHistoryResult([], is_full_history=True),
+        prompt="Change plan now",
+        response_envelope=envelope,
+        sources=ResponseSources(("$alice",), ("$alice",)),
+        user_id=alice,
+        participation=ParticipationConfig(debounce_seconds=30) if had_participation else None,
+        on_participation_approved=voice_echo,
+        payload_preparation=payload_preparation,
+        notices=(notice,),
+    )
+    with (
+        patch.object(
+            runner,
+            "_admit_locked_turn",
+            side_effect=_wrap_async_call(runner._admit_locked_turn, on_exit=lambda: call_order.append("admitted")),
+        ),
+        patch.object(runner, "_send_placeholder", wraps=runner._send_placeholder) as mock_placeholder,
+        patch("mindroom.response_runner.create_participation_decider", return_value=decider),
+        patch_response_runner_module(
+            stream_agent_response=stream,
+            should_use_streaming=AsyncMock(return_value=True),
+            typing_indicator=_noop_typing,
+        ),
+    ):
+        fate = await runner.generate_response(request)
+
+    assert fate == Owned()
+    decider.assert_not_called()
+    assert [c.kwargs.get("placeholder_message") for c in mock_placeholder.await_args_list] == ["Thinking..."]
+    assert call_order == (["admitted", "voice_echo"] if had_participation else ["admitted"])
+    assert len(captured_model_prompts) == 1
+    assert _STEER_CONTINUATION_LINE in captured_model_prompts[0]
+    assert not notice.active
+    assert not conversation.has_pending_human_messages()
+
+
+@pytest.mark.asyncio
+async def test_held_notice_hitting_busy_lock_preserves_rich_queued_message_and_releases_all_on_lock() -> None:
+    """A turn hitting a busy lock keeps its rich QueuedMessage intact and releases all notices upon lock acquisition."""
+    lifecycle = ResponseLifecycleCoordinator()
+    alice = "@alice:localhost"
+    bob = "@bob:localhost"
+    conversation = lifecycle._conversation_for(MessageTarget.resolve("!room:localhost", "$thread", "$v2"))
+
+    def make_envelope(event_id: str, requester: str, body: str = "plain body") -> MessageEnvelope:
+        return replace(
+            _envelope(
+                source_event_id=event_id,
+                target=MessageTarget.resolve("!room:localhost", "$thread", event_id),
+            ),
+            body=body,
+            origin=message_origin(sender_id=requester, requester_id=requester),
+        )
+
+    # Reserve two rich notices for a coalesced batch while a prior turn runs, then end that prior turn.
+    conversation.begin_response_turn()
+    notice_v1 = lifecycle.reserve_waiting_human_message(
+        target=MessageTarget.resolve("!room:localhost", "$thread", "$v1"),
+        response_envelope=make_envelope("$v1", alice),
+        transcript="voice transcript one",
+        mentions_nobody=True,
+        mode=MidTurnMode.STEER,
+    )
+    notice_v2 = lifecycle.reserve_waiting_human_message(
+        target=MessageTarget.resolve("!room:localhost", "$thread", "$v2"),
+        response_envelope=make_envelope("$v2", alice),
+        transcript="voice transcript two",
+        mentions_nobody=False,
+        mode=MidTurnMode.AUTO,
+    )
+    assert notice_v1 is not None
+    assert notice_v2 is not None
+    conversation.finish_response_turn()
+
+    # Another requester's turn acquires the lock before Alice's turn reaches run_locked_response.
+    bob_entered = asyncio.Event()
+    release_bob = asyncio.Event()
+
+    async def bob_reply() -> None:
+        bob_entered.set()
+        await release_bob.wait()
+
+    bob_task = asyncio.create_task(
+        lifecycle.run_locked_response(
+            target=MessageTarget.resolve("!room:localhost", "$thread", "$bob"),
+            response_envelope=make_envelope("$bob", bob),
+            pipeline_timing=None,
+            locked_operation=bob_reply,
+        ),
+    )
+    await asyncio.wait_for(bob_entered.wait(), timeout=2.0)
+
+    alice_state_in_lock: list[tuple[int, bool, bool, set[str]]] = []
+
+    async def alice_reply() -> None:
+        alice_state_in_lock.append(
+            (
+                conversation.pending_human_messages,
+                notice_v1.active,
+                notice_v2.active,
+                set(conversation.requester_steer_event_ids),
+            ),
+        )
+
+    alice_task = asyncio.create_task(
+        lifecycle.run_locked_response(
+            target=MessageTarget.resolve("!room:localhost", "$thread", "$v2"),
+            response_envelope=make_envelope("$v2", alice, body="raw body should not overwrite transcript"),
+            pipeline_timing=None,
+            locked_operation=alice_reply,
+            notices=(notice_v1, notice_v2),
+        ),
+    )
+    await asyncio.sleep(0)
+
+    # While blocked on Bob's busy lock, _begin_response_turn_notice preserves both rich QueuedMessage entries.
+    snapshot = conversation.pending_message_snapshot()
+    assert [(m.event_id, m.text, m.mode, m.mentions_nobody, m.requester_id) for m in snapshot] == [
+        ("$v1", "voice transcript one", MidTurnMode.STEER, True, alice),
+        ("$v2", "voice transcript two", MidTurnMode.AUTO, False, alice),
+    ]
+
+    release_bob.set()
+    await asyncio.wait_for(asyncio.gather(bob_task, alice_task), timeout=2.0)
+
+    assert alice_state_in_lock == [(0, False, False, set())]
+    assert not notice_v1.active
+    assert not notice_v2.active
+    assert not conversation.has_pending_human_messages()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", [MidTurnMode.STEER, MidTurnMode.QUEUE])
+async def test_lock_race_begin_response_turn_notice_preserves_mid_turn_mode(mode: MidTurnMode) -> None:
+    """When a turn misses ingress reservation and races for the lock, its MidTurnMode survives into the notice."""
+    lifecycle = ResponseLifecycleCoordinator()
+    target = MessageTarget.resolve("!room:localhost", "$thread", "$active")
+    queue = lifecycle._conversation_for(target)
+    alice = "@alice:localhost"
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    observed: dict[str, object] = {}
+
+    async def active_reply() -> None:
+        started.set()
+        await finish.wait()
+        observed["pending"] = queue.pending_message_snapshot()
+        observed["steers"] = queue.requester_steer_snapshot()
+        observed["interrupting"] = queue.interrupting_snapshot()
+        observed["queued"] = queue.queued_snapshot()
+
+    async def racing_reply() -> None:
+        observed["racing_ran"] = True
+
+    first = asyncio.create_task(
+        lifecycle.run_locked_response(
+            target=target,
+            response_envelope=_envelope(source_event_id="$active", requester_id=alice, target=target),
+            pipeline_timing=None,
+            locked_operation=active_reply,
+        ),
+    )
+    await asyncio.wait_for(started.wait(), SETTLE_TIMEOUT_SECONDS)
+
+    # Second turn enters run_locked_response with no prior ingress reservation (lock-race fallback).
+    second = asyncio.create_task(
+        lifecycle.run_locked_response(
+            target=target,
+            response_envelope=_envelope(source_event_id="$racing", requester_id=alice, target=target),
+            pipeline_timing=None,
+            locked_operation=racing_reply,
+            mid_turn_mode=mode,
+        ),
+    )
+    await asyncio.sleep(0)
+    finish.set()
+    await asyncio.wait_for(asyncio.gather(first, second), SETTLE_TIMEOUT_SECONDS)
+
+    [pending] = observed["pending"]
+    assert pending.event_id == "$racing"
+    assert pending.mode is mode
+    if mode is MidTurnMode.STEER:
+        assert [m.event_id for m in observed["steers"]] == ["$racing"]
+        assert [m.event_id for m in observed["interrupting"]] == ["$racing"]
+        assert observed["queued"] == ()
+    else:
+        assert observed["steers"] == ()
+        assert observed["interrupting"] == ()
+        assert [m.event_id for m in observed["queued"]] == ["$racing"]
+    assert observed["racing_ran"] is True
+    assert not queue.has_pending_human_messages()

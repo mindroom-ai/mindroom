@@ -21,6 +21,7 @@ _PRIVATE_NETWORKS = tuple(
     ipaddress.ip_network(network) for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
 )
 _HOSTED_CHAT_ORIGIN = "https://chat.mindroom.chat"
+_PUBLISHED_REPORTS_ACCESS_ENV = "MINDROOM_PUBLISHED_REPORTS_ACCESS"
 
 
 def normalized_origin(url: str | None) -> str | None:
@@ -139,17 +140,28 @@ def connections_client_origin_allowed(paths: RuntimePaths, client_origin: str, s
     return client_origin == _HOSTED_CHAT_ORIGIN or (is_local_origin(server_origin) and is_local_origin(client_origin))
 
 
-def connections_sign_in_page(paths: RuntimePaths) -> str | None:
-    """Return MindRoom Chat's Connections page on the first web origin the operator lists, or `None` without one.
+def connections_chat_origin(paths: RuntimePaths, signed_in_from: str | None = None) -> str | None:
+    """Return a web MindRoom Chat origin the operator lists for Connections, or `None` without one.
 
-    That page signs the browser in to the portal, so the portal sends signed-out visitors there.
+    That is `signed_in_from` while the list still names it, else the first listed one.
     """
     web_origins = [
         origin
         for origin in allowed_client_origins(paths, CONNECTIONS_ALLOWED_ORIGINS_ENV)
         if origin != "capacitor://localhost"
     ]
-    return f"{web_origins[0]}/connections" if web_origins else None
+    if signed_in_from in web_origins:
+        return signed_in_from
+    return web_origins[0] if web_origins else None
+
+
+def connections_sign_in_page(paths: RuntimePaths) -> str | None:
+    """Return MindRoom Chat's Connections page on the first web origin the operator lists, or `None` without one.
+
+    That page signs the browser in to the portal, so the portal sends signed-out visitors there.
+    """
+    chat_origin = connections_chat_origin(paths)
+    return f"{chat_origin}/connections" if chat_origin else None
 
 
 def connections_sign_in_enabled(paths: RuntimePaths) -> bool:
@@ -157,3 +169,15 @@ def connections_sign_in_enabled(paths: RuntimePaths) -> bool:
     return not connections_origins_configured(paths) or bool(
         allowed_client_origins(paths, CONNECTIONS_ALLOWED_ORIGINS_ENV),
     )
+
+
+def published_reports_require_sign_in(paths: RuntimePaths) -> bool:
+    """Return whether `MINDROOM_PUBLISHED_REPORTS_ACCESS` opens published reports only to signed-in people.
+
+    The default, `anyone_with_link`, opens them to anyone who holds the link; any other value raises, never opening them.
+    """
+    value = (paths.env_value(_PUBLISHED_REPORTS_ACCESS_ENV) or "").strip()
+    if value not in {"", "anyone_with_link", "signed_in"}:
+        msg = f"{_PUBLISHED_REPORTS_ACCESS_ENV} must be anyone_with_link or signed_in, not {value!r}"
+        raise ValueError(msg)
+    return value == "signed_in"

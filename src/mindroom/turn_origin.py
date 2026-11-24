@@ -5,11 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.dispatch_source import (
     EXTERNAL_TRIGGER_SOURCE_KIND,
     HOOK_DISPATCH_SOURCE_KIND,
     HOOK_SOURCE_KIND,
+    REACTIVE_TRIGGER_SOURCE_KIND,
     SCHEDULED_SOURCE_KIND,
     SILENT_SCHEDULE_SOURCE_KIND,
     TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
@@ -101,6 +101,15 @@ class TurnOrigin:
         }
 
     @property
+    def active_human_requester_id(self) -> str | None:
+        """Return the human requester this reply answers, including job follow-ups on their behalf."""
+        if self.may_answer_interactive_prompt or (
+            self.requester_kind == SenderKind.USER and self.intent is TurnIntent.JOB_FOLLOW_UP
+        ):
+            return self.requester_id
+        return None
+
+    @property
     def may_be_superseded_by_newer_requester_turn(self) -> bool:
         """Return whether replay guards may skip this turn when a newer requester prompt exists."""
         return self.may_answer_interactive_prompt
@@ -116,8 +125,9 @@ def classify_turn_origin(
     original_sender: str | None,
     trusted_user_relay: bool,
     acts_for_requester: bool = False,
+    routed: bool = False,
 ) -> TurnOrigin:
-    """Return the canonical origin policy for one inbound turn."""
+    """Return the canonical origin policy for one inbound turn; `routed` marks one a room's steward routed."""
     sender_kind = SenderKind.MANAGED_ENTITY if sender_entity_name is not None else SenderKind.USER
     requester_kind = SenderKind.MANAGED_ENTITY if requester_entity_name is not None else SenderKind.USER
     trust = _turn_trust(
@@ -133,7 +143,7 @@ def classify_turn_origin(
         sender_kind=sender_kind,
         requester_kind=requester_kind,
         intent=_turn_intent(
-            sender_entity_name=sender_entity_name,
+            routed=routed,
             sender_kind=sender_kind,
             source_kind=source_kind,
             trust=trust,
@@ -141,25 +151,6 @@ def classify_turn_origin(
         source_kind=source_kind,
         trust=trust,
         acts_for_requester=acts_for_requester,
-    )
-
-
-def original_sender_for_router_handoff(
-    *,
-    target_entity_name: str | None,
-    requester_id: str,
-    requester_entity_name: str | None,
-    inherited_original_sender: str | None = None,
-    inherited_original_sender_entity_name: str | None = None,
-) -> str | None:
-    """Return original-sender metadata for a real router handoff."""
-    if target_entity_name is None:
-        return None
-    return original_sender_for_router_relay(
-        requester_id=requester_id,
-        requester_entity_name=requester_entity_name,
-        inherited_original_sender=inherited_original_sender,
-        inherited_original_sender_entity_name=inherited_original_sender_entity_name,
     )
 
 
@@ -213,26 +204,23 @@ def _turn_trust(
 
 def _turn_intent(
     *,
-    sender_entity_name: str | None,
+    routed: bool,
     sender_kind: SenderKind,
     source_kind: str,
     trust: TurnTrust,
 ) -> TurnIntent:
     intent: TurnIntent
     if trust == TurnTrust.TRUSTED_USER_RELAY:
-        if sender_entity_name == ROUTER_AGENT_NAME:
-            intent = TurnIntent.ROUTER_HANDOFF
-        else:
-            intent = TurnIntent.TRUSTED_INTERNAL_RELAY
+        intent = TurnIntent.ROUTER_HANDOFF if routed else TurnIntent.TRUSTED_INTERNAL_RELAY
     elif source_kind in {SCHEDULED_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND}:
         intent = TurnIntent.SCHEDULED_FIRE
-    elif source_kind == EXTERNAL_TRIGGER_SOURCE_KIND:
+    elif source_kind in {EXTERNAL_TRIGGER_SOURCE_KIND, REACTIVE_TRIGGER_SOURCE_KIND}:
         intent = TurnIntent.EXTERNAL_TRIGGER
     elif source_kind == HOOK_DISPATCH_SOURCE_KIND:
         intent = TurnIntent.HOOK_DISPATCH
     elif source_kind == HOOK_SOURCE_KIND:
         intent = TurnIntent.HOOK_MESSAGE
-    elif sender_entity_name == ROUTER_AGENT_NAME:
+    elif routed:
         intent = TurnIntent.ROUTER_NOTICE
     elif source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND:
         intent = TurnIntent.TRUSTED_INTERNAL_RELAY

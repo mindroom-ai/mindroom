@@ -6,7 +6,7 @@ import asyncio
 import json
 import threading
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
 from datetime import datetime
 from types import SimpleNamespace
@@ -25,9 +25,13 @@ from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.participation import ParticipationConfig
+from mindroom.config.room_activity import AgentRoomActivityConfig
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
     ATTACHMENT_IDS_KEY,
+    COMPACTION_NOTICE_CONTENT_KEY,
+    COMPACTIONS_CONTENT_KEY,
+    FORK_CONTENT_KEY,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_KEY,
@@ -59,7 +63,7 @@ from mindroom.final_delivery import (
     outcome_label,
 )
 from mindroom.history.storage import with_force_compaction
-from mindroom.history.types import CompactionLifecycleStart, HistoryScope
+from mindroom.history.types import CompactionLifecycleStart, CompactionOutcome, HistoryScope
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_BEFORE_RESPONSE,
@@ -112,11 +116,13 @@ from tests.bot_helpers import (
     _set_knowledge_for_agent,
     _visible_message,
     _visible_response_event_id,
+    install_sub_room,
     make_mock_agent_user,
     make_test_agent_bot,
     unique_room_send_responses,
 )
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     delivered_matrix_event,
     delivered_matrix_side_effect,
     install_model_providers,
@@ -139,7 +145,9 @@ from tests.response_runner_helpers import (
     stream_transport,
     streamed_answer,
 )
+from tests.test_event_journal_store import admit
 from tests.test_sandbox_proxy import _FakeResponse, _static_worker_manager_lease, _StreamsFromPost
+from tests.threading_helpers import seed_thread_history
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Coroutine, Sequence
@@ -371,6 +379,346 @@ class TestAgentBot(AgentBotTestBase):
         assert "outside any thread" in target_item.text
 
     @pytest.mark.asyncio
+    async def test_agent_thread_reply_hears_about_the_room_s_other_threads(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """With room_activity on, a thread reply's turn context lists the room's other threads with new messages."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                        tools=["matrix_message"],
+                        room_activity=AgentRoomActivityConfig(enabled=True),
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
+        bot.client = _make_matrix_client_mock()
+        room = nio.MatrixRoom("!test:localhost", mock_agent_user.matrix_id.full_id)
+        bot.client.rooms = {room.room_id: room}
+        unique_room_send_responses(bot.client, prefix="$response")
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+        await admit(
+            bot.journal_principal(),
+            "$other-reply",
+            room_id="!test:localhost",
+            thread_id="$other",
+            sender="@bob:localhost",
+            ts=int(time.time() * 1000) - 60_000,
+        )
+        mock_ai = AsyncMock(return_value="Handled")
+        with patch_response_runner_module(
+            typing_indicator=_noop_typing_indicator,
+            stream_agent_response=streamed_answer(mock_ai),
+        ):
+            await _respond(
+                bot,
+                _response_request(
+                    room_id="!test:localhost",
+                    thread_id="$thread",
+                    prompt="Any news?",
+                    reply_to_event_id="$event123",
+                    user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        thread_id="$thread",
+                        reply_to_event_id="$event123",
+                        prompt="Any news?",
+                        user_id="@user:localhost",
+                    ),
+                ),
+            )
+
+        items = mock_ai.call_args.args[0].transient_enrichment_items
+        (note,) = [item for item in items if item.key == "room_activity"]
+        assert "- (thread $other): bob; 1 new message, last 1 min ago" in note.text.splitlines()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("forked", [True, False], ids=["fork", "plain-thread"])
+    async def test_a_fork_turn_is_told_which_thread_it_was_forked_from(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        forked: bool,
+    ) -> None:
+        """A fork's turn context names its parent thread and fork point, read from its root; a plain thread's has none."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
+        bot.client = _make_matrix_client_mock()
+        unique_room_send_responses(bot.client, prefix="$response")
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+        root_content: dict[str, object] = {"body": "carry on", "msgtype": "m.text"}
+        if forked:
+            root_content[FORK_CONTENT_KEY] = {"thread_id": "$parent", "event_id": "$fork-point"}
+        root = _visible_message(sender="@user:localhost", body="carry on", event_id="$fork", content=root_content)
+        # The locked turn re-reads its thread, so the journal serves the root and parent prefix.
+        if forked:
+            await seed_thread_history(
+                bot,
+                room_id="!test:localhost",
+                thread_id="$parent",
+                messages=[
+                    _visible_message(sender="@user:localhost", body="parent", event_id="$parent"),
+                    replace(
+                        _visible_message(sender="@user:localhost", body="fork point", event_id="$fork-point"),
+                        thread_id="$parent",
+                    ),
+                ],
+            )
+        await seed_thread_history(bot, room_id="!test:localhost", thread_id="$fork", messages=[root])
+        mock_ai = AsyncMock(return_value="Handled")
+        with patch_response_runner_module(
+            typing_indicator=_noop_typing_indicator,
+            stream_agent_response=streamed_answer(mock_ai),
+        ):
+            await _respond(
+                bot,
+                _response_request(
+                    room_id="!test:localhost",
+                    thread_id="$fork",
+                    thread_history=[root],
+                    prompt="carry on",
+                    reply_to_event_id="$fork",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        thread_id="$fork",
+                        reply_to_event_id="$fork",
+                        prompt="carry on",
+                    ),
+                ),
+            )
+
+        items = [item for item in mock_ai.call_args.args[0].transient_enrichment_items if item.key == "thread_fork"]
+        if not forked:
+            assert items == []
+            return
+        (note,) = items
+        assert note.text == config.render_prompt(
+            "THREAD_FORK_CONTEXT_TEMPLATE",
+            parent_thread_id="$parent",
+            fork_point_event_id="$fork-point",
+        )
+        assert "thread $parent, forked after message $fork-point" in note.text
+        assert (note.cache_policy, note.persist, note.minimal_required) == ("stable", False, True)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("authorized", [True, False], ids=["authorized-cross-room", "denied-cross-room"])
+    async def test_cross_room_fork_context_template_and_parent_display_names(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        *,
+        authorized: bool,
+    ) -> None:
+        """Cross-room fork emits its own template and merges parent display names only when prefix loads."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
+        bot.client = _make_matrix_client_mock()
+        bot.client.user_id = mock_agent_user.user_id
+        unique_room_send_responses(bot.client, prefix="$response")
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+
+        source_room_id = "!source:localhost"
+        source_room = nio.MatrixRoom(source_room_id, mock_agent_user.user_id)
+        source_room.name = "Source Room"
+        source_room.members_synced = True
+        source_room.add_member(mock_agent_user.user_id, "Agent", None)
+        source_room.add_member("@user:localhost", "Alice Source", None)
+        source_room.add_member("@carol:localhost", "Carol Source", None)
+
+        target_room = nio.MatrixRoom("!test:localhost", mock_agent_user.user_id)
+        target_room.members_synced = True
+        target_room.add_member(mock_agent_user.user_id, "Agent", None)
+        target_room.add_member("@user:localhost", "Alice Target", None)
+        if not authorized:
+            target_room.add_member("@outsider:localhost", "Outsider", None)
+        bot.client.rooms = {source_room_id: source_room, "!test:localhost": target_room}
+        bot.client.room_get_state_event = AsyncMock(
+            side_effect=lambda room_id, event_type, state_key="": (
+                nio.RoomGetStateEventResponse(
+                    {"history_visibility": bot.client.rooms[room_id].history_visibility},
+                    event_type,
+                    state_key,
+                    room_id,
+                )
+                if event_type == "m.room.history_visibility" and room_id in bot.client.rooms
+                else nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND")
+            ),
+        )
+        bot.client.room_get_state = AsyncMock(
+            side_effect=lambda room_id: (
+                nio.RoomGetStateResponse(
+                    room_id=room_id,
+                    events=[
+                        {"type": "m.room.member", "state_key": user_id, "content": {"membership": "join"}}
+                        for user_id in bot.client.rooms[room_id].users
+                    ],
+                )
+                if room_id in bot.client.rooms
+                else nio.RoomGetStateError("forbidden")
+            ),
+        )
+
+        await seed_thread_history(
+            bot,
+            room_id=source_room_id,
+            thread_id="$parent",
+            messages=[
+                _visible_message(sender="@carol:localhost", body="source root", event_id="$parent"),
+                replace(
+                    _visible_message(sender="@user:localhost", body="source point", event_id="$fork-point"),
+                    thread_id="$parent",
+                ),
+            ],
+        )
+        root = _visible_message(
+            sender="@user:localhost",
+            body="carry on",
+            event_id="$fork",
+            content={
+                "body": "carry on",
+                "msgtype": "m.text",
+                FORK_CONTENT_KEY: {
+                    "room_id": source_room_id,
+                    "thread_id": "$parent",
+                    "event_id": "$fork-point",
+                },
+            },
+        )
+        await seed_thread_history(bot, room_id="!test:localhost", thread_id="$fork", messages=[root])
+
+        from mindroom.tool_system.runtime_context import get_tool_runtime_context  # noqa: PLC0415
+
+        captured_fork_parent_scopes: list[frozenset[tuple[str, str]]] = []
+
+        async def capture_turn(*_args: object, **_kwargs: object) -> str:
+            active_tool_context = get_tool_runtime_context()
+            assert active_tool_context is not None
+            captured_fork_parent_scopes.append(active_tool_context.fork_parent_scopes)
+            return "Handled"
+
+        mock_ai = AsyncMock(side_effect=capture_turn)
+        with patch_response_runner_module(
+            typing_indicator=_noop_typing_indicator,
+            stream_agent_response=streamed_answer(mock_ai),
+        ):
+            await _respond(
+                bot,
+                replace(
+                    _response_request(
+                        room_id="!test:localhost",
+                        thread_id="$fork",
+                        thread_history=[root],
+                        prompt="carry on",
+                        reply_to_event_id="$fork",
+                        response_envelope=request_envelope(
+                            room_id="!test:localhost",
+                            thread_id="$fork",
+                            reply_to_event_id="$fork",
+                            prompt="carry on",
+                            user_id="@user:localhost",
+                        ),
+                    ),
+                    member_display_names={"@user:localhost": "Alice Target"},
+                ),
+            )
+
+        turn = mock_ai.call_args.args[0]
+        items = [item for item in turn.transient_enrichment_items if item.key == "thread_fork"]
+        if not authorized:
+            assert items == []
+            assert "@carol:localhost" not in turn.member_display_names
+            assert captured_fork_parent_scopes == [frozenset()]
+            return
+        (note,) = items
+        assert note.text == config.render_prompt(
+            "CROSS_ROOM_THREAD_FORK_CONTEXT_TEMPLATE",
+            parent_room_id=source_room_id,
+            parent_room_label=f"'Source Room' (room ID {source_room_id})",
+            parent_thread_id="$parent",
+            fork_point_event_id="$fork-point",
+        )
+        assert "including the model" in note.text
+        assert turn.member_display_names["@carol:localhost"] == "Carol Source"
+        assert turn.member_display_names["@user:localhost"] == "Alice Target"
+        assert captured_fork_parent_scopes == [frozenset({(source_room_id, "$parent")})]
+
+    @pytest.mark.asyncio
+    async def test_cross_room_fork_refresh_failure_does_not_reuse_expanded_snapshot(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """If post-lock refresh fails, a turn with a cross-room prefix aborts instead of reusing the earlier snapshot."""
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
+        from tests.conftest import make_matrix_client_mock  # noqa: PLC0415
+
+        bot.client = make_matrix_client_mock(user_id=mock_agent_user.user_id)
+        room = nio.MatrixRoom("!test:localhost", mock_agent_user.user_id)
+        bot.client.rooms = {room.room_id: room}
+        unique_room_send_responses(bot.client, prefix="$response")
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+
+        source_msg = replace(
+            _visible_message(sender="@user:localhost", body="secret source text", event_id="$parent"),
+            room_id="!source:localhost",
+        )
+        fork_root = _visible_message(
+            sender="@user:localhost",
+            body="carry on",
+            event_id="$fork",
+            content={
+                "body": "carry on",
+                "msgtype": "m.text",
+                FORK_CONTENT_KEY: {
+                    "room_id": "!source:localhost",
+                    "thread_id": "$parent",
+                    "event_id": "$parent",
+                },
+            },
+        )
+        bot._conversation_resolver.fetch_thread_history = AsyncMock(side_effect=RuntimeError("homeserver down"))
+
+        mock_ai = AsyncMock(return_value="Should never run")
+        runner = unwrap_extracted_collaborator(bot._response_runner)
+        with patch_response_runner_module(
+            typing_indicator=_noop_typing_indicator,
+            stream_agent_response=streamed_answer(mock_ai),
+        ):
+            await runner.generate_response(
+                replace(
+                    _response_request(
+                        room_id="!test:localhost",
+                        thread_id="$fork",
+                        thread_history=[source_msg, fork_root],
+                        prompt="carry on",
+                        reply_to_event_id="$fork",
+                        response_envelope=request_envelope(
+                            room_id="!test:localhost",
+                            thread_id="$fork",
+                            reply_to_event_id="$fork",
+                            prompt="carry on",
+                            user_id="@user:localhost",
+                        ),
+                    ),
+                    requires_model_history_refresh=False,
+                ),
+            )
+
+        mock_ai.assert_not_awaited()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("source_kind", "allows_no_report_response"),
         [
@@ -483,6 +831,59 @@ class TestAgentBot(AgentBotTestBase):
         model_prompt = mock_ai.call_args.args[0].model_prompt
         assert "[Matrix metadata for tool calls]" not in model_prompt
         assert "!test:localhost" in _matrix_target_item(mock_ai).text
+
+    @pytest.mark.asyncio
+    async def test_agent_reply_in_a_sub_room_is_told_the_rooms_around_it(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+    ) -> None:
+        """A turn in a room listed under another room gets the tree of rooms around it, with their room IDs."""
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                        tools=["matrix_message"],
+                        include_default_tools=False,
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
+        bot.client = _make_matrix_client_mock()
+        install_sub_room(bot.client, mock_agent_user.matrix_id.full_id)
+        unique_room_send_responses(bot.client, prefix="$response")
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+        mock_ai = AsyncMock(return_value="Handled")
+        with patch_response_runner_module(
+            typing_indicator=_noop_typing_indicator,
+            stream_agent_response=streamed_answer(mock_ai),
+        ):
+            await _respond(
+                bot,
+                _response_request(
+                    room_id="!test:localhost",
+                    prompt="What did planning decide?",
+                    reply_to_event_id="$event123",
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event123",
+                        prompt="What did planning decide?",
+                        user_id="@user:localhost",
+                    ),
+                ),
+            )
+
+        [tree] = [item for item in mock_ai.call_args.args[0].transient_enrichment_items if item.key == "room_tree"]
+        assert "- 'design' (!design:localhost), main room" in tree.text
+        assert "  - 'planning' (!planning:localhost)" in tree.text
+        assert "(!test:localhost), you are here" in tree.text
 
     @pytest.mark.asyncio
     async def test_streamed_agent_reply_includes_matrix_metadata_when_tool_enabled(
@@ -1440,6 +1841,7 @@ class TestAgentBot(AgentBotTestBase):
                     response_kind="ai",
                     response_envelope=response_envelope,
                     correlation_id="corr-finalize-stream-visible-failure",
+                    turn_id="turn-1",
                     sources=ResponseSources((response_envelope.source_event_id,), (response_envelope.source_event_id,)),
                 ),
                 tool_trace=None,
@@ -1602,13 +2004,17 @@ class TestAgentBot(AgentBotTestBase):
 
         assert delivery.event_id == "$response1"
         content = bot.client.room_send.await_args.kwargs["content"]["m.new_content"]
-        assert content["body"].endswith("Final answer")
+        assert content["body"] == "Final answer"
         assert content[TOOL_TRACE_CONTENT_KEY]["events"] == [
             {
                 "type": "tool_call_completed",
                 "tool_name": "run_shell_command",
                 "args_preview": "cmd=git status",
                 "result_preview": "clean",
+                "tool_call_id": "call-1",
+                # The call's marker opens the reply, before its first line and block.
+                "body_line": 0,
+                "at": 0,
             },
         ]
 
@@ -2200,6 +2606,7 @@ class TestAgentBot(AgentBotTestBase):
         mock_fetch_thread_history.assert_awaited_once_with(
             "!test:localhost",
             "$thread",
+            requester_id="@alice:localhost",
         )
         turn = answer.call_args.args[0]
         assert list(turn.thread_history) == fresh_history
@@ -2468,6 +2875,7 @@ class TestAgentBot(AgentBotTestBase):
             delivered_response=DeliveredResponse(event_id="$response", body="ok"),
             entity_name=bot.agent_name,
             membership_index=bot._runtime_view.agent_reply_memberships,
+            retitle=False,
         )
         assert "thread_summary_!test:localhost_$thread" in scheduled_names
 
@@ -2479,10 +2887,11 @@ class TestAgentBot(AgentBotTestBase):
     ) -> None:
         """First-turn threaded replies should keep compaction notices and summaries in the resolved thread."""
 
+        # A requested compaction keeps its own notice; an automatic one is recorded on the reply instead.
         async def fake_ai_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
             await ctx.compaction_lifecycle.start(
                 CompactionLifecycleStart(
-                    mode="auto",
+                    mode="manual",
                     session_id="session-1",
                     scope="agent:test_agent",
                     summary_model="summary-model",
@@ -2586,12 +2995,214 @@ class TestAgentBot(AgentBotTestBase):
             delivered_response=DeliveredResponse(event_id="$response", body="ok"),
             entity_name=bot.agent_name,
             membership_index=bot._runtime_view.agent_reply_memberships,
+            retitle=False,
         )
         mock_send_compaction_lifecycle_start.assert_awaited_once()
         compaction_notice_kwargs = mock_send_compaction_lifecycle_start.await_args.kwargs
         assert compaction_notice_kwargs["target"].resolved_thread_id == root_event_id
         assert compaction_notice_kwargs["reply_to_event_id"] == root_event_id
         assert "thread_summary_!test:localhost_$root_event" in scheduled_names
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("streamed", [False, True], ids=["collected", "streamed"])
+    async def test_auto_compaction_records_on_reply_without_notice(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        streamed: bool,
+    ) -> None:
+        """An automatic compaction is recorded on the reply it ran for, collected or streamed, and sends no notice."""
+
+        async def fake_ai_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+            lifecycle = ctx.compaction_lifecycle
+            entry_id = await lifecycle.start(
+                CompactionLifecycleStart(
+                    mode="auto",
+                    session_id="session-1",
+                    scope="agent:test_agent",
+                    summary_model="summary-model",
+                    before_tokens=30_000,
+                    history_budget_tokens=100_000,
+                    runs_before=20,
+                ),
+            )
+            await lifecycle.complete_success(
+                CompactionOutcome(
+                    mode="auto",
+                    session_id="session-1",
+                    scope="agent:test_agent",
+                    summary="summary",
+                    summary_model="summary-model",
+                    before_tokens=30_000,
+                    after_tokens=4_000,
+                    window_tokens=200_000,
+                    threshold_tokens=0,
+                    runs_before=20,
+                    runs_after=1,
+                    compacted_run_count=20,
+                    compacted_at="2026-11-17T00:00:00Z",
+                    history_budget_tokens=100_000,
+                    lifecycle_notice_event_id=entry_id,
+                    duration_ms=1_200,
+                ),
+            )
+            return "ok"
+
+        sent_contents: list[dict[str, Any]] = []
+        deliver_sent = delivered_matrix_side_effect("$response")
+        progress_edits: list[dict[str, Any]] = []
+        deliver_progress_edit = delivered_matrix_side_effect("$edit")
+
+        async def record_send(*args: object, **kwargs: object) -> DeliveredMatrixEvent:
+            content = kwargs.get("content", args[2] if len(args) > 2 else None)
+            if isinstance(content, dict):
+                sent_contents.append(content)
+            return await deliver_sent(*args, **kwargs)
+
+        async def record_progress_edit(*args: object, **kwargs: object) -> DeliveredMatrixEvent:
+            # A streamed reply's progress edits: (client, room_id, event_id, content, text).
+            progress_edits.append(cast("dict[str, Any]", args[3]))
+            return await deliver_progress_edit(*args, **kwargs)
+
+        config = self._config_for_storage(tmp_path)
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
+        bot.client = _make_matrix_client_mock()
+        bot._knowledge_access_support.resolve_for_agent_async = AsyncMock(
+            return_value=_KnowledgeResolution(knowledge=None),
+        )
+        response_envelope = _hook_envelope(source_event_id="$user_msg")
+
+        with (
+            patch("mindroom.reply_turn.request.typing_indicator", _noop_typing_indicator),
+            patch("mindroom.response_runner.should_use_streaming", new_callable=AsyncMock, return_value=streamed),
+            patch(
+                "mindroom.response_runner.stream_agent_response",
+                new=streamed_answer(AsyncMock(side_effect=fake_ai_response)),
+            ),
+            patch("mindroom.delivery_gateway.send_message_outcome", new=AsyncMock(side_effect=record_send)),
+            patch(
+                "mindroom.delivery_gateway.edit_message_outcome",
+                new=AsyncMock(side_effect=delivered_matrix_side_effect("$edit")),
+            ),
+            patch("mindroom.streaming.edit_message_result", new=AsyncMock(side_effect=record_progress_edit)),
+            patch(
+                "mindroom.reply_turn.locked_turn.store_conversation_memory",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch("mindroom.post_response_effects.maybe_generate_thread_summary", new_callable=AsyncMock),
+        ):
+            await bot._response_runner.generate_response(
+                ResponseRequest(
+                    sources=ResponseSources(
+                        pending_event_ids=(response_envelope.source_event_id,),
+                        logical_source_event_ids=(response_envelope.source_event_id,),
+                    ),
+                    prompt="Hello",
+                    thread_history=[],
+                    user_id="@alice:localhost",
+                    response_envelope=response_envelope,
+                ),
+            )
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
+
+        assert not any(COMPACTION_NOTICE_CONTENT_KEY in content for content in sent_contents)
+        # The final answer edits the reply's placeholder; its new content carries the compaction.
+        placeholder, final_edit = sent_contents[0], sent_contents[-1]
+        assert "m.new_content" not in placeholder
+        assert final_edit["m.relates_to"]["rel_type"] == "m.replace"
+        assert final_edit["m.relates_to"]["event_id"] == "$response"
+        final_content = final_edit["m.new_content"]
+        assert final_content["body"] == "ok"
+        [entry] = final_content[COMPACTIONS_CONTENT_KEY]
+        assert entry["status"] == "success"
+        assert entry["phase"] == "pre_turn"
+        assert entry["mode"] == "auto"
+        assert entry["after_tool"] == 0
+        assert entry["after_tokens"] == 4_000
+        # A streamed reply also shows it in a progress edit, which only the stream itself writes.
+        shown = [content[COMPACTIONS_CONTENT_KEY] for content in progress_edits if COMPACTIONS_CONTENT_KEY in content]
+        assert [entries[0]["status"] for entries in shown] == (["success"] if streamed else [])
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("show_tool_calls", "after_tool"), [(True, 2), (False, 0)])
+    async def test_collected_compaction_anchors_after_the_tools_collected_so_far(
+        self,
+        mock_agent_user: AgentMatrixUser,
+        tmp_path: Path,
+        show_tool_calls: bool,
+        after_tool: int,
+    ) -> None:
+        """A compaction in a collected reply sits after the tool calls shown before it began, or at the top if hidden.
+
+        Either way the reply ran tools first, hidden ones too, so the compaction is mid-turn.
+        """
+        config = _runtime_bound_config(
+            Config(
+                agents={
+                    "calculator": AgentConfig(
+                        display_name="CalculatorAgent",
+                        rooms=["!test:localhost"],
+                        show_tool_calls=show_tool_calls,
+                    ),
+                },
+            ),
+            tmp_path,
+        )
+        bot = make_test_agent_bot(mock_agent_user, config=config, runtime_paths=runtime_paths_for(config))
+        install_direct_response_admission(bot)
+        bot.client = _make_matrix_client_mock()
+        unique_room_send_responses(bot.client, prefix="$response")
+        _set_knowledge_for_agent(bot, MagicMock(return_value=None))
+
+        async def fake_stream_agent_response(
+            ctx: ResponseTurnContext,
+            *_args: object,
+            **_kwargs: object,
+        ) -> AsyncIterator[object]:
+            yield ToolStarted(ReportedCall(tool_call_id="call-1", tool_name="read_file", tool_args={"path": "a"}))
+            yield ToolStarted(ReportedCall(tool_call_id="call-2", tool_name="read_file", tool_args={"path": "b"}))
+            lifecycle = ctx.compaction_lifecycle
+            assert lifecycle is not None
+            await lifecycle.start(
+                CompactionLifecycleStart(
+                    mode="auto",
+                    session_id="session-1",
+                    scope="agent:calculator",
+                    summary_model="summary-model",
+                    before_tokens=30_000,
+                    history_budget_tokens=100_000,
+                    runs_before=20,
+                ),
+            )
+            yield "Answer after compacting"
+
+        with patch_response_runner_module(
+            typing_indicator=_noop_typing_indicator,
+            stream_agent_response=fake_stream_agent_response,
+        ):
+            await _respond(
+                bot,
+                _response_request(
+                    room_id="!test:localhost",
+                    prompt="Read both",
+                    reply_to_event_id="$event",
+                    thread_history=[],
+                    user_id="@user:localhost",
+                    response_envelope=request_envelope(
+                        room_id="!test:localhost",
+                        reply_to_event_id="$event",
+                        prompt="Read both",
+                        user_id="@user:localhost",
+                    ),
+                ),
+            )
+
+        content = bot.client.room_send.await_args.kwargs["content"]["m.new_content"]
+        [entry] = content[COMPACTIONS_CONTENT_KEY]
+        assert entry["phase"] == "mid_turn"
+        assert entry["after_tool"] == after_tool
 
     @pytest.mark.asyncio
     async def test_generate_response_marks_non_streaming_model_error_unsuccessful_for_post_effects(
@@ -2818,7 +3429,15 @@ class TestAgentBot(AgentBotTestBase):
             events.append("cleanup_complete")
             return outcome
 
-        lifecycle = cast("Any", SimpleNamespace(identity=identity, finalize=finalize))
+        lifecycle = cast(
+            "Any",
+            SimpleNamespace(
+                identity=identity,
+                finalize=finalize,
+                turn=lambda **_kwargs: nullcontext(),
+                start_turn=AsyncMock(),
+            ),
+        )
         # The response runs in the reply span the locked generation claims for it.
         async with runner.deps.replies.span_scope():
             claimed = await runner._claim_reply_span(request, history_scope=runner.deps.state_writer.history_scope())
@@ -2895,7 +3514,7 @@ class TestAgentBot(AgentBotTestBase):
         ):
             # The paused approval owns the source.
             assert await bot._response_runner.generate_response(request) == Owned()
-            assert not bot._response_runner.has_active_response_for_target(target.target)
+            assert not bot._response_runner.lifecycle_coordinator.has_active_response_for_target(target.target)
 
         suspend.assert_awaited_once()
         effects.assert_not_awaited()
@@ -3227,7 +3846,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
             if action != "sync_restart":
                 raise
             result = None
-        assert await wait_for_background_tasks(timeout=5, owner=bot._runtime_view)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
         sends = bot.client.room_send.await_args_list
         bodies = [call.kwargs["content"].get("body", "") for call in sends]
         stop_buttons = [
@@ -3309,7 +3928,7 @@ class TestAdaptiveResponse(AgentBotTestBase):
 
         await bot._response_runner.generate_response(self._participation_request(bot, reaction=None, backend="model"))
 
-        assert await wait_for_background_tasks(timeout=5, owner=bot._runtime_view)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
         assert thread_summary.await_count == (1 if action == "respond" else 0)
         assert memory_queued == (["stored"] if action == "respond" else [])
 

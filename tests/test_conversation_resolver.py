@@ -18,7 +18,7 @@ import pytest
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.constants import ATTACHMENT_IDS_KEY, SKIP_MENTIONS_KEY
+from mindroom.constants import ATTACHMENT_IDS_KEY, FORK_CONTENT_KEY, SKIP_MENTIONS_KEY
 from mindroom.conversation_resolver import ConversationResolver, ConversationResolverDeps
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
@@ -39,6 +39,7 @@ from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.matrix.relation_lookup import RelationLookup
 from mindroom.matrix.thread_membership import RelatedEventUnavailableError, ThreadMembershipLookupError
 from mindroom.message_target import MessageTarget
+from mindroom.thread_utils import get_agents_in_thread
 from mindroom.turn_origin import TurnTrust
 from tests.conftest import (
     bind_runtime_paths,
@@ -989,3 +990,330 @@ async def test_dispatch_context_asks_for_a_model_history_refresh_only_for_a_part
 
     assert context.thread_id == _PARENT
     assert context.requires_model_history_refresh is refresh
+
+
+_FORK = "$fork:localhost"
+_AGENT_REPLY = "$agent-reply:localhost"
+
+
+def _per_thread_reader(pages: dict[str, tuple[VisibleMessage, ...]]) -> ConversationReader:
+    """Return a reader that serves one fixed page per thread_id keyword."""
+
+    async def read(*, thread_id: str, **_: object) -> ConversationPage:
+        return ConversationPage(messages=pages[thread_id], refresh_pending=(), next_cursor=None)
+
+    return cast(
+        "ConversationReader",
+        SimpleNamespace(
+            may_have_unread_history=AsyncMock(return_value=False),
+            hydration_was_truncated=AsyncMock(return_value=False),
+            read=AsyncMock(side_effect=read),
+            read_strict=AsyncMock(side_effect=read),
+        ),
+    )
+
+
+_FORK_ROOT_CONTENT = {
+    "msgtype": "m.text",
+    "body": "fork root",
+    FORK_CONTENT_KEY: {"thread_id": _PARENT, "event_id": _AGENT_REPLY},
+}
+
+
+def _fork_pages() -> dict[str, tuple[VisibleMessage, ...]]:
+    # Roots carry no thread relation, so the projection stores them at room level.
+    parent_root = replace(_projected(_PARENT, "question"), thread_id=None, sender=_HUMAN_USER_ID)
+    agent_reply = replace(
+        _projected(_AGENT_REPLY, "answer"),
+        thread_id=_PARENT,
+        sender=_BOT_USER_ID,
+        created_ts=2_000,
+    )
+    later = replace(_projected("$later:localhost", "after the fork"), thread_id=_PARENT, created_ts=3_000)
+    fork_root = replace(
+        _projected(_FORK, "fork root"),
+        thread_id=None,
+        sender=_HUMAN_USER_ID,
+        created_ts=4_000,
+        content=_FORK_ROOT_CONTENT,
+    )
+    return {_PARENT: (parent_root, agent_reply, later), _FORK: (fork_root,)}
+
+
+@pytest.mark.asyncio
+async def test_fork_dispatch_context_counts_the_parents_agent(config: Config) -> None:
+    """Routing sees the parent's agent in a fork, because the prefix is part of the planning history."""
+    resolver = _resolver(config, conversation_reader=_per_thread_reader(_fork_pages()))
+    event = _event(
+        {"body": "go on", "m.relates_to": {"rel_type": "m.thread", "event_id": _FORK}},
+    )
+
+    context = await resolver.extract_dispatch_context(_room(), event, thread_id=_FORK)
+
+    assert [m.event_id for m in context.planning_thread_history] == [_PARENT, _AGENT_REPLY, _FORK]
+    agents = get_agents_in_thread(context.planning_thread_history, config, resolver.deps.runtime_paths)
+    assert [a.full_id for a in agents] == [_BOT_USER_ID]
+
+
+@pytest.mark.asyncio
+async def test_fork_strict_history_includes_the_prefix(config: Config) -> None:
+    """A strict read returns the prefix then the fork, reading both threads strictly."""
+    reader = _per_thread_reader(_fork_pages())
+    resolver = _resolver(config, conversation_reader=reader)
+
+    history = await resolver.fetch_thread_history(_ROOM_ID, _FORK)
+
+    assert [m.event_id for m in history] == [_PARENT, _AGENT_REPLY, _FORK]
+    awaited = {call.kwargs["thread_id"] for call in reader.read_strict.await_args_list}  # type: ignore[attr-defined]
+    assert awaited == {_PARENT, _FORK}
+
+
+@pytest.mark.asyncio
+async def test_fork_root_is_a_turn_in_its_own_thread_that_counts_the_parents_agent(config: Config) -> None:
+    """A fork's first message is routed as the parent's next message, so the parent's agent answers it unmentioned."""
+    resolver = _resolver(config, conversation_reader=_per_thread_reader(_fork_pages()))
+    root = _event(_FORK_ROOT_CONTENT, event_id=_FORK)
+
+    thread_id = await resolver.coalescing_thread_id(_room(), root)
+    target = resolver.build_message_target(
+        room_id=_ROOM_ID,
+        thread_id=thread_id,
+        reply_to_event_id=_FORK,
+        event_source=root.source,
+    )
+    context = await resolver.extract_dispatch_context(_room(), root, thread_id=target.source_thread_id)
+
+    assert thread_id == _FORK
+    assert (target.source_thread_id, target.resolved_thread_id) == (_FORK, _FORK)
+    assert [m.event_id for m in context.planning_thread_history] == [_PARENT, _AGENT_REPLY, _FORK]
+    agents = get_agents_in_thread(context.planning_thread_history, config, resolver.deps.runtime_paths)
+    assert [a.full_id for a in agents] == [_BOT_USER_ID]
+
+
+@pytest.mark.asyncio
+async def test_fork_root_stays_room_level_in_room_thread_mode(tmp_path: Path) -> None:
+    """Room thread mode has no threads, so a fork's first message is an ordinary room message there."""
+    config = bind_runtime_paths(
+        Config(agents={"general": AgentConfig(display_name="General", thread_mode="room")}),
+        test_runtime_paths(tmp_path),
+    )
+    resolver = _resolver(config, conversation_reader=_per_thread_reader(_fork_pages()))
+
+    assert await resolver.coalescing_thread_id(_room(), _event(_FORK_ROOT_CONTENT, event_id=_FORK)) is None
+
+
+@pytest.mark.asyncio
+async def test_plain_reply_to_a_lone_fork_root_does_not_join_the_fork(config: Config) -> None:
+    """Membership proofs read the fork's own messages only, so the parent's prefix never proves the fork a thread."""
+    resolver = _resolver(config, conversation_reader=_per_thread_reader(_fork_pages()))
+    reply = _event({"body": "a reply", "m.relates_to": {"m.in_reply_to": {"event_id": _FORK}}})
+
+    assert await resolver.coalescing_thread_id(_room(), reply) is None
+
+
+@pytest.mark.asyncio
+async def test_edited_fork_root_that_keeps_the_reference_stays_a_fork(config: Config) -> None:
+    """The projection holds a root's visible revision, so an edit that keeps the reference keeps the prefix."""
+    pages = _fork_pages()
+    edited_root = replace(
+        pages[_FORK][0],
+        revision_event_id="$fork-edit:localhost",
+        revision_ts=5_000,
+        content={**_FORK_ROOT_CONTENT, "body": "edited fork root"},
+    )
+    resolver = _resolver(config, conversation_reader=_per_thread_reader({**pages, _FORK: (edited_root,)}))
+
+    history = await resolver.fetch_thread_history(_ROOM_ID, _FORK)
+
+    assert [(m.event_id, m.body) for m in history] == [
+        (_PARENT, "question"),
+        (_AGENT_REPLY, "answer"),
+        (_FORK, "edited fork root"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_prefix_message_edited_in_the_parent_shows_its_edit_in_the_fork(config: Config) -> None:
+    """A fork shares the parent's prefix messages, so their edits show, and the parent's later message stays out."""
+    pages = _fork_pages()
+    parent_root, agent_reply, later = pages[_PARENT]
+    edited_reply = replace(
+        agent_reply,
+        revision_event_id="$answer-edit:localhost",
+        revision_ts=3_500,
+        content={"msgtype": "m.text", "body": "edited answer"},
+    )
+    resolver = _resolver(
+        config,
+        conversation_reader=_per_thread_reader({**pages, _PARENT: (parent_root, edited_reply, later)}),
+    )
+
+    history = await resolver.fetch_thread_history(_ROOM_ID, _FORK)
+
+    assert [(m.event_id, m.body) for m in history] == [
+        (_PARENT, "question"),
+        (_AGENT_REPLY, "edited answer"),
+        (_FORK, "fork root"),
+    ]
+    assert history.messages[1].visible_event_id == "$answer-edit:localhost"
+
+
+_SOURCE_ROOM_ID = "!source:localhost"
+
+
+def _room_aware_reader(pages: dict[tuple[str, str], tuple[VisibleMessage, ...]]) -> ConversationReader:
+    """Return a reader that serves one fixed page per (room_id, thread_id)."""
+
+    async def read(*, room_id: str, thread_id: str, **_: object) -> ConversationPage:
+        return ConversationPage(messages=pages.get((room_id, thread_id), ()), refresh_pending=(), next_cursor=None)
+
+    return cast(
+        "ConversationReader",
+        SimpleNamespace(
+            may_have_unread_history=AsyncMock(return_value=False),
+            hydration_was_truncated=AsyncMock(return_value=False),
+            read=AsyncMock(side_effect=read),
+            read_strict=AsyncMock(side_effect=read),
+        ),
+    )
+
+
+def _cross_room_matrix_room(
+    room_id: str,
+    *,
+    joined: tuple[str, ...],
+    members_synced: bool = True,
+) -> nio.MatrixRoom:
+    room = nio.MatrixRoom(room_id, _BOT_USER_ID)
+    room.members_synced = members_synced
+    for user_id in joined:
+        room.add_member(user_id, user_id, None)
+    return room
+
+
+def _cross_room_fork_pages() -> dict[tuple[str, str], tuple[VisibleMessage, ...]]:
+    parent_root = replace(_projected(_PARENT, "source question"), thread_id=None, sender=_HUMAN_USER_ID)
+    agent_reply = replace(
+        _projected(_AGENT_REPLY, "source answer"),
+        thread_id=_PARENT,
+        sender=_BOT_USER_ID,
+        created_ts=2_000,
+    )
+    fork_root = replace(
+        _projected(_FORK, "cross-room fork"),
+        thread_id=None,
+        sender=_HUMAN_USER_ID,
+        created_ts=4_000,
+        content={
+            "msgtype": "m.text",
+            "body": "cross-room fork",
+            FORK_CONTENT_KEY: {"room_id": _SOURCE_ROOM_ID, "thread_id": _PARENT, "event_id": _AGENT_REPLY},
+        },
+    )
+    return {
+        (_SOURCE_ROOM_ID, _PARENT): (parent_root, agent_reply),
+        (_ROOM_ID, _FORK): (fork_root,),
+    }
+
+
+@pytest.mark.asyncio
+async def test_cross_room_fork_authorized_denied_and_deferred_to_strict(config: Config) -> None:
+    """Authorized cross-room fork loads stamped prefix; denied omits without degrading; DEFERRED retries strictly."""
+    reader = _room_aware_reader(_cross_room_fork_pages())
+    resolver = _resolver(config, conversation_reader=reader)
+    client = resolver.deps.runtime.client
+    assert client is not None
+    client.user_id = _BOT_USER_ID
+    client.room_get_state_event = AsyncMock(
+        side_effect=lambda room_id, event_type, state_key="": (
+            nio.RoomGetStateEventResponse(
+                {"history_visibility": client.rooms[room_id].history_visibility},
+                event_type,
+                state_key,
+                room_id,
+            )
+            if event_type == "m.room.history_visibility" and room_id in client.rooms
+            else nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND")
+        ),
+    )
+    client.room_get_state = AsyncMock(
+        side_effect=lambda room_id: (
+            nio.RoomGetStateResponse(
+                room_id=room_id,
+                events=[
+                    {"type": "m.room.member", "state_key": user_id, "content": {"membership": "join"}}
+                    for user_id in client.rooms[room_id].users
+                ],
+            )
+            if room_id in client.rooms
+            else nio.RoomGetStateError("forbidden")
+        ),
+    )
+
+    # 1) Authorized: source and target share the same human requester and agent.
+    source_room = _cross_room_matrix_room(_SOURCE_ROOM_ID, joined=(_BOT_USER_ID, _HUMAN_USER_ID))
+    target_room = _cross_room_matrix_room(_ROOM_ID, joined=(_BOT_USER_ID, _HUMAN_USER_ID))
+    client.rooms = {_SOURCE_ROOM_ID: source_room, _ROOM_ID: target_room}
+
+    event = _event({"body": "go on", "m.relates_to": {"rel_type": "m.thread", "event_id": _FORK}})
+    allowed_ctx = await resolver.extract_dispatch_context(
+        target_room,
+        event,
+        thread_id=_FORK,
+        requester_id=_HUMAN_USER_ID,
+    )
+    assert [(m.room_id, m.event_id) for m in allowed_ctx.thread_history] == [
+        (_SOURCE_ROOM_ID, _PARENT),
+        (_SOURCE_ROOM_ID, _AGENT_REPLY),
+        (None, _FORK),
+    ]
+    assert not allowed_ctx.requires_model_history_refresh
+
+    # 2) Denied (outsider joined in target room): zero parent messages, NOT degraded, parent never read.
+    reader.read.reset_mock()  # type: ignore[attr-defined]
+    reader.read_strict.reset_mock()  # type: ignore[attr-defined]
+    target_with_outsider = _cross_room_matrix_room(
+        _ROOM_ID,
+        joined=(_BOT_USER_ID, _HUMAN_USER_ID, "@outsider:localhost"),
+    )
+    client.rooms = {_SOURCE_ROOM_ID: source_room, _ROOM_ID: target_with_outsider}
+    denied_ctx = await resolver.extract_dispatch_context(
+        target_with_outsider,
+        event,
+        thread_id=_FORK,
+        requester_id=_HUMAN_USER_ID,
+    )
+    assert [m.event_id for m in denied_ctx.thread_history] == [_FORK]
+    assert not denied_ctx.requires_model_history_refresh
+    assert not denied_ctx.planning_thread_history_unavailable
+    assert [
+        (call.kwargs["room_id"], call.kwargs["thread_id"])
+        for call in reader.read_strict.await_args_list  # type: ignore[attr-defined]
+    ] == [(_ROOM_ID, _FORK)]
+
+    # 3) DEFERRED in NONBLOCKING (source room cache incomplete) upgrades to STRICT, reading authoritative room_get_state.
+    reader.read.reset_mock()  # type: ignore[attr-defined]
+    reader.read_strict.reset_mock()  # type: ignore[attr-defined]
+    source_unsynced = _cross_room_matrix_room(_SOURCE_ROOM_ID, joined=(_BOT_USER_ID,), members_synced=False)
+    client.rooms = {_SOURCE_ROOM_ID: source_unsynced, _ROOM_ID: target_room}
+    client.room_get_state = AsyncMock(
+        return_value=nio.RoomGetStateResponse(
+            room_id=_SOURCE_ROOM_ID,
+            events=[
+                {"type": "m.room.member", "state_key": _BOT_USER_ID, "content": {"membership": "join"}},
+                {"type": "m.room.member", "state_key": _HUMAN_USER_ID, "content": {"membership": "join"}},
+            ],
+        ),
+    )
+    upgraded_ctx = await resolver.extract_dispatch_context(
+        target_room,
+        event,
+        thread_id=_FORK,
+        requester_id=_HUMAN_USER_ID,
+    )
+    assert [(m.room_id, m.event_id) for m in upgraded_ctx.thread_history] == [
+        (_SOURCE_ROOM_ID, _PARENT),
+        (_SOURCE_ROOM_ID, _AGENT_REPLY),
+        (None, _FORK),
+    ]
+    assert reader.read_strict.await_count == 2  # type: ignore[attr-defined]

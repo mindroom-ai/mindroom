@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
+from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.constants import ATTACHMENT_IDS_KEY
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.matrix.typing import typing_indicator
+from mindroom.mid_turn import MidTurnMode
 from mindroom.response_sources import ResponseSources
 
 if TYPE_CHECKING:
@@ -18,14 +21,18 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.active_runs import ActiveRunPublisher
+    from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.config.main import Config
     from mindroom.config.participation import ParticipationConfig
+    from mindroom.constants import RuntimePaths
     from mindroom.contacts.store import ContactRecord, SideName
     from mindroom.dispatch_source import ScheduledHistoryBudget
     from mindroom.hooks import EnrichmentItem, MessageEnvelope
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.media_inputs import MediaInputs
     from mindroom.participation import ParticipationGate
+    from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.response_payload_preparation import ResponsePayloadPreparation
     from mindroom.skill_learning.capture import SkillReviewCapture
     from mindroom.timing import DispatchPipelineTiming
@@ -57,6 +64,28 @@ def reply_authorization_entity_names(
     return tuple(dict.fromkeys((owner_entity_name, *team_member_names)))
 
 
+def requester_remains_authorized(
+    requester_id: str,
+    room_id: str,
+    *,
+    owner_entity_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    membership_index: AgentReplyMembershipIndex,
+    reply_entity_names: Sequence[str] = (),
+) -> bool:
+    """Recheck one requester under serialized ownership with resolved membership."""
+    return is_sender_allowed_for_entity_replies_in_room(
+        requester_id,
+        reply_authorization_entity_names(config, owner_entity_name, reply_entity_names),
+        config,
+        room_id,
+        runtime_paths,
+        membership_index,
+        require_resolved_membership=True,
+    )
+
+
 @dataclass(frozen=True)
 class ResponseRequest:
     """Typed carrier for one response lifecycle request."""
@@ -66,6 +95,8 @@ class ResponseRequest:
     response_envelope: MessageEnvelope
     sources: ResponseSources
     participation: ParticipationConfig | None = None
+    # Runs once ``participation`` approves this reply, before it shows anything.
+    on_participation_approved: Callable[[], Awaitable[None]] | None = None
     member_display_names: Mapping[str, str] = field(default_factory=dict)
     model_prompt: str | None = None
     # The event this response was dispatched to write over: the answer an edit
@@ -82,6 +113,8 @@ class ResponseRequest:
     media: MediaInputs | None = None
     attachment_ids: tuple[str, ...] | None = None
     correlation_id: str | None = None
+    # The turn's own ID, which its hooks and tool calls carry; unlike the correlation ID, no other turn shares it.
+    turn_id: str = field(default_factory=lambda: uuid4().hex)
     matrix_run_metadata: Mapping[str, Any] | None = None
     participating_agent_names: tuple[str, ...] = ()
     transient_enrichment_items: tuple[EnrichmentItem, ...] = ()
@@ -89,12 +122,18 @@ class ResponseRequest:
     requires_model_history_refresh: bool = False
     scheduled_history_budget: ScheduledHistoryBudget | None = None
     history_boundary_event_id: str | None = None
+    # The person's messages a route names, which the prompt holds: the thread's copy of each is no history beside it.
+    prompt_source_event_ids: tuple[str, ...] = ()
     scheduled_model: str | None = None
     payload_preparation: ResponsePayloadPreparation | None = None
     current_timestamp_ms: float | None = None
     current_prompt_is_structured: bool = False
+    mid_turn_mode: MidTurnMode = MidTurnMode.AUTO
     # Runs once the response holds its conversation's lock, so its dispatcher knows the turn left the lane.
     on_lifecycle_lock_acquired: Callable[[], None] | None = None
+    # This turn's own queued-human notices, held across pre-lock dispatch until the conversation lock is acquired
+    # (or released on early failure/cancellation before lock acquisition).
+    notices: tuple[QueuedHumanNoticeReservation, ...] = ()
     # Which sources became terminal while the request waited for its lock: deleted, or answered elsewhere.
     prepare_source_turn: Callable[[Sequence[ResolvedVisibleMessage]], Coroutine[Any, Any, SourcePreparation]] | None = (
         None
@@ -136,7 +175,7 @@ class ResponseRequest:
 
     @property
     def quiet(self) -> bool:
-        """Return whether the turn shows no progress in its room: a silent schedule's or a contact turn's."""
+        """Return whether the turn shows no placeholder, stream, or typing: a silent schedule's or a contact turn's."""
         return self.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND or self.contact is not None
 
 
@@ -145,7 +184,7 @@ def correlation_id_for_request(request: ResponseRequest) -> str:
     return request.correlation_id or request.reply_to_event_id or request.response_envelope.source_event_id
 
 
-def response_typing_log_context(
+def _response_typing_log_context(
     request: ResponseRequest,
     *,
     response_run_id: str | None,
@@ -170,40 +209,61 @@ async def response_typing_indicator(
     *,
     response_run_id: str | None,
     participation: ParticipationGate | None = None,
+    contact_receipt: Callable[[], Awaitable[None]] | None = None,
+    active_runs: ActiveRunPublisher | None = None,
 ) -> AsyncIterator[None]:
-    """Expose typing only for a response whose progress may be visible, which a quiet one's never is."""
-    if request.quiet:
+    """Expose typing only for a response whose progress may be visible, which a quiet one's never is.
+
+    A contact turn, quiet as it is, sends ``contact_receipt`` instead, once its participation lets it become visible,
+    unless it runs a silent schedule, whose hidden trigger nobody waits on.
+    """
+    silent_schedule = request.response_envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND
+    if silent_schedule or (request.quiet and contact_receipt is None):
         yield
         return
 
-    @asynccontextmanager
-    async def show_typing() -> AsyncIterator[None]:
-        async with typing_indicator(
-            client,
-            request.room_id,
-            log_context=response_typing_log_context(request, response_run_id=response_run_id),
-        ):
+    lease_cm = (
+        active_runs.track(request.room_id, request.thread_id, active=False)
+        if active_runs is not None and request.contact is None
+        else nullcontext()
+    )
+    async with lease_cm as lease:
+
+        @asynccontextmanager
+        async def show_progress() -> AsyncIterator[None]:
+            if request.contact is not None and contact_receipt is not None:
+                await contact_receipt()
+                yield
+                return
+            async with (
+                active_runs.activate(lease) if active_runs is not None and lease is not None else nullcontext(),
+                typing_indicator(
+                    client,
+                    request.room_id,
+                    log_context=_response_typing_log_context(request, response_run_id=response_run_id),
+                ),
+            ):
+                yield
+
+        if participation is None:
+            async with show_progress():
+                yield
+            return
+        finished = asyncio.Event()
+
+        async def approved_progress() -> None:
+            if await participation.wait_for_approval():
+                async with show_progress():
+                    await finished.wait()
+
+        task = asyncio.create_task(approved_progress())
+        try:
             yield
-
-    if participation is None:
-        async with show_typing():
-            yield
-        return
-    finished = asyncio.Event()
-
-    async def approved_typing() -> None:
-        if await participation.wait_for_approval():
-            async with show_typing():
-                await finished.wait()
-
-    task = asyncio.create_task(approved_typing())
-    try:
-        yield
-    finally:
-        finished.set()
-        task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
+        finally:
+            finished.set()
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
 
 
 @dataclass(frozen=True)

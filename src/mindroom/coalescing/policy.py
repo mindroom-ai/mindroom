@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import enum
-from typing import TYPE_CHECKING
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, NamedTuple
 
+from mindroom.constants import SUBMISSION_CONTENT_KEY
 from mindroom.dispatch_handoff import DispatchEvent, is_media_dispatch_event
 from mindroom.dispatch_source import (
     IMAGE_SOURCE_KIND,
@@ -25,6 +27,14 @@ class QueueKind(enum.Enum):
     BYPASS = "bypass"
 
 
+class SubmissionMarker(NamedTuple):
+    """One event's place in the composer submission that sent it."""
+
+    submission_id: str
+    # Whether the client sends another event of this submission without the person doing anything.
+    more: bool
+
+
 _ROOM_SCOPE_BATCHING_SOURCE_KINDS: frozenset[str] = frozenset(
     {VOICE_SOURCE_KIND, IMAGE_SOURCE_KIND, MEDIA_SOURCE_KIND},
 )
@@ -40,13 +50,43 @@ def pending_event_is_text(pending_event: PendingEvent) -> bool:
     return pending_event.event.raw_event is None
 
 
+def submission_marker_from_source(source: Mapping[str, Any]) -> SubmissionMarker | None:
+    """Return the composer submission marker one Matrix event source carries, or None if unmarked or malformed.
+
+    A marker is a mapping with a non-empty string ``id`` and an optional bool
+    ``more``, read as False when missing; anything else is no marker.
+    """
+    content = source.get("content") if isinstance(source, Mapping) else None
+    marker = content.get(SUBMISSION_CONTENT_KEY) if isinstance(content, Mapping) else None
+    if not isinstance(marker, Mapping):
+        return None
+    submission_id = marker.get("id")
+    more = marker.get("more", False)
+    if not isinstance(submission_id, str) or not submission_id or type(more) is not bool:
+        return None
+    return SubmissionMarker(submission_id, more)
+
+
+def submission_marker(pending_event: PendingEvent) -> SubmissionMarker | None:
+    """Return the composer submission marker one event carries, or None for an unmarked or malformed one."""
+    return submission_marker_from_source(pending_event.event.source)
+
+
 def pending_events_sent_together(earlier: PendingEvent, later: PendingEvent, *, window_seconds: float) -> bool:
-    """Return whether two events were sent within one burst window of each other.
+    """Return whether two events were sent within one burst window of each other, or by one composer submission.
 
     Local receipt time collapses when sync catch-up or slow voice readiness
     delivers a backlog at once, so a send burst compares the homeserver's
     origin timestamps. An event without one is never proven to share a burst.
     """
+    earlier_submission = submission_marker(earlier)
+    later_submission = submission_marker(later)
+    if (
+        earlier_submission is not None
+        and later_submission is not None
+        and earlier_submission.submission_id == later_submission.submission_id
+    ):
+        return True
     earlier_ms = normalize_timestamp_ms(earlier.event.server_timestamp)
     later_ms = normalize_timestamp_ms(later.event.server_timestamp)
     return (
@@ -64,6 +104,7 @@ def source_or_event_allows_room_scope_batching(
 
 def queue_kind(pending_event: PendingEvent) -> QueueKind:
     """Return the dispatch behavior for one resolved pending event."""
-    if source_kind_bypasses_coalescing(pending_event.facts.source_kind):
+    # A route is a whole turn its steward selected, whatever its kind: it shares a turn with nothing.
+    if source_kind_bypasses_coalescing(pending_event.facts.source_kind) or pending_event.facts.routed_event_ids:
         return QueueKind.BYPASS
     return QueueKind.NORMAL

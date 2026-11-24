@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
 from types import MappingProxyType
-from typing import TypeGuard, cast, overload
+from typing import Literal, TypeGuard, cast, overload
 
 from dotenv import dotenv_values
 
@@ -21,11 +21,13 @@ from mindroom.providers.names import provider_route
 
 # Agent names
 ROUTER_AGENT_NAME = "router"
-ROUTER_DISPLAY_NAME = "RouterAgent"
+ROUTER_DISPLAY_NAME = "MindRoom"
 AGENT_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_]+$")
 # "_shared" is the requester-store directory part for `user` scope in CredentialsManager.for_primary_runtime_scope.
 RESERVED_ENTITY_NAMES = frozenset({ROUTER_AGENT_NAME, "user", "_shared"})
 VISIBLE_ROUTER_VOICE_ECHO_KEY = "com.mindroom.visible_router_voice_echo"
+# Event ID of the voice message a transcript echo transcribes, so clients can fold the echo into it.
+VOICE_SOURCE_EVENT_ID_KEY = "com.mindroom.voice_source_event_id"
 CONFIG_CONFIRMATION_REACTION_KEY = "com.mindroom.config_confirmation_reaction"
 DEFAULT_MINDROOM_URL = "http://127.0.0.1:8765"
 DEFAULT_MATRIX_HOMESERVER = "https://mindroom.chat"
@@ -55,6 +57,8 @@ _CONFIG_SEARCH_PATHS = [Path("config.yaml"), Path.home() / ".mindroom" / "config
 CONTROL_STATE_PATH_ENV = runtime_env_policy.CONTROL_STATE_PATH_ENV
 _RUNTIME_PATH_ENV_KEYS = frozenset({"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH", CONTROL_STATE_PATH_ENV})
 _SANDBOX_STARTUP_MANIFEST_RELATIVE_PATH = Path(".runtime") / "startup_manifest.json"
+STARTUP_MANIFEST_EAGER_SETUP_PLUGINS = "eager_setup_plugins"
+STARTUP_MANIFEST_SANDBOX_MOUNT = "sandbox_mount"
 _CONFIG_PATH_PLACEHOLDER_PATTERN = re.compile(r"\$(?:\{(?P<braced>[A-Z0-9_]+)\}|(?P<bare>[A-Z0-9_]+))")
 
 # Bash bookkeeping vars that change every time printenv runs and are never
@@ -132,6 +136,9 @@ def is_workspace_env_overlay_name_allowed(name: str) -> bool:
     return runtime_env_policy.is_shell_passthrough_allowed_env_name(name)
 
 
+EnvValueSource = Literal["process_env", "env_file"]
+
+
 @dataclass(frozen=True)
 class RuntimePaths:
     """Resolved runtime context shared across the process.
@@ -178,18 +185,31 @@ class RuntimePaths:
         plain = self.plain_env_value((name,))
         return default if plain is None else plain[0]
 
+    def plain_env_value_with_source(self, names: Sequence[str]) -> tuple[str, str, EnvValueSource] | None:
+        """Return the first usable value of ``names``, the variable that set it, and which layer supplied it.
+
+        Searches the process env before the `.env` file. A blank or unedited starter-template placeholder value counts
+        as unset, so an exported one does not hide a `.env` value.
+        """
+        layers: tuple[tuple[EnvValueSource, Mapping[str, str]], ...] = (
+            ("process_env", self.process_env),
+            ("env_file", self.env_file_values),
+        )
+        for source, layer in layers:
+            for name in names:
+                value = layer.get(name, "")
+                if not runtime_env_policy.is_unset_env_value(name, value):
+                    return value, name, source
+        return None
+
     def plain_env_value(self, names: Sequence[str]) -> tuple[str, str] | None:
         """Return the first usable value of ``names`` in the process env, then the `.env`, and the variable that set it.
 
         A blank or unedited starter-template placeholder value counts as unset, so an exported one does not hide a
         `.env` value.
         """
-        for layer in (self.process_env, self.env_file_values):
-            for name in names:
-                value = layer.get(name, "")
-                if not runtime_env_policy.is_unset_env_value(name, value):
-                    return value, name
-        return None
+        resolved = self.plain_env_value_with_source(names)
+        return None if resolved is None else (resolved[0], resolved[1])
 
     def first_env_value(self, names: Sequence[str]) -> tuple[str, str] | None:
         """Return the first usable value of ``names`` and the variable that supplied it.
@@ -443,13 +463,23 @@ def _serialize_startup_manifest(
     *,
     tool_validation_snapshot: Mapping[str, object] | None = None,
     public_runtime: bool = False,
+    eager_setup_plugins: Sequence[str] | None = None,
+    sandbox_mount: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """Return one JSON-compatible startup manifest for sandbox runners."""
+    """Return one JSON-compatible startup manifest for sandbox runners.
+
+    ``eager_setup_plugins`` asks the runner to prepare itself when its container starts, and lists the enabled plugin
+    paths it may then import once for all its calls; None leaves the runner preparing itself on its first request.
+    ``sandbox_mount`` pins a sandboxed worker's mounted workspace path and inode; omitted when None so non-sandboxed
+    manifests and hashes remain byte-identical.
+    """
     return {
         "runtime_paths": serialize_public_runtime_paths(runtime_paths)
         if public_runtime
         else serialize_runtime_paths(runtime_paths),
         "tool_validation_snapshot": dict(tool_validation_snapshot or {}),
+        **({} if eager_setup_plugins is None else {STARTUP_MANIFEST_EAGER_SETUP_PLUGINS: list(eager_setup_plugins)}),
+        **({} if sandbox_mount is None else {STARTUP_MANIFEST_SANDBOX_MOUNT: dict(sandbox_mount)}),
     }
 
 
@@ -458,6 +488,8 @@ def _startup_manifest_json(
     *,
     tool_validation_snapshot: Mapping[str, object] | None = None,
     public_runtime: bool = False,
+    eager_setup_plugins: Sequence[str] | None = None,
+    sandbox_mount: Mapping[str, object] | None = None,
 ) -> str:
     """Return one deterministic JSON string for sandbox-runner startup state."""
     return json.dumps(
@@ -465,6 +497,8 @@ def _startup_manifest_json(
             runtime_paths,
             tool_validation_snapshot=tool_validation_snapshot,
             public_runtime=public_runtime,
+            eager_setup_plugins=eager_setup_plugins,
+            sandbox_mount=sandbox_mount,
         ),
         separators=(",", ":"),
         sort_keys=True,
@@ -476,12 +510,16 @@ def startup_manifest_sha256(
     *,
     tool_validation_snapshot: Mapping[str, object] | None = None,
     public_runtime: bool = False,
+    eager_setup_plugins: Sequence[str] | None = None,
+    sandbox_mount: Mapping[str, object] | None = None,
 ) -> str:
     """Return one stable content hash for sandbox-runner startup state."""
     payload = _startup_manifest_json(
         runtime_paths,
         tool_validation_snapshot=tool_validation_snapshot,
         public_runtime=public_runtime,
+        eager_setup_plugins=eager_setup_plugins,
+        sandbox_mount=sandbox_mount,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -497,6 +535,8 @@ def write_startup_manifest(
     *,
     tool_validation_snapshot: Mapping[str, object] | None = None,
     public_runtime: bool = False,
+    eager_setup_plugins: Sequence[str] | None = None,
+    sandbox_mount: Mapping[str, object] | None = None,
 ) -> Path:
     """Write one sandbox-runner startup manifest and return its path."""
     manifest_path = sandbox_startup_manifest_path(storage_root)
@@ -507,6 +547,8 @@ def write_startup_manifest(
             runtime_paths,
             tool_validation_snapshot=tool_validation_snapshot,
             public_runtime=public_runtime,
+            eager_setup_plugins=eager_setup_plugins,
+            sandbox_mount=sandbox_mount,
         ),
     )
     return manifest_path
@@ -834,6 +876,29 @@ def runtime_env_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
     return _resolve_runtime_relative_path(value, base_dir=runtime_paths.config_dir)
 
 
+def secret_from_env_or_file(runtime_paths: RuntimePaths, value_env: str, file_env: str) -> str | None:
+    """Return a secret set in ``value_env`` or read from the file ``file_env`` names, or None when neither is set.
+
+    Raises ValueError, never showing the secret, when both are set or the file is unreadable or empty.
+    """
+    value = (runtime_paths.env_value(value_env) or "").strip()
+    file_path = runtime_env_path(runtime_paths, file_env)
+    if value and file_path is not None:
+        msg = f"Set only one of {value_env} or {file_env}"
+        raise ValueError(msg)
+    if file_path is None:
+        return value or None
+    try:
+        file_value = read_secret_file(file_path)
+    except (OSError, UnicodeDecodeError) as exc:
+        msg = f"{file_env} is not readable: {file_path}"
+        raise ValueError(msg) from exc
+    if not file_value:
+        msg = f"{file_env} points to an empty file: {file_path}"
+        raise ValueError(msg)
+    return file_value
+
+
 def secret_path_env_names(runtime_paths: RuntimePaths) -> frozenset[str]:
     """Return the variables naming the primary's secret files: every `<NAME>_FILE`, and a set credentials path."""
     names = {name for name in {*runtime_paths.process_env, *runtime_paths.env_file_values} if name.endswith("_FILE")}
@@ -1026,6 +1091,10 @@ def find_config_path(*, process_env: Mapping[str, str]) -> Path:
 # Other constants
 VOICE_PREFIX = "🎤 "
 ORIGINAL_SENDER_KEY = "com.mindroom.original_sender"
+# Says an agent wrote this event, whoever's account sent it: from an account MindRoom does not manage, a message,
+# reaction, approval or job cancel never acts as its sender, and a message stays conversation history. Only the key's
+# presence counts, never its value.
+AGENT_AUTHORED_KEY = "io.mindroom.agent_authored"
 # The human or configured bot account an entity's reply was written for; entities it mentions act for that requester.
 ACTING_REQUESTER_KEY = "com.mindroom.acting_requester"
 SOURCE_KIND_KEY = "com.mindroom.source_kind"
@@ -1034,12 +1103,46 @@ PER_FIRE_THREAD_ROOT_EVENT_ID_KEY = "com.mindroom.per_fire_thread_root_event_id"
 SCHEDULED_HISTORY_LIMIT_KEY = "com.mindroom.history_limit"
 SCHEDULED_MODEL_KEY = "com.mindroom.scheduled_model"
 SILENT_SCHEDULE_EVENT_TYPE = "io.mindroom.scheduled.trigger"
+# The hidden event a room's steward sends to the responder it selected for a message that names nobody.
+# Its content holds, under this same key, the responder's Matrix ID as `entity`, the person's events it routes as
+# `event_ids` (the answer replies to the last), and the thread the answer belongs in as `thread_id`.
+ROUTE_EVENT_TYPE = "io.mindroom.route"
+# In a route's content: whether its `body`, the steward's prompt for the turn, holds the steward's own message tags.
+ROUTE_PROMPT_STRUCTURED_KEY = "io.mindroom.route_prompt_structured"
+# In a route handed to its responder: the long-text file of a route whose prompt is too long for one event.
+ROUTE_PROMPT_FILE_KEY = "io.mindroom.route_prompt_file"
+# In a route's content: the turn is too long to read, and its responder posts ROUTE_TOO_LARGE_NOTICE instead of a reply.
+ROUTE_TOO_LARGE_KEY = "io.mindroom.route_too_large"
+ROUTE_TOO_LARGE_NOTICE = "Your message is too long for me to read."
+# In a waiting message's content and its route's: the sender's edit its text is, as [origin_server_ts, event ID].
+ROUTE_REVISION_KEY = "io.mindroom.route_revision"
+# What a read appends to the body of a message whose long-text file, or later edit, it could not read.
+UNREADABLE_SIDECAR_NOTICE = "[The rest of this message could not be loaded.]"
+UNREADABLE_EDIT_NOTICE = "[A later edit of this message could not be read.]"
+# In a route's content: the steward's transcript of each voice message it routes, by event ID.
+ROUTE_VOICE_TRANSCRIPTS_KEY = "io.mindroom.voice_transcripts"
+# Transcripts over this many encoded bytes are left to the responder's own checkpoint.
+ROUTE_VOICE_TRANSCRIPTS_LIMIT = 16 * 1024
 # Room state holding one scheduled task, keyed by its task ID.
 SCHEDULED_TASK_EVENT_TYPE = "com.mindroom.scheduled.task"
 SILENT_SCHEDULE_NO_REPLY_TOKEN = "NO_REPLY"  # noqa: S105 - Public no-report marker, not a credential.
 HOOK_SOURCE_KEY = "com.mindroom.hook_source"
 HOOK_MESSAGE_RECEIVED_DEPTH_KEY = "com.mindroom.message_received_depth"
 SKIP_MENTIONS_KEY = "com.mindroom.skip_mentions"
+# On a thread-move copy, which is skip-marked: the user IDs its original counted as mentioning earlier in its thread,
+# which the copy keeps counting while waking nobody.
+COPIED_MENTIONS_KEY = "io.mindroom.copied_mentions"
+# On each event of one composer submission with attachments: {"id": <per submission>, "more": <bool>}, where
+# ``more`` says the client sends another event of that submission without the person doing anything.
+SUBMISSION_CONTENT_KEY = "io.mindroom.submission"
+# Composer-chosen mid-turn behavior ("steer", "queue", or "auto") on an inbound message.
+MID_TURN_MODE_KEY = "io.mindroom.mid_turn"
+# On a forked thread's root: the parent thread and the last parent message the fork includes.
+FORK_CONTENT_KEY = "io.mindroom.fork"
+# Marks a message's ``m.mentions`` as every mention it makes, so receivers do not look for more in its text.
+EXACT_MENTIONS_KEY = "io.mindroom.exact_mentions"
+# False on a message whose mentions must not wake the agents among them.
+WAKE_MENTIONED_KEY = "io.mindroom.wake_mentioned"
 VOICE_RAW_AUDIO_FALLBACK_KEY = "com.mindroom.voice_raw_audio_fallback"
 VOICE_TRANSCRIPT_KEY = "com.mindroom.voice_transcript"
 ATTACHMENT_IDS_KEY = "com.mindroom.attachment_ids"
@@ -1052,8 +1155,18 @@ HOOK_SOURCE_RUN_METADATA_KEY = "hook_source"
 TURN_INTENT_RUN_METADATA_KEY = "turn_intent"
 # Run metadata key holding the usage of the attempts the run's turn spent before it, summed, as run metrics are stored.
 PRIOR_USAGE_RUN_METADATA_KEY = "mindroom_prior_usage"
+# Run metadata key holding that usage by the run id of each attempt, so two runs' views of one turn merge by attempt.
+PRIOR_USAGE_BY_RUN_METADATA_KEY = "mindroom_prior_usage_by_run"
+# Run metadata key holding what the subagent turns whose results the run's turn received cost so far, in USD.
+SUBAGENT_COST_RUN_METADATA_KEY = "mindroom_subagent_cost_usd"
+# Run metadata key holding that cost by the delegation id of each received turn, which the sum above totals.
+SUBAGENT_RECEIPTS_RUN_METADATA_KEY = "mindroom_subagent_receipts"
+# The id a turn's carried cost is kept under when it was stored as one sum, without the ids above.
+LEGACY_COST_ID = "legacy"
 MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY = "matrix_message_target"
 MATRIX_RESPONSE_EVENT_ID_METADATA_KEY = "matrix_response_event_id"
+# The recovered runs a turn's replay continued, which its answer's message is linked to as well.
+CONTINUED_RUNS_METADATA_KEY = "mindroom_continued_runs"
 MATRIX_SEEN_EVENT_IDS_METADATA_KEY = "matrix_seen_event_ids"
 MATRIX_SOURCE_EVENT_IDS_METADATA_KEY = "matrix_source_event_ids"
 MATRIX_SOURCE_EVENT_PROMPTS_METADATA_KEY = "matrix_source_event_prompts"
@@ -1061,15 +1174,23 @@ MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY = "matrix_source_event_revisions"
 # Session metadata key holding the database owner's history state: its force-compaction flag.
 MINDROOM_HISTORY_METADATA_KEY = "mindroom_history"
 COMPACTION_NOTICE_CONTENT_KEY = "io.mindroom.compaction"
+# The automatic history compactions a reply ran, in start order, recorded on the reply itself.
+COMPACTIONS_CONTENT_KEY = "io.mindroom.compactions"
 SKILL_REVIEW_NOTICE_CONTENT_KEY = "io.mindroom.skill_review"
 UI_ACTION_CONTENT_KEY = "io.mindroom.ui_action"
 THREAD_SUMMARY_CONTENT_KEY = "io.mindroom.thread_summary"
+# Marks a notice that asks its reader to reply in its thread, so clients show it as a conversation, not a status.
+CONVERSATION_CONTENT_KEY = "io.mindroom.conversation"
+# A finished call's duration and spoken turns by sender ID, on its transcript message.
+CALL_TRANSCRIPT_CONTENT_KEY = "io.mindroom.call_transcript"
 STREAM_STATUS_KEY = "io.mindroom.stream_status"
 # The model reasoning a streamed reply showed, with how long it was observed, on the reply's terminal update.
 REASONING_CONTENT_KEY = "io.mindroom.reasoning"
 STREAM_VISIBLE_BODY_KEY = "io.mindroom.visible_body"
 STREAM_WARMUP_SUFFIX_KEY = "io.mindroom.warmup_suffix"
 TOOL_TRACE_CONTENT_KEY = "io.mindroom.tool_trace"
+# The identity of the outbox row a payload was frozen for; a write sent outside the outbox carries none.
+DURABLE_DELIVERY_ID_KEY = "io.mindroom.delivery_id"
 STREAM_STATUS_PENDING = "pending"
 STREAM_STATUS_STREAMING = "streaming"
 STREAM_STATUS_APPROVAL_PENDING = "approval_pending"
@@ -1077,6 +1198,8 @@ STREAM_STATUS_COMPLETED = "completed"
 STREAM_STATUS_CANCELLED = "cancelled"
 STREAM_STATUS_INTERRUPTED = "interrupted"
 STREAM_STATUS_ERROR = "error"
+# A reply with one of these statuses is still being streamed.
+NONTERMINAL_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
 # A reply with one of these statuses is still being written or waits for a tool approval.
 UNFINISHED_REPLY_STATUSES = frozenset(
     {STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING, STREAM_STATUS_APPROVAL_PENDING},
@@ -1089,10 +1212,23 @@ OWNER_MATRIX_USER_ID_PLACEHOLDER = "__MINDROOM_OWNER_USER_ID_FROM_PAIRING__"
 OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
 
 
+def _is_no_report_line(line: str) -> bool:
+    """Return whether one line holds only the no-report token, in any case."""
+    return line.strip().casefold() == SILENT_SCHEDULE_NO_REPLY_TOKEN.casefold()
+
+
 def is_silent_schedule_no_report_response(response_text: str) -> bool:
-    """Return whether one silent-schedule final text explicitly reports nothing."""
-    normalized = response_text.strip()
-    return not normalized or normalized.casefold() == SILENT_SCHEDULE_NO_REPLY_TOKEN.casefold()
+    """Return whether one silent-schedule final text reports nothing: it is blank, or its last non-blank line is the token.
+
+    The token matches in any case, and the line holds nothing else, so a report must not end with it.
+    """
+    lines = response_text.strip().splitlines()
+    return not lines or _is_no_report_line(lines[-1])
+
+
+def without_no_report_lines(text: str) -> str:
+    """Return ``text`` without the lines that hold only the no-report token, which a reply never shows."""
+    return "\n".join(line for line in text.splitlines() if not _is_no_report_line(line)).rstrip()
 
 
 # Canonical mapping from provider name to the environment variable it requires.

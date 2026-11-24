@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -27,6 +28,7 @@ from mindroom.coalescing.batch import (
 )
 from mindroom.coalescing.gate import CoalescingGate, ReadyPendingEvent
 from mindroom.coalescing.ingress_lanes import ReceiptLaneKey
+from mindroom.commands.parsing import CommandType
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
@@ -40,6 +42,7 @@ from mindroom.constants import (
     SOURCE_KIND_KEY,
     STREAM_STATUS_KEY,
     STREAM_STATUS_STREAMING,
+    SUBMISSION_CONTENT_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
@@ -68,14 +71,17 @@ from mindroom.event_journal import (
     EventKind,
     JournalEvent,
     PendingTurnView,
+    PrincipalStore,
 )
 from mindroom.hooks import MessageEnvelope
 from mindroom.inbound_turn_normalizer import (
     BatchMediaAttachmentRequest,
     DispatchPayload,
     DispatchPayloadWithAttachmentsRequest,
+    InboundTurnNormalizer,
     _BatchMediaAttachmentResult,
 )
+from mindroom.llm.media import Audio
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.journal_ingress import _inbound_event
@@ -95,7 +101,8 @@ from mindroom.response_sources import Owned, SourceFate
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.turn_policy import DispatchPlan, PreparedDispatch
 from mindroom.turn_record import SourceEventMetadata, TurnRecord
-from mindroom.turns.dispatch import TurnDispatcher
+from mindroom.turns.dispatch import TurnDispatcher, _attachment_parts
+from mindroom.turns.facts import command_for
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
@@ -485,6 +492,7 @@ def _text_event(
     thread_id: str | None = None,
     source_kind: str | None = None,
     original_sender: str | None = None,
+    submission: dict[str, object] | None = None,
 ) -> nio.RoomMessageText:
     """Build a synthetic inbound text event for coalescing tests."""
     content: dict[str, object] = {
@@ -493,6 +501,8 @@ def _text_event(
     }
     if thread_id is not None:
         content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
+    if submission is not None:
+        content[SUBMISSION_CONTENT_KEY] = submission
     if source_kind is not None:
         content[SOURCE_KIND_KEY] = source_kind
     if original_sender is not None:
@@ -606,6 +616,53 @@ def _file_event(
                 "room_id": "!room:localhost",
                 "type": "m.room.message",
                 "content": content,
+            },
+        ),
+    )
+
+
+def _video_event(*, event_id: str, server_timestamp: int, submission: dict[str, object]) -> nio.RoomMessageVideo:
+    """Build a synthetic inbound room-root video event sent as part of one composer submission."""
+    return cast(
+        "nio.RoomMessageVideo",
+        nio.RoomMessageVideo.from_dict(
+            {
+                "event_id": event_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": server_timestamp,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.video",
+                    "body": "clip.mp4",
+                    "filename": "clip.mp4",
+                    "url": "mxc://localhost/test-video",
+                    "info": {"mimetype": "video/mp4"},
+                    SUBMISSION_CONTENT_KEY: submission,
+                },
+            },
+        ),
+    )
+
+
+def _audio_event(*, event_id: str, server_timestamp: int, submission: dict[str, object]) -> nio.RoomMessageAudio:
+    """Build a synthetic inbound room-root audio event sent as part of one composer submission."""
+    return cast(
+        "nio.RoomMessageAudio",
+        nio.RoomMessageAudio.from_dict(
+            {
+                "event_id": event_id,
+                "sender": "@user:localhost",
+                "origin_server_ts": server_timestamp,
+                "room_id": "!room:localhost",
+                "type": "m.room.message",
+                "content": {
+                    "msgtype": "m.audio",
+                    "body": "voice.ogg",
+                    "url": "mxc://localhost/test-audio",
+                    "info": {"mimetype": "audio/ogg"},
+                    SUBMISSION_CONTENT_KEY: submission,
+                },
             },
         ),
     )
@@ -967,6 +1024,117 @@ async def test_room_root_image_and_thread_caption_coalesce_into_single_thread_di
         await bot._coalescing_gate.drain_all()
 
     assert calls == [(["$img", "$caption"], "$img")]
+
+
+@pytest.mark.asyncio
+async def test_marked_room_root_video_and_late_thread_caption_dispatch_once(tmp_path: Path) -> None:
+    """A caption whose callback starts past the debounce still joins the video its submission said was not complete."""
+    bot = _make_bot(tmp_path, debounce_ms=50)
+    room = _make_room()
+    video = _video_event(event_id="$video", server_timestamp=1000, submission={"id": "upload-1", "more": True})
+    caption = _text_event(
+        event_id="$caption",
+        body="what happens in this clip?",
+        server_timestamp=4200,
+        thread_id=video.event_id,
+        submission={"id": "upload-1", "more": False},
+    )
+    calls: list[tuple[list[str], str | None]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        _dispatched_event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: TurnRecord | None = None,
+        coalescing_key: CoalescingKey | None = None,
+        **_metadata: object,
+    ) -> None:
+        calls.append(
+            (
+                _handled_turn_source_event_ids(handled_turn),
+                coalescing_key.thread_id if coalescing_key is not None else None,
+            ),
+        )
+
+    with patch.object(
+        TurnDispatcher,
+        "dispatch_turn",
+        new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+    ):
+        await bot._turn_ingress.handle_media_event(room, video)
+        await asyncio.sleep(0.2)
+        assert calls == []
+        await bot._turn_ingress.handle_text_event(room, caption)
+        await _wait_for(lambda: len(calls) == 1)
+        await bot._coalescing_gate.drain_all()
+
+    assert calls == [(["$video", "$caption"], "$video")]
+
+
+@pytest.mark.parametrize("fallback", ["prepared", "text_only"])
+@pytest.mark.asyncio
+async def test_marked_room_root_voice_and_late_thread_caption_dispatch_once(tmp_path: Path, fallback: str) -> None:
+    """A voice message keeps its submission marker through preparation, so its late caption joins it."""
+    bot = _make_bot(tmp_path, debounce_ms=50)
+    room = _make_room()
+    voice = _audio_event(event_id="$voice", server_timestamp=1000, submission={"id": "upload-1", "more": True})
+    caption = _text_event(
+        event_id="$caption",
+        body="what do you make of this?",
+        server_timestamp=4200,
+        thread_id=voice.event_id,
+        submission={"id": "upload-1", "more": False},
+    )
+    calls: list[tuple[list[str], str | None]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        _dispatched_event: nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: TurnRecord | None = None,
+        coalescing_key: CoalescingKey | None = None,
+        **_metadata: object,
+    ) -> None:
+        calls.append(
+            (
+                _handled_turn_source_event_ids(handled_turn),
+                coalescing_key.thread_id if coalescing_key is not None else None,
+            ),
+        )
+
+    failing_raw_audio = AsyncMock(side_effect=RuntimeError("registration failed"))
+    both_preparations_fail = (
+        patch.multiple(
+            InboundTurnNormalizer,
+            prepare_voice_event=AsyncMock(side_effect=RuntimeError("stt failed")),
+            prepare_raw_voice_fallback_event=failing_raw_audio,
+        )
+        if fallback == "text_only"
+        else nullcontext()
+    )
+    with (
+        patch(
+            "mindroom.voice.handler._download_audio",
+            new=AsyncMock(return_value=Audio(content=b"voice-bytes", mime_type="audio/ogg")),
+        ),
+        both_preparations_fail,
+        patch.object(
+            TurnDispatcher,
+            "dispatch_turn",
+            new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+        ),
+    ):
+        await bot._turn_ingress.handle_media_event(room, voice)
+        await asyncio.sleep(0.2)
+        assert calls == []
+        await bot._turn_ingress.handle_text_event(room, caption)
+        await _wait_for(lambda: len(calls) == 1)
+        await bot._coalescing_gate.drain_all()
+
+    assert failing_raw_audio.await_count == (1 if fallback == "text_only" else 0)
+    assert calls == [(["$voice", "$caption"], "$voice")]
 
 
 @pytest.mark.parametrize("caption_in_upload_thread", [True, False])
@@ -1667,7 +1835,11 @@ async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: P
             "_active_thread_ids_for_room",
             new=lambda _room_id: frozenset(active_threads),
         ),
-        patch.object(bot._response_runner, "reserve_waiting_human_message", return_value=MagicMock()),
+        patch.object(
+            bot._response_runner.lifecycle_coordinator,
+            "reserve_waiting_human_message",
+            return_value=MagicMock(),
+        ),
     ):
         for event, requester_user_id in ((first, "@alice:localhost"), (second, "@bob:localhost")):
             await _enqueue_for_dispatch(
@@ -1690,6 +1862,58 @@ async def test_active_follow_ups_share_target_gate_across_requesters(tmp_path: P
         ("@alice:localhost", "@alice:localhost"),
         ("@bob:localhost", "@bob:localhost"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_an_agents_reply_for_someone_else_is_not_queued_behind_a_running_response(tmp_path: Path) -> None:
+    """In a thread where this agent is answering, another agent's message for someone else dispatches at once.
+
+    Its turn settles it as chatter; only the message that mentions this agent waits for the running response.
+    """
+    bot = _make_bot(tmp_path, debounce_ms=0)
+    room = _make_room()
+    router = "@mindroom_router:localhost"
+    for_someone_else = _text_event(event_id="$other", body="Done.", sender=router, thread_id="$thread")
+    for_this_agent = _text_event(event_id="$mine", body="@mindroom_test_agent next", sender=router, thread_id="$thread")
+    for_this_agent.source["content"]["m.mentions"] = {"user_ids": ["@mindroom_test_agent:localhost"]}
+    idle = asyncio.Event()
+    calls: list[PreparedTurn] = []
+
+    async def record_dispatch(batch: PreparedTurn) -> bool:
+        calls.append(batch)
+        return True
+
+    async def wait_for_thread_response_idle(_room_id: str, _thread_id: str | None) -> None:
+        await idle.wait()
+
+    with (
+        patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock(side_effect=record_dispatch)),
+        # The gate reads which conversations have a response running from the runner it was built with.
+        patch.object(
+            bot._coalescing_gate,
+            "_wait_for_thread_response_idle",
+            new=AsyncMock(side_effect=wait_for_thread_response_idle),
+        ),
+        patch.object(bot._coalescing_gate, "_active_thread_ids_for_room", new=lambda _room_id: frozenset({"$thread"})),
+    ):
+        for event in (for_someone_else, for_this_agent):
+            await _enqueue_for_dispatch(
+                bot,
+                event,
+                room,
+                source_kind="message",
+                requester_user_id=router,
+                coalescing_key=CoalescingKey(room.room_id, "$thread", RequesterCoalescingOwner(router)),
+            )
+        await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in calls] == [["$other"]])
+        assert not calls[0].active_follow_up
+
+        idle.set()
+        await _wait_for(
+            lambda: [list(batch.handled_turn.source_event_ids) for batch in calls] == [["$other"], ["$mine"]],
+        )
+
+    assert calls[1].active_follow_up
 
 
 @pytest.mark.asyncio
@@ -1723,8 +1947,8 @@ async def test_active_follow_ups_from_two_senders_run_tools_as_their_own_sender(
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
-    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    lifecycle_lock = lifecycle._conversation_for(target).lock
+    queued_signal = lifecycle._conversation_for(target)
     late_event = _text_event(
         event_id="$bob-late",
         body="one more thing",
@@ -1829,8 +2053,8 @@ async def test_follow_up_run_is_superseded_only_when_no_other_requester_waits(
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
-    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    lifecycle_lock = lifecycle._conversation_for(target).lock
+    queued_signal = lifecycle._conversation_for(target)
     runs: list[tuple[str | None, str]] = []
 
     async def fake_ai_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
@@ -1904,8 +2128,8 @@ async def test_follow_up_run_waits_for_an_agent_reply_written_for_the_same_reque
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
-    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    lifecycle_lock = lifecycle._conversation_for(target).lock
+    queued_signal = lifecycle._conversation_for(target)
     runs: list[tuple[str | None, str]] = []
 
     async def fake_ai_response(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
@@ -1963,6 +2187,128 @@ async def test_follow_up_run_waits_for_an_agent_reply_written_for_the_same_reque
 
 
 @pytest.mark.asyncio
+async def test_edit_cannot_renew_notice_after_its_queued_message_flushes(tmp_path: Path) -> None:
+    """A slow journal write must not make an already claimed message look like a waiting follow-up."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    gate = bot._coalescing_gate
+    ingress = bot._turn_ingress
+    message = _text_event(event_id="$queued", body="before", thread_id="$thread")
+    edit = _text_event(event_id="$edit", body="* after", server_timestamp=1001)
+    edit.source["content"].update(
+        {
+            "m.relates_to": {"rel_type": "m.replace", "event_id": message.event_id},
+            "m.new_content": {"msgtype": "m.text", "body": "after"},
+        },
+    )
+    target = MessageTarget.resolve(room.room_id, "$thread", message.event_id)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    signal = runner.lifecycle_coordinator._conversation_for(target)
+    revision_started = asyncio.Event()
+    release_revision = asyncio.Event()
+    dispatched_bodies: list[str] = []
+
+    async def hold_revision(_event_id: str, _content: object) -> None:
+        revision_started.set()
+        await release_revision.wait()
+
+    async def dispatch(turn: PreparedTurn) -> bool:
+        dispatched_bodies.append(turn.event.body)
+        signal.begin_response_turn()
+        return True
+
+    signal.begin_response_turn()
+    try:
+        with (
+            patch.object(PrincipalStore, "revise_pending", new=AsyncMock(side_effect=hold_revision)),
+            patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock(side_effect=dispatch)),
+        ):
+            key = active_follow_up_coalescing_key(room.room_id, "$thread")
+            await _admit_ready(gate, key, make_pending_event(message, room, source_kind=MESSAGE_SOURCE_KIND))
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS), asyncio.TaskGroup() as tasks:
+                edited = tasks.create_task(ingress._edit_queued_message(room, edit, EventInfo.from_event(edit.source)))
+                await revision_started.wait()
+                signal.finish_response_turn()
+                await gate.drain_all()
+                release_revision.set()
+            assert edited.result()
+        assert dispatched_bodies == ["after"]
+        assert signal.has_active_response_turn()
+        assert signal.pending_human_messages == 0
+    finally:
+        signal.finish_response_turn()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("before", "after", "body", "expected_type"),
+    [
+        (None, "agent", "@TestAgent !help", CommandType.HELP),
+        ("agent", None, "@TestAgent !help", None),
+        (None, "owner", "!help", None),
+        ("owner", None, "!help", CommandType.HELP),
+    ],
+    ids=["add-agent-pill", "drop-agent-pill", "add-owner-pill", "drop-owner-pill"],
+)
+async def test_queued_edit_uses_edited_mentions_to_classify_the_command(
+    tmp_path: Path,
+    before: str | None,
+    after: str | None,
+    body: str,
+    expected_type: CommandType | None,
+) -> None:
+    """A live flush classifies the command the same way as replay of the edited content."""
+    bot = _make_bot(tmp_path)
+    room = _make_room()
+    gate = bot._coalescing_gate
+    ingress = bot._turn_ingress
+    validator = ingress.deps.ingress
+    registry = entity_identity_registry(bot.config, bot.runtime_paths)
+    mention_ids = {"agent": bot.matrix_id.full_id, "owner": registry.current_id(ROUTER_AGENT_NAME).full_id}
+    message = _text_event(event_id="$queued", body="hello", thread_id="$thread")
+    if before is not None:
+        message.source["content"]["m.mentions"] = {"user_ids": [mention_ids[before]]}
+    new_content = {
+        "msgtype": "m.text",
+        "body": body,
+        "m.mentions": {"user_ids": [] if after is None else [mention_ids[after]]},
+    }
+    edit = _text_event(event_id="$edit", body=f"* {body}", server_timestamp=1001)
+    edit.source["content"].update(
+        {
+            "m.relates_to": {"rel_type": "m.replace", "event_id": message.event_id},
+            "m.new_content": new_content,
+        },
+    )
+    await _admit_pending_thread_event(bot, message.source)
+    facts = validator.classify(message, room_id=room.room_id)
+    pending = make_pending_event(message, room, source_kind=MESSAGE_SOURCE_KIND, facts=facts)
+    target = MessageTarget.resolve(room.room_id, "$thread", message.event_id)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    signal = runner.lifecycle_coordinator._conversation_for(target)
+    dispatch = AsyncMock(return_value=True)
+
+    signal.begin_response_turn()
+    try:
+        with patch.object(TurnDispatcher, "dispatch_turn", new=dispatch):
+            key = requester_coalescing_key(room.room_id, "$thread", message.sender)
+            await _admit_ready(gate, key, pending)
+            assert await ingress._edit_queued_message(room, edit, EventInfo.from_event(edit.source))
+            signal.finish_response_turn()
+            await gate.drain_all()
+    finally:
+        signal.finish_response_turn()
+
+    dispatch.assert_awaited_once()
+    assert dispatch.await_args is not None
+    turn = dispatch.await_args.args[0]
+    edited_facts = validator.classify_source(message.sender, {"content": new_content}, room_id=room.room_id)
+    expected = command_for(edited_facts, body)
+    assert (None if expected is None else expected.type) is expected_type
+    assert turn.command == expected
+
+
+@pytest.mark.asyncio
 async def test_slow_thread_lookup_active_follow_up_stays_before_later_follow_up(tmp_path: Path) -> None:
     """A slow older lookup must stay before a later same-sender follow-up in the backlog."""
     bot = _make_bot(tmp_path, debounce_ms=0)
@@ -1984,8 +2330,8 @@ async def test_slow_thread_lookup_active_follow_up_stays_before_later_follow_up(
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
-    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    lifecycle_lock = lifecycle._conversation_for(target).lock
+    queued_signal = lifecycle._conversation_for(target)
     second_lookup_started = asyncio.Event()
     release_second_lookup = asyncio.Event()
     calls: list[list[str]] = []
@@ -2075,8 +2421,8 @@ async def test_later_slow_thread_lookup_active_follow_up_lands_as_own_turn(tmp_p
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = response_runner.lifecycle_coordinator
     target = MessageTarget.resolve(room.room_id, "$thread", "$response")
-    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    lifecycle_lock = lifecycle._conversation_for(target).lock
+    queued_signal = lifecycle._conversation_for(target)
     second_lookup_started = asyncio.Event()
     release_second_lookup = asyncio.Event()
     calls: list[list[str]] = []
@@ -2164,8 +2510,8 @@ async def test_active_follow_up_owner_includes_later_media_payload(tmp_path: Pat
     target = MessageTarget.resolve(room.room_id, "$thread", "$text")
     response_runner = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = response_runner.lifecycle_coordinator
-    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    lifecycle_lock = lifecycle._conversation_for(target).lock
+    queued_signal = lifecycle._conversation_for(target)
     captured_requests = []
     payload_requests = []
     registered_media_event_ids = []
@@ -5052,7 +5398,6 @@ async def test_backlog_replay_respects_coalesced_source_ownership(
 
     async def plan_turn(
         _room: object,
-        _event: object,
         prepared_dispatch: PreparedDispatch,
         **_kwargs: object,
     ) -> DispatchPlan:
@@ -5421,54 +5766,6 @@ async def test_full_history_replay_guard_ignores_visible_router_voice_echo() -> 
 
 
 @pytest.mark.asyncio
-async def test_full_history_replay_guard_counts_non_router_visible_echo_marker() -> None:
-    """Only router voice echoes are display-only; other trusted relay turns still suppress older turns."""
-    older_event = PreparedIngress(
-        sender="@user:localhost",
-        event_id="$voice",
-        body="check my calendar",
-        source={"content": {"msgtype": "m.text", "body": "check my calendar", SOURCE_KIND_KEY: "voice"}},
-        server_timestamp=1000,
-    )
-    marked_helper_relay = ResolvedVisibleMessage(
-        sender="@mindroom_helper:localhost",
-        body="check my calendar",
-        timestamp=2000,
-        event_id="$helper_relay",
-        content={
-            "msgtype": "m.text",
-            "body": "check my calendar",
-            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-            ORIGINAL_SENDER_KEY: "@user:localhost",
-            VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
-        },
-        thread_id="$thread",
-        latest_event_id="$helper_relay",
-    )
-
-    should_skip = await has_newer_unresponded_in_thread(
-        older_event,
-        ("@user:localhost", None),
-        [marked_helper_relay],
-        may_be_superseded_by_newer_requester_turn=True,
-        pending_turns=_journal_owing_every_event(),
-        classify=lambda sender, _source: make_ingress_facts(
-            sender,
-            source_kind=TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-            requester_user_id="@user:localhost",
-            original_sender="@user:localhost",
-            original_sender_is_human=True,
-            sender_entity_name="helper",
-        ),
-        is_handled=AsyncMock(return_value=frozenset()),
-        for_another_participant=AsyncMock(return_value=False),
-        logger=MagicMock(),
-    )
-
-    assert should_skip
-
-
-@pytest.mark.asyncio
 async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voice_echo(tmp_path: Path) -> None:
     """Router transcript echoes must not suppress the canonical voice turn they represent."""
     bot = _make_bot(tmp_path)
@@ -5526,67 +5823,6 @@ async def test_backlog_replay_degraded_thread_history_ignores_visible_router_voi
     history_guard.assert_not_called()
     assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$voice")]
     action_mock.assert_awaited_once()
-    assert not await bot._turn_store.is_handled(room.room_id, "$voice")
-
-
-@pytest.mark.asyncio
-async def test_backlog_replay_degraded_thread_history_counts_non_router_visible_echo_marker(tmp_path: Path) -> None:
-    """Only router transcript echoes are replay noise; other marked relays still count as newer turns."""
-    bot = _make_bot(tmp_path)
-    room = _make_room()
-    older_event = PreparedIngress(
-        sender="@user:localhost",
-        event_id="$voice",
-        body="check my calendar",
-        source={"content": {"msgtype": "m.text", "body": "check my calendar", SOURCE_KIND_KEY: "voice"}},
-        server_timestamp=1000,
-    )
-    dispatch = _prepared_dispatch(event_id="$voice", body="check my calendar", thread_id="$thread")
-    degraded_history = ThreadHistoryResult(
-        [],
-        is_full_history=False,
-        diagnostics={
-            THREAD_HISTORY_SOURCE_DIAGNOSTIC: THREAD_HISTORY_SOURCE_DEGRADED,
-            THREAD_HISTORY_DEGRADED_DIAGNOSTIC: True,
-        },
-    )
-    dispatch.context.am_i_mentioned = False
-    dispatch.context.thread_history = degraded_history
-    dispatch.context.requires_model_history_refresh = True
-    marked_helper_relay_source = {
-        "event_id": "$helper_relay",
-        "sender": bot.agent_user.user_id,
-        "origin_server_ts": 2000,
-        "room_id": room.room_id,
-        "type": "m.room.message",
-        "content": {
-            "msgtype": "m.text",
-            "body": "check my calendar",
-            SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-            ORIGINAL_SENDER_KEY: "@user:localhost",
-            VISIBLE_ROUTER_VOICE_ECHO_KEY: True,
-            "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread"},
-        },
-    }
-    await _admit_pending_thread_event(bot, marked_helper_relay_source)
-    pending_turns = _watch_pending_turns(bot)
-
-    action_mock = AsyncMock()
-    history_guard = MagicMock(wraps=bot._turn_dispatcher._has_newer_unresponded_in_thread)
-    with (
-        patch.object(
-            bot._turn_dispatcher,
-            "_prepare_dispatch",
-            new=AsyncMock(return_value=dispatch),
-        ),
-        patch.object(bot._turn_dispatcher, "_has_newer_unresponded_in_thread", new=history_guard),
-        patch.object(bot._turn_policy, "plan_turn", new=action_mock),
-    ):
-        await dispatch_test_turn(bot._turn_dispatcher, room, older_event, "@user:localhost")
-
-    history_guard.assert_not_called()
-    assert pending_turns.calls == [(room.room_id, "$thread", 1000, "$voice")]
-    action_mock.assert_not_awaited()
     assert not await bot._turn_store.is_handled(room.room_id, "$voice")
 
 
@@ -6686,7 +6922,9 @@ def _resolver_mention_context(
         *,
         thread_id: str | None,
         payload_metadata: DispatchPayloadMetadata | None = None,
+        requester_id: str | None = None,
     ) -> MessageContext:
+        del requester_id
         if captured_event_ids is not None:
             captured_event_ids.append(event.event_id)
         mentioned_agents, _am_i_mentioned = bot._conversation_resolver.pre_hydration_mentions(
@@ -6722,13 +6960,18 @@ async def _capture_gate_dispatches(
     media_batches: list[list[object]] = []
     payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
 
-    async def record_plan(*args: object, **kwargs: object) -> DispatchPlan:
-        dispatch = cast("PreparedDispatch", args[2])
+    async def record_plan(*args: object, **_kwargs: object) -> DispatchPlan:
+        dispatch = cast("PreparedDispatch", args[1])
         envelopes.append(dispatch.envelope)
-        media_batches.append(list(cast("list[object] | None", kwargs.get("media_events")) or []))
-        if captured_plan_extra_content is not None:
-            captured_plan_extra_content.append(kwargs.get("extra_content"))
         return _respond_dispatch_plan()
+
+    def record_attachment_parts(prepared: Any) -> tuple[list[str], list[str], dict[str, Any]]:  # noqa: ANN401
+        # What the turn would route with: its media batch and its extra content.
+        parts = _attachment_parts(prepared)
+        media_batches.append(list(prepared.turn.media_events))
+        if captured_plan_extra_content is not None:
+            captured_plan_extra_content.append(parts[2] or None)
+        return parts
 
     async def record_response(*args: object, **_kwargs: object) -> None:
         await prepare_payload_via_seam(bot, args)
@@ -6761,6 +7004,7 @@ async def _capture_gate_dispatches(
             new=AsyncMock(side_effect=_resolver_mention_context(bot, captured_context_event_ids)),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=record_plan)),
+        patch("mindroom.turns.dispatch._attachment_parts", side_effect=record_attachment_parts),
         patch.object(bot._turn_dispatcher, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
         patch.object(
             bot._inbound_turn_normalizer,
@@ -7451,11 +7695,15 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
     captured_extra_content: list[object] = []
     payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
 
-    async def record_plan(*args: object, **kwargs: object) -> DispatchPlan:
-        dispatch = cast("PreparedDispatch", args[2])
+    async def record_plan(*args: object, **_kwargs: object) -> DispatchPlan:
+        dispatch = cast("PreparedDispatch", args[1])
         captured_envelopes.append(dispatch.envelope)
-        captured_extra_content.append(kwargs.get("extra_content"))
         return _respond_dispatch_plan()
+
+    def record_attachment_parts(prepared: Any) -> tuple[list[str], list[str], dict[str, Any]]:  # noqa: ANN401
+        parts = _attachment_parts(prepared)
+        captured_extra_content.append(parts[2] or None)
+        return parts
 
     async def record_payload_request(request: DispatchPayloadWithAttachmentsRequest) -> DispatchPayload:
         payload_requests.append(request)
@@ -7471,6 +7719,7 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
             new=AsyncMock(side_effect=_resolver_mention_context(bot)),
         ),
         patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(side_effect=record_plan)),
+        patch("mindroom.turns.dispatch._attachment_parts", side_effect=record_attachment_parts),
         patch.object(bot._turn_dispatcher, "_execute_response_action", new=AsyncMock(side_effect=record_response)),
         patch.object(
             bot._inbound_turn_normalizer,
@@ -7479,7 +7728,7 @@ async def test_untrusted_sidecar_payload_metadata_spoofing_does_not_reach_envelo
         ),
     ):
         ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, "@user:localhost")
-        handled = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
+        handled = await bot._turn_ingress._normalize_and_dispatch_text(
             room,
             sidecar_event,
             make_ingress_facts(sidecar_event.sender, requester_user_id="@user:localhost"),
@@ -7520,7 +7769,7 @@ async def test_sidecar_hydration_preserves_trusted_attachment_metadata(tmp_path:
     payload_requests: list[DispatchPayloadWithAttachmentsRequest] = []
 
     async def record_plan(*args: object, **_kwargs: object) -> DispatchPlan:
-        dispatch = cast("PreparedDispatch", args[2])
+        dispatch = cast("PreparedDispatch", args[1])
         captured_envelopes.append(dispatch.envelope)
         return _respond_dispatch_plan()
 
@@ -7580,7 +7829,7 @@ async def test_sidecar_hydration_refreshes_prompt_and_mentions_before_dispatch(t
     captured_handled_turns: list[TurnRecord] = []
 
     async def record_plan(*args: object, **_kwargs: object) -> DispatchPlan:
-        dispatch = cast("PreparedDispatch", args[2])
+        dispatch = cast("PreparedDispatch", args[1])
         captured_envelopes.append(dispatch.envelope)
         return _respond_dispatch_plan()
 
@@ -7633,7 +7882,7 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
         patch.object(bot._coalescing_gate, "_on_dispatch_failure", new=retry_pending_source),
         patch.object(
             bot._inbound_turn_normalizer,
-            "prepare_file_sidecar_text_event",
+            "resolve_text_event",
             new=AsyncMock(return_value=hydrated),
         ),
         patch.object(
@@ -7643,7 +7892,7 @@ async def test_sidecar_gate_failure_retries_original_media_callback(tmp_path: Pa
         ),
     ):
         ticket = bot._turn_ingress.reserve_prompt_ingress_order(room, sidecar.sender)
-        outcome = await bot._turn_ingress._dispatch_file_sidecar_text_preview(
+        outcome = await bot._turn_ingress._normalize_and_dispatch_text(
             room,
             sidecar,
             make_ingress_facts(sidecar.sender, requester_user_id=sidecar.sender),
@@ -7693,99 +7942,6 @@ async def test_router_skips_intermediate_agent_stream_edit_without_precheck(tmp_
 
 
 @pytest.mark.asyncio
-async def test_router_early_skip_keeps_sidecar_preview_for_hydration(tmp_path: Path) -> None:
-    """Router early skip should not drop sidecar previews before hydration can recover metadata."""
-    bot = _make_bot(tmp_path, agent_name="router")
-    room = _make_room()
-    sidecar_preview = cast("nio.RoomMessageText", _file_event(event_id="$sidecar-preview", body="preview"))
-    content = sidecar_preview.source["content"]
-    assert isinstance(content, dict)
-    content["io.mindroom.long_text"] = {
-        "version": 2,
-        "encoding": "matrix_event_content_json",
-        "original_event_size": 100_000,
-        "preview_size": len(sidecar_preview.body),
-        "is_complete_content": True,
-    }
-
-    should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
-        room,
-        sidecar_preview,
-        facts=make_ingress_facts(sidecar_preview.sender, requester_user_id="@user:localhost"),
-        thread_id="$thread",
-    )
-
-    assert should_skip is False
-
-
-@pytest.mark.parametrize(
-    ("membership", "expected"),
-    [
-        ("absent", False),
-        ("invited", False),
-        ("joined", True),
-    ],
-)
-@pytest.mark.asyncio
-async def test_router_early_skip_only_honors_joined_non_agent_mentions(
-    tmp_path: Path,
-    membership: str,
-    expected: bool,
-) -> None:
-    """An absent or merely invited human mention must not bypass normal router dispatch."""
-    bot = _make_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
-    room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
-    room.add_member(bot.matrix_id.full_id, "Router", None)
-    room.add_member("@user:localhost", "User", None)
-    # A synced cache is what makes "absent" mean absent rather than "not fetched yet".
-    room.members_synced = True
-    mentioned_user_id = "@human:localhost"
-    if membership != "absent":
-        room.add_member(
-            mentioned_user_id,
-            "Human",
-            None,
-            invited=membership == "invited",
-        )
-    event = _text_event(event_id="$human-mention", body=f"hello {mentioned_user_id}")
-    content = event.source["content"]
-    assert isinstance(content, dict)
-    content["m.mentions"] = {"user_ids": [mentioned_user_id]}
-
-    should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
-        room,
-        event,
-        facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
-        thread_id=None,
-    )
-
-    assert should_skip is expected
-
-
-@pytest.mark.asyncio
-async def test_router_early_skip_keeps_a_question_to_the_router_itself(tmp_path: Path) -> None:
-    """A message mentioning only the router reaches its dispatch plan, which answers it with guidance."""
-    bot = _make_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
-    room = nio.MatrixRoom("!room:localhost", bot.matrix_id.full_id)
-    room.add_member(bot.matrix_id.full_id, "Router", None)
-    room.add_member("@user:localhost", "User", None)
-    room.members_synced = True
-    event = _text_event(event_id="$router-mention", body=f"hello {bot.matrix_id.full_id}")
-    content = event.source["content"]
-    assert isinstance(content, dict)
-    content["m.mentions"] = {"user_ids": [bot.matrix_id.full_id]}
-
-    should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
-        room,
-        event,
-        facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
-        thread_id=None,
-    )
-
-    assert should_skip is False
-
-
-@pytest.mark.asyncio
 async def test_first_router_turn_refreshes_lazy_members_before_mention_routing(tmp_path: Path) -> None:
     """A partial lazy-member cache must not hide a joined mentioned participant."""
     bot = _make_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
@@ -7812,9 +7968,8 @@ async def test_first_router_turn_refreshes_lazy_members_before_mention_routing(t
         "_dispatch_prepared_text_like_ingress",
         new=AsyncMock(return_value=TurnDispatchOutcome.DEFERRED),
     ):
-        outcome = await bot._turn_ingress.handle_text_event(room, event)
+        await bot._turn_ingress.handle_text_event(room, event)
 
-    assert outcome is TurnDispatchOutcome.INTENTIONALLY_IGNORED
     assert room_membership_is_complete(room)
     assert mentioned_user_id in cached_joined_member_ids(room)
     assert not room.members_synced
@@ -7840,79 +7995,3 @@ async def test_first_turn_membership_refresh_failure_reuses_cached_state_for_pla
     assert drain_result.dispatch_failure_count == 0
     bot.client.joined_members.assert_awaited_once_with(room.room_id)
     assert not room.members_synced
-
-
-@pytest.mark.asyncio
-async def test_router_early_skip_labels_thread_snapshot_refresh(tmp_path: Path) -> None:
-    """Router skip checks should attribute dispatch-safe snapshot refreshes."""
-    bot = _make_bot(tmp_path, agent_name="router")
-    room = _make_room()
-    event = cast(
-        "nio.RoomMessageText",
-        nio.RoomMessageText.from_dict(
-            {
-                "event_id": "$event",
-                "sender": "@user:localhost",
-                "origin_server_ts": 1000,
-                "room_id": room.room_id,
-                "type": "m.room.message",
-                "content": {
-                    "msgtype": "m.text",
-                    "body": "plain follow-up",
-                },
-            },
-        ),
-    )
-    snapshot = AsyncMock(return_value=ThreadHistoryResult([], is_full_history=False))
-    bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = snapshot
-
-    should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
-        room,
-        event,
-        facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
-        thread_id="$thread",
-    )
-
-    assert should_skip is False
-    snapshot.assert_awaited_once_with(
-        room.room_id,
-        "$thread",
-    )
-
-
-@pytest.mark.asyncio
-async def test_router_early_skip_fails_open_for_thread_snapshot_failure(tmp_path: Path) -> None:
-    """Router early skip should not abort live dispatch when its optional snapshot read fails."""
-    bot = _make_bot(tmp_path, agent_name="router")
-    room = _make_room()
-    event = cast(
-        "nio.RoomMessageText",
-        nio.RoomMessageText.from_dict(
-            {
-                "event_id": "$event",
-                "sender": "@user:localhost",
-                "origin_server_ts": 1000,
-                "room_id": room.room_id,
-                "type": "m.room.message",
-                "content": {
-                    "msgtype": "m.text",
-                    "body": "plain follow-up",
-                },
-            },
-        ),
-    )
-    snapshot = AsyncMock(side_effect=RuntimeError("snapshot failed"))
-    bot._turn_ingress.deps.resolver.dispatch_thread_snapshot = snapshot
-
-    should_skip = await bot._turn_ingress._should_skip_router_before_shared_ingress_work(
-        room,
-        event,
-        facts=make_ingress_facts(event.sender, requester_user_id="@user:localhost"),
-        thread_id="$maybe-root",
-    )
-
-    assert should_skip is False
-    snapshot.assert_awaited_once_with(
-        room.room_id,
-        "$maybe-root",
-    )

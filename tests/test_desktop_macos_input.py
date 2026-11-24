@@ -49,8 +49,8 @@ def test_double_click_preserves_negative_points_and_click_count(quartz: SimpleNa
     assert [event[10] for event in quartz.posted] == [1, 1, 2, 2]
 
 
-def test_drag_releases_button_after_emergency_stop(quartz: SimpleNamespace) -> None:
-    """A fail-safe during motion must still post the matching mouse-up event."""
+def test_drag_releases_button_after_failed_pointer_check(quartz: SimpleNamespace) -> None:
+    """A pointer check failing during motion must still post the matching mouse-up event."""
     checks = 0
 
     def check(_point: tuple[int, int]) -> None:

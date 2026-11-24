@@ -6,10 +6,13 @@ import hashlib
 import re
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 from urllib.parse import quote
+
+from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES
+from mindroom.workers.placements import DedicatedWorkerPlacement
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -19,7 +22,7 @@ if TYPE_CHECKING:
 
 WorkerScope = Literal["shared", "user", "user_agent"]
 ResolvedWorkerKeyScope = Literal["shared", "user", "user_agent", "unscoped"]
-_ExecutionChannel = Literal["matrix", "openai_compat", "mcp"]
+_ExecutionChannel = Literal["matrix", "openai_compat", "headless", "mcp"]
 
 _WORKER_DIRNAME_MAX_PREFIX_LENGTH = 80
 _DEFAULT_WORKER_NAME_PREFIX = "mindroom-worker"
@@ -34,9 +37,10 @@ WORKER_SHARED_CREDENTIALS_DIRNAME = ".shared_credentials"
 # Spotify connection. MCP registry tools are supported on every scope: OAuth-backed servers follow the configured
 # worker scope, and non-OAuth servers always execute through the shared server session without requester credentials.
 _SHARED_ONLY_INTEGRATION_NAMES = frozenset({"spotify", "spotify_oauth", "homeassistant"})
-_SUBAGENT_PIN_PREFIX = "subagent="
-_SUBAGENT_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
-_SUBAGENT_PIN_PATTERN = re.compile(rf"{re.escape(_SUBAGENT_PIN_PREFIX)}[0-9a-f]{{32}}")
+# What a worker of its own is pinned to: one subagent, or one name a reply's calls address.
+_PinnedWorkerKind = Literal["subagent", "named"]
+_PIN_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
+_PIN_PATTERN = re.compile(rf"(?P<kind>{'|'.join(get_args(_PinnedWorkerKind))})=[0-9a-f]{{32}}")
 
 
 @dataclass(frozen=True)
@@ -92,8 +96,8 @@ def parse_tool_execution_identity_payload(
 
     raw_payload = cast("dict[str, object]", payload)
     channel = raw_payload.get("channel")
-    if channel not in ("matrix", "openai_compat", "mcp"):
-        msg = f"{error_prefix}.channel must be matrix, openai_compat, or mcp"
+    if channel not in get_args(_ExecutionChannel):
+        msg = f"{error_prefix}.channel must be matrix, openai_compat, headless, or mcp"
         raise TypeError(msg)
 
     agent_name = raw_payload.get("agent_name")
@@ -128,6 +132,147 @@ class ResolvedWorkerTarget:
     account_id: str | None
     worker_key: str | None
     private_agent_names: frozenset[str] | None = None
+    # The subagent's own worker the resolving turn ran its calls in, which its calls reach wherever they run later.
+    # Not compared: equality asks whether the agent, requester, and worker key match, not which worker calls run in.
+    placement: DedicatedWorkerPlacement | None = field(default=None, compare=False)
+
+
+_STORED_TARGET_VERSION = 2
+# LEGACY_COMPAT: version 1 stored worker targets, which have no placement key.
+# Legacy format: a dump_worker_target object with "version": 1 and no "placement" key.
+# Last legacy release: every release from v2026.11.264 (which added stored targets) through the last one before
+# this change writes version 1, v2026.11.265 included; the release with this change writes version 2, which adds
+# "placement".
+# Handling: load_worker_target reads it with no placement, so it reaches the agent's normal worker as before.
+# Coverage: tests/test_worker_target_storage.py::test_a_version_1_target_loads_without_a_placement
+_LEGACY_STORED_TARGET_VERSION = 1
+# The stored format of each version, spelled out so that a new field of these dataclasses fails the round trip tests
+# instead of changing what plugins have stored.
+_LEGACY_STORED_TARGET_KEYS = frozenset(
+    {
+        "version",
+        "worker_scope",
+        "routing_agent_name",
+        "execution_identity",
+        "tenant_id",
+        "account_id",
+        "worker_key",
+        "private_agent_names",
+    },
+)
+_STORED_TARGET_KEYS = _LEGACY_STORED_TARGET_KEYS | {"placement"}
+_STORED_IDENTITY_KEYS = frozenset(
+    {
+        "channel",
+        "agent_name",
+        "requester_id",
+        "room_id",
+        "thread_id",
+        "resolved_thread_id",
+        "session_id",
+        "tenant_id",
+        "account_id",
+        "transport_agent_name",
+    },
+)
+_STORED_TARGET_STRINGS = ("routing_agent_name", "tenant_id", "account_id", "worker_key")
+
+
+def dump_worker_target(target: ResolvedWorkerTarget) -> dict[str, object]:
+    """Return a JSON-safe copy of ``target`` that ``load_worker_target`` reads back, for a plugin to store."""
+    identity = target.execution_identity
+    names = target.private_agent_names
+    placement = target.placement
+    return {
+        "version": _STORED_TARGET_VERSION,
+        "worker_scope": target.worker_scope,
+        "routing_agent_name": target.routing_agent_name,
+        "execution_identity": serialize_tool_execution_identity(identity) if identity is not None else None,
+        "tenant_id": target.tenant_id,
+        "account_id": target.account_id,
+        "worker_key": target.worker_key,
+        "private_agent_names": sorted(names) if names is not None else None,
+        "placement": asdict(placement) if placement is not None else None,
+    }
+
+
+def load_worker_target(data: object) -> ResolvedWorkerTarget:
+    """Return the target ``dump_worker_target`` stored, else raise ``ValueError``.
+
+    It refuses a target whose worker key or private-agent visibility is not what its own scope, agent, and identity
+    resolve, so stored data never pairs one person's or agent's identity with another's worker.
+    """
+    if not isinstance(data, dict) or "version" not in data:
+        msg = "A stored worker target is an object with a version key."
+        raise ValueError(msg)
+    stored = cast("dict[str, object]", data)
+    version = stored["version"]
+    # ``type`` rather than ``==``, which takes ``true`` and ``1.0`` for ``1``.
+    if type(version) is not int or version not in (_LEGACY_STORED_TARGET_VERSION, _STORED_TARGET_VERSION):
+        msg = f"Unknown stored worker target version: {version!r}."
+        raise ValueError(msg)
+    keys = _STORED_TARGET_KEYS if version == _STORED_TARGET_VERSION else _LEGACY_STORED_TARGET_KEYS
+    if set(stored) != keys:
+        msg = f"A stored worker target of version {version} has exactly the keys {sorted(keys)}."
+        raise ValueError(msg)
+    scope, identity, names = stored["worker_scope"], stored["execution_identity"], stored["private_agent_names"]
+    placement = stored.get("placement")
+    strings = {name: stored[name] for name in _STORED_TARGET_STRINGS}
+    if (
+        scope not in (None, *get_args(WorkerScope))
+        or any(value is not None and not isinstance(value, str) for value in strings.values())
+        or (names is not None and not (isinstance(names, list) and all(isinstance(name, str) for name in names)))
+        or (identity is not None and not (isinstance(identity, dict) and set(identity) == _STORED_IDENTITY_KEYS))
+        or (placement is not None and not _is_stored_placement(placement))
+    ):
+        msg = "A stored worker target holds a value dump_worker_target never writes."
+        raise ValueError(msg)
+    try:
+        identity = parse_tool_execution_identity_payload(identity) if identity is not None else None
+    except TypeError as error:
+        msg = f"A stored worker target holds a value dump_worker_target never writes: {error}."
+        raise ValueError(msg) from None
+    target = ResolvedWorkerTarget(
+        worker_scope=cast("WorkerScope | None", scope),
+        execution_identity=identity,
+        private_agent_names=frozenset(cast("list[str]", names)) if names is not None else None,
+        placement=DedicatedWorkerPlacement(**cast("dict[str, Any]", placement)) if placement is not None else None,
+        **cast("dict[str, str | None]", strings),
+    )
+    agent = target.routing_agent_name
+    visibilities = (
+        {_turn_private_agent_names(target.worker_scope, agent, is_private=private) for private in (False, True)}
+        if agent is not None
+        else {None}
+    )
+    # The target is what a turn of its agent resolves, whether that agent is private or not.
+    if target not in (
+        resolve_worker_target(
+            target.worker_scope,
+            agent,
+            execution_identity=identity,
+            tenant_id=target.tenant_id,
+            account_id=target.account_id,
+            private_agent_names=visibility,
+        )
+        for visibility in visibilities
+    ):
+        msg = "A stored worker target names another worker than its own scope, agent, and identity resolve."
+        raise ValueError(msg)
+    return target
+
+
+def _is_stored_placement(placement: object) -> bool:
+    """Return whether ``placement`` is a placement ``dump_worker_target`` writes."""
+    if not isinstance(placement, dict) or set(placement) != {"subagent_id", "resource_profile"}:
+        return False
+    fields = cast("dict[str, object]", placement)
+    subagent_id, profile = fields["subagent_id"], fields["resource_profile"]
+    return (
+        isinstance(subagent_id, str)
+        and _PIN_ID_PATTERN.fullmatch(subagent_id) is not None
+        and profile in (None, *SCRIPT_RESOURCE_PROFILE_NAMES)
+    )
 
 
 # The identity a runner without a Matrix conversation binds for the calls it runs; a conversation's context names
@@ -299,17 +444,25 @@ def build_agent_toolkit_worker_target(
     Single source of truth for the `private_agent_names` derivation shared by
     agent toolkit construction and dispatch-time tool composition.
     """
-    if worker_scope == "user_agent":
-        private_agent_names = frozenset({agent_name}) if is_private else frozenset()
-    else:
-        private_agent_names = None
     return build_worker_target_from_runtime_env(
         worker_scope,
         agent_name,
         execution_identity=execution_identity,
         runtime_paths=runtime_paths,
-        private_agent_names=private_agent_names,
+        private_agent_names=_turn_private_agent_names(worker_scope, agent_name, is_private=is_private),
     )
+
+
+def _turn_private_agent_names(
+    worker_scope: WorkerScope | None,
+    agent_name: str,
+    *,
+    is_private: bool,
+) -> frozenset[str] | None:
+    """Return the private agents a turn of ``agent_name`` sees in its worker: itself when private, on user_agent only."""
+    if worker_scope != "user_agent":
+        return None
+    return frozenset({agent_name}) if is_private else frozenset()
 
 
 def worker_scope_allows_shared_only_integrations(worker_scope: WorkerScope | None) -> bool:
@@ -388,30 +541,51 @@ def resolve_unscoped_worker_key(
     return f"v1:{tenant_key}:unscoped:{effective_agent_name}"
 
 
-def subagent_worker_key(state_scope_worker_key: str, subagent_id: str) -> str:
-    """Pin one subagent's own worker below the normal worker key whose workspaces and credentials it serves.
+def _pinned_worker_key(kind: _PinnedWorkerKind, state_scope_worker_key: str, pin_id: str) -> str:
+    """Pin a worker of its own below the normal worker key whose workspaces and credentials it serves.
 
-    The pin is one ``subagent=<id>`` part before the normal key's last part, the shape
+    The pin is one ``<kind>=<id>`` part before the normal key's last part, the shape
     ``resolve_state_scope_worker_key`` validates. No generated tenant, agent, or requester part contains ``=``, so
-    ``subagent_worker_state_scope_key`` can find the pin even though requester parts contain ``:``.
+    ``pinned_worker_state_scope_key`` can find the pin even though requester parts contain ``:``.
     """
-    if not _SUBAGENT_ID_PATTERN.fullmatch(subagent_id):
-        msg = "A subagent worker key requires a 32-character lowercase hex subagent ID."
+    if not _PIN_ID_PATTERN.fullmatch(pin_id):
+        msg = f"A {kind} worker key requires a 32-character lowercase hex ID."
         raise ValueError(msg)
     if resolved_worker_key_scope(state_scope_worker_key) is None or "=" in state_scope_worker_key:
-        msg = "A subagent worker key requires a resolved, unpinned worker key."
+        msg = f"A {kind} worker key requires a resolved, unpinned worker key."
         raise ValueError(msg)
     parts = state_scope_worker_key.split(":")
-    return ":".join((*parts[:-1], f"{_SUBAGENT_PIN_PREFIX}{subagent_id}", parts[-1]))
+    return ":".join((*parts[:-1], f"{kind}={pin_id}", parts[-1]))
 
 
-def subagent_worker_state_scope_key(worker_key: str) -> str | None:
-    """Return the normal worker key a subagent-pinned key serves, or None for a key without a subagent pin."""
+def subagent_worker_key(state_scope_worker_key: str, subagent_id: str) -> str:
+    """Return the key of one subagent's own worker, which serves its normal worker's workspaces and credentials."""
+    return _pinned_worker_key("subagent", state_scope_worker_key, subagent_id)
+
+
+def named_worker_key(state_scope_worker_key: str, pin_id: str) -> str:
+    """Return the key of one worker a reply's calls name, which serves its normal worker's workspaces and credentials.
+
+    ``pin_id`` is the owning reply's digest of the name, so the name itself never reaches a key.
+    """
+    return _pinned_worker_key("named", state_scope_worker_key, pin_id)
+
+
+def pinned_worker_kind(worker_key: str) -> _PinnedWorkerKind | None:
+    """Return what a pinned key's worker is pinned to, or None for a key without a pin."""
     parts = worker_key.split(":")
-    if len(parts) < 5 or not _SUBAGENT_PIN_PATTERN.fullmatch(parts[-2]):
+    pin = _PIN_PATTERN.fullmatch(parts[-2]) if len(parts) >= 5 else None
+    if pin is None or resolved_worker_key_scope(":".join((*parts[:-2], parts[-1]))) is None:
         return None
-    state_scope_worker_key = ":".join((*parts[:-2], parts[-1]))
-    return state_scope_worker_key if resolved_worker_key_scope(state_scope_worker_key) is not None else None
+    return cast("_PinnedWorkerKind", pin["kind"])
+
+
+def pinned_worker_state_scope_key(worker_key: str) -> str | None:
+    """Return the normal worker key a pinned key serves, or None for a key without a pin."""
+    if pinned_worker_kind(worker_key) is None:
+        return None
+    parts = worker_key.split(":")
+    return ":".join((*parts[:-2], parts[-1]))
 
 
 def normal_worker_key(worker_target: ResolvedWorkerTarget) -> str | None:
@@ -438,7 +612,7 @@ def resolved_worker_key_scope(worker_key: str) -> ResolvedWorkerKeyScope | None:
     scope = parts[2]
     if scope not in {"shared", "user", "user_agent", "unscoped"}:
         return None
-    return cast("ResolvedWorkerKeyScope", scope)
+    return scope
 
 
 def requires_explicit_private_agent_visibility(worker_key: str) -> bool:
@@ -452,8 +626,7 @@ def worker_key_agent_name(worker_key: str) -> str | None:
     if scope is None or scope == "user":
         return None
     parts = worker_key.split(":")
-    # The agent is a key's last part; a user_agent key also names its requester before it, and a subagent-pinned
-    # key its pin.
+    # The agent is a key's last part; a user_agent key also names its requester before it, and a pinned key its pin.
     if scope == "user_agent":
         return parts[-1] if len(parts) >= 5 else None
     return parts[-1]
@@ -602,8 +775,8 @@ def visible_workspace_roots(
     agent in ``private_agent_names`` sees only that private workspace, so a stale
     policy never widens it to the shared one.
     """
-    # A subagent-pinned worker sees what its normal worker sees, from that worker's private scope.
-    worker_key = subagent_worker_state_scope_key(worker_key) or worker_key
+    # A pinned worker sees what its normal worker sees, from that worker's private scope.
+    worker_key = pinned_worker_state_scope_key(worker_key) or worker_key
     scope = resolved_worker_key_scope(worker_key)
     if scope == "user":
         return tuple(

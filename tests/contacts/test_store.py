@@ -133,3 +133,30 @@ def test_a_record_written_before_dates_reads_them_unset() -> None:
     """A contact stored before requests and decisions were dated reads with neither date."""
     record = ContactRecord.model_validate_json(_record().model_dump_json(exclude={"requested_at", "decided_at"}))
     assert (record.requested_at, record.decided_at) == (None, None)
+
+
+def test_only_an_agent_of_another_deployment_has_no_owner() -> None:
+    """Another deployment's agent is known by its Matrix ID alone, while every party here has an owner."""
+    remote = ContactParty(kind="remote_agent", id="@mindroom_mind:other.org", owner=None)
+    assert _record(target=remote).target.owner is None
+    with pytest.raises(ValueError, match="owner"):
+        ContactParty(kind="remote_agent", id="@mindroom_mind:other.org", owner=BOB)
+    with pytest.raises(ValueError, match="owner"):
+        ContactParty(kind="agent", id="mind_bob", owner=None)
+
+
+def test_a_request_from_another_deployment_has_no_origin_here() -> None:
+    """A request another deployment sent was asked in no room of this deployment."""
+    remote = ContactParty(kind="remote_agent", id="@mindroom_mind:other.org", owner=None)
+    record = _record(requester=remote, origin_room_id=None, origin_thread_id=None)
+    assert record.origin_room_id is None
+    assert record.owner_side(BOB) == "target"
+
+
+def test_only_a_request_from_another_deployment_has_no_origin_room() -> None:
+    """A request made here was asked in a room here, and another deployment's request was asked in none."""
+    remote = ContactParty(kind="remote_agent", id="@mindroom_mind:other.org", owner=None)
+    with pytest.raises(ValueError, match="origin room"):
+        _record(origin_room_id=None)
+    with pytest.raises(ValueError, match="origin room"):
+        _record(requester=remote)

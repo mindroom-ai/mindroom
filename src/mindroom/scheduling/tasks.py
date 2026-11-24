@@ -7,6 +7,8 @@ import hashlib
 import json
 import typing
 import uuid
+from collections import Counter
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
@@ -28,7 +30,9 @@ from mindroom.approval.tool_approval import (
     evaluate_tool_approval,
     resolve_tool_approval_approver,
     scheduled_call_offers_any_arguments,
+    toolkit_approval_alias,
 )
+from mindroom.config.models import unsupported_level_message
 from mindroom.config.resolution import entity_timezone
 from mindroom.constants import SCHEDULED_TASK_EVENT_TYPE
 from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
@@ -40,16 +44,20 @@ from mindroom.matrix.conversation_hydration import ConversationReadError
 from mindroom.matrix.conversation_reads import complete_thread_history
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.mentions import parse_mentions_in_text
+from mindroom.matrix.state_failures import StateFailure, state_failure
 from mindroom.providers import registry as provider_registry
 from mindroom.scheduling.errors import (
     ScheduledTaskNotFoundError,
     ScheduledTaskStateReadError,
+    ScheduledTaskStateRefusedError,
     ScheduledTaskStorageError,
     SchedulingError,
+    refused_for_power,
 )
-from mindroom.scheduling.ownership import decide_task_owner
+from mindroom.steward_duties import moderator_rights_message
 from mindroom.thread_utils import filter_thread_agents_for_sender, get_agents_in_thread
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -66,6 +74,7 @@ logger = get_logger(__name__)
 
 # Maximum length for message preview in task listings
 _MESSAGE_PREVIEW_LENGTH = 50
+_SCHEDULE_PARSE_TIMEOUT_SECONDS = 300.0
 
 # Reasons shown on a scheduled tool call's approval card when its task changes.
 SCHEDULE_CANCELLED_REASON = "Schedule cancelled."
@@ -87,6 +96,9 @@ def scheduled_task_state_lock(client: nio.AsyncClient, room_id: str, task_id: st
     return lock
 
 
+_logged_unmanaged_authors: set[tuple[str, str]] = set()
+
+
 def _runtime_authored_task_content(
     room_id: str,
     event: dict[str, typing.Any],
@@ -102,9 +114,18 @@ def _runtime_authored_task_content(
     if not isinstance(content, dict) or not isinstance(sender, str):
         return None
     if sender in runtime_account_ids:
-        return content
-    logger.warning(
-        "scheduled_task_state_ignored_unmanaged_author",
+        # LEGACY_COMPAT: Scheduled tasks without a stored owner.
+        # Legacy format: Scheduled-task state content whose "owner" is absent, empty or not a string; every task
+        #   saved before owners were stored.
+        # Last legacy release: v2026.10.675 wrote scheduled-task state without an owner; replacement: the next
+        #   release stores the owner's Matrix ID in the task's state content when the task is saved.
+        # Handling: The account that last wrote the task reads as its owner, and every rewrite stores that owner,
+        #   so a write by the room's steward never moves the task; the router's ID marks a task the router owned.
+        # Coverage: tests/test_scheduled_task_runtime.py::test_task_saved_without_an_owner_keeps_its_writer_as_owner_through_a_rewrite.
+        owner = content.get("owner")
+        return {**content, "owner": owner if isinstance(owner, str) and owner else sender}
+    logger.debug(
+        "scheduled_task_event_ignored_unmanaged_author",
         room_id=room_id,
         task_id=event.get("state_key"),
         event_id=event.get("event_id"),
@@ -221,6 +242,8 @@ class ScheduledWorkflow(BaseModel):
     # The IANA timezone the task's times are interpreted and shown in. MindRoom sets it from the scheduling agent,
     # so the schema the parser model fills leaves it out.
     timezone: SkipJsonSchema[str | None] = None
+    # The message the scheduling reply answered, so a client can show the task under that reply; MindRoom sets it.
+    source_event_id: SkipJsonSchema[str | None] = None
 
     @field_validator("execute_at")
     @classmethod
@@ -246,8 +269,8 @@ class ScheduledTaskRecord:
     created_at: datetime | None
     workflow: ScheduledWorkflow
     revision: str | None = None
-    # Matrix ID of the bot that runs the task, decided once when it was saved; None for a task saved before owners
-    # were stored.
+    # Matrix ID of the bot that runs the task. A record read from a room always has one: a task stored without an
+    # owner reads with its last writer (`_runtime_authored_task_content`). None only on a record built without a read.
     owner_id: str | None = None
 
 
@@ -424,6 +447,7 @@ def build_edited_scheduled_workflow(  # noqa: C901
         new_thread=existing_workflow.new_thread,
         silent=existing_workflow.silent if silent is None else silent,
         timezone=existing_workflow.timezone,
+        source_event_id=existing_workflow.source_event_id,
     )
 
 
@@ -444,7 +468,7 @@ def _parse_scheduled_task_record(
         return None
     try:
         workflow = ScheduledWorkflow(**json.loads(workflow_data_raw))
-    except ValueError:
+    except (TypeError, ValueError):
         logger.exception("Failed to parse scheduled task workflow", room_id=room_id, task_id=task_id)
         return None
     if not workflow.created_by:
@@ -464,29 +488,25 @@ def _parse_scheduled_task_record(
     )
 
 
-def _cancelled_task_content(
-    task_id: str,
-    existing_content: dict[str, object] | None,
-) -> dict[str, object]:
+def _cancelled_task_content(task_id: str, existing_content: dict[str, object]) -> dict[str, object]:
     """Build cancelled task state while preserving existing metadata where possible."""
     cancelled_content: dict[str, object] = {"status": "cancelled", "task_id": task_id}
 
-    if existing_content:
-        workflow = existing_content.get("workflow")
-        if isinstance(workflow, str):
-            cancelled_content["workflow"] = workflow
+    workflow = existing_content.get("workflow")
+    if isinstance(workflow, str):
+        cancelled_content["workflow"] = workflow
 
-        created_at = existing_content.get("created_at")
-        if isinstance(created_at, str) and created_at:
-            cancelled_content["created_at"] = created_at
+    created_at = existing_content.get("created_at")
+    if isinstance(created_at, str) and created_at:
+        cancelled_content["created_at"] = created_at
 
-        original_task_id = existing_content.get("task_id")
-        if isinstance(original_task_id, str) and original_task_id:
-            cancelled_content["task_id"] = original_task_id
+    original_task_id = existing_content.get("task_id")
+    if isinstance(original_task_id, str) and original_task_id:
+        cancelled_content["task_id"] = original_task_id
 
-        owner = existing_content.get("owner")
-        if isinstance(owner, str):
-            cancelled_content["owner"] = owner
+    owner = existing_content.get("owner")
+    if isinstance(owner, str):
+        cancelled_content["owner"] = owner
 
     cancelled_content["updated_at"] = datetime.now(UTC).isoformat()
     return cancelled_content
@@ -526,31 +546,41 @@ def _validate_conditional_workflow(workflow: ScheduledWorkflow) -> None:
         )
 
 
-def task_records_with_writers(
+def task_records(
     room_id: str,
     state_response: nio.RoomGetStateResponse,
     runtime_paths: RuntimePaths,
     include_non_pending: bool = False,
-) -> list[tuple[ScheduledTaskRecord, str]]:
-    """Parse runtime-authored scheduled task records from a room state response, each with the account that wrote it."""
+) -> list[ScheduledTaskRecord]:
+    """Parse runtime-authored scheduled task records from a room state response."""
     runtime_account_ids = persisted_bot_user_ids(runtime_paths)
-    tasks: list[tuple[ScheduledTaskRecord, str]] = []
+    tasks: list[ScheduledTaskRecord] = []
+    unmanaged: Counter[str] = Counter()
     for event in state_response.events:
-        if event.get("type") != SCHEDULED_TASK_EVENT_TYPE:
+        if not isinstance(event, dict) or event.get("type") != SCHEDULED_TASK_EVENT_TYPE:
             continue
 
         state_key = event.get("state_key")
         content = _runtime_authored_task_content(room_id, event, runtime_account_ids)
+        sender = event.get("sender")
+        if content is None and isinstance(sender, str) and isinstance(event.get("content"), dict):
+            unmanaged[sender] += 1
         if not isinstance(state_key, str) or content is None:
+            continue
+        # A room keeps every finished task's state, so only the records a caller wants are parsed.
+        if not include_non_pending and _stored_task_status(content) != "pending":
             continue
 
         task = _parse_scheduled_task_record(room_id, state_key, content)
         if not task:
             continue
-        if not include_non_pending and task.status != "pending":
-            continue
-        tasks.append((task, event["sender"]))
+        tasks.append(task)
 
+    for sender, count in unmanaged.items():
+        key = (room_id, sender)
+        if key not in _logged_unmanaged_authors:
+            _logged_unmanaged_authors.add(key)
+            logger.info("scheduled_task_state_ignored_unmanaged_author", room_id=room_id, sender=sender, count=count)
     return tasks
 
 
@@ -558,8 +588,8 @@ async def _room_state_for_tasks(client: nio.AsyncClient, room_id: str) -> nio.Ro
     """Read a room's full state to list or cancel its tasks, or raise that its tasks cannot be retrieved."""
     try:
         response = await client.room_get_state(room_id)
-    except aiohttp.ClientError as exc:
-        # nio raises a response that broke off instead of answering it.
+    except (aiohttp.ClientError, nio.LocalProtocolError) as exc:
+        # nio raises a response that broke off, or a read through a lent client its bot closed since.
         msg = f"Unable to retrieve scheduled tasks: {type(exc).__name__}: {exc}"
         raise ScheduledTaskStateReadError(msg) from exc
     if not isinstance(response, nio.RoomGetStateResponse):
@@ -581,9 +611,7 @@ async def get_scheduled_tasks_for_room(
 
     """
     response = await _room_state_for_tasks(client, room_id)
-    return [
-        task for task, _writer_id in task_records_with_writers(room_id, response, runtime_paths, include_non_pending)
-    ]
+    return task_records(room_id, response, runtime_paths, include_non_pending)
 
 
 async def get_pending_schedule_thread_ids_for_room(
@@ -654,16 +682,14 @@ async def _read_scheduled_task_state(
     except Exception as exc:
         msg = f"{failure}: {type(exc).__name__}: {exc}"
         raise ScheduledTaskStateReadError(msg) from exc
-    if isinstance(response, nio.RoomGetStateEventError) and response.status_code == "M_NOT_FOUND":
+    if isinstance(response, nio.RoomGetStateEventError) and state_failure(response) is StateFailure.MISSING:
         return None
     if not isinstance(response, nio.RoomGetStateEventResponse):
         msg = f"{failure}: {response}"
         raise ScheduledTaskStateReadError(msg)
     event = response.content
     if not isinstance(event.get("sender"), str) or not isinstance(event.get("content"), dict):
-        transport = response.transport_response
-        error = event.get("errcode") or (f"HTTP {transport.status}" if transport is not None else "no HTTP status")
-        msg = f"Scheduled task `{task_id}` in room `{room_id}` was not returned as a full state event ({error})"
+        msg = f"Scheduled task `{task_id}` in room `{room_id}` was not returned as a full state event"
         raise ScheduledTaskStateReadError(msg)
     # A server that ignores format=event returns the state content itself, whose author can shape it like a
     # bot-written event, so only a server proven to return whole events names the sender.
@@ -703,49 +729,6 @@ async def require_scheduled_task(
     return task
 
 
-def _scheduled_task_permission_hint(
-    client: nio.AsyncClient,
-    room_id: str,
-    writers: ScheduledTaskRuntime | None,
-) -> str:
-    """Tell the room admin how to let MindRoom save schedule state in a room.
-
-    Name the running router whenever there is one: it runs schedules in every room where it may write their state,
-    and backs other accounts' rejected writes, so its grant is the one that unblocks scheduling for the whole room.
-    Rooms MindRoom did not create often leave it below the power level that room state needs.
-    """
-    account = (writers.router_client() if writers is not None else None) or client
-    room = account.rooms.get(room_id)
-    if room is not None:
-        required_level = room.power_levels.get_state_event_required_level(SCHEDULED_TASK_EVENT_TYPE)
-        current_level = room.power_levels.get_user_level(account.user_id)
-        if current_level < required_level:
-            return (
-                f"Ask a room admin to raise the power level of {account.user_id} in this room "
-                f"from {current_level} to {required_level}, then retry."
-            )
-    return f"Ensure {account.user_id} is joined with permission to write room state, then retry."
-
-
-async def _write_scheduled_task_state(
-    client: nio.AsyncClient,
-    room_id: str,
-    task_id: str,
-    content: dict[str, typing.Any],
-) -> str | None:
-    """Write one scheduled-task state event as one account, returning why it failed or None once it landed."""
-    try:
-        response = await client.room_put_state(
-            room_id=room_id,
-            event_type=SCHEDULED_TASK_EVENT_TYPE,
-            content=content,
-            state_key=task_id,
-        )
-    except Exception as exc:
-        return f"{type(exc).__name__}: {exc!s}"
-    return None if isinstance(response, nio.RoomPutStateResponse) else str(response)
-
-
 async def _put_scheduled_task_state_content(
     client: nio.AsyncClient,
     room_id: str,
@@ -753,24 +736,31 @@ async def _put_scheduled_task_state_content(
     content: dict[str, typing.Any],
     writers: ScheduledTaskRuntime | None = None,
 ) -> None:
-    """Write scheduled-task state, falling back on rejection to another bot whose room power allows it."""
-    failure = await _write_scheduled_task_state(client, room_id, task_id, content)
-    if failure is None:
+    """Write scheduled-task state as the room's steward, whose power there no other running bot exceeds.
+
+    ``client`` writes only where there is no runtime to name a steward.
+    A room without a steward, or whose steward lacks the power, gets the moderator-rights answer; any other failure
+    may succeed on a retry.
+    """
+    with nullcontext(client) if writers is None else writers.lend_client(room_id, client) as writer:
+        if writer is None:
+            logger.warning("scheduled_task_state_refused", room_id=room_id, task_id=task_id, error="no steward")
+            raise ScheduledTaskStateRefusedError(moderator_rights_message("save schedules"))
+        try:
+            outcome: object = await writer.room_put_state(
+                room_id=room_id,
+                event_type=SCHEDULED_TASK_EVENT_TYPE,
+                content=content,
+                state_key=task_id,
+            )
+        except Exception as exc:
+            outcome = f"{type(exc).__name__}: {exc!s}"
+    if isinstance(outcome, nio.RoomPutStateResponse):
         return
-
-    if writers is not None:
-        with writers.other_state_writer(room_id, refused_user_id=client.user_id) as writer:
-            if writer is not None:
-                writer_failure = await _write_scheduled_task_state(writer, room_id, task_id, content)
-                if writer_failure is None:
-                    logger.info("scheduled_task_state_persisted_via_room_writer", room_id=room_id, task_id=task_id)
-                    return
-                failure = f"{failure}; {writer.user_id} write failed ({writer_failure})"
-
-    msg = (
-        f"Failed to persist scheduled task state for task `{task_id}`: {failure}. "
-        f"{_scheduled_task_permission_hint(client, room_id, writers)}"
-    )
+    if isinstance(outcome, nio.RoomPutStateError) and state_failure(outcome) is StateFailure.REFUSED:
+        logger.warning("scheduled_task_state_refused", room_id=room_id, task_id=task_id, error=str(outcome))
+        raise ScheduledTaskStateRefusedError(moderator_rights_message("save schedules"))
+    msg = f"Failed to persist scheduled task state for task `{task_id}`: {outcome}."
     raise ScheduledTaskStorageError(msg)
 
 
@@ -790,8 +780,7 @@ async def persist_scheduled_task_state(
 
     The stored `cron_description` is written for clients in the task's own timezone, which `config` supplies for a
     task that has none.
-    `owner_id` is the task's stored owner, which every rewrite keeps; a task saved before owners were stored keeps
-    none.
+    `owner_id` is the task's owner, which every rewrite keeps.
     """
     revision = str(uuid.uuid4())
     content = {
@@ -817,29 +806,6 @@ async def persist_scheduled_task_state(
         writers=writers,
     )
     return revision
-
-
-async def _save_pending_scheduled_task(
-    client: nio.AsyncClient,
-    room_id: str,
-    task_id: str,
-    workflow: ScheduledWorkflow,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    task_runtime: ScheduledTaskRuntime | None = None,
-) -> str:
-    """Decide a new task's owner, persist the task with it as pending, and return the owner; its runner is not started."""
-    owner_id = await decide_task_owner(client, room_id, workflow, runtime_paths)
-    await persist_scheduled_task_state(
-        client=client,
-        room_id=room_id,
-        task_id=task_id,
-        workflow=workflow,
-        config=config,
-        owner_id=owner_id,
-        writers=task_runtime,
-    )
-    return owner_id
 
 
 def _raise_unless_editable(task: ScheduledTaskRecord) -> None:
@@ -958,19 +924,31 @@ async def _parse_workflow_schedule(
 
     provider = provider_registry.build_model_provider(config, runtime_paths, "default")
 
+    parse_timeout = asyncio.timeout(_SCHEDULE_PARSE_TIMEOUT_SECONDS)
     try:
-        response = await complete_prompt(
-            provider,
-            prompt,
-            instructions=["Parse scheduling requests into structured workflows"],
-            schema=ScheduledWorkflow,
-        )
+        async with parse_timeout:
+            response = await complete_prompt(
+                provider,
+                prompt,
+                instructions=["Parse scheduling requests into structured workflows"],
+                schema=ScheduledWorkflow,
+            )
         await record_system_usage(response.usage, runtime_paths=runtime_paths, kind="schedule_parse")
     except ModelSafeguardRefusal as refusal:
         logger.warning("Schedule parser model refused the request", request=request)
         msg = f"The schedule parser model declined this request ({refusal})."
         raise SchedulingError(msg) from refusal
     except Exception as e:
+        if isinstance(e, TimeoutError) and parse_timeout.expired():
+            logger.exception(
+                "Timed out parsing workflow schedule",
+                request=request,
+                timeout_seconds=_SCHEDULE_PARSE_TIMEOUT_SECONDS,
+            )
+            _raise_parse_failure(
+                f"Timed out parsing the schedule request after {int(_SCHEDULE_PARSE_TIMEOUT_SECONDS)}s",
+                "Try a simpler format like 'Daily at 9am, check my email'",
+            )
         logger.exception("Error parsing workflow schedule", error=str(e), request=request)
         _raise_parse_failure(
             f"Error parsing schedule: {failure_text(e)}",
@@ -1017,25 +995,16 @@ def _extract_mentioned_agents_from_text(
     runtime_paths: RuntimePaths,
 ) -> list[MatrixID]:
     """Extract valid agent mentions from scheduling text."""
-    _, mentioned_user_ids, _ = parse_mentions_in_text(
-        full_text,
-        config,
-        runtime_paths,
-    )
-    mentioned_agents: list[MatrixID] = []
-
-    for user_id in mentioned_user_ids:
-        matrix_id = MatrixID.parse(user_id)
-        if (
-            entity_identity_registry(config, runtime_paths).current_entity_name_for_user_id(
-                matrix_id.full_id,
-                include_router=False,
-            )
-            and matrix_id not in mentioned_agents
-        ):
-            mentioned_agents.append(matrix_id)
-
-    return mentioned_agents
+    mentioned_user_ids = parse_mentions_in_text(full_text, config, runtime_paths)[1]
+    # Text without mentions does not need prepared Matrix accounts.
+    if not mentioned_user_ids:
+        return []
+    registry = entity_identity_registry(config, runtime_paths)
+    return [
+        MatrixID.parse(user_id)
+        for user_id in mentioned_user_ids
+        if registry.current_entity_name_for_user_id(user_id, include_router=False)
+    ]
 
 
 def _history_limit_display(history_limit: int) -> str:
@@ -1091,6 +1060,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     history_limit: int | None = None,
     silent: bool | None = None,
     model: str | None = None,
+    source_event_id: str | None = None,
 ) -> str:
     """Schedule a workflow from natural language request and return the confirmation.
 
@@ -1110,8 +1080,10 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     if model is not None:
         selected_model = model.strip() or None
     if selected_model is not None and selected_model not in runtime.config.models:
-        available = ", ".join(sorted(runtime.config.models))
-        msg = f"Unknown model: {selected_model}. Available models: {available}"
+        msg = unsupported_level_message(runtime.config.models, selected_model)
+        if msg is None:
+            available = ", ".join(sorted(runtime.config.models))
+            msg = f"Unknown model: {selected_model}. Available models: {available}"
         raise SchedulingError(msg)
 
     client = runtime.client
@@ -1134,7 +1106,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
                 msg = f"Could not read this thread's history: {e}"
                 raise SchedulingError(msg) from e
             available_responders = filter_thread_agents_for_sender(
-                get_agents_in_thread(thread_history, config, runtime_paths),
+                get_agents_in_thread(thread_history, config, runtime_paths, room_id=room_id),
                 scheduled_by,
                 config,
                 runtime_paths,
@@ -1205,6 +1177,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     workflow_result.room_id = room_id
     workflow_result.new_thread = new_thread
     workflow_result.timezone = existing_task.workflow.timezone if existing_task else task_timezone
+    workflow_result.source_event_id = existing_task.workflow.source_event_id if existing_task else source_event_id
     if history_limit is not None:
         workflow_result.history_limit = history_limit
     if silent is not None:
@@ -1241,17 +1214,18 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
                 writers=runtime.task_runtime,
             )
         else:
-            owner_id = await _save_pending_scheduled_task(
+            # A new task is owned by the bot that saves it; the room's steward only writes its state.
+            await persist_scheduled_task_state(
                 client=client,
                 room_id=room_id,
                 task_id=task_id,
                 workflow=workflow_result,
                 config=config,
-                runtime_paths=runtime_paths,
-                task_runtime=runtime.task_runtime,
+                owner_id=client.user_id,
+                writers=runtime.task_runtime,
             )
             if runtime.task_runtime is not None:
-                runtime.task_runtime.start_new_task(task_id, workflow_result, owner_id=owner_id)
+                runtime.task_runtime.start_new_task(task_id, workflow_result, owner_id=client.user_id)
     except SchedulingError as e:
         msg = f"Failed to schedule: {e}"
         raise SchedulingError(msg) from e
@@ -1350,6 +1324,7 @@ async def _checked_scheduled_call(
             tool_name,
             arguments,
             agent_name,
+            toolkit_approval_alias(config, config_plugins(config, runtime_paths).tools, call.toolkit_name, tool_name),
         )
     except ToolApprovalScriptError as exc:
         msg = f"Could not evaluate the approval policy for `{tool_name}`: {exc}"
@@ -1376,6 +1351,7 @@ async def schedule_approved_tool_call(
     arguments: dict[str, object],
     execute_at: str,
     description: str,
+    source_event_id: str | None = None,
 ) -> str:
     """Store one gated call of the agent's own, ask the requester to approve it now, and return the confirmation.
 
@@ -1424,6 +1400,7 @@ async def schedule_approved_tool_call(
         room_id=room_id,
         pre_approved_call=True,
         timezone=timezone,
+        source_event_id=source_event_id,
     )
     binding = ScheduledCallBinding(
         task_id=task_id,
@@ -1454,14 +1431,14 @@ async def schedule_approved_tool_call(
             msg = "Could not post an approvable approval card for this call; nothing was scheduled."
             raise SchedulingError(msg)
         try:
-            owner_id = await _save_pending_scheduled_task(
+            await persist_scheduled_task_state(
                 runtime.client,
                 room_id,
                 task_id,
                 workflow,
-                config,
-                runtime.runtime_paths,
-                task_runtime=runtime.task_runtime,
+                config=config,
+                owner_id=runtime.client.user_id,
+                writers=runtime.task_runtime,
             )
         except SchedulingError as e:
             msg = f"Failed to schedule: {e}"
@@ -1472,7 +1449,7 @@ async def schedule_approved_tool_call(
             await withdraw_scheduled_call(task_id, reason=SCHEDULE_CANCELLED_REASON)
     # Started only once the task is published, so a failed start never withdraws the approval a stored task uses.
     if runtime.task_runtime is not None:
-        runtime.task_runtime.start_new_task(task_id, workflow, owner_id=owner_id)
+        runtime.task_runtime.start_new_task(task_id, workflow, owner_id=runtime.client.user_id)
     scheduled_for = _format_scheduled_time(send_at, timezone)
     return (
         f"✅ Scheduled `{tool_name}` for {scheduled_for} (task `{task_id}`).\n"
@@ -1554,9 +1531,6 @@ async def list_scheduled_tasks(  # noqa: C901
     if not tasks and not tasks_in_other_threads and not new_thread_tasks:
         return "No scheduled tasks found."
 
-    if not tasks and tasks_in_other_threads and not new_thread_tasks:
-        return f"No scheduled tasks in this thread.\n\n📌 {len(tasks_in_other_threads)} task(s) scheduled in other threads. Use !list_schedules in those threads to see details."
-
     # Sort by execution time (one-time tasks) or put recurring tasks at the end
     def _sort_key(r: ScheduledTaskRecord) -> tuple[bool, datetime]:
         t = r.workflow.execute_at if r.workflow.schedule_type == "once" else None
@@ -1601,7 +1575,7 @@ async def list_scheduled_tasks(  # noqa: C901
     if tasks_in_other_threads:
         lines.append("")
         lines.append(
-            f"📌 {len(tasks_in_other_threads)} task(s) scheduled in other threads. Use !list_schedules in those threads to see details.",
+            f"📌 {len(tasks_in_other_threads)} task(s) scheduled in other threads. Use /list_schedules in those threads to see details.",
         )
 
     return "\n".join(lines)
@@ -1679,7 +1653,7 @@ async def cancel_all_scheduled_tasks(
     """
     response = await _room_state_for_tasks(client, room_id)
     cancelled_count = 0
-    failed_count = 0
+    failures: list[ScheduledTaskStateRefusedError | None] = []
     runtime_account_ids = persisted_bot_user_ids(runtime_paths)
 
     for event in response.events:
@@ -1699,17 +1673,19 @@ async def cancel_all_scheduled_tasks(
                 await _cancel_stored_task(client, room_id, task_id, current_content, task_runtime)
             cancelled_count += 1
             logger.info("scheduled_task_cancelled", task_id=task_id)
-        except Exception:
+        except Exception as error:
             logger.exception("scheduled_task_cancel_failed", task_id=task_id)
-            failed_count += 1
+            failures.append(refused_for_power(error))
     if cancelled_count == 0:
-        if failed_count > 0:
-            msg = f"Failed to cancel {failed_count} scheduled task(s)"
+        if failures and (refusal := failures[0]) is not None and all(failures):
+            raise refusal
+        if failures:
+            msg = f"Failed to cancel {len(failures)} scheduled task(s)"
             raise SchedulingError(msg)
         return "No scheduled tasks to cancel."
 
     result = f"✅ Cancelled {cancelled_count} scheduled task(s)"
-    if failed_count > 0:
-        result += f"\n⚠️ Failed to cancel {failed_count} task(s)"
+    if failures:
+        result += f"\n⚠️ Failed to cancel {len(failures)} task(s)"
 
     return result

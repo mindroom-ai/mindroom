@@ -89,7 +89,7 @@ def _tool_name(function: Callable[..., Any]) -> str:
     if mark is not None and mark.name is not None:
         return mark.name
     # A tool is a function or a method (``_require_tool_shape``), so it has a name of its own.
-    return function.__name__  # ty: ignore[unresolved-attribute]
+    return function.__name__  # ty: ignore[missing-attribute]
 
 
 def _require_tool_shape(toolkit: str, function: object) -> None:

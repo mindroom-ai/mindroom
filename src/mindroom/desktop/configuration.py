@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mindroom.desktop.protocol import MAX_COMMAND_TTL_MS
 from mindroom.matrix.device_identity import PinnedMatrixDevice
+
+if TYPE_CHECKING:
+    from mindroom.config.main import Config
 
 DESKTOP_IDENTITY_FIELDS = frozenset({"device_user_id", "device_id", "device_ed25519"})
 
@@ -81,9 +84,30 @@ def desktop_configuration_state(credentials: dict[str, Any] | None) -> DesktopCo
     )
 
 
+def desktop_disconnect_error(config: Config, agent_name: str) -> str | None:
+    """Return why an agent cannot own requester-scoped Desktop disconnect, or None when eligible."""
+    if agent_name not in config.agents:
+        return "Run this command while talking directly to a configured agent."
+    return None
+
+
+def desktop_pairing_error(config: Config, agent_name: str) -> str | None:
+    """Return why an agent cannot own requester-scoped Desktop pairing, or None when eligible."""
+    if (error := desktop_disconnect_error(config, agent_name)) is not None:
+        return error
+    policy = config.defaults.desktop_pairing
+    if policy == "disabled":
+        return "Desktop pairing is disabled by configuration."
+    if policy == "explicit_only" and "desktop" not in config.resolve_agent(agent_name).tools.tool_names:
+        return f"Agent '{agent_name}' does not declare the Desktop tool."
+    return None
+
+
 __all__ = [
     "DESKTOP_IDENTITY_FIELDS",
     "DesktopConfigurationState",
     "DesktopConfigurationStatus",
     "desktop_configuration_state",
+    "desktop_disconnect_error",
+    "desktop_pairing_error",
 ]

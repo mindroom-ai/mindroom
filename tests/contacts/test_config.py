@@ -56,3 +56,11 @@ def test_judge_model_must_exist() -> None:
     )
     assert config.agents["helper"].contacts is not None
     assert config.agents["helper"].contacts.judgment is not None
+
+
+def test_remote_agents_default_to_none_and_refuse_duplicates() -> None:
+    """Contacts stay within the deployment until patterns name agents of other deployments, each named once."""
+    assert ContactsConfig().remote_agents == []
+    assert ContactsConfig(remote_agents=["@mindroom_*:other.org"]).remote_agents == ["@mindroom_*:other.org"]
+    with pytest.raises(ValidationError, match="remote_agents"):
+        ContactsConfig(remote_agents=["@a:other.org", "@a:other.org"])

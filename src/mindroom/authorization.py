@@ -101,12 +101,12 @@ def _responder_reply_authorization(
 
     A responder always admits its own account; other MindRoom accounts need a grant like any requester.
     ``observed_room`` is the answering bot's own synced view of ``room_id``. Its roster never grants
-    access; it only lets a same-room denial wait briefly for the router to apply a join.
+    access; it only lets a same-room denial wait briefly for the room's observer to apply a join.
     """
     allowed = _is_own_account(sender_id, entity_name, runtime_paths)
     resolved_sender = resolve_human_requester_alias(sender_id, config, runtime_paths)
     access = resolve_responder_access(config, entity_name)
-    allowed = allowed or resolved_sender in config.administrators
+    allowed = allowed or (resolved_sender in config.administrators and administrators_pass_access(config, entity_name))
     allowed = allowed or any(fnmatchcase(resolved_sender, allowed_user) for allowed_user in access.users)
     allowed = allowed or (
         room_id is not None
@@ -134,7 +134,7 @@ def _responder_reply_authorization(
         room_id is not None
         and observed_room is not None
         and observed_room.room_id == room_id
-        and membership_index.awaits_router_join(
+        and membership_index.awaits_observer_join(
             resolved_sender,
             room_id,
             cached_joined_member_ids(observed_room),
@@ -144,9 +144,18 @@ def _responder_reply_authorization(
             runtime_paths=runtime_paths,
         )
     ):
-        logger.info("reply_authorization_awaits_router_join", room_id=room_id, entity_name=entity_name)
+        logger.info("reply_authorization_awaits_observer_join", room_id=room_id, entity_name=entity_name)
         return _ReplyAuthorizationDecision.PENDING
     return _ReplyAuthorizationDecision.DENIED
+
+
+def administrators_pass_access(config: Config, entity_name: str) -> bool:
+    """Return whether administrators pass this responder's access: not for a generated agent or a team with one.
+
+    A personal or created agent serves its owners, so only its own ``access`` admits anyone else.
+    """
+    members = config.teams[entity_name].agents if entity_name in config.teams else [entity_name]
+    return all(config.generated_agent(member) is None for member in members)
 
 
 def is_sender_allowed_for_agent_reply_in_room(
@@ -271,12 +280,6 @@ def is_sender_allowed_for_agent_oauth_connection(
         and is_human_requester_id(sender_id, config, runtime_paths)
         and is_sender_allowed_for_responder(sender_id, agent_name, None, config, runtime_paths, membership_index)
     )
-
-
-def is_platform_administrator(sender_id: str, config: Config, runtime_paths: RuntimePaths) -> bool:
-    """Return whether a requester has platform-wide administrative authority."""
-    resolved_sender = resolve_human_requester_alias(sender_id, config, runtime_paths)
-    return resolved_sender in config.administrators
 
 
 def filter_responders_by_sender_permissions(

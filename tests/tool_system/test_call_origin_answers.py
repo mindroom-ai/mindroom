@@ -21,6 +21,7 @@ from mindroom.mcp_gateway import tools as gateway
 from mindroom.message_target import MessageTarget
 from mindroom.oauth.providers import OAuthConnectionRequired
 from mindroom.script_runs.models import ScriptCallState
+from mindroom.shell.background_scope import ShellBackgroundScope
 from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_system.agent_tool_calls import AgentToolCallStep
 from mindroom.tool_system.agno_toolkits import Function, Toolkit
@@ -281,6 +282,7 @@ async def _voice_answer(tmp_path: Path, entrypoint: Callable[[], str], *hooks: o
         agent_name=AGENT,
         authorize_operation=_authorized_call_operation,
         usage_owner=_USAGE_OWNER,
+        shell_scope=ShellBackgroundScope(),
         connect=_unconnected,
     )
     return await tool({})

@@ -7,7 +7,8 @@ import contextlib
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 import httpx
@@ -29,10 +30,13 @@ from mindroom.script_runs.models import (
     script_worker_key_for_run,
     supervisor_handle_for_run,
 )
+from mindroom.script_runs.reasons import MAX_RUNTIME_EXCEEDED
 from mindroom.script_runs.recovery import script_recovery_signature
 from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
 from mindroom.script_runs.supervised import signal_supervised_script, supervised_script_status, worker_script_namespace
 from mindroom.shell.supervisor import _ShellSupervisorManager, run_command_via_supervisor
+from mindroom.workers.backends._dedicated_worker_common import stable_json_digest
+from mindroom.workers.backends.kubernetes import KubernetesWorkerBackend, KubernetesWorkerBackendConfig
 from mindroom.workers.models import WorkerHandle, WorkerSpec
 from tests.process_helpers import assert_linux_pid_not_running
 
@@ -44,6 +48,9 @@ if TYPE_CHECKING:
 _RUN_ID = f"script-{'a' * 32}"
 _GATEWAY_URL = "http://primary.test/api/script-gateway"
 _MINIMAL_ENV = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+# Far beyond the test's own timeout, so neither the supervisor nor a primary reaches the run's deadline on wall time;
+# the test moves the reconstructed primary's clock there instead.
+_MAX_RUNTIME_SECONDS = 3600
 
 
 @dataclass
@@ -61,13 +68,14 @@ class _RecoveringWorkerBackend:
     handle: WorkerHandle
     configured_image: str
     worker_template_image: str
+    recovery_digest: str
     cleanup_locator: str | None = "kubernetes:test"
     backend_name: str = "kubernetes"
     idle_timeout_seconds: float = 3600
     ensure_calls: int = 0
 
     def script_recovery_signature(self) -> str:
-        return "stable-worker-authority"
+        return self.recovery_digest
 
     def script_resource_recovery_authority(self, resource_profile: str | None) -> dict[str, object]:
         return {"profile": resource_profile, "requests": {}, "limits": {}}
@@ -151,6 +159,8 @@ def _runtime_paths(tmp_path: Path) -> RuntimePaths:
         storage_root=tmp_path / "storage",
         control_state_root=tmp_path / "control",
         process_env={
+            "MINDROOM_KUBERNETES_WORKER_IMAGE": "worker-image-v1",
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "worker-storage",
             "MINDROOM_SANDBOX_EXECUTION_MODE": "all",
             "MINDROOM_SCRIPT_GATEWAY_ISOLATED": "true",
             "MINDROOM_SCRIPT_GATEWAY_URL": _GATEWAY_URL,
@@ -202,20 +212,6 @@ async def _read_progress(path: Path, *, greater_than: int = -1) -> int:
     raise AssertionError(message)
 
 
-async def _wait_for_finished(socket_path: str, *, worker_key: str) -> WorkerScriptStatus:
-    for _ in range(120):
-        status = await supervised_script_status(
-            socket_path,
-            namespace=worker_script_namespace(worker_key, _RUN_ID),
-            run_id=_RUN_ID,
-        )
-        if status.state == "exited":
-            return status
-        await asyncio.sleep(0.05)
-    error = f"Script process did not reach its supervisor deadline: {status}"
-    raise AssertionError(error)
-
-
 @pytest.mark.asyncio
 async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  # noqa: PLR0915
     tmp_path: Path,
@@ -236,10 +232,23 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
         created_at=1.0,
         debug_metadata={"image": "worker-image-v1"},
     )
+    kubernetes = KubernetesWorkerBackend(
+        runtime_paths=runtime_paths,
+        config=KubernetesWorkerBackendConfig.from_runtime(runtime_paths),
+        auth_token=None,
+        storage_root=runtime_paths.storage_root,
+        current_launch=lambda: pytest.fail("Recovery must not build a worker launch"),
+    )
+    # The first primary persisted the digest before the SSH release label existed.
+    main_payload = kubernetes._script_recovery_payload()
+    main_config = main_payload["config"]
+    assert isinstance(main_config, dict)
+    main_config.pop("tailnet_ssh_release_id", None)
     backend = _RecoveringWorkerBackend(
         handle=worker,
         configured_image="worker-image-v1",
         worker_template_image="worker-image-v1",
+        recovery_digest=stable_json_digest(main_payload),
     )
     recovery_signature = script_recovery_signature(
         backend=backend,  # type: ignore[arg-type]
@@ -262,10 +271,12 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
             worker_key=worker_key,
             worker_backend_locator=backend.cleanup_locator,
             recovery_signature=recovery_signature,
-            max_runtime_seconds=4,
+            max_runtime_seconds=_MAX_RUNTIME_SECONDS,
         ),
     )
-    store.transition_run(_RUN_ID, state=ScriptRunState.RUNNING, worker_id=worker.worker_id)
+    running = store.transition_run(_RUN_ID, state=ScriptRunState.RUNNING, worker_id=worker.worker_id)
+    assert running.started_at is not None
+    started = datetime.fromisoformat(running.started_at)
 
     supervisor = _ShellSupervisorManager()
     first_lifecycle: ScriptRuntimeLifecycle | None = None
@@ -297,7 +308,7 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
             tail=100,
             timeout=0,
             handle=supervisor_handle_for_run(_RUN_ID),
-            max_runtime_seconds=4,
+            max_runtime_seconds=_MAX_RUNTIME_SECONDS,
         )
         process_group_leader = int(re.search(r"PID (\d+)", launch.message).group(1))  # type: ignore[union-attr]
         first_progress = await _read_progress(progress_path)
@@ -331,6 +342,8 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
         assert store.get_call(_RUN_ID, "accepted-before-restart").state is ScriptCallState.INDETERMINATE
 
         backend.configured_image = "worker-image-v2"
+        kubernetes.config = replace(kubernetes.config, image=backend.configured_image)
+        backend.recovery_digest = kubernetes.script_recovery_signature()
         reopened_store = ScriptRunStore(runtime_paths)
         second_lifecycle = _lifecycle(
             runtime_paths=runtime_paths,
@@ -370,11 +383,17 @@ async def test_reconstructed_primary_adopts_same_process_and_durable_receipt(  #
         assert response.status_code == 200
         assert response.json()["state"] == ScriptCallState.INDETERMINATE
 
-        finished = await _wait_for_finished(socket_path, worker_key=worker_key)
-        assert finished.exit_code == -9
-        await assert_linux_pid_not_running(script_pid)
-        terminal = await second_lifecycle.manager.reconcile_durable(run_id=_RUN_ID)
+        manager = second_lifecycle.manager
+        manager.clock = lambda: started + timedelta(seconds=_MAX_RUNTIME_SECONDS - 1)
+        before_deadline = await manager.reconcile_durable(run_id=_RUN_ID)
+        assert before_deadline.state is ScriptRunState.RUNNING
+        manager.clock = lambda: started + timedelta(seconds=_MAX_RUNTIME_SECONDS)
+        terminal = await manager.reconcile_durable(run_id=_RUN_ID)
         assert terminal.state is ScriptRunState.INTERRUPTED
+        assert terminal.cancellation_reason == MAX_RUNTIME_EXCEEDED
+        # The script ignores SIGTERM, so it ends only by the kill that follows.
+        assert terminal.exit_code == -9
+        await assert_linux_pid_not_running(script_pid)
         await second_lifecycle.shutdown()
         second_shutdown = True
     finally:

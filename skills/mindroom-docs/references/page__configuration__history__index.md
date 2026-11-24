@@ -43,7 +43,7 @@ defaults:
 
 ### How tokens are counted
 
-Every token limit, including `context_window`, the compaction thresholds, and `memory.file.max_entrypoint_tokens`, is counted as the model that receives the text counts tokens.
+Every token limit, including `context_window` and the compaction thresholds, is counted as the model that receives the text counts tokens.
 OpenAI models with a known tokenizer, such as GPT-4o, count exactly on OpenAI's own endpoints, Codex, and OpenRouter, and on Azure when the deployment is named after the model.
 Other models use an estimate that is deliberately high, by up to about three quarters for Claude and two thirds for Gemini, so limits act early rather than late.
 Each request to the model, including the first one after an approval, is sized from the request size the provider reported for the latest answer it continues; without one, such as after a history limit dropped older messages, another model answered, or the agent's system prompt or tools changed (including on the first reply of each day, because the system prompt names the date), or right after native compaction condensed the history, it uses the estimate.
@@ -117,18 +117,20 @@ Choose a model with a larger context window or shorten the prompt; MindRoom neve
 
 ### Native compaction
 
-MindRoom supports automatic [OpenAI Responses compaction](https://developers.openai.com/api/docs/guides/compaction) and [Claude compaction](https://platform.claude.com/docs/en/build-with-claude/compaction).
+MindRoom supports automatic [OpenAI Responses compaction](https://developers.openai.com/api/docs/guides/compaction) and [Claude threshold compaction](https://platform.claude.com/docs/en/build-with-claude/compaction-threshold).
 
-- **OpenAI**: GPT-5.3 Codex, GPT-5.4, and GPT-6 model families on the official Responses endpoint or the Codex login backend.
-  An explicit `store: true`, background mode, an alternate OpenAI endpoint, or a custom context-management request keeps the model on text compaction.
-- **Claude**: direct Anthropic and Vertex AI Claude on Sonnet 4.6 and later, Opus 4.6 and later, Fable, and Mythos models.
+- **OpenAI**: GPT-5.3 Codex, GPT-5.4, and GPT-6 model families on the official Responses endpoint, the Codex login backend, or [OpenRouter's Responses endpoint](https://docs.mindroom.chat/configuration/models/#gpt-through-openrouter-responses) (with `openai/` model IDs).
+  An explicit `store: true`, background mode, another OpenAI-compatible endpoint, OpenRouter model-rerouting fields (`models`, `model`, `route`, `preset`, or `@preset/` IDs), or a custom context-management request keeps the model on text compaction.
+- **Claude**: direct Anthropic, [OpenRouter's Messages endpoint](https://docs.mindroom.chat/configuration/models/#claude-through-openrouter), and Vertex AI Claude on Sonnet 4.6 and later, Opus 4.6 and later, Haiku 5.5 and later, Fable, and Mythos models.
   This is a provider beta and needs a trigger of at least 50,000 tokens.
-  An authored `compact_20260112` context-management policy keeps its own trigger and instructions, and `pause_after_compaction: true` is rejected because MindRoom needs the provider to continue its response.
+  Other Anthropic gateways, and OpenRouter models with a `models` or `fallbacks` list, use text compaction; an authored `compact_20260112` policy is sent as written.
+  `pause_after_compaction: true` is rejected because MindRoom needs the provider to continue its response.
 - Gemini, Chat Completions, and all other providers use text compaction.
 
 Native compaction also requires compaction to be enabled, replay of all history (no `num_history_runs` or `num_history_messages`), no `max_tool_calls_from_history`, and a trigger above the current prompt size and below the replay window minus `reserve_tokens`.
 An explicit `compaction.model`, a [scheduled task](https://docs.mindroom.chat/scheduling/) with a `history_limit`, or a request already over the replay window minus `reserve_tokens` uses text compaction instead.
-Native checkpoints survive restarts and are tied to their provider, model, and endpoint; after a model switch, the conversation is rebuilt from its full stored history.
+Native checkpoints survive restarts and are tied to their provider, configured model `id`, and endpoint; after a switch to another `id` or endpoint, the conversation is rebuilt from its full stored history.
+Changing only a `request_params` model override keeps the checkpoint stored; on OpenRouter Responses the override turns native compaction off, so the checkpoint is not replayed while the override is present.
 When that history then needs text compaction, it starts from the latest Claude checkpoint's summary instead of summarizing everything that checkpoint covers again, as long as the summary and turns before it are still the ones its request replayed and leave room for its turn; OpenAI checkpoints are encrypted, so they are skipped.
 If a reply's request still would not fit, for example after a very large tool result, native compaction stays off for the rest of that reply and it [compacts as text](#compaction-during-a-reply).
 A completed response that carries a provider checkpoint logs a `Native compaction checkpoint` event with the trigger (`threshold_tokens`, `null` for an authored policy) and the checkpoint's serialized size in characters (`checkpoint_chars`).
@@ -139,6 +141,15 @@ The `Compaction summary chunk` events and the `compaction_*` fields of `Dispatch
 Add the `compact_context` tool to an agent's `tools` to let it request compaction itself.
 The request runs before the next reply in the same conversation and always uses text compaction.
 It requires a summary model with a `context_window` and the same 2,000-token summary input budget; otherwise the tool returns `Error: Compaction is unavailable for this scope because ...` with the reason.
+
+From chat, use `/compact` (or `!compact`) to compact now without another message.
+`/compact <agent_or_team>` requests it for one agent or configured team; `/compact` alone requests it for all of them.
+Both forms only reach agents and configured teams you may address that already have a conversation here.
+The conversation is the thread, or the whole room for an agent or team in room mode; for a thread-mode agent, send it inside the thread.
+The command acknowledges each target. Targets report estimated history tokens before and after compaction in separate notices.
+If a reply is in progress or waiting for approval, compaction waits behind it. Replies queued behind compaction wait for it to finish.
+In a target's contact room, compaction still runs before its next reply instead of sending a separate notice.
+If the target's recent room history has not synced or needs repair, the immediate fold is skipped and the request stays pending for its next reply.
 
 ## Team History and Compaction
 

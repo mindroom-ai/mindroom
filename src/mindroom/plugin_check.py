@@ -2,19 +2,49 @@
 
 from __future__ import annotations
 
+import ast
 import inspect
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING
 
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import get_hook_metadata
 from mindroom.oauth.registry import oauth_provider_registry
+from mindroom.tool_system import plugin_imports
 from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.authoring import Toolkit, tool_attributes
 from mindroom.tool_system.catalog import load_toolkit_class
 from mindroom.tool_system.plugins import ConfigPlugins, dispose_plugins, staged_plugins
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
+
+# The plugin API, as docs/plugins.md documents it: the modules a plugin may import whole, and the names it may import
+# from other modules, plus the client docs/tools/background-scripts.md offers to scripts, such as a skill's. Every other
+# `mindroom` module can change in any release.
+_PLUGIN_API = (
+    "mindroom.custom_tools.google_service.GoogleCloudToolkit",
+    "mindroom.memory.refresh_agent_memory_search",
+    "mindroom.memory.write_scope_markdown_file",
+    "mindroom.plugin_api",
+    "mindroom.plugin_http",
+    "mindroom.script_sdk",
+)
+# Each entry with a trailing dot, so an import matches it only on whole name parts: `mindroom.plugin_apix` is outside.
+_PLUGIN_API_PREFIXES = tuple(f"{public}." for public in _PLUGIN_API)
+
+
+@dataclass(frozen=True, order=True, slots=True)
+class OutsideImport:
+    """One import of a ``mindroom`` module or name outside the plugin API, in a file relative to the plugin root."""
+
+    path: Path
+    line: int
+    name: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,16 +75,27 @@ def _derive_owned_functions(tool_name: str, tool_class: type) -> None:
             raise ValueError(msg) from error
 
 
+def _throwaway_runtime_paths(temporary_root: Path) -> RuntimePaths:
+    """Return runtime paths inside an empty temporary directory, so no real config, ``.env``, or storage takes part."""
+    return resolve_runtime_paths(
+        config_path=temporary_root / "config.yaml",
+        storage_path=temporary_root / "data",
+        process_env={},
+    )
+
+
+def resolve_plugin_root(plugin_path: str) -> Path:
+    """Resolve a plugin argument in every form a ``plugins:`` entry takes, as one in the working directory would."""
+    with TemporaryDirectory(prefix="mindroom-plugin-check-") as temporary_directory:
+        runtime_paths = _throwaway_runtime_paths(Path(temporary_directory))
+        return plugin_imports._resolve_plugin_root(plugin_path, replace(runtime_paths, config_dir=Path.cwd()))
+
+
 def check_plugin(plugin_path: Path) -> _PluginCheckResult:
     """Strictly load one plugin through every runtime registration surface, leaving the process's plugins as they were."""
     plugin_root = plugin_path.expanduser().resolve()
     with TemporaryDirectory(prefix="mindroom-plugin-check-") as temporary_directory:
-        temporary_root = Path(temporary_directory)
-        runtime_paths = resolve_runtime_paths(
-            config_path=temporary_root / "config.yaml",
-            storage_path=temporary_root / "data",
-            process_env={},
-        )
+        runtime_paths = _throwaway_runtime_paths(Path(temporary_directory))
         config = Config.model_validate(
             {"plugins": [{"path": str(plugin_root)}]},
             context={"runtime_paths": runtime_paths},
@@ -76,8 +117,9 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
                     msg = f"Expected one loaded plugin, got {len(plugins.loaded_plugins)}"
                     raise ValueError(msg)
                 [plugin] = plugins.loaded_plugins
-                if plugin.routes_error is not None:
-                    raise plugin.routes_error
+                for error in (plugin.routes_error, plugin.lifespan_error, plugin.origin_error):
+                    if error is not None:
+                        raise error
                 tool_names = tuple(sorted(plugin.tools))
                 for tool_name in tool_names:
                     factory = plugin.tools[tool_name].factory
@@ -107,3 +149,64 @@ def check_plugin(plugin_path: Path) -> _PluginCheckResult:
                 )
             finally:
                 dispose_plugins(generation)
+
+
+def _root_tests(plugin_root: Path) -> set[Path]:
+    """Return the ``conftest.py`` and ``test_*.py`` files beside the plugin's manifest, except any it names as a module."""
+    candidates = {plugin_root / "conftest.py", *plugin_root.glob("test_*.py")}
+    try:
+        base = plugin_imports._load_plugin_base(plugin_root)
+    except Exception:
+        # `check_plugin` fails on this manifest, and the scan still lists the imports of every other file.
+        return candidates
+    named_modules = {
+        base.tools_module_path,
+        base.hooks_module_path,
+        base.oauth_module_path,
+        base.routes_module_path,
+        base.lifecycle_module_path,
+        base.origin_module_path,
+    }
+    return {path for path in candidates if path.resolve() not in named_modules}
+
+
+def imports_outside_plugin_api(plugin_root: Path) -> list[OutsideImport]:
+    """Statically list each import from ``mindroom`` outside the plugin API in the plugin's Python files, by file and line."""
+    manifest = plugin_imports._PLUGIN_MANIFEST
+    if not (plugin_root / manifest).exists():
+        # Not a plugin, such as an installed package a mistyped name resolved to: `check_plugin` fails on it at once.
+        return []
+    root_tests = _root_tests(plugin_root)
+    found: list[OutsideImport] = []
+    for directory, subdirectories, file_names in plugin_root.walk():
+        # MindRoom never loads these as this plugin: installed packages, such as a virtual environment's copy of MindRoom,
+        # hidden directories, the plugin's tests, and the separate plugins nested in it, each with its own manifest.
+        # Unlike `Path.exists` on Python 3.13, `os.path.exists` is False inside a directory the user cannot enter, which
+        # the walk then skips.
+        subdirectories[:] = [
+            name
+            for name in subdirectories
+            if name != "site-packages"
+            and not name.startswith(".")
+            and not (directory == plugin_root and name == "tests")
+            and not os.path.exists(directory / name / manifest)  # noqa: PTH110
+        ]
+        for path in {directory / name for name in file_names if name.endswith(".py")} - root_tests:
+            try:
+                tree = ast.parse(path.read_bytes(), filename=str(path))
+            except (OSError, SyntaxError, RecursionError, MemoryError):
+                # A file Python cannot read or parse runs no imports, and `check_plugin` fails on any such module the plugin loads.
+                # The parser raises RecursionError or MemoryError for sources nested too deeply or too long to compile.
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    module_prefix = ""
+                elif isinstance(node, ast.ImportFrom) and node.level == 0:
+                    module_prefix = f"{node.module}."
+                else:
+                    continue
+                for alias in node.names:
+                    imported = f"{module_prefix}{alias.name}"
+                    if f"{imported}.".startswith("mindroom.") and not f"{imported}.".startswith(_PLUGIN_API_PREFIXES):
+                        found.append(OutsideImport(path.relative_to(plugin_root), alias.lineno, imported))
+    return sorted(found)

@@ -37,8 +37,10 @@ from mindroom.config.models import (
     validate_unique_tool_entries,
 )
 from mindroom.config.participation import ParticipationConfig  # noqa: TC001
+from mindroom.config.room_activity import AgentRoomActivityConfig  # noqa: TC001
 from mindroom.config.schema_hints import dashboard_hint
 from mindroom.config.skill_learning import SkillLearningConfig
+from mindroom.config.tool_aliases import ToolNames  # noqa: TC001
 from mindroom.config.validation import (
     OptionalNonBlankStr,
     TimezoneName,
@@ -51,7 +53,7 @@ from mindroom.config.validation import (
 from mindroom.tool_system.worker_routing import WorkerScope, agent_workspace_relative_path
 
 _PrivateWorkerScope = Literal["user", "user_agent"]
-# `auto` lets the router and a room's only responder answer a message that mentions no one; `mentions` does not.
+# `auto` lets the best-fitting or a room's only responder answer a message that mentions no one; `mentions` does not.
 RoomReplyMode = Literal["auto", "mentions"]
 # Everything the primary writes beside a private workspace in its private state root;
 # tests/test_private_root_reservations.py enumerates the writers. Workers mount only
@@ -305,6 +307,10 @@ class AgentConfig(BaseModel):
         default=None,
         description="Opt-in switch of an idle thread to cheap_model for the rest of the thread",
     )
+    room_activity: AgentRoomActivityConfig | None = Field(
+        default=None,
+        description="Per-agent override of defaults.room_activity; omitted fields inherit it",
+    )
     access: ResponderAccessConfig | None = Field(
         default=None,
         description="Optional membership-based conversation access policy",
@@ -427,7 +433,7 @@ class AgentConfig(BaseModel):
         default=None,
         description="Whether streamed replies show the model's reasoning to the room (per-agent override)",
     )
-    worker_tools: list[str] | None = Field(
+    worker_tools: ToolNames | None = Field(
         default=None,
         description="Tool names to route through scoped workers (overrides defaults; None = use the built-in default routing policy)",
         json_schema_extra=dashboard_hint(reference="tool"),
@@ -439,6 +445,10 @@ class AgentConfig(BaseModel):
     file_access: FileAccess | None = Field(
         default=None,
         description="Per-agent override of defaults.file_access (None = inherit the default)",
+    )
+    terminals: Literal["none", "watch", "type"] = Field(
+        default="none",
+        description="What people in the agent's rooms may do with its terminals: none, watch, or type",
     )
     allow_self_config: bool | None = Field(
         default=None,
@@ -465,6 +475,17 @@ class AgentConfig(BaseModel):
     dedicated_subagent_workers: bool = Field(
         default=False,
         description="Allow run_subagent to run a subagent in its own dedicated worker on the docker or kubernetes worker backend",
+    )
+    tailnet_ssh: bool = Field(
+        default=False,
+        description=(
+            "Let authorized users SSH from the operator's tailnet to the dedicated worker this agent's shell uses"
+        ),
+    )
+    named_workers: int = Field(
+        default=0,
+        ge=0,
+        description="How many named workers this agent's shell calls may have at once for one requester on the kubernetes worker backend, for an agent whose workers are per requester and agent; 0 turns them off",
     )
 
     @property
@@ -649,7 +670,7 @@ class RoomConfig(BaseModel):
     reply_mode: RoomReplyMode = Field(
         default="auto",
         description=(
-            "'auto' lets the router and the room's only agent or team answer a message that mentions no one; "
+            "'auto' lets the best-fitting or the room's only agent or team answer a message that mentions no one; "
             "'mentions' answers only messages that mention an agent or team, and follow-ups in threads an agent or "
             "team already replied in or is still answering"
         ),

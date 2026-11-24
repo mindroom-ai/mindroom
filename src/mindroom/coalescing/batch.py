@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, NamedTuple
 
 from mindroom.attachments.ids import merge_attachment_ids
+from mindroom.constants import DURABLE_DELIVERY_ID_KEY
 from mindroom.dispatch_handoff import (
     DispatchPayloadMetadata,
     MediaDispatchEvent,
@@ -20,7 +21,12 @@ from mindroom.dispatch_source import (
     MEDIA_SOURCE_KIND,
     VOICE_SOURCE_KIND,
 )
+from mindroom.logging_config import get_logger
+from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.member_display_names import room_member_display_names
+from mindroom.matrix.segmented_messages import SEGMENT_COUNT_KEY
+from mindroom.mid_turn import MidTurnMode, coalesced_mid_turn_mode, mid_turn_mode
+from mindroom.model_selection import THREAD_MODEL_CONTENT_KEY, parse_thread_model_choice
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.timestamp_formatting import normalize_timestamp_ms
 from mindroom.turn_record import SourceEventMetadata, TurnRecord
@@ -30,10 +36,14 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.commands.parsing import Command
+    from mindroom.model_selection import ThreadModelChoice
     from mindroom.response_lifecycle import QueuedHumanNoticeReservation
     from mindroom.turn_store import TurnClaim
     from mindroom.turns.facts import IngressFacts, RunIdentity
     from mindroom.turns.interactive_selection import InteractiveSelectionDispatch
+
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -120,25 +130,35 @@ class PreparedTurn:
     facts: IngressFacts
     # The command the turn's text runs as; a turn of several sources has none.
     command: Command | None
+    thread_model_choice: ThreadModelChoice | None
     handled_turn: TurnRecord
     # The gate's batching scope; a key without a thread is a room-level conversation.
     coalescing_key: CoalescingKey
     # Whether any of the batch's events queued behind its conversation's running response.
     active_follow_up: bool
+    # Whether the mid-turn judge said that response cannot wait for one of the batch's events.
+    stopped_reply: bool
     payload: DispatchPayloadMetadata
     current_prompt_is_structured: bool
     media_events: tuple[MediaDispatchEvent, ...]
-    # The batch's per-event claims and queued notices, which dispatch replaces and releases.
+    # The batch's per-event claims (replaced by dispatch) and queued notices (held across pre-lock
+    # preparation until lock acquisition, or released if dispatch exits before taking the lock).
     claims: tuple[TurnClaim, ...]
     notices: tuple[QueuedHumanNoticeReservation, ...]
     selection: InteractiveSelectionDispatch | None
     # The queued notices of follow-ups still waiting behind this batch when it flushed, which dispatch
-    # releases with its own. Only a batch of an active response's follow-ups has any.
+    # releases immediately when this batch starts dispatch so edits cannot re-arm them against this turn.
+    # Only a batch of an active response's follow-ups has any.
     queued_follow_up_notices: tuple[QueuedHumanNoticeReservation, ...]
     # Whether this turn's queue still holds a run other than the given run identity's own messages for this
     # agent. A live read, not a snapshot: dispatch asks after awaiting its context, and a message admitted
     # meanwhile counts.
     queues_other_run: Callable[[RunIdentity], bool]
+    # Detaches this batch's notices from its PendingEvents once a detached response task owns them,
+    # so gate cancellation closing the segment cannot release notices still waiting on the lock.
+    detach_notices: Callable[[], None] = field(default=lambda: None, compare=False)
+    # Combined composer mid-turn mode of the batch for lock-race notice registration.
+    mid_turn_mode: MidTurnMode = MidTurnMode.AUTO
 
 
 _COALESCED_MESSAGES_INTRO = (
@@ -358,6 +378,27 @@ def pending_event_addressing(pending_event: PendingEvent) -> bool | None:
     return event.for_another_participant
 
 
+class _SplitReplySegment(NamedTuple):
+    """One segment of a managed sender's reply: the reply's delivery identity, and the count its first segment declares."""
+
+    delivery: Mapping[str, object]
+    count: int | None
+
+
+def split_reply_segment(pending_event: PendingEvent) -> _SplitReplySegment | None:
+    """Return a managed sender's text as a segment of its reply, or None for anyone else's message or an upload."""
+    content = pending_event.event.source.get("content")
+    if (
+        pending_event.facts.sender_entity_name is None
+        or pending_event.event.raw_event is not None
+        or not isinstance(content, Mapping)
+        or not isinstance(delivery := content.get(DURABLE_DELIVERY_ID_KEY), Mapping)
+    ):
+        return None
+    count = content.get(SEGMENT_COUNT_KEY)
+    return _SplitReplySegment(delivery, count if type(count) is int and count > 1 else None)
+
+
 def _batch_facts(ordered_pending_events: list[PendingEvent]) -> IngressFacts:
     """Reduce the batch's per-event facts to the facts the whole turn dispatches with.
 
@@ -407,6 +448,29 @@ def _batch_source_event_metadata(ordered_pending_events: list[PendingEvent]) -> 
     }
 
 
+def _batch_thread_model_choice(events: list[PendingEvent]) -> ThreadModelChoice | None:
+    """Read the latest opening pick from a direct source, not from an edit or relay."""
+    for pending in reversed(events):
+        content = pending.event.source.get("content")
+        if not isinstance(content, Mapping) or THREAD_MODEL_CONTENT_KEY not in content:
+            continue
+        if EventInfo.from_event(pending.event.source).is_edit:
+            continue
+        if pending.facts.sender_is_managed or pending.facts.acts_for_requester:
+            logger.info(
+                "Ignoring root thread model choice",
+                event_id=pending.event.event_id,
+                reason="managed_or_proxied_source",
+            )
+            continue
+        choice = parse_thread_model_choice(content)
+        if choice is None:
+            logger.info("Ignoring root thread model choice", event_id=pending.event.event_id, reason="malformed")
+        # A newer malformed choice must not silently fall back to an older pick.
+        return choice
+    return None
+
+
 def build_prepared_turn(
     key: CoalescingKey,
     pending_events: list[PendingEvent],
@@ -418,6 +482,19 @@ def build_prepared_turn(
     """Build the logical turn represented by one coalescing-gate flush."""
     ordered_pending_events = list(pending_events)
     primary_pending_event = ordered_pending_events[-1]
+    # A turn that ends inside a split reply answers that reply: its first segment carries the mentions and the reply
+    # it finishes.
+    if (tail := split_reply_segment(primary_pending_event)) is not None:
+        primary_pending_event = next(
+            (
+                event
+                for event in ordered_pending_events
+                if (segment := split_reply_segment(event)) is not None
+                and segment.count is not None
+                and segment.delivery == tail.delivery
+            ),
+            primary_pending_event,
+        )
     active_follow_up = any(pending_event.event.active_follow_up for pending_event in ordered_pending_events)
     prompt_rendering = _render_coalesced_prompt(
         ordered_pending_events,
@@ -427,14 +504,22 @@ def build_prepared_turn(
     source_event_ids = tuple(pending_event.event.event_id for pending_event in ordered_pending_events)
     source_event_prompts = _batch_source_event_prompts(ordered_pending_events)
     source_event_metadata = _batch_source_event_metadata(ordered_pending_events)
-    routed_aliases = tuple(filter(None, (item.discovery_event_id for item in source_event_metadata.values())))
+    routed_aliases = tuple(
+        alias for pending_event in ordered_pending_events for alias in pending_event.facts.discovery_event_ids
+    )
     facts = _batch_facts(ordered_pending_events)
+
+    def detach_notices() -> None:
+        for pending_event in ordered_pending_events:
+            pending_event.notice = None
+
     return PreparedTurn(
         room=primary_pending_event.room,
         event=replace(primary_pending_event.event, body=prompt_rendering.prompt),
         facts=facts,
         # One source's prompt is its own ``dispatch_prompt_for_event``, the command's canonical text.
         command=command_for(facts, prompt_rendering.prompt, len(source_event_ids)),
+        thread_model_choice=_batch_thread_model_choice(ordered_pending_events),
         handled_turn=TurnRecord.create(
             source_event_ids,
             discovery_event_ids=routed_aliases,
@@ -448,6 +533,7 @@ def build_prepared_turn(
         ),
         coalescing_key=key,
         active_follow_up=active_follow_up,
+        stopped_reply=any(event.notice.stopped_reply for event in ordered_pending_events if event.notice is not None),
         payload=_batch_payload_metadata(ordered_pending_events),
         current_prompt_is_structured=prompt_rendering.is_structured,
         media_events=tuple(
@@ -460,4 +546,8 @@ def build_prepared_turn(
         selection=next((event.selection for event in ordered_pending_events if event.selection is not None), None),
         queued_follow_up_notices=queued_follow_up_notices,
         queues_other_run=queues_other_run,
+        detach_notices=detach_notices,
+        mid_turn_mode=coalesced_mid_turn_mode(
+            tuple(mid_turn_mode(pending_event.event.source.get("content")) for pending_event in ordered_pending_events),
+        ),
     )

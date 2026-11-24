@@ -13,7 +13,7 @@ final class DesktopBridgeProtocolTests: XCTestCase {
       "pairing":{"state":"paired","session_state":"ready","homeserver":"https://example.org","user_id":"@me:example.org","device_id":"LOCAL","controller_fingerprint":"key"},
       "helper":{"state":"running","version":"1.2.3"},
       "bridge":{"state":"observe_only","active_action":null,"last_error":null},
-      "authority":{"control_available":false,"lease_remaining_seconds":0,"lease_expires_at_ms":null,"emergency_stop_latched":false},
+      "authority":{"control_available":false,"lease_remaining_seconds":0,"lease_expires_at_ms":null,"control_scope":"saved_apps"},
       "permissions":{"accessibility":{"state":"granted","can_request":true,"recovery":null},"screen_recording":{"state":"missing","can_request":true,"recovery":"Open Settings"}},
       "browser":{"configured":true,"runtime":"available","extension":"disconnected","reconnect_token_configured":false,"executable_path":"/Applications/Browser.app/Contents/MacOS/Browser","user_data_dir":"/Users/test/Library/Application Support/Browser","last_error":null},
       "apps":[{"id":"com.example.Editor","name":"Editor","installed":true,"running":false}],
@@ -25,6 +25,7 @@ final class DesktopBridgeProtocolTests: XCTestCase {
         let status = try JSONDecoder().decode(DesktopStatus.self, from: Self.completeStatusData)
         XCTAssertEqual(status.bridge.state, "observe_only")
         XCTAssertFalse(status.authority.controlAvailable)
+        XCTAssertEqual(status.authority.controlScope, "saved_apps")
         XCTAssertEqual(status.apps.first?.id, "com.example.Editor")
         XCTAssertEqual(status.browser.executablePath, "/Applications/Browser.app/Contents/MacOS/Browser")
         XCTAssertEqual(status.browser.userDataDirectory, "/Users/test/Library/Application Support/Browser")

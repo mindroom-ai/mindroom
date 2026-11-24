@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from mindroom import constants
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.state import MatrixState, _load_matrix_state_file_cached, matrix_state_for_runtime
 from tests.conftest import test_runtime_paths
 from tests.matrix_state_helpers import save_matrix_state
-
-if TYPE_CHECKING:
-    import os
 
 
 def _seed_state(runtime_paths: constants.RuntimePaths, room_key: str, room_id: str) -> Path:
@@ -213,6 +210,38 @@ def test_matrix_state_cache_observes_first_write_after_missing_read(tmp_path: Pa
     written = matrix_state_for_runtime(runtime_paths)
     assert written is not missing
     assert written.get_room("dev") is not None
+
+
+def test_matrix_state_cache_keeps_a_local_write_across_the_stat_ttl(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001
+    """State this process wrote stays one cached object after the stat TTL, so identity memos keyed on it hold."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    now = 0.0
+    monkeypatch.setattr(matrix_state, "monotonic", lambda: now)
+    monkeypatch.setattr(matrix_state, "_MATRIX_STATE_STAT_TTL_SECONDS", 1.0)
+    # The missing file's stat is cached before the write, as a first read at startup caches it.
+    assert matrix_state_for_runtime(runtime_paths).rooms == {}
+    _seed_state(runtime_paths, "dev", "!dev:localhost")
+    written = matrix_state_for_runtime(runtime_paths)
+    now = 1.0
+
+    assert matrix_state_for_runtime(runtime_paths) is written
+
+
+def test_matrix_state_cache_observes_a_local_write_that_keeps_size_and_mtime(tmp_path: Path) -> None:
+    """A local write is seen at once even when the rewritten file keeps its size and modification time."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    state_file = _seed_state(runtime_paths, "dev", "!aaa:localhost")
+    assert matrix_state.get_room_id("dev", runtime_paths) == "!aaa:localhost"
+    before = state_file.stat()
+
+    def move_room(state: MatrixState) -> None:
+        state.rooms["dev"].room_id = "!bbb:localhost"
+
+    matrix_state.update_matrix_state(runtime_paths, move_room)
+    os.utime(state_file, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+    assert state_file.stat().st_size == before.st_size
+    assert matrix_state.get_room_id("dev", runtime_paths) == "!bbb:localhost"
 
 
 def test_matrix_state_cache_observes_external_write_after_stat_ttl(tmp_path: Path, monkeypatch) -> None:  # noqa: ANN001

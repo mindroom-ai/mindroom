@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field
+from bisect import bisect_left
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
-from mindroom.live_frames.frames import LiveDocs, live_delta, live_frame, new_publisher_id
-from mindroom.live_frames.transport import LiveSendOutcome, send_live_frame
+from mindroom.live_frames.frames import (
+    LIVE_EVENT_TYPE,
+    LiveDocs,
+    fitted_tools,
+    live_delta,
+    live_frame,
+    new_publisher_id,
+)
+from mindroom.live_frames.transport import RETRY_BACKOFF_SECONDS, LiveSendOutcome, frame_fits, send_live_frame
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -22,8 +30,6 @@ _FRAME_INTERVAL_SECONDS = 0.1
 # A snapshot this often lets a client that missed frames, or opened the room mid-reply, catch up, and tells clients
 # the reply is still live while nothing changes.
 _SNAPSHOT_INTERVAL_SECONDS = 5.0
-_SEND_TIMEOUT_SECONDS = 5.0
-_RETRY_BACKOFF_SECONDS = 1.0
 
 
 @dataclass
@@ -39,6 +45,9 @@ class LivePublisher:
     last_snapshot_at: float = 0.0
     # False once frames stopped for this reply; durable edits then keep their ordinary cadence.
     running: bool = True
+    # How many of the oldest tool entries frames show without previews, so snapshots fit the size limit. Only a
+    # snapshot raises it, so the deltas between snapshots stay small.
+    bare: int = 0
 
     def checkpoint(self) -> dict[str, object] | None:
         """Return the watermark a durable write carries: every frame up to it is no newer than that write."""
@@ -50,29 +59,34 @@ class LivePublisher:
         """Send one frame when the documents changed or a snapshot is due; return the outcome, None when none was due."""
         now = time.monotonic()
         snapshot_due = self.last_sent is None or now - self.last_snapshot_at >= _SNAPSHOT_INTERVAL_SECONDS
-        if not snapshot_due and docs == self.last_sent:
+        shown = replace(docs, tools=fitted_tools(docs.tools, bare=self.bare))
+        if not snapshot_due and shown == self.last_sent:
             return None
         self.seq += 1
-        frame = live_frame(
-            reply_event_id=reply_event_id,
-            publisher_id=self.publisher_id,
-            seq=self.seq,
-            snapshot=docs if snapshot_due else None,
-            delta=None if snapshot_due or self.last_sent is None else live_delta(self.last_sent, docs),
-        )
-        try:
-            outcome = await asyncio.wait_for(
-                send_live_frame(self.client, self.room_id, frame, transaction_id=f"{self.publisher_id}.{self.seq}"),
-                timeout=_SEND_TIMEOUT_SECONDS,
+        frame = None
+        if not snapshot_due and self.last_sent is not None:
+            frame = live_frame(
+                reply_event_id=reply_event_id,
+                publisher_id=self.publisher_id,
+                seq=self.seq,
+                delta=live_delta(self.last_sent, shown),
             )
-        except TimeoutError:
-            outcome = LiveSendOutcome.RETRY
-        except Exception:
-            # Frames are best effort: a send that raises ends them for this reply instead of failing the reply.
-            logger.warning("live_frame_send_failed", room_id=self.room_id, event_id=reply_event_id, exc_info=True)
-            outcome = LiveSendOutcome.STOP
+        if frame is None or not self._fits(frame):
+            bare = self.bare
+            snapshot, fitted = self._fitted_snapshot(reply_event_id, docs)
+            if frame is None or self._fits(snapshot):
+                snapshot_due, frame, shown = True, snapshot, fitted
+            else:
+                # The size check is an estimate; a delta it rejects may still go out, where no snapshot fits it.
+                self.bare = bare
+        outcome = await send_live_frame(
+            self.client,
+            self.room_id,
+            frame,
+            transaction_id=f"{self.publisher_id}.{self.seq}",
+        )
         if outcome is LiveSendOutcome.SENT:
-            self.last_sent = docs
+            self.last_sent = shown
             if snapshot_due:
                 self.last_snapshot_at = now
         elif outcome is LiveSendOutcome.RETRY:
@@ -80,6 +94,33 @@ class LivePublisher:
         else:
             self.running = False
         return outcome
+
+    def _fits(self, frame: dict[str, object]) -> bool:
+        return frame_fits(self.client, self.room_id, frame, event_type=LIVE_EVENT_TYPE)
+
+    def _fitted_snapshot(self, reply_event_id: str, docs: LiveDocs) -> tuple[dict[str, object], LiveDocs]:
+        """Return a snapshot frame within the size limit, without the previews of the fewest more oldest tool entries.
+
+        When even no previews do not fit, as when the Markdown alone is too big, the transport refuses the frame and
+        frames stop.
+        """
+
+        def built(bare: int) -> tuple[dict[str, object], LiveDocs]:
+            shown = replace(docs, tools=fitted_tools(docs.tools, bare=bare))
+            frame = live_frame(
+                reply_event_id=reply_event_id,
+                publisher_id=self.publisher_id,
+                seq=self.seq,
+                snapshot=shown,
+            )
+            return frame, shown
+
+        count = len(docs.tools)
+        self.bare = min(self.bare, count)
+        if not self._fits(built(self.bare)[0]):
+            fitting = bisect_left(range(count + 1), True, lo=self.bare + 1, key=lambda bare: self._fits(built(bare)[0]))
+            self.bare = min(fitting, count)
+        return built(self.bare)
 
     async def run(
         self,
@@ -111,4 +152,4 @@ class LivePublisher:
             if outcome is LiveSendOutcome.RETRY:
                 # A send that fails at once, as through a proxy while the homeserver restarts, is not repeated every
                 # tick; the next frame is a snapshot.
-                await asyncio.sleep(_RETRY_BACKOFF_SECONDS)
+                await asyncio.sleep(RETRY_BACKOFF_SECONDS)

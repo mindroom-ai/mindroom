@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
@@ -28,6 +29,8 @@ from mindroom.matrix.conversation_reads import (
 from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
+from mindroom.matrix.thread_fork_access import authorize_cross_room_fork_access
+from mindroom.matrix.thread_forks import is_thread_fork_root, with_fork_prefix
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.matrix.thread_membership import (
     RelatedEventUnavailableError,
@@ -41,7 +44,7 @@ from mindroom.matrix.thread_membership import (
 )
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_protocols import SupportsClientConfig  # noqa: TC001
-from mindroom.thread_utils import check_agent_mentioned
+from mindroom.thread_utils import check_agent_mentioned, should_skip_mentions
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -58,17 +61,8 @@ if TYPE_CHECKING:
     from mindroom.matrix.relation_lookup import RelationLookup
     from mindroom.turns.facts import IngressFacts
 
-
-def _should_skip_mentions(event_source: dict[str, Any]) -> bool:
-    """Return whether mentions in this message should be ignored."""
-    content = event_source.get("content", {})
-    if not isinstance(content, dict):
-        return False
-    if bool(content.get(SKIP_MENTIONS_KEY, False)):
-        return True
-
-    new_content = content.get("m.new_content")
-    return isinstance(new_content, dict) and bool(new_content.get(SKIP_MENTIONS_KEY, False))
+# nio retries a stalled or rate-limited homeserver read without limit.
+_RELATED_THREAD_LOOKUP_TIMEOUT_SECONDS = 10.0
 
 
 def _with_skip_mentions_metadata(content: dict[str, Any], skip_mentions: bool) -> dict[str, Any]:
@@ -188,7 +182,7 @@ class ConversationResolver:
         room: nio.MatrixRoom,
     ) -> tuple[list[MatrixID], bool, bool]:
         """Return mention facts from one already-normalized event source."""
-        if _should_skip_mentions(event_source):
+        if should_skip_mentions(event_source.get("content")):
             return [], False, False
         return check_agent_mentioned(
             event_source,
@@ -357,6 +351,10 @@ class ConversationResolver:
                 event_info,
                 fallback_root_event_id=event.event_id,
             )
+        content = event.source.get("content")
+        if event_info.can_be_thread_root and isinstance(content, dict) and is_thread_fork_root(content):
+            # A fork's first message continues its parent's conversation, so it is a turn in its own thread.
+            return event.event_id
         resolution = await self._coalescing_thread_resolution(
             room,
             event,
@@ -418,17 +416,18 @@ class ConversationResolver:
         room_id: str,
         related_event_id: str,
     ) -> str | None:
-        """Return thread membership from local state without waiting on the homeserver."""
-        resolution = await resolve_related_event_thread_membership(
-            room_id,
-            related_event_id,
-            access=self._thread_membership_access(
-                mode=ThreadReadMode.NONBLOCKING,
-                # Reaction hook context wants the target's thread, not its
-                # conversation, so an incomplete page answers it just as well.
-                requires_complete_history=False,
-            ),
-        )
+        """Return the related event's thread from local state or the homeserver, raising ``TimeoutError`` on a stall."""
+        async with asyncio.timeout(_RELATED_THREAD_LOOKUP_TIMEOUT_SECONDS):
+            resolution = await resolve_related_event_thread_membership(
+                room_id,
+                related_event_id,
+                access=self._thread_membership_access(
+                    mode=ThreadReadMode.NONBLOCKING,
+                    # Reaction hook context wants the target's thread, not its
+                    # conversation, so an incomplete page answers it just as well.
+                    requires_complete_history=False,
+                ),
+            )
         return resolution.thread_id
 
     def _thread_membership_access(
@@ -552,6 +551,7 @@ class ConversationResolver:
         *,
         thread_id: str | None,
         payload_metadata: DispatchPayloadMetadata | None = None,
+        requester_id: str | None = None,
     ) -> MessageContext:
         """Extract dispatch context in the thread this turn was decided to belong to.
 
@@ -563,9 +563,19 @@ class ConversationResolver:
         """
         history: ThreadHistoryResult | None = None
         if thread_id is not None:
-            snapshot = await self.dispatch_thread_snapshot(room.room_id, thread_id)
+            snapshot = await self._dispatch_thread_snapshot(
+                room.room_id,
+                thread_id,
+                requester_id=requester_id,
+                target_room=room,
+            )
             history = (
-                await self.fetch_thread_history(room.room_id, thread_id)
+                await self.fetch_thread_history(
+                    room.room_id,
+                    thread_id,
+                    requester_id=requester_id,
+                    target_room=room,
+                )
                 if is_thread_history_degraded(snapshot)
                 else snapshot
             )
@@ -600,9 +610,19 @@ class ConversationResolver:
         event: DispatchEvent,
         *,
         thread_id: str | None,
+        requester_id: str | None = None,
     ) -> MessageContext:
         """Extract strict context in a recorded thread, whatever the room's thread mode is now."""
-        history = None if thread_id is None else await self.fetch_thread_history(room.room_id, thread_id)
+        history = (
+            None
+            if thread_id is None
+            else await self.fetch_thread_history(
+                room.room_id,
+                thread_id,
+                requester_id=requester_id,
+                target_room=room,
+            )
+        )
         return await self._message_context(
             room,
             event,
@@ -624,32 +644,78 @@ class ConversationResolver:
         async with self.deps.relations.turn_scope():
             yield
 
-    async def dispatch_thread_snapshot(
+    async def _with_fork_prefix(
         self,
         room_id: str,
         thread_id: str,
+        *,
+        mode: ThreadReadMode,
+        requester_id: str | None = None,
+        target_room: nio.MatrixRoom | None = None,
     ) -> ThreadHistoryResult:
-        """Read one thread without waiting for the homeserver.
+        """Read a thread and, when it is a fork, put its parent chain's messages in front.
+
+        Only the public reads do this. Membership proofs read the raw thread, or a
+        reply to a parent message would be placed in the fork.
+        """
+        history = await self._read_thread_messages(room_id, thread_id, mode=mode)
+        return await with_fork_prefix(
+            history,
+            room_id=room_id,
+            thread_id=thread_id,
+            read_thread=lambda parent_room_id, parent_id: self._read_thread_messages(
+                parent_room_id,
+                parent_id,
+                mode=mode,
+            ),
+            authorize_cross_room=lambda hop: authorize_cross_room_fork_access(
+                client=self.deps.runtime.client,
+                config=self.deps.runtime.config,
+                runtime_paths=self.deps.runtime_paths,
+                hop=hop,
+                requester_id=requester_id,
+                nonblocking=mode is ThreadReadMode.NONBLOCKING,
+                target_room=target_room,
+            ),
+            logger=self.deps.logger,
+        )
+
+    async def _dispatch_thread_snapshot(
+        self,
+        room_id: str,
+        thread_id: str,
+        *,
+        requester_id: str | None = None,
+        target_room: nio.MatrixRoom | None = None,
+    ) -> ThreadHistoryResult:
+        """Read one thread, and the parents it forks from, without waiting for the homeserver.
 
         For callers that run before a turn is accepted and must not block on
         Matrix to decide whether to look at it at all.
         """
-        return await self._read_thread_messages(
+        return await self._with_fork_prefix(
             room_id,
             thread_id,
             mode=ThreadReadMode.NONBLOCKING,
+            requester_id=requester_id,
+            target_room=target_room,
         )
 
     async def fetch_thread_history(
         self,
         room_id: str,
         thread_id: str,
+        *,
+        requester_id: str | None = None,
+        target_room: nio.MatrixRoom | None = None,
     ) -> ThreadHistoryResult:
-        """Fetch complete thread history from the conversation projection."""
-        return await self._read_thread_messages(
+        """Fetch complete thread history, and the parents it forks from, from the conversation projection."""
+        return await self._with_fork_prefix(
             room_id,
             thread_id,
             mode=ThreadReadMode.STRICT,
+            requester_id=requester_id,
+            target_room=target_room,
         )
 
     async def consecutive_agent_messages(self, room_id: str, thread_id: str | None, *, limit: int) -> int:
@@ -662,3 +728,31 @@ class ConversationResolver:
             thread_id=thread_id,
             limit=limit,
         )
+
+
+class DegradedThreadHistoryError(RuntimeError):
+    """A strict thread read came back degraded."""
+
+
+async def read_fresh_thread_history(
+    resolver: ConversationResolver,
+    target: MessageTarget,
+    *,
+    strict: bool = False,
+    requester_id: str | None = None,
+) -> ThreadHistoryResult | None:
+    """Read a locked target's thread with its fork parents, or None in a room; ``strict`` refuses a degraded read."""
+    if target.resolved_thread_id is None:
+        return None
+    history = (
+        await resolver.fetch_thread_history(target.room_id, target.resolved_thread_id)
+        if requester_id is None
+        else await resolver.fetch_thread_history(
+            target.room_id,
+            target.resolved_thread_id,
+            requester_id=requester_id,
+        )
+    )
+    if strict and is_thread_history_degraded(history):
+        raise DegradedThreadHistoryError(target.resolved_thread_id)
+    return history

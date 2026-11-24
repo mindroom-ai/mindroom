@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom import reply_lifecycle as rl
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
@@ -26,6 +27,8 @@ from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, _LargeMessageStrategy
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
+    ROUTE_EVENT_TYPE,
+    SILENT_SCHEDULE_EVENT_TYPE,
     SILENT_SCHEDULE_NO_REPLY_TOKEN,
 )
 from mindroom.delivery_gateway import (
@@ -66,7 +69,9 @@ from mindroom.matrix.large_messages import (
     _MATRIX_EVENT_HARD_LIMIT,
     _calculate_delivery_event_size,
     calculate_event_size,
+    fit_reasoning_to_ordinary_event,
 )
+from mindroom.matrix.room_history_reads import UnresolvedOpaqueRoomHistoryError
 from mindroom.message_target import MessageTarget
 from mindroom.reply_presentation import NoteKind, Presentation, Segment, note_segment
 from mindroom.reply_scope import current_span, initial_write
@@ -74,7 +79,7 @@ from mindroom.reply_turn.inbox import InboxResponses
 from mindroom.response_sources import ResponseSources
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from mindroom.streaming import ProgressPermission
-from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.events import ToolTraceEntry, tool_markers_out_of_text
 from mindroom.turn_record import TurnRecord
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
@@ -92,6 +97,7 @@ from tests.journal_helpers import admit_room_event
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import end_span_as_locked_turn, final_in_resume_span, final_in_span, reply_span
 from tests.test_turn_store import _in_room, _redact, _store
+from tests.tool_position_helpers import _SHELL, _marked
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping
@@ -146,6 +152,7 @@ def _identity(
         response_kind="agent",
         response_envelope=envelope,
         correlation_id="c1",
+        turn_id="turn-1",
         sources=ResponseSources((envelope.source_event_id,), (envelope.source_event_id,)),
     )
 
@@ -245,7 +252,7 @@ async def _turn_row(principal: PrincipalStore, stage: DeliveryStage, turn_id: st
     return row
 
 
-@pytest.mark.parametrize("kind", ["participation_decline", "mid_turn_defer", "approval_wait"])
+@pytest.mark.parametrize("kind", ["participation_decline", "mid_turn_defer", "approval_wait", "contact_turn"])
 async def test_judgment_reaction_reuses_transaction_across_gateway_restarts(tmp_path: Path, kind: str) -> None:
     """Replaying an acknowledgement must use the same transaction, even if its configured emoji changes."""
     sent: list[dict[str, object]] = []
@@ -288,7 +295,7 @@ async def test_judgment_reaction_reuses_transaction_across_gateway_restarts(tmp_
     assert sent[3]["tx_id"] != sent[0]["tx_id"]
 
 
-@pytest.mark.parametrize("kind", ["participation_decline", "mid_turn_defer", "approval_wait"])
+@pytest.mark.parametrize("kind", ["participation_decline", "mid_turn_defer", "approval_wait", "contact_turn"])
 async def test_judgment_reaction_respects_retired_membership(tmp_path: Path, kind: str) -> None:
     """An agent that lost this turn's room membership must not leave an acknowledgement."""
     outbox = FakeOutbox()
@@ -305,7 +312,7 @@ async def test_judgment_reaction_respects_retired_membership(tmp_path: Path, kin
 
 
 @pytest.mark.parametrize("failure", [RuntimeError("offline"), nio.RoomSendError("denied", "M_FORBIDDEN")])
-@pytest.mark.parametrize("kind", ["participation_decline", "mid_turn_defer", "approval_wait"])
+@pytest.mark.parametrize("kind", ["participation_decline", "mid_turn_defer", "approval_wait", "contact_turn"])
 async def test_judgment_reaction_delivery_failure_is_best_effort(tmp_path: Path, failure: object, kind: str) -> None:
     """Transport errors are logged without reopening a declined response."""
     gateway = _gateway(tmp_path)
@@ -321,7 +328,7 @@ async def test_judgment_reaction_delivery_failure_is_best_effort(tmp_path: Path,
     gateway.deps.logger.warning.assert_called_once()
 
 
-@pytest.mark.parametrize("kind", ["participation_decline", "mid_turn_defer", "approval_wait"])
+@pytest.mark.parametrize("kind", ["participation_decline", "mid_turn_defer", "approval_wait", "contact_turn"])
 async def test_judgment_reaction_preserves_cancellation(tmp_path: Path, kind: str) -> None:
     """Stopping a reaction send must still cancel its owning response turn."""
     gateway = _gateway(tmp_path)
@@ -343,7 +350,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
     def _hooks() -> MagicMock:
         """Return hooks that pass the draft through unchanged, which every `_gateway()` starts with.
 
-        A full turn's lifecycle also awaits `_emit_after_response` on the gateway's hooks.
+        A full turn's lifecycle also awaits `_emit_after_response` and `_emit_turn_event` on the gateway's hooks.
         """
         return MagicMock(
             apply_before_response=AsyncMock(
@@ -356,6 +363,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 ),
             ),
             _emit_after_response=AsyncMock(),
+            _emit_turn_event=AsyncMock(),
         )
 
     @staticmethod
@@ -377,7 +385,13 @@ class TestTurnDeliveryGoesThroughTheOutbox:
 
     @pytest.mark.parametrize(
         "text",
-        ["", " \n\t", SILENT_SCHEDULE_NO_REPLY_TOKEN, f"  {SILENT_SCHEDULE_NO_REPLY_TOKEN.lower()}\n"],
+        [
+            "",
+            " \n\t",
+            SILENT_SCHEDULE_NO_REPLY_TOKEN,
+            f"  {SILENT_SCHEDULE_NO_REPLY_TOKEN.lower()}\n",
+            f"Let me check.\n\n {SILENT_SCHEDULE_NO_REPLY_TOKEN} \n\n",
+        ],
     )
     async def test_silent_schedule_no_report_response_is_suppressed_after_hooks(
         self,
@@ -385,7 +399,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         alice: PrincipalStore,
         text: str,
     ) -> None:
-        """Silent whitespace settles as suppressed without creating a Matrix event."""
+        """A silent answer that is blank or whose last non-blank line is the token settles as suppressed, unsent."""
         gateway = _gateway(tmp_path, alice)
         send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": text}))
 
@@ -421,6 +435,7 @@ class TestTurnDeliveryGoesThroughTheOutbox:
                 response_kind="agent",
                 response_envelope=envelope,
                 correlation_id="c1",
+                turn_id="turn-1",
                 sources=ResponseSources((envelope.source_event_id,), (envelope.source_event_id,)),
             ),
         )
@@ -567,12 +582,15 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         tmp_path: Path,
         alice: PrincipalStore,
     ) -> None:
-        """Display-only tool markers must not turn a silent no-report result into a visible response."""
+        """Display-only tool markers must not turn a silent no-report result into a visible response.
+
+        The marker comes last, so only its stripping leaves the token as the last line.
+        """
         gateway = _gateway(tmp_path, alice)
         send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": SILENT_SCHEDULE_NO_REPLY_TOKEN}))
         request = replace(
             self._final_request(
-                f"🔧 `run_shell_command` [1]\n\n{SILENT_SCHEDULE_NO_REPLY_TOKEN}",
+                f"{SILENT_SCHEDULE_NO_REPLY_TOKEN}\n\n🔧 `run_shell_command` [1]",
                 source_kind=SILENT_SCHEDULE_SOURCE_KIND,
             ),
             tool_trace=[
@@ -619,14 +637,23 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert outcome.ending == Suppressed(Suppression.SILENT_NO_REPORT)
         send.assert_not_awaited()
 
-    async def test_silent_schedule_unmatched_tool_marker_no_reply_remains_visible(
+    @pytest.mark.parametrize(
+        ("text", "shown"),
+        [
+            ("🔧 `reported_finding` [1]", True),
+            # A last no-report line withholds the answer whatever comes before it.
+            (f"🔧 `reported_finding` [1]\n\n{SILENT_SCHEDULE_NO_REPLY_TOKEN}", False),
+        ],
+    )
+    async def test_silent_schedule_unmatched_tool_marker_remains_visible_unless_the_answer_reports_nothing(
         self,
         tmp_path: Path,
         alice: PrincipalStore,
+        text: str,
+        shown: bool,
     ) -> None:
         """Marker-shaped findings must not be stripped when they do not match the trace."""
         gateway = _gateway(tmp_path, alice)
-        text = f"🔧 `reported_finding` [1]\n\n{SILENT_SCHEDULE_NO_REPLY_TOKEN}"
         send = AsyncMock(return_value=DeliveredMatrixEvent("$sent", {"body": text}))
         request = replace(
             self._final_request(text, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
@@ -643,15 +670,45 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         with patch("mindroom.delivery_gateway.send_message_outcome", send):
             outcome = await final_in_span(gateway, alice, request)
 
+        assert outcome.ending == (Completed() if shown else Suppressed(Suppression.SILENT_NO_REPORT))
+        assert send.await_count == int(shown)
+
+    @pytest.mark.parametrize(
+        ("text", "shown"),
+        [
+            (f"Checked the inbox.\n\n{SILENT_SCHEDULE_NO_REPLY_TOKEN}", "Checked the inbox."),
+            (SILENT_SCHEDULE_NO_REPLY_TOKEN, note_segment(NoteKind.NOTHING_TO_SHOW).text),
+        ],
+    )
+    async def test_a_silent_schedule_s_no_report_answer_finishes_the_message_its_reply_shows(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+        text: str,
+        shown: str,
+    ) -> None:
+        """A turn whose reply shows a message, such as one approved in place, ends it without the token, unsuppressed."""
+        gateway = _gateway(tmp_path, alice)
+        send = AsyncMock(return_value=DeliveredMatrixEvent("$edit", {"body": shown}))
+        request = replace(
+            self._final_request(text, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+            existing_event_id="$waiting",
+        )
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", send):
+            outcome = await final_in_span(gateway, alice, request)
+
         assert outcome.ending == Completed()
-        assert outcome.event_id == "$sent"
+        assert outcome.final_visible_event_id == "$waiting"
         send.assert_awaited_once()
+        assert send.await_args.args[2]["m.new_content"]["body"] == shown
 
     @pytest.mark.parametrize(
         ("text", "source_kind"),
         [
             ("Finding", SILENT_SCHEDULE_SOURCE_KIND),
             (f"Finding mentions {SILENT_SCHEDULE_NO_REPLY_TOKEN}", SILENT_SCHEDULE_SOURCE_KIND),
+            (f"{SILENT_SCHEDULE_NO_REPLY_TOKEN}\nFinding after the token", SILENT_SCHEDULE_SOURCE_KIND),
             (f"[{SILENT_SCHEDULE_NO_REPLY_TOKEN}]", SILENT_SCHEDULE_SOURCE_KIND),
             (SILENT_SCHEDULE_NO_REPLY_TOKEN, MESSAGE_SOURCE_KIND),
         ],
@@ -1395,6 +1452,42 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert len(projections) == 1
         assert projections[0].content == visible
 
+    async def test_a_delivered_reply_with_tool_calls_is_projected_as_it_was_built(self, tmp_path: Path) -> None:
+        """Matrix holds the reply without its tool markers, and the projection holds every reply with them."""
+        outbox = FakeOutbox()
+        built = {
+            **_marked("🔧 `shell` [1]\n\nChoose", [_SHELL]),
+            "io.mindroom.interactive": {
+                "creator_agent": "agent",
+                "option_labels": {"1": "Yes"},
+                "options": {"1": "yes"},
+                "question_text": "Choose?",
+                "source_event_id": "$cause",
+            },
+        }
+        held = tool_markers_out_of_text(built)
+        assert held["body"] == "Choose"
+        await outbox.enqueue_matrix_delivery(
+            delivery_id="$cause",
+            stage=DeliveryStage.FINAL,
+            room_id=_ROOM_ID,
+            thread_id=None,
+            payload=built,
+        )
+        claimed = await outbox.load_matrix_delivery(delivery_id="$cause", stage=DeliveryStage.FINAL)
+        assert claimed is not None
+        gateway = _gateway(tmp_path, outbox)
+        gateway.deps.runtime.client.room_get_event.return_value = _delivered_event_response(
+            _ROOM_ID,
+            "$sent",
+            content=held,
+        )
+        gateway.deps.runtime.client.room_get_event.side_effect = None
+
+        projections = await gateway._observe_delivered(claimed, "$sent")
+
+        assert [projection.content for projection in projections] == [built]
+
     async def test_an_edit_acknowledgement_projects_its_target_before_the_edit(self, tmp_path: Path) -> None:
         """A missed target echo cannot leave an acknowledged prompt edit unresolved."""
         outbox = FakeOutbox()
@@ -1543,6 +1636,37 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         stored = await _turn_row(alice, DeliveryStage.FINAL)
         assert stored.attempted
         assert stored.acknowledged_event_id is None
+
+    @pytest.mark.parametrize(
+        ("failure", "permanent"),
+        [
+            (
+                MatrixDeliveryFailure(
+                    MatrixDeliveryFailureKind.ENCRYPTION_REFUSED,
+                    "Encryption has been disabled",
+                    403,
+                ),
+                True,
+            ),
+            (MatrixDeliveryFailure(MatrixDeliveryFailureKind.UNEXPECTED_RESPONSE, "forbidden", 403), False),
+        ],
+    )
+    async def test_a_homeserver_that_refuses_encryption_ends_the_delivery(
+        self,
+        tmp_path: Path,
+        alice: PrincipalStore,
+        failure: MatrixDeliveryFailure,
+        permanent: bool,
+    ) -> None:
+        """A refusal no resend can change is terminal; any other refusal stays for recovery to retry."""
+        gateway = _gateway(tmp_path, alice)
+
+        with patch("mindroom.delivery_gateway.send_message_outcome", AsyncMock(return_value=failure)):
+            await final_in_span(gateway, alice, self._final_request("the answer"))
+
+        stored = await _turn_row(alice, DeliveryStage.FINAL)
+        assert stored.acknowledged_event_id is None
+        assert stored.permanently_failed is permanent
 
     async def test_a_redacted_delivery_acknowledges_without_resurrecting_its_content(
         self,
@@ -1836,6 +1960,93 @@ class TestTurnDeliveryGoesThroughTheOutbox:
         assert client.room_send.await_count == 1
         kept = delivery.payload["m.new_content"]["io.mindroom.reasoning"]
         assert kept["text"].endswith("…")
+
+    @pytest.mark.parametrize(
+        ("half", "size_limit", "kept_segments"),
+        [(40_000, 30_000, 1), (10, None, 2)],
+        ids=["cut-drops-the-segment-past-the-cut", "fitting-reasoning-keeps-every-segment"],
+    )
+    async def test_cut_reasoning_keeps_only_segments_that_start_in_the_kept_text(
+        self,
+        half: int,
+        size_limit: int | None,
+        kept_segments: int,
+    ) -> None:
+        """Cutting reasoning to a prefix keeps only the segments that begin inside it."""
+        client = MagicMock(spec=nio.AsyncClient)
+        segments = [
+            {"start": 0, "after_tool": 0, "duration_ms": 4},
+            {"start": half + 2, "after_tool": 2, "duration_ms": 5},
+        ]
+        reasoning = {"text": "a" * half + "\n\n" + "b" * half, "duration_ms": 9, "segments": segments}
+
+        fitted = fit_reasoning_to_ordinary_event(
+            client,
+            _ROOM_ID,
+            {"msgtype": "m.text", "body": "answer", "io.mindroom.reasoning": reasoning},
+            room_encrypted=False,
+            size_limit=size_limit,
+        )
+
+        kept = fitted["io.mindroom.reasoning"]
+        assert (len(kept["text"]) < half) == (kept_segments == 1)
+        assert kept["segments"] == segments[:kept_segments]
+
+    async def test_cut_reasoning_counts_segment_starts_in_utf16_code_units(self) -> None:
+        """A non-BMP character in the kept text takes two UTF-16 code units, so a segment after it stays."""
+        client = MagicMock(spec=nio.AsyncClient)
+        lead = "🙂" * 1000 + "\n\n"
+        segments = [
+            {"start": 0, "after_tool": 0, "duration_ms": 4},
+            {"start": 2002, "after_tool": 1, "duration_ms": 5},
+            {"start": 2002 + 50_000, "after_tool": 2, "duration_ms": 6},
+        ]
+        text = lead + "b" * 50_000 + "c" * 50_000
+        content = {"msgtype": "m.text", "body": "answer"}
+        expected_text = lead + "b" * 500 + "…"
+        size_limit = calculate_event_size(
+            {**content, "io.mindroom.reasoning": {"text": expected_text, "duration_ms": 15, "segments": segments[:2]}},
+        )
+
+        fitted = fit_reasoning_to_ordinary_event(
+            client,
+            _ROOM_ID,
+            {**content, "io.mindroom.reasoning": {"text": text, "duration_ms": 15, "segments": segments}},
+            room_encrypted=False,
+            size_limit=size_limit,
+        )
+
+        kept = fitted["io.mindroom.reasoning"]
+        assert kept["segments"] == segments[:2]
+        assert kept["text"] == expected_text
+
+    async def test_cut_at_a_segment_start_drops_that_segment(self) -> None:
+        """A cut that keeps none of a segment's text drops the segment, even though the cut text ends in a marker."""
+        client = MagicMock(spec=nio.AsyncClient)
+        lead = "a" * 1000 + "\n\n"
+        segments = [
+            {"start": 0, "after_tool": 0, "duration_ms": 4},
+            {"start": 1002, "after_tool": 1, "duration_ms": 5},
+        ]
+        content = {"msgtype": "m.text", "body": "answer"}
+        size_limit = calculate_event_size(
+            {**content, "io.mindroom.reasoning": {"text": lead + "…", "duration_ms": 9, "segments": segments}},
+        )
+
+        fitted = fit_reasoning_to_ordinary_event(
+            client,
+            _ROOM_ID,
+            {
+                **content,
+                "io.mindroom.reasoning": {"text": lead + "b" * 100_000, "duration_ms": 9, "segments": segments},
+            },
+            room_encrypted=False,
+            size_limit=size_limit,
+        )
+
+        kept = fitted["io.mindroom.reasoning"]
+        assert kept["text"] == lead + "…"
+        assert kept["segments"] == segments[:1]
 
     async def test_recovery_from_a_new_device_sends_only_the_missing_continuations(
         self,
@@ -4131,3 +4342,178 @@ async def test_compaction_lifecycle_success_edits_notice_with_html_body(tmp_path
     assert sent_content["formatted_body"] == (
         "<em>\U0001f4e6 Compacted 12 runs: 30,000 → 12,000 / 100,000 history budget</em>"
     )
+
+
+def _history_event(event_id: str, event_type: str, *, sender: str = "@alice:localhost", **content: object) -> nio.Event:
+    """Return one event of a room's history as a `/messages` page holds it."""
+    source = {"event_id": event_id, "sender": sender, "type": event_type, "origin_server_ts": 1, "content": content}
+    return nio.UnknownEvent(source, event_type)
+
+
+def _own_route(event_id: str, *routed: str) -> nio.Event:
+    route = {"entity": "@other:localhost", "event_ids": list(routed)}
+    return _history_event(event_id, ROUTE_EVENT_TYPE, sender=_AGENT_USER_ID, **{ROUTE_EVENT_TYPE: route})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("uploads", [True, False])
+async def test_a_route_too_long_for_one_event_is_sent_with_its_file_or_not_at_all(
+    tmp_path: Path,
+    uploads: bool,
+) -> None:
+    """A route's prompt, such as a long scheduled one, reaches its responder whole: it is never sent cut short."""
+    gateway = _gateway(tmp_path)
+    client = gateway.deps.runtime.client
+    uploaded = nio.UploadResponse.from_dict({"content_uri": "mxc://localhost/route"})
+    client.upload.return_value = (uploaded if uploads else nio.UploadError("unavailable"), None)
+    client.room_send.return_value = nio.RoomSendResponse(event_id="$route", room_id=_ROOM_ID)
+    route = {"entity": "@other:localhost", "event_ids": ["$question"]}
+
+    sent = await gateway.send_route(_ROOM_ID, {ROUTE_EVENT_TYPE: route, "body": "Poll the queue. " * 5_000})
+
+    if not uploads:
+        assert sent is None
+        client.room_send.assert_not_awaited()
+        return
+    assert sent == "$route"
+    wire = client.room_send.await_args.kwargs
+    assert wire["message_type"] == ROUTE_EVENT_TYPE
+    assert wire["content"][ROUTE_EVENT_TYPE] == route
+    assert wire["content"]["url"] == "mxc://localhost/route"
+    assert "io.mindroom.long_text" in wire["content"]
+
+
+def _history(gateway: DeliveryGateway, *pages: list[nio.Event]) -> AsyncMock:
+    """Serve the room's history newest first, one `/messages` page per list, each but the last with a next page."""
+    responses = [
+        nio.RoomMessagesResponse(_ROOM_ID, page, "", f"page-{index}" if index < len(pages) else None)
+        for index, page in enumerate(pages, start=1)
+    ]
+    gateway.deps.runtime.client.room_messages = AsyncMock(side_effect=responses)
+    return gateway.deps.runtime.client.room_messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("readable_route", [False, True])
+async def test_an_unreadable_event_of_its_own_may_be_the_route_a_steward_sent(
+    tmp_path: Path,
+    readable_route: bool,
+) -> None:
+    """A route the steward can read is adopted; without one, its own ciphertext since the message may hide it."""
+    gateway = _gateway(tmp_path)
+    own_ciphertext = _history_event("$opaque", "m.room.encrypted", sender=_AGENT_USER_ID, ciphertext="opaque")
+    route = [_own_route("$route", "$question")] if readable_route else []
+    _history(gateway, [own_ciphertext, *route, _history_event("$question", "m.room.message", body="who can help?")])
+
+    if readable_route:
+        assert await gateway.sent_route(_ROOM_ID, ["$question"]) == "$route"
+    else:
+        with pytest.raises(UnresolvedOpaqueRoomHistoryError, match="cannot read"):
+            await gateway.sent_route(_ROOM_ID, ["$question"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("newest_first", "routed"),
+    [
+        # The steward's own encrypted schedule trigger is the message it routes.
+        (["$fire"], ["$fire"]),
+        # Its ciphertext stands between the messages of a batch, so it predates the complete batch.
+        (["$second", "$opaque", "$first"], ["$first", "$second"]),
+    ],
+    ids=["own-trigger", "inside-batch"],
+)
+async def test_own_ciphertext_no_newer_than_the_routed_messages_is_no_route(
+    tmp_path: Path,
+    newest_first: list[str],
+    routed: list[str],
+) -> None:
+    """A route follows every message it names, so the lookup ends at the newest of them with no route sent."""
+    gateway = _gateway(tmp_path)
+    own = {"$fire", "$opaque"}
+    page = [
+        _history_event(event_id, "m.room.encrypted", sender=_AGENT_USER_ID, ciphertext="opaque")
+        if event_id in own
+        else _history_event(event_id, "m.room.message", body="who can help?")
+        for event_id in newest_first
+    ]
+    older = [_history_event("$older", "m.room.message", body="earlier")]
+    requests = _history(gateway, page, older)
+
+    assert await gateway.sent_route(_ROOM_ID, routed) is None
+    assert requests.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_route_lookup_ends_at_its_route_or_at_the_message_it_routes(tmp_path: Path) -> None:
+    """The lookup reads no page past the route it finds, nor past the routed message, a silent trigger included."""
+    gateway = _gateway(tmp_path)
+    older = [_history_event(f"$older-{index}", "m.room.message", body="earlier") for index in range(3)]
+    # An own event older than the routed message is never its route, readable or not.
+    older_ciphertext = _history_event("$old-opaque", "m.room.encrypted", sender=_AGENT_USER_ID, ciphertext="opaque")
+
+    requests = _history(gateway, [_own_route("$route", "$question")], [older[0]], [older[1]])
+    assert await gateway.sent_route(_ROOM_ID, ["$question"]) == "$route"
+    assert requests.await_count == 1
+
+    trigger = _history_event("$trigger", SILENT_SCHEDULE_EVENT_TYPE, sender="@other:localhost", body="poll")
+    requests = _history(gateway, [_own_route("$unrelated", "$other"), trigger, older_ciphertext], [older[0]])
+    assert await gateway.sent_route(_ROOM_ID, ["$trigger"]) is None
+    assert requests.await_count == 1
+    assert SILENT_SCHEDULE_EVENT_TYPE in requests.await_args.kwargs["message_filter"]["types"]
+
+
+@pytest.mark.asyncio
+async def test_a_route_lookup_gives_up_at_its_page_bound(tmp_path: Path) -> None:
+    """A room whose recent history holds neither the route nor the routed message is read for ten pages, no more."""
+    gateway = _gateway(tmp_path)
+    pages = [[_history_event(f"$unrelated-{index}", "m.room.message", body="chatter")] for index in range(15)]
+    requests = _history(gateway, *pages)
+
+    assert await gateway.sent_route(_ROOM_ID, ["$question"]) is None
+    assert requests.await_count == 10
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("delivery_turn_id", "http_status", "expect_warning"),
+    [
+        ("$cause", 502, True),
+        ("$cause", 503, True),
+        ("$cause", 504, True),
+        ("$cause", 403, False),
+        ("$cause", None, False),
+        (None, 502, False),
+    ],
+)
+async def test_durable_send_transient_http_status_logs_deferred_warning(
+    tmp_path: Path,
+    delivery_turn_id: str | None,
+    http_status: int | None,
+    expect_warning: bool,
+) -> None:
+    """Durable 502/503/504 sends log deferred warning; non-durable 502 and non-transient sends stay error."""
+    gateway = _gateway(tmp_path)
+    gateway.deps.runtime.client.room_send = AsyncMock(
+        return_value=nio.RoomSendError("unknown error", room_id=_ROOM_ID, http_status=http_status),
+    )
+    target = MessageTarget.resolve(_ROOM_ID, None, "$cause")
+    with capture_logs() as logs:
+        result = await gateway.send_text(
+            SendTextRequest(target=target, response_text="hello", delivery_turn_id=delivery_turn_id),
+        )
+    assert result is None
+    send_logs = [entry for entry in logs if entry["event"] == "matrix_message_send_failed"]
+    assert [(entry["log_level"], entry["http_status"]) for entry in send_logs] == [
+        ("warning" if expect_warning else "error", http_status),
+    ]
+    if expect_warning:
+        gateway.deps.logger.warning.assert_called_once()
+        args, kwargs = gateway.deps.logger.warning.call_args
+        assert "outbox recovery" in args[0]
+        assert kwargs["http_status"] == http_status
+        gateway.deps.logger.error.assert_not_called()
+    else:
+        gateway.deps.logger.error.assert_called_once()
+        _, kwargs = gateway.deps.logger.error.call_args
+        assert kwargs["http_status"] == http_status

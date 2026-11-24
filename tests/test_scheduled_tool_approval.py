@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import weakref
 from collections.abc import AsyncIterator, Iterator, Sequence  # noqa: TC003 - Agno reads tool annotations at runtime
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
@@ -85,6 +86,7 @@ from tests.approval_card_helpers import card_is_terminal, pending_card
 from tests.approval_continuation_helpers import approval_continuation
 from tests.conftest import (
     approval_manager_for_test,
+    gc_paused,
     handle_card_response_for_test,
     initialize_approval_store_for_test,
     install_model_providers,
@@ -95,11 +97,21 @@ from tests.conftest import (
 from tests.fakes.scripted_model import ScriptedModel
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
-from tests.scheduling_helpers import joined_member_state, run_once_task, scheduled_task_runtime, serve_full_room_state
+from tests.scheduling_helpers import (
+    joined_member_state,
+    run_once_task,
+    scheduled_task_runtime,
+    scheduling_bot,
+)
 from tests.scripted_agent_helpers import registered_toolkit
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
 from tests.test_tool_hooks import _plugin
-from tests.tool_approval_helpers import gated_functions, scheduled_call_approvals
+from tests.tool_approval_helpers import (
+    gated_functions,
+    judge_test_tool_function_as_shell,
+    scheduled_call_approvals,
+    timed_out_judge,
+)
 from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
@@ -126,7 +138,7 @@ _OTHER_ARGUMENTS: dict[str, object] = {"channel": "U999", "text": "Other"}
 
 
 def _manager(journal: EventJournalStore, tmp_path: Path, sent: list[MatrixDelivery]) -> ApprovalManager:
-    async def prepare(_room: str, _thread: str | None, content: dict) -> dict:
+    async def prepare(_room: str, _thread: str | None, content: dict, _sender_entity: str) -> dict:
         return content
 
     async def send(delivery: MatrixDelivery) -> str:
@@ -138,7 +150,7 @@ def _manager(journal: EventJournalStore, tmp_path: Path, sent: list[MatrixDelive
         cards=journal.principal("router@shared"),
         prepare_approval_event=prepare,
         send_approval_delivery=send,
-        transport_sender_id=lambda: "@router:test",
+        sender_bot=lambda _entity_name, _room_id: object(),
     )
 
 
@@ -637,20 +649,65 @@ async def test_cancelling_the_task_denies_its_pending_card(
 
 
 @pytest.mark.asyncio
-async def test_new_room_tenure_does_not_inherit_the_approval(
+@pytest.mark.parametrize("returns", [False, True], ids=["left", "left-and-rejoined"])
+async def test_approval_is_not_spent_once_the_asking_agent_left_the_room(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    returns: bool,
+) -> None:
+    """An approval the agent asked for in one membership of the room is not spent after that membership ended."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    manager.transport.responder_principal_id = lambda entity_name: entity_name + "@shared"
+    asker = journal.principal(_AGENT + "@shared")
+    await admit_room_membership(asker, _ROOM, "join")
+    try:
+        await _armed(manager)
+
+        await admit_room_membership(asker, _ROOM, "leave")
+        if returns:
+            await admit_room_membership(asker, _ROOM, "join")
+
+        assert await _claim(manager) == "left_room"
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_approval_asked_for_after_the_agent_rejoined_is_spent_in_that_membership(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """Leaving and rejoining the room voids an approval given under the old membership."""
+    """An agent that left and rejoined before it asked spends the approval in the membership it asked in."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
+    asker = journal.principal(_AGENT + "@shared")
+    for membership in ("join", "leave", "join"):
+        await admit_room_membership(asker, _ROOM, membership)
     try:
         await _armed(manager)
-        cards = journal.principal("router@shared")
-        await admit_room_membership(cards, _ROOM, "leave")
-        await admit_room_membership(cards, _ROOM, "join")
 
-        assert await _claim(manager) == "left_room"
+        assert isinstance(await _claim(manager), ScheduledCallClaim)
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_approval_is_spent_while_the_asking_agent_stays_after_the_owner_account_left(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """The owner account leaving the room does not void an approval an agent that stays there asked for."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    manager.transport.responder_principal_id = lambda entity_name: entity_name + "@shared"
+    await admit_room_membership(journal.principal(_AGENT + "@shared"), _ROOM, "join")
+    try:
+        await _armed(manager)
+
+        await admit_room_membership(journal.principal("router@shared"), _ROOM, "leave")
+
+        assert isinstance(await _claim(manager), ScheduledCallClaim)
     finally:
         await manager.shutdown()
 
@@ -1032,13 +1089,13 @@ async def test_republished_scheduled_receipt_alias_stays_terminal(
         await manager.shutdown()
 
 
-def _gated_config() -> Config:
+def _gated_config(match: str = "post_slack_message") -> Config:
     return _bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
             models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval=ToolApprovalConfig(
-                rules=[ApprovalRuleConfig(match="post_slack_message", action="require_approval")],
+                rules=[ApprovalRuleConfig(match=match, action="require_approval")],
             ),
         ),
     )
@@ -1047,7 +1104,6 @@ def _gated_config() -> Config:
 def _tool_context(config: Config, *, thread_id: str | None = "$thread") -> ToolRuntimeContext:
     context = _make_context(config)
     client = context.client
-    serve_full_room_state(client, "!room:localhost")
     client.room_put_state = AsyncMock(
         return_value=nio.RoomPutStateResponse.from_dict({"event_id": "$state"}, room_id="!room:localhost"),
     )
@@ -1196,9 +1252,12 @@ async def _schedule_from_tool(
 async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of_matrix() -> None:
     """The card binds the stored call, while the saved task and trigger name only the task to run."""
     config = _gated_config()
-    context = _tool_context(config)
+    context = replace(
+        _tool_context(config),
+        target=MessageTarget.resolve(room_id="!room:localhost", thread_id="$thread", reply_to_event_id="$answered"),
+    )
     request = AsyncMock(return_value=True)
-    task_runtime = scheduled_task_runtime(runtime_paths_for(config), config=config)
+    task_runtime = scheduled_task_runtime(runtime_paths_for(config), scheduling_bot(context.client), config=config)
 
     with (
         scheduled_call_approvals(request_scheduled_call_approval=request),
@@ -1220,6 +1279,7 @@ async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of
     assert workflow.created_by == "@user:localhost"
     assert workflow.description == "Morning DM"
     assert workflow.pre_approved_call is True
+    assert workflow.source_event_id == "$answered"
     assert workflow.message.startswith("@general ")
     assert f'run_scheduled_call` with task_id "{record.task_id}"' in workflow.message
     assert "`post_slack_message`" in workflow.message
@@ -1244,6 +1304,8 @@ async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of
     assert kwargs["scheduled_for_text"] == "2030-01-02 14:00 UTC"
     assert kwargs["any_arguments_offered"] is True
     start.assert_called_once()
+    assert record.owner_id == context.client.user_id
+    assert start.call_args.kwargs["owner_id"] == context.client.user_id
     assert record.task_id in result
     assert "approve" in result.lower()
 
@@ -1427,6 +1489,48 @@ async def test_schedule_tool_call_rejects_what_it_cannot_store(
     request.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_a_call_judged_as_a_gated_function_can_be_scheduled_pre_approved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No rule gates ``post_slack_message``, but its toolkit says its calls are shell commands, which a rule gates."""
+    judge_test_tool_function_as_shell(monkeypatch, _TOOLKIT, "post_slack_message")
+    config = _gated_config("run_shell_command")
+    context = _tool_context(config)
+    request = AsyncMock(return_value=True)
+
+    with (
+        scheduled_call_approvals(request_scheduled_call_approval=request),
+        tool_runtime_context(context),
+        _responders(context.config, "general"),
+    ):
+        await _schedule_from_tool()
+
+    request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_judge_that_fails_refuses_the_schedule_as_a_failing_approval_script_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A judge that times out leaves the call unscheduled with the approval-policy error and posts no card."""
+    judge_test_tool_function_as_shell(monkeypatch, _TOOLKIT, "post_slack_message", timed_out_judge)
+    config = _gated_config("run_shell_command")
+    context = _tool_context(config)
+    request = AsyncMock(return_value=True)
+
+    with (
+        scheduled_call_approvals(request_scheduled_call_approval=request),
+        tool_runtime_context(context),
+        _responders(context.config, "general"),
+        pytest.raises(
+            SchedulingError,
+            match=r"Could not evaluate the approval policy for `post_slack_message`: .*failed with TimeoutError",
+        ),
+    ):
+        await _schedule_from_tool()
+
+    request.assert_not_awaited()
+
+
 _CARD_REFUSED = "Could not post an approvable approval card for this call; nothing was scheduled."
 
 
@@ -1452,7 +1556,7 @@ async def test_no_task_is_published_when_its_card_cannot_be_posted(
         else AsyncMock(return_value=request_outcome)
     )
     withdraw = AsyncMock()
-    task_runtime = scheduled_task_runtime(context.runtime_paths, config=context.config)
+    task_runtime = scheduled_task_runtime(context.runtime_paths, scheduling_bot(context.client), config=context.config)
 
     with (
         scheduled_call_approvals(request_scheduled_call_approval=request, withdraw_scheduled_call_approval=withdraw),
@@ -1497,7 +1601,7 @@ async def test_card_is_withdrawn_when_its_task_cannot_be_published() -> None:
     context.client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
     request = AsyncMock(return_value=True)
     withdraw = AsyncMock()
-    task_runtime = scheduled_task_runtime(context.runtime_paths, config=context.config)
+    task_runtime = scheduled_task_runtime(context.runtime_paths, scheduling_bot(context.client), config=context.config)
 
     with (
         scheduled_call_approvals(request_scheduled_call_approval=request, withdraw_scheduled_call_approval=withdraw),
@@ -1518,7 +1622,7 @@ async def test_a_published_call_keeps_its_approval_when_its_runner_cannot_start(
     context = _tool_context(_gated_config())
     request = AsyncMock(return_value=True)
     withdraw = AsyncMock()
-    task_runtime = scheduled_task_runtime(context.runtime_paths, config=context.config)
+    task_runtime = scheduled_task_runtime(context.runtime_paths, scheduling_bot(context.client), config=context.config)
 
     with (
         scheduled_call_approvals(request_scheduled_call_approval=request, withdraw_scheduled_call_approval=withdraw),
@@ -2133,6 +2237,36 @@ async def test_a_stored_call_a_plugin_hook_declines_answers_the_runner_with_the_
         await manager.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_a_stored_call_reads_as_hidden_while_the_runner_that_runs_it_reads_as_shown(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """A reply that shows tool calls shows the runner's call; the stored call's arguments stay out of Matrix."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    seen: list[tuple[str, bool, str | None]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def mirror(ctx: ToolBeforeCallContext) -> None:
+        seen.append((ctx.tool_name, ctx.shown, ctx.chat_preview()))
+
+    registry = HookRegistry.from_plugins([_plugin("mirror", [mirror])])
+    agent = _live_agent(middleware=(detached_policy(registry),))
+    try:
+        await _armed(manager)
+
+        context = replace(_turn_context(_code_config()), hooks=HookBindings(registry=registry), tool_calls_shown=True)
+        await _run(manager, agent, context=context)
+
+        assert seen == [
+            ("run_scheduled_call", True, f"task_id={_TASK}, arguments_json=null"),
+            ("post_slack_message", False, None),
+        ]
+    finally:
+        await manager.shutdown()
+
+
 class _ConfiguredSlackTools(Toolkit):
     """The Slack toolkit as the tool registry builds it for an agent, recording each real run."""
 
@@ -2234,6 +2368,16 @@ def test_only_a_build_offering_the_scheduler_binds_its_live_functions(
     names = [middleware.__name__ for middleware in build.tool_policy]
     assert names.count("bind_live_functions") == int(offered is not None)
     assert (names[0] == "bind_live_functions") is (offered is not None)
+
+
+def test_the_live_functions_binding_is_freed_without_a_garbage_collection() -> None:
+    """The step binding a run's functions holds no reference cycle, so dropping the run's policy frees it at once."""
+    functions = {function.name: function for function in adapt_toolkit(SchedulerTools(), key="scheduler").functions}
+    with gc_paused():
+        policy = bind_live_tools(functions, ())
+        released = weakref.ref(policy[0])
+        del policy
+        assert released() is None
 
 
 @pytest.mark.asyncio

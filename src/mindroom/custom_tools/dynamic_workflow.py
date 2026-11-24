@@ -15,11 +15,13 @@ from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agent_loop.run import run_agent
 from mindroom.agent_loop.spec import RunContext, UnstoredSession
-from mindroom.approval.tool_approval import tool_may_require_approval
+from mindroom.approval.tool_approval import tool_may_require_approval, toolkit_approval_alias
 from mindroom.authorization import responder_candidate_entities_from_cached_room
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.budgets.monitor import budget_model
+from mindroom.config.models import split_model_reference, unsupported_level_message
 from mindroom.config.resolution import authored_tool_entries
+from mindroom.config.tool_aliases import canonical_tool_names
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
     dynamic_workflow_store_and_owner,
@@ -72,6 +74,8 @@ from mindroom.tool_system.skills import SKILL_READ_FUNCTION_NAMES
 from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from mindroom.agent_loop.build import AgentBuild
     from mindroom.config.main import Config
     from mindroom.delegation.state import DelegationChild, SubagentPersona
@@ -92,7 +96,6 @@ _WORKFLOW_RESTRICTED_TOOLS = frozenset(
         "delegate",
         "dynamic_tools",
         "dynamic_workflow",
-        "invite_router",
         "memory",
         "self_config",
         "skill_manage",
@@ -205,7 +208,7 @@ class DynamicWorkflowTools(Toolkit):
         if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         try:
-            parsed = parse_workflow_spec(spec)
+            parsed = parse_workflow_spec(_authored(spec))
             store, owner_id = dynamic_workflow_store_and_owner(context)
 
             def create() -> DynamicWorkflowSummary:
@@ -236,7 +239,7 @@ class DynamicWorkflowTools(Toolkit):
         if isinstance(context := tool_context_or_error(self._payload, "Dynamic Workflow"), str):
             return context
         try:
-            parsed = parse_workflow_spec(spec)
+            parsed = parse_workflow_spec(_authored(spec))
             _validate_workflow_policy_for_context(context, parsed)
         except WorkflowSpecError as exc:
             return self._spec_errors_payload(exc)
@@ -262,7 +265,7 @@ class DynamicWorkflowTools(Toolkit):
                     workflow_id=workflow_id,
                     scope=AGENT_SCOPE,
                     owner_id=owner_id,
-                    patch=patch,
+                    patch=_authored(patch),
                     updated_by=context.agent_name,
                     reason=reason,
                     spec_validator=lambda spec: _validate_workflow_policy_for_context(context, spec),
@@ -508,13 +511,14 @@ async def _execute_subagent_participant(
         raise DynamicWorkflowExecutionError(msg)
     # Recheck approvals against the current config each step; only the function ownership is cached.
     allowed = _workflow_allowed_tools(context)
-    if error := _unapproved_participant_tool_error(context, participant_id, request, allowed=allowed):
-        raise DynamicWorkflowExecutionError(error)
     if participant_id not in state.function_owners:
         state.function_owners[participant_id] = await _participant_function_owners(context, persona)
+    owners = state.function_owners[participant_id]
+    if error := _unapproved_participant_tool_error(context, participant_id, request, allowed=allowed, owners=owners):
+        raise DynamicWorkflowExecutionError(error)
     approval_config = _participant_run_config(
         context,
-        state.function_owners[participant_id],
+        owners,
         allowed=allowed,
         reads_skills=bool(persona.skills),
     )
@@ -572,8 +576,7 @@ async def _participant_function_owners(
     """
     entries = persona.tools or ()
     names = sorted({entry.partition(".")[0] for entry in entries})
-    tools = config_plugins(context.config, context.runtime_paths).tools
-    functions = {name: declared for name in names if (declared := declared_function_names(name, tools)) is not None}
+    functions = _declared_functions(config_plugins(context.config, context.runtime_paths).tools, names)
     built = await asyncio.to_thread(
         _resolve_participant_toolkits,
         context,
@@ -581,6 +584,21 @@ async def _participant_function_owners(
     )
     functions |= {name: toolkit_function_names(toolkit) for name, toolkit in built.items()}
     return _selected_function_owners(entries, functions)
+
+
+def _declared_functions(tools: ToolRegistry, names: Iterable[str]) -> dict[str, tuple[str, ...]]:
+    """Return the functions each named toolkit of ``tools`` declares up front, leaving out those known only once built."""
+    return {name: declared for name in names if (declared := declared_function_names(name, tools)) is not None}
+
+
+def _declared_function_owners(
+    context: ToolRuntimeContext,
+    entries: tuple[str, ...],
+) -> dict[str, frozenset[str]] | None:
+    """Return the toolkits exposing each function a participant selected, or None if one shows them only once built."""
+    names = {entry.partition(".")[0] for entry in entries}
+    functions = _declared_functions(config_plugins(context.config, context.runtime_paths).tools, names)
+    return _selected_function_owners(entries, functions) if functions.keys() == names else None
 
 
 def _selected_function_owners(
@@ -602,25 +620,44 @@ def _unapproved_participant_tool_error(
     request: PersonaRequest,
     *,
     allowed: frozenset[str],
+    owners: Mapping[str, frozenset[str]] | None,
 ) -> str | None:
-    """A participant cannot pause, so the shell a minimal participant runs through, and every tool it names, must run without approval."""
+    """A participant cannot pause, so the shell a minimal participant runs through, and every tool it names, must run without approval.
+
+    ``owners`` maps each function the participant selected to the toolkits exposing it, or is None while some of
+    those toolkits show their functions only once built.
+    """
     shell = f"shell.{SHELL_FUNCTION}"
-    if request.agent_mode == "minimal" and (problem := _tool_approval_problem(context, shell, allowed)):
+    if request.agent_mode == "minimal" and (problem := _tool_approval_problem(context, shell, allowed, owners)):
         return (
             f"Dynamic Workflow participant '{participant_id}' runs in minimal mode through {shell}, which {problem} "
             "Leave mode unset for a participant that needs no shell."
         )
     for entry in cast("SubagentPersona", request.persona).tools or ():
-        if problem := _tool_approval_problem(context, entry, allowed):
+        if problem := _tool_approval_problem(context, entry, allowed, owners):
             return f"Dynamic Workflow participant '{participant_id}' tool '{entry}' {problem}"
     return None
 
 
-def _tool_approval_problem(context: ToolRuntimeContext, entry: str, allowed: frozenset[str]) -> str | None:
+_NEEDS_APPROVAL = (
+    "requires approval, and workflow participants cannot pause for approval; "
+    "check the operator tool_approval rules and the dynamic_workflow allowed_tools setting."
+)
+
+
+def _tool_approval_problem(
+    context: ToolRuntimeContext,
+    entry: str,
+    allowed: frozenset[str],
+    owners: Mapping[str, frozenset[str]] | None,
+) -> str | None:
     """Say why one participant tool would need approval.
 
     A whole toolkit needs a pre-approval through ``allowed_tools``; a single function may instead be
-    auto-approved by an operator rule, which also matches before any pre-approval.
+    auto-approved by an operator rule, which also matches before any pre-approval. A named function whose approval
+    alias has another function's rules judge its calls also needs that function to run without approval:
+    pre-approved through one of the participant's toolkits ``owners`` lists for it, or auto-approved by an operator
+    rule. Without ``owners``, which a run knows once it builds the participant's toolkits, that is left to the run.
     """
     toolkit, separator, function = entry.partition(".")
     if not separator:
@@ -632,18 +669,19 @@ def _tool_approval_problem(context: ToolRuntimeContext, entry: str, allowed: fro
                 "or name its auto-approved functions."
             )
         return None
-    overlay = build_automation_approval_config(
-        context.config,
-        function_owners={function: frozenset({toolkit})},
-        preapproved_toolkits=allowed,
-        never_preapprove_toolkits=NEVER_PREAPPROVE_TOOLKITS,
-    )
-    if not tool_may_require_approval(overlay, function):
+    if tool_may_require_approval(
+        _participant_run_config(context, {function: frozenset({toolkit})}, allowed=allowed, reads_skills=False),
+        function,
+    ):
+        return _NEEDS_APPROVAL
+    tools = config_plugins(context.config, context.runtime_paths).tools
+    alias = toolkit_approval_alias(context.config, tools, toolkit, function)
+    if owners is None or alias is None:
         return None
-    return (
-        "requires approval, and workflow participants cannot pause for approval; "
-        "check the operator tool_approval rules and the dynamic_workflow allowed_tools setting."
-    )
+    judged_owners = {alias.judged_as: owners[alias.judged_as]} if alias.judged_as in owners else {}
+    judged_config = _participant_run_config(context, judged_owners, allowed=allowed, reads_skills=False)
+    gated = tool_may_require_approval(judged_config, alias.judged_as)
+    return f"calls {alias.judged_as} through {function}, which {_NEEDS_APPROVAL}" if gated else None
 
 
 def _participant_cap(context: ToolRuntimeContext) -> tuple[str, ...] | None:
@@ -849,13 +887,39 @@ def _resolve_participant_model_name(
     *,
     default_model: str,
 ) -> str:
+    """Return the participant's model as it runs now, which its run keeps whatever a later reload sets."""
     if raw_model is None:
-        return default_model
+        return _canonical_model_ref(context, default_model)
     model_ref = raw_model.strip()
     if (model_name := _configured_model_name(context, model_ref)) is not None:
-        return model_name
-    msg = f"Dynamic Workflow participant model '{model_ref}' is not allowlisted in config.models."
+        return _canonical_model_ref(context, model_name)
+    reason = unsupported_level_message(context.config.models, model_ref)
+    msg = (
+        f"Dynamic Workflow participant model: {reason}."
+        if reason
+        else f"Dynamic Workflow participant model '{model_ref}' is not allowlisted in config.models."
+    )
     raise DynamicWorkflowError(msg)
+
+
+def _authored(spec: dict[str, Any]) -> dict[str, Any]:
+    """Return a spec or patch a call just wrote with file and coding in its tool lists read as filesystem.
+
+    A saved revision never passes through here, so the names it holds stay as they were written.
+    """
+
+    def renamed(owner: object) -> object:
+        if not isinstance(owner, dict):
+            return owner
+        tools = owner.get("tools")
+        if not isinstance(tools, list) or not all(isinstance(name, str) for name in tools):
+            return owner
+        return {**owner, "tools": canonical_tool_names([name.strip() for name in tools])}
+
+    authored = {**spec, "permissions": renamed(spec.get("permissions"))} if "permissions" in spec else dict(spec)
+    if isinstance(participants := spec.get("participants"), list):
+        authored["participants"] = [renamed(participant) for participant in participants]
+    return authored
 
 
 def _validate_workflow_policy_for_context(
@@ -873,48 +937,87 @@ def _validate_workflow_policy_for_context(
     tool_names = [*granted_tools, *(tool for participant in subagents for tool in participant.tools or ())]
     if tool_names:
         _reject_unavailable_workflow_tools(tool_names, config_plugins(context.config, context.runtime_paths).tools)
-    permission_models = _with_budget_substitutes(
-        context,
-        _workflow_permission_model_refs(context, spec.permissions.models or []),
-    )
+    permissions = spec.permissions.models or []
     allowed = _workflow_allowed_tools(context) if subagents else frozenset()
     requests: dict[str, PersonaRequest] = {}
     for participant in spec.participants:
         if isinstance(participant, RoomAgentParticipant):
-            model_name = _runtime_model_name(context, _validate_room_agent_reference_for_context(context, participant))
+            agent_name = _validate_room_agent_reference_for_context(context, participant)
+            model_ref = _canonical_model_ref(context, _runtime_model_name(context, agent_name))
         else:
             request = _participant_request(context, participant, workflow_id=spec.id)
             persona_tools = cast("SubagentPersona", request.persona).tools or ()
             if error := granted_tool_error(participant.id, persona_tools, granted_tools) or (
-                _unapproved_participant_tool_error(context, participant.id, request, allowed=allowed)
+                _unapproved_participant_tool_error(
+                    context,
+                    participant.id,
+                    request,
+                    allowed=allowed,
+                    owners=_declared_function_owners(context, persona_tools),
+                )
             ):
                 raise DynamicWorkflowError(error)
             requests[participant.id] = request
-            model_name = cast("str", request.model)
-        if permission_models and _model_refs(context, model_name).isdisjoint(permission_models):
+            model_ref = cast("str", request.model)
+        if permissions and not (
+            _permissions_admit(context, model_ref, permissions) or _budget_admits(context, model_ref, permissions)
+        ):
             msg = (
-                f"Dynamic Workflow participant model '{model_name}' is not allowed by permissions.models. "
+                f"Dynamic Workflow participant model '{model_ref}' is not allowed by permissions.models. "
                 "Add the model to workflow permissions before running this revision."
             )
             raise DynamicWorkflowError(msg)
     return requests
 
 
-def _with_budget_substitutes(context: ToolRuntimeContext, model_refs: set[str]) -> set[str]:
-    """Permit the fallback model wherever a permitted model would be swapped for it under the caller's budget."""
-    substitutes = {
-        budget_model(
-            context.config,
-            context.runtime_paths,
-            context.budget_monitor,
-            context.requester_id,
-            model_name,
-            log_fallback=False,
+def _canonical_model_ref(context: ToolRuntimeContext, model_name: str) -> str:
+    """Return the model as it runs now: ``name@level`` for a model with reasoning levels, else its name."""
+    model_config = context.config.models.get(model_name)
+    if model_config is None or model_config.reasoning is None:
+        return model_name
+    return f"{split_model_reference(model_name)[0]}@{model_config.reasoning.default}"
+
+
+def _permissions_admit(context: ToolRuntimeContext, model_ref: str, permissions: list[str]) -> bool:
+    """Return whether a permission admits the canonical ``model_ref``.
+
+    A ``name@level`` permission for a configured ``name`` admits only that exact reference.
+    Any other admits a model at every level: by its name, its provider ID, or another name with the same provider ID.
+    """
+    refs = _model_refs(context, split_model_reference(model_ref)[0])
+    for permission in permissions:
+        name, level = split_model_reference(permission)
+        if level is not None and name in context.config.models:
+            if permission == model_ref:
+                return True
+        elif not refs.isdisjoint(_model_refs(context, _configured_model_name(context, permission) or permission)):
+            return True
+    return False
+
+
+def _budget_admits(context: ToolRuntimeContext, model_ref: str, permissions: list[str]) -> bool:
+    """Return whether ``model_ref`` is the fallback that the caller's budget swaps a permitted model for.
+
+    Only the fallback's canonical reference counts, never another name for it or a provider ID.
+    """
+    budgets = context.config.budgets
+    if budgets is None or model_ref != _canonical_model_ref(context, budgets.fallback_model):
+        return False
+    swapped = partial(
+        budget_model,
+        context.config,
+        context.runtime_paths,
+        context.budget_monitor,
+        context.requester_id,
+        log_fallback=False,
+    )
+    return any(
+        _permissions_admit(context, candidate, permissions) and swapped(candidate) != candidate
+        for name, model_config in context.config.models.items()
+        for candidate in (
+            [f"{name}@{level}" for level in model_config.reasoning.levels] if model_config.reasoning else [name]
         )
-        for model_name in context.config.models
-        if not _model_refs(context, model_name).isdisjoint(model_refs)
-    }
-    return model_refs.union(*(_model_refs(context, model_name) for model_name in substitutes))
+    )
 
 
 def _participant_scope(context: ToolRuntimeContext, agent_name: str) -> ModelScope:
@@ -934,15 +1037,6 @@ def _caller_runtime_model_name(context: ToolRuntimeContext) -> str:
     return context.active_model_name or _runtime_model_name(context, context.agent_name)
 
 
-def _workflow_permission_model_refs(context: ToolRuntimeContext, models: list[str]) -> set[str]:
-    refs: set[str] = set()
-    for model_ref in models:
-        refs.add(model_ref)
-        if (model_name := _configured_model_name(context, model_ref)) is not None:
-            refs.update(_model_refs(context, model_name))
-    return refs
-
-
 def _configured_model_name(context: ToolRuntimeContext, model_ref: str) -> str | None:
     """Return the configured model a reference names, by its config name or else by its provider ID."""
     if model_ref in context.config.models:
@@ -954,8 +1048,6 @@ def _configured_model_name(context: ToolRuntimeContext, model_ref: str) -> str |
 
 
 def _model_refs(context: ToolRuntimeContext, model_name: str) -> set[str]:
-    refs = {model_name}
+    """Return the model's name and, when it is configured, its provider ID."""
     model_config = context.config.models.get(model_name)
-    if model_config is not None:
-        refs.add(model_config.id)
-    return refs
+    return {model_name} if model_config is None else {model_name, model_config.id}

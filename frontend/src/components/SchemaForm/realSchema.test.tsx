@@ -137,6 +137,30 @@ describe("forms rendered from the real configuration schema", () => {
     expect(roots).not.toContain("egress_broker");
   });
 
+  it("shows the reranker under Search with its provider choice and errors", () => {
+    useConfigStore.setState({
+      // Config types only the roots hand-built pages edit.
+      config: { reranker: { provider: "vertex_ai" } } as never,
+      diagnostics: [
+        {
+          kind: "validation",
+          issue: {
+            loc: ["reranker", "vertex_ai", "model"],
+            msg: "Field required",
+            type: "missing",
+          },
+        },
+      ],
+    });
+    render(<Settings />);
+    fireEvent.click(screen.getByRole("button", { name: /^Search/ }));
+
+    expect(
+      screen.getByDisplayValue("Cohere, Sentence Transformers or Vertex AI"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Field required")).toBeInTheDocument();
+  });
+
   it("shows a plugin automation entry with its name and keeps it through an edit", () => {
     const changes: unknown[] = [];
     const entry = {

@@ -8,15 +8,18 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.delegation.background import ACKNOWLEDGED_BY, delegation_child
+from mindroom.delegation.cost import receive_subagent_cost
 from mindroom.llm.runs import RunRecord, TeamRunRecord
 from mindroom.logging_config import get_logger
 from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.tool_jobs.execution_authority import current_job_call
 from mindroom.tool_jobs.results import read_result_payload
+from mindroom.tool_jobs.runtime import AcknowledgeWait
 from mindroom.tool_system.tool_function import ToolValue
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Sequence
 
     from mindroom.session_storage.store import ConversationStore
     from mindroom.tool_jobs.execution_authority import JobCall
@@ -61,29 +64,112 @@ def job_failure(job: BackgroundJob, value: Any, payload: ToolResultPayload) -> s
     return None if job.status == "completed" else job_failure_text(value, payload)
 
 
+@dataclass(frozen=True, slots=True)
+class _LoadedRun:
+    team: bool
+    finished_call_ids: frozenset[str]
+
+
+def _finished_call_ids(run: RunRecord | TeamRunRecord) -> frozenset[str]:
+    """Collect every tool call ID finished with a result in a saved agent or team run.
+
+    A run stopped or failed after the call is saved without its tools when it did not stream, but keeps the
+    call's result message, so either counts.
+    """
+    call_ids = {
+        tool.tool_call_id
+        for tool in run.tools or ()
+        if tool.tool_call_id is not None and not tool.is_paused and tool.result is not None
+    }
+    call_ids.update(
+        message.tool_call_id
+        for message in run.messages or ()
+        if message.role == "tool" and message.tool_call_id is not None
+    )
+    return frozenset(call_ids)
+
+
+def _load_runs(storage: ConversationStore, run_ids: Sequence[str]) -> dict[str, _LoadedRun | None | Exception]:
+    loaded: dict[str, _LoadedRun | None | Exception] = {}
+    for run_id in run_ids:
+        try:
+            run = storage.get_run(run_id)
+            if isinstance(run, RunRecord | TeamRunRecord):
+                loaded[run_id] = _LoadedRun(
+                    team=isinstance(run, TeamRunRecord),
+                    finished_call_ids=_finished_call_ids(run),
+                )
+            else:
+                loaded[run_id] = None
+        except Exception as error:
+            loaded[run_id] = error
+    return loaded
+
+
+def _log_unconfirmed(job_id: str, run_id: str | None, error: Exception) -> None:
+    logger.warning(
+        "Tool result persistence was not confirmed",
+        job_id=job_id,
+        run_id=run_id,
+        exc_info=error,
+    )
+
+
+async def _release_by_runtime(items: Sequence[tuple[ToolJobRuntime, str, JobClaim]]) -> None:
+    by_runtime: dict[ToolJobRuntime, list[tuple[str, JobClaim]]] = {}
+    for runtime, job_id, claim in items:
+        by_runtime.setdefault(runtime, []).append((job_id, claim))
+    for runtime, waits in by_runtime.items():
+        await runtime.release_waits(waits)
+
+
+def _saved_by_runtime(
+    consumptions: Sequence[_Consumption],
+    loaded_runs: dict[str, _LoadedRun | None | Exception],
+) -> dict[ToolJobRuntime, list[_Consumption]]:
+    by_runtime: dict[ToolJobRuntime, list[_Consumption]] = {}
+    for consumption in consumptions:
+        loaded = loaded_runs.get(consumption.run_id)
+        if isinstance(loaded, Exception):
+            _log_unconfirmed(consumption.job.job_id, consumption.run_id, loaded)
+            continue
+        if loaded is not None and loaded.team == consumption.team and consumption.call_id in loaded.finished_call_ids:
+            by_runtime.setdefault(consumption.runtime, []).append(consumption)
+    return by_runtime
+
+
+async def _acknowledge_batch(runtime: ToolJobRuntime, batch: Sequence[_Consumption]) -> None:
+    waits = [
+        AcknowledgeWait(
+            consumption.job.job_id,
+            consumption.claim,
+            returned_inline=consumption.returned_inline,
+            # A tool's job keeps the adapter it was admitted with, which a call that reattaches to it matches.
+            adapter={ACKNOWLEDGED_BY: consumption.run_id} if consumption.job.kind == "delegation" else None,
+        )
+        for consumption in batch
+    ]
+    try:
+        errors = await runtime.acknowledge_waits(waits)
+    except Exception as error:
+        for consumption in batch:
+            _log_unconfirmed(consumption.job.job_id, consumption.run_id, error)
+        return
+    if errors:
+        run_ids_by_job = {consumption.job.job_id: consumption.run_id for consumption in batch}
+        for job_id, ack_error in errors:
+            _log_unconfirmed(job_id, run_ids_by_job.get(job_id), ack_error)
+
+
 @dataclass(frozen=True)
 class _Consumption:
     runtime: ToolJobRuntime
-    job_id: str
+    job: BackgroundJob
     claim: JobClaim
     run_id: str
     team: bool
     call_id: str
     returned_inline: bool
-
-    def saved(self, storage: ConversationStore) -> bool:
-        """Find the exact tool call, finished with a result, in the saved parent run of the calling agent or team.
-
-        A run stopped or failed after the call is saved without its tools when it did not stream, but keeps the
-        call's result message, so either counts.
-        """
-        run = storage.get_run(self.run_id)
-        if not isinstance(run, TeamRunRecord if self.team else RunRecord):
-            return False
-        return any(
-            tool.tool_call_id == self.call_id and not tool.is_paused and tool.result is not None
-            for tool in run.tools or []
-        ) or any(message.role == "tool" and message.tool_call_id == self.call_id for message in run.messages or [])
 
 
 @dataclass
@@ -96,7 +182,7 @@ class ConsumptionOwner:
     def register(
         self,
         runtime: ToolJobRuntime,
-        job_id: str,
+        job: BackgroundJob,
         claim: JobClaim,
         *,
         run_id: str,
@@ -105,34 +191,32 @@ class ConsumptionOwner:
         returned_inline: bool,
     ) -> None:
         """Keep a claim until the parent run ``run_id`` is saved with its tool call ``call_id`` finished."""
-        self._claims.append(_Consumption(runtime, job_id, claim, run_id, team, call_id, returned_inline))
+        self._claims.append(_Consumption(runtime, job, claim, run_id, team, call_id, returned_inline))
         if returned_inline:
-            runtime.hold_inline(job_id, claim)
+            runtime.hold_inline(job.job_id, claim)
 
     async def finalize(self) -> None:
         """Acknowledge exact saved rows; release missing, failed, or unsaved evidence."""
         consumptions, self._claims = self._claims, []
-        for consumption in consumptions:
+        if not consumptions:
+            return
+        try:
+            if self.storage_factory is None:
+                return
+            run_ids = tuple(dict.fromkeys(consumption.run_id for consumption in consumptions))
             try:
-                saved = self.storage_factory is not None and await run_session_storage_operation(
+                loaded_runs = await run_session_storage_operation(
                     self.storage_factory,
-                    consumption.saved,
+                    lambda storage: _load_runs(storage, run_ids),
                 )
-                if saved:
-                    await consumption.runtime.acknowledge_wait(
-                        consumption.job_id,
-                        consumption.claim,
-                        returned_inline=consumption.returned_inline,
-                    )
-            except Exception:
-                logger.warning(
-                    "Tool result persistence was not confirmed",
-                    job_id=consumption.job_id,
-                    run_id=consumption.run_id,
-                    exc_info=True,
-                )
-            finally:
-                await consumption.runtime.release_wait(consumption.job_id, consumption.claim)
+            except Exception as error:
+                for consumption in consumptions:
+                    _log_unconfirmed(consumption.job.job_id, consumption.run_id, error)
+                return
+            for runtime, batch in _saved_by_runtime(consumptions, loaded_runs).items():
+                await _acknowledge_batch(runtime, batch)
+        finally:
+            await _release_by_runtime([(c.runtime, c.job.job_id, c.claim) for c in consumptions])
 
 
 @contextmanager
@@ -173,19 +257,43 @@ def session_state_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[s
     }
 
 
-def _merge_session_state(value: Any, job: BackgroundJob, payload: ToolResultPayload, call: JobCall) -> Any:  # noqa: ANN401
-    """Apply unconflicted state changes, reporting conflicts in a new value that leaves the payload intact."""
+def _apply_state_change(state: dict[str, Any], key: str, change: dict[str, Any]) -> bool:
+    """Apply one baseline-checked key change to ``state``; return False when the live value no longer matches."""
+    if (key in state) != change["before_present"] or state.get(key) != change["before"]:
+        return False
+    if change["present"]:
+        state[key] = change["value"]
+    else:
+        state.pop(key, None)
+    return True
+
+
+def _apply_prepared_changes(state: dict[str, Any], changes: dict[str, dict[str, Any]]) -> None:
+    """Apply accepted per-key changes against live ``state``, skipping any key whose baseline moved."""
+    for key, change in changes.items():
+        _apply_state_change(state, key, change)
+
+
+def _merge_session_state(
+    state: dict[str, Any],
+    value: Any,  # noqa: ANN401
+    job: BackgroundJob,
+    payload: ToolResultPayload,
+    accepted: dict[str, dict[str, Any]],
+) -> Any:  # noqa: ANN401
+    """Apply unconflicted state changes to ``state``, reporting conflicts in a new value that leaves the payload intact."""
     if job.consumed or job.status != "completed":
         return value
-    state = call.context.session_state
-    conflicts = []
+    conflicts: list[str] = []
     for key, change in payload.state_delta.items():
-        if (key in state) != change["before_present"] or state.get(key) != change["before"]:
-            conflicts.append(key)
-        elif change["present"]:
-            state[key] = change["value"]
+        if _apply_state_change(state, key, change):
+            if key in accepted:
+                # Preserve the original live baseline and advance only the final target across chained jobs.
+                accepted[key] = {**accepted[key], "present": change["present"], "value": change["value"]}
+            else:
+                accepted[key] = change
         else:
-            state.pop(key, None)
+            conflicts.append(key)
     if conflicts:
         warning = "Session state conflicts: " + ", ".join(sorted(conflicts))
         if isinstance(value, ToolValue):
@@ -194,32 +302,143 @@ def _merge_session_state(value: Any, job: BackgroundJob, payload: ToolResultPayl
     return value
 
 
-async def _retain_claim(
-    runtime: ToolJobRuntime,
-    job_id: str,
-    claim: JobClaim,
-    call: JobCall | None,
-    *,
-    returned_inline: bool,
-) -> None:
-    """Keep a claim until the parent run saves the exact tool call, releasing it when no such run will be saved."""
-    owner = _OWNER.get()
-    if call is None or owner is None:
-        await runtime.release_wait(job_id, claim)
-        return
-    if not call.context.run_id or not call.context.call_id:
-        await runtime.release_wait(job_id, claim)
+def _require_call_identity(call: JobCall) -> tuple[str, str]:
+    run_id, call_id = call.context.run_id, call.context.call_id
+    if not run_id or not call_id:
         msg = "Tool result consumption requires the exact run and tool call"
         raise ValueError(msg)
-    owner.register(
-        runtime,
-        job_id,
-        claim,
-        run_id=call.context.run_id,
-        team=call.team,
-        call_id=call.context.call_id,
-        returned_inline=returned_inline,
-    )
+    return run_id, call_id
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedConsumption:
+    """One staged outcome after merging its state delta against a fresh copy of live session state."""
+
+    job: BackgroundJob
+    value: Any
+    payload: ToolResultPayload
+
+
+@dataclass(frozen=True, slots=True)
+class _StagedPayload:
+    runtime: ToolJobRuntime
+    job: BackgroundJob
+    claim: JobClaim
+    payload: ToolResultPayload
+    returned_inline: bool
+    subagent_cost: tuple[str, float | None] | None
+
+
+@dataclass
+class StagedConsumptions:
+    """Payloads read by one tool call whose session state, cost, and claims commit only if the call returns them."""
+
+    job_call: JobCall | None = None
+    _items: list[_StagedPayload] = field(default_factory=list, init=False)
+    _prepared_changes: dict[str, dict[str, Any]] | None = field(default=None, init=False)
+
+    def __post_init__(self) -> None:
+        """Capture the active management call when none was supplied explicitly."""
+        if self.job_call is None:
+            self.job_call = current_job_call()
+
+    async def stage(
+        self,
+        runtime: ToolJobRuntime,
+        job: BackgroundJob,
+        claim: JobClaim,
+        *,
+        returned_inline: bool = False,
+    ) -> int:
+        """Read one claimed outcome without touching session state, subagent cost, or retaining its claim yet."""
+        owner = _OWNER.get()
+        try:
+            payload = await read_result_payload(runtime, job)
+            if self.job_call is not None and owner is not None:
+                _require_call_identity(self.job_call)
+            subagent_cost = (
+                (child.delegation_id, child.cost_usd)
+                if job.kind == "delegation" and not job.consumed and (child := delegation_child(job))
+                else None
+            )
+        except BaseException:
+            await runtime.release_wait(job.job_id, claim)
+            raise
+        self._prepared_changes = None
+        self._items.append(_StagedPayload(runtime, job, claim, payload, returned_inline, subagent_cost))
+        return len(self._items) - 1
+
+    def prepare_values(self) -> list[PreparedConsumption]:
+        """Merge all staged payloads synchronously against a fresh copy of live session state."""
+        owner = _OWNER.get()
+        staged_state = (
+            dict(self.job_call.context.session_state)
+            if self.job_call is not None
+            and owner is not None
+            and any(
+                not item.job.consumed and item.job.status == "completed" and item.payload.state_delta
+                for item in self._items
+            )
+            else None
+        )
+        accepted: dict[str, dict[str, Any]] = {}
+        prepared = [
+            PreparedConsumption(
+                job=item.job,
+                value=(
+                    _merge_session_state(staged_state, item.payload.value, item.job, item.payload, accepted)
+                    if staged_state is not None
+                    else item.payload.value
+                ),
+                payload=item.payload,
+            )
+            for item in self._items
+        ]
+        self._prepared_changes = accepted
+        return prepared
+
+    async def commit(self) -> None:
+        """Apply prepared session-state changes, subagent costs, and claim retentions."""
+        if not self._items:
+            return
+        owner, call = _OWNER.get(), self.job_call
+        if owner is None or call is None:
+            await _release_by_runtime([(item.runtime, item.job.job_id, item.claim) for item in self._items])
+            items, self._items, self._prepared_changes = self._items, [], None
+            for item in items:
+                if item.subagent_cost is not None:
+                    receive_subagent_cost(*item.subagent_cost)
+            return
+        try:
+            run_id, call_id = _require_call_identity(call)
+        except ValueError:
+            await self.release()
+            raise
+        if self._prepared_changes is None:
+            self.prepare_values()
+        items, prepared_changes = self._items, self._prepared_changes
+        self._items, self._prepared_changes = [], None
+        if prepared_changes:
+            _apply_prepared_changes(call.context.session_state, prepared_changes)
+        for item in items:
+            if item.subagent_cost is not None:
+                # The turn that reads a subagent job's result first receives what its child cost.
+                receive_subagent_cost(*item.subagent_cost)
+            owner.register(
+                item.runtime,
+                item.job,
+                item.claim,
+                run_id=run_id,
+                team=call.team,
+                call_id=call_id,
+                returned_inline=item.returned_inline,
+            )
+
+    async def release(self) -> None:
+        """Release every still-staged claim in one lock acquisition per runtime."""
+        items, self._items, self._prepared_changes = self._items, [], None
+        if items:
+            await _release_by_runtime([(item.runtime, item.job.job_id, item.claim) for item in items])
 
 
 async def consume_tool_job(
@@ -235,14 +454,12 @@ async def consume_tool_job(
     ``job_call`` is the call that consumes it, the management call running now when omitted; ``returned_inline``
     says this tool call is the one that started the job.
     """
-    call = job_call or current_job_call()
+    staging = StagedConsumptions(job_call)
     try:
-        payload = await read_result_payload(runtime, job)
-        value = payload.value
-        if call is not None and _OWNER.get() is not None:
-            value = _merge_session_state(value, job, payload, call)
+        await staging.stage(runtime, job, claim, returned_inline=returned_inline)
+        (prepared,) = staging.prepare_values()
+        await staging.commit()
     except BaseException:
-        await runtime.release_wait(job.job_id, claim)
+        await staging.release()
         raise
-    await _retain_claim(runtime, job.job_id, claim, call, returned_inline=returned_inline)
-    return value, payload
+    return prepared.value, prepared.payload

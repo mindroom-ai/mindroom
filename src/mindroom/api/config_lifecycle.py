@@ -31,6 +31,8 @@ from mindroom.tool_jobs.settings import pending_background_tool_jobs_restart
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from fastapi.requests import HTTPConnection
+
     from mindroom import constants
 
 logger = get_logger(__name__)
@@ -98,19 +100,19 @@ def _registered_api_states() -> list[ApiState]:
     return states
 
 
-def _request_snapshot(request: Request) -> ApiSnapshot | None:
+def _request_snapshot(request: HTTPConnection) -> ApiSnapshot | None:
     """Return the request-bound API snapshot, if one was pinned earlier."""
     snapshot = request.scope.get(_REQUEST_SNAPSHOT_SCOPE_KEY)
     return snapshot if isinstance(snapshot, ApiSnapshot) else None
 
 
-def _store_request_snapshot(request: Request, snapshot: ApiSnapshot) -> ApiSnapshot:
+def _store_request_snapshot(request: HTTPConnection, snapshot: ApiSnapshot) -> ApiSnapshot:
     """Pin one API snapshot to the current request."""
     request.scope[_REQUEST_SNAPSHOT_SCOPE_KEY] = snapshot
     return snapshot
 
 
-def bind_current_request_snapshot(request: Request) -> ApiSnapshot:
+def bind_current_request_snapshot(request: HTTPConnection) -> ApiSnapshot:
     """Pin the app's current published snapshot to the current request."""
     existing = _request_snapshot(request)
     if existing is not None:
@@ -120,7 +122,7 @@ def bind_current_request_snapshot(request: Request) -> ApiSnapshot:
         return _store_request_snapshot(request, state.snapshot)
 
 
-def rebind_current_request_snapshot(request: Request) -> ApiSnapshot:
+def rebind_current_request_snapshot(request: HTTPConnection) -> ApiSnapshot:
     """Move a request to the app's newest publication of the runtime it authenticated against.
 
     A request whose app moved to another runtime meanwhile is stale: its auth state names the old one.

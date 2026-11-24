@@ -1,0 +1,143 @@
+# Companion MindRoom config.yaml for cluster/k8s/runtime/values-multi-user.example.yaml.
+# Load into the mindroom-config ConfigMap (key: config.yaml) before installing the runtime chart.
+
+models:
+  default:
+    provider: openrouter
+    id: anthropic/claude-sonnet-5.5
+    context_window: 1000000
+  fast:
+    provider: openrouter
+    id: anthropic/claude-haiku-5.5
+    context_window: 1000000
+
+router: {model: fast}
+knowledge_graph: {model: fast}
+
+event_journal:
+  backend: postgres
+  database_url_env: MINDROOM_EVENT_CACHE_DATABASE_URL
+
+rooms:
+  lobby:
+    description: Welcome lobby; join or send !personal to create your personal room.
+    # lobby is invite-only and unlisted by default; list the Matrix users to invite
+    # (setting join_policy: public gives every user who joins a personal agent billed to your model key).
+    invite_users:
+      - "@alice:example.com"
+
+personal_agents:
+  mind:
+    # Start each user's workspace empty instead of loading ~16 KB of prompt text from the 6 default starter files.
+    # Point at a slim starter folder mounted via extraVolumes / extraVolumeMounts to pre-seed files.
+    workspace_template: null
+    agent:
+      display_name: "{user_first_name}'s Mind"
+      role: Personal assistant for {user_display_name}.
+      model: default
+      worker_scope: user_agent
+      worker_tools: [shell, filesystem, browser]
+      dedicated_subagent_workers: true
+      # Per-user named worker limit; size alongside MINDROOM_KUBERNETES_NAMED_WORKERS_MAX (default 16).
+      named_workers: 4
+      # For personal agents, only users admitted by `access` (the owner by default) can type;
+      # widening `access` exposes shell input — use `watch` or `none` if others are untrusted.
+      terminals: type
+      knowledge_graph: true
+      skill_learning: {enabled: true, model: fast}
+      contacts:
+        rules:
+          - Never share passwords, keys, or other credentials.
+          - From my calendar, share only when I am free or busy, never event details.
+        judgment: {provider: llm, model: fast}
+      participation:
+        debounce_seconds: 0
+        judgment: {provider: llm, model: fast}
+        instructions: Join multi-human threads only when directly helpful or asked; stay quiet during human-to-human side conversation.
+      mid_turn:
+        judgment: {provider: llm, model: fast}
+        defer_reaction: "👀"
+        instructions: Finish the active turn unless the new message cancels, corrects, or redirects the current work.
+      delegate_to: [mind]
+      include_default_tools: false
+      # Deliberately omits update_awareness (upgrades are operator-managed via Helm).
+      tools:
+        - shell
+        - memory
+        - scheduler
+        - matrix_message
+        - {name: todo, defer: true}
+        - {name: filesystem, defer: true}
+        - {name: browser, defer: true}
+        - {name: website, defer: true}
+        - {name: egress_credentials, defer: true}
+        - {name: oauth_connections, defer: true}
+        - {name: shared_directories, defer: true}
+        - name: chat_ui
+          defer: true
+          overrides: {enable_show_canvas: true, enable_canvas_libraries: true}
+        - {name: usage_stats, defer: true}  # Omit admin_scope so each user sees only their own usage
+        - {name: report_publishing, defer: true}
+        - {name: google_scholar, defer: true}
+        - {name: desktop, defer: true}
+        - {name: matrix_room, defer: true}
+        - {name: thread_model, defer: true}
+        - {name: thread_tags, defer: true}
+        - {name: thread_summary, defer: true}
+        - {name: thread_resolution, defer: true}
+        - {name: thread_snooze, defer: true}
+        - {name: compact_context, defer: true}
+        - {name: callback_manager, defer: true}
+        # Optional integrations (defer when adding):
+        # - {name: matrix_voice_message, defer: true}  # Requires OPENAI_API_KEY or an OpenRouter TTS model override
+        # - gmail / google_calendar / google_drive / google_sheets, github, slack
+        # - exa (API-backed web search) or duckduckgo (keyless web search)
+        # - matrix_user (requires MATRIX_USER_APPSERVICE_TOKEN or _FILE from an appservice covering the intended human users)
+        # - approved_egress (list explicitly here because include_default_tools is false; keep approvedEgress.manageRuntimeConfig: true so request_network_access stays gated)
+        # - mcp_<server_id> for OAuth-backed remote MCP servers configured under mcp_servers:
+
+personal_rooms:
+  agent: mind
+  onboarding_rooms: [lobby]
+  commands: ["!personal"]
+  welcome_dispatch: true
+
+memory:
+  backend: file
+  embedder:
+    provider: openai
+    config:
+      model: openai/text-embedding-3-small
+      host: https://openrouter.ai/api/v1
+      credentials_service: openrouter
+      dimensions: 1536
+  search: {mode: semantic}
+  auto_flush: {enabled: true}
+
+tool_approval:
+  rules:
+    - match: resolve_thread
+      action: require_approval
+    - match: matrix_user_write
+      action: require_approval
+    # For OAuth MCP servers, require approval on `<prefix>_*` and auto-approve only reviewed
+    # read functions on trusted servers above the catch-all:
+    # - match: example_list_tools
+    #   action: auto_approve
+    # - match: example_*
+    #   action: require_approval
+
+# Optional shared team agent (shared worker; omit knowledge_graph and skill_learning so shared
+# conversations don't feed learned skills or a shared graph; its Drive connection is shared across lobby users):
+# agents:
+#   team_helper:
+#     display_name: Team Helper
+#     role: Shared assistant for team rooms.
+#     model: default
+#     rooms: [lobby]
+#     worker_scope: shared
+#     include_default_tools: false
+#     tools:
+#       - name: google_drive
+#         defer: true
+#         overrides: {download_file: false, write: false}

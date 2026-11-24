@@ -468,6 +468,36 @@ def test_instance_chart_configures_owner_room_access_for_oidc_tenants() -> None:
 
 
 @pytest.mark.parametrize(
+    ("auth_args", "expected"),
+    [
+        (
+            ("accountId=account-42", "supabaseUrl=https://supabase.example.test", "supabaseAnonKey=anon-key"),
+            "@owner:42.example.test",
+        ),
+        (("supabaseUrl=https://supabase.example.test", "supabaseAnonKey=anon-key"), None),
+        (("accountId=account-42", "allowUnauthenticatedPrimary=true"), None),
+    ],
+    ids=["platform-login", "no-account-binding", "open-access"],
+)
+def test_instance_chart_maps_platform_logins_to_the_owner_only_behind_supabase(
+    auth_args: tuple[str, ...],
+    expected: str | None,
+) -> None:
+    """Only account-bound platform logins act as the owner; never other project users or credentialless requests."""
+    docs = _render_chart(
+        Path("cluster/k8s/instance"),
+        "customer=42",
+        "baseDomain=example.test",
+        *auth_args,
+        set_string_args=("administrators[0]=@owner:42.example.test",),
+    )
+    container = _resource(docs, "Deployment", "mindroom-42")["spec"]["template"]["spec"]["containers"][0]
+    env_values = {env["name"]: env.get("value") for env in container["env"]}
+
+    assert env_values.get("MINDROOM_OWNER_USER_ID") == expected
+
+
+@pytest.mark.parametrize(
     "oidc_args",
     [(), ("matrixOidc.enabled=true", "matrixOidc.issuer=https://api.example.test/matrix-oidc")],
     ids=["default", "oidc"],
@@ -1195,6 +1225,8 @@ def test_instance_chart_static_runner_mounts_only_agent_state() -> None:
 
     assert {"name": "storage", "mountPath": "/mindroom_data"} in mindroom_container["volumeMounts"]
     assert _env_by_name(mindroom_container)["MINDROOM_CONFIG_PATH"]["value"] == "/mindroom_data/config/config.yaml"
+    # The primary knows the sidecar mounts the agents' storage, so people may type in the agents' terminals.
+    assert _env_by_name(mindroom_container)["MINDROOM_STATIC_RUNNER_AGENT_STORAGE"]["value"] == "true"
     assert runner_container["volumeMounts"] == [
         {"name": "storage", "mountPath": "/mindroom_data", "subPath": "sandbox-runner"},
         {"name": "storage", "mountPath": "/mindroom_data/agents", "subPath": "agents"},
@@ -3017,6 +3049,8 @@ def test_runtime_chart_static_runner_withholds_key_and_mounts_only_agent_state(
     }
     assert [ref["key"] for ref in _secret_key_refs(runner_container)] == ["MINDROOM_SANDBOX_PROXY_TOKEN"]
     assert {"name": "storage", "mountPath": "/app/agent_data"} in mindroom_container["volumeMounts"]
+    # The primary knows the sidecar mounts the agents' storage, so people may type in the agents' terminals.
+    assert _env_by_name(mindroom_container)["MINDROOM_STATIC_RUNNER_AGENT_STORAGE"]["value"] == "true"
     assert runner_container["volumeMounts"] == [
         {"name": "storage", "mountPath": "/app/agent_data", "subPath": "sandbox-runner"},
         {"name": "storage", "mountPath": "/app/agent_data/agents", "subPath": "agents"},
@@ -3544,13 +3578,32 @@ def _broker_primary_env(docs: list[dict[str, Any]]) -> tuple[dict[str, Any], dic
 
 
 def test_runtime_chart_egress_broker_disabled_by_default() -> None:
-    """Without opting in, the chart renders no broker Service, policies, listener, or env."""
+    """Without opting in, the chart renders no broker Service, policies, or listener, and turns the broker off."""
     docs = _render_runtime_chart("networkPolicy.create=true", *_EGRESS_PROXY_VALUES)
     container, env = _broker_primary_env(docs)
 
     assert _egress_broker_resource_names(docs) == []
     assert [port["name"] for port in container["ports"]] == ["api"]
-    assert not [name for name in env if name.startswith("MINDROOM_EGRESS_BROKER_")]
+    assert {name: value for name, value in env.items() if name.startswith("MINDROOM_EGRESS_BROKER_")} == {
+        "MINDROOM_EGRESS_BROKER_PORT": "off",
+    }
+
+
+@pytest.mark.parametrize("backend", ["static_runner", "kubernetes"])
+def test_runtime_chart_turns_the_default_broker_off_for_every_worker_backend(backend: str) -> None:
+    """`egressBroker.enabled: false` means off on every backend, including the chart's default static runner."""
+    docs = _render_chart(
+        Path("cluster/k8s/runtime"),
+        f"workers.backend={backend}",
+        "workers.sandbox.proxyToken.value=test-token",
+        "eventCache.postgres.auth.password=test-password",
+        release_name="mindroom-runtime",
+    )
+    _, env = _broker_primary_env(docs)
+
+    assert {name: value for name, value in env.items() if name.startswith("MINDROOM_EGRESS_BROKER_")} == {
+        "MINDROOM_EGRESS_BROKER_PORT": "off",
+    }
 
 
 def test_runtime_chart_egress_broker_direct_mode_without_worker_egress_policy() -> None:
@@ -3804,7 +3857,9 @@ def test_runtime_chart_chain_requires_both_features() -> None:
     broker_only = _render_runtime_chart("egressBroker.enabled=true")
 
     assert not any(doc["metadata"]["name"] == _EGRESS_SQUID_CONFIG_NAME for doc in approved_only)
-    assert not [name for name in _broker_primary_env(approved_only)[1] if name.startswith("MINDROOM_EGRESS_BROKER_")]
+    assert {
+        name: value for name, value in _broker_primary_env(approved_only)[1].items() if "EGRESS_BROKER" in name
+    } == {"MINDROOM_EGRESS_BROKER_PORT": "off"}
     assert "checksum/squid-config" not in _resource(approved_only, "Deployment", _EGRESS_PROXY_NAME)["spec"][
         "template"
     ]["metadata"].get("annotations", {})
@@ -3911,9 +3966,11 @@ def test_instance_chart_egress_broker_env_on_primary_only() -> None:
 
 
 def test_instance_chart_egress_broker_disabled_by_default() -> None:
-    """Hosted tenants get no broker env unless the release opts in."""
+    """Hosted tenants get no broker unless the release opts in: MindRoom's default loopback broker is turned off."""
     deployment = _resource(_render_instance_chart(), "Deployment", "mindroom-demo")
 
-    for container in ("mindroom", "sandbox-runner"):
+    for container, expected in (("mindroom", {"MINDROOM_EGRESS_BROKER_PORT": "off"}), ("sandbox-runner", {})):
         env = _env_by_name(_container(deployment, container))
-        assert not [name for name in env if name.startswith("MINDROOM_EGRESS_BROKER_")]
+        assert {
+            name: entry.get("value") for name, entry in env.items() if name.startswith("MINDROOM_EGRESS_BROKER_")
+        } == expected

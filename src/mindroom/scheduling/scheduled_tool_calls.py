@@ -23,6 +23,7 @@ from mindroom.json_utils import has_only_finite_numbers, object_with_unique_keys
 from mindroom.scheduling.errors import SchedulingError
 from mindroom.tool_approval_grants import ANY_ARGUMENTS, canonical_arguments
 from mindroom.tool_system.invocation import run_tool_call
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_access import validate_tool_arguments
 from mindroom.tool_system.tool_function import ToolGate, ToolOutcome
 from mindroom.tool_system.tool_hooks import owned_sync_tool_completion
@@ -84,8 +85,8 @@ class LiveFunction:
 class _LiveTools:
     """The functions one agent's run offers and how the run calls them.
 
-    ``middleware`` is the run's tool-call policy, and ``context`` is the run's context for the call that is
-    running, so a stored call runs exactly as the model's own call of it would.
+    ``middleware`` is the run's tool-call policy, without the step that binds these, and ``context`` is the run's
+    context for the call that is running, so a stored call runs exactly as the model's own call of it would.
     """
 
     functions: Mapping[str, ToolFunction]
@@ -103,22 +104,23 @@ def bind_live_tools(
     """Return ``middleware`` behind a first step that shows each call the run's functions, for scheduled calls.
 
     ``functions`` are the ones the run offers, by name; a generated function names no toolkit, so no stored call can
-    name it; a stored call runs under the returned policy, this step included. A run that offers no scheduler
-    function reading them gets ``middleware`` as it is.
+    name it. A stored call runs under ``middleware`` alone: it runs inside ``run_scheduled_call``'s own call, which
+    this step already bound. A run that offers no scheduler function reading them gets ``middleware`` as it is.
     """
+    rest = tuple(middleware)
     if _LIVE_FUNCTION_READERS.isdisjoint(functions):
-        return tuple(middleware)
-    policy: tuple[ToolMiddleware, ...]
+        return rest
+    # The step binds the policy without itself: holding the policy that holds it would be a reference cycle, which
+    # keeps all of the run's functions until the cyclic garbage collector runs.
 
     async def bind_live_functions(call: ToolCall, call_next: ToolNext) -> object:
-        token = _LIVE_TOOLS.set(_LiveTools(functions=functions, middleware=policy, context=call.context))
+        token = _LIVE_TOOLS.set(_LiveTools(functions=functions, middleware=rest, context=call.context))
         try:
             return await call_next(call.arguments)
         finally:
             _LIVE_TOOLS.reset(token)
 
-    policy = (bind_live_functions, *middleware)
-    return policy
+    return (bind_live_functions, *rest)
 
 
 def _parse_arguments(text: str) -> dict[str, object] | str:
@@ -210,14 +212,16 @@ async def run_scheduled_call(  # noqa: PLR0911 - one refusal per broken conditio
             return _refused(task_id, f"{_REFUSALS[claimed]}; it runs when its task fires")
         return _refused(task_id, _REFUSALS[claimed])
     # The approval is spent; a call interrupted from here leaves its outcome unknown and is never retried.
-    # The run's tool-call policy owns every synchronous body the call starts until it finishes.
+    # The run's tool-call policy owns every synchronous body the call starts until it finishes. The reply shows only
+    # this runner's call, never the stored call or its arguments, so its hooks read it as hidden.
     async with owned_sync_tool_completion():
-        result = await run_tool_call(
-            function,
-            json.loads(arguments_text),
-            replace(live.context, call_id=f"scheduled-{task_id}"),
-            middleware=live.middleware,
-        )
+        with tool_runtime_context(replace(context, tool_calls_shown=False)):
+            result = await run_tool_call(
+                function,
+                json.loads(arguments_text),
+                replace(live.context, call_id=f"scheduled-{task_id}"),
+                middleware=live.middleware,
+            )
     await manager.record_scheduled_call_outcome(task_id, "completed" if result.succeeded else "failed")
     if result.error is not None:
         return ToolOutcome(content=f"❌ Scheduled call `{task_id}` failed: {result.failure_text}", is_error=True)

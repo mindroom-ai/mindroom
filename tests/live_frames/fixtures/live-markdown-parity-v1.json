@@ -71,6 +71,46 @@
       "name": "horizontal rule and setext",
       "md": "Title\n===\n\n---\n\nafter",
       "html": "<h1>Title</h1>\n<hr>\n<p>after</p>\n"
+    },
+    {
+      "name": "inline title tag then markdown",
+      "md": "Use the \"<title>\" tag for `head`\n\n1. first\n2. *second*",
+      "html": "<p>Use the &quot;&lt;title&gt;&quot; tag for <code>head</code></p>\n<ol>\n<li>first</li>\n<li><em>second</em></li>\n</ol>\n"
+    },
+    {
+      "name": "inline script and textarea tags",
+      "md": "Run <script>go()</script> then **bold** <textarea>note *x*</textarea> `y`",
+      "html": "<p>Run &lt;script&gt;go()&lt;/script&gt; then <strong>bold</strong> &lt;textarea&gt;note <em>x</em>&lt;/textarea&gt; <code>y</code></p>\n"
+    },
+    {
+      "name": "allowed inline tag unchanged",
+      "md": "H<sub>2</sub>O and x<sup>2</sup> stay",
+      "html": "<p>H<sub>2</sub>O and x<sup>2</sup> stay</p>\n"
+    },
+    {
+      "name": "list item opening with title tag",
+      "md": "- <title> labels the tab\n- second\n\n**After** the list",
+      "html": "<ul>\n<li>\n&lt;title&gt; labels the tab\n</li>\n<li>second</li>\n</ul>\n<p><strong>After</strong> the list</p>\n"
+    },
+    {
+      "name": "quote opening with title tag",
+      "md": "> <title> names the page\n\n*After* the `quote`",
+      "html": "<blockquote>\n&lt;title&gt; names the page\n</blockquote>\n<p><em>After</em> the <code>quote</code></p>\n"
+    },
+    {
+      "name": "quote with extra space before title tag",
+      "md": ">  <title> labels the tab\n\n**After**",
+      "html": "<blockquote>\n &lt;title&gt; labels the tab\n</blockquote>\n<p><strong>After</strong></p>\n"
+    },
+    {
+      "name": "quote with title tags then allowed tag",
+      "md": "> <title></title> <strong>kept</strong>",
+      "html": "<blockquote>\n&lt;title&gt;&lt;/title&gt; <strong>kept</strong></blockquote>\n"
+    },
+    {
+      "name": "title tag inside block html",
+      "md": "<p>a <title> b</p>",
+      "html": "<p>a &lt;title&gt; b</p>"
     }
   ]
 }

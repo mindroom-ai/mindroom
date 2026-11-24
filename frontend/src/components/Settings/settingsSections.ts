@@ -72,7 +72,7 @@ const SETTINGS_SECTIONS: readonly SettingsSection[] = [
           "num_history_messages",
           "max_tool_calls_from_history",
           "compaction",
-          "max_preload_chars",
+          "max_preload_file_chars",
           "thread_summary_model",
           "thread_summary_temperature",
           "thread_summary_first_threshold",
@@ -99,6 +99,12 @@ const SETTINGS_SECTIONS: readonly SettingsSection[] = [
         ],
       },
     ],
+  },
+  {
+    id: "search",
+    title: "Search",
+    description: "How knowledge and memory searches rank their results.",
+    entries: [{ root: "reranker" }],
   },
   {
     id: "router",
@@ -154,13 +160,14 @@ const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     id: "access",
     title: "Access and identity",
     description:
-      "Administrators, permissions, and accounts MindRoom treats specially.",
+      "Administrators, permissions, email invites, and accounts MindRoom treats specially.",
     entries: [
       { root: "administrators" },
       { root: "authorization" },
       { root: "bot_accounts" },
       { root: "mindroom_user" },
       { root: "external_trigger_policy" },
+      { root: "email_invites" },
       { root: "slack" },
     ],
   },

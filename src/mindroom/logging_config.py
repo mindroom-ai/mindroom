@@ -21,7 +21,9 @@ import structlog
 from mindroom.redaction import redact_log_event, redact_sensitive_text
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from contextlib import AbstractContextManager
+    from types import TracebackType
     from typing import TextIO
 
     from structlog.typing import ExceptionRenderer, ExcInfo, Processor
@@ -37,6 +39,7 @@ __all__ = [
     "setup_logging",
     "setup_subprocess_logging",
     "subprocess_logging_env",
+    "use_library_logging",
     "uses_default_logging",
 ]
 
@@ -94,6 +97,31 @@ class _Mem0KeywordSearchFilter(logging.Filter):
         )
 
 
+def _scrub_request_record(record: logging.LogRecord) -> bool:
+    """Keep the query, headers, and frame contents of uvicorn's requests out of its records, since they can carry secrets.
+
+    Returns False for each raw WebSocket traffic record, whether or not it carries such data, and True for every other
+    record, its query cut.
+    """
+    message = record.msg if isinstance(record.msg, str) else ""
+    # The websockets library logs each raw handshake line, header, and frame on uvicorn's error logger at DEBUG.
+    if message.startswith(("< ", "> ")):
+        return False
+    # Uvicorn logs each HTTP request's target, its path with query, as the third argument of an access line,
+    # and each WebSocket handshake's as the second argument of a `WebSocket` line on its error logger.
+    if record.name == "uvicorn.access":
+        target = 2
+    elif message.startswith('%s - "WebSocket %s"'):
+        target = 1
+    else:
+        return True
+    if isinstance(record.args, tuple) and len(record.args) > target:
+        args = list(record.args)
+        args[target] = str(args[target]).partition("?")[0]
+        record.args = tuple(args)
+    return True
+
+
 class _AgnoLevelFilter(logging.Filter):
     """Drop records below the level MindRoom resolved for one Agno logger."""
 
@@ -138,10 +166,25 @@ def _redact_log_event_preserving_exc_info(
     return redacted
 
 
+def _hand_rendered_line_to_logger(
+    logger: object,
+    _method_name: str,
+    line: str,
+) -> str | tuple[tuple[str], dict[str, None]]:
+    """Hand a stdlib logger the rendered line without the exception, whose traceback the line already holds.
+
+    Library logging hands every line to a stdlib logger, and a program can also set structlog's stdlib logger factory
+    and keep these processors; `logging.Logger.exception` logs the current exception again unless told there is none.
+    """
+    if isinstance(logger, logging.Logger):
+        return (line,), {"exc_info": None}
+    return line
+
+
 # structlog's builtin console renderer prints Rich tracebacks with every frame's
 # locals: resolved config, credentials, subprocess environments. Processes that
 # never call `setup_logging`, such as subprocess entrypoints and the sandbox
-# runner, log through these processors instead.
+# runner, log through these processors instead, and so does library logging.
 _DEFAULT_PROCESSORS: list[Processor] = [
     structlog.contextvars.merge_contextvars,
     structlog.processors.add_log_level,
@@ -153,7 +196,27 @@ _DEFAULT_PROCESSORS: list[Processor] = [
         colors=False,
         exception_formatter=_RedactingExceptionFormatter(structlog.dev.plain_traceback),
     ),
+    cast("Processor", _hand_rendered_line_to_logger),
 ]
+
+
+# MindRoom's own processors for library logging, which skip each record below its stdlib logger's level first.
+_LIBRARY_PROCESSORS: list[Processor] = [
+    structlog.stdlib.filter_by_level,
+    structlog.stdlib.PositionalArgumentsFormatter(),
+    *_DEFAULT_PROCESSORS,
+]
+_library_logging = False
+
+
+def use_library_logging() -> None:
+    """Hand MindRoom's records to stdlib logging, where the program's own logging setup decides what shows.
+
+    MindRoom's records keep `_DEFAULT_PROCESSORS`' rendering and redaction, whatever the program configures structlog
+    to do. Until the program configures stdlib logging, Python prints only warnings and errors, on stderr.
+    """
+    global _library_logging
+    _library_logging = True
 
 
 def configure_default_logging() -> None:
@@ -222,7 +285,7 @@ def _build_logger_levels(
 
 
 # Several minutes of busy logging at tens of records a second, in a few tens of megabytes at most.
-_MAX_QUEUED_LOG_FILE_RECORDS = 10_000
+_MAX_QUEUED_LOG_RECORDS = 10_000
 
 
 class _LogFile(logging.FileHandler):
@@ -236,40 +299,52 @@ class _LogFile(logging.FileHandler):
             self.handleError(record)
 
 
-class _QueuedFileHandler(logging.handlers.QueueHandler):
-    """Format records on the logging thread and append them to the log file from a writer thread.
+class _QueuedLogHandler(logging.handlers.QueueHandler):
+    """Format records on the logging thread and write them to stderr or the log file from a writer thread.
 
-    A log directory on a network file system can stall writes for minutes, and a write on the event loop would stall
-    every agent with it. Formatting stays on the logging thread, so records keep their bound context and timestamps.
+    A slow stderr reader, such as journald or a container log driver under load, or a log directory on a network file
+    system can stall writes for seconds to minutes, and a write on the event loop would stall every agent with it.
+    Formatting stays on the logging thread, so records keep their bound context and timestamps.
     The queue is capped so a long stall cannot grow memory without limit: from the cap until the writer has caught up,
-    records skip the file only, stderr still gets them, and a note in the file says how many it skipped.
+    records skip the stalled output only, the other output still gets them, and a note there says how many it skipped.
     """
 
-    def __init__(self, filename: str, mode: str, encoding: str) -> None:
+    def __init__(self, target: logging.Handler, output: str) -> None:
         # Unlike `queue.Queue`, `SimpleQueue` is reentrant, so a finalizer that logs during a put cannot deadlock it.
         super().__init__(queue.SimpleQueue())
-        self._file = _LogFile(filename, mode=mode, encoding=encoding)
+        self._target = target
+        self.output = output
         self._dropped_records = 0
         # A later `dictConfig`, such as uvicorn's, drops this handler from the list `logging.shutdown` closes at exit.
         atexit.register(self.close)
 
+    @classmethod
+    def to_file(cls, filename: str, mode: str, encoding: str) -> _QueuedLogHandler:
+        """Queue records for a log file."""
+        return cls(_LogFile(filename, mode=mode, encoding=encoding), "log file")
+
+    @classmethod
+    def to_stderr(cls, stream: TextIO) -> _QueuedLogHandler:
+        """Queue records for stderr."""
+        return cls(logging.StreamHandler(stream), "stderr")
+
     def enqueue(self, record: logging.LogRecord) -> None:
         """Queue the formatted record, or count it as dropped from the cap until the writer has caught up."""
         queued_records = cast("queue.SimpleQueue[logging.LogRecord]", self.queue).qsize()
-        if queued_records >= _MAX_QUEUED_LOG_FILE_RECORDS or (self._dropped_records and queued_records):
+        if queued_records >= _MAX_QUEUED_LOG_RECORDS or (self._dropped_records and queued_records):
             self._dropped_records += 1
             return
         if self.listener is None:
             # Any `dictConfig` closes every handler, even one it leaves on the root logger, and a closed `FileHandler`
             # reopens on its next record; this writer starts again the same way.
-            listener = logging.handlers.QueueListener(self.queue, self._file)
+            listener = logging.handlers.QueueListener(self.queue, self._target)
             listener.start()
             self.listener = listener
         self._queue_dropped_records_note()
         self.queue.put_nowait(record)
 
     def _queue_dropped_records_note(self) -> None:
-        """Queue a note where the file skipped records, if it skipped any since the last note."""
+        """Queue a note where the output skipped records, if it skipped any since the last note."""
         if not self._dropped_records:
             return
         note = logging.makeLogRecord(
@@ -277,7 +352,8 @@ class _QueuedFileHandler(logging.handlers.QueueHandler):
                 "name": __name__,
                 "levelno": logging.WARNING,
                 "levelname": "WARNING",
-                "msg": "Log file dropped records while its writes were stalled",
+                "msg": "Log output dropped records while its writes were stalled",
+                "log_output": self.output,
                 "dropped_records": self._dropped_records,
             },
         )
@@ -285,18 +361,41 @@ class _QueuedFileHandler(logging.handlers.QueueHandler):
         # An empty context keeps the bound fields of whichever task logged next off the note.
         self.queue.put_nowait(contextvars.Context().run(self.prepare, note))
 
-    def close(self) -> None:
-        """Write every queued record, then close the file."""
+    def flush(self) -> None:
+        """Write every queued record; the next record starts the writer again."""
         self.acquire()
         try:
             if self.listener is not None:
                 self._queue_dropped_records_note()
                 self.listener.stop()
                 self.listener = None
-            self._file.close()
         finally:
             self.release()
+
+    def close(self) -> None:
+        """Write every queued record, then close the output."""
+        self.flush()
+        self._target.close()
         super().close()
+
+
+def _flush_logs_before_excepthook(
+    exc_type: type[BaseException],
+    exc: BaseException,
+    tb: TracebackType | None,
+) -> None:
+    """Write queued stderr records before the traceback of an uncaught exception, which would otherwise come first.
+
+    The log file drains at exit, so a stalled file cannot hold back the traceback.
+    """
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, _QueuedLogHandler) and handler.output == "stderr":
+            handler.flush()
+    assert _previous_excepthook is not None
+    _previous_excepthook(exc_type, exc, tb)
+
+
+_previous_excepthook: Callable[[type[BaseException], BaseException, TracebackType | None], object] | None = None
 
 
 _current_log_file: Path | None = None
@@ -407,7 +506,7 @@ def _configure_logging(*, level: str, log_file: Path | None) -> str:
     handlers: dict[str, dict[str, object]] = {
         "console": {
             "level": handler_level,
-            "class": "logging.StreamHandler",
+            "()": _QueuedLogHandler.to_stderr,
             "stream": "ext://sys.stderr",
             "formatter": renderer_name,
             "filters": ["nio_validation", "mem0_keyword_search"],
@@ -416,7 +515,7 @@ def _configure_logging(*, level: str, log_file: Path | None) -> str:
     if log_file is not None:
         handlers["file"] = {
             "level": handler_level,
-            "()": _QueuedFileHandler,
+            "()": _QueuedLogHandler.to_file,
             "filename": str(log_file),
             "mode": "a",
             "encoding": "utf-8",
@@ -477,6 +576,10 @@ def _configure_logging(*, level: str, log_file: Path | None) -> str:
         cache_logger_on_first_use=True,
     )
     _route_agno_loggers_to_root(loggers)
+    global _previous_excepthook
+    if _previous_excepthook is None:
+        # Once is enough: Typer installs its own hook before running the command that sets up logging.
+        _previous_excepthook, sys.excepthook = sys.excepthook, _flush_logs_before_excepthook
     return renderer_name
 
 
@@ -519,6 +622,25 @@ def exception_frames(error: BaseException) -> list[str]:
     ]
 
 
+class _Logger:
+    """A logger that follows structlog's configuration, or after `use_library_logging` MindRoom's own processors."""
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+        self._configured_logger = structlog.get_logger(name)
+
+    def __reduce__(self) -> tuple[type[_Logger], tuple[str]]:
+        """Pickle and copy by name, since `__getattr__` cannot serve a copy whose attributes are not set yet."""
+        return _Logger, (self._name,)
+
+    def __getattr__(self, attribute: str) -> object:
+        if _library_logging:
+            # Built here rather than from structlog's configuration, which the program owns and may set to anything.
+            logger = structlog.stdlib.BoundLogger(logging.getLogger(self._name), _LIBRARY_PROCESSORS, {})
+            return getattr(logger, attribute)
+        return getattr(self._configured_logger, attribute)
+
+
 def get_logger(name: str = __name__) -> structlog.stdlib.BoundLogger:
     """Get a structlog logger instance.
 
@@ -526,10 +648,10 @@ def get_logger(name: str = __name__) -> structlog.stdlib.BoundLogger:
         name: Logger name (typically __name__)
 
     Returns:
-        Configured structlog logger
+        A structlog logger, which logs through MindRoom's own processors after `use_library_logging`
 
     """
-    return structlog.get_logger(name)
+    return cast("structlog.stdlib.BoundLogger", _Logger(name))
 
 
 def bound_log_context(**context: object) -> AbstractContextManager[None]:
@@ -539,3 +661,7 @@ def bound_log_context(**context: object) -> AbstractContextManager[None]:
 
 if not structlog.is_configured():
     configure_default_logging()
+# A logger's filters outlast every later `dictConfig`, such as the one each uvicorn server runs as it starts,
+# so every server in a process that imports this module keeps these.
+logging.getLogger("uvicorn.access").addFilter(_scrub_request_record)
+logging.getLogger("uvicorn.error").addFilter(_scrub_request_record)

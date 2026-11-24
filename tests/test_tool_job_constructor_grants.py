@@ -13,7 +13,7 @@ from mindroom.config.models import ToolConfigEntry
 from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.resources import execution_resources
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError
+from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError, register_background_runtime
 from mindroom.tool_system.agno_toolkits import toolkit_function_names
 from mindroom.tool_system.construction import tool_config_signature
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -45,13 +45,8 @@ pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 @pytest.mark.parametrize(
     ("toolkit_name", "function_name", "flag", "arguments"),
     [
-        ("file", "save_file", "enable_save_file", {"file_name": "nested.txt", "contents": "accepted"}),
-        (
-            "shell",
-            "run_shell_command",
-            "enable_run_shell_command",
-            {"args": ["sh", "-c", "printf accepted > nested.txt"]},
-        ),
+        ("filesystem", "delete_file", "enable_delete_file", {"path": "doomed.txt"}),
+        ("shell", "run_shell_command", "enable_run_shell_command", {"args": ["rm", "doomed.txt"]}),
     ],
 )
 async def test_retained_tool_constructor_grants_gate_nested_execution_and_results(  # noqa: PLR0915
@@ -67,6 +62,7 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
 
     The refused nested call fails as that call, so the outer work reports it.
     """
+    (tmp_path / "doomed.txt").write_text("kept")
     config = managed_team_config(tmp_path)
     config.defaults.tools = []
     entry = ToolConfigEntry(name=toolkit_name, defer=deferred, overrides={flag: True})
@@ -98,15 +94,17 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
         started.set()
         await release.wait()
         try:
-            record = await run_job_turn(actor, model, "Write the marker", session_id=owner.session_id or "session")
+            record = await run_job_turn(actor, model, "Delete the marker", session_id=owner.session_id or "session")
             [nested] = record.tools or []
             return BackgroundOutcome("failed" if nested.is_error else "completed", str(nested.result))
         finally:
             finished.set()
 
     try:
-        await coordinator.sync()
+        # No background worker: its revocation pass would race the nested gate this test pins and may cancel the job.
+        await coordinator.initialize()
         runtime = coordinator.runtime
+        register_background_runtime(paths, runtime)
         async with execution_resources():
             with tool_runtime_context(context):
                 job, claim = await runtime.start(
@@ -134,14 +132,14 @@ async def test_retained_tool_constructor_grants_gate_nested_execution_and_result
                 release.set()
                 await asyncio.wait_for(finished.wait(), JOB_TEST_TIMEOUT)
                 if revoked:
-                    assert not (tmp_path / "nested.txt").exists()
+                    assert (tmp_path / "doomed.txt").exists()
                     assert await runtime.list_jobs(owner=owner, depth=0) == []
                     assert pending_outcome(runtime, job.job_id) is None
                     with pytest.raises(JobAccessError):
                         await lookup(runtime, job.job_id, owner=owner, depth=0)
                     entry.overrides[flag] = True
                 else:
-                    assert (tmp_path / "nested.txt").read_text() == "accepted"
+                    assert not (tmp_path / "doomed.txt").exists()
                 waited = await runtime.wait(job.job_id, owner=owner, depth=0, claim=claim)
                 if revoked:
                     assert waited.job.status == "failed"

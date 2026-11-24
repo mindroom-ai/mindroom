@@ -8,7 +8,8 @@ This page covers opening the dashboard, what each tab does, saving and conflict 
 
 **Standalone:** run `mindroom run` and open `http://localhost:8765`.
 When running from a source checkout, MindRoom builds the dashboard assets on first start if Bun is available.
-When `MINDROOM_API_KEY` is set, the dashboard first asks for that key, and the login page shows which `.env` file holds it.
+When `MINDROOM_API_KEY` is set, the dashboard first asks for that key, and the login page points to the `.env` file when the key comes from `.env`, or to the service environment when supplied through the process environment.
+When `MINDROOM_PUBLIC_URL` is an HTTPS address, sign in to the dashboard through that address, because the dashboard does not work through a plain-HTTP address of the same server.
 See [Authorization](https://docs.mindroom.chat/authorization/#dashboard-configuration) for who can open the dashboard and [Environment Variables](https://docs.mindroom.chat/configuration/#dashboard-and-api) for the related settings.
 
 **SaaS platform:** open `https://<instance-id>.mindroom.chat`.
@@ -58,7 +59,7 @@ The exported JSON summary lists counts, agents, rooms, teams, and model configur
 ### Schedules
 
 Lists scheduled tasks across rooms with room, status, schedule type, delivery mode, and next run time.
-A room whose schedules cannot be read, for example because the router is not in it, is named above the list with the reason, and the home tab counts it, instead of showing as empty.
+A room whose schedules cannot be read, for example because no running agent has joined it, is named above the list with the reason, and the home tab counts it, instead of showing as empty.
 You can edit a task's timing, description, and visible or silent delivery, or cancel it.
 See [Scheduling](https://docs.mindroom.chat/scheduling/).
 
@@ -73,6 +74,9 @@ Add and edit models with provider, model ID, host URL, and advanced settings, an
 A row's **Save** only updates the draft; click **Save All Changes** to write model changes to `config.yaml`.
 The add-model dropdown does not have a preset for every supported provider, but the dashboard keeps any provider already in the configuration.
 A model's **More settings** section appears below the table while its row is being edited, and **Cancel** on the row also reverts More settings changes made since the last save.
+Saving a row whose provider changed keeps the model's provider-neutral fields, such as its display name, icon, context window, and pricing, and only the `extra_kwargs` values changed in More settings during that edit.
+It drops every other `extra_kwargs` key, even one More settings still shows, including sampling options such as `temperature` and `max_tokens`, and the model's existing API key, so after saving, edit the row again and add back the options you need in More settings.
+Switching back to the original provider before saving keeps the model's saved settings.
 See [Models](https://docs.mindroom.chat/configuration/models/) for providers and fields.
 
 ### Usage

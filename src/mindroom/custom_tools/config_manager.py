@@ -13,7 +13,6 @@ from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError, model_va
 
 from mindroom.api.config_lifecycle import commit_config
 from mindroom.authorization import (
-    is_platform_administrator,
     is_sender_allowed_for_agent_credential_management,
     responder_candidate_entities_from_cached_room,
 )
@@ -25,14 +24,16 @@ from mindroom.config.main import (
     format_invalid_config_message,
     load_config_or_user_error,
 )
-from mindroom.config.models import ToolConfigEntry
+from mindroom.config.models import ToolConfigEntry, unsupported_level_message
 from mindroom.config.schema_hints import redaction_marker_location
+from mindroom.config.tool_aliases import canonical_tool_name, canonical_tool_names
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.logging_config import get_logger
 from mindroom.oauth import oauth_connect_url_requires_host_browser
 from mindroom.oauth.credential_lifecycle import oauth_credentials_worker_target
 from mindroom.oauth.service import oauth_connect_url
 from mindroom.redaction import REDACTED, redact_sensitive_text
+from mindroom.requester_identity import is_platform_administrator
 from mindroom.runtime_resolution import resolve_agent_execution
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.catalog import ToolCategory, ToolStatus
@@ -284,7 +285,8 @@ def preserve_tool_overrides(
 ) -> list[ToolConfigEntry]:
     """Keep inline overrides for retained tools during string-only tool-list edits."""
     existing_by_name = {entry.name: entry for entry in existing_entries}
-    return [existing_by_name.get(tool_name, ToolConfigEntry(name=tool_name)) for tool_name in updated_tool_names]
+    names = canonical_tool_names(updated_tool_names)
+    return [existing_by_name.get(tool_name, ToolConfigEntry(name=tool_name)) for tool_name in names]
 
 
 def validate_knowledge_bases(
@@ -808,6 +810,7 @@ class ConfigManagerTools(Toolkit):
         )
         if marker_error is not None:
             return marker_error
+        tools = None if tools is None else canonical_tool_names(tools)
 
         if operation == "update":
             return self._update_agent_config(
@@ -1100,6 +1103,7 @@ class ConfigManagerTools(Toolkit):
             return load_error
         assert tool_metadata is not None
 
+        tool_name = canonical_tool_name(tool_name)
         if tool_name not in tool_metadata:
             available = ", ".join(sorted(tool_metadata.keys()))
             return f"Unknown tool: {tool_name}\n\nAvailable tools: {available}"
@@ -1391,9 +1395,11 @@ class ConfigManagerTools(Toolkit):
                 issues.append(f"Invalid tools: {', '.join(invalid_tools)}")
 
         # Check model
-        available_models = list(config.models.keys()) if config.models else []
-        if available_models and agent.model not in available_models:
-            warnings.append(f"Model '{agent.model}' not in configured models: {', '.join(available_models)}")
+        if config.models and agent.model not in config.models:
+            warnings.append(
+                unsupported_level_message(config.models, agent.model)
+                or f"Model '{agent.model}' not in configured models: {', '.join(config.models)}",
+            )
 
         # Format results
         output = [f"## Validation Results for '{agent_name}':\n"]

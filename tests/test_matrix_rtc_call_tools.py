@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import threading
+import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -17,7 +20,7 @@ from agno.tools.function import Function, ToolResult
 from agno.tools.toolkit import Toolkit
 
 from mindroom.agent_loop.build import AgentBuild, AgentSurface, prompt_for_turn
-from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, PromptSpec
+from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, MATRIX_MARKDOWN_OUTPUT_FORMAT, PromptSpec
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import offered_toolkits
 from mindroom.agents import create_agent
@@ -56,6 +59,7 @@ from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.session_storage.store import ConversationStore
+from mindroom.shell.background_scope import ShellBackgroundScope
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
@@ -86,9 +90,9 @@ from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-    from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.history.interrupted_replay import InterruptedReplaySnapshot
     from mindroom.llm.provider import TokenCounter
     from mindroom.response_turn import ResponseTurnContext, TurnSinks
     from mindroom.session_storage.types import ConversationSession
@@ -107,6 +111,20 @@ _EMPTY_SCHEMA = {"type": "object", "properties": {}}
 async def _authorized_call_operation() -> AsyncIterator[bool]:
     """Model a live admitted caller for call-tool unit tests."""
     yield True
+
+
+def _interruption(run_id: str, snapshot: InterruptedReplaySnapshot) -> dict[str, object]:
+    """Return what a call stores of an interrupted reply: its run and the facts of its record."""
+    return {
+        "run_id": run_id,
+        "user_message": snapshot.user_message,
+        "user_message_is_structured": snapshot.user_message_is_structured,
+        "partial_text": snapshot.partial_text,
+        "completed_tools": snapshot.completed_tools,
+        "interrupted_tools": snapshot.interrupted_tools,
+        "run_metadata": snapshot.run_metadata,
+        "original_status": snapshot.original_status,
+    }
 
 
 async def _unconnected() -> None:
@@ -207,13 +225,22 @@ def _build(*toolkits: Toolkit, policy: tuple[ToolMiddleware, ...] = (), role: st
 
 
 def test_a_call_s_build_leaves_out_the_chat_s_markdown_format() -> None:
-    """A call speaks its replies, so its build drops the Markdown line the chat prompt states."""
+    """A call speaks its replies, so its build drops the Markdown block the chat prompt states."""
     build = _build()
-    chat = replace(build, prompt=replace(build.prompt, markdown=True, turn_context="Today."))
+    chat = replace(
+        build,
+        prompt=replace(
+            build.prompt,
+            markdown=True,
+            markdown_format=MATRIX_MARKDOWN_OUTPUT_FORMAT,
+            turn_context="Today.",
+        ),
+    )
 
-    assert MARKDOWN_OUTPUT_FORMAT in system_text(prompt_for_turn(chat))
+    assert MATRIX_MARKDOWN_OUTPUT_FORMAT in system_text(prompt_for_turn(chat))
     instructions = _call_instructions(_spoken(chat))
     assert MARKDOWN_OUTPUT_FORMAT not in instructions
+    assert MATRIX_MARKDOWN_OUTPUT_FORMAT not in instructions
     assert instructions == "<your_role>\nTHE CHAT ROLE\n</your_role>\n\nToday."
 
 
@@ -230,6 +257,7 @@ def _wrap(function: Function, *, middleware: tuple[ToolMiddleware, ...] = ()):  
         agent_name=AGENT,
         authorize_operation=_authorized_call_operation,
         usage_owner=_USAGE_OWNER,
+        shell_scope=ShellBackgroundScope(),
         connect=_unconnected,
     )
 
@@ -331,6 +359,7 @@ async def test_realtime_call_tool_does_not_run_after_authorization_is_revoked() 
         agent_name=AGENT,
         authorize_operation=denied_operation,
         usage_owner=_USAGE_OWNER,
+        shell_scope=ShellBackgroundScope(),
         connect=_unconnected,
     )
 
@@ -371,7 +400,8 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
     chat_functions = _functions(chat_build)
 
     assert list(call_functions) == list(chat_functions)
-    assert MARKDOWN_OUTPUT_FORMAT in system_text(prompt_for_turn(chat_build))
+    assert MATRIX_MARKDOWN_OUTPUT_FORMAT in system_text(prompt_for_turn(chat_build))
+    assert MATRIX_MARKDOWN_OUTPUT_FORMAT not in system_text(prompt_for_turn(call_build))
     assert system_text(prompt_for_turn(call_build)) == system_text(
         prompt_for_turn(replace(chat_build, prompt=replace(chat_build.prompt, markdown=False))),
     )
@@ -764,6 +794,44 @@ async def test_call_responder_prepares_full_requester_prompt_before_first_turn(
 
 
 @pytest.mark.asyncio
+async def test_each_transcript_of_a_call_runs_its_tools_under_a_turn_id_of_its_own(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call's transcripts are separate turns, so the tool calls of each carry a turn ID the other's do not."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _ollama_config(runtime_paths)
+    turn_ids: list[str | None] = []
+
+    async def respond(*_args: object, **_kwargs: object) -> TurnResult:
+        turn_ids.append(_bound_tool_context().turn_id)
+        return TurnResult("Sure.")
+
+    monkeypatch.setattr("mindroom.ai.ai_response", respond)
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=_tool_support(config, runtime_paths),
+        room_id="!call:example.org",
+        requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
+        enable_responder=True,
+        reconcile_spoken_response=False,
+    )
+    assert tooling.close is not None
+    try:
+        assert tooling.responder is not None
+        await tooling.responder("What time is it?", None)
+        await tooling.responder("And the weather?", None)
+    finally:
+        await tooling.close()
+
+    assert len(turn_ids) == 2
+    assert len(set(turn_ids) - {None}) == 2
+
+
+@pytest.mark.asyncio
 async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -984,13 +1052,21 @@ async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_function
     call_store = ConversationStore(tmp_path / "call.db")
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_session_storage", lambda *_args: call_store)
 
-    def record_interruption(*, storage: ConversationStore, session: ConversationSession, **kwargs: object) -> None:
+    def record_interruption(
+        *,
+        storage: ConversationStore,
+        session: ConversationSession,
+        run_id: str,
+        snapshot: InterruptedReplaySnapshot,
+    ) -> None:
         assert storage is call_store
         # The interrupted run is written in the database's lane, behind the conversation's other storage work.
         assert threading.current_thread().name.startswith("conversation-store")
-        persisted_interruptions.append({"session": (session.session_id, session.kind, session.owner_id), **kwargs})
+        persisted_interruptions.append(
+            {"session": (session.session_id, session.kind, session.owner_id), **_interruption(run_id, snapshot)},
+        )
 
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.persist_interrupted_replay", record_interruption)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.persist_interrupted_replay_snapshot", record_interruption)
     if not reconcile_spoken_response:
         monkeypatch.setattr(
             "mindroom.matrix_rtc.call_tools._CallResponseTracker.register",
@@ -1222,8 +1298,10 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
         AsyncMock(return_value=SimpleNamespace(knowledge=None, unavailable=())),
     )
     monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.persist_interrupted_replay",
-        lambda **kwargs: persisted_interruptions.append(kwargs),
+        "mindroom.matrix_rtc.call_tools.persist_interrupted_replay_snapshot",
+        lambda *, session, run_id, snapshot, **_: persisted_interruptions.append(
+            {"session": session, **_interruption(run_id, snapshot)},
+        ),
     )
 
     tooling = await build_call_tools(
@@ -1310,8 +1388,10 @@ async def test_cascaded_cancellation_during_knowledge_resolution_persists_transc
         blocked_resolution,
     )
     monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.persist_interrupted_replay",
-        lambda **kwargs: persisted_interruptions.append(kwargs),
+        "mindroom.matrix_rtc.call_tools.persist_interrupted_replay_snapshot",
+        lambda *, session, run_id, snapshot, **_: persisted_interruptions.append(
+            {"session": session, **_interruption(run_id, snapshot)},
+        ),
     )
     tooling = await build_call_tools(
         agent_name=AGENT,
@@ -1468,6 +1548,54 @@ def _completed_run_state(run_id: str) -> _CallAgentRunState:
         outcome="completed",
         original_status=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_realtime_tooling_finishes_its_agent_build_first(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call that stops while its realtime agent is built waits for the build, so no build outlives the call."""
+    config = Config(agents={AGENT: AgentConfig(display_name="Helper")})
+    runtime_paths = test_runtime_paths(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked_create_agent(*_args: object, **_kwargs: object) -> AgentBuild:
+        started.set()
+        release.wait(timeout=5)
+        return _build()
+
+    class ToolSupport:
+        def build_context(self, target: MessageTarget, **_kwargs: object) -> ToolRuntimeContext:
+            return _runtime_context(config=config, runtime_paths=runtime_paths, target=target)
+
+    async def resolve_knowledge(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(knowledge=None, unavailable={})
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async", resolve_knowledge)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", blocked_create_agent)
+    building = asyncio.create_task(
+        build_call_tools(
+            agent_name=AGENT,
+            config=config,
+            runtime_paths=runtime_paths,
+            tool_support=ToolSupport(),  # type: ignore[arg-type]
+            room_id="!room:example.org",
+            requester_id=REQUESTER,
+            authorize_operation=_authorized_call_operation,
+        ),
+    )
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        building.cancel()
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert not building.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(building, timeout=5)
 
 
 @pytest.mark.asyncio
@@ -2077,7 +2205,7 @@ async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
     )
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=_build()))
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.persist_interrupted_replay", persist_interrupted)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.persist_interrupted_replay_snapshot", persist_interrupted)
     tooling = await build_call_tools(
         agent_name=AGENT,
         config=config,
@@ -2244,26 +2372,6 @@ async def test_build_call_tools_hides_offered_functions_needing_text_chat(
 
 
 @pytest.mark.asyncio
-async def test_build_call_tools_keeps_builtin_invite_router_under_approval_policy(tmp_path: Path) -> None:
-    """Voice recovery must stay callable when global policy requires approval for everything else."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    config = _ollama_config(runtime_paths, tools=["calculator"])
-    config.tool_approval = ToolApprovalConfig(default="require_approval")
-
-    tooling = await build_call_tools(
-        agent_name=AGENT,
-        config=config,
-        runtime_paths=runtime_paths,
-        tool_support=_tool_support(config, runtime_paths),  # type: ignore[arg-type]
-        room_id="!room:example.org",
-        requester_id=REQUESTER,
-        authorize_operation=_authorized_call_operation,
-    )
-
-    assert _tool_names(tooling.tools) == ["invite_router"]
-
-
-@pytest.mark.asyncio
 async def test_build_call_tools_requires_runtime_context(tmp_path: Path) -> None:
     """Voice cannot silently downgrade when same-agent tool context is unavailable."""
     tool_support = SimpleNamespace(build_context=lambda *_a, **_k: None)
@@ -2313,3 +2421,70 @@ def test_an_interrupted_voice_reply_drops_the_tools_its_fold_summarized() -> Non
 
     assert state.run_metadata["source"] == "voice"
     assert [tool.tool_call_id for tool in state.completed_tools] == ["after"]
+
+
+@pytest.mark.asyncio
+async def test_realtime_call_tools_bind_shell_background_scope_and_close_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Realtime call tools run inside a ShellBackgroundScope that tooling.close() stops alongside toolkits."""
+    from mindroom.shell.background_scope import (  # noqa: PLC0415
+        BackgroundLogPolicy,
+        ShellBackgroundScope,
+        current_shell_background_scope,
+    )
+    from mindroom.shell.execution import run_command  # noqa: PLC0415
+
+    log: list[str] = []
+    observed: dict[str, Any] = {}
+
+    async def run_bg() -> str:
+        scope = current_shell_background_scope()
+        assert isinstance(scope, ShellBackgroundScope)
+        result = await run_command(
+            scope.records,
+            namespace=f"shell-scope:{scope.scope_id}",
+            argv=["bash", "-c", "echo voice-start; sleep 30"],
+            env=dict(os.environ),
+            cwd=str(tmp_path),
+            tail=10,
+            timeout=0.15,
+            on_timeout="background",
+            background_log=BackgroundLogPolicy(log_dir=str(tmp_path / "logs")),
+        )
+        assert result.handle is not None
+        record = scope.records[result.handle]
+        observed["scope"] = scope
+        observed["pid"] = record.pid
+        observed["log_path"] = record._log_path
+        return result.message
+
+    build = _connected_build(log, runner=("run_bg", run_bg))
+    tooling = await _call_tools_over(build, tmp_path, monkeypatch)
+    tools = dict(zip(_tool_names(tooling.tools), tooling.tools, strict=True))
+
+    output = await tools["run_bg"]({})
+    assert "Still running" in output
+    scope = observed["scope"]
+    pid = observed["pid"]
+    os.kill(pid, 0)
+    assert not scope.closed
+    assert len(scope.records) == 1
+
+    assert tooling.close is not None
+    await tooling.close()
+
+    assert scope.closed
+    assert scope.records == {}
+    assert log == ["runner connect", "runner close"]
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        await asyncio.sleep(0.02)
+    else:
+        pytest.fail(f"Process {pid} remained alive after tooling.close()")
+    assert "[MindRoom: stopped when turn ended]" in Path(observed["log_path"]).read_text(encoding="utf-8")

@@ -23,7 +23,7 @@ from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationChild, Del
 from mindroom.helper_usage import get_helper_usage_owner
 from mindroom.history import storage as history_storage
 from mindroom.history.interrupted_replay import NO_TURN_INPUT, TurnInput
-from mindroom.history.session_context import ScopeSessionContext
+from mindroom.history.session_context import ScopeSessionContext, load_scrubbed_scope_session
 from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message
@@ -683,10 +683,7 @@ async def test_history_cleanup_repeats_until_a_pass_removes_nothing_new(monkeypa
         storage_factory=lambda: Mock(spec=ConversationStore),
     )
 
-    await response_turn_module._remove_history_of_redacted_events(
-        _ctx(redacted_history_events=redacted_history_events),
-        scope_context,
-    )
+    await load_scrubbed_scope_session(lambda: scope_context, redacted_history_events)
 
     # The third pass still sees "$z" but has nothing new to remove, so it stops.
     assert removed == ["$x", "$z"]
@@ -1232,8 +1229,8 @@ def test_an_empty_run_s_metadata_stays_out_of_collector() -> None:
     """An empty run's payload must not ride out on a later resolution.
 
     The retry's resolution owns the collector; here it errors without
-    metadata, so the collector must stay empty rather than describe a run
-    that history never holds.
+    run metrics, so the collector records only a terminal error status
+    rather than describing a run that history never holds.
     """
     collector: dict[str, Any] = {}
     attempts = 0
@@ -1259,7 +1256,7 @@ def test_an_empty_run_s_metadata_stays_out_of_collector() -> None:
 
     assert attempts == 2
     assert chunks == [_FRIENDLY_ERROR]
-    assert collector == {}
+    assert collector == {"io.mindroom.ai_run": {"version": 1, "status": "error"}}
 
 
 def test_superseded_continuation_metadata_stays_out_of_collector() -> None:

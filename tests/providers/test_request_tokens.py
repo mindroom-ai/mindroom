@@ -20,6 +20,7 @@ from mindroom.llm.messages import Message, model_provenance, stable_serialize
 from mindroom.llm.provider import DeferredTools, ModelRequest, TokenCounter, ToolSpec
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import checkpoint_items
+from mindroom.providers.claude_code.prompt import rebuild_input
 from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.token_counting.counts import count, opaque_tokens
@@ -29,6 +30,7 @@ from tests.fakes.token_counter import quarter_tokens
 from tests.history_helpers import blank_pdf, record_native_checkpoint
 from tests.providers.anthropic_family_support import FAMILIES as CLAUDE_FAMILIES
 from tests.providers.anthropic_family_support import isolated_provider_environment, provider_for
+from tests.providers.claude_code.support import LOOKUP, PNG, fake_cli, user
 from tests.providers.gemini_ollama_support import FAMILIES as GEMINI_OLLAMA_FAMILIES
 from tests.providers.gemini_ollama_support import build_adapter
 from tests.providers.golden_support import golden_id, golden_paths, golden_request, load_golden, pipeline_provider
@@ -60,6 +62,7 @@ _TRANSPORT_KEYS = frozenset(
         "media_type",
         "mime_type",
         "image_url",
+        "video_url",
         "file_id",
         "file_data",
         "file_uri",
@@ -81,6 +84,29 @@ _TRANSPORT_KEYS = frozenset(
 _ARGUMENT_KEYS = frozenset({"input", "args"})
 # The body fields a request's model context lives in, per wire.
 _CONTEXT_FIELDS = ("messages", "input", "contents", "system", "systemInstruction", "instructions", "tools")
+
+
+def test_request_tokens_count_rendered_text_but_not_disabled_tools(tmp_path: Path) -> None:
+    """A cold request counts the renderer's text and media allowance, but not tools it omits."""
+    provider = fake_cli(tmp_path).provider()
+    request = ModelRequest(
+        messages=[
+            Message(role="system", content="Be brief."),
+            user("Hi"),
+            Message(role="assistant", content="Hello"),
+            user("More?"),
+        ],
+        tools=[LOOKUP],
+        tool_choice="none",
+    )
+    system, blocks = rebuild_input(request.messages, provider.identity.provider)
+    rendered = system + "".join(block["text"] for block in blocks)
+
+    assert provider.request_tokens(request) == count(provider.token_counter, rendered)
+    assert provider.request_tokens(request, start=3) == count(provider.token_counter, "More?")
+    image = Message(role="user", images=[Image(content=PNG)])
+    with_image = replace(request, messages=[*request.messages, image])
+    assert provider.request_tokens(with_image) == provider.request_tokens(request) + MEDIA_ALLOWANCE_TOKENS
 
 
 def _recording_counter(texts: list[str]) -> TokenCounter:

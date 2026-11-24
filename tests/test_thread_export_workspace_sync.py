@@ -69,6 +69,10 @@ class _FakeBot:
         return MatrixID.parse(self.user_id)
 
     @property
+    def agent_name(self) -> str:
+        return self.matrix_id.username.removeprefix("mindroom_")
+
+    @property
     def approval_room_ids(self) -> frozenset[str]:
         return frozenset(self.rooms) | self.invited_room_ids
 
@@ -100,6 +104,7 @@ def _runner(config: Config, bots: dict[str, _ThreadExportBot]) -> WorkspaceThrea
             runtime_paths=runtime_paths_for(config),
             config_provider=lambda: config,
             bot_provider=bots.get,
+            steward_provider=lambda room_id: next((bot for bot in bots.values() if room_id in bot.rooms), None),
             response_admission_gate=ResponseAdmissionGate(),
             agent_reply_memberships=AgentReplyMembershipIndex(),
             debounce_seconds=0,
@@ -176,6 +181,23 @@ async def test_activity_marks_coalesce_into_one_exact_room_pass(tmp_path: Path) 
         "!dev:localhost",
         "!lobby:localhost",
     ]
+
+
+async def test_an_agent_keeps_what_its_passes_wrote_for_the_next_pass(tmp_path: Path) -> None:
+    """Every pass hands an agent's source the same record of what that agent's earlier passes wrote."""
+    config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
+    write_thread_export_matrix_state(tmp_path)
+    runner = _runner(config, _bots(_FakeBot("@mindroom_router:localhost"), _FakeBot("@mindroom_code:localhost")))
+    export = _export_mock()
+
+    with patch(EXPORT_PATH, new=export):
+        for _ in range(2):
+            runner.mark_room_activity("!lobby:localhost")
+            await runner._run_pass_once()
+
+    (first,), (second,) = (call.kwargs["sources"] for call in export.await_args_list)
+    assert first.exported is not None
+    assert second.exported is first.exported
 
 
 async def test_partial_pass_queries_only_agents_related_to_dirty_rooms(tmp_path: Path) -> None:
@@ -761,7 +783,7 @@ async def test_manual_export_borrows_live_owner_and_reserves_reload_admission(tm
     try:
         with patch("mindroom.thread_export.service.export_threads_for_targets_for_client", side_effect=export_source):
             stats = await runner.export_once()
-        assert stats.rooms_exported == 1
+        assert stats.rooms_exported == 2
         assert gate.in_flight_response_count == 0
         client.close.assert_not_awaited()
         assert await principal.load_event("$missing") is None
@@ -787,7 +809,7 @@ async def test_manual_export_preserves_previous_files_when_owner_is_unavailable(
     try:
         stats = await runner.export_once(output_dir=output)
         assert stats.failures == 2
-        assert all("No running Matrix owner for router" in item.error for item in stats.failed_items)
+        assert all("No running Matrix owner for !" in item.error for item in stats.failed_items)
         assert prior.exists()
         assert runner._deps.response_admission_gate.in_flight_response_count == 0
     finally:

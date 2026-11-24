@@ -29,6 +29,7 @@ from mindroom.matrix.thread_membership import RelatedEventUnavailableError, Thre
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import Owned, SourceFate
 from mindroom.runtime_shutdown import SYNC_RESTART_SHUTDOWN
+from mindroom.turn_policy import TurnPolicy
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import ClaimContended, TurnClaim
 from mindroom.turns.dispatch import TurnDispatcher
@@ -420,9 +421,10 @@ async def test_enter_lane_during_bounded_drain_returns_closed_slot() -> None:
 
 
 @pytest.mark.asyncio
-async def test_router_command_targeting_unresolved_conversation_fails_visibly(tmp_path: Path) -> None:
-    """A command whose conversation cannot resolve yet gets a loud visible no-op."""
-    bot = _make_bot(tmp_path, agent_name="router")
+@pytest.mark.usefixtures("commands_aimed_at_bot_under_test")
+async def test_command_targeting_unresolved_conversation_fails_visibly(tmp_path: Path) -> None:
+    """A command whose conversation cannot resolve yet gets a loud visible no-op from the bot it is aimed at."""
+    bot = _make_bot(tmp_path)
     room = _make_room()
     command_event = _text_event(event_id="$cmd", body="!help", server_timestamp=1000, thread_id="$pending_root")
     send_text_mock = AsyncMock(return_value="$notice")
@@ -447,14 +449,14 @@ async def test_router_command_targeting_unresolved_conversation_fails_visibly(tm
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_unresolved_router_command_waits_for_reload_and_rechecks_authorization(tmp_path: Path) -> None:
+@pytest.mark.usefixtures("enforce_turn_authorization", "commands_aimed_at_bot_under_test")
+async def test_unresolved_command_waits_for_reload_and_rechecks_authorization(tmp_path: Path) -> None:
     """The exceptional command notice must not publish after its requester is revoked."""
     sender_id = "@user:localhost"
-    bot = _make_bot(tmp_path, agent_name="router")
-    bot.config.router.access = ResponderAccessConfig(current_room_members=False, users=[sender_id])
+    bot = _make_bot(tmp_path)
+    bot.config.agents["test_agent"].access = ResponderAccessConfig(current_room_members=False, users=[sender_id])
     replacement_config = bot.config.model_copy(deep=True)
-    replacement_config.router.access = ResponderAccessConfig(current_room_members=False, users=[])
+    replacement_config.agents["test_agent"].access = ResponderAccessConfig(current_room_members=False, users=[])
     room = _make_room()
     command_event = _text_event(
         event_id="$cmd-during-reload",
@@ -502,8 +504,8 @@ async def test_unresolved_router_command_waits_for_reload_and_rechecks_authoriza
 
 
 @pytest.mark.asyncio
-async def test_non_router_agent_settles_unresolvable_command_without_notice(tmp_path: Path) -> None:
-    """Non-router agents explicitly ignore unresolvable commands without recording a turn."""
+async def test_agent_a_command_is_not_aimed_at_settles_unresolvable_command_without_notice(tmp_path: Path) -> None:
+    """A bot explicitly ignores an unresolvable command aimed at another, without recording a turn."""
     bot = _make_bot(tmp_path)
     settle_ignored = AsyncMock()
     replace_turn_deps(bot, settle_ignored_sources=settle_ignored)
@@ -519,6 +521,7 @@ async def test_non_router_agent_settles_unresolvable_command_without_notice(tmp_
         ),
         patch.object(bot._delivery_gateway, "send_text", new=send_text_mock),
         patch.object(TurnDispatcher, "dispatch_turn", new=AsyncMock()) as dispatch_mock,
+        patch.object(TurnPolicy, "aims_command_at_me", new=AsyncMock(return_value=False)),
     ):
         await bot._turn_ingress.handle_text_event(room, command_event)
 
@@ -595,7 +598,7 @@ def _turn_ingress_journal_dispatcher(
             source_has_live_owner=lambda _event_id: False,
             turn_has_live_claim=bot._turn_store.has_live_turn_claim,
             replies_ended=lambda _reply_ids: None,
-            on_job_follow_up=AsyncMock(),
+            on_runtime_source=AsyncMock(),
             on_job_cancel=AsyncMock(),
         ),
         room_for_id=lambda _room_id: room,
@@ -747,7 +750,7 @@ async def test_ignored_source_remains_owned_during_durable_settlement(
         source_has_live_owner=gate.has_pending_source_event,
         turn_has_live_claim=lambda _event_id: False,
         replies_ended=lambda _reply_ids: None,
-        on_job_follow_up=AsyncMock(),
+        on_runtime_source=AsyncMock(),
         on_job_cancel=AsyncMock(),
     )
     dispatcher = JournalDispatcher(
@@ -1369,8 +1372,8 @@ async def test_response_cancellation_drains_follow_up_queue(tmp_path: Path) -> N
     target = MessageTarget.resolve(room.room_id, "$thread", "$m0")
     runner = unwrap_extracted_collaborator(bot._response_runner)
     lifecycle = runner.lifecycle_coordinator
-    lifecycle_lock = lifecycle._response_lifecycle_lock(target)
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    lifecycle_lock = lifecycle._conversation_for(target).lock
+    queued_signal = lifecycle._conversation_for(target)
     response_running = asyncio.Event()
     calls: list[PreparedTurn] = []
 

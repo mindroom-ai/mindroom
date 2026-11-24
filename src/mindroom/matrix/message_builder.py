@@ -17,6 +17,7 @@ from pygments.lexers import get_lexer_by_name
 from pygments.util import ClassNotFound
 
 from mindroom.matrix.event_info import UNQUOTED_REPLY_RELATION_KEY
+from mindroom.matrix.identity import valid_matrix_server_name
 
 # Standard Matrix-safe HTML tags.
 _GENERAL_FORMATTED_BODY_TAGS = frozenset(
@@ -318,30 +319,54 @@ def _escape_unterminated_html_fragments(html_text: str) -> str:
     return _HTML_LINE_PATTERN.sub(_escape_unterminated_html_fragment, html_text)
 
 
+# HTML rendered from Markdown never keeps an <img> no client can load; explicit or relayed formatted_body is not checked.
+def _image_not_sent_note(attrs: list[tuple[str, str | None]]) -> str | None:
+    """Return the text replacing an ``<img>`` whose first ``src`` no client can load, or None to keep it."""
+    src = unescape(next((value or "" for name, value in attrs if name == "src"), "")).strip()  # the src as emitted
+    server, _, media_id = src.removeprefix("mxc://").partition("/")
+    web_src = f"https:{src}" if src.startswith("//") else src  # a scheme-relative src loads like https
+    try:
+        parts = urlsplit(web_src)
+        web = parts.scheme.lower() in {"http", "https"} and bool(parts.hostname) and parts.port != -1  # port may raise
+    except ValueError:
+        web = False
+    authority = re.split(r"[/?#]", web_src.partition("://")[2])[0]  # raw, since urlsplit drops tabs and newlines
+    mxc = src.startswith("mxc://") and valid_matrix_server_name(server) and re.fullmatch(r"[A-Za-z0-9_-]+", media_id)
+    if (web and not any(char.isspace() for char in authority)) or mxc:
+        return None
+    alt = next((value for name, value in attrs if name == "alt" and value), "image")
+    return escape(f"⚠️ Image not sent: {alt} (no uploaded file)")
+
+
+def _sanitize_attribute_value(attr_name: str, attr_value: str) -> str | None:
+    if attr_name in _URL_ATTRIBUTES:
+        allowed_schemes = _ALLOWED_HREF_SCHEMES if attr_name == "href" else _ALLOWED_URL_SCHEMES
+        return _sanitize_url_attribute(attr_value, allowed_schemes)
+    if attr_name == "style":
+        return _sanitize_style_attribute(attr_value)
+    return attr_value
+
+
 def _format_sanitized_attributes(tag_name: str, attrs: list[tuple[str, str | None]]) -> str:
     allowed_attributes = _ALLOWED_FORMATTED_BODY_ATTRIBUTES.get(tag_name, frozenset())
     sanitized_attributes: list[str] = []
+    seen: set[str] = set()  # an img keeps only its first src, the one checked
     for attr_name, attr_value in attrs:
         normalized_attr_name = attr_name.lower()
-        if normalized_attr_name not in allowed_attributes:
+        if normalized_attr_name not in allowed_attributes or normalized_attr_name in seen:
             continue
+        if tag_name == "img" and normalized_attr_name == "src":
+            seen.add("src")
         if normalized_attr_name == "open":
             sanitized_attributes.append(" open")
             continue
         if attr_value is None:
+            if normalized_attr_name == "data-mx-spoiler":
+                sanitized_attributes.append(" data-mx-spoiler")
             continue
-        sanitized_value = attr_value
-        if normalized_attr_name in _URL_ATTRIBUTES:
-            allowed_schemes = _ALLOWED_HREF_SCHEMES if normalized_attr_name == "href" else _ALLOWED_URL_SCHEMES
-            sanitized_url = _sanitize_url_attribute(attr_value, allowed_schemes)
-            if sanitized_url is None:
-                continue
-            sanitized_value = sanitized_url
-        elif normalized_attr_name == "style":
-            sanitized_style = _sanitize_style_attribute(attr_value)
-            if sanitized_style is None:
-                continue
-            sanitized_value = sanitized_style
+        sanitized_value = _sanitize_attribute_value(normalized_attr_name, attr_value)
+        if sanitized_value is None:
+            continue
         sanitized_attributes.append(f' {normalized_attr_name}="{escape(sanitized_value, quote=True)}"')
     return "".join(sanitized_attributes)
 
@@ -356,11 +381,20 @@ class _FormattedBodyHtmlSanitizer(HTMLParser):
     def get_html(self) -> str:
         return "".join(self._parts)
 
+    def set_cdata_mode(self, elem: str, *, escapable: bool = False) -> None:
+        """Parse on after a raw ``<title>``, ``<script>`` and the like, which it escapes as any disallowed tag.
+
+        ``HTMLParser`` would read all text after one as raw text, escaping the rest of the message.
+        """
+
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         normalized_tag = tag.lower()
         starttag_text = self.get_starttag_text() or ""
         if normalized_tag not in _ALLOWED_FORMATTED_BODY_TAGS:
             self._parts.append(escape(starttag_text))
+            return
+        if normalized_tag == "img" and (note := _image_not_sent_note(attrs)) is not None:
+            self._parts.append(note)
             return
         self._parts.append(f"<{normalized_tag}{_format_sanitized_attributes(normalized_tag, attrs)}>")
 
@@ -371,7 +405,7 @@ class _FormattedBodyHtmlSanitizer(HTMLParser):
             self._parts.append(escape(starttag_text))
             return
         if normalized_tag in _VOID_FORMATTED_BODY_TAGS:
-            self._parts.append(f"<{normalized_tag}{_format_sanitized_attributes(normalized_tag, attrs)}>")
+            self.handle_starttag(tag, attrs)
             return
         self._parts.append(
             f"<{normalized_tag}{_format_sanitized_attributes(normalized_tag, attrs)}></{normalized_tag}>",

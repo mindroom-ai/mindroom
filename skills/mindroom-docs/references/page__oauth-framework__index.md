@@ -86,6 +86,7 @@ The API routes are:
 | `GET` | `/api/oauth/{provider}/status` | Connection status |
 | `POST` | `/api/oauth/{provider}/disconnect` | Remove the stored token; the tool's editable settings stay |
 | `GET`, `POST` | `/api/oauth/{provider}/reset` | Browser-confirmed reset (see [`oauth_connections`](#oauth_connections)) |
+| `GET` | `/api/oauth/{provider}/client-metadata.json` | Client ID metadata document that a remote MCP server's authorization server fetches when a user connects; it must stay reachable without signing in (see [OAuth Client Registration](https://docs.mindroom.chat/mcp/#oauth-client-registration)) |
 
 Add `agent_name` to target a connection for one agent's credential scope.
 The dashboard connects to the agent's saved scope, so save a `worker_scope` change before connecting.
@@ -143,7 +144,7 @@ OAuth tokens and OAuth client configuration stay in the primary runtime and are 
 | Spotify | [Spotify](https://docs.mindroom.chat/tools/media-and-content/#connect-spotify) |
 | Remote MCP servers with `auth.type: oauth` | [OAuth-Backed Remote MCP](https://docs.mindroom.chat/mcp/#oauth-backed-remote-mcp) |
 
-A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom or the browser opened the dashboard at `MINDROOM_DASHBOARD_URL`, and the authorization server confirmed that callback when registering.
+A dynamically registered MCP client works from a hosted address only when `MINDROOM_PUBLIC_URL` is an HTTPS URL without query or fragment on a public DNS hostname, that hostname matches the address the browser used to open MindRoom or the browser opened the dashboard at `MINDROOM_DASHBOARD_URL`, and the authorization server confirmed that callback when registering or MindRoom identifies itself with a client ID metadata document.
 Otherwise the client works only when MindRoom is opened on `localhost`, and other addresses get `The provisioned OAuth client is available only when MindRoom is opened on localhost. Set MINDROOM_PUBLIC_URL and configure a custom OAuth client for remote access.`
 
 ### Provider And Credential Service Rules
@@ -161,7 +162,7 @@ These rules apply to built-in providers and to providers that plugins register (
 - Credential responses redact `client_secret` for client config services.
   Saving a confidential client may omit `client_secret` only when `client_id` is unchanged, so changing its `client_id` requires the matching new secret.
 - Client config services cannot be copied through the generic copy route.
-- Automatic discovery with `oauth_runtime_bootstrapper()` can register a client dynamically only when the provider declares a provider-specific `client_config_services` entry to store it in.
+- Automatic discovery with `oauth_runtime_bootstrapper()` can register a client dynamically, or use a client ID metadata document for a public client as described in [OAuth Client Registration](https://docs.mindroom.chat/mcp/#oauth-client-registration), only when the provider declares a provider-specific `client_config_services` entry to store it in.
 - `requester_scoped_credentials=True` always stores the provider's tokens in the requester's `user` scope.
 - `pkce_code_challenge_method="S256"` enables PKCE; a custom `token_exchanger` receives `(provider, code, client_config, runtime_paths, code_verifier)` so it can send the verifier.
 - `allowed_email_domains`, `allowed_hosted_domains`, and a custom `claim_validator` restrict which accounts may connect.

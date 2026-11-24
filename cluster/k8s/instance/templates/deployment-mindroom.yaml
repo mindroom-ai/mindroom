@@ -164,6 +164,12 @@ spec:
           value: {{ .Values.accountId | quote }}
         - name: CUSTOMER_ID
           value: {{ .Values.customer | quote }}
+        {{- if and .Values.administrators .Values.accountId .Values.supabaseUrl .Values.supabaseAnonKey }}
+        # Platform dashboard logins (accountId limits them to the tenant's account) carry the account id; act as the owner's Matrix user.
+        # Never without Supabase: an open-access chart would hand credentialless requests the owner's authority.
+        - name: MINDROOM_OWNER_USER_ID
+          value: {{ first .Values.administrators | quote }}
+        {{- end }}
         - name: MINDROOM_STORAGE_PATH
           value: {{ .Values.storagePath }}
         - name: MINDROOM_CONFIG_PATH
@@ -186,9 +192,16 @@ spec:
           value: "127.0.0.1"
         - name: MINDROOM_EGRESS_BROKER_URL
           value: "http://127.0.0.1:8768"
+        {{- else }}
+        # MindRoom runs a loopback broker unless told otherwise.
+        - name: MINDROOM_EGRESS_BROKER_PORT
+          value: "off"
         {{- end }}
         - name: MINDROOM_SANDBOX_PROXY_URL
           value: "http://localhost:8766"
+        # The sandbox-runner sidecar mounts the agents' storage, so people in a room may type in agents' terminals.
+        - name: MINDROOM_STATIC_RUNNER_AGENT_STORAGE
+          value: "true"
         - name: MINDROOM_SANDBOX_PROXY_TOKEN
           valueFrom:
             secretKeyRef:

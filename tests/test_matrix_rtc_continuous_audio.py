@@ -437,7 +437,7 @@ async def test_only_live_audio_bounds_upstream_backlog_to_recent_frames(live: bo
 
 
 class OutputClock:
-    """Stand in for the monotonic clock the output paces against."""
+    """Stand in for the monotonic clock the output paces against, and for the waits it takes."""
 
     def __init__(self) -> None:
         self.now = 0.0
@@ -446,12 +446,33 @@ class OutputClock:
         """Return the simulated time."""
         return self.now
 
+    async def sleep(self, delay: float) -> None:
+        """Let the simulated time pass, as the output's playout cushion does."""
+        self.now += delay
+        await asyncio.sleep(0)
+
+
+class ClockedAsyncio:
+    """The voice agent module's asyncio, with its sleeps on the simulated clock."""
+
+    def __init__(self, clock: OutputClock) -> None:
+        self._clock = clock
+
+    async def sleep(self, delay: float) -> None:
+        """Wait on the simulated clock."""
+        await self._clock.sleep(delay)
+
+    def __getattr__(self, name: str) -> object:
+        """Hand out everything else from asyncio itself."""
+        return getattr(asyncio, name)
+
 
 @pytest.fixture
 def output_clock(monkeypatch: pytest.MonkeyPatch) -> OutputClock:
-    """Drive output arrival times without sleeping."""
+    """Drive output arrival times and the output's waits without sleeping."""
     clock = OutputClock()
     monkeypatch.setattr(voice_agent_module, "time", SimpleNamespace(monotonic=clock.monotonic))
+    monkeypatch.setattr(voice_agent_module, "asyncio", ClockedAsyncio(clock))
     return clock
 
 
@@ -532,8 +553,8 @@ def delta(value: int) -> rtc.AudioFrame:
 
 
 async def deliver(output: agents_io.AudioOutput, clock: OutputClock, value: int, *, at: float) -> None:
-    """Hand one delta to the session output at a given time."""
-    clock.now = at
+    """Hand one delta to the session output once it arrived and the output took the delta before it."""
+    clock.now = max(clock.now, at)
     await output.capture_frame(delta(value))
 
 
@@ -586,7 +607,8 @@ async def test_caller_speech_over_late_audio_clears_it_once(output_clock: Output
             await deliver(call.output, output_clock, value, at=value * 0.1)
         for value in range(10, 25):
             await deliver(call.output, output_clock, value, at=2.5)
-        # 1.5 s arrived at 2.5 s behind audio that finished at 1.0 s, so 1.3 s is still queued.
+        # 1.5 s arrived at 2.5 s after the output ran dry and plays from 2.6 s behind its cushion,
+        # so 1.4 s is still queued.
         output_clock.now = 2.7
         call.caller("speaking")
         call.caller("listening")
@@ -596,7 +618,7 @@ async def test_caller_speech_over_late_audio_clears_it_once(output_clock: Output
     assert call.sink.values == list(range(26))
     assert call.sink.calls == ["clear"]
     assert drop_logs(logs) == [
-        {"event": "call_output_backlog_dropped", "log_level": "warning", "dropped_ms": 1300},
+        {"event": "call_output_backlog_dropped", "log_level": "warning", "dropped_ms": 1400},
     ]
 
 
@@ -650,13 +672,68 @@ async def test_caller_speech_leaves_up_to_half_a_second_queued(
     queued_deltas: int,
     cleared: bool,
 ) -> None:
-    """The normal lead and short backlogs stay for GPT-Live to yield on its own."""
+    """The playout cushion and short backlogs stay for GPT-Live to yield on its own."""
     with capture_logs() as logs:
         for value in range(queued_deltas):
             await deliver(call.output, output_clock, value, at=0.0)
         call.caller("speaking")
     assert (call.sink.calls == ["clear"]) is cleared
     assert len(drop_logs(logs)) == cleared
+
+
+async def cushion_waited(call: CallSession, clock: OutputClock, value: int, *, at: float) -> float:
+    """Deliver one delta and return how long the output held it back before RoomIO got it."""
+    arrived = max(clock.now, at)
+    await deliver(call.output, clock, value, at=at)
+    return round(clock.now - arrived, 3)
+
+
+@pytest.mark.asyncio
+async def test_live_output_keeps_a_cushion_for_late_deltas(output_clock: OutputClock, call: CallSession) -> None:
+    """Playback starts 100 ms after an utterance's first audio and again after running dry, never per late delta."""
+    # The first delta waits for the cushion, so it plays from 0.1 s to 0.2 s.
+    assert await cushion_waited(call, output_clock, 0, at=0.0) == 0.1
+    assert await cushion_waited(call, output_clock, 1, at=0.1) == 0
+    # 80 ms late, but the cushion still had 20 ms to play.
+    assert await cushion_waited(call, output_clock, 2, at=0.28) == 0
+    # The output ran dry at 0.4 s, so playback resumes with a new cushion.
+    assert await cushion_waited(call, output_clock, 3, at=0.55) == 0.1
+    call.output.flush()
+    assert await cushion_waited(call, output_clock, 4, at=2.0) == 0.1
+    assert call.sink.values == [0, 1, 2, 3, 4]
+
+
+@pytest.mark.asyncio
+async def test_speech_interrupted_during_the_cushion_has_no_playout_to_wait_for(
+    output_clock: OutputClock,
+    call: CallSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Speech cut off before its first audio reached RoomIO finishes at once, and the next utterance plays out."""
+    held = asyncio.Event()
+    cushion = output_clock.sleep
+
+    async def hold_the_first_cushion(delay: float) -> None:
+        if not held.is_set():
+            held.set()
+            await asyncio.Event().wait()
+        await cushion(delay)
+
+    monkeypatch.setattr(output_clock, "sleep", hold_the_first_cushion)
+    delivery = asyncio.create_task(deliver(call.output, output_clock, 0, at=0.0))
+    await asyncio.wait_for(held.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+    # LiveKit cancels the forwarding and then flushes and clears the output.
+    delivery.cancel()
+    await asyncio.gather(delivery, return_exceptions=True)
+    call.output.flush()
+    call.output.clear_buffer()
+    await asyncio.wait_for(call.output.wait_for_playout(), timeout=SETTLE_TIMEOUT_SECONDS)
+    assert call.sink.values == []
+
+    await deliver(call.output, output_clock, 1, at=1.0)
+    call.output.flush()
+    await asyncio.wait_for(call.output.wait_for_playout(), timeout=SETTLE_TIMEOUT_SECONDS)
+    assert call.sink.values == [1]
 
 
 @pytest.mark.asyncio

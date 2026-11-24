@@ -54,7 +54,7 @@ async def test_concurrent_typing_indicators_share_one_matrix_lease(turn_count: i
             await release_turns.wait()
 
     tasks = [asyncio.create_task(turn()) for _ in range(turn_count)]
-    await asyncio.wait_for(all_entered.wait(), timeout=1)
+    await all_entered.wait()
 
     assert client.room_typing.await_count == 1
     client.room_typing.assert_awaited_once_with(room_id, True, 30_000)

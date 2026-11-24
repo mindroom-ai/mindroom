@@ -20,7 +20,6 @@ from urllib.parse import urlparse
 import idna
 from authlib.common.errors import AuthlibBaseError
 from authlib.deprecate import AuthlibDeprecationWarning
-from httpx import HTTPError, HTTPStatusError, ReadError, ReadTimeout, RemoteProtocolError
 
 from mindroom.credentials.manager import get_runtime_credentials_manager, validate_service_name
 from mindroom.credentials.policy import (
@@ -33,7 +32,7 @@ from mindroom.credentials.policy import (
 )
 from mindroom.logging_config import get_logger
 from mindroom.origins import configured_public_url, local_api_origin
-from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
+from mindroom.server_fetch_url import ServerFetchUrlError
 
 # Silences the OAuth clients, which are imported where a client is built because they pull in requests and joserfc.
 warnings.filterwarnings(
@@ -43,6 +42,8 @@ warnings.filterwarnings(
 )
 
 if TYPE_CHECKING:
+    import httpx2
+
     from mindroom.constants import RuntimePaths
     from mindroom.oauth.credential_store_types import OAuthCredentialStoreContext
 
@@ -52,16 +53,12 @@ _PKCECodeChallengeMethod = Literal["S256"]
 _TokenEndpointAuthMethod = Literal["none", "client_secret_post", "client_secret_basic"]
 _DEFAULT_AUTHORIZE_TIMEOUT_SECONDS = 20.0
 _DEFAULT_REFRESH_SKEW_SECONDS = 60.0
-# The request was sent, so the provider may have redeemed the refresh token even though its response was lost.
-_REFRESH_RESPONSE_LOST_ERRORS = (ReadTimeout, ReadError, RemoteProtocolError)
 # Wall-clock budget for every refresh grant attempt together. The grant runs inside the credential store's write
 # transaction, so it must end well before a waiting same-credential writer gives up on the lock
 # (`credential_store._LOCK_WAIT_TIMEOUT_SECONDS`); tests pin that relationship.
 _REFRESH_GRANT_DEADLINE_SECONDS = 25.0
 # Skip the repeat after a lost response when less than this much of the budget remains.
 _REFRESH_REPEAT_MIN_SECONDS = 2.0
-# A token endpoint answered with a body that is not JSON text.
-_TOKEN_RESPONSE_DECODE_ERRORS = (json.JSONDecodeError, UnicodeDecodeError)
 _DEFAULT_TOKEN_ENDPOINT_AUTH_METHOD: _TokenEndpointAuthMethod = "client_secret_post"  # noqa: S105
 _PUBLIC_TOKEN_ENDPOINT_AUTH_METHOD: _TokenEndpointAuthMethod = "none"  # noqa: S105
 _SUPPORTED_TOKEN_ENDPOINT_AUTH_METHODS = frozenset(
@@ -192,6 +189,14 @@ class OAuthProviderError(RuntimeError):
         super().__init__(message)
         self.oauth_error = oauth_error
         self.oauth_error_description = oauth_error_description
+
+
+class OAuthTokenResponseBodyError(ValueError):
+    """Raised when a token endpoint answers a success status with JSON that is not an object."""
+
+
+# A token endpoint answered a success status with a body that is not a JSON object.
+_TOKEN_RESPONSE_DECODE_ERRORS = (json.JSONDecodeError, UnicodeDecodeError, OAuthTokenResponseBodyError)
 
 
 class OAuthRefreshRejectedError(OAuthProviderError):
@@ -521,7 +526,7 @@ def _oauth_error_fields(error: object, description: object) -> tuple[str | None,
     return error_code, error_description, ": ".join(parts) if parts else None
 
 
-def _http_status_oauth_error_fields(exc: HTTPStatusError) -> tuple[str | None, str | None, str | None]:
+def _http_status_oauth_error_fields(exc: httpx2.HTTPStatusError) -> tuple[str | None, str | None, str | None]:
     """Return OAuth error detail from an HTTP error response body, if present."""
     try:
         payload = exc.response.json()
@@ -532,27 +537,43 @@ def _http_status_oauth_error_fields(exc: HTTPStatusError) -> tuple[str | None, s
     return _oauth_error_fields(payload.get("error"), payload.get("error_description"))
 
 
+def _require_token_response_json_object(response: httpx2.Response) -> httpx2.Response:
+    """Raise a decode error for a success token response whose body is not a JSON object.
+
+    Authlib 1.9 raises a bare ValueError for that body, which callers cannot tell apart from a programming error.
+    Error statuses pass through, so Authlib raises their HTTP error.
+    """
+    if response.is_success and not isinstance(response.json(), dict):
+        msg = "OAuth token endpoint response is not a JSON object"
+        raise OAuthTokenResponseBodyError(msg)
+    return response
+
+
 def _token_client_transport(endpoints: OAuthRuntimeEndpoints) -> dict[str, Any]:
-    """Return the guarded transport option for a discovered token endpoint."""
+    """Return the guarded httpx2 transport option for a discovered token endpoint."""
     if endpoints.token_fetch_allow_private_networks is None:
         return {}
+    from mindroom.server_fetch_httpx2 import ServerFetchAsyncHTTPX2Transport  # noqa: PLC0415
+
     return {
-        "transport": ServerFetchAsyncHTTPTransport(
+        "transport": ServerFetchAsyncHTTPX2Transport(
             allow_private_networks=endpoints.token_fetch_allow_private_networks,
         ),
     }
 
 
 def _oauth_refresh_error(
-    exc: AuthlibBaseError | HTTPError | TimeoutError | ValueError,
+    exc: AuthlibBaseError | httpx2.HTTPError | ServerFetchUrlError | TimeoutError | ValueError,
 ) -> OAuthProviderError:
     """Build a safe refresh failure with provider OAuth reason fields when available."""
+    import httpx2  # noqa: PLC0415 - Loaded with Authlib's token client, which raised `exc`.
+
     error_code: str | None = None
     error_description: str | None = None
     detail: str | None = None
     if isinstance(exc, AuthlibBaseError):
         error_code, error_description, detail = _oauth_error_fields(exc.error, exc.description)
-    elif isinstance(exc, HTTPStatusError):
+    elif isinstance(exc, httpx2.HTTPStatusError):
         error_code, error_description, detail = _http_status_oauth_error_fields(exc)
 
     msg = "OAuth token refresh failed"
@@ -967,6 +988,7 @@ class OAuthProvider:
                 token_url=token_url,
             )
 
+        import httpx2  # noqa: PLC0415 - Authlib's token client runs on httpx2.
         from authlib.integrations.httpx_client import AsyncOAuth2Client  # noqa: PLC0415
 
         async with AsyncOAuth2Client(
@@ -978,6 +1000,7 @@ class OAuthProvider:
             timeout=_DEFAULT_AUTHORIZE_TIMEOUT_SECONDS,
             **_token_client_transport(endpoints),
         ) as client:
+            client.register_compliance_hook("access_token_response", _require_token_response_json_object)
             try:
                 fetch_kwargs: dict[str, Any] = {
                     "code": code,
@@ -990,7 +1013,7 @@ class OAuthProvider:
                     token_url,
                     **fetch_kwargs,
                 )
-            except (AuthlibBaseError, HTTPError, ServerFetchUrlError, *_TOKEN_RESPONSE_DECODE_ERRORS) as exc:
+            except (AuthlibBaseError, httpx2.HTTPError, ServerFetchUrlError, *_TOKEN_RESPONSE_DECODE_ERRORS) as exc:
                 msg = "OAuth token exchange failed"
                 raise OAuthProviderError(msg) from exc
         if not isinstance(token_response, Mapping):
@@ -1028,13 +1051,17 @@ class OAuthProvider:
 
     async def _request_refresh_grant(self, request_refresh: Callable[[], Awaitable[object]]) -> object:
         """Send one refresh grant, repeating it once within a shared deadline when its response is lost."""
+        import httpx2  # noqa: PLC0415 - Authlib's token client runs on httpx2.
+
+        # The request was sent, so the provider may have redeemed the refresh token even though its response was lost.
+        response_lost_errors = (httpx2.ReadTimeout, httpx2.ReadError, httpx2.RemoteProtocolError)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _REFRESH_GRANT_DEADLINE_SECONDS
         try:
             async with asyncio.timeout_at(deadline):
                 try:
                     return await request_refresh()
-                except _REFRESH_RESPONSE_LOST_ERRORS as exc:
+                except response_lost_errors as exc:
                     if deadline - loop.time() < _REFRESH_REPEAT_MIN_SECONDS:
                         raise
                     # Providers that rotate refresh tokens, such as Slack, honor a just-redeemed token only for a
@@ -1044,15 +1071,13 @@ class OAuthProvider:
                         provider_id=self.id,
                         credential_service=self.credential_service,
                         error_type=next(
-                            error_type.__name__
-                            for error_type in _REFRESH_RESPONSE_LOST_ERRORS
-                            if isinstance(exc, error_type)
+                            error_type.__name__ for error_type in response_lost_errors if isinstance(exc, error_type)
                         ),
                     )
                     return await request_refresh()
         except (
             AuthlibBaseError,
-            HTTPError,
+            httpx2.HTTPError,
             ServerFetchUrlError,
             TimeoutError,
             *_TOKEN_RESPONSE_DECODE_ERRORS,
@@ -1091,6 +1116,7 @@ class OAuthProvider:
             timeout=_DEFAULT_AUTHORIZE_TIMEOUT_SECONDS,
             **_token_client_transport(endpoints),
         ) as client:
+            client.register_compliance_hook("refresh_token_response", _require_token_response_json_object)
             request_refresh = partial(
                 client.refresh_token,
                 endpoints.token_url,

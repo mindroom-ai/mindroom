@@ -91,6 +91,7 @@ async def test_streaming_e2e_worker_warmup_edit_sequence(tmp_path: Path) -> None
         _event_id: str,
         new_content: dict[str, object],
         new_text: str,
+        **_kwargs: object,
     ) -> DeliveredMatrixEvent:
         deliveries.append(("edit", new_text))
         delivered.set()

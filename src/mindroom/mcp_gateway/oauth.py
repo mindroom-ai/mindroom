@@ -121,7 +121,7 @@ class _GatewayRefreshToken(RefreshToken):
     authenticated_user_id: str
     grant_id: str
     account_id: str | None = None
-    resource: str
+    resource: str  # ty: ignore[incompatible-mutable-override]  # required here: every gateway grant is resource-bound
 
 
 @dataclass(frozen=True)

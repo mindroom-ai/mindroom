@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.agent_cli.minimal_mode_preflight import minimal_subagent_candidates
 from mindroom.agent_descriptions import describe_agent
 from mindroom.ai import run_delegated_child_response
+from mindroom.delegation.cost import receive_subagent_cost
 from mindroom.delegation.direct import run_direct_child_turn
 from mindroom.delegation.execution import delegation_call_job
 from mindroom.delegation.lifecycle import authorize_delegation, prepare_child_turn
@@ -20,7 +21,7 @@ from mindroom.delegation.sessions import SubagentSessionError
 from mindroom.delegation.state import CONTINUE_SUBAGENT, RUN_SUBAGENT
 from mindroom.delegation.targets import resolve_follow_up_target, resolve_fresh_target
 from mindroom.delegation.workers import dedicated_worker_refusal, resource_profiles_available
-from mindroom.tool_jobs.runtime import get_background_runtime
+from mindroom.tool_jobs.runtime import ManagedJobToolkit, get_background_runtime
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.plugins import config_plugins
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.config.main import Config
+    from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild, SubagentPersona
     from mindroom.delegation.targets import DelegationTarget
@@ -42,7 +44,12 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-class DelegateTools(Toolkit):
+def _model_choice(name: str, model: ModelConfig) -> str:
+    """Name one model for the tool description, with its reasoning levels and how to pick one."""
+    return f"{name} ({model.reasoning.describe()}; write {name}@<level>)" if model.reasoning else name
+
+
+class DelegateTools(Toolkit, ManagedJobToolkit):
     """Tools that let an agent run configured agents as fresh subagents."""
 
     def __init__(
@@ -100,10 +107,11 @@ class DelegateTools(Toolkit):
             *(() if self._resource_profiles else ("resource_profile",)),
         }
         description = self._build_run_subagent_description()
-        if not hidden:
-            return replace(function, description=description)
         properties = {name: value for name, value in function.parameters["properties"].items() if name not in hidden}
+        # Models always name the run with a string; only a call without one, such as one stored before it, runs untitled.
+        properties["title"] = {"type": "string", "description": properties["title"]["description"]}
         parameters = closed_parameters(self.run_subagent, {**function.parameters, "properties": properties})
+        parameters["required"] = [*parameters["required"], "title"]
         return replace(function, description=description, parameters=parameters)
 
     def _build_instructions(self) -> str:
@@ -155,6 +163,7 @@ class DelegateTools(Toolkit):
             if background
             else ""
         )
+        models = ", ".join(_model_choice(name, model) for name, model in sorted(self._config.models.items()))
         return (
             "Run one allowed configured agent as a fresh subagent and wait for its result.\n"
             f"Allowed subagents for this caller: {available_targets}.\n"
@@ -164,7 +173,7 @@ class DelegateTools(Toolkit):
             "Omit agent_name or pass null to select yourself; the same allowlist applies. "
             f"{background_guidance}"
             "Set model to a configured model name to override the child's model for this session. "
-            f"Available models: {', '.join(sorted(self._config.models))}. "
+            f"Available models: {models}. "
             "Omit model or pass null to use the child's normal thread, room, or configured model. "
             f"{'This' if background else 'The caller waits; this'} does not create a Matrix thread. "
             "Use continue_subagent with the returned subagent_id for follow-ups in the same child session; "
@@ -230,6 +239,8 @@ class DelegateTools(Toolkit):
         profile: str | None = None,
         dedicated_worker: bool = False,
         resource_profile: ScriptResourceProfileName | None = None,
+        *,
+        title: str | None = None,
     ) -> str:
         """Run a fresh subagent and wait for its response and audit reference.
 
@@ -248,6 +259,7 @@ class DelegateTools(Toolkit):
             profile: Name of a subagents/<name>.md profile in your workspace; excludes system_prompt, tools, skills, and knowledge.
             dedicated_worker: True runs the child's worker tools in a new worker of its own, for parallel or heavy children.
             resource_profile: CPU and memory size of that worker, small, standard, or large; omit for the normal size.
+            title: Short title of 3-6 words naming the task, shown to people watching the run.
 
         Returns:
             The delegated agent's response, or an error message if delegation failed.
@@ -257,6 +269,7 @@ class DelegateTools(Toolkit):
             RUN_SUBAGENT,
             {
                 "task": task,
+                "title": title,
                 "agent_name": agent_name,
                 "model": model,
                 "minimal": minimal,
@@ -288,7 +301,7 @@ class DelegateTools(Toolkit):
         Each follow-up gets a separate audit record and returns the same subagent ID.
 
         Args:
-            subagent_id: Exact Subagent ID returned by run_subagent or continue_subagent.
+            subagent_id: Subagent ID (or a unique prefix of at least 8 hex characters) returned by run_subagent or continue_subagent.
             message: Follow-up instructions or question for that child.
 
         Returns:
@@ -313,6 +326,8 @@ class DelegateTools(Toolkit):
         if isinstance(prepared, str):
             return prepared
         child, config, parent_run_id = prepared
+        if function_name == CONTINUE_SUBAGENT:
+            arguments = {**arguments, "subagent_id": child.subagent_id}
         return delegation_call_job(
             child,
             job_id=job_id,
@@ -383,6 +398,7 @@ class DelegateTools(Toolkit):
             agent_mode=target.agent_mode,
             previous=target.previous_child,
             parent_tool_call_id=(parent.context.call_id or "") if parent is not None else "",
+            title=target.title,
             persona=target.persona,
             dedicated_worker=target.dedicated_worker,
             worker_resource_profile=target.resource_profile,
@@ -406,5 +422,7 @@ class DelegateTools(Toolkit):
             )
         except SubagentSessionError as error:
             return str(error)
+        # The turn that made this call receives what the settled child cost.
+        receive_subagent_cost(child.delegation_id, child.cost_usd)
         # The stable child record reference follows the child's answer.
         return f"{result.text}\n\n{result.receipt}" if result.receipt else result.text

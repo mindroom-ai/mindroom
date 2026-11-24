@@ -29,6 +29,10 @@ if TYPE_CHECKING:
     from mindroom.response_runner import ResponseRunner
 
 
+async def no_reply_jobs(_reply_id: str) -> None:
+    """End no jobs on a reply's Stop, for a bot instance whose replies start none."""
+
+
 def _runtime(
     principal: PrincipalStore,
     *,
@@ -40,6 +44,7 @@ def _runtime(
         generation="gen-test",
         retry_sources=lambda _room_id, _sources: None,
         approval_ended=lambda _ended: None,
+        reply_stopped=no_reply_jobs,
     )
 
 

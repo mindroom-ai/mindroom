@@ -14,7 +14,7 @@ import sys
 import tempfile
 import threading
 import tomllib
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -32,6 +32,9 @@ if TYPE_CHECKING:
 _PACKAGE_NAME = "mindroom"
 _RECEIPT_NAME = "uv-receipt.toml"
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
+# Found at import, as `mindroom/__init__.py` reads its version, so an install that replaces
+# MindRoom's own metadata later cannot move the dependency lock or hide it.
+_INSTALLATION_SITE_PACKAGES = Path(str(importlib_metadata.distribution(_PACKAGE_NAME).locate_file("")))
 
 
 class _EnvironmentLockState(threading.local):
@@ -43,11 +46,20 @@ _ENVIRONMENT_LOCK_STATE = _EnvironmentLockState()
 
 
 def _environment_lock_path() -> Path:
-    """Return the current user's lock for this Python environment.
+    """Return the lock that every process running this MindRoom installation takes.
 
-    The OS temporary directory also works when HOME or the environment is read-only.
-    A private per-user directory keeps other local users from creating or holding the lock.
+    The lock lives in the site-packages directory MindRoom is installed in: installs into MindRoom's
+    own environment write there, and every process running it imports from there, including local
+    worker tool subprocesses with their own TMPDIR and venv. The file is private to the account that
+    creates it, so other local users can hold it only if they can already change those packages.
+    When this user cannot open it, as in a read-only installation or one where another account
+    created it, a private per-user directory in the OS temporary directory keeps other local users
+    from creating or holding the lock.
     """
+    lock_path = _INSTALLATION_SITE_PACKAGES / ".mindroom-optional-dependencies.lock"
+    with suppress(OSError):
+        os.close(os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600))
+        return lock_path
     key = hashlib.sha256(str(Path(sys.prefix).resolve()).encode()).hexdigest()
     if sys.platform == "win32":
         # Windows temporary directories are already per user.
@@ -64,7 +76,7 @@ def _environment_lock_path() -> Path:
 
 @contextmanager
 def optional_dependency_environment(*, exclusive: bool = False) -> Iterator[None]:
-    """Coordinate same-user optional imports and installs for one Python environment.
+    """Coordinate optional imports and installs for one MindRoom installation.
 
     Imports share the lock; installers own it exclusively. Install before entering
     an import scope, so no reader attempts a non-atomic upgrade to a write lock.
@@ -262,7 +274,7 @@ def _install_via_uv_tool(extras: list[str]) -> bool:
     # the live environment before building, so a failed build would leave nothing behind. Without them
     # uv updates the environment in place, syncing it exactly to `extras`; callers pass the receipt's
     # extras merged with the new ones so installed extras are kept.
-    base_python = sys._base_executable  # ty: ignore[unresolved-attribute]  # typeshed omits it
+    base_python = sys._base_executable  # ty: ignore[missing-attribute]  # typeshed omits it
     cmd = ["uv", "tool", "install", package_spec, "--python", base_python, "-q"]
     result = subprocess.run(cmd, check=False, env={**os.environ, **vendor_telemetry_env_values()})
     return result.returncode == 0
@@ -357,8 +369,9 @@ def ensure_optional_deps(
     runtime_paths: RuntimePaths,
     *,
     missing_message: str | None = None,
+    auto_install: bool = True,
 ) -> bool:
-    """Ensure dependencies are installed, auto-installing via optional extra if needed.
+    """Check dependency versions and install the extra if needed, unless ``auto_install`` is false.
 
     Import the package inside ``optional_dependency_environment()`` afterwards,
     so the import cannot overlap another thread's install.
@@ -369,7 +382,7 @@ def ensure_optional_deps(
         unsupported = _unsupported_extra_requirements(extra_name) if installed else []
     if installed and not unsupported:
         return False
-    if not auto_install_optional_extra_for_import_retry(extra_name, runtime_paths):
+    if not auto_install or not auto_install_optional_extra_for_import_retry(extra_name, runtime_paths):
         install_hint = f"Install with: pip install 'mindroom[{extra_name}]'"
         if unsupported:
             missing_message = f"Unsupported dependency versions: {', '.join(unsupported)}. {install_hint}"

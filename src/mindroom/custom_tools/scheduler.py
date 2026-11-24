@@ -57,7 +57,7 @@ class SchedulerTools(Toolkit):
     ) -> str:
         """Schedule a task using natural language.
 
-        This uses the exact same scheduling backend as the `!schedule` command.
+        This uses the exact same scheduling backend as the `/schedule` command.
 
         Args:
             request: The scheduling request, e.g. "in 5 minutes remind me to check logs"
@@ -75,7 +75,8 @@ class SchedulerTools(Toolkit):
                 independently sent tool messages remain visible. Leave unset to infer
                 the mode from the scheduling request.
             model: Configured model alias for each scheduled run (including team
-                members), e.g. "cheap". Leave unset to use normal agent, room, and
+                members), e.g. "cheap", or `name@level` for one of its reasoning
+                levels, e.g. "sol@high". Leave unset to use normal agent, room, and
                 thread model selection. This does not change the conversation model.
 
         Returns:
@@ -93,6 +94,7 @@ class SchedulerTools(Toolkit):
             history_limit=history_limit,
             silent=silent,
             model=model,
+            source_event_id=context.reply_to_event_id,
         )
 
     async def schedule_tool_call(
@@ -136,6 +138,7 @@ class SchedulerTools(Toolkit):
             arguments=arguments,
             execute_at=execute_at,
             description=description,
+            source_event_id=context.reply_to_event_id,
         )
 
     async def run_scheduled_call(
@@ -181,9 +184,10 @@ class SchedulerTools(Toolkit):
                 and omit empty, whitespace-only, or exact `NO_REPLY` finals while
                 keeping findings, failures, and independently sent tool messages
                 visible. Leave unset to preserve the existing mode.
-            model: Configured model alias for each run, including team members.
-                Leave unset to preserve the existing choice. Use an empty string
-                to restore normal agent, room, and thread model selection.
+            model: Configured model alias for each run, including team members,
+                or `name@level` for one of its reasoning levels. Leave unset to
+                preserve the existing choice. Use an empty string to restore
+                normal agent, room, and thread model selection.
 
         Returns:
             The edit result message.

@@ -140,7 +140,7 @@ def test_pair_preserves_or_upgrades_saved_access_only_after_claim(
     _fake_access(monkeypatch)
     session_path = tmp_path / "desktop_bridge" / "matrix_session.json"
     original = session_path.read_bytes()
-    owner = SimpleNamespace(close=AsyncMock())
+    owner = SimpleNamespace(client=object(), close=AsyncMock())
 
     async def open_client(session: DesktopMatrixSession, **kwargs: object) -> object:
         assert session.cloudflare_access is saved_access
@@ -154,6 +154,7 @@ def test_pair_preserves_or_upgrades_saved_access_only_after_claim(
         return "ABCD-EFGH"
 
     monkeypatch.setattr("mindroom.desktop.session.open_desktop_client", open_client)
+    monkeypatch.setattr("mindroom.desktop.session.client_ed25519_fingerprint", lambda _client: "device-ed25519")
     monkeypatch.setattr("mindroom.desktop.pairing_client.send_desktop_pairing_claim", claim)
     parameters: dict[str, object] = {"code": "pairing-code"}
     if requested_access is not None:
@@ -162,6 +163,9 @@ def test_pair_preserves_or_upgrades_saved_access_only_after_claim(
     result = asyncio.run(host.handle(NativeRequest("pair", "pair", parameters)))
 
     assert result["confirmation_command"] == "!desktop confirm pairing-code ABCD-EFGH"
+    assert result["agent_confirmation_command"] == "!desktop confirm assistant pairing-code ABCD-EFGH"
+    assert result["device_id"] == "LOCAL"
+    assert result["device_ed25519"] == "device-ed25519"
     assert load_desktop_session(session_path).cloudflare_access is bool(saved_access or requested_access)
     if not requested_access:
         assert session_path.read_bytes() == original
@@ -179,7 +183,7 @@ def test_pair_rejects_failed_claim_or_changed_setup_without_overwriting_session(
     _fake_access(monkeypatch)
     session_path = tmp_path / "desktop_bridge" / "matrix_session.json"
     original_session = load_desktop_session(session_path)
-    owner = SimpleNamespace(close=AsyncMock())
+    owner = SimpleNamespace(client=object(), close=AsyncMock())
 
     async def open_client(*_args: object, **_kwargs: object) -> object:
         if change == "config_replaced":
@@ -194,6 +198,7 @@ def test_pair_rejects_failed_claim_or_changed_setup_without_overwriting_session(
         return "ABCD-EFGH"
 
     monkeypatch.setattr("mindroom.desktop.session.open_desktop_client", open_client)
+    monkeypatch.setattr("mindroom.desktop.session.client_ed25519_fingerprint", lambda _client: "device-ed25519")
     monkeypatch.setattr("mindroom.desktop.pairing_client.send_desktop_pairing_claim", claim)
 
     with pytest.raises(NativeProtocolError) as exc:

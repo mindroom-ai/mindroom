@@ -1,6 +1,9 @@
 # MindRoom Local Development with Kind
 
-Run MindRoom locally with Kubernetes using [kind](https://kind.sigs.k8s.io/).
+> **Looking to deploy MindRoom locally on kind?** Follow the [Kubernetes Quick Start](../../../docs/deployment/kubernetes.md#quick-start-local-kind-cluster) for a local setup (Docker, `kind`, `kubectl`, `helm`, `git`, `python3`, and `openssl`; no `sudo` or existing cluster) using the runtime and Tuwunel charts.
+> This page is for developing the SaaS platform and instance charts.
+
+Run the MindRoom SaaS platform locally with Kubernetes using [kind](https://kind.sigs.k8s.io/).
 
 Run all commands below from the repository root.
 The bootstrap and diagnostic scripts use your exported `KUBECONFIG`, or the default `~/.kube/config` when unset.
@@ -26,8 +29,8 @@ just cluster-kind-down
 - Docker 28 or newer running
 - `just` and Nix (`nix-shell`) for the `just cluster-kind-*` recipes
 - kind (`brew install kind` or [install guide](https://kind.sigs.k8s.io/docs/user/quick-start/#installation))
-- kubectl (`brew install kubectl`)
-- helm (`brew install helm`)
+- kubectl (`brew install kubectl` or [install guide](https://kubernetes.io/docs/tasks/tools/))
+- helm (`brew install helm` or [install guide](https://helm.sh/docs/intro/install/))
 
 ## First Time Setup
 
@@ -152,6 +155,10 @@ kubectl logs -n mindroom-staging -l app=platform-frontend -f
 
 # Deploy and smoke-test a real MindRoom instance
 python -m cluster.k8s.kind.smoke_instance
+
+# Smoke-test worker SSH in TAILNET_SSH_SMOKE_CONTEXT (default kind-mindroom).
+# Requires a kind cluster; creates and deletes only its own namespace.
+uv run --no-project --with pyyaml python -m cluster.k8s.kind.smoke_tailnet_ssh_worker
 ```
 
 ## Clean Up

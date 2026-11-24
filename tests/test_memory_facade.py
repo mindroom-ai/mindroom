@@ -30,7 +30,6 @@ from mindroom.memory.config import _Mem0Embedder, _Mem0StrictOpenAIEmbedder, mem
 from mindroom.prompts import MEMORY_CONTEXT_PROMPT_TEMPLATE
 from mindroom.tool_system.worker_routing import agent_state_root_path, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for
-from tests.fakes.token_counter import fake_token_counter
 from tests.memory_test_support import MockTeamConfig
 
 if TYPE_CHECKING:
@@ -135,7 +134,6 @@ async def build_memory_prompt_parts(
         agent_name,
         config,
         runtime_paths_for(config),
-        counter=fake_token_counter(),
     )
 
 
@@ -612,6 +610,43 @@ class TestMemoryFacade:
             prompt_parts.transient_turn_context
         )
         assert "I previously calculated 2+2=4" in prompt_parts.transient_turn_context
+
+    @pytest.mark.asyncio
+    async def test_mem0_per_turn_recall_keeps_top_three(
+        self,
+        mock_memory: AsyncMock,
+        config: Config,
+    ) -> None:
+        """Mem0 keeps the top-3 recall: the gap selection measured on semantic file memory does not apply."""
+        mock_memory.search.return_value = {
+            "results": [
+                {"id": "1", "memory": "The shed is painted green", "score": 0.90},
+                {"id": "2", "memory": "The shed roof is copper", "score": 0.87},
+                {"id": "3", "memory": "Pixel eats salmon kibble", "score": 0.60},
+            ],
+        }
+
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
+            prompt_parts = await build_memory_prompt_parts("Tell me about the shed", "calculator", config)
+
+        assert mock_memory.search.call_args.kwargs["top_k"] == 3
+        assert "The shed is painted green" in prompt_parts.transient_turn_context
+        assert "The shed roof is copper" in prompt_parts.transient_turn_context
+        assert "Pixel eats salmon kibble" in prompt_parts.transient_turn_context
+
+    @pytest.mark.asyncio
+    async def test_tool_search_limit_unchanged(self, mock_memory: AsyncMock, config: Config) -> None:
+        """A search with its own limit, such as the `search_memories` tool's, returns every hit up to that limit."""
+        mock_results = [
+            {"id": str(index), "memory": f"memory {index}", "score": 0.9 - index * 0.1} for index in range(6)
+        ]
+        mock_memory.search.return_value = {"results": mock_results}
+
+        with patch("mindroom.memory._backend.create_memory_instance", return_value=mock_memory):
+            results = await search_agent_memories("memory", "calculator", config, limit=5)
+
+        assert mock_memory.search.call_args.kwargs["top_k"] == 5
+        assert results == mock_results[:5]
 
     @pytest.mark.asyncio
     async def test_build_memory_prompt_parts_no_memories(

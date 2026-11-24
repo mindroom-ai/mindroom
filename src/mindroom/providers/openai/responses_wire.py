@@ -19,7 +19,7 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from mindroom.llm.messages import tool_result_view
+from mindroom.llm.messages import media_items, tool_result_view
 from mindroom.llm.provider import (
     ReasoningDelta,
     StopReason,
@@ -29,11 +29,16 @@ from mindroom.llm.provider import (
     hosted_tool_started,
 )
 from mindroom.llm.usage import MessageMetrics, TokenCounts
-from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY, native_checkpoint_state, native_replay_messages
+from mindroom.native_compaction import (
+    ENCRYPTED_REPLAY_RESET_KEY,
+    NATIVE_CHECKPOINT_KEY,
+    native_checkpoint_state,
+    native_replay,
+)
 from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.openai.chat_wire import function_definition, sdk_call_kwargs
 from mindroom.providers.openai.codex_auth import codex_installation_metadata, codex_session_headers
-from mindroom.providers.openai.media import responses_file_part, responses_image_part
+from mindroom.providers.openai.media import responses_file_part, responses_image_part, responses_video_part
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY, assistant_replay_items
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.settings import CODEX_REJECTED_FIELDS
@@ -57,6 +62,7 @@ __all__ = [
     "ResponsesTurnParts",
     "ResponsesWire",
     "conversation_digest",
+    "replays_encrypted_state",
     "request_replay",
     "request_store",
     "responses_input",
@@ -87,6 +93,8 @@ class ResponsesWire:
     explicit_breakpoint: bool
     # Only Codex requests read it, as their instructions; the openai route carries the same prompt unused.
     default_instructions: str
+    # Route scope for persisted sticky-replay reset boundaries (OpenRouter Responses only).
+    reset_scope: str | None = None
 
 
 def request_store(wire: ResponsesWire, request: ModelRequest) -> bool | None:
@@ -110,6 +118,8 @@ class ResponsesReplay:
     sent_from: int
     previous_response_id: str | None
     native_route: str | None
+    # Messages before this index in ``history`` rebuild from canonical text and calls without encrypted state.
+    encrypted_from: int = 0
 
 
 def _latest_response(messages: Sequence[Message]) -> tuple[int, dict[str, Any]] | None:
@@ -126,28 +136,24 @@ def conversation_digest(messages: Sequence[Message]) -> str:
 
     It covers what a request sends of each message, the system text and the turn context (``add_to_agent_memory=False``)
     included, and leaves out what only storage reads: ids, replay flags, usage, a reply's provider data and reasoning,
-    and inline media bytes, which a media item's id and source stand for.
+    and inline media bytes, which a media item's id and source stand for. Each message is encoded alone, which gives
+    the digest of the list encoded in one call, so a worker thread computing it lets the event loop take the GIL
+    between messages.
     """
-    sent = [
-        {
+    digest = hashlib.sha256(b"[")
+    for index, message in enumerate(messages):
+        sent = {
             "role": message.role,
             "content": message.content,
             "tool_call_id": message.tool_call_id,
             "tool_call_error": message.tool_call_error,
             "tool_calls": message.tool_calls,
-            "media": [
-                item.to_dict(include_content=False)
-                for item in (
-                    *(message.images or ()),
-                    *(message.audio or ()),
-                    *(message.videos or ()),
-                    *(message.files or ()),
-                )
-            ],
+            "media": [item.to_dict(include_content=False) for _, item in media_items(message)],
         }
-        for message in messages
-    ]
-    return hashlib.sha256(json.dumps(sent, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
+        encoded = json.dumps(sent, ensure_ascii=False, sort_keys=True, default=str)
+        digest.update(f"{', ' if index else ''}{encoded}".encode())
+    digest.update(b"]")
+    return digest.hexdigest()
 
 
 def _continuable(provider_data: dict[str, Any], before: Sequence[Message]) -> bool:
@@ -182,17 +188,22 @@ def responses_replay(
     store: bool | None,
     portable_replay: bool,
     native_compaction: NativeCompactionReplay | None,
+    reset_scope: str | None = None,
+    strip_encrypted: bool = False,
 ) -> ResponsesReplay:
     """Decide whether a request with storage setting ``store`` continues the latest stored response in ``messages``.
 
     Portable replay, an unstored request, a history without a stored response, and one whose latest response was not
-    stored or holds another conversation send the history explicitly.
+    stored or holds another conversation send the history explicitly. The history is ``native_replay``'s projection,
+    which a reset on ``reset_scope`` or a request that sends no encrypted state (``strip_encrypted``) starts over.
     """
     route = native_compaction.route if native_compaction is not None else None
-    history = native_replay_messages(messages, route)
+    projected = native_replay(messages, route, reset_scope=reset_scope, stripped=strip_encrypted)
+    history, encrypted_from = projected.messages, projected.encrypted_from
     latest = _latest_response(history)
     continues = (
         latest is not None
+        and latest[0] >= encrypted_from
         and not portable_replay
         and store is not False
         and _continuable(latest[1], history[: latest[0]])
@@ -203,6 +214,7 @@ def responses_replay(
         sent_from=0 if chained is None else chained[0] + 1,
         previous_response_id=None if chained is None else chained[1]["response_id"],
         native_route=route,
+        encrypted_from=encrypted_from,
     )
 
 
@@ -213,11 +225,13 @@ def request_replay(wire: ResponsesWire, request: ModelRequest) -> ResponsesRepla
         store=request_store(wire, request),
         portable_replay=request.portable_replay,
         native_compaction=request.native_compaction,
+        reset_scope=wire.reset_scope,
+        strip_encrypted=request.strip_encrypted_replay,
     )
 
 
 def _prompt_item(message: Message, provider: str) -> dict[str, Any]:
-    """Return a system or user message as a Responses input message with its images and files."""
+    """Return a system or user message as a Responses input message with its images, videos, and files."""
     item: dict[str, Any] = {"role": "developer" if message.role == "system" else "user"}
     if message.content is not None:
         item["content"] = message.content
@@ -225,6 +239,15 @@ def _prompt_item(message: Message, provider: str) -> dict[str, Any]:
         item["content"] = [
             {"type": "input_text", "text": message.content},
             *(part for image in message.images if (part := responses_image_part(image, provider=provider)) is not None),
+        ]
+    if video_parts := [
+        part for video in message.videos or () if (part := responses_video_part(video, provider=provider)) is not None
+    ]:
+        content = item.get("content")
+        # A copy, so the stored message's own content list never takes the video parts.
+        item["content"] = [
+            *(content if isinstance(content, list) else [{"type": "input_text", "text": content or ""}]),
+            *video_parts,
         ]
     if message.files:
         content = item.get("content")
@@ -258,7 +281,7 @@ def _input_items(replay: ResponsesReplay, provider: str) -> list[Any]:
     canonical = reformat_tool_call_ids(replay.history, "responses")
     call_ids = _call_ids(canonical)
     items: list[Any] = []
-    for message in canonical[replay.sent_from :]:
+    for index, message in enumerate(canonical[replay.sent_from :], start=replay.sent_from):
         if message.role in {"user", "system"}:
             items.append(_prompt_item(message, provider))
         elif message.role == "tool":
@@ -267,7 +290,7 @@ def _input_items(replay: ResponsesReplay, provider: str) -> list[Any]:
                 call_id = call_ids.get(result.call_id, result.call_id)
                 items.append({"type": "function_call_output", "call_id": call_id, "output": result.content})
         else:
-            items.extend(assistant_replay_items(message, replay.native_route))
+            items.extend(assistant_replay_items(message, replay.native_route, encrypted=index >= replay.encrypted_from))
     return items
 
 
@@ -284,6 +307,17 @@ def _with_system_prefix_breakpoint(formatted_input: list[Any]) -> list[Any]:
         return formatted_input
     prefix_block = {"type": "input_text", "text": content, "prompt_cache_breakpoint": {"mode": "explicit"}}
     return [{**first_message, "content": [prefix_block]}, *formatted_input[1:]]
+
+
+def replays_encrypted_state(replay: ResponsesReplay) -> bool:
+    """Return whether ``replay`` sends a provider-encrypted compaction checkpoint or reasoning item."""
+    canonical = reformat_tool_call_ids(replay.history, "responses")
+    return any(
+        item.get("encrypted_content")
+        for index, message in enumerate(canonical[replay.sent_from :], start=replay.sent_from)
+        if message.role == "assistant"
+        for item in assistant_replay_items(message, replay.native_route, encrypted=index >= replay.encrypted_from)
+    )
 
 
 def responses_input(
@@ -500,6 +534,7 @@ class ResponsesStream:
     portable_replay: bool
     native_compaction: NativeCompactionReplay | None
     conversation_digest: str
+    encrypted_replay_reset: str | None = None
     parts: ResponsesTurnParts = field(default_factory=ResponsesTurnParts)
     # Whether the response ended, completed or incomplete; a stream that stops before then did not finish the turn.
     ended: bool = False
@@ -582,6 +617,8 @@ class ResponsesStream:
         parts.provider_data[_STORED_KEY] = self.store is not False
         if self.store is not False:
             parts.provider_data[_CONVERSATION_DIGEST_KEY] = self.conversation_digest
+        if self.encrypted_replay_reset is not None:
+            parts.provider_data[ENCRYPTED_REPLAY_RESET_KEY] = self.encrypted_replay_reset
         items = [item.model_dump(mode="json", exclude_none=True) for item in response.output] or [
             self._items[index] for index in sorted(self._items)
         ]

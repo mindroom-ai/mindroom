@@ -145,6 +145,14 @@ async def resolve_livekit_service(
             ssl_verify=ssl_verify,
             allow_private_networks=True,
         )
+        if trusted_url is not None and _normalized_service_url(trusted_url) != advertised_focus:
+            # A recently discovered URL may predate a well-known change that the caller's client already follows.
+            trusted_url = await discover_livekit_service_url(
+                local_server_name,
+                ssl_verify=ssl_verify,
+                allow_private_networks=True,
+                max_age_s=0,
+            )
     trusted_focus = _normalized_service_url(trusted_url) if trusted_url is not None else None
     if advertised_focus != trusted_focus:
         logger.warning(

@@ -4,9 +4,14 @@
 from __future__ import annotations
 
 import base64
+import http.client
+import importlib
 import json
 import re
+import threading
 import time
+import urllib.error
+import urllib.request
 from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -17,6 +22,7 @@ import httpx
 import httpx2
 import openai
 import pytest
+from openai.types.chat import ChatCompletionChunk
 from openai.types.responses import ResponseOutputItemAddedEvent, ResponseReasoningSummaryTextDeltaEvent
 from pydantic import BaseModel
 from structlog.testing import capture_logs
@@ -24,16 +30,19 @@ from structlog.testing import capture_logs
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.history.request_size import RequestSizer
+from mindroom.history.summary_call import generate_compaction_summary
 from mindroom.llm.errors import (
     AuthenticationFailed,
     ContextWindowExceeded,
     InvalidRequest,
+    ModelSafeguardRefusal,
     ProviderError,
     ProviderUnavailable,
     RateLimited,
 )
-from mindroom.llm.media import Audio, File, Image
-from mindroom.llm.messages import Message
+from mindroom.llm.media import Audio, File, Image, Video
+from mindroom.llm.messages import Message, model_provenance
 from mindroom.llm.provider import (
     DeferredTools,
     ModelRequest,
@@ -46,17 +55,24 @@ from mindroom.llm.provider import (
     UsageReported,
     complete,
 )
+from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import native_compaction_route
 from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
 from mindroom.providers.openai import build as openai_build
 from mindroom.providers.openai.build import ProviderRuntime, build_provider
 from mindroom.providers.openai.chat import ChatAdapter
+from mindroom.providers.openai.chat_wire import ChatStream, ChatWire
+from mindroom.providers.openai.codex_auth import CODEX_BASE_URL
 from mindroom.providers.openai.errors import provider_error
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import ResponsesStream
 from mindroom.providers.pipeline import retry as retry_stage
-from mindroom.providers.pipeline.media import FALLBACK_MARKER
+from mindroom.providers.pipeline.media import ANSWERED_AUDIO_MARKER, FALLBACK_MARKER
+from mindroom.redaction import redact_sensitive_data
+from mindroom.token_counting.counts import count
+from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, RequestParts
+from tests.history_helpers import stamp_request_identity
 from tests.providers.golden_support import PacedBytes, encoded_response, httpx2_transport, pipeline_provider
 from tests.providers.openai_family_support import (
     golden_provider,
@@ -204,6 +220,105 @@ async def test_usage_on_several_chat_chunks_adds_up(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("model_config", "reply", "sdk_module", "history"),
+    [
+        (
+            _OPENAI_CHAT,
+            _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")),
+            "openai.resources.chat.completions.completions",
+            "messages",
+        ),
+        (
+            _OPENAI_RESPONSES,
+            _responses_reply(*_text_events("ok"), _completed()),
+            "openai.resources.responses.responses",
+            "input",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_the_sdk_sends_the_history_and_tools_without_walking_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model_config: dict[str, Any],
+    reply: dict[str, Any],
+    sdk_module: str,
+    history: str,
+) -> None:
+    """The SDK's walk of typed body fields, which blocks the event loop, never sees the history or the tools."""
+    module = importlib.import_module(sdk_module)
+    transform = module.async_maybe_transform
+    walked: list[dict[str, Any]] = []
+
+    async def recording(data: dict[str, Any], expected_type: object) -> object:
+        walked.append(data)
+        return await transform(data, expected_type)
+
+    monkeypatch.setattr(module, "async_maybe_transform", recording)
+    built = _Built(tmp_path, model_config, reply)
+    tool = ToolSpec(name="lookup", description="Look it up.", parameters={"type": "object"}, strict=None)
+
+    await _adapter_turn(built, ModelRequest(messages=[_user()], tools=(tool,)))
+
+    assert len(walked) == 1
+    assert not walked[0].get(history)
+    assert not walked[0].get("tools")
+    body = built.body()
+    assert body[history]
+    assert body["tools"]
+    assert body["stream"] is True
+
+
+@pytest.mark.parametrize(
+    ("model_config", "reply"),
+    [
+        (_OPENAI_CHAT, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop"))),
+        (_OPENAI_RESPONSES, _responses_reply(*_text_events("ok"), _completed())),
+    ],
+)
+@pytest.mark.asyncio
+async def test_the_history_is_encoded_off_the_event_loop_one_message_at_a_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model_config: dict[str, Any],
+    reply: dict[str, Any],
+) -> None:
+    """No JSON encoding of the history runs on the event loop, and each message encodes in its own call.
+
+    The encoder holds the GIL through one call, so a worker thread encoding the whole history at once could still
+    stall the loop for most of that call; between calls the loop takes the GIL back.
+    """
+    loop_thread = threading.current_thread()
+    dumps = json.dumps
+    encoded: list[tuple[bool, str]] = []
+
+    def recording(obj: object, **kwargs: Any) -> str:  # noqa: ANN401
+        text = dumps(obj, **kwargs)
+        encoded.append((threading.current_thread() is loop_thread, text))
+        return text
+
+    monkeypatch.setattr(json, "dumps", recording)
+    built = _Built(tmp_path, model_config, reply)
+
+    await _adapter_turn(
+        built,
+        ModelRequest(messages=[_user("first marker"), Message(role="assistant", content="second marker")]),
+    )
+
+    history = [(on_loop, text) for on_loop, text in encoded if "marker" in text]
+    assert history
+    assert not [text for on_loop, text in history if on_loop]
+    assert not [text for _, text in history if "first marker" in text and "second marker" in text]
+    # The SDK's encoder writes no space after a key, which tells its pieces from the digest's.
+    body = [text for _, text in history if '": "' not in text]
+    assert [text for text in body if "first marker" in text]
+    assert [text for text in body if "second marker" in text]
+    sent = built.requests[0].content.decode()
+    assert "first marker" in sent
+    assert "second marker" in sent
+
+
 @pytest.mark.asyncio
 async def test_chat_stream_tolerates_sparse_tool_call_indexes(tmp_path: Path) -> None:
     delta = {
@@ -249,10 +364,21 @@ async def test_chat_stream_places_calls_streamed_without_an_index_by_their_posit
 async def test_chat_finish_reason_maps_to_stop_reason(tmp_path: Path, finish_reason: str, stop: str) -> None:
     built = _Built(tmp_path, _OPENAI_CHAT, _chat_reply(_chunk({"content": "cut"}, finish_reason=finish_reason)))
 
-    turn = await _turn(built, ModelRequest(messages=[_user()]))
+    turn = await _adapter_turn(built, ModelRequest(messages=[_user()]))
 
     assert turn.stop_reason == stop
     assert "finish_reason" not in (turn.message.provider_data or {})
+
+
+@pytest.mark.asyncio
+async def test_a_chat_content_filter_stop_is_a_safeguard_refusal(tmp_path: Path) -> None:
+    """OpenRouter reports Claude's refusal as ``content_filter``; the reply must say so, not read as empty."""
+    built = _Built(tmp_path, _OPENAI_CHAT, _chat_reply(_chunk({"content": ""}, finish_reason="content_filter")))
+
+    with pytest.raises(ModelSafeguardRefusal):
+        await _turn(built, ModelRequest(messages=[_user()]))
+
+    assert len(built.requests) == 1
 
 
 @pytest.mark.asyncio
@@ -568,27 +694,166 @@ async def test_a_chat_call_id_may_arrive_after_its_name_and_arguments(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_an_openrouter_stream_keeps_its_reasoning_details_and_routing_fields(tmp_path: Path) -> None:
-    """Reasoning details streamed in pieces are stored whole for replay, with the upstream OpenRouter routed to."""
-    first = [{"type": "reasoning.text", "text": "Rain is likely", "index": 0}]
-    second = [{"type": "reasoning.text", "text": " this afternoon.", "index": 0}]
+    """Reasoning details streamed in pieces are stored whole for replay, with the upstream OpenRouter routed to.
+
+    A text joins its pieces up to the one carrying its signature, as OpenRouter's unstreamed replies hold it; an
+    encrypted detail is stored as it came.
+    """
+    text = {"type": "reasoning.text", "format": "anthropic-claude-v1", "index": 0}
+    encrypted = {"type": "reasoning.encrypted", "data": "c2VhbGVk", "format": "anthropic-claude-v1", "index": 1}
     built = _Built(
         tmp_path,
         {"provider": "openrouter", "id": "anthropic/claude-sonnet-5.5", "api_key": "k"},
         _chat_reply(
-            _chunk({"reasoning": "Rain is likely", "reasoning_details": first}, provider="Anthropic"),
             _chunk(
-                {"content": "Pack a coat.", "reasoning": " this afternoon.", "reasoning_details": second},
-                finish_reason="stop",
+                {"reasoning": "Rain is likely", "reasoning_details": [{**text, "text": "Rain is likely"}]},
                 provider="Anthropic",
             ),
+            _chunk(
+                {"reasoning": " this afternoon.", "reasoning_details": [{**text, "text": " this afternoon."}]},
+                provider="Anthropic",
+            ),
+            _chunk({"reasoning_details": [{**text, "signature": "c2lnbmVk"}, encrypted]}, provider="Anthropic"),
+            _chunk({"content": "Pack a coat."}, finish_reason="stop", provider="Anthropic"),
         ),
     )
 
     turn = await _turn(built, ModelRequest(messages=[_user()]))
 
     assert turn.message.reasoning_content == "Rain is likely this afternoon."
-    assert turn.message.provider_data["reasoning_details"] == first + second
+    assert turn.message.provider_data["reasoning_details"] == [
+        {**text, "text": "Rain is likely this afternoon.", "signature": "c2lnbmVk"},
+        encrypted,
+    ]
     assert turn.message.provider_data["model_extra"] == {"provider": "Anthropic"}
+
+
+@pytest.mark.asyncio
+async def test_a_reply_v2026_11_389_stored_sends_its_reasoning_details_whole(tmp_path: Path) -> None:
+    """Reasoning details v2026.11.389 stored as their streamed pieces are sent whole, the stored pieces kept.
+
+    Pieces join within one type, index, and id up to a text's signature; encrypted details stay apart.
+    """
+    claude = {"type": "reasoning.text", "format": "anthropic-claude-v1", "index": 0}
+    summary = {"type": "reasoning.summary", "format": "openai-responses-v1", "index": 0}
+    sealed = {"type": "reasoning.encrypted", "format": "openai-responses-v1", "index": 1}
+    redacted = {"type": "reasoning.encrypted", "format": "anthropic-claude-v1", "index": 0}
+    text = {"type": "reasoning.text", "format": "unknown"}
+    stored = {
+        "Two signed thoughts.": [
+            {**claude, "text": "Rain"},
+            {**claude, "text": " is likely."},
+            {**claude, "signature": "c2lnLTE="},
+            {**claude, "text": "Pack"},
+            {**claude, "text": " a coat."},
+            {**claude, "signature": "c2lnLTI="},
+        ],
+        "A summary and its sealed reasoning.": [
+            {**summary, "summary": "**Rain**"},
+            {**summary, "summary": " ahead."},
+            {**sealed, "id": "rs_1", "data": "ZW5jLTE="},
+            {**sealed, "id": "rs_2", "data": "ZW5jLTI="},
+        ],
+        "Two redacted thoughts.": [{**redacted, "data": "cmVkLTE="}, {**redacted, "data": "cmVkLTI="}],
+        "Summaries of two ids.": [
+            {**summary, "id": "rs_1", "summary": "Rain"},
+            {**summary, "id": "rs_1", "summary": " ahead."},
+            {**summary, "id": "rs_2", "summary": "Sun later."},
+        ],
+        "Two indexes and types.": [
+            {**text, "index": 0, "text": "Rain"},
+            {**text, "index": 0, "text": " ahead."},
+            {**text, "index": 1, "text": "Sun"},
+            {**summary, "index": 1, "summary": "Sun later."},
+        ],
+    }
+    history = [_user()]
+    for content, pieces in stored.items():
+        reply = Message(role="assistant", content=content, provider_data={"reasoning_details": deepcopy(pieces)})
+        history += [reply, _user("And then?")]
+    built = _Built(
+        tmp_path,
+        {"provider": "openrouter", "id": "z-ai/glm-5.3", "api_key": "k"},
+        _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")),
+    )
+
+    await _turn(built, ModelRequest(messages=history))
+
+    sent = {message["content"]: message["reasoning_details"] for message in built.body()["messages"][1::2]}
+    assert sent == {
+        "Two signed thoughts.": [
+            {**claude, "text": "Rain is likely.", "signature": "c2lnLTE="},
+            {**claude, "text": "Pack a coat.", "signature": "c2lnLTI="},
+        ],
+        "A summary and its sealed reasoning.": [
+            {**summary, "summary": "**Rain** ahead."},
+            {**sealed, "id": "rs_1", "data": "ZW5jLTE="},
+            {**sealed, "id": "rs_2", "data": "ZW5jLTI="},
+        ],
+        "Two redacted thoughts.": [{**redacted, "data": "cmVkLTE="}, {**redacted, "data": "cmVkLTI="}],
+        "Summaries of two ids.": [
+            {**summary, "id": "rs_1", "summary": "Rain ahead."},
+            {**summary, "id": "rs_2", "summary": "Sun later."},
+        ],
+        "Two indexes and types.": [
+            {**text, "index": 0, "text": "Rain ahead."},
+            {**text, "index": 1, "text": "Sun"},
+            {**summary, "index": 1, "summary": "Sun later."},
+        ],
+    }
+    assert [message.provider_data["reasoning_details"] for message in history[1::2]] == list(stored.values())
+
+
+def test_chat_reasoning_carries_when_its_call_or_last_text_began() -> None:
+    """OpenRouter sends a call's reasoning in one burst at its end, so a thought starts at the call or its last text."""
+    before = time.monotonic()
+    stream = ChatStream(ChatWire(route="openrouter", system_role="system"))
+    created = time.monotonic()
+    time.sleep(0.01)
+
+    def delta(fields: dict[str, Any]) -> ReasoningDelta:
+        [event] = stream.add(ChatCompletionChunk.model_validate(_chunk(fields)["data"]))
+        assert isinstance(event, ReasoningDelta)
+        return event
+
+    # OpenRouter's reasoning chunks carry an empty ``content`` beside the reasoning.
+    first = delta({"reasoning": "Plan.", "content": ""})
+    stream.add(ChatCompletionChunk.model_validate(_chunk({"content": "Checking."})["data"]))
+    text_sent = time.monotonic()
+    time.sleep(0.01)
+    second = delta({"reasoning": "Next.", "content": ""})
+
+    assert first.started_at is not None
+    assert before <= first.started_at <= created
+    assert second.started_at is not None
+    assert created <= second.started_at <= text_sent
+
+
+def test_chat_reasoning_streamed_as_written_starts_when_it_arrives() -> None:
+    """Routes other than OpenRouter stream reasoning as the model writes it, so a thought starts at its first piece."""
+    stream = ChatStream(ChatWire(route="deepseek", system_role="system"))
+
+    [event] = stream.add(ChatCompletionChunk.model_validate(_chunk({"reasoning_content": "Plan."})["data"]))
+
+    assert event == ReasoningDelta("Plan.")
+
+
+def test_chat_typed_content_parts_split_into_text_and_reasoning() -> None:
+    """Mistral's GLM models stream ``content`` as typed parts; ``thinking`` parts are reasoning, ``text`` parts reply."""
+    stream = ChatStream(ChatWire(route="openai", system_role="system"))
+    content = [
+        {"type": "thinking", "thinking": [{"type": "text", "text": "Plan."}], "closed": True},
+        {"type": "text", "text": "pong"},
+    ]
+    # The SDK builds stream chunks without validation, so the list reaches ``delta.content`` as sent.
+    chunk = openai._models.construct_type(type_=ChatCompletionChunk, value=_chunk({"content": content})["data"])
+
+    events = stream.add(chunk)
+    stream.finish()
+
+    assert events == [ReasoningDelta("Plan."), TextDelta("pong")]
+    assert stream.parts.content == "pong"
+    assert stream.parts.reasoning == "Plan."
 
 
 @pytest.mark.asyncio
@@ -758,6 +1023,41 @@ async def test_a_chat_route_sends_audio_and_file_attachments_inline(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_openrouter_chat_sends_voice_audio_only_before_an_assistant_message(tmp_path: Path) -> None:
+    """Request 1 carries ``input_audio``; requests 2 and 3 carry a byte-identical text note without audio."""
+    voice_path = tmp_path / "att_voice.wav"
+    voice_path.write_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt synthetic")
+    voice = Message(
+        role="user",
+        content="🎤 Check the tests.",
+        audio=[Audio(id="att_voice", filepath=str(voice_path), mime_type="audio/wav")],
+    )
+    call_1 = Message(
+        role="assistant",
+        tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "run", "arguments": "{}"}}],
+    )
+    tool_1 = Message(role="tool", tool_call_id="call_1", content="ok")
+    call_2 = Message(
+        role="assistant",
+        tool_calls=[{"id": "call_2", "type": "function", "function": {"name": "run", "arguments": "{}"}}],
+    )
+    tool_2 = Message(role="tool", tool_call_id="call_2", content="ok")
+    config = {"provider": "openrouter", "id": "google/gemini-4-neon", "api_key": "test-key"}
+    built = _Built(tmp_path, config, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
+
+    await _turn(built, ModelRequest(messages=[voice]))
+    await _turn(built, ModelRequest(messages=[voice, call_1, tool_1]))
+    await _turn(built, ModelRequest(messages=[voice, call_1, tool_1, call_2, tool_2]))
+
+    first, second, third = (built.body(i)["messages"][0] for i in range(3))
+    assert any(part.get("type") == "input_audio" for part in first["content"])
+    assert isinstance(second["content"], str)
+    assert ANSWERED_AUDIO_MARKER in second["content"]
+    assert "audio (att_voice)" in second["content"]
+    assert json.dumps(second, sort_keys=True) == json.dumps(third, sort_keys=True)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("text", ["Compare them.", None], ids=["with-text", "without-text"])
 async def test_a_chat_route_keeps_file_attachments_in_the_order_they_came(tmp_path: Path, text: str | None) -> None:
     """Each file keeps its place among the message's files, and a message without text still carries them."""
@@ -773,6 +1073,135 @@ async def test_a_chat_route_keeps_file_attachments_in_the_order_they_came(tmp_pa
         "third.pdf",
     ]
     assert [part["text"] for part in content if part["type"] == "text"] == ([text] if text else [])
+
+
+@pytest.mark.asyncio
+async def test_openrouter_chat_sends_video_parts_with_mime_resolution_and_canonical_order(tmp_path: Path) -> None:
+    """OpenRouter Chat sends inline/URL videos with resolved MIME types in canonical media order, omitting empties."""
+    mov_path = tmp_path / "clip.mov"
+    mov_path.write_bytes(b"mov-bytes")
+    bin_path = tmp_path / "clip.bin"
+    bin_path.write_bytes(b"bin-bytes")
+    empty_path = tmp_path / "empty.mp4"
+    empty_path.write_bytes(b"")
+    config = {"provider": "openrouter", "id": "google/gemini-4-neon", "api_key": "test-key"}
+    reply = _chat_reply(_chunk({"content": "ok"}, finish_reason="stop"))
+    message = Message(
+        role="user",
+        content="Watch all.",
+        images=[Image(content=b"\x89PNG\r\n\x1a\n" + bytes(8), mime_type="image/png")],
+        audio=[Audio(content=b"RIFF", format="wav", mime_type="audio/wav")],
+        videos=[
+            Video(content=b"qt-bytes", mime_type="video/quicktime"),
+            Video(content=b"webm-bytes", mime_type="application/octet-stream", format=".WEBM "),
+            Video(content=b"custom-bytes", format="x-custom"),
+            Video(filepath=str(mov_path)),
+            Video(filepath=str(bin_path)),
+            Video(content=b""),
+            Video(filepath=str(empty_path)),
+        ],
+        files=[File(content=b"%PDF-1.4", filename="report.pdf", mime_type="application/pdf")],
+    )
+    built = _Built(tmp_path, config, reply)
+
+    await _turn(built, ModelRequest(messages=[message]))
+
+    content = built.body()["messages"][0]["content"]
+    assert [part["type"] for part in content] == [
+        "text",
+        "image_url",
+        "input_audio",
+        *["video_url"] * 5,
+        "file",
+    ]
+    assert [part["video_url"]["url"] for part in content if part["type"] == "video_url"] == [
+        f"data:video/quicktime;base64,{base64.b64encode(b'qt-bytes').decode()}",
+        f"data:video/webm;base64,{base64.b64encode(b'webm-bytes').decode()}",
+        f"data:video/x-custom;base64,{base64.b64encode(b'custom-bytes').decode()}",
+        f"data:video/quicktime;base64,{base64.b64encode(b'mov-bytes').decode()}",
+        f"data:video/mp4;base64,{base64.b64encode(b'bin-bytes').decode()}",
+    ]
+
+    link = Message(role="user", content="Link", videos=[Video(url="https://example.com/clip.mp4")])
+    await _adapter_turn(built, ModelRequest(messages=[link]))
+    assert built.body(1)["messages"][0]["content"] == [
+        {"type": "text", "text": "Link"},
+        {"type": "video_url", "video_url": {"url": "https://example.com/clip.mp4"}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_sends_input_video_parts_and_omits_empty_videos(tmp_path: Path) -> None:
+    """OpenRouter Responses sends input_video parts in canonical order and leaves empty-video content untouched."""
+    clip = tmp_path / "clip.mov"
+    clip.write_bytes(b"mov-bytes")
+    empty = tmp_path / "empty.mp4"
+    empty.write_bytes(b"")
+    reply = _responses_reply(*_text_events("ok"), _completed())
+    message = Message(
+        role="user",
+        content="Inspect",
+        images=[Image(content=b"\x89PNG\r\n\x1a\n" + bytes(8), mime_type="image/png")],
+        videos=[
+            Video(content=b"mp4-bytes", mime_type="video/mp4"),
+            Video(filepath=str(clip)),
+            Video(content=b""),
+            Video(filepath=str(empty)),
+        ],
+        files=[File(content=b"%PDF-1.4", filename="report.pdf", mime_type="application/pdf")],
+    )
+    built = _Built(tmp_path, _OPENROUTER_RESPONSES, reply)
+
+    await _turn(built, ModelRequest(messages=[message]))
+
+    content = built.body()["input"][0]["content"]
+    part_types = [part["type"] for part in content]
+    assert part_types == ["input_text", "input_image", "input_video", "input_video", "input_file"]
+    assert [part["video_url"] for part in content if part["type"] == "input_video"] == [
+        f"data:video/mp4;base64,{base64.b64encode(b'mp4-bytes').decode()}",
+        f"data:video/quicktime;base64,{base64.b64encode(b'mov-bytes').decode()}",
+    ]
+
+    link = Message(role="user", content="Link", videos=[Video(url="https://example.com/clip.mp4")])
+    await _adapter_turn(built, ModelRequest(messages=[link]))
+    assert built.body(1)["input"][0]["content"] == [
+        {"type": "input_text", "text": "Link"},
+        {"type": "input_video", "video_url": "https://example.com/clip.mp4"},
+    ]
+
+    empty_msg = Message(role="user", content="Plain", videos=[Video(content=b""), Video(filepath=str(empty))])
+    await _turn(built, ModelRequest(messages=[empty_msg]))
+    assert built.body(2)["input"][0]["content"] == "Plain"
+
+
+def test_video_omitted_media_is_enabled_only_on_openrouter_routes(tmp_path: Path) -> None:
+    """OpenRouter Chat and Responses admit video, while OpenAI and other Chat routes keep video omitted."""
+    runtime = _runtime(tmp_path)
+    or_chat = build_provider(ModelConfig(provider="openrouter", id="google/gemini-4-neon"), runtime).capabilities
+    or_resp = build_provider(
+        ModelConfig(
+            provider="openai",
+            id="google/gemini-4-neon",
+            api="responses",
+            extra_kwargs={"base_url": "https://openrouter.ai/api/v1"},
+        ),
+        runtime,
+    ).capabilities
+    openai_chat = build_provider(
+        ModelConfig(provider="openai", id="gpt-6-astra", api="chat_completions"),
+        runtime,
+    ).capabilities
+    openai_resp = build_provider(
+        ModelConfig(provider="openai", id="gpt-6-astra", api="responses"),
+        runtime,
+    ).capabilities
+
+    assert (or_chat.omitted_media, or_chat.url_media) == (frozenset(), frozenset({"image"}))
+    assert (or_resp.omitted_media, or_resp.url_media) == (frozenset({"audio"}), frozenset({"file", "image"}))
+    assert "video" in openai_chat.omitted_media
+    assert openai_resp.omitted_media == frozenset({"audio", "video"})
+    for route in ("azure", "deepseek", "zai", "llama_cpp", "kimi", "groq", "cerebras"):
+        assert "video" in build_provider(ModelConfig(provider=route, id="m"), runtime).capabilities.omitted_media
 
 
 @pytest.mark.asyncio
@@ -1540,6 +1969,1001 @@ def test_responses_native_compaction_settings_match_the_claude_contract(tmp_path
     assert proxied.native_compaction_settings(threshold=60_000, history_generation="", allow_authored=False) is None
 
 
+_OPENROUTER_RESPONSES = {
+    "provider": "openai",
+    "api": "responses",
+    "id": "openai/gpt-6.2-sol",
+    "api_key": "or-test-key",
+    "extra_kwargs": {"base_url": "https://openrouter.ai/api/v1"},
+}
+
+
+@pytest.mark.parametrize(
+    ("model_id", "base_url", "extra_kwargs", "expected"),
+    [
+        ("openai/gpt-6.2-sol", "https://openrouter.ai/api/v1", {}, True),
+        ("openai/gpt-5.4", "https://openrouter.ai/api/v1", {}, True),
+        ("openai/gpt-5.3-codex", "https://openrouter.ai/api/v1", {}, True),
+        ("anthropic/claude-opus-5.5", "https://openrouter.ai/api/v1", {}, False),
+        ("anthropic/gpt-6.2-sol", "https://openrouter.ai/api/v1", {}, False),
+        (
+            "openai/gpt-6.2-sol",
+            "https://openrouter.ai/api/v1",
+            {"extra_body": {"provider": {"order": ["openai"], "allow_fallbacks": False}}},
+            True,
+        ),
+        (
+            "openai/gpt-6.2-sol",
+            "https://openrouter.ai/api/v1",
+            {"request_params": {"extra_body": {"provider": {"order": ["openai"]}}}},
+            True,
+        ),
+        (
+            "openai/gpt-6.2-sol",
+            "https://openrouter.ai/api/v1",
+            {"request_params": {"extra_body": {"provider": {"only": ["openai"]}}}},
+            True,
+        ),
+        (
+            "openai/gpt-6.2-sol",
+            "https://openrouter.ai/api/v1",
+            {"extra_body": {"models": ["openai/gpt-6.2-sol"]}},
+            False,
+        ),
+        ("openai/gpt-6.2-sol", "https://openrouter.ai/api/v1", {"request_params": {"route": "fallback"}}, False),
+        (
+            "openai/gpt-6.2-sol",
+            "https://openrouter.ai/api/v1",
+            {"request_params": {"extra_body": {"model": "anthropic/claude-opus-5.5"}}},
+            False,
+        ),
+        ("openai/gpt-6.2-sol", "https://openrouter.ai/api/v1", {"extra_body": {"preset": "@preset/fast"}}, False),
+        ("openai/gpt-6.2-sol", "https://openrouter.ai/api/v1", {"request_params": {"preset": "@preset/fast"}}, False),
+        (
+            "openai/gpt-6.2-sol",
+            "https://openrouter.ai/api/v1",
+            {"request_params": {"extra_body": {"preset": "@preset/fast"}}},
+            False,
+        ),
+        ("openai/gpt-6.2-sol@preset/fast", "https://openrouter.ai/api/v1", {}, False),
+        ("@preset/fast", "https://openrouter.ai/api/v1", {}, False),
+        ("openai/gpt-6.2-sol", "https://openrouter.ai/api/v1", {"store": True}, False),
+        ("openai/gpt-6.2-sol", "https://api.openai.com/v1", {}, False),
+        ("gpt-6.2-sol", "https://api.openai.com/v1", {}, True),
+        # ``request_params.extra_body`` replaces ``extra_body``, so its ``models`` is never sent and cannot reroute.
+        (
+            "openai/gpt-6.2-sol",
+            "https://openrouter.ai/api/v1",
+            {
+                "extra_body": {"models": ["anthropic/claude-opus-5.5"]},
+                "request_params": {"extra_body": {"provider": {"order": ["openai"]}}},
+            },
+            True,
+        ),
+        # As on main, an authored replay policy opts out wherever it is written.
+        (
+            "openai/gpt-6.2-sol",
+            "https://openrouter.ai/api/v1",
+            {
+                "extra_body": {"background": True},
+                "request_params": {"extra_body": {"provider": {"order": ["openai"]}}},
+            },
+            False,
+        ),
+        # As on main, the ``openai`` route stays eligible at the Codex endpoint.
+        ("gpt-6.2-sol", CODEX_BASE_URL, {}, True),
+    ],
+)
+def test_openrouter_responses_native_compaction_eligibility(
+    tmp_path: Path,
+    model_id: str,
+    base_url: str,
+    extra_kwargs: dict[str, Any],
+    *,
+    expected: bool,
+) -> None:
+    runtime = _runtime(tmp_path)
+    adapter = build_provider(
+        ModelConfig(
+            provider="openai",
+            api="responses",
+            id=model_id,
+            api_key="or-test-key",
+            extra_kwargs={"base_url": base_url, **extra_kwargs},
+        ),
+        runtime,
+    )
+
+    assert isinstance(adapter, ResponsesAdapter)
+    assert adapter.capabilities.native_compaction is expected
+    if base_url == "https://openrouter.ai/api/v1":
+        assert adapter.capabilities.native_tool_search is False
+        assert adapter.wire.explicit_breakpoint is False
+    if model_id.endswith("gpt-6.2-sol"):
+        assert adapter.capabilities.provider_default_sampling is True
+
+
+@pytest.mark.parametrize(
+    ("model_id", "base_url", "expected"),
+    [
+        ("openai/gpt-6.2-sol", "https://openrouter.ai/api/v1", False),
+        # The endpoint decides, not the id: a bare eligible id at OpenRouter stays off on the Codex route.
+        ("gpt-6.2-sol", "https://openrouter.ai/api/v1", False),
+        # As on main, the Codex route stays eligible at OpenAI's endpoint.
+        ("gpt-6.2-sol", "https://api.openai.com/v1", True),
+    ],
+)
+def test_codex_native_compaction_follows_the_endpoint_and_never_recovers_sticky_replay(
+    tmp_path: Path,
+    model_id: str,
+    base_url: str,
+    *,
+    expected: bool,
+) -> None:
+    runtime = _runtime(tmp_path)
+    adapter = build_provider(
+        ModelConfig(provider="codex", id=model_id, extra_kwargs={"base_url": base_url}),
+        runtime,
+    )
+
+    assert isinstance(adapter, ResponsesAdapter)
+    assert adapter.capabilities.native_compaction is expected
+    assert adapter.capabilities.sticky_replay_recovery is None
+    assert adapter.capabilities.replay_reset_scope is None
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_native_compaction_wire_send(tmp_path: Path) -> None:
+    output = [
+        {
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Pack", "annotations": []}],
+        },
+    ]
+    config = {
+        **_OPENROUTER_RESPONSES,
+        "extra_kwargs": {
+            "base_url": "https://openrouter.ai/api/v1",
+            "request_params": {"extra_body": {"provider": {"order": ["openai"], "allow_fallbacks": False}}},
+        },
+    }
+    built = _Built(tmp_path, config, _responses_reply(*_text_events("Pack"), _completed(output)))
+    assert isinstance(built.adapter, ResponsesAdapter)
+    native = built.adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
+    assert native is not None
+
+    turn = await _turn(built, ModelRequest(messages=[_user()], native_compaction=native))
+
+    body = built.body()
+    assert str(built.requests[0].url) == "https://openrouter.ai/api/v1/responses"
+    assert built.requests[0].headers["authorization"] == "Bearer or-test-key"
+    assert body["model"] == "openai/gpt-6.2-sol"
+    assert body["store"] is False
+    assert body["include"] == ["reasoning.encrypted_content"]
+    assert body["context_management"] == [{"type": "compaction", "compact_threshold": 50_000}]
+    assert body["provider"] == {"order": ["openai"], "allow_fallbacks": False}
+    assert turn.message.provider_data["mindroom_native_compaction"]["route"] == native.route
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("extra_kwargs", "compacts"),
+    [({}, True), ({"request_params": {"extra_body": {"models": ["openai/gpt-6.2-sol"]}}}, False)],
+    ids=["documented-config", "rerouting-field"],
+)
+async def test_openrouter_responses_never_sends_an_unset_store_as_true(
+    tmp_path: Path,
+    extra_kwargs: dict[str, Any],
+    *,
+    compacts: bool,
+) -> None:
+    """OpenRouter rejects ``store: true``, so every request of the route goes unstored, native compaction or not."""
+    config = {**_OPENROUTER_RESPONSES, "extra_kwargs": {"base_url": "https://openrouter.ai/api/v1", **extra_kwargs}}
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return encoded_response(_responses_reply(*_text_events("Pack"), _completed()))
+
+    adapter = openai_family_adapter(config, tmp_path, respond)
+    assert isinstance(adapter, ResponsesAdapter)
+    provider = pipeline_provider(adapter)
+    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
+    assert (native is not None) is compacts
+
+    # A reply with native compaction where the route has it, one without, and MindRoom's own summary call.
+    await complete(provider, ModelRequest(messages=[_user()], native_compaction=native))
+    await complete(provider, ModelRequest(messages=[_user()]))
+    summary = await generate_compaction_summary(
+        model=provider,
+        summary_input="Conversation",
+        summary_prompt="Summarize",
+        timeout_seconds=10,
+        on_usage=None,
+    )
+
+    bodies = [json.loads(request.content) for request in sent]
+    assert summary == "Pack"
+    assert [body["store"] for body in bodies] == [False, False, False]
+    assert [body["include"] for body in bodies] == [["reasoning.encrypted_content"]] * 3
+    assert ["context_management" in body for body in bodies] == [compacts, False, False]
+    assert all("previous_response_id" not in body for body in bodies)
+
+
+def test_openrouter_responses_keeps_an_authored_store_and_other_routes_keep_their_default(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+
+    def store(config: dict[str, Any]) -> bool | None:
+        adapter = build_provider(ModelConfig(**config), runtime)
+        assert isinstance(adapter, ResponsesAdapter)
+        return adapter.wire.store
+
+    openrouter = {"base_url": "https://openrouter.ai/api/v1"}
+    assert store(_OPENROUTER_RESPONSES) is False
+    assert store({**_OPENROUTER_RESPONSES, "extra_kwargs": {**openrouter, "store": True}}) is True
+    assert store({**_OPENROUTER_RESPONSES, "extra_kwargs": {**openrouter, "request_params": {"store": True}}}) is True
+    assert store(_OPENAI_RESPONSES) is None
+    assert store({"provider": "codex", "id": "gpt-6.2-sol"}) is False
+
+
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+)
+_STICKY_400_BODY = {
+    "error": {
+        "message": (
+            "Your request contains encrypted reasoning or compaction content that can only be processed by the "
+            "provider that created it (azure), but your request's provider.order preference with allow_fallbacks "
+            "disabled excludes that provider. Allow azure or start a new conversation without the encrypted items."
+        ),
+        "code": 400,
+    },
+}
+_UPSTREAM_429_BODY = {
+    "error": {
+        "message": "openai/gpt-6.2-sol is temporarily rate-limited upstream. Please retry shortly.",
+        "code": 429,
+    },
+}
+
+
+def _openrouter_route(
+    tmp_path: Path,
+    *replies: dict[str, Any],
+    config: dict[str, Any] = _OPENROUTER_RESPONSES,
+) -> tuple[ResponsesAdapter, ModelProvider, NativeCompactionReplay, list[httpx2.Request]]:
+    """Return an OpenRouter Responses route, in its pipeline, with its native settings and the requests it sends.
+
+    The wire answers with ``replies`` in turn, and with the last one from then on.
+    """
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return encoded_response(replies[min(len(sent), len(replies)) - 1])
+
+    adapter = openai_family_adapter(config, tmp_path, respond)
+    assert isinstance(adapter, ResponsesAdapter)
+    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
+    assert native is not None
+    return adapter, pipeline_provider(adapter), native, sent
+
+
+def _encrypted_history(native: NativeCompactionReplay) -> list[Message]:
+    """Return stored history with an earlier turn, a compacted checkpoint turn, and an encrypted-reasoning turn."""
+    checkpoint_output = [
+        {"id": "rs_old", "type": "reasoning", "summary": [], "encrypted_content": "enc-reason-azure-1"},
+        {
+            "id": "msg_old",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Compacted answer", "annotations": []}],
+        },
+    ]
+    tail_call = {
+        "id": "fc_lookup",
+        "call_id": "call_lookup",
+        "type": "function",
+        "function": {"name": "get_weather", "arguments": '{"city": "Paris"}'},
+    }
+    tail_output = [
+        {"id": "rs_tail", "type": "reasoning", "summary": [], "encrypted_content": "enc-reason-azure-2"},
+        {
+            "id": "fc_lookup",
+            "type": "function_call",
+            "call_id": "call_lookup",
+            "name": "get_weather",
+            "arguments": '{"city": "Paris"}',
+            "status": "completed",
+        },
+    ]
+    return [
+        Message(role="user", content="Earliest question before compaction"),
+        Message(role="assistant", content="Earliest answer before compaction"),
+        Message(role="user", content="Question that triggered compaction"),
+        Message(
+            role="assistant",
+            content="Compacted answer",
+            provider_data={
+                "response_id": "resp_cmp",
+                "mindroom_response_stored": False,
+                RESPONSE_OUTPUT_KEY: checkpoint_output,
+                "mindroom_native_compaction": {
+                    "route": native.route,
+                    "threshold": native.threshold,
+                    "checkpoint_prefix": True,
+                    "items": [
+                        {"id": "cmp_azure", "type": "compaction", "encrypted_content": "enc-compaction-azure"},
+                        checkpoint_output[1],
+                    ],
+                },
+            },
+        ),
+        Message(role="user", content="Check Paris weather"),
+        Message(
+            role="assistant",
+            content=None,
+            tool_calls=[tail_call],
+            provider_data={
+                "response_id": "resp_tail",
+                "mindroom_response_stored": False,
+                RESPONSE_OUTPUT_KEY: tail_output,
+                "mindroom_native_compaction": {
+                    "route": native.route,
+                    "threshold": native.threshold,
+                    "checkpoint_prefix": True,
+                },
+            },
+        ),
+        Message(role="tool", tool_call_id="fc_lookup", content="Sunny, 20C"),
+        Message(role="user", content="Next question after provider change"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_recovers_once_from_sticky_400_and_stores_new_checkpoint(tmp_path: Path) -> None:
+    new_output = [
+        {"id": "cmp_openai", "type": "compaction", "encrypted_content": "enc-compaction-openai"},
+        {"id": "rs_openai", "type": "reasoning", "summary": [], "encrypted_content": "enc-reason-openai"},
+        {
+            "id": "msg_new",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Recovered", "annotations": []}],
+        },
+    ]
+    replies = [
+        _json_reply(_STICKY_400_BODY, status=400),
+        _responses_reply(*_text_events("Recovered"), _completed(new_output)),
+    ]
+    _adapter, provider, native, sent = _openrouter_route(tmp_path, *replies)
+    messages = _encrypted_history(native)
+    original_snapshot = deepcopy(messages)
+
+    with capture_logs() as logs:
+        turn = await complete(provider, ModelRequest(messages=messages, native_compaction=native))
+
+    assert (turn.content, len(sent)) == ("Recovered", 2)
+    first_body, second_body = json.loads(sent[0].content), json.loads(sent[1].content)
+    # First attempt sent the compaction checkpoint and encrypted reasoning.
+    assert any(item.get("type") == "compaction" for item in first_body["input"])
+    assert "enc-compaction-azure" in json.dumps(first_body["input"])
+    assert "enc-reason-azure-2" in json.dumps(first_body["input"])
+    # Second attempt drops all compaction items and encrypted_content and replays the full stored history.
+    second_input = second_body["input"]
+    second_json = json.dumps(second_input)
+    assert not any(item.get("type") == "compaction" for item in second_input)
+    assert "encrypted_content" not in second_json
+    assert "rs_" not in second_json
+    assert "fc_" not in second_json
+    # The whole stored history goes in order: each answer's text, then the call, then its result.
+    assert second_input == [
+        {"role": "user", "content": "Earliest question before compaction"},
+        {"role": "assistant", "content": "Earliest answer before compaction"},
+        {"role": "user", "content": "Question that triggered compaction"},
+        {"role": "assistant", "content": "Compacted answer"},
+        {"role": "user", "content": "Check Paris weather"},
+        {
+            "type": "function_call",
+            "call_id": "call_lookup",
+            "name": "get_weather",
+            "arguments": '{"city": "Paris"}',
+            "status": "completed",
+        },
+        {"type": "function_call_output", "call_id": "call_lookup", "output": "Sunny, 20C"},
+        {"role": "user", "content": "Next question after provider change"},
+    ]
+    assert second_body["store"] is False
+    assert second_body["include"] == ["reasoning.encrypted_content"]
+    assert second_body["context_management"] == [{"type": "compaction", "compact_threshold": 50_000}]
+    # New checkpoint and reasoning are stored normally; original messages were not mutated.
+    assert turn.message.provider_data["mindroom_native_compaction"]["items"][0]["encrypted_content"] == (
+        "enc-compaction-openai"
+    )
+    assert turn.message.provider_data[RESPONSE_OUTPUT_KEY][0]["encrypted_content"] == "enc-reason-openai"
+    assert messages == original_snapshot
+    assert any(
+        entry.get("log_level") == "warning" and "provider-encrypted replay state" in str(entry.get("event"))
+        for entry in logs
+    )
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_recovers_from_a_sticky_rejection_sent_as_a_stream_error(tmp_path: Path) -> None:
+    """A rejection that arrives as the stream's error event has no HTTP status, only the event's code."""
+    rejection = {
+        "type": "error",
+        "sequence_number": 1,
+        "code": "400",
+        "message": _STICKY_400_BODY["error"]["message"],
+        "param": None,
+    }
+    _adapter, provider, native, sent = _openrouter_route(
+        tmp_path,
+        _responses_reply(_text_events("")[0], rejection),
+        _responses_reply(*_text_events("Recovered"), _completed()),
+    )
+    history = _encrypted_history(native)
+    history[-1] = replace(history[-1], images=[Image(id="att_photo", content=_PNG, mime_type="image/png")])
+
+    turn = await complete(provider, ModelRequest(messages=history, native_compaction=native))
+
+    assert (turn.content, len(sent)) == ("Recovered", 2)
+    inputs = [json.dumps(json.loads(request.content)["input"]) for request in sent]
+    assert ["encrypted_content" in sent_input for sent_input in inputs] == [True, False]
+    assert all("input_image" in sent_input for sent_input in inputs)
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_sticky_400_retries_at_most_once(tmp_path: Path) -> None:
+    _adapter, provider, native, sent = _openrouter_route(tmp_path, _json_reply(_STICKY_400_BODY, status=400))
+
+    with pytest.raises(InvalidRequest, match="can only be processed by the provider that created it"):
+        await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
+
+    assert len(sent) == 2
+
+
+@pytest.mark.asyncio
+async def test_direct_openai_responses_does_not_retry_sticky_400(tmp_path: Path) -> None:
+    _adapter, provider, native, sent = _openrouter_route(
+        tmp_path,
+        _json_reply(_STICKY_400_BODY, status=400),
+        config=_OPENAI_RESPONSES,
+    )
+
+    with pytest.raises(InvalidRequest, match="can only be processed by the provider that created it"):
+        await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
+
+    assert len(sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_429_after_retries_recovers_only_when_encrypted_items_were_sent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+    transient_attempts = 1 + retry_stage._MAX_TRANSIENT_RETRIES
+    sent_encrypted: list[httpx2.Request] = []
+
+    def respond_encrypted(request: httpx2.Request) -> httpx.Response:
+        sent_encrypted.append(request)
+        if len(sent_encrypted) <= transient_attempts:
+            return encoded_response(_json_reply(_UPSTREAM_429_BODY, status=429))
+        return encoded_response(_responses_reply(*_text_events("Fallback ok"), _completed()))
+
+    (tmp_path / "encrypted").mkdir()
+    adapter = openai_family_adapter(_OPENROUTER_RESPONSES, tmp_path / "encrypted", respond_encrypted)
+    assert isinstance(adapter, ResponsesAdapter)
+    provider = pipeline_provider(adapter)
+    native = adapter.native_compaction_settings(threshold=50_000, history_generation="g1", allow_authored=False)
+    assert native is not None
+
+    turn = await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
+
+    assert (turn.content, len(sent_encrypted)) == ("Fallback ok", transient_attempts + 1)
+    recovered_body = json.loads(sent_encrypted[-1].content)
+    assert not any(item.get("type") == "compaction" for item in recovered_body["input"])
+    assert "encrypted_content" not in json.dumps(recovered_body["input"])
+
+    # A plain 429 on a fresh request (no encrypted items) stops after the normal transient retries.
+    sent_fresh: list[httpx2.Request] = []
+
+    def respond_fresh(request: httpx2.Request) -> httpx.Response:
+        sent_fresh.append(request)
+        return encoded_response(_json_reply(_UPSTREAM_429_BODY, status=429))
+
+    (tmp_path / "fresh").mkdir()
+    fresh_provider = pipeline_provider(openai_family_adapter(_OPENROUTER_RESPONSES, tmp_path / "fresh", respond_fresh))
+    with pytest.raises(RateLimited):
+        await complete(fresh_provider, ModelRequest(messages=[_user()], native_compaction=native))
+
+    assert len(sent_fresh) == transient_attempts
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_recovers_when_only_encrypted_reasoning_is_replayed(tmp_path: Path) -> None:
+    replies = [
+        _json_reply(_STICKY_400_BODY, status=400),
+        _responses_reply(*_text_events("Rebuilt ok"), _completed()),
+    ]
+    sent: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return encoded_response(replies[len(sent) - 1])
+
+    config = {**_OPENROUTER_RESPONSES, "extra_kwargs": {"base_url": "https://openrouter.ai/api/v1", "store": False}}
+    provider = pipeline_provider(openai_family_adapter(config, tmp_path, respond))
+    messages = [
+        Message(role="user", content="First question"),
+        Message(
+            role="assistant",
+            content="First answer",
+            provider_data={
+                "mindroom_response_stored": False,
+                RESPONSE_OUTPUT_KEY: [
+                    {"id": "rs_1", "type": "reasoning", "summary": [], "encrypted_content": "enc-reason-azure"},
+                    {
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [{"type": "output_text", "text": "First answer", "annotations": []}],
+                    },
+                ],
+            },
+        ),
+        Message(role="user", content="Second question"),
+    ]
+
+    turn = await complete(provider, ModelRequest(messages=messages))
+
+    assert (turn.content, len(sent)) == ("Rebuilt ok", 2)
+    assert "enc-reason-azure" in json.dumps(json.loads(sent[0].content)["input"])
+    assert "encrypted_content" not in json.dumps(json.loads(sent[1].content)["input"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_replacement_checkpoint", [False, True], ids=["without-checkpoint", "with-checkpoint"])
+async def test_openrouter_responses_recovery_boundary_persists_to_following_request(
+    tmp_path: Path,
+    *,
+    with_replacement_checkpoint: bool,
+) -> None:
+    new_output = [
+        *(
+            [{"id": "cmp_openai", "type": "compaction", "encrypted_content": "enc-compaction-openai"}]
+            if with_replacement_checkpoint
+            else []
+        ),
+        {"id": "rs_openai", "type": "reasoning", "summary": [], "encrypted_content": "enc-reason-openai"},
+        {
+            "id": "msg_new",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Recovered", "annotations": []}],
+        },
+    ]
+    replies = [
+        _json_reply(_STICKY_400_BODY, status=400),
+        _responses_reply(*_text_events("Recovered"), _completed(new_output)),
+        _responses_reply(*_text_events("Next ok"), _completed()),
+    ]
+    _adapter, provider, native, sent = _openrouter_route(tmp_path, *replies)
+    history = _encrypted_history(native)
+
+    recovered = await complete(provider, ModelRequest(messages=history, native_compaction=native))
+    follow_up_messages = [*history, recovered.message, Message(role="user", content="Follow-up after recovery")]
+    follow_up = await complete(provider, ModelRequest(messages=follow_up_messages, native_compaction=native))
+
+    assert (recovered.content, follow_up.content, len(sent)) == ("Recovered", "Next ok", 3)
+    third_input = json.loads(sent[2].content)["input"]
+    third_json = json.dumps(third_input)
+    # Old upstream's checkpoint and reasoning never reappear on the following request.
+    assert "enc-compaction-azure" not in third_json
+    assert "enc-reason-azure" not in third_json
+    if with_replacement_checkpoint:
+        # New checkpoint supersedes the boundary and replaces earlier history.
+        assert "enc-compaction-openai" in third_json
+        assert "Earliest question before compaction" not in third_json
+    else:
+        # Without a replacement checkpoint, earlier turns stay rebuilt while the recovered turn replays normally.
+        assert not any(item.get("type") == "compaction" for item in third_input)
+        assert "Earliest question before compaction" in third_json
+        assert "enc-reason-openai" in third_json
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_request_after_recovery_is_sized_as_the_wire_sends_it(tmp_path: Path) -> None:
+    """Without a replacement checkpoint the next request replays the whole history, which its size must cover.
+
+    The answer after the old checkpoint reported the small request that checkpoint left, and the attachment before
+    the checkpoint went unsent then; neither describes the request after the reset.
+    """
+    recovered_output = [
+        {"id": "rs_openai", "type": "reasoning", "summary": [], "encrypted_content": "enc-reason-openai"},
+        {
+            "id": "msg_new",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Recovered", "annotations": []}],
+        },
+    ]
+    replies = [
+        _json_reply(_STICKY_400_BODY, status=400),
+        _responses_reply(*_text_events("Recovered"), _completed(recovered_output)),
+        _responses_reply(*_text_events("Next ok"), _completed()),
+    ]
+    adapter, provider, native, sent = _openrouter_route(tmp_path, *replies)
+    history = _encrypted_history(native)
+    early_text = "Earliest question before compaction. " + "The long trip notes go on. " * 4_000
+    history[0] = replace(
+        history[0],
+        content=early_text,
+        images=[Image(id="att_map", content=_PNG, mime_type="image/png")],
+    )
+    # The answer after the checkpoint anchors a request that still replays the checkpoint, at the size it reported.
+    anchor = history[5]
+    anchor.metrics = MessageMetrics(tokens=TokenCounts(input_tokens=150, output_tokens=5))
+    anchor.provider_data = {**anchor.provider_data, **model_provenance(adapter.identity.id, adapter.identity.provider)}
+    stamp_request_identity(anchor, provider, ModelRequest(messages=history[:5], native_compaction=native))
+    sizer = RequestSizer(provider, "openai")
+    before = ModelRequest(messages=history, native_compaction=native)
+    assert sizer.size(before).reported
+    assert sizer.size(before).tokens < 1_000
+
+    recovered = await complete(provider, before)
+    follow_up = ModelRequest(
+        messages=[*history, recovered.message, Message(role="user", content="Follow-up after recovery")],
+        native_compaction=native,
+    )
+    size = sizer.size(follow_up)
+    await complete(provider, follow_up)
+
+    third_input = json.loads(sent[2].content)["input"]
+    assert early_text in json.dumps(third_input)
+    assert any(part.get("type") == "input_image" for part in third_input[0]["content"])
+    assert not size.reported
+    assert size.tokens >= count(adapter.token_counter, early_text) + MEDIA_ALLOWANCE_TOKENS
+    assert size.tokens == provider.request_tokens(follow_up)
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_always_429_stops_at_single_stripped_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+    transient_attempts = 1 + retry_stage._MAX_TRANSIENT_RETRIES
+    _adapter, provider, native, sent = _openrouter_route(tmp_path, _json_reply(_UPSTREAM_429_BODY, status=429))
+
+    with pytest.raises(RateLimited):
+        await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
+
+    # 5 encrypted attempts (initial + 4 transient retries) + 1 final stripped attempt = 6 total.
+    assert len(sent) == transient_attempts + 1
+    assert "encrypted_content" in json.dumps(json.loads(sent[0].content)["input"])
+    assert "encrypted_content" not in json.dumps(json.loads(sent[-1].content)["input"])
+
+
+_STREAM_429 = {
+    "type": "error",
+    "sequence_number": 1,
+    "code": "429",
+    "message": _UPSTREAM_429_BODY["error"]["message"],
+    "param": None,
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "transient",
+    [
+        _json_reply(_UPSTREAM_429_BODY, status=429),
+        _json_reply({"error": {"message": "overloaded"}}, status=503),
+        _responses_reply(_text_events("")[0], _STREAM_429),
+    ],
+    ids=["429", "503", "stream-429"],
+)
+async def test_openrouter_responses_stripped_resend_keeps_the_transient_retries_left(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    transient: dict[str, Any],
+) -> None:
+    """A rejection on the first attempt used no transient retry, so the resend retries a transient failure, stripped."""
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+    adapter, provider, native, sent = _openrouter_route(
+        tmp_path,
+        _json_reply(_STICKY_400_BODY, status=400),
+        transient,
+        transient,
+        _responses_reply(*_text_events("Recovered"), _completed()),
+    )
+
+    turn = await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
+
+    assert (turn.content, len(sent)) == ("Recovered", 4)
+    inputs = [json.dumps(json.loads(request.content)["input"]) for request in sent]
+    assert ["encrypted_content" in sent_input for sent_input in inputs] == [True, False, False, False]
+    assert inputs[1] == inputs[2] == inputs[3]
+    assert turn.message.provider_data["mindroom_encrypted_replay_reset"] == adapter.capabilities.replay_reset_scope
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_stripped_resend_shares_one_transient_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resend gets no budget of its own: retries spent before the rejection are gone, and nothing strips twice."""
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+    rate_limited = _json_reply(_UPSTREAM_429_BODY, status=429)
+    _adapter, provider, native, sent = _openrouter_route(
+        tmp_path,
+        rate_limited,
+        rate_limited,
+        _json_reply(_STICKY_400_BODY, status=400),
+        rate_limited,
+    )
+
+    with pytest.raises(RateLimited):
+        await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
+
+    # Two retries before the rejection leave the stripped resend two more: 3 encrypted sends, then 3 stripped.
+    assert retry_stage._MAX_TRANSIENT_RETRIES == 4
+    inputs = [json.dumps(json.loads(request.content)["input"]) for request in sent]
+    assert ["encrypted_content" in sent_input for sent_input in inputs] == [True, True, True, False, False, False]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("extra_override", "recovers"),
+    [
+        ({"request_params": {"input": "authored override"}}, False),
+        ({"extra_body": {"input": "authored override"}}, False),
+        ({"request_params": {"extra_body": {"input": "authored override"}}}, False),
+        # ``request_params.extra_body`` replaces ``extra_body``, so its ``input`` is never sent and the replay goes.
+        (
+            {
+                "extra_body": {"input": "authored override"},
+                "request_params": {"extra_body": {"provider": {"order": ["openai"]}}},
+            },
+            True,
+        ),
+    ],
+    ids=["request_params", "extra_body", "request_params.extra_body", "shadowed-extra_body"],
+)
+async def test_openrouter_responses_only_an_effective_authored_input_skips_429_sticky_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_override: dict[str, Any],
+    *,
+    recovers: bool,
+) -> None:
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+    transient_attempts = 1 + retry_stage._MAX_TRANSIENT_RETRIES
+    config = {
+        **_OPENROUTER_RESPONSES,
+        "extra_kwargs": {"base_url": "https://openrouter.ai/api/v1", **extra_override},
+    }
+    _adapter, provider, native, sent = _openrouter_route(
+        tmp_path,
+        _json_reply(_UPSTREAM_429_BODY, status=429),
+        config=config,
+    )
+
+    with pytest.raises(RateLimited):
+        await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
+
+    assert len(sent) == transient_attempts + recovers
+    if recovers:
+        assert "encrypted_content" not in json.dumps(json.loads(sent[-1].content)["input"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "routing",
+    [
+        # With fallbacks off both listed upstreams stay eligible.
+        {"order": ["openai", "azure"], "allow_fallbacks": False},
+        {"only": ["openai", "azure"]},
+        # One slug can cover several endpoints, so a single entry does not prove one endpoint created the items.
+        {"only": ["openai"]},
+    ],
+    ids=["order-without-fallbacks", "only-two", "only-one"],
+)
+async def test_openrouter_responses_429_sticky_recovery_keeps_the_routing_preferences(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    routing: dict[str, Any],
+) -> None:
+    """Whatever the routing preferences, the one stripped resend goes, and goes with them unchanged."""
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+    transient_attempts = 1 + retry_stage._MAX_TRANSIENT_RETRIES
+    config = {
+        **_OPENROUTER_RESPONSES,
+        "extra_kwargs": {
+            "base_url": "https://openrouter.ai/api/v1",
+            "request_params": {"extra_body": {"provider": routing}},
+        },
+    }
+    _adapter, provider, native, sent = _openrouter_route(
+        tmp_path,
+        *[_json_reply(_UPSTREAM_429_BODY, status=429)] * transient_attempts,
+        _responses_reply(*_text_events("Other upstream ok"), _completed()),
+        config=config,
+    )
+
+    turn = await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
+
+    assert (turn.content, len(sent)) == ("Other upstream ok", transient_attempts + 1)
+    bodies = [json.loads(request.content) for request in sent]
+    assert [body["provider"] for body in bodies] == [routing] * len(sent)
+    assert all("encrypted_content" in json.dumps(body["input"]) for body in bodies[:-1])
+    assert "encrypted_content" not in json.dumps(bodies[-1]["input"])
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_sticky_400_recovers_under_a_single_upstream_pin(tmp_path: Path) -> None:
+    """A rejection says another upstream created the items, so a pin to one upstream still resends without them."""
+    config = {
+        **_OPENROUTER_RESPONSES,
+        "extra_kwargs": {
+            "base_url": "https://openrouter.ai/api/v1",
+            "request_params": {"extra_body": {"provider": {"only": ["openai"]}}},
+        },
+    }
+    _adapter, provider, native, sent = _openrouter_route(
+        tmp_path,
+        _json_reply(_STICKY_400_BODY, status=400),
+        _responses_reply(*_text_events("Recovered"), _completed()),
+        config=config,
+    )
+
+    turn = await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
+
+    assert (turn.content, len(sent)) == ("Recovered", 2)
+    assert "encrypted_content" not in json.dumps(json.loads(sent[1].content)["input"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "message", "error_type"),
+    [
+        ("400", _STICKY_400_BODY["error"]["message"], InvalidRequest),
+        ("429", _UPSTREAM_429_BODY["error"]["message"], RateLimited),
+    ],
+    ids=["sticky-400", "429"],
+)
+async def test_openrouter_responses_failure_after_output_is_sent_once(
+    tmp_path: Path,
+    code: str,
+    message: str,
+    error_type: type[ProviderError],
+) -> None:
+    """Text the caller already received commits the attempt, so its failure is neither retried nor recovered."""
+    failure = {"type": "error", "sequence_number": 2, "code": code, "message": message, "param": None}
+    _adapter, provider, native, sent = _openrouter_route(
+        tmp_path,
+        _responses_reply(*_text_events("Partial answer"), failure),
+    )
+
+    with pytest.raises(error_type):
+        await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
+
+    assert len(sent) == 1
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_sticky_400_twice_sends_twice_with_an_attachment(tmp_path: Path) -> None:
+    """A sticky rejection is not a media rejection, so the media fallback never resends the request without media."""
+    _adapter, provider, native, sent = _openrouter_route(tmp_path, _json_reply(_STICKY_400_BODY, status=400))
+    history = _encrypted_history(native)
+    history[-1] = replace(history[-1], images=[Image(id="att_photo", content=_PNG, mime_type="image/png")])
+
+    with pytest.raises(InvalidRequest, match="can only be processed by the provider that created it"):
+        await complete(provider, ModelRequest(messages=history, native_compaction=native))
+
+    bodies = [json.loads(request.content) for request in sent]
+    assert ["encrypted_content" in json.dumps(body["input"]) for body in bodies] == [True, False]
+    assert all("input_image" in json.dumps(body["input"]) for body in bodies)
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_media_fallback_after_recovery_stays_stripped(tmp_path: Path) -> None:
+    """The one recovery spans the request: the media-free resend keeps the encrypted state out, in three sends."""
+    replies = [
+        _json_reply(_STICKY_400_BODY, status=400),
+        _json_reply({"error": {"message": "This model does not support image input.", "code": 400}}, status=400),
+        _responses_reply(*_text_events("Without the photo"), _completed()),
+    ]
+    adapter, provider, native, sent = _openrouter_route(tmp_path, *replies)
+    history = _encrypted_history(native)
+    history[-1] = replace(history[-1], images=[Image(id="att_photo", content=_PNG, mime_type="image/png")])
+
+    turn = await complete(provider, ModelRequest(messages=history, native_compaction=native))
+
+    assert (turn.content, len(sent)) == ("Without the photo", 3)
+    inputs = [json.dumps(json.loads(request.content)["input"]) for request in sent]
+    assert ["encrypted_content" in sent_input for sent_input in inputs] == [True, False, False]
+    assert ["input_image" in sent_input for sent_input in inputs] == [True, True, False]
+    assert FALLBACK_MARKER in inputs[2]
+    # The answer records the reset, so the next request keeps the old upstream's state out too.
+    assert turn.message.provider_data["mindroom_encrypted_replay_reset"] == adapter.capabilities.replay_reset_scope
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_failures", "sends", "recovers"),
+    [
+        # A rate limit used the budget up: one stripped send, and its media-free reissue gets no retry either.
+        (1 + 4, 7, False),
+        # A rejection on the first attempt used none: the media-free reissue retries with the whole budget.
+        (0, 4, True),
+    ],
+    ids=["budget-used-up", "budget-unused"],
+)
+async def test_openrouter_responses_media_fallback_after_recovery_shares_the_transient_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first_failures: int,
+    sends: int,
+    *,
+    recovers: bool,
+) -> None:
+    """A stripped request the media fallback rewrites keeps the retries its request has left, not a fresh budget."""
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+    assert retry_stage._MAX_TRANSIENT_RETRIES == 4
+    rate_limited = _json_reply(_UPSTREAM_429_BODY, status=429)
+    _adapter, provider, native, sent = _openrouter_route(
+        tmp_path,
+        *([rate_limited] * first_failures or [_json_reply(_STICKY_400_BODY, status=400)]),
+        _json_reply({"error": {"message": "This model does not support image input.", "code": 400}}, status=400),
+        rate_limited,
+        *([_responses_reply(*_text_events("Without the photo"), _completed())] if recovers else []),
+    )
+    history = _encrypted_history(native)
+    history[-1] = replace(history[-1], images=[Image(id="att_photo", content=_PNG, mime_type="image/png")])
+    request = ModelRequest(messages=history, native_compaction=native)
+
+    if recovers:
+        assert (await complete(provider, request)).content == "Without the photo"
+    else:
+        with pytest.raises(RateLimited):
+            await complete(provider, request)
+
+    encrypted_sends = max(first_failures, 1)
+    inputs = [json.dumps(json.loads(request.content)["input"]) for request in sent]
+    assert len(sent) == sends
+    assert ["encrypted_content" in sent_input for sent_input in inputs] == [True] * encrypted_sends + [False] * (
+        sends - encrypted_sends
+    )
+    assert ["input_image" in sent_input for sent_input in inputs] == [True] * (encrypted_sends + 1) + [False] * (
+        sends - encrypted_sends - 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_openrouter_responses_plain_non_sticky_400_is_not_retried(tmp_path: Path) -> None:
+    _adapter, provider, native, sent = _openrouter_route(
+        tmp_path,
+        _json_reply({"error": {"message": "Invalid parameter: max_output_tokens", "code": 400}}, status=400),
+    )
+
+    with pytest.raises(InvalidRequest, match="Invalid parameter"):
+        await complete(provider, ModelRequest(messages=_encrypted_history(native), native_compaction=native))
+
+    assert len(sent) == 1
+
+
 # --- Request settings -----------------------------------------------------------------------------------------
 
 
@@ -2303,3 +3727,486 @@ def test_responses_capabilities_follow_model_and_endpoint(tmp_path: Path) -> Non
 def test_non_openai_family_provider_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="not an OpenAI-family provider"):
         build_provider(ModelConfig(provider="anthropic", id="claude-sonnet-5-5"), _runtime(tmp_path))
+
+
+def _calls(*call_ids: str) -> list[dict[str, Any]]:
+    return [{**_CALL, "id": call_id} for call_id in call_ids]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "google/gemini-4-neon",
+        "google/gemini-3.8-flash:thinking",
+        "~google/gemini-pro-latest",
+        "Google/Gemini-4-Neon",
+    ],
+)
+async def test_openrouter_gemini_wraps_tool_results_as_json_objects(tmp_path: Path, model_id: str) -> None:
+    """OpenRouter's Gemini translator parses ``{...}`` out of plain-text tool content unless it is a JSON object."""
+    built = _Built(tmp_path, {"provider": "openrouter", "id": model_id, "api_key": "k"}, _chat_reply())
+    text = 'Header\nextra_kwargs: {}\nSee `{viaServers: ["child.example"]}` 🚀\nFooter'
+    assistant = Message(role="assistant", content="", tool_calls=_calls("call_1", "call_2", "call_3"))
+    ok_result = Message(role="tool", content=text, tool_call_id="call_1", tool_name="get_weather")
+    err_result = Message(
+        role="tool",
+        content="Failed with {code: 500}",
+        tool_call_id="call_2",
+        tool_name="get_weather",
+        tool_call_error=True,
+    )
+    empty_err = Message(role="tool", content="", tool_call_id="call_3", tool_name="get_weather", tool_call_error=True)
+
+    await _turn(built, ModelRequest(messages=[_user(), assistant, ok_result, err_result, empty_err]))
+
+    sent = built.body()["messages"]
+    assert json.loads(sent[2]["content"]) == {"result": text}
+    assert json.loads(sent[3]["content"]) == {"error": "Failed with {code: 500}"}
+    assert json.loads(sent[4]["content"]) == {"error": "The tool call failed without an error message."}
+    # Wrapping happens only on the wire; stored messages stay plain text for cross-provider replay.
+    assert ok_result.content == text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_id", "extra_kwargs", "expect_wrapped"),
+    [
+        ("openrouter/auto", {"request_params": {"model": "google/gemini-4-neon"}}, True),
+        ("openrouter/auto", {"extra_body": {"model": "google/gemini-4-neon"}}, True),
+        ("google/gemini-4-neon", {"extra_body": {"model": "z-ai/glm-5.3"}}, False),
+        (
+            "openrouter/auto",
+            {"request_params": {"model": "z-ai/glm-5.3"}, "extra_body": {"model": "google/gemini-4-neon"}},
+            True,
+        ),
+        (
+            "google/gemini-4-neon",
+            {"request_params": {"model": "google/gemini-4-neon"}, "extra_body": {"model": "z-ai/glm-5.3"}},
+            False,
+        ),
+    ],
+    ids=[
+        "request_params-gemini",
+        "extra_body-gemini",
+        "gemini-overridden-to-glm",
+        "extra_body-gemini-wins-over-request_params",
+        "extra_body-glm-wins-over-request_params",
+    ],
+)
+async def test_openrouter_gemini_tool_wrapping_follows_authored_model_override(
+    tmp_path: Path,
+    model_id: str,
+    extra_kwargs: dict[str, Any],
+    expect_wrapped: bool,
+) -> None:
+    built = _Built(
+        tmp_path,
+        {"provider": "openrouter", "id": model_id, "api_key": "k", "extra_kwargs": extra_kwargs},
+        _chat_reply(),
+    )
+    text = "Header\n{}\nFooter"
+    assistant = Message(role="assistant", content="", tool_calls=[_CALL])
+    result = Message(role="tool", content=text, tool_call_id="call_1", tool_name="get_weather")
+
+    await _turn(built, ModelRequest(messages=[_user(), assistant, result]))
+
+    sent_content = built.body()["messages"][2]["content"]
+    if expect_wrapped:
+        assert json.loads(sent_content) == {"result": text}
+    else:
+        assert sent_content == text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra_body_model", [None, ""], ids=["null", "empty"])
+@pytest.mark.parametrize(
+    ("model_id", "request_params"),
+    [("openrouter/auto", {"model": "google/gemini-4-neon"}), ("google/gemini-4-neon", {})],
+    ids=["request_params-gemini", "configured-gemini"],
+)
+async def test_openrouter_gemini_null_or_empty_extra_body_model_is_the_effective_model(
+    tmp_path: Path,
+    model_id: str,
+    request_params: dict[str, Any],
+    extra_body_model: str | None,
+) -> None:
+    """The SDK sends an authored ``extra_body`` ``model`` over every other, even a null or empty one.
+
+    The wire, the context key, and the request log all read that one model, so none of them takes the request for
+    a Gemini one because the configured ID or ``request_params`` names a Gemini model.
+    """
+    log_dir = tmp_path / "request-logs"
+    extra_kwargs = {"request_params": request_params, "extra_body": {"model": extra_body_model}}
+    built = _Built(
+        tmp_path,
+        {"provider": "openrouter", "id": model_id, "api_key": "k", "extra_kwargs": extra_kwargs},
+        _chat_reply(),
+    )
+    assert isinstance(built.adapter, ChatAdapter)
+    provider = pipeline_provider(built.adapter, log_dir=log_dir)
+    quoted_text = 'password="synthetic-quoted-value" followed by public text'
+    compact_json = '{"result":"ok"}'
+    assistant = Message(role="assistant", content="", tool_calls=_calls("call_1", "call_2"))
+    quoted_tool = Message(role="tool", content=quoted_text, tool_call_id="call_1", tool_name="get_weather")
+    compact_tool = Message(role="tool", content=compact_json, tool_call_id="call_2", tool_name="get_weather")
+    request = ModelRequest(messages=[_user(), assistant, quoted_tool, compact_tool])
+
+    await complete(provider, request)
+
+    body = built.body()
+    assert body["model"] == extra_body_model
+    assert [message["content"] for message in body["messages"][2:]] == [quoted_text, compact_json]
+    parts = RequestParts(built.adapter.token_counter)
+    built.adapter._parts(replace(request, messages=()), 0, parts)
+    assert "openrouter_gemini_tool_results" not in parts.flags
+    (log_file,) = log_dir.glob("llm-requests-*.jsonl")
+    logged_text = log_file.read_text(encoding="utf-8")
+    assert "synthetic-quoted-value" not in logged_text
+    logged_messages = json.loads(logged_text.splitlines()[0])["body"]["messages"]
+    # Redacted as plain text, and a result that only looks like a wrapped one is neither decoded nor re-encoded.
+    assert logged_messages[2]["content"] == 'password="***redacted***" followed by public text'
+    assert logged_messages[3]["content"] == compact_json
+
+
+@pytest.mark.asyncio
+async def test_openrouter_gemini_wraps_multimodal_and_multipart_tool_results(tmp_path: Path) -> None:
+    """Attached media stays beside one JSON-wrapped text part, and several text parts wrap as a list of their texts."""
+    built = _Built(tmp_path, {"provider": "openrouter", "id": "google/gemini-4-neon", "api_key": "k"}, _chat_reply())
+    call_ids = [f"call_{number}" for number in range(1, 7)]
+    assistant = Message(role="assistant", content="", tool_calls=_calls(*call_ids))
+    image_part = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+    attached_image = Image(content=b"\x89PNG\r\n\x1a\n", mime_type="image/png")
+    with_attached_image = Message(
+        role="tool",
+        content="Caption {}",
+        tool_call_id="call_1",
+        tool_name="get_weather",
+        images=[attached_image],
+    )
+    multi_text_only = Message(
+        role="tool",
+        content=[{"type": "text", "text": "Part 1"}, {"type": "text", "text": "Part 2 {a: 1}"}],
+        tool_call_id="call_2",
+        tool_name="get_weather",
+    )
+    mixed_parts = Message(
+        role="tool",
+        content=[{"type": "text", "text": "Before {}"}, image_part],
+        tool_call_id="call_3",
+        tool_name="get_weather",
+    )
+    image_only = Message(role="tool", content=[image_part], tool_call_id="call_4", tool_name="get_weather")
+    multi_text_around_inline_image = Message(
+        role="tool",
+        content=[{"type": "text", "text": "Part 1"}, image_part, {"type": "text", "text": "Part 2 {b: 2}"}],
+        tool_call_id="call_5",
+        tool_name="get_weather",
+    )
+    multi_text_with_attached_image = Message(
+        role="tool",
+        content=[{"type": "text", "text": "Part 1"}, {"type": "text", "text": "Part 2 {c: 3}"}],
+        tool_call_id="call_6",
+        tool_name="get_weather",
+        images=[attached_image],
+    )
+
+    await _turn(
+        built,
+        ModelRequest(
+            messages=[
+                _user(),
+                assistant,
+                with_attached_image,
+                multi_text_only,
+                mixed_parts,
+                image_only,
+                multi_text_around_inline_image,
+                multi_text_with_attached_image,
+            ],
+        ),
+    )
+
+    sent = built.body()["messages"]
+    assert sent[2]["content"][0]["type"] == "text"
+    assert json.loads(sent[2]["content"][0]["text"]) == {"result": "Caption {}"}
+    assert sent[2]["content"][1]["type"] == "image_url"
+    assert json.loads(sent[3]["content"]) == {"result": ["Part 1", "Part 2 {a: 1}"]}
+    assert sent[4]["content"][0]["type"] == "text"
+    assert json.loads(sent[4]["content"][0]["text"]) == {"result": "Before {}"}
+    assert sent[4]["content"][1] == image_part
+    assert sent[5]["content"] == [image_part]
+    assert [part["type"] for part in sent[6]["content"]] == ["text", "image_url"]
+    assert json.loads(sent[6]["content"][0]["text"]) == {"result": ["Part 1", "Part 2 {b: 2}"]}
+    assert sent[6]["content"][1] == image_part
+    assert [part["type"] for part in sent[7]["content"]] == ["text", "image_url"]
+    assert json.loads(sent[7]["content"][0]["text"]) == {"result": ["Part 1", "Part 2 {c: 3}"]}
+
+
+@pytest.mark.asyncio
+async def test_openrouter_gemini_preserves_authored_cache_control_on_tool_text_part(tmp_path: Path) -> None:
+    """Wrapping a marked text part keeps its ``cache_control`` so the automatic Claude ladder stays disabled."""
+    built = _Built(
+        tmp_path,
+        {
+            "provider": "openrouter",
+            "id": "anthropic/claude-opus-5.5",
+            "api_key": "k",
+            "extra_kwargs": {"request_params": {"model": "google/gemini-4-neon"}},
+        },
+        _chat_reply(),
+    )
+    marker = {"type": "ephemeral"}
+    assistant = Message(role="assistant", content="", tool_calls=[_CALL])
+    marked = Message(
+        role="tool",
+        content=[{"type": "text", "text": "Marked {}", "cache_control": marker}],
+        tool_call_id="call_1",
+        tool_name="get_weather",
+    )
+
+    await _turn(
+        built,
+        ModelRequest(messages=[Message(role="system", content="System prompt"), _user(), assistant, marked]),
+    )
+
+    sent = built.body()["messages"]
+    # The authored marker survived wrapping, so automatic Claude system-prompt breakpoints did not run.
+    assert sent[0] == {"role": "system", "content": "System prompt"}
+    assert sent[3]["content"][0]["cache_control"] == marker
+    assert json.loads(sent[3]["content"][0]["text"]) == {"result": "Marked {}"}
+
+
+@pytest.mark.asyncio
+async def test_openrouter_gemini_wrapping_never_mixes_the_fields_of_several_text_parts(tmp_path: Path) -> None:
+    """Several text parts keep only a ``cache_control`` marker, and one text part keeps all its fields.
+
+    Fields merged across parts could put one part's value beside another part's ``name``, where the request log no
+    longer reads it as the secret its own ``name`` labels it.
+    """
+    log_dir = tmp_path / "request-logs"
+    built = _Built(tmp_path, {"provider": "openrouter", "id": "google/gemini-4-neon", "api_key": "k"}, _chat_reply())
+    provider = pipeline_provider(built.adapter, log_dir=log_dir)
+    labeled = {"name": "password", "value": "synthetic-meta-canary"}
+    first_marker, last_marker = {"type": "ephemeral"}, {"type": "ephemeral", "ttl": "1h"}
+    image_part = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+    contents = [
+        [{"type": "text", "text": "Part 1", **labeled}, {"type": "text", "text": "Part 2", "name": "display"}],
+        [{"type": "text", "text": "Only part", **labeled}],
+        [
+            {"type": "text", "text": "Part 1", **labeled, "cache_control": first_marker},
+            image_part,
+            {"type": "text", "text": "Part 2", "name": "display", "cache_control": last_marker},
+        ],
+    ]
+    call_ids = [f"call_{number}" for number in range(1, len(contents) + 1)]
+    assistant = Message(role="assistant", content="", tool_calls=_calls(*call_ids))
+    results = [
+        Message(role="tool", content=content, tool_call_id=call_id, tool_name="get_weather")
+        for call_id, content in zip(call_ids, contents, strict=True)
+    ]
+
+    await complete(provider, ModelRequest(messages=[_user(), assistant, *results]))
+
+    several_texts = json.dumps({"result": ["Part 1", "Part 2"]})
+    one_text = json.dumps({"result": "Only part"})
+    sent = [message["content"] for message in built.body()["messages"][2:]]
+    assert sent == [
+        several_texts,
+        [{"type": "text", "text": one_text, **labeled}],
+        [{"type": "text", "text": several_texts, "cache_control": last_marker}, image_part],
+    ]
+    (log_file,) = log_dir.glob("llm-requests-*.jsonl")
+    logged_text = log_file.read_text(encoding="utf-8")
+    assert "synthetic-meta-canary" not in logged_text
+    logged = [message["content"] for message in json.loads(logged_text.splitlines()[0])["body"]["messages"][2:]]
+    assert logged == [
+        several_texts,
+        [{"type": "text", "text": one_text, "name": "password", "value": "***redacted***"}],
+        [{"type": "text", "text": several_texts, "cache_control": last_marker}, image_part],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_openrouter_gemini_request_log_redacts_secrets_inside_wrapped_tool_results(tmp_path: Path) -> None:
+    """Request logging redacts decoded wrapped tool text once, keeping valid JSON and non-secret text intact."""
+    log_dir = tmp_path / "request-logs"
+    built = _Built(tmp_path, {"provider": "openrouter", "id": "google/gemini-4-neon", "api_key": "k"}, _chat_reply())
+    provider = pipeline_provider(built.adapter, log_dir=log_dir)
+    json_payload = '{"password": "synthetic-json-value", "public": "ok"}'
+    kv_payload = "password=synthetic-kv-value\nnext=ok"
+    quoted_payload = 'password="synthetic-quoted-value" followed by public text'
+    assistant = Message(role="assistant", content="", tool_calls=_calls("call_1", "call_2", "call_3"))
+    json_tool = Message(role="tool", content=json_payload, tool_call_id="call_1", tool_name="get_weather")
+    multipart_tool = Message(
+        role="tool",
+        content=kv_payload,
+        tool_call_id="call_2",
+        tool_name="get_weather",
+        images=[Image(content=b"\x89PNG\r\n\x1a\n", mime_type="image/png")],
+    )
+    quoted_tool = Message(role="tool", content=quoted_payload, tool_call_id="call_3", tool_name="get_weather")
+
+    await complete(provider, ModelRequest(messages=[_user(), assistant, json_tool, multipart_tool, quoted_tool]))
+
+    wire_messages = built.body()["messages"]
+    assert json.loads(wire_messages[2]["content"]) == {"result": json_payload}
+    assert json.loads(wire_messages[3]["content"][0]["text"]) == {"result": kv_payload}
+    assert json.loads(wire_messages[4]["content"]) == {"result": quoted_payload}
+
+    log_files = list(log_dir.glob("llm-requests-*.jsonl"))
+    assert len(log_files) == 1
+    logged_text = log_files[0].read_text(encoding="utf-8")
+    assert "synthetic-json-value" not in logged_text
+    assert "synthetic-kv-value" not in logged_text
+    assert "synthetic-quoted-value" not in logged_text
+    request_record = json.loads(logged_text.splitlines()[0])
+    logged_messages = request_record["body"]["messages"]
+    assert json.loads(logged_messages[2]["content"]) == {
+        "result": '{"password": "***redacted***", "public": "ok"}',
+    }
+    assert json.loads(logged_messages[3]["content"][0]["text"]) == {
+        "result": "password=***redacted***\nnext=ok",
+    }
+    assert json.loads(logged_messages[4]["content"]) == {
+        "result": 'password="***redacted***" followed by public text',
+    }
+
+
+@pytest.mark.asyncio
+async def test_openrouter_gemini_request_log_redacts_each_text_part_of_a_multipart_tool_result(tmp_path: Path) -> None:
+    """The wrapper keeps each text part apart, so the log redacts a part as it would unwrapped.
+
+    Redacted as one joined text, the API-key message of the first part would take the key or the opening quote of
+    the second part for the credential and leave the real value in the open.
+    """
+    log_dir = tmp_path / "request-logs"
+    built = _Built(tmp_path, {"provider": "openrouter", "id": "google/gemini-4-neon", "api_key": "k"}, _chat_reply())
+    provider = pipeline_provider(built.adapter, log_dir=log_dir)
+    message = "Invalid API key provided:"
+    secrets = ["password: synthetic-canary-1", 'password="synthetic-canary-2"', "API key: synthetic-canary-3"]
+    redacted = ["password: ***redacted***", 'password="***redacted***"', "API key: ***redacted***"]
+    call_ids = [f"call_{number}" for number in range(1, len(secrets) + 1)]
+    assistant = Message(role="assistant", content="", tool_calls=_calls(*call_ids))
+    results = [
+        Message(
+            role="tool",
+            content=[{"type": "text", "text": message}, {"type": "text", "text": secret}],
+            tool_call_id=call_id,
+            tool_name="get_weather",
+        )
+        for call_id, secret in zip(call_ids, secrets, strict=True)
+    ]
+
+    await complete(provider, ModelRequest(messages=[_user(), assistant, *results]))
+
+    sent = [json.loads(sent_message["content"]) for sent_message in built.body()["messages"][2:]]
+    assert sent == [{"result": [message, secret]} for secret in secrets]
+    (log_file,) = log_dir.glob("llm-requests-*.jsonl")
+    logged_text = log_file.read_text(encoding="utf-8")
+    assert "synthetic-canary" not in logged_text
+    logged_messages = json.loads(logged_text.splitlines()[0])["body"]["messages"][2:]
+    logged = [json.loads(logged_message["content"]) for logged_message in logged_messages]
+    # Each part reads as it does redacted alone, the message included.
+    assert logged == [{"result": [redact_sensitive_data(message), hidden]} for hidden in redacted]
+
+
+@pytest.mark.asyncio
+async def test_request_log_does_not_parse_or_rewrite_non_gemini_tool_results(tmp_path: Path) -> None:
+    """Unrelated routes skip wrapped-tool decoding so formatting stays byte-exact and deep JSON never recurses."""
+    log_dir = tmp_path / "request-logs"
+    built = _Built(tmp_path, {"provider": "openrouter", "id": "z-ai/glm-5.3", "api_key": "k"}, _chat_reply())
+    provider = pipeline_provider(built.adapter, log_dir=log_dir)
+    compact_json = '{"result":"ok"}'
+    deeply_nested = '{"a":' * 1500 + "1" + "}" * 1500
+    assistant = Message(role="assistant", content="", tool_calls=_calls("call_1", "call_2"))
+    compact_tool = Message(role="tool", content=compact_json, tool_call_id="call_1", tool_name="get_weather")
+    deep_tool = Message(role="tool", content=deeply_nested, tool_call_id="call_2", tool_name="get_weather")
+
+    await complete(provider, ModelRequest(messages=[_user(), assistant, compact_tool, deep_tool]))
+
+    log_files = list(log_dir.glob("llm-requests-*.jsonl"))
+    assert len(log_files) == 1
+    request_record = json.loads(log_files[0].read_text(encoding="utf-8").splitlines()[0])
+    logged_messages = request_record["body"]["messages"]
+    assert logged_messages[2]["content"] == compact_json
+    assert logged_messages[3]["content"] == deeply_nested
+
+
+def test_openrouter_gemini_context_key_records_wrapper_flag(tmp_path: Path) -> None:
+    """The OpenRouter Gemini route records its wrapper flag in ``RequestParts`` so pre-upgrade anchors miss."""
+    runtime = _runtime(tmp_path)
+    gemini = build_provider(
+        ModelConfig(provider="openrouter", id="google/gemini-4-neon", api_key="k"),
+        runtime,
+    )
+    glm = build_provider(
+        ModelConfig(provider="openrouter", id="z-ai/glm-5.3", api_key="k"),
+        runtime,
+    )
+    assert isinstance(gemini, ChatAdapter)
+    assert isinstance(glm, ChatAdapter)
+    request = ModelRequest(messages=[_user()])
+    gemini_parts = RequestParts(gemini.token_counter)
+    glm_parts = RequestParts(glm.token_counter)
+
+    gemini._parts(replace(request, messages=()), 0, gemini_parts)
+    glm._parts(replace(request, messages=()), 0, glm_parts)
+
+    assert "openrouter_gemini_tool_results" in gemini_parts.flags
+    assert "openrouter_gemini_tool_results" not in glm_parts.flags
+    assert gemini.context_key(request) != glm.context_key(request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_config",
+    [
+        {"provider": "openrouter", "id": "anthropic/claude-opus-5.5", "api_key": "k"},
+        {"provider": "openrouter", "id": "google/gemma-4-31b-it", "api_key": "k"},
+        {"provider": "openrouter", "id": "z-ai/glm-5.3", "api_key": "k"},
+        {"provider": "openai", "api": "chat_completions", "id": "google/gemini-4-neon", "api_key": "k"},
+    ],
+    ids=["openrouter-claude", "openrouter-gemma", "openrouter-glm", "openai-route"],
+)
+async def test_non_openrouter_gemini_routes_keep_plain_text_tool_results(
+    tmp_path: Path,
+    model_config: dict[str, Any],
+) -> None:
+    built = _Built(tmp_path, model_config, _chat_reply())
+    text = "Header\nextra_kwargs: {}\nFooter"
+    assistant = Message(role="assistant", content="", tool_calls=[_CALL])
+    result = Message(role="tool", content=text, tool_call_id="call_1", tool_name="get_weather")
+
+    await _turn(built, ModelRequest(messages=[_user(), assistant, result]))
+
+    sent_content = built.body()["messages"][2]["content"]
+    if model_config["id"].startswith("anthropic/"):
+        assert sent_content[0]["text"] == text
+    else:
+        assert sent_content == text
+
+
+def test_openrouter_gemini_upstream_issue_still_open() -> None:
+    """Fail once OpenRouterTeam/docs#815 closes so we re-probe and revert the Gemini tool-result wrapper."""
+    request = urllib.request.Request(
+        "https://api.github.com/repos/OpenRouterTeam/docs/issues/815",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "mindroom-tests",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:  # noqa: S310
+            payload = json.load(response)
+    except urllib.error.HTTPError as exc:
+        pytest.skip(f"Could not check OpenRouterTeam/docs#815: HTTP {exc.code}")
+    except (OSError, http.client.HTTPException, ValueError) as exc:
+        pytest.skip(f"Could not check OpenRouterTeam/docs#815: {type(exc).__name__}")
+    if not isinstance(payload, dict) or not isinstance(state := payload.get("state"), str):
+        pytest.skip("Unexpected GitHub API payload for OpenRouterTeam/docs#815")
+    assert state == "open", (
+        "OpenRouterTeam/docs#815 is no longer open "
+        f"(state={state!r}, state_reason={payload.get('state_reason')!r}). "
+        "Re-probe OpenRouter Gemini tool-result wrapping and revert the workaround if fixed upstream."
+    )

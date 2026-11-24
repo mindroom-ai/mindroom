@@ -79,11 +79,11 @@
       },
       "messages": [
         {
-          "content": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Assistant and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `delegate`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n\nAnswer questions about the team handbook.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n\n- To save a tool's full supported output to a file in your workspace instead of returning it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with file, coding, python, or shell tools. In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, `~` and `$HOME` point there too.\n\nIf you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.\nA skill is a folder `skills/<skill-name>/` in your workspace containing a `SKILL.md` file, plus optional `scripts/` and `references/` subfolders.\n`SKILL.md` starts with YAML frontmatter declaring `name` and `description`, followed by the markdown instructions:\n\n---\nname: my-skill\ndescription: One-line summary of when to use this skill\n---\n\n# My Skill\nStep-by-step instructions...\n\nDo not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.\nA workspace skill you create or edit becomes available on your next run, without any config change.\n\nWhen you need the user to choose between options, create an interactive question by including this JSON in your response with the following format:\n\nIMPORTANT: This is just an example. You can customize the question and options as needed.\n\n```interactive\n{\n    \"question\": \"How would you like me to proceed?\",\n    \"options\": [\n        {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n        {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n    ]\n}\n```\n\nIMPORTANT:\n- You must write ```interactive on the SAME LINE (no space or newline between the backticks and the word \"interactive\").\n- The JSON block will be automatically replaced with a formatted question showing the options with emojis.\n- Don't write things like \"here are the options:\" before the JSON block - the formatted question will appear instead.\n- Write your response as if the formatted question will be shown directly to the user.\n- Only a SINGLE JSON block will be converted to an interactive question. DO NOT INCLUDE MULTIPLE BLOCKS!\n\nThe JSON block above will be automatically converted to this formatted display:\n\nHow would you like me to proceed?\n\n1. 🚀 Fast and automated\n2. 🐢 Careful and manual\n\nReact with an emoji or type the number to respond.\n\nThe user can respond by:\n- Clicking the emoji reaction\n- Typing the number (1, 2, etc.)\n\nKeep it simple: max 5 options with clear, concise labels.\n\nYou can run the following configured agents as fresh subagents:\nassistant\n  - Yourself, run as a fresh copy.\n\nresearcher\n  - Research topics in depth.\n  - Tools: calculator\n  - Name your sources.\n\nUse run_subagent for a bounded subtask whose result you need before continuing, and continue_subagent for follow-ups in that child's session.\nDelegation is limited to three nested child levels; a follow-up does not add nesting depth.\nIn Matrix, a child tool that requires approval runs only once the user approves it.\nOther runtimes retain their approval restrictions.\nChild records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json and events.jsonl; transcript.md exists only after the child finishes.\nYour workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC.",
+          "content": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\n\n## Matrix Reply Targeting\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, thread continuation, or enabled automations). Plain-text display names are not Matrix mentions; multiple explicit agent mentions can form an ad-hoc team; configured teams run their team workflow. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\n## Tool Execution Environment\n- All tools run in the primary MindRoom runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n\nAnswer questions about the team handbook.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n- CommonMark (single newlines break lines), GFM tables, strikethrough, fenced code blocks with a language tag, `<details><summary>...</summary>...</details>` collapsibles (put blank lines around inner Markdown), and `<span data-mx-spoiler>...</span>` spoilers (never `||spoiler||`, which does not render) are supported.\n- For math, use `$inline$` (no spaces just inside `$`) and `$$display$$` on its own line; never use `\\(...\\)` or `\\[...\\]`, which do not render as math.\n- Link Matrix rooms and threads/messages instead of writing bare `!room_id` or `$event_id` strings: use `<https://matrix.to/#/!room_id>` for rooms, and `[title](https://matrix.to/#/!room_id/$event_id)` (custom label) or `<https://matrix.to/#/!room_id/$event_id>` (auto-labeled pill) for threads/messages (optional `?via=server` for federated rooms; never wrap links in backticks).\n- Mermaid fences, GitHub callouts (`> [!NOTE]`), footnotes, and external image URLs (`![](https://...)`) are not rendered; link to external URLs instead.\n- In MindRoom Chat, while streaming, your text appears live while thoughts and tool calls stay collapsed by default (expandable in place); when a reply finishes with earlier text or media before the last tool call and an answer after it, everything up through your last tool call (thoughts, tool calls, and earlier output) folds away. Write a self-contained final answer after your last tool call (including your conclusion and key details), assuming the reader will not open or read anything collapsed above.\n\n- Pass `mindroom_output_path: <relative-path>` to save a tool's output to a workspace-relative file. In shell, `$MINDROOM_AGENT_WORKSPACE` is that workspace (`~` and `$HOME` in worker-routed shell/python).\n\nWhen the user needs to choose between options, include one fenced interactive JSON block:\n\n```interactive\n{\n    \"question\": \"How would you like to proceed?\",\n    \"options\": [\n        {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n        {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n    ]\n}\n```\n\nRules:\n- Write literal ```interactive on the same line; include only a single block.\n- Max 5 options with distinct emojis.\n- Omit preambles like \"here are the options:\" — MindRoom replaces the block with the formatted prompt and reaction buttons.\n\nYou can run the following configured agents as fresh subagents:\nassistant\n  - Yourself, run as a fresh copy.\n\nresearcher\n  - Research topics in depth.\n  - Tools: calculator\n  - Name your sources.\n\nUse run_subagent for a bounded subtask whose result you need before continuing, and continue_subagent for follow-ups in that child's session.\nDelegation is limited to three nested child levels; a follow-up does not add nesting depth.\nIn Matrix, a child tool that requires approval runs only once the user approves it.\nOther runtimes retain their approval restrictions.\nChild records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json and events.jsonl; transcript.md exists only after the child finishes.\nYour workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC.",
           "role": "system"
         },
         {
-          "content": "<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>",
+          "content": "<mindroom_session_context>\nCurrent date: <DATE> (UTC, UTC).\n</mindroom_session_context>",
           "role": "system"
         },
         {
@@ -120,7 +120,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -137,7 +137,7 @@
             "properties": {
               "subagent_id": {
                 "type": "string",
-                "description": "Exact Subagent ID returned by run_subagent or continue_subagent."
+                "description": "Subagent ID (or a unique prefix of at least 8 hex characters) returned by run_subagent or continue_subagent."
               },
               "message": {
                 "type": "string",
@@ -153,7 +153,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -186,7 +186,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -219,7 +219,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -248,34 +248,12 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
               "n"
             ]
-          }
-        },
-        {
-          "name": "invite_router",
-          "description": "Invite router to current Matrix room.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-              }
-            },
-            "required": []
           }
         },
         {
@@ -298,7 +276,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -330,7 +308,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -435,6 +413,10 @@
                 ],
                 "description": "Name of a subagents/<name>.md profile in your workspace; excludes system_prompt, tools, skills, and knowledge."
               },
+              "title": {
+                "type": "string",
+                "description": "Short title of 3-6 words naming the task, shown to people watching the run."
+              },
               "mindroom_output_path": {
                 "anyOf": [
                   {
@@ -445,11 +427,12 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
-              "task"
+              "task",
+              "title"
             ],
             "additionalProperties": false
           }
@@ -474,7 +457,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -506,7 +489,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -527,11 +510,11 @@
       },
       "messages": [
         {
-          "content": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Assistant and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `delegate`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n\nAnswer questions about the team handbook.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n\n- To save a tool's full supported output to a file in your workspace instead of returning it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with file, coding, python, or shell tools. In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, `~` and `$HOME` point there too.\n\nIf you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.\nA skill is a folder `skills/<skill-name>/` in your workspace containing a `SKILL.md` file, plus optional `scripts/` and `references/` subfolders.\n`SKILL.md` starts with YAML frontmatter declaring `name` and `description`, followed by the markdown instructions:\n\n---\nname: my-skill\ndescription: One-line summary of when to use this skill\n---\n\n# My Skill\nStep-by-step instructions...\n\nDo not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.\nA workspace skill you create or edit becomes available on your next run, without any config change.\n\nWhen you need the user to choose between options, create an interactive question by including this JSON in your response with the following format:\n\nIMPORTANT: This is just an example. You can customize the question and options as needed.\n\n```interactive\n{\n    \"question\": \"How would you like me to proceed?\",\n    \"options\": [\n        {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n        {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n    ]\n}\n```\n\nIMPORTANT:\n- You must write ```interactive on the SAME LINE (no space or newline between the backticks and the word \"interactive\").\n- The JSON block will be automatically replaced with a formatted question showing the options with emojis.\n- Don't write things like \"here are the options:\" before the JSON block - the formatted question will appear instead.\n- Write your response as if the formatted question will be shown directly to the user.\n- Only a SINGLE JSON block will be converted to an interactive question. DO NOT INCLUDE MULTIPLE BLOCKS!\n\nThe JSON block above will be automatically converted to this formatted display:\n\nHow would you like me to proceed?\n\n1. 🚀 Fast and automated\n2. 🐢 Careful and manual\n\nReact with an emoji or type the number to respond.\n\nThe user can respond by:\n- Clicking the emoji reaction\n- Typing the number (1, 2, etc.)\n\nKeep it simple: max 5 options with clear, concise labels.\n\nYou can run the following configured agents as fresh subagents:\nassistant\n  - Yourself, run as a fresh copy.\n\nresearcher\n  - Research topics in depth.\n  - Tools: calculator\n  - Name your sources.\n\nUse run_subagent for a bounded subtask whose result you need before continuing, and continue_subagent for follow-ups in that child's session.\nDelegation is limited to three nested child levels; a follow-up does not add nesting depth.\nIn Matrix, a child tool that requires approval runs only once the user approves it.\nOther runtimes retain their approval restrictions.\nChild records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json and events.jsonl; transcript.md exists only after the child finishes.\nYour workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC.",
+          "content": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\n\n## Matrix Reply Targeting\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, thread continuation, or enabled automations). Plain-text display names are not Matrix mentions; multiple explicit agent mentions can form an ad-hoc team; configured teams run their team workflow. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\n## Tool Execution Environment\n- All tools run in the primary MindRoom runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n\nAnswer questions about the team handbook.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n- CommonMark (single newlines break lines), GFM tables, strikethrough, fenced code blocks with a language tag, `<details><summary>...</summary>...</details>` collapsibles (put blank lines around inner Markdown), and `<span data-mx-spoiler>...</span>` spoilers (never `||spoiler||`, which does not render) are supported.\n- For math, use `$inline$` (no spaces just inside `$`) and `$$display$$` on its own line; never use `\\(...\\)` or `\\[...\\]`, which do not render as math.\n- Link Matrix rooms and threads/messages instead of writing bare `!room_id` or `$event_id` strings: use `<https://matrix.to/#/!room_id>` for rooms, and `[title](https://matrix.to/#/!room_id/$event_id)` (custom label) or `<https://matrix.to/#/!room_id/$event_id>` (auto-labeled pill) for threads/messages (optional `?via=server` for federated rooms; never wrap links in backticks).\n- Mermaid fences, GitHub callouts (`> [!NOTE]`), footnotes, and external image URLs (`![](https://...)`) are not rendered; link to external URLs instead.\n- In MindRoom Chat, while streaming, your text appears live while thoughts and tool calls stay collapsed by default (expandable in place); when a reply finishes with earlier text or media before the last tool call and an answer after it, everything up through your last tool call (thoughts, tool calls, and earlier output) folds away. Write a self-contained final answer after your last tool call (including your conclusion and key details), assuming the reader will not open or read anything collapsed above.\n\n- Pass `mindroom_output_path: <relative-path>` to save a tool's output to a workspace-relative file. In shell, `$MINDROOM_AGENT_WORKSPACE` is that workspace (`~` and `$HOME` in worker-routed shell/python).\n\nWhen the user needs to choose between options, include one fenced interactive JSON block:\n\n```interactive\n{\n    \"question\": \"How would you like to proceed?\",\n    \"options\": [\n        {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n        {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n    ]\n}\n```\n\nRules:\n- Write literal ```interactive on the same line; include only a single block.\n- Max 5 options with distinct emojis.\n- Omit preambles like \"here are the options:\" — MindRoom replaces the block with the formatted prompt and reaction buttons.\n\nYou can run the following configured agents as fresh subagents:\nassistant\n  - Yourself, run as a fresh copy.\n\nresearcher\n  - Research topics in depth.\n  - Tools: calculator\n  - Name your sources.\n\nUse run_subagent for a bounded subtask whose result you need before continuing, and continue_subagent for follow-ups in that child's session.\nDelegation is limited to three nested child levels; a follow-up does not add nesting depth.\nIn Matrix, a child tool that requires approval runs only once the user approves it.\nOther runtimes retain their approval restrictions.\nChild records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json and events.jsonl; transcript.md exists only after the child finishes.\nYour workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC.",
           "role": "system"
         },
         {
-          "content": "<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>",
+          "content": "<mindroom_session_context>\nCurrent date: <DATE> (UTC, UTC).\n</mindroom_session_context>",
           "role": "system"
         },
         {
@@ -598,7 +581,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -615,7 +598,7 @@
             "properties": {
               "subagent_id": {
                 "type": "string",
-                "description": "Exact Subagent ID returned by run_subagent or continue_subagent."
+                "description": "Subagent ID (or a unique prefix of at least 8 hex characters) returned by run_subagent or continue_subagent."
               },
               "message": {
                 "type": "string",
@@ -631,7 +614,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -664,7 +647,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -697,7 +680,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -726,34 +709,12 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
               "n"
             ]
-          }
-        },
-        {
-          "name": "invite_router",
-          "description": "Invite router to current Matrix room.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-              }
-            },
-            "required": []
           }
         },
         {
@@ -776,7 +737,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -808,7 +769,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -913,6 +874,10 @@
                 ],
                 "description": "Name of a subagents/<name>.md profile in your workspace; excludes system_prompt, tools, skills, and knowledge."
               },
+              "title": {
+                "type": "string",
+                "description": "Short title of 3-6 words naming the task, shown to people watching the run."
+              },
               "mindroom_output_path": {
                 "anyOf": [
                   {
@@ -923,11 +888,12 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
-              "task"
+              "task",
+              "title"
             ],
             "additionalProperties": false
           }
@@ -952,7 +918,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -984,7 +950,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -1005,11 +971,11 @@
       },
       "messages": [
         {
-          "content": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Assistant and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `delegate`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n\nAnswer questions about the team handbook.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n\n- To save a tool's full supported output to a file in your workspace instead of returning it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with file, coding, python, or shell tools. In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, `~` and `$HOME` point there too.\n\nIf you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.\nA skill is a folder `skills/<skill-name>/` in your workspace containing a `SKILL.md` file, plus optional `scripts/` and `references/` subfolders.\n`SKILL.md` starts with YAML frontmatter declaring `name` and `description`, followed by the markdown instructions:\n\n---\nname: my-skill\ndescription: One-line summary of when to use this skill\n---\n\n# My Skill\nStep-by-step instructions...\n\nDo not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.\nA workspace skill you create or edit becomes available on your next run, without any config change.\n\nWhen you need the user to choose between options, create an interactive question by including this JSON in your response with the following format:\n\nIMPORTANT: This is just an example. You can customize the question and options as needed.\n\n```interactive\n{\n    \"question\": \"How would you like me to proceed?\",\n    \"options\": [\n        {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n        {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n    ]\n}\n```\n\nIMPORTANT:\n- You must write ```interactive on the SAME LINE (no space or newline between the backticks and the word \"interactive\").\n- The JSON block will be automatically replaced with a formatted question showing the options with emojis.\n- Don't write things like \"here are the options:\" before the JSON block - the formatted question will appear instead.\n- Write your response as if the formatted question will be shown directly to the user.\n- Only a SINGLE JSON block will be converted to an interactive question. DO NOT INCLUDE MULTIPLE BLOCKS!\n\nThe JSON block above will be automatically converted to this formatted display:\n\nHow would you like me to proceed?\n\n1. 🚀 Fast and automated\n2. 🐢 Careful and manual\n\nReact with an emoji or type the number to respond.\n\nThe user can respond by:\n- Clicking the emoji reaction\n- Typing the number (1, 2, etc.)\n\nKeep it simple: max 5 options with clear, concise labels.\n\nYou can run the following configured agents as fresh subagents:\nassistant\n  - Yourself, run as a fresh copy.\n\nresearcher\n  - Research topics in depth.\n  - Tools: calculator\n  - Name your sources.\n\nUse run_subagent for a bounded subtask whose result you need before continuing, and continue_subagent for follow-ups in that child's session.\nDelegation is limited to three nested child levels; a follow-up does not add nesting depth.\nIn Matrix, a child tool that requires approval runs only once the user approves it.\nOther runtimes retain their approval restrictions.\nChild records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json and events.jsonl; transcript.md exists only after the child finishes.\nYour workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC.",
+          "content": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\n\n## Matrix Reply Targeting\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, thread continuation, or enabled automations). Plain-text display names are not Matrix mentions; multiple explicit agent mentions can form an ad-hoc team; configured teams run their team workflow. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\n## Tool Execution Environment\n- All tools run in the primary MindRoom runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n\nAnswer questions about the team handbook.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n- CommonMark (single newlines break lines), GFM tables, strikethrough, fenced code blocks with a language tag, `<details><summary>...</summary>...</details>` collapsibles (put blank lines around inner Markdown), and `<span data-mx-spoiler>...</span>` spoilers (never `||spoiler||`, which does not render) are supported.\n- For math, use `$inline$` (no spaces just inside `$`) and `$$display$$` on its own line; never use `\\(...\\)` or `\\[...\\]`, which do not render as math.\n- Link Matrix rooms and threads/messages instead of writing bare `!room_id` or `$event_id` strings: use `<https://matrix.to/#/!room_id>` for rooms, and `[title](https://matrix.to/#/!room_id/$event_id)` (custom label) or `<https://matrix.to/#/!room_id/$event_id>` (auto-labeled pill) for threads/messages (optional `?via=server` for federated rooms; never wrap links in backticks).\n- Mermaid fences, GitHub callouts (`> [!NOTE]`), footnotes, and external image URLs (`![](https://...)`) are not rendered; link to external URLs instead.\n- In MindRoom Chat, while streaming, your text appears live while thoughts and tool calls stay collapsed by default (expandable in place); when a reply finishes with earlier text or media before the last tool call and an answer after it, everything up through your last tool call (thoughts, tool calls, and earlier output) folds away. Write a self-contained final answer after your last tool call (including your conclusion and key details), assuming the reader will not open or read anything collapsed above.\n\n- Pass `mindroom_output_path: <relative-path>` to save a tool's output to a workspace-relative file. In shell, `$MINDROOM_AGENT_WORKSPACE` is that workspace (`~` and `$HOME` in worker-routed shell/python).\n\nWhen the user needs to choose between options, include one fenced interactive JSON block:\n\n```interactive\n{\n    \"question\": \"How would you like to proceed?\",\n    \"options\": [\n        {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n        {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n    ]\n}\n```\n\nRules:\n- Write literal ```interactive on the same line; include only a single block.\n- Max 5 options with distinct emojis.\n- Omit preambles like \"here are the options:\" — MindRoom replaces the block with the formatted prompt and reaction buttons.\n\nYou can run the following configured agents as fresh subagents:\nassistant\n  - Yourself, run as a fresh copy.\n\nresearcher\n  - Research topics in depth.\n  - Tools: calculator\n  - Name your sources.\n\nUse run_subagent for a bounded subtask whose result you need before continuing, and continue_subagent for follow-ups in that child's session.\nDelegation is limited to three nested child levels; a follow-up does not add nesting depth.\nIn Matrix, a child tool that requires approval runs only once the user approves it.\nOther runtimes retain their approval restrictions.\nChild records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json and events.jsonl; transcript.md exists only after the child finishes.\nYour workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC.",
           "role": "system"
         },
         {
-          "content": "<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>",
+          "content": "<mindroom_session_context>\nCurrent date: <DATE> (UTC, UTC).\n</mindroom_session_context>",
           "role": "system"
         },
         {
@@ -1106,7 +1072,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -1123,7 +1089,7 @@
             "properties": {
               "subagent_id": {
                 "type": "string",
-                "description": "Exact Subagent ID returned by run_subagent or continue_subagent."
+                "description": "Subagent ID (or a unique prefix of at least 8 hex characters) returned by run_subagent or continue_subagent."
               },
               "message": {
                 "type": "string",
@@ -1139,7 +1105,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -1172,7 +1138,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -1205,7 +1171,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -1234,34 +1200,12 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
               "n"
             ]
-          }
-        },
-        {
-          "name": "invite_router",
-          "description": "Invite router to current Matrix room.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-              }
-            },
-            "required": []
           }
         },
         {
@@ -1284,7 +1228,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -1316,7 +1260,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -1421,6 +1365,10 @@
                 ],
                 "description": "Name of a subagents/<name>.md profile in your workspace; excludes system_prompt, tools, skills, and knowledge."
               },
+              "title": {
+                "type": "string",
+                "description": "Short title of 3-6 words naming the task, shown to people watching the run."
+              },
               "mindroom_output_path": {
                 "anyOf": [
                   {
@@ -1431,11 +1379,12 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
-              "task"
+              "task",
+              "title"
             ],
             "additionalProperties": false
           }
@@ -1460,7 +1409,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -1492,7 +1441,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -1513,11 +1462,11 @@
       },
       "messages": [
         {
-          "content": "<your_role>\n## Your Identity\nYou are Researcher (Matrix ID: @mindroom_researcher:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Researcher and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `invite_router`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n\nResearch topics in depth.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n\n- Name your sources.\n\n- To save a tool's full supported output to a file in your workspace instead of returning it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with file, coding, python, or shell tools. In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, `~` and `$HOME` point there too.\n\nIf you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.\nA skill is a folder `skills/<skill-name>/` in your workspace containing a `SKILL.md` file, plus optional `scripts/` and `references/` subfolders.\n`SKILL.md` starts with YAML frontmatter declaring `name` and `description`, followed by the markdown instructions:\n\n---\nname: my-skill\ndescription: One-line summary of when to use this skill\n---\n\n# My Skill\nStep-by-step instructions...\n\nDo not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.\nA workspace skill you create or edit becomes available on your next run, without any config change.",
+          "content": "<your_role>\n## Your Identity\nYou are Researcher (Matrix ID: @mindroom_researcher:localhost), a MindRoom agent in a Matrix chatroom.\nModel: Anthropic (`claude-sonnet-5-5`).\n\nOther senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: `from` is the sender's stable Matrix ID (`display_name` can change; newest wins), `ts` is local send time, and `event_id` targets reactions/edits. Your own prior replies are normal assistant messages. Grouped `<messages>` or `<queued_messages>` are one turn — reply once.\nMention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart.\n\n## Matrix Reply Targeting\nMindRoom selects which messages reach you (explicit Matrix mentions, routing, thread continuation, or enabled automations). Plain-text display names are not Matrix mentions; multiple explicit agent mentions can form an ad-hoc team; configured teams run their team workflow. If asked why an earlier message went unanswered, note you may not have been dispatched for it.\n\n## Tool Execution Environment\n- All tools run in the primary MindRoom runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n\nResearch topics in depth.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n- CommonMark (single newlines break lines), GFM tables, strikethrough, fenced code blocks with a language tag, `<details><summary>...</summary>...</details>` collapsibles (put blank lines around inner Markdown), and `<span data-mx-spoiler>...</span>` spoilers (never `||spoiler||`, which does not render) are supported.\n- For math, use `$inline$` (no spaces just inside `$`) and `$$display$$` on its own line; never use `\\(...\\)` or `\\[...\\]`, which do not render as math.\n- Link Matrix rooms and threads/messages instead of writing bare `!room_id` or `$event_id` strings: use `<https://matrix.to/#/!room_id>` for rooms, and `[title](https://matrix.to/#/!room_id/$event_id)` (custom label) or `<https://matrix.to/#/!room_id/$event_id>` (auto-labeled pill) for threads/messages (optional `?via=server` for federated rooms; never wrap links in backticks).\n- Mermaid fences, GitHub callouts (`> [!NOTE]`), footnotes, and external image URLs (`![](https://...)`) are not rendered; link to external URLs instead.\n- In MindRoom Chat, while streaming, your text appears live while thoughts and tool calls stay collapsed by default (expandable in place); when a reply finishes with earlier text or media before the last tool call and an answer after it, everything up through your last tool call (thoughts, tool calls, and earlier output) folds away. Write a self-contained final answer after your last tool call (including your conclusion and key details), assuming the reader will not open or read anything collapsed above.\n\n- Name your sources.\n- Pass `mindroom_output_path: <relative-path>` to save a tool's output to a workspace-relative file. In shell, `$MINDROOM_AGENT_WORKSPACE` is that workspace (`~` and `$HOME` in worker-routed shell/python).",
           "role": "system"
         },
         {
-          "content": "<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>",
+          "content": "<mindroom_session_context>\nCurrent date: <DATE> (UTC, UTC).\n</mindroom_session_context>",
           "role": "system"
         },
         {
@@ -1550,7 +1499,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -1583,7 +1532,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -1616,7 +1565,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -1645,34 +1594,12 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
               "n"
             ]
-          }
-        },
-        {
-          "name": "invite_router",
-          "description": "Invite router to current Matrix room.",
-          "parameters": {
-            "type": "object",
-            "properties": {
-              "mindroom_output_path": {
-                "anyOf": [
-                  {
-                    "type": "string"
-                  },
-                  {
-                    "type": "null"
-                  }
-                ],
-                "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
-              }
-            },
-            "required": []
           }
         },
         {
@@ -1695,7 +1622,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -1727,7 +1654,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -1756,7 +1683,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -1788,7 +1715,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -1809,11 +1736,11 @@
       },
       "messages": [
         {
-          "content": "You are a careful critic. Name the single biggest risk.\n\n<your_role>\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n\nTo save a tool's full supported output to a file in your workspace instead of returning it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with file, coding, python, or shell tools. In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, `~` and `$HOME` point there too.",
+          "content": "You are a careful critic. Name the single biggest risk.\n\n<your_role>\n## Tool Execution Environment\n- All tools run in the primary MindRoom runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n- CommonMark (single newlines break lines), GFM tables, strikethrough, fenced code blocks with a language tag, `<details><summary>...</summary>...</details>` collapsibles (put blank lines around inner Markdown), and `<span data-mx-spoiler>...</span>` spoilers (never `||spoiler||`, which does not render) are supported.\n- For math, use `$inline$` (no spaces just inside `$`) and `$$display$$` on its own line; never use `\\(...\\)` or `\\[...\\]`, which do not render as math.\n- Link Matrix rooms and threads/messages instead of writing bare `!room_id` or `$event_id` strings: use `<https://matrix.to/#/!room_id>` for rooms, and `[title](https://matrix.to/#/!room_id/$event_id)` (custom label) or `<https://matrix.to/#/!room_id/$event_id>` (auto-labeled pill) for threads/messages (optional `?via=server` for federated rooms; never wrap links in backticks).\n- Mermaid fences, GitHub callouts (`> [!NOTE]`), footnotes, and external image URLs (`![](https://...)`) are not rendered; link to external URLs instead.\n- In MindRoom Chat, while streaming, your text appears live while thoughts and tool calls stay collapsed by default (expandable in place); when a reply finishes with earlier text or media before the last tool call and an answer after it, everything up through your last tool call (thoughts, tool calls, and earlier output) folds away. Write a self-contained final answer after your last tool call (including your conclusion and key details), assuming the reader will not open or read anything collapsed above.\n\nPass `mindroom_output_path: <relative-path>` to save a tool's output to a workspace-relative file. In shell, `$MINDROOM_AGENT_WORKSPACE` is that workspace (`~` and `$HOME` in worker-routed shell/python).",
           "role": "system"
         },
         {
-          "content": "<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>",
+          "content": "<mindroom_session_context>\nCurrent date: <DATE> (UTC, UTC).\n</mindroom_session_context>",
           "role": "system"
         },
         {
@@ -1846,7 +1773,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -1879,7 +1806,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -1912,7 +1839,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -1941,7 +1868,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -1969,7 +1896,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -2001,7 +1928,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -2030,7 +1957,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [
@@ -2062,7 +1989,7 @@
                   }
                 ],
                 "default": null,
-                "description": "Optional MindRoom-managed workspace-relative path. If set, the full supported tool output is written to this file in your workspace and the tool returns only a compact receipt. Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
               }
             },
             "required": [

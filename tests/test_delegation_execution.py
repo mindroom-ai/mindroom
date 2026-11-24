@@ -10,25 +10,32 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import threading
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from mindroom import agents
 from mindroom.ai import run_delegated_child_response
+from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.response import require_ordered_pause_presentation
+from mindroom.approval.tool_approval import evaluate_tool_approval
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
+from mindroom.constants import SUBAGENT_COST_RUN_METADATA_KEY
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation import execution
+from mindroom.delegation import execution, lifecycle
+from mindroom.delegation.cost import SubagentCost, receipts_metadata, receiving_subagent_cost, stored_receipts
 from mindroom.delegation.lifecycle import authorize_delegation
 from mindroom.delegation.records import DelegationRecordLocator, DelegationRecordOwner
 from mindroom.delegation.recovery import cancel_approval_delegations
+from mindroom.delegation.sessions import reserve_subagent_turn
 from mindroom.delegation.state import DELEGATION_STATE_KEY, DelegationState, child_execution_identity
 from mindroom.history.storage import new_scope_session
 from mindroom.history.types import HistoryScope
@@ -37,6 +44,7 @@ from mindroom.llm.events import ToolCompleted
 from mindroom.llm.provider import TurnCompleted
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.llm.usage import RunMetrics, TokenCounts
+from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.session_storage.agent_storage import create_session_storage, create_state_storage
 from mindroom.session_storage.lanes import run_session_storage_operation
@@ -69,6 +77,7 @@ from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer,
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity
 from tests.tool_approval_helpers import gated_functions
+from tests.tool_job_helpers import NewerMessageWaits
 from tests.usage_helpers import counted_total
 
 if TYPE_CHECKING:
@@ -76,6 +85,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.delegation.activity import SubagentSnapshot
     from mindroom.delegation.state import DelegationChild
     from mindroom.llm.runs import AnyRunRecord
     from mindroom.session_storage.store import SaveOutcome
@@ -467,7 +477,57 @@ async def test_a_child_resumed_after_its_approval_reports_its_activity_as_progre
 
     assert isinstance(result, CompletedApprovalRun)
     assert report.written == ["written"]
-    assert reports[-1] == "\nCalling write_report\nchild result"
+    assert re.fullmatch(r"\nCalling write_report \(started \d\d:\d\d:\d\d UTC\)\nchild result", reports[-1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("feed", [True, False], ids=["feed", "no_feed"])
+async def test_a_call_resumed_after_its_approval_keeps_its_first_start_in_the_caller_s_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    feed: bool,
+) -> None:
+    """The caller's progress names when the paused call was first announced, the start its feed row keeps.
+
+    Without a feed, as when live frames are off, the progress names the same first start.
+    """
+    paths = _runtime_paths(tmp_path)
+    config = _config(paths)
+    identity = _leader_identity()
+    leader = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")),
+            answer("parent result"),
+        ],
+    )
+    code = ScriptedModel([calls(tool_call("write_report", "same-call")), answer("child result")])
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(lifecycle, "time", SimpleNamespace(time=lambda: clock.now))
+    snapshots: list[SubagentSnapshot] = []
+    monkeypatch.setattr(lifecycle, "_subagent_sink", lambda *_: snapshots.append if feed else None)
+    reports: list[str] = []
+    monkeypatch.setattr(lifecycle, "report_tool_progress", reports.append)
+
+    with registered_report_tool():
+        paused = await respond(
+            "leader",
+            "delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=identity,
+            run_id="parent-run",
+        )
+        assert isinstance(paused, PausedAttempt)
+        clock.now = 10_900.0
+        result = await _approve_the_child_s_pending_call(config, paths, paused, "card-0")
+
+    assert isinstance(result, CompletedApprovalRun)
+    starts = [item.started_at for snapshot in snapshots for item in snapshot.items if item.kind == "tool"]
+    assert set(starts) == ({100.0} if feed else set())
+    calling = [line for report in reports for line in report.splitlines() if line.startswith("Calling")]
+    assert calling
+    assert set(calling) == {"Calling write_report (started 00:01:40 UTC)"}
 
 
 @pytest.mark.asyncio
@@ -1168,6 +1228,96 @@ async def test_delegate_policy_denial_never_starts_child(tmp_path: Path, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_continue_subagent_prefix_projects_resolved_id_for_approval_policy_and_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prefix continue_subagent call exposes the resolved full subagent_id to approval policy and binds it on resume."""
+    paths, identity = _runtime_paths(tmp_path), _leader_identity()
+    base = _config(paths, child_tools=())
+    owner = _delegate_runtime_context(base, paths, execution_identity=identity).execution_identity
+    assert owner is not None
+    child = replace(
+        lifecycle.prepare_child_turn(
+            "leader",
+            "code",
+            "Init",
+            owner=owner,
+            config=base,
+            runtime_paths=paths,
+            depth=0,
+            budget_monitor=None,
+            model=None,
+            agent_mode="standard",
+            previous=None,
+            persona=None,
+        ),
+        status="completed",
+        result="First",
+    )
+    await reserve_subagent_turn(child, owner=owner, runtime_paths=paths)
+    full_id = child.subagent_id
+
+    script = paths.config_path.parent / "check_subagent_id.py"
+    script.write_text(
+        f"def check(t, args, a): return t == 'continue_subagent' and args.get('subagent_id') == {full_id!r}\n",
+    )
+    approval_cls = type(base.tool_approval)
+    gated_config = base.model_copy(
+        update={
+            "tool_approval": approval_cls.model_validate(
+                {"rules": [{"match": "continue_subagent", "script": str(script)}]},
+            ),
+        },
+    )
+    ScriptedAgents(
+        {
+            "leader": ScriptedModel(
+                [
+                    calls(tool_call("continue_subagent", "continue-gated", subagent_id=full_id[:8], message="Next")),
+                    answer("Done"),
+                ],
+            ),
+            "code": ScriptedModel([answer("Follow-up done")]),
+        },
+    ).install(monkeypatch)
+
+    paused = await respond(
+        "leader",
+        "continue",
+        config=gated_config,
+        runtime_paths=paths,
+        identity=identity,
+        run_id="continue-run",
+    )
+    assert isinstance(paused, PausedAttempt)
+    state = DelegationState.from_metadata(_parent_record(gated_config, paths, identity, "continue-run").metadata)
+    assert state.children == []
+    projected_args = paused.tools[0].call.tool_args
+    assert projected_args is not None
+    assert (state.pending_tools[0]["tool_args"]["subagent_id"], projected_args["subagent_id"]) == (full_id, full_id)
+    assert (
+        await evaluate_tool_approval(gated_config, paths, "continue_subagent", dict(projected_args), "leader", None)
+    )[0]
+
+    result = await resume(
+        approval_executor(gated_config, paths),
+        paused,
+        _saved_approval_calls(state),
+        agent_name="leader",
+        identity=identity,
+        config=gated_config,
+        runtime_paths=paths,
+        decisions={"continue-gated": True},
+    )
+    assert isinstance(result, CompletedApprovalRun)
+    resumed = _parent_record(gated_config, paths, identity, "continue-run")
+    assert resumed.status is RunStatus.completed
+    assert DelegationState.from_metadata(resumed.metadata).children[0].subagent_id == full_id
+    assert "Follow-up done" in str(next(m.content for m in resumed.messages if m.tool_call_id == "continue-gated"))
+
+
+@pytest.mark.asyncio
 async def test_member_delegation_gate_and_card_keep_the_member_call_id(tmp_path: Path) -> None:
     """A team member's gated delegation is carded and gated as ``member_id:call_id``, never as the bare call id.
 
@@ -1411,6 +1561,60 @@ async def test_the_driver_saves_the_parent_as_it_was_handed_over(tmp_path: Path)
     assert stored is not None
     assert stored.content == "as handed over"
     assert DELEGATION_STATE_KEY in (stored.metadata or {})
+
+
+@pytest.mark.asyncio
+async def test_a_parent_that_gets_only_its_delegation_key_keeps_what_its_subagents_cost(tmp_path: Path) -> None:
+    """A minimal-mode checkpoint, which an approval recovery resumes, gets only its key, and it carries the cost too.
+
+    The key's save stores what the run holds merged with what the turn in its context received, so a holder that
+    knows less than the run leaves the run's receipts in place, on the record and on its row.
+    """
+    paths = _runtime_paths(tmp_path)
+    store = create_session_storage("leader", _config(paths), paths, _leader_identity())
+    session = new_scope_session(session_id="parent", scope=HistoryScope(kind="agent", scope_id="leader"))
+    checkpoint = RunRecord(
+        run_id="parent-run",
+        session_id="parent",
+        status=RunStatus.cancelled,
+        metadata=receipts_metadata({"earlier-child": 0.5}),
+    )
+    await persist_to(store, session)(checkpoint)
+
+    with receiving_subagent_cost(SubagentCost({"child": 0.0022})):
+        await execution.persist_delegation_state(store, session, checkpoint, DelegationState())
+
+    stored = store.get_run("parent-run")
+    assert stored is not None
+    for metadata in (checkpoint.metadata, stored.metadata):
+        assert stored_receipts(metadata) == {"earlier-child": 0.5, "child": 0.0022}
+        assert (metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY) == 0.5022
+
+
+@pytest.mark.asyncio
+async def test_a_paused_parent_s_save_keeps_what_its_record_its_row_and_its_turn_each_hold(tmp_path: Path) -> None:
+    """A paused run is saved whole, and its row then holds every receipt the record, the stored row, or the turn held."""
+    paths = _runtime_paths(tmp_path)
+    store = create_session_storage("leader", _config(paths), paths, _leader_identity())
+    session = new_scope_session(session_id="parent", scope=HistoryScope(kind="agent", scope_id="leader"))
+    checkpoint = RunRecord(
+        run_id="parent-run",
+        session_id="parent",
+        status=RunStatus.cancelled,
+        metadata=receipts_metadata({"first": 0.5, "only on the row": 0.125}),
+    )
+    await persist_to(store, session)(checkpoint)
+    paused = replace(checkpoint, status=RunStatus.paused, metadata=receipts_metadata({"first": 0.5, "second": 0.75}))
+
+    with receiving_subagent_cost(SubagentCost({"third": 0.25})):
+        await execution.persist_delegation_state(store, session, paused, DelegationState())
+
+    stored = store.get_run("parent-run")
+    assert stored is not None
+    assert stored.status is RunStatus.paused
+    expected = {"first": 0.5, "only on the row": 0.125, "second": 0.75, "third": 0.25}
+    assert stored_receipts(stored.metadata) == expected
+    assert (stored.metadata or {}).get(SUBAGENT_COST_RUN_METADATA_KEY) == 1.625
 
 
 @pytest.mark.asyncio
@@ -1958,3 +2162,55 @@ async def test_a_child_paused_again_after_its_resumed_run_continued_reports_ever
     reported, counted = _child_turn_usage(tmp_path, config, paths)
     assert counted == (65, 7)
     assert reported == counted
+
+
+@pytest.mark.asyncio
+async def test_a_subagent_works_until_its_own_request_carries_the_pause_notice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The notice a newer message adds after the parent's delegation batch never stops the subagent that batch runs.
+
+    Only the run whose request carried the notice stops at its next calls: the subagent writes its report, reads the
+    notice after its own batch, and answers.
+    """
+    paths = _runtime_paths(tmp_path)
+    config = with_responder_access(
+        Config(
+            agents={
+                "leader": AgentConfig(display_name="Leader", delegate_to=["code"]),
+                "code": AgentConfig(display_name="Code", tools=["report"]),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            memory={"backend": "none"},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            # The subagent runs inline in the parent's batch, under the reply's queued-message notices.
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
+        ),
+        "code",
+        users=[REQUESTER],
+    )
+    entity_ids(config, paths)
+    leader = ScriptedModel(
+        [calls(tool_call("run_subagent", "delegate-0", agent_name="code", task="Write report")), answer("Paused.")],
+    )
+    code = ScriptedModel([calls(tool_call("write_report", "write-1")), answer("Report written")])
+    ScriptedAgents({"leader": leader, "code": code}).install(monkeypatch)
+
+    with registered_report_tool() as report, queued_message_signal_context(NewerMessageWaits()):
+        await respond(
+            "leader",
+            "delegate",
+            config=config,
+            runtime_paths=paths,
+            identity=_leader_identity(),
+            run_id="parent-run",
+        )
+
+    assert report.written == ["written"]
+    assert len(code.requests) == 2
+    assert code.requests[1].messages[-1].content == QUEUED_MESSAGE_NOTICE_TEXT
+    parent = _parent_record(config, paths, _leader_identity(), "parent-run")
+    result = next(message.content for message in parent.messages if message.tool_call_id == "delegate-0")
+    assert isinstance(result, str)
+    assert "Report written" in result

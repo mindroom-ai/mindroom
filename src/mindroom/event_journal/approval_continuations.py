@@ -36,7 +36,8 @@ _CONTINUATION_COLUMNS = """
 
 # A continuation holds the pending sources of the span whose pause created it.
 # Join on ``held_source.event_id``; ``held_source.ordinal = 0`` is the source
-# recovery dispatches.
+# recovery dispatches. ``journal._pending_rows`` spells these holds as two LEFT
+# JOINs, so a change here belongs there too.
 HELD_SOURCES = """
     reply_span_sources AS held_source
     JOIN approval_continuations AS continuations
@@ -93,9 +94,28 @@ def failure_of_row(row: Row) -> ApprovalFailure | None:
     )
 
 
-def _unavailable_notice_delivery_id(approval_id: str, membership_epoch: int) -> str:
-    """Return one membership's delivery identity for an unavailable-owner notice."""
-    return f"approval-unavailable:{approval_id}:{membership_epoch}"
+def _unavailable_notice_prefix(approval_id: str) -> str:
+    """Return the delivery identity of an unavailable-owner notice, which the membership epoch completes."""
+    return f"approval-unavailable:{approval_id}:"
+
+
+def unavailable_notice(transaction: Transaction, _principal_id: str, approval_id: str) -> tuple[str, str, bool] | None:
+    """Return the principal and delivery of one approval's unavailable-owner notice and whether Matrix acknowledged it.
+
+    The attempt an account began stands, whoever posts for the room now, until its history shows it was never sent.
+    """
+    prefix = _unavailable_notice_prefix(approval_id)
+    row = transaction.fetchone(
+        """
+        SELECT principal_id, delivery_id, acknowledged_event_id FROM matrix_delivery_outbox
+        WHERE substr(delivery_id, 1, ?) = ? AND (retired = 0 OR acknowledged_event_id IS NOT NULL)
+        ORDER BY acknowledged_event_id IS NULL, created_at_ns
+        """,
+        (len(prefix), prefix),
+    )
+    if row is None:
+        return None
+    return str(row["principal_id"]), str(row["delivery_id"]), row["acknowledged_event_id"] is not None
 
 
 def enqueue_unavailable_notice(
@@ -115,7 +135,7 @@ def enqueue_unavailable_notice(
     )
     if membership_epoch is None:
         return None
-    delivery_id = _unavailable_notice_delivery_id(approval_id, membership_epoch)
+    delivery_id = f"{_unavailable_notice_prefix(approval_id)}{membership_epoch}"
     transaction_id = outbox.enqueue(
         transaction,
         principal_id,
@@ -215,6 +235,11 @@ class ApprovalContinuation:
     message_received_depth: int = 0
     dispatch_policy_source_kind: str | None = None
     correlation_id: str | None = None
+    # The event the paused turn's reply answers, which its resumed run and tools answer too. A routed turn's is the
+    # person's message, though its source is the steward's hidden route.
+    reply_to_event_id: str | None = None
+    # The paused turn's ID, which its resumed run keeps.
+    turn_id: str = field(kw_only=True)
     history_scope: HistoryScope | None = None
     # Who sent and who requested the paused turn, restored for the resumed hooks.
     origin: TurnOrigin = field(kw_only=True)
@@ -266,6 +291,8 @@ def _context(continuation: ApprovalContinuation) -> dict[str, object]:
         "message_received_depth": continuation.message_received_depth,
         "dispatch_policy_source_kind": continuation.dispatch_policy_source_kind,
         "correlation_id": continuation.correlation_id,
+        "reply_to_event_id": continuation.reply_to_event_id,
+        "turn_id": continuation.turn_id,
         "history_scope": continuation.history_scope.to_metadata() if continuation.history_scope is not None else None,
         "origin": _origin_to_dict(continuation.origin),
         "memory_prompt": continuation.memory_prompt,
@@ -333,6 +360,7 @@ def _from_rows(
     claimed = row["state"] == "ready" and claim_span_id is not None
     claim_span = None if claim_span_id is None else reply_spans.load(transaction, principal_id, claim_span_id)
     generation = int(row["generation"])
+    origin = _origin_from_dict(cast("dict[str, object]", stored["origin"]))
     return ApprovalContinuation(
         cli_call=cast("dict[str, object] | None", stored["cli_call"]),
         approval_id=str(row["approval_id"]),
@@ -374,8 +402,32 @@ def _from_rows(
         message_received_depth=int(stored["message_received_depth"]),
         dispatch_policy_source_kind=cast("str | None", stored["dispatch_policy_source_kind"]),
         correlation_id=cast("str | None", stored["correlation_id"]),
+        # LEGACY_COMPAT: Approval continuations stored without the event their reply answers.
+        # Legacy format: the stored context of an approval continuation had no reply_to_event_id key.
+        # Last legacy release: every release before the router-free change ships, v2026.11.459 the newest when written,
+        #   stores continuations without it; replacement: unreleased, the first release with this change stores
+        #   the event the paused turn's reply answers in every continuation.
+        # Handling: absence reads as the turn's newest source, the event a resume answered before the upgrade, and as
+        #   no event for a job follow-up, whose source is no Matrix event.
+        # Coverage: tests/test_event_journal_store.py::TestApprovalContinuations::test_continuation_without_a_reply_target_loads_with_the_event_its_resume_answered.
+        reply_to_event_id=(
+            cast("str | None", stored["reply_to_event_id"])
+            if "reply_to_event_id" in stored
+            else None
+            if origin.intent is TurnIntent.JOB_FOLLOW_UP
+            else span.sources.logical_source_event_ids[-1]
+        ),
+        # LEGACY_COMPAT: Approval continuations stored without their paused turn's ID.
+        # Legacy format: the stored context of an approval continuation had no turn_id key.
+        # Last legacy release: every release before this change ships, v2026.11.203 the newest when written, stores
+        #   continuations without it; replacement: unreleased, the first release with this change stores the paused
+        #   turn's ID in every continuation.
+        # Handling: absence reads as the approval's ID, so each resume and the settlement of a reply paused before the
+        #   upgrade carry one turn ID, though not the one the paused turn's earlier hooks carried.
+        # Coverage: tests/test_event_journal_store.py::TestApprovalContinuations::test_continuation_without_a_turn_id_loads_with_its_approval_id.
+        turn_id=cast("str | None", stored.get("turn_id")) or str(row["approval_id"]),
         history_scope=HistoryScope.from_metadata(stored["history_scope"]),
-        origin=_origin_from_dict(cast("dict[str, object]", stored["origin"])),
+        origin=origin,
         memory_prompt=cast("str | None", stored["memory_prompt"]),
         memory_thread_history=tuple(
             ApprovalMemoryTurn(
@@ -737,7 +789,10 @@ def may_finish(transaction: Transaction, principal_id: str, *, approval_id: str)
     continuation = get_locked(transaction, principal_id, approval_id=approval_id)
     if continuation is None:
         return None
-    if continuation.state == "failing" and _paused_reply_gone(transaction, principal_id, continuation):
+    if (
+        continuation.state == "failing"
+        and _paused_reply_state(transaction, principal_id, continuation) is ReplyState.GONE
+    ):
         return continuation
     delivered = transaction.fetchone(
         """
@@ -750,22 +805,35 @@ def may_finish(transaction: Transaction, principal_id: str, *, approval_id: str)
     return None if delivered is None else continuation
 
 
-def _paused_reply_gone(transaction: Transaction, principal_id: str, continuation: ApprovalContinuation) -> bool:
-    """Return whether the reply a continuation paused is gone."""
+def _paused_reply_state(
+    transaction: Transaction,
+    principal_id: str,
+    continuation: ApprovalContinuation,
+) -> ReplyState | None:
+    """Return the state of the reply a continuation paused, or None when its records are gone."""
     assert continuation.span_id is not None, "a stored continuation names the span whose pause created it"
     span = reply_spans.load(transaction, principal_id, continuation.span_id)
     reply = None if span is None else reply_messages.load(transaction, principal_id, span.reply_id)
-    return reply is not None and reply.state is ReplyState.GONE
+    return None if reply is None else reply.state
 
 
 def delete(transaction: Transaction, principal_id: str, *, approval_id: str) -> None:
-    """Delete a paused run whose end the reply it paused already applied, with the calls no live card shows."""
+    """Delete a paused run whose end the reply it paused already applied, with the calls no live card shows.
+
+    Its end names the continuation and the state that end left the reply in, which says how the paused turn ended.
+    """
+    continuation = get(transaction, principal_id, approval_id=approval_id)
+    ended = (
+        None
+        if continuation is None
+        else approval_signals.EndedApproval(continuation, _paused_reply_state(transaction, principal_id, continuation))
+    )
     approval_calls.delete_reply_calls(transaction, approval_id=approval_id)
     transaction.execute(
         "DELETE FROM approval_continuations WHERE principal_id = ? AND approval_id = ?",
         (principal_id, approval_id),
     )
-    approval_signals.ended(transaction, principal_id, approval_id)
+    approval_signals.ended(transaction, principal_id, approval_id, ended)
 
 
 def may_release(
@@ -796,45 +864,16 @@ def may_discard_unavailable(
     principal_id: str,
     *,
     approval_id: str,
-    notice_principal_id: str,
 ) -> ApprovalContinuation | None:
-    """Lock a permanently unavailable owner's paused run whose visible card cleanup is done, so it may end."""
-    observed = get(transaction, principal_id, approval_id=approval_id)
-    if observed is None or observed.state != "failing":
-        return None
-    membership_epoch = membership_state.claim_active_membership_epoch(
-        transaction,
-        notice_principal_id,
-        room_id=observed.room_id,
-    )
-    if membership_epoch is None:
-        return None
+    """Lock a permanently unavailable owner's paused run whose visible card cleanup is done, so it may end.
+
+    Its acknowledged notice stands whether or not the account that posted it is still in the room.
+    """
     continuation = get_locked(transaction, principal_id, approval_id=approval_id)
-    if continuation is None or continuation.state != "failing" or continuation.room_id != observed.room_id:
+    notice = unavailable_notice(transaction, principal_id, approval_id)
+    if continuation is None or continuation.state != "failing" or notice is None or not notice[2]:
         return None
-    delivery_id = _unavailable_notice_delivery_id(approval_id, membership_epoch)
-    # The membership row is already held before the cross-principal
-    # continuation lock. The helper's membership claim is therefore reentrant;
-    # its new lock is only the outbox row, preserving membership ->
-    # continuation -> delivery order against router departure.
-    ownership = outbox.claim_active_delivery_ownership(
-        transaction,
-        notice_principal_id,
-        delivery_id=delivery_id,
-        stage=DeliveryStage.FINAL,
-        expected_room_id=continuation.room_id,
-    )
-    if ownership is None:
-        return None
-    delivered = transaction.fetchone(
-        """
-        SELECT 1 AS present FROM matrix_delivery_outbox
-        WHERE principal_id = ? AND delivery_id = ? AND stage = ?
-          AND acknowledged_event_id IS NOT NULL
-        """,
-        (notice_principal_id, delivery_id, DeliveryStage.FINAL.value),
-    )
-    return None if delivered is None else continuation
+    return continuation
 
 
 def get_locked(

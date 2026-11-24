@@ -9,6 +9,7 @@ import stat
 import sys
 import threading
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
@@ -51,6 +52,7 @@ from mindroom.tool_system.runtime_context import ToolRuntimeContext
 from mindroom.tool_system.sandbox_proxy import runner_config_snapshot
 from mindroom.tool_system.worker_routing import agent_workspace_root_path, worker_root_path
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backends.local import _LocalWorkerBackend
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import (
     ScriptResourceProfile,
@@ -102,7 +104,13 @@ def _runtime_paths(
     )
 
 
-def _config(*, private: bool = False, private_scope: str = "user_agent", worker_scope: str = "user_agent") -> Config:
+def _config(
+    *,
+    private: bool = False,
+    private_scope: str = "user_agent",
+    worker_scope: str = "user_agent",
+    template_dir: str | None = None,
+) -> Config:
     watcher: dict[str, object] = {
         "display_name": "Watcher",
         "worker_scope": worker_scope,
@@ -110,7 +118,10 @@ def _config(*, private: bool = False, private_scope: str = "user_agent", worker_
     }
     if private:
         watcher.pop("worker_scope")
-        watcher["private"] = {"per": private_scope, "root": "private/watcher"}
+        private_cfg: dict[str, object] = {"per": private_scope, "root": "private/watcher"}
+        if template_dir is not None:
+            private_cfg["template_dir"] = template_dir
+        watcher["private"] = private_cfg
     return Config(
         agents={
             "watcher": watcher,
@@ -142,6 +153,7 @@ def _context(
     worker_scope: str = "user_agent",
     backend: str | None = None,
     isolated_script_gateway: bool = False,
+    template_dir: str | None = None,
 ) -> ToolRuntimeContext:
     runtime_paths = _runtime_paths(
         tmp_path,
@@ -149,7 +161,12 @@ def _context(
         backend=backend,
         isolated_script_gateway=isolated_script_gateway,
     )
-    config = _config(private=private, private_scope=private_scope, worker_scope=worker_scope)
+    config = _config(
+        private=private,
+        private_scope=private_scope,
+        worker_scope=worker_scope,
+        template_dir=template_dir,
+    )
     return make_test_tool_runtime_context(
         agent_name=agent_name,
         target=MessageTarget.resolve(
@@ -303,6 +320,7 @@ class _WorkerClient:
     launch_paths: dict[str, tuple[Path, Path]] = field(default_factory=dict)
     launch_state_scope_worker_keys: list[str | None] = field(default_factory=list)
     launch_config_snapshots: list[dict[str, object] | None] = field(default_factory=list)
+    launch_entries: list[str] = field(default_factory=list)
     cancel_observed_revocation: bool = False
     cancel_forces: list[bool] = field(default_factory=list)
     launched_run_ids: list[str] = field(default_factory=list)
@@ -327,12 +345,14 @@ class _WorkerClient:
         source_digest: str,
         gateway_url: str,
         max_runtime_seconds: int,
+        entry: str = "script",
         state_scope_worker_key: str | None = None,
         private_agent_names: tuple[str, ...] | None = None,
         config_snapshot: dict[str, object] | None = None,
     ) -> None:
         del source_digest, gateway_url, private_agent_names
         assert max_runtime_seconds > 0
+        self.launch_entries.append(entry)
         self.launch_state_scope_worker_keys.append(state_scope_worker_key)
         self.launch_config_snapshots.append(config_snapshot)
         starting = self.store.get_run(run_id)
@@ -838,6 +858,19 @@ async def test_static_worker_backend_rejects_script_before_creating_any_state(tm
     assert client.launched_run_ids == []
 
 
+def test_script_backend_must_actually_support_exact_retirement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cleanup locator is not enough without a real method that can retire a worker."""
+    backend = _LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=10.0,
+    )
+    monkeypatch.setattr(backend, "cleanup_locator", "cleanup-locator")
+
+    with pytest.raises(ScriptRunManagerError, match="does not support exact worker retirement"):
+        manager_module._require_script_worker_backend(backend)
+
+
 @pytest.mark.asyncio
 async def test_kubernetes_worker_rejects_scripts_without_a_gateway_only_listener(tmp_path: Path) -> None:
     """A pod must not receive network access to the primary API's non-gateway routes."""
@@ -1031,6 +1064,32 @@ async def test_launch_allows_an_eligible_toolkit_with_no_current_functions(tmp_p
 
     assert run.grants == (ScriptToolGrant("calculator", "add"),)
     assert run.preapprove_launch_grants is True
+
+
+@pytest.mark.asyncio
+async def test_launch_rejects_an_allowlist_naming_filesystem_by_an_old_name(tmp_path: Path) -> None:
+    """A saved file or coding entry neither grants filesystem nor narrows the allowlist: the launch says what to write."""
+    manager, _backend, _client = _manager(tmp_path)
+    manager.toolkit_name_resolver = lambda _context: frozenset({"calculator", "filesystem"})
+
+    for old_name in ("file", "coding"):
+        with pytest.raises(ScriptRunManagerError, match=rf"toolkit names: {old_name}\. .*name filesystem"):
+            await manager.run(
+                _context(tmp_path),
+                source="print('ok')\n",
+                limits=ScriptRunLimits(allowed_tools=(old_name,)),
+            )
+
+    manager.toolkit_name_resolver = lambda _context: frozenset({"calculator", "triggers"})
+    with pytest.raises(
+        ScriptRunManagerError,
+        match=r"toolkit names: external_trigger_manager\. .*name triggers instead of external_trigger_manager",
+    ):
+        await manager.run(
+            _context(tmp_path),
+            source="print('ok')\n",
+            limits=ScriptRunLimits(allowed_tools=("external_trigger_manager",)),
+        )
 
 
 @pytest.mark.asyncio
@@ -2666,18 +2725,30 @@ async def test_terminal_failure_error_is_bounded_with_its_output(tmp_path: Path)
     assert reconciled.error.endswith(":tail")
 
 
+def test_runtime_limit_is_measured_against_the_current_time(tmp_path: Path) -> None:
+    """Unless a test sets it, a run's maximum runtime is measured against the current UTC time."""
+    manager, _backend, _client = _manager(tmp_path)
+
+    before = datetime.now(UTC)
+    measured = manager.clock()
+
+    assert before <= measured <= datetime.now(UTC)
+
+
 @pytest.mark.asyncio
-async def test_reconcile_enforces_runtime_limit_through_revocation_path(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An expired run is revoked and broker-cancelled before its worker receives a signal."""
+@pytest.mark.parametrize("entry", ["reconcile", "status"])
+async def test_an_expired_run_is_revoked_before_its_worker_is_signalled(tmp_path: Path, entry: str) -> None:
+    """An expired run is revoked and broker-cancelled before its worker receives a signal, also when its owner asks."""
     manager, _backend, client = _manager(tmp_path)
     context = _context(tmp_path)
     run = await manager.run(context, source="print('ok')\n")
-    monkeypatch.setattr(manager_module, "_runtime_expired", lambda _run: True)
+    started = datetime.fromisoformat(run.started_at or run.created_at)
+    manager.clock = lambda: started + timedelta(seconds=run.max_runtime_seconds)
 
-    reconciled = await manager.reconcile_durable(run_id=run.run_id)
+    if entry == "status":
+        reconciled = (await manager.status(context, run_id=run.run_id)).run
+    else:
+        reconciled = await manager.reconcile_durable(run_id=run.run_id)
 
     assert reconciled.state is ScriptRunState.INTERRUPTED
     assert reconciled.cancellation_reason == "Background script maximum runtime exceeded."
@@ -3154,3 +3225,17 @@ async def test_a_refused_local_launch_fails_its_start_and_ends_its_run(
 
     [stored] = manager.store.list_runs()
     assert stored.state is ScriptRunState.INTERRUPTED
+
+
+@pytest.mark.asyncio
+async def test_path_launch_materializes_private_workspace_template(tmp_path: Path) -> None:
+    """Plain script path= launches materialize a fresh private workspace template before reading the file."""
+    template_dir = tmp_path / "watcher_template"
+    template_dir.mkdir()
+    (template_dir / "check.py").write_text("print('ok')\n", encoding="utf-8")
+
+    manager, _backend, _client = _manager(tmp_path)
+    context = _context(tmp_path, private=True, template_dir=str(template_dir))
+    run = await manager.run(context, path="check.py")
+
+    assert run.state is ScriptRunState.RUNNING

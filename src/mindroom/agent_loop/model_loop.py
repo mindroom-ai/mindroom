@@ -34,6 +34,7 @@ from mindroom.llm.errors import incomplete_stream_error
 from mindroom.llm.events import ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.messages import (
     AGGREGATE_USAGE_KEY,
+    CUT_OFF_TEXT_KEY,
     REWRITTEN_ATTEMPT_KEY,
     Message,
     model_provenance,
@@ -105,9 +106,9 @@ class EndRun:
 type RequestDecision = SendRequest | EndRun
 type BeforeRequestHook = Callable[[LoopState], Awaitable[RequestDecision]]
 type RewriteToolCalls = Callable[[list[dict[str, Any]], Mapping[str, ToolFunction]], list[dict[str, Any]]]
-type AnswerToolCalls = Callable[[Message, StopReason | None], list[Message] | None]
+type AnswerToolCalls = Callable[[Sequence[Message], StopReason | None], list[Message] | None]
 type BeforeDispatchHook = Callable[[LoopState, Sequence[PlannedCall]], Awaitable[None]]
-type AfterToolBatchHook = Callable[[list[Message], Sequence[Message]], Awaitable[None]]
+type AfterToolBatchHook = Callable[[list[Message], Sequence[Message]], Awaitable[bool | None]]
 type LoopEndHook = Callable[[LoopState, ModelRequest], None]
 
 
@@ -118,20 +119,24 @@ class LoopHooks:
     - ``before_request``: awaited in order before every model request, after the request cap; a hook may rewrite
       ``state.messages`` in place (mid-turn compaction), append to them (the approval receipt), or end the loop
       (participation, the skill review's budget).
-    - ``answer_tool_calls``: sees each assistant message that requests tools together with the turn's stop reason;
-      when it returns result messages, one per call in call order, they answer the batch in place of running it, and
-      each call is recorded and announced as a failed call (the output-limit policy).
+    - ``answer_tool_calls``: sees the live messages, which end with an assistant message that requests tools,
+      together with the turn's stop reason; when it returns result messages, one per call in call order, they answer
+      the batch in place of running it, and each call is recorded and announced as a failed call (the output-limit
+      policy).
     - ``rewrite_tool_calls``: rewrites an assistant message's tool calls before they are resolved to functions
       (portable tool search), and the rewritten calls are what the message stores.
     - ``before_dispatch``: awaited with the loop state, whose messages end with the batch's assistant message and
       whose record holds the batch's executions, and the planned calls before any call of the batch runs (minimal
-      mode's checkpoint of the batch).
+      mode's checkpoint of the batch); a resume awaits it with each approved call before that call runs.
     - ``tool_middleware``: wraps every tool call the loop executes, outermost first (job admission, the hook bridge).
     - ``after_tool_batch``: awaited in order with the live messages and the batch's result messages after the
       results and any media follow-up are appended, before the loop continues; a batch that stops the run, by a
-      result or by calling again a tool refused for failing, runs none (queued-message and job notices).
+      result or by calling again a tool refused for failing, runs none (queued-message and job notices). A hook that
+      returns True ends the loop normally after this batch, without another request, and the hooks after it do not
+      run; a batch that paused still ends paused. None or False continues.
     - ``on_resume_entry``: awaited in order by a resume with the live messages and the decided calls' results after
-      they are appended, before the loop continues; a resumed batch that stops the run runs none.
+      they are appended, before the loop continues; a resumed batch that stops the run runs none. Its hooks return as
+      ``after_tool_batch`` hooks do.
     - ``on_loop_end``: called once when the loop ends without an exception, with the final state and the last
       request as sent, when any was (the skill review's capture).
     """
@@ -316,7 +321,7 @@ async def _run_tool_batch(
     finished.
     """
     assert message.tool_calls
-    answers = None if hooks.answer_tool_calls is None else hooks.answer_tool_calls(message, stop_reason)
+    answers = None if hooks.answer_tool_calls is None else hooks.answer_tool_calls(state.messages, stop_reason)
     if answers is not None:
         batch = answered_tool_batch(answers)
     else:
@@ -400,6 +405,10 @@ async def _answer_resumed(
             function = replace(state.offered.functions[execution.tool_name], gate=None)
             execution.requires_confirmation = False
             planned = PlannedCall(function=function, execution=execution)
+            if hooks.before_dispatch is not None:
+                # Approved calls run one after another, so each is announced alone: the record then holds the
+                # results of those before it.
+                await hooks.before_dispatch(state, [planned])
             yield ToolStarted(execution.call)
             finished = dispatch_tool_calls([planned], run=state.run, middleware=hooks.tool_middleware)
             async with closing_async_stream(finished):
@@ -454,7 +463,8 @@ async def _answer_batch(
     them, and reach the model on one user message after the results. Every batch path answers here, so one rule
     decides the stop: a batch stops the run when ``ends_run`` says the loop ends it or any of its results does,
     counting the results a resumed batch answered before its pause. No later request reads what a hook would add after
-    a batch that stops the run, so none runs.
+    a batch that stops the run, so none runs. A hook that returns True stops the run after the batch it answered as
+    it stands, its results' own outcomes and stop flags untouched, and no later hook runs.
     """
     follow_up = media_follow_up(results)
     messages.extend(results)
@@ -463,7 +473,8 @@ async def _answer_batch(
     if ends_run or _batch_stops_run(messages):
         return True
     for hook in hooks:
-        await hook(messages, results)
+        if await hook(messages, results) is True:
+            return True
     return False
 
 
@@ -489,11 +500,13 @@ async def _stream_turn(
     """Stream one request, yielding its deltas and then its finished turn.
 
     The finished turn records the identity of ``request`` (``llm.request_identity``), unless a pipeline stage answered
-    it with another request in its place (``REWRITTEN_ATTEMPT_KEY``).
+    it with another request in its place (``REWRITTEN_ATTEMPT_KEY``) or recorded the identity as it sent the request.
 
     When the stream is cut off by cancellation, a provider error, or a consumer that stops reading, the usage it
     already reported is kept on an assistant message appended to ``messages`` and counted once in ``metrics``,
-    before whatever ended the stream reaches the run's terminal handling. A turn that completed but was never taken
+    before whatever ended the stream reaches the run's terminal handling. The message has no content, so no request
+    sends it; the text the stream yielded, which a reply showed, is kept in its ``CUT_OFF_TEXT_KEY``, and a stream
+    that reported no usage leaves the message for that text alone. A turn that completed but was never taken
     by the consumer, such as one cancelled while a pipeline stage finishes the stream, is cut off the same way with
     the turn's own usage; once the consumer takes it, ``_accept_turn`` counts that usage instead.
     """
@@ -501,11 +514,15 @@ async def _stream_turn(
     turn: TurnCompleted | None = None
     handed_off = False
     reported = ReportedUsage()
+    shown: list[str] = []
     try:
         stream = model.stream(request)
         async with closing_async_stream(stream):
             async for event in stream:
-                if isinstance(event, TextDelta | ReasoningDelta):
+                if isinstance(event, TextDelta):
+                    shown.append(event.text)
+                    yield event
+                elif isinstance(event, ReasoningDelta):
                     yield event
                 elif isinstance(event, UsageReported):
                     reported.observe(event)
@@ -513,11 +530,12 @@ async def _stream_turn(
                     turn = event
         if turn is None:
             raise incomplete_stream_error(provider=identity.provider)
-        # Digesting a long history would stall the replies sharing the event loop; the turn is still this stream's.
-        request_identity = (await asyncio.to_thread(request_prefixes, model, request))[-1]
         answered = turn.message.provider_data or {}
-        if request_identity is not None and not answered.get(REWRITTEN_ATTEMPT_KEY):
-            turn.message.provider_data = {**answered, REQUEST_IDENTITY_KEY: request_identity}
+        if not answered.get(REWRITTEN_ATTEMPT_KEY) and REQUEST_IDENTITY_KEY not in answered:
+            # Digesting a long history would stall the replies sharing the event loop; the turn is still this stream's.
+            request_identity = (await asyncio.to_thread(request_prefixes, model, request))[-1]
+            if request_identity is not None:
+                turn.message.provider_data = {**answered, REQUEST_IDENTITY_KEY: request_identity}
         yield turn
         # The consumer asked for more, so it holds the turn and accepts it before its next suspension point.
         handed_off = True
@@ -526,17 +544,41 @@ async def _stream_turn(
             # A cut-off request settles exactly what was billed: the completed turn's usage, else the final reports
             # plus a partial none replaced.
             billed = turn.message.metrics if turn is not None else reported.received
-            if billed is not None and billed.reported:
-                provider_data = model_provenance(identity.id, identity.provider)
-                # The retrying stage marks usage that sums attempts on the finished turn and on the reports alike.
-                sums_attempts = (
-                    usage_sums_attempts(turn.message.provider_data) if turn is not None else reported.sums_attempts
-                )
-                if sums_attempts:
-                    # Usage that sums retried attempts must not read as one request's.
-                    provider_data = {AGGREGATE_USAGE_KEY: True, **provider_data}
-                messages.append(Message(role="assistant", metrics=billed, provider_data=provider_data))
-                _count_request(metrics, billed, identity)
+            # The retrying stage marks usage that sums attempts on the finished turn and on the reports alike.
+            sums_attempts = (
+                usage_sums_attempts(turn.message.provider_data) if turn is not None else reported.sums_attempts
+            )
+            _keep_cut_off(messages, metrics, identity, billed, "".join(shown), sums_attempts=sums_attempts)
+
+
+def _keep_cut_off(
+    messages: list[Message],
+    metrics: RunMetrics,
+    identity: ModelIdentity,
+    billed: MessageMetrics | None,
+    shown: str,
+    *,
+    sums_attempts: bool,
+) -> None:
+    """Append the message that stands for a cut-off request, if it reported usage or streamed text.
+
+    It holds the usage the request ``billed``, counted once in ``metrics``, and the text it had ``shown``.
+    """
+    if billed is not None and not billed.reported:
+        billed = None
+    if billed is None and not shown:
+        return
+    provider_data = model_provenance(identity.id, identity.provider)
+    if shown:
+        provider_data[CUT_OFF_TEXT_KEY] = shown
+    if sums_attempts:
+        # Usage that sums retried attempts must not read as one request's.
+        provider_data = {AGGREGATE_USAGE_KEY: True, **provider_data}
+    message = Message(role="assistant", provider_data=provider_data)
+    messages.append(message)
+    if billed is not None:
+        message.metrics = billed
+        _count_request(metrics, billed, identity)
 
 
 def _count_request(metrics: RunMetrics, usage: MessageMetrics, identity: ModelIdentity) -> None:

@@ -56,7 +56,7 @@ def _is_secret_schema(schema: Mapping[str, Any]) -> bool:
 
 
 # An environment reference names where a secret lives, so it is shown rather than masked.
-_ENV_PLACEHOLDER_PATTERN = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+ENV_PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def _mask_secret_value(value: object) -> object:
@@ -65,7 +65,7 @@ def _mask_secret_value(value: object) -> object:
         return {key: _mask_secret_value(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_mask_secret_value(item) for item in value]
-    if value is None or (isinstance(value, str) and _ENV_PLACEHOLDER_PATTERN.fullmatch(value)):
+    if value is None or (isinstance(value, str) and ENV_PLACEHOLDER_PATTERN.fullmatch(value)):
         return value
     return REDACTED
 

@@ -177,6 +177,10 @@ class ProcessLiveVoiceBridge:
         """Restrict the child's media to the current Matrix call roster."""
         self._send({"type": "SetRoster", "identities": sorted(participant_identities)})
 
+    def vacate_roster(self) -> None:
+        """Keep the child's last roster after the Matrix roster emptied (see ``RealtimeVoiceBridge.vacate_roster``)."""
+        self._send({"type": "VacateRoster"})
+
     async def connect(self, grant: SfuGrant) -> None:
         """Connect the child to the SFU."""
         await self._call({"type": "Connect", "url": grant.url, "jwt": grant.jwt})
@@ -293,7 +297,7 @@ class ProcessLiveVoiceBridge:
         elif options is None:
             return
         elif kind == "Turn" and options.on_conversation_turn is not None:
-            options.on_conversation_turn(message["speaker"], message["text"])
+            options.on_conversation_turn(message["speaker"], message["text"], message["spoken_at"])
         elif kind == "SessionError" and options.on_session_error is not None:
             options.on_session_error(message["message"])
         elif kind == "Usage":

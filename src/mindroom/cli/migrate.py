@@ -12,6 +12,7 @@ from mindroom.cli.config import (
     console,
     format_validation_errors,
     load_config_quiet,
+    print_literal,
 )
 
 
@@ -23,7 +24,7 @@ def config_migrate(
     config_file = runtime_paths.config_path
 
     if not config_file.exists():
-        console.print(f"[yellow]No config file found at:[/yellow] {config_file}")
+        print_literal("[yellow]No config file found at:[/yellow] ", config_file)
         console.print("\nRun [cyan]mindroom config init[/cyan] to create one.")
         raise typer.Exit(1)
 
@@ -42,4 +43,4 @@ def config_migrate(
         return
 
     console.print("[green]Applied migration:[/green] membership access schema")
-    console.print(f"[green]Config updated:[/green] {config_file}")
+    print_literal("[green]Config updated:[/green] ", config_file)

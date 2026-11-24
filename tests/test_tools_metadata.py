@@ -9,9 +9,11 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import threading
-from collections.abc import Callable, Iterator
+import time
+from collections.abc import AsyncIterator, Callable, Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +21,7 @@ from unittest.mock import AsyncMock
 from urllib.parse import urlsplit
 
 import agno.tools.crawl4ai as agno_crawl4ai
+import httpcore
 import httpx
 import pytest
 from agno.tools import Toolkit
@@ -33,8 +36,10 @@ import mindroom.tool_system.plugins as plugins_module
 # Import tools to trigger tool registration
 import mindroom.tools  # noqa: F401
 import mindroom.tools.custom_api as custom_api_module
+from mindroom import public_fetch
 from mindroom.config.main import Config, ConfigRuntimeValidationError, load_config
 from mindroom.constants import resolve_runtime_paths
+from mindroom.public_fetch import PublicFetchError
 from mindroom.redaction import REDACTED
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.agno_toolkits import toolkit_function_names
@@ -68,9 +73,12 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.tools import crawl4ai as crawl4ai_module
 from mindroom.tools.crawl4ai import crawl4ai_tools
 from mindroom.tools.custom_api import custom_api_tools
+from mindroom.tools.newspaper4k import newspaper4k_tools
+from mindroom.tools.trafilatura import trafilatura_tools
 from mindroom.worker_computer.browser_proxy import BrowserDestinationProxy, BrowserEgress, _UpstreamProxy
 from tests.browser_egress_helpers import socks5_connect
-from tests.conftest import preserved_builtin_tools
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, preserved_builtin_tools
+from tests.public_fetch_helpers import TrickleBody, public_dns, serve
 
 _BUILTINS = builtin_tool_registry()
 _CRAWL4AI_RUNTIME_PATHS = resolve_runtime_paths(config_path=Path("config.yaml"), process_env={})
@@ -290,14 +298,14 @@ def test_custom_api_tool_rejects_unsafe_url_before_request(
     assert exc_info.value.reason == reason
 
 
-class _TrackedStream(httpx.SyncByteStream):
+class _TrackedStream(httpx.AsyncByteStream):
     """A response body that records whether anything read it."""
 
     def __init__(self, body: bytes) -> None:
         self.body = body
         self.read = False
 
-    def __iter__(self) -> Iterator[bytes]:
+    async def __aiter__(self) -> AsyncIterator[bytes]:
         self.read = True
         yield self.body
 
@@ -321,8 +329,11 @@ def _install_custom_api_transport(
             )
         return response
 
-    monkeypatch.setattr(custom_api_module, "validate_server_fetch_url", lambda url: url)
-    monkeypatch.setattr(custom_api_module, "ServerFetchHTTPTransport", lambda **_kwargs: httpx.MockTransport(handle))
+    monkeypatch.setattr(
+        custom_api_module,
+        "ServerFetchAsyncHTTPTransport",
+        lambda **_kwargs: httpx.MockTransport(handle),
+    )
     return sent
 
 
@@ -401,6 +412,27 @@ def test_custom_api_tool_sends_dashboard_json_headers_to_the_base_url(monkeypatc
 
     assert json.loads(tool.make_request("data"))["data"] == {"ok": True}
     assert sent[0].headers["X-Api-Key"] == "operator-secret"
+
+
+@pytest.mark.parametrize("verify_ssl", [True, False])
+def test_custom_api_tool_hands_its_tls_verification_setting_to_the_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    verify_ssl: bool,
+) -> None:
+    """An API with a self-signed certificate can be called by turning verification off."""
+    transport_options: list[dict[str, object]] = []
+
+    def transport(**options: object) -> httpx.MockTransport:
+        transport_options.append(options)
+        return httpx.MockTransport(lambda _request: httpx.Response(200, stream=httpx.ByteStream(b'{"ok": true}')))
+
+    monkeypatch.setattr(custom_api_module, "ServerFetchAsyncHTTPTransport", transport)
+
+    payload = json.loads(custom_api_tools()(verify_ssl=verify_ssl).make_request("https://93.184.216.34/data"))
+
+    assert payload["data"] == {"ok": True}
+    assert transport_options == [{"verify": verify_ssl}]
 
 
 @pytest.mark.parametrize("headers", ['["X-Api-Key"]', '{"X-Retries": 3}', "X-Api-Key: abc"])
@@ -608,6 +640,113 @@ def test_custom_api_tool_caps_redirect_hops(monkeypatch: pytest.MonkeyPatch) -> 
 
     assert payload["error"] == "Request failed: more than 10 redirects"
     assert len(sent) == 11
+
+
+@pytest.mark.parametrize(
+    ("tool_function", "error"),
+    [
+        pytest.param(
+            lambda: trafilatura_tools()().extract_text,
+            "Error: Could not fetch content from URL: http://93.184.216.34/slow",
+            id="trafilatura",
+        ),
+        pytest.param(
+            lambda: newspaper4k_tools()().read_article,
+            "Error reading article from http://93.184.216.34/slow: No data found.",
+            id="newspaper",
+        ),
+        pytest.param(
+            lambda: custom_api_tools()(timeout=0.3).make_request,
+            json.dumps({"error": "Request failed: the request did not finish within 0.3 seconds"}, indent=2),
+            id="custom_api",
+        ),
+    ],
+)
+def test_web_tools_give_up_on_a_server_that_trickles_its_response(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_function: Callable[[], Callable[[str], str]],
+    error: str,
+) -> None:
+    """A server that keeps sending slowly ends the tool call at the download deadline with the tool's error."""
+    monkeypatch.setattr(public_fetch, "_DEADLINE_SECONDS", 0.3)
+    call = tool_function()
+    requests = serve(monkeypatch, lambda _request: httpx.Response(200, stream=TrickleBody()))
+    started = time.monotonic()
+
+    result = call("http://93.184.216.34/slow")
+
+    assert time.monotonic() - started < 2
+    assert result == error
+    assert len(requests) == 1
+
+
+def test_custom_api_tool_returns_at_its_timeout_while_a_hostname_lookup_hangs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The timeout covers resolving the API's hostname, not only the request after it."""
+    released = threading.Event()
+
+    def hang(*_args: object, **_kwargs: object) -> object:
+        released.wait(10)
+        raise socket.gaierror(socket.EAI_NONAME, "lookup released")
+
+    monkeypatch.setattr(socket, "getaddrinfo", hang)
+    tool = custom_api_tools()(base_url="https://api.example.com", timeout=0.3)
+    started = time.monotonic()
+    try:
+        payload = json.loads(tool.make_request("data"))
+        elapsed = time.monotonic() - started
+    finally:
+        released.set()
+
+    assert payload == {"error": "Request failed: the request did not finish within 0.3 seconds"}
+    assert elapsed < 2
+
+
+def test_custom_api_tool_tries_the_next_address_when_one_never_answers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An address that drops connection attempts uses up only its own connect limit, not the request's timeout."""
+    monkeypatch.setattr(custom_api_module, "CONNECT_TIMEOUT_SECONDS", 0.1)
+    dead, live = "93.184.216.34", "93.184.216.35"
+    public_dns(monkeypatch, (dead, live))
+    dialed: list[tuple[str, float | None]] = []
+
+    async def connect_tcp(
+        _backend: object,
+        host: str,
+        _port: int,
+        timeout: float | None = None,  # noqa: ASYNC109 - Signature must match httpcore.
+        **_kwargs: object,
+    ) -> None:
+        dialed.append((host, timeout))
+        if host == dead:
+            # Nothing answers, so the attempt lasts until its connect limit.
+            await asyncio.sleep(timeout or 0)
+            raise httpcore.ConnectTimeout
+        msg = "connection refused"
+        raise httpcore.ConnectError(msg)
+
+    monkeypatch.setattr(httpcore.AnyIOBackend, "connect_tcp", connect_tcp)
+
+    payload = json.loads(
+        custom_api_tools()(timeout=SETTLE_TIMEOUT_SECONDS).make_request("https://api.example.com/data"),
+    )
+
+    assert dialed == [(dead, 0.1), (live, 0.1)]
+    assert payload == {"error": "Request failed: connection refused"}
+
+
+def test_custom_api_tool_returns_a_response_that_arrived_before_closing_the_connection_outlasted_its_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The timeout bounds the request, so a response read in time is returned even when closing takes longer."""
+    _install_custom_api_transport(monkeypatch, lambda _request: httpx.Response(200, json={"ok": True}))
+
+    async def close_slowly(_transport: httpx.MockTransport) -> None:
+        await asyncio.sleep(0.5)
+
+    monkeypatch.setattr(httpx.MockTransport, "aclose", close_slowly)
+
+    payload = json.loads(custom_api_tools()(timeout=0.2).make_request("https://example.com/data"))
+
+    assert payload["data"] == {"ok": True}
 
 
 def test_crawl4ai_tool_rejects_private_url_before_crawl(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -973,7 +1112,7 @@ def test_local_url_fetch_tools_do_not_contact_loopback_targets(
     with _recording_loopback_server() as (url, connections):
         for function_name, parameter in _url_functions(tool_name):
             argument = [url] if parameter.endswith("urls") else url
-            with contextlib.suppress(ServerFetchUrlError):
+            with contextlib.suppress(ServerFetchUrlError, PublicFetchError):
                 getattr(toolkit, function_name)(**{parameter: argument})
 
     assert connections == []
@@ -1466,25 +1605,6 @@ def test_searxng_empty_include_tools_override_filters_all_functions(tmp_path: Pa
     assert not toolkit_function_names(tool)
 
 
-def test_file_empty_exclude_patterns_override_reaches_constructor(tmp_path: Path) -> None:
-    """Declared string-array fields should preserve an explicit empty list."""
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "storage",
-    )
-
-    tool = get_tool_by_name(
-        "file",
-        runtime_paths,
-        tool_config_overrides={"exclude_patterns": []},
-        runs_in_worker=False,
-        worker_target=None,
-        tools=builtin_tool_registry(),
-    )
-
-    assert tool.exclude_patterns == []
-
-
 def test_script_integral_number_overrides_reach_integer_limits(tmp_path: Path) -> None:
     """JSON number fields such as 3.0 must satisfy integer-valued script limits."""
     runtime_paths = resolve_runtime_paths(
@@ -1892,14 +2012,15 @@ def test_only_code_execution_tools_execute_code() -> None:
         "python",
         "script",
         "shell",
+        "terminal",
+        "workflow",
     }
 
 
 def test_path_tools_follow_agent_file_access_and_receive_it() -> None:
     """Tools that take model-supplied paths follow and receive the agent file_access."""
     for name in (
-        "file",
-        "coding",
+        "filesystem",
         "attachments",
         "matrix_message",
         "gmail",
@@ -2046,7 +2167,7 @@ def test_file_access_on_other_tools_points_to_agent_setting() -> None:
 
 def test_restrict_to_base_dir_is_rejected_with_file_access_hint() -> None:
     """The removed per-tool restriction field points authors to the agent file_access setting."""
-    for tool_name in ("file", "coding", "python"):
+    for tool_name in ("filesystem", "python"):
         with pytest.raises(
             ToolConfigOverrideError,
             match=rf"agents\.a\.tools\.{tool_name}\.restrict_to_base_dir was removed; use agents\.<name>\.file_access",

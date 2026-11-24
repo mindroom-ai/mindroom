@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from functools import cached_property, partial
 from pathlib import Path
@@ -13,14 +14,22 @@ from mindroom import constants
 from mindroom.agent_cli.cli_shell_agent import STANDARD_CLI_NOTE, standard_cli_eligible, wrap_native_shell_window
 from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_loop.build import AgentBuild, AgentSurface
-from mindroom.agent_loop.prompt import PromptSpec, join_sections
+from mindroom.agent_loop.prompt import (
+    MARKDOWN_OUTPUT_FORMAT,
+    MATRIX_MARKDOWN_OUTPUT_FORMAT,
+    PromptSpec,
+    join_sections,
+)
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import offered_toolkits, toolkit_instructions
-from mindroom.approval.tool_approval import tool_may_require_approval
+from mindroom.approval.tool_approval import tool_may_require_approval, toolkit_approval_alias
+from mindroom.config.models import EffectiveToolConfig
 from mindroom.config.resolution import memory_backend
 from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.computer_announcement import computer_announcement_middleware
 from mindroom.custom_tools.job import JobTools
+from mindroom.custom_tools.workflow_peers import WorkflowPeerTools
 from mindroom.delegation.personas import (
     caller_toolkit_names,
     persona_allows,
@@ -28,6 +37,7 @@ from mindroom.delegation.personas import (
     require_built_persona_tools,
 )
 from mindroom.delegation.state import is_delegation_function
+from mindroom.desktop.credentials import has_ready_self_service_desktop
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.failure_text import failure_text
@@ -37,26 +47,26 @@ from mindroom.llm.provider import DeferredTools, ModelRequest
 from mindroom.logging_config import get_logger
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.path_confinement import read_regular_file_within_root
-from mindroom.prompt_templates import build_agent_identity_context, openai_compat_identity, render_prompt_template
+from mindroom.preload_cap import cap_preload_text
+from mindroom.prompt_templates import openai_compat_identity, render_prompt_template
 from mindroom.providers import registry as provider_registry
 from mindroom.runtime_resolution import (
     ResolvedAgentRuntime,
     resolve_agent_runtime,
 )
 from mindroom.scheduling.scheduled_tool_calls import bind_live_tools
-from mindroom.shared_directories.paths import describe_agent_shared_directories
+from mindroom.shared_directories.paths import describe_agent_pending_invitations, describe_agent_shared_directories
 from mindroom.system_prompt import render_session_context
 from mindroom.timing import timed, timed_block
 from mindroom.tool_jobs.authorization import authority_snapshot
 from mindroom.tool_jobs.execution import JobActor, approval_can_run_as_job, assembled_job_tools, with_job_admission
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled, toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
-from mindroom.tool_system.agent_tools import AgentTools, turn_room_flags
+from mindroom.tool_system.agent_tools import AgentTools, offered_without_room, turn_keeps_room_tools
 from mindroom.tool_system.agno_toolkits import (
     adapt_toolkit,
     configure_toolkit_functions,
     offered_refusal,
-    toolkit_function_names,
     with_offered_instructions,
 )
 from mindroom.tool_system.catalog import get_tool_by_name
@@ -66,13 +76,9 @@ from mindroom.tool_system.construction import (
     get_toolkit_construction,
     tool_config_signature,
 )
-from mindroom.tool_system.declarations import (
-    MATRIX_ROOM_RUNTIME_TOOL_NAMES,
-    ToolFileAccess,
-    is_matrix_room_runtime_function,
-)
+from mindroom.tool_system.declarations import ToolFileAccess
 from mindroom.tool_system.dynamic_toolkits import DeferredToolkit, ToolDeferral, defer_toolkit
-from mindroom.tool_system.output_files import ToolOutputFilePolicy
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT, ToolOutputFilePolicy, current_tool_workdir
 from mindroom.tool_system.sandbox_proxy import ToolPlacement, tool_placement
 from mindroom.tool_system.skills import SKILL_FUNCTION_NAMES, agent_workspace_skills_root, build_skills_toolkit
 from mindroom.tool_system.tool_function import AdaptedToolkit, ToolGate
@@ -82,8 +88,10 @@ from mindroom.tool_system.worker_routing import (
     agent_workspace_root_path,
     resolve_agent_owned_path,
 )
+from mindroom.tools.filesystem import with_view_file_hint
 from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
-from mindroom.workspaces import ensure_workspace_template
+from mindroom.workers.named import named_workers_refusal
+from mindroom.workspaces import MIND_TEMPLATE_CONTEXT_FILES, MIND_WORKSPACE_TEMPLATE, ensure_workspace_template
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -92,7 +100,7 @@ if TYPE_CHECKING:
     from mindroom.agent_modes import AgentMode
     from mindroom.config.agent import AgentConfig
     from mindroom.config.main import Config
-    from mindroom.config.models import EffectiveToolConfig, FileAccess
+    from mindroom.config.models import FileAccess
     from mindroom.config.resolution import ResolvedAgent
     from mindroom.delegation.state import SubagentPersona
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
@@ -104,37 +112,26 @@ if TYPE_CHECKING:
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.skills import RefusedWorkspaceSkill, SkillsToolkit
     from mindroom.tool_system.tool_function import ToolFunction
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, WorkerScope
     from mindroom.turn_model import TurnModel
 
 logger = get_logger(__name__)
 
 _DEFAULT_MIND_AGENT_NAME = "mind"
-_DEFAULT_MIND_CONTEXT_FILES = (
-    "SOUL.md",
-    "AGENTS.md",
-    "USER.md",
-    "IDENTITY.md",
-    "TOOLS.md",
-    "HEARTBEAT.md",
-)
 _PROJECTED_WORKER_ASSET_PATH_PREFIXES = (
     "./.mindroom-worker-assets/",
     ".mindroom-worker-assets/",
 )
 _MAX_WORKSPACE_CONTEXT_FILE_BYTES = 1 << 20
+_NO_OUTPUT_REDIRECT_TOOLKITS = frozenset({"dynamic_tools", "skill_manage"})
 
 
-@dataclass
+@dataclass(frozen=True)
 class _PreloadChunk:
-    """One preloaded context file: its path as ``title``, its text, and what the preload cap removed from it.
-
-    The rendered section names each file the cap cut and by how much, so a dropped file never vanishes without a trace.
-    """
+    """One preloaded context file: its path as ``title`` and its text; the preload cuts only what it renders."""
 
     title: str
     body: str
-    omitted_chars: int = 0
 
 
 @dataclass(frozen=True)
@@ -166,9 +163,17 @@ class _AgentToolAssembly:
     local_tool_names: tuple[str, ...]
     worker_routed_tool_names: tuple[str, ...]
     cli_deferred: tuple[DeferredAgentToolkit, ...]
+    named_workers: bool
+    supports_output_redirect: bool
+    supports_workspace_skill_authoring: bool
     # The tool-call policy the loop runs around every call, the hook bridge; a browser's computer announcement is
     # its functions' own.
     tool_middleware: tuple[ToolMiddleware, ...]
+
+    @property
+    def has_offered_tools(self) -> bool:
+        """Return whether the assembly offers any tool function or CLI-deferred toolkit."""
+        return any(entry.adapted.functions for entry in self.entries) or bool(self.cli_deferred)
 
     @property
     def toolkits(self) -> tuple[AdaptedToolkit, ...]:
@@ -223,43 +228,55 @@ class _AgentRoleContext:
         return [path.relative_to(workspace_root).as_posix() for path in paths if path.is_relative_to(workspace_root)]
 
 
-def _uses_default_mind_workspace_scaffold(config: Config, agent_name: str) -> bool:
+def _workspace_template(config: Config, agent_name: str) -> str | None:
+    """Return the template an agent's workspace starts from: 'mind', a config-relative directory, or None."""
+    if (instance := config.personal_agent_instance(agent_name)) is not None:
+        return config.personal_agents[instance.template].workspace_template
     agent_config = config.agents[agent_name]
-    return (
+    uses_mind_starter = (
         agent_name == _DEFAULT_MIND_AGENT_NAME
         and agent_config.private is None
         and memory_backend(config, agent_name) == "file"
-        and tuple(agent_config.context_files) == _DEFAULT_MIND_CONTEXT_FILES
+        and tuple(agent_config.context_files) == MIND_TEMPLATE_CONTEXT_FILES
     )
+    return MIND_WORKSPACE_TEMPLATE if uses_mind_starter else None
 
 
-def _ensure_default_mind_workspace(storage_path: Path) -> None:
-    workspace_path = agent_workspace_root_path(storage_path, _DEFAULT_MIND_AGENT_NAME)
+def _ensure_agent_workspace(config: Config, agent_name: str, runtime_paths: constants.RuntimePaths) -> None:
+    """Copy the files an agent's workspace template has that its workspace lacks, overwriting nothing."""
+    template = _workspace_template(config, agent_name)
+    if template is None:
+        return
+    workspace_path = agent_workspace_root_path(runtime_paths.storage_root, agent_name)
     try:
-        ensure_workspace_template(workspace_path, template="mind")
+        ensure_workspace_template(
+            workspace_path,
+            template=template
+            if template == MIND_WORKSPACE_TEMPLATE
+            else constants.config_relative_path(template, runtime_paths),
+        )
     except (OSError, ValueError) as exc:
         # Worker code writes the workspace; a planted entry must not fail every agent build.
-        logger.warning("default_mind_workspace_scaffold_skipped", path=str(workspace_path), error=str(exc))
+        logger.warning("agent_workspace_scaffold_skipped", agent=agent_name, path=str(workspace_path), error=str(exc))
 
 
-def ensure_default_agent_workspaces(config: Config, storage_path: Path) -> None:
-    """Materialize built-in starter workspaces under the active runtime storage root."""
+def ensure_default_agent_workspaces(config: Config, runtime_paths: constants.RuntimePaths) -> None:
+    """Materialize every agent's workspace template under the active runtime storage root."""
     for agent_name in config.agents:
-        if _uses_default_mind_workspace_scaffold(config, agent_name):
-            _ensure_default_mind_workspace(storage_path)
+        _ensure_agent_workspace(config, agent_name, runtime_paths)
 
 
 def agent_build_can_overlap_file_memory(agent_name: str, config: Config, storage_path: Path) -> bool:
     """Return True when it is safe to overlap agent construction with file-memory reads."""
-    if not _uses_default_mind_workspace_scaffold(config, agent_name):
+    if _workspace_template(config, agent_name) is None:
         return True
     memory_path = agent_workspace_root_path(storage_path, agent_name) / "MEMORY.md"
     return memory_path.is_file()
 
 
-def _get_mind_runtime_context(agent_name: str, runtime_paths: constants.RuntimePaths) -> str:
-    """Render live installation facts for the default Mind agent."""
-    if agent_name != _DEFAULT_MIND_AGENT_NAME:
+def _get_mind_runtime_context(agent_name: str, config: Config, runtime_paths: constants.RuntimePaths) -> str:
+    """Render live installation facts for the default Mind agent and agents given its starter files."""
+    if agent_name != _DEFAULT_MIND_AGENT_NAME and _workspace_template(config, agent_name) != MIND_WORKSPACE_TEMPLATE:
         return ""
     homeserver = constants.runtime_matrix_homeserver(runtime_paths=runtime_paths)
     return f"\n## MindRoom Runtime\n- Active Matrix homeserver: `{homeserver}`\n"
@@ -332,168 +349,53 @@ def _read_context_file(resolved_path: Path, *, workspace_root: Path | None, agen
         return None
     if len(payload) >= _MAX_WORKSPACE_CONTEXT_FILE_BYTES:
         logger.warning("context_file_truncated", agent=agent_name, path=str(resolved_path))
-    return payload.decode("utf-8", errors="replace").strip()
-
-
-def _render_context_chunk(chunk: _PreloadChunk, *, chunk_marker_template: str) -> str:
-    """Render one chunk under its source path, marking what the cap removed."""
-    body = chunk.body.strip()
-    if not chunk.omitted_chars:
-        return f"### {chunk.title}\n{body}" if body else ""
-    marker = render_prompt_template(
-        chunk_marker_template,
-        title=chunk.title,
-        omitted_chars=chunk.omitted_chars,
-    )
-    return f"### {chunk.title}\n{body}\n{marker}" if body else f"### {chunk.title}\n{marker}"
+    # The preload counts the file as it is, so nothing is stripped before its cut.
+    return payload.decode("utf-8", errors="replace")
 
 
 def _render_context_chunks(
     chunks: list[_PreloadChunk],
     *,
+    agent_name: str,
     section_heading: str,
-    chunk_marker_template: str,
+    max_chars: int,
+    cut_marker_template: str,
 ) -> str:
-    """Render every chunk that still carries content or an omission marker."""
-    rendered = [
-        block
-        for chunk in chunks
-        if (block := _render_context_chunk(chunk, chunk_marker_template=chunk_marker_template))
-    ]
+    """Render each non-empty file under its path, cut on its own to ``max_chars`` and marked where it was cut."""
+    rendered: list[str] = []
+    for chunk in chunks:
+        kept, cut = cap_preload_text(chunk.body, max_chars)
+        parts = [kept.strip()]
+        if cut:
+            logger.warning(
+                "context_file_preload_cut",
+                agent=agent_name,
+                path=chunk.title,
+                max_preload_file_chars=max_chars,
+            )
+            parts.append(render_prompt_template(cut_marker_template, path=chunk.title, max_chars=max_chars))
+        if block := "\n".join(part for part in parts if part):
+            rendered.append(f"### {chunk.title}\n{block}")
     if not rendered:
         return ""
     return f"{section_heading}\n" + "\n\n".join(rendered) + "\n\n"
-
-
-def _drop_whole_chunks(
-    chunks: list[_PreloadChunk],
-    max_preload_chars: int,
-    *,
-    render: Callable[[list[_PreloadChunk]], str],
-) -> int:
-    """Drop entire chunk bodies (least critical first) until under the cap."""
-    omitted = 0
-    remaining_body_chunks = sum(bool(chunk.body) for chunk in chunks)
-    for chunk in chunks:
-        if len(render(chunks)) <= max_preload_chars:
-            return omitted
-        if not chunk.body:
-            continue
-        if remaining_body_chunks == 1:
-            return omitted
-        omitted += len(chunk.body)
-        chunk.omitted_chars += len(chunk.body)
-        chunk.body = ""
-        remaining_body_chunks -= 1
-    return omitted
-
-
-def _trim_chunk_tails(
-    chunks: list[_PreloadChunk],
-    max_preload_chars: int,
-    *,
-    render: Callable[[list[_PreloadChunk]], str],
-) -> int:
-    """Trim from the *end* of chunks to preserve headers/identity at the top."""
-    omitted = 0
-    for chunk in chunks:
-        while chunk.body:
-            overflow = len(render(chunks)) - max_preload_chars
-            if overflow <= 0:
-                return omitted
-            remove_count = min(overflow, len(chunk.body))
-            original_length = len(chunk.body)
-            chunk.body = chunk.body[: original_length - remove_count].rstrip()
-            actual_removed = original_length - len(chunk.body)
-            chunk.omitted_chars += actual_removed
-            omitted += actual_removed
-    return omitted
-
-
-def _apply_preload_cap(
-    personality_chunks: list[_PreloadChunk],
-    max_preload_chars: int,
-    *,
-    section_heading: str,
-    truncation_marker_template: str,
-    chunk_marker_template: str,
-) -> tuple[str, int]:
-    """Apply hard preload cap with deterministic truncation priority.
-
-    Truncation order is by file list order.
-    First drops whole chunks, then trims from the *end* of remaining chunks.
-    Every touched file keeps a marker naming it and the chars it lost, so a
-    dropped context file is visible to the model instead of silently missing.
-    """
-    render = partial(
-        _render_context_chunks,
-        section_heading=section_heading,
-        chunk_marker_template=chunk_marker_template,
-    )
-    rendered = render(personality_chunks)
-    if len(rendered) <= max_preload_chars:
-        return rendered, 0
-
-    # Trim against a budget that already reserves room for the summary marker,
-    # so file bodies cannot consume space required by omission metadata.
-    marker_upper_bound = render_prompt_template(
-        truncation_marker_template,
-        omitted_chars=sum(len(chunk.body) for chunk in personality_chunks),
-    )
-    marker_upper_bound_block = f"\n\n{marker_upper_bound}\n\n"
-    required_marker_chunks = [
-        replace(
-            chunk,
-            body="",
-            omitted_chars=chunk.omitted_chars + len(chunk.body),
-        )
-        for chunk in personality_chunks
-    ]
-    minimum_rendered = render(required_marker_chunks).rstrip("\n") + marker_upper_bound_block
-    if len(minimum_rendered) > max_preload_chars:
-        msg = (
-            f"max_preload_chars={max_preload_chars} cannot fit required context headings and omission markers; "
-            f"at least {len(minimum_rendered)} characters are required"
-        )
-        raise ValueError(msg)
-    trim_budget = max_preload_chars - len(marker_upper_bound_block)
-
-    omitted_chars = _drop_whole_chunks(
-        personality_chunks,
-        trim_budget,
-        render=render,
-    )
-    omitted_chars += _trim_chunk_tails(
-        personality_chunks,
-        trim_budget,
-        render=render,
-    )
-
-    rendered = render(personality_chunks)
-    if omitted_chars <= 0:
-        return rendered, 0
-
-    marker = render_prompt_template(truncation_marker_template, omitted_chars=omitted_chars)
-    marker_block = f"\n\n{marker}\n\n"
-    return rendered.rstrip("\n") + marker_block, omitted_chars
 
 
 @timed("system_prompt_assembly.agent_create.preloaded_files")
 def _render_preloaded_files(
     agent_name: str,
     agent_config: AgentConfig,
-    max_preload_chars: int,
+    max_preload_file_chars: int,
     *,
     personality_section_heading: str,
-    truncation_marker_template: str,
-    chunk_marker_template: str,
+    cut_marker_template: str,
     workspace_context_files: tuple[Path, ...],
     workspace_root: Path,
     context_documents: list[_PreloadChunk],
     storage_path: Path,
     runtime_paths: constants.RuntimePaths,
 ) -> str:
-    """Render the configured and workspace context files as the role's preload section, within ``max_preload_chars``.
+    """Render the configured and workspace context files as the role's preload section, each cut on its own.
 
     This is evaluated each time one agent instance is created.
     The normal Matrix and OpenAI-compatible request paths build fresh agent
@@ -511,23 +413,15 @@ def _render_preloaded_files(
             workspace_root=workspace_root,
         )
 
-    # Preload truncation mutates chunks; keep complete files for CLI reads.
-    context_documents.extend(replace(chunk) for chunk in personality_chunks)
-
-    rendered, omitted_chars = _apply_preload_cap(
+    # CLI reads get each whole file stripped, as before; the preload cuts the text as it is.
+    context_documents.extend(replace(chunk, body=chunk.body.strip()) for chunk in personality_chunks)
+    return _render_context_chunks(
         personality_chunks,
-        max_preload_chars,
+        agent_name=agent_name,
         section_heading=personality_section_heading,
-        truncation_marker_template=truncation_marker_template,
-        chunk_marker_template=chunk_marker_template,
+        max_chars=max_preload_file_chars,
+        cut_marker_template=cut_marker_template,
     )
-    if omitted_chars > 0:
-        logger.warning(
-            "Preload context exceeded max_preload_chars and was truncated",
-            omitted_chars=omitted_chars,
-            max_preload_chars=max_preload_chars,
-        )
-    return rendered
 
 
 def _file_mode_knowledge_instruction_block(
@@ -538,7 +432,7 @@ def _file_mode_knowledge_instruction_block(
     """Describe workspace-accessible file-only knowledge bases to the model."""
     lines = [
         "File-only knowledge bases are available in the workspace.",
-        "Use file or coding tools such as grep, list, and read instead of search_knowledge_base for these sources.",
+        "Use filesystem tools such as grep, ls, and read_file instead of search_knowledge_base for these sources.",
         "Available file-only sources:",
     ]
     source_lines: list[str] = []
@@ -558,12 +452,12 @@ def _file_mode_knowledge_instruction_block(
 
 
 def _tool_base_dir_override(tool_name: str, *, tools: ToolRegistry, workspace_path: Path) -> dict[str, object] | None:
-    """Point a registered tool that exposes a ``base_dir`` config field at the agent's workspace."""
+    """Point a registered tool that exposes a ``base_dir`` config field at the bound workdir or the agent's workspace."""
     metadata = tools.get(tool_name)
     config_fields = (metadata.config_fields if metadata is not None else None) or ()
     if not any(field.name == "base_dir" for field in config_fields):
         return None
-    return {"base_dir": str(workspace_path)}
+    return {"base_dir": str(current_tool_workdir() or workspace_path)}
 
 
 def _offered_entries(
@@ -573,13 +467,17 @@ def _offered_entries(
 ) -> tuple[tuple[_ToolkitEntry, ...], dict[str, set[str]]]:
     """Return ``entries``, each holding only the functions a run offers of it, and by tool the functions left out.
 
-    A run offers one function per name. An MCP function leaves whenever another toolkit offers its name, or the name
-    is reserved for Matrix room recovery, because its server's catalog chooses that name and can change it without
-    anyone editing the config, so a new remote tool never shadows a local function or another server's; every other
+    A run offers one function per name. An MCP function leaves whenever another toolkit offers its name, because its
+    server's catalog chooses that name and can change it without anyone editing the config, so a new remote tool
+    never shadows a local function or another server's; every other
     name keeps its first function (``offered_toolkits``). A configured toolkit whose every function another took is
-    reported.
+    reported. A ``filesystem`` read that cannot decode an image names ``view_file`` when the run offers it and it finds the file.
     """
-    offered = offered_toolkits(_without_colliding_mcp_functions(entries, agent_name=agent_name), agent=agent_name)
+    viewer = next((entry.toolkit for entry in entries if isinstance(entry.toolkit, AttachmentTools)), None)
+    offered = with_view_file_hint(
+        offered_toolkits(_without_colliding_mcp_functions(entries, agent_name=agent_name), agent=agent_name),
+        viewer.views if viewer is not None else None,
+    )
     offered_entries: list[_ToolkitEntry] = []
     left_out: dict[str, set[str]] = {}
     for entry, toolkit in zip(entries, offered, strict=True):
@@ -600,21 +498,17 @@ def _offered_entries(
 
 def _without_colliding_mcp_functions(entries: Sequence[_ToolkitEntry], *, agent_name: str) -> list[AdaptedToolkit]:
     """Return the toolkits of ``entries``, each MCP one without the functions whose name another toolkit offers."""
-    # Each owner is an entry, named by its toolkit; a reserved room-recovery function is its registered tool's,
-    # offered or not.
-    owners: dict[str, list[tuple[_ToolkitEntry | None, str]]] = {
-        name: [(None, name)] for name in MATRIX_ROOM_RUNTIME_TOOL_NAMES
-    }
+    owners: dict[str, list[_ToolkitEntry]] = {}
     for entry in entries:
         for function in entry.adapted.functions:
-            owners.setdefault(function.name, []).append((entry, entry.adapted.name))
+            owners.setdefault(function.name, []).append(entry)
     toolkits: list[AdaptedToolkit] = []
     for entry in entries:
         toolkit = entry.adapted
         if isinstance(entry.toolkit, MindRoomMCPToolkit):
             kept: list[ToolFunction] = []
             for function in toolkit.functions:
-                others = [*dict.fromkeys(name for owner, name in owners[function.name] if owner is not entry)]
+                others = [*dict.fromkeys(owner.adapted.name for owner in owners[function.name] if owner is not entry)]
                 if not others:
                     kept.append(function)
                     continue
@@ -630,25 +524,6 @@ def _without_colliding_mcp_functions(entries: Sequence[_ToolkitEntry], *, agent_
     return toolkits
 
 
-class _MatrixRoomRuntimeToolCollisionError(ValueError):
-    """Raised when another registered tool claims a reserved runtime function."""
-
-
-def _reject_matrix_room_runtime_tool_function_collisions(registered_tool_name: str, toolkit: AnyToolkit) -> None:
-    """Keep reserved room-runtime functions owned by their registered built-in tool, whatever else the toolkit holds.
-
-    An MCP server's catalog chooses its names, so its function of a reserved name leaves at offer time instead.
-    """
-    if isinstance(toolkit, MindRoomMCPToolkit):
-        return
-    reserved_names = set(MATRIX_ROOM_RUNTIME_TOOL_NAMES)
-    function_names = set(toolkit_function_names(toolkit))
-    collisions = sorted(name for name in function_names & reserved_names if registered_tool_name != name)
-    if collisions:
-        msg = f"Tool function name(s) {', '.join(collisions)} are reserved for Matrix room recovery tools."
-        raise _MatrixRoomRuntimeToolCollisionError(msg)
-
-
 def _agent_tool_output_file_policy(
     agent_runtime: ResolvedAgentRuntime,
     runtime_paths: constants.RuntimePaths,
@@ -659,6 +534,7 @@ def _agent_tool_output_file_policy(
         agent_runtime.workspace.root,
         runtime_paths,
         auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
+        tools_use_workdir=current_tool_workdir() is not None,
     )
 
 
@@ -859,27 +735,47 @@ def _render_tool_execution_environment(
     runtime_paths: constants.RuntimePaths,
     local_tool_names: tuple[str, ...],
     worker_routed_tool_names: tuple[str, ...],
+    has_other_tools: bool,
     worker_scope: WorkerScope | None,
     file_access: FileAccess,
+    workdir: Path | None,
+    workspace_root: Path,
     unconfined_tool_names: tuple[str, ...],
     primary_only_unconfined_tool_names: tuple[str, ...],
     shared_directories: tuple[str, ...],
+    pending_shared_directory_invitations: tuple[str, ...],
 ) -> str:
-    """Describe effective per-tool execution routing and file access to the model."""
+    """Describe effective per-tool execution routing and file access to the model, and where a workdir moves them."""
 
     def tool_list(names: tuple[str, ...]) -> str:
         return ", ".join(f"`{name}`" for name in names) if names else "none"
 
-    if not worker_routed_tool_names and not local_tool_names:
+    if not worker_routed_tool_names and not local_tool_names and not has_other_tools:
         return "## Tool Execution Environment\n- No tools are available in this runtime."
 
     file_access_description = {
-        "workspace": "agent workspace and attachments only",
+        "workspace": "agent workspace and attachments only"
+        if workdir is None
+        else "`filesystem`: the workdir and your saved tool outputs, read-only outside the workdir; "
+        "`view_file`: the workdir; other path tools: agent workspace and attachments only",
         "unrestricted": "any path the tool's process can reach",
     }[file_access]
     file_access_lines = [f"- File access for path tools: `{file_access}` ({file_access_description})."]
+    if workdir is not None:
+        # The prompt and the tools name workspace files by relative paths, which the workdir's tools resolve there.
+        file_access_lines.append(
+            f"- Workdir: `{workdir}`, where `shell` runs and `filesystem` resolves relative paths; "
+            "code that `python` runs uses this process's current directory, so give it absolute paths. "
+            "Your workspace, which holds your skills, subagent profiles, saved tool outputs, and delegation records, "
+            f"is `{workspace_root}`; name files there by absolute path.",
+        )
     if shared_directories:
         file_access_lines.append(f"- Shared directories: {', '.join(shared_directories)}.")
+    if pending_shared_directory_invitations:
+        file_access_lines.append(
+            "- Pending shared directory invitations; ask your user before accepting or declining: "
+            f"{', '.join(pending_shared_directory_invitations)}.",
+        )
     if unconfined_tool_names:
         file_access_lines.append(
             f"- Not confined by file_access (only a worker isolates them): {tool_list(unconfined_tool_names)}.",
@@ -894,8 +790,7 @@ def _render_tool_execution_environment(
         return "\n".join(
             [
                 "## Tool Execution Environment",
-                f"- All available tools run in the primary MindRoom runtime: {tool_list(local_tool_names)}.",
-                "- No tools use a worker runtime.",
+                "- All tools run in the primary MindRoom runtime.",
                 *file_access_lines,
             ],
         )
@@ -978,14 +873,14 @@ def _keep_functions(toolkit: AdaptedToolkit, keep: Callable[[ToolFunction], bool
     return replace(toolkit, functions=tuple(function for function in toolkit.functions if keep(function)))
 
 
-def _approval_may_gate(config: Config, function_name: str, registered_tool_name: str) -> bool:
-    """Return whether a config approval rule may gate one function of the toolkit registered as this name."""
+def _approval_may_gate(config: Config, tools: ToolRegistry, function_name: str, registered_tool_name: str) -> bool:
+    """Return whether a config approval rule may gate one function of the tool registered as this name in ``tools``."""
     # A scheduled call runs only with the approval its requester gave when it was scheduled.
     is_scheduled_call_runner = registered_tool_name == "scheduler" and function_name == "run_scheduled_call"
-    return (
-        not is_matrix_room_runtime_function(registered_tool_name, function_name)
-        and not is_scheduled_call_runner
-        and tool_may_require_approval(config, function_name)
+    return not is_scheduled_call_runner and tool_may_require_approval(
+        config,
+        function_name,
+        toolkit_approval_alias(config, tools, registered_tool_name, function_name),
     )
 
 
@@ -994,6 +889,7 @@ def apply_tool_approval_capability(
     toolkit: AnyToolkit,
     config: Config,
     *,
+    tools: ToolRegistry,
     registered_tool_name: str,
     resumable: bool,
     approvals_as_jobs: bool,
@@ -1004,11 +900,12 @@ def apply_tool_approval_capability(
     approval. Otherwise each function an approval rule gates pauses the run for its approval, or, with
     ``approvals_as_jobs``, asks for it as the first phase of its call's job when the call can become one. Without
     ``approvals_as_jobs`` the delegation functions pause for their native driver, which owns the policy gate and the
-    exact child wait; with it they are ordinary calls whose subagents run as jobs.
+    exact child wait; with it they are ordinary calls whose subagents run as jobs. ``tools`` is the registry the toolkit
+    was built from, whose approval aliases let another function's rules gate its functions too.
     """
 
     def offered(function: ToolFunction) -> ToolFunction | None:
-        may_gate = _approval_may_gate(config, function.name, registered_tool_name)
+        may_gate = _approval_may_gate(config, tools, function.name, registered_tool_name)
         if not resumable:
             return None if function.gate is ToolGate.CONFIRM or may_gate else function
         delegation = is_delegation_function(function)
@@ -1026,50 +923,77 @@ def apply_tool_approval_capability(
     return replace(adapted, functions=tuple(function for function in functions if function is not None))
 
 
+def _matrix_automation_lines(agent_config: AgentConfig) -> tuple[str, ...]:
+    """Return cache-stable Matrix dispatch facts enabled on ``agent_config``."""
+    lines: list[str] = []
+    if agent_config.participation is not None:
+        lines.append(
+            "In multi-human threads where you already replied, "
+            "MindRoom judges unmentioned messages before starting a reply.",
+        )
+    if agent_config.listen is not None:
+        lines.append(
+            "You also run separate silent listening turns in configured rooms "
+            "(output is not posted; only listen-allowed tools run).",
+        )
+    return tuple(lines)
+
+
 def _render_agent_identity_context(
     agent_name: str,
-    display_name: str,
+    agent_config: AgentConfig,
     config: Config,
     runtime_paths: constants.RuntimePaths,
     *,
     model_provider: str,
     model_id: str,
-    include_openai_compat_guidance: bool,
+    outside_matrix: bool,
+    headless: bool,
 ) -> str:
-    openai_compat_history_guidance = config.get_prompt("OPENAI_COMPAT_HISTORY_GUIDANCE")
-    if include_openai_compat_guidance:
+    """Render the agent's identity: in Matrix, in the OpenAI-compatible API, or, with ``headless``, in a headless run."""
+    display_name = agent_config.display_name
+    if outside_matrix:
+        # A headless run answers one prompt, so it has no prior turns for this guidance to describe.
+        openai_compat_history_guidance = "" if headless else config.get_prompt("OPENAI_COMPAT_HISTORY_GUIDANCE")
+        prompt_name = (
+            "HEADLESS_AGENT_IDENTITY_CONTEXT_TEMPLATE" if headless else "OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE"
+        )
         return openai_compat_identity(
             config.prompts,
-            openai_identity=render_prompt_template(
-                config.get_prompt("OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE"),
+            openai_identity=config.render_prompt(
+                prompt_name,
                 agent_name=agent_name,
                 display_name=display_name,
                 model_provider=model_provider,
                 model_id=model_id,
                 openai_compat_history_guidance=openai_compat_history_guidance,
             ),
-            matrix_identity=render_prompt_template(
-                config.get_prompt("AGENT_IDENTITY_CONTEXT_TEMPLATE"),
+            matrix_identity=config.render_prompt(
+                "AGENT_IDENTITY_CONTEXT_TEMPLATE",
                 display_name=display_name,
-                matrix_id="not available in OpenAI-compatible API",
+                matrix_id="not available in a headless run" if headless else "not available in OpenAI-compatible API",
                 model_provider=model_provider,
                 model_id=model_id,
                 openai_compat_history_guidance=openai_compat_history_guidance,
             ),
-            openai_prompt_name="OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE",
+            openai_prompt_name=prompt_name,
             matrix_prompt_name="AGENT_IDENTITY_CONTEXT_TEMPLATE",
         )
 
-    matrix_id = entity_identity_registry(config, runtime_paths).current_id(agent_name).full_id
-    return build_agent_identity_context(
+    identity = config.render_prompt(
+        "AGENT_IDENTITY_CONTEXT_TEMPLATE",
         display_name=display_name,
-        matrix_id=matrix_id,
+        matrix_id=entity_identity_registry(config, runtime_paths).current_id(agent_name).full_id,
         model_provider=model_provider,
         model_id=model_id,
-        include_openai_compat_guidance=False,
-        identity_context_template=config.get_prompt("AGENT_IDENTITY_CONTEXT_TEMPLATE"),
-        openai_compat_history_guidance=openai_compat_history_guidance,
+        openai_compat_history_guidance="",
     )
+    if "AGENT_IDENTITY_CONTEXT_TEMPLATE" in config.prompts:
+        return identity
+    automation_lines = _matrix_automation_lines(agent_config)
+    if not automation_lines:
+        return identity
+    return f"{identity.rstrip()}\n" + "\n".join(automation_lines)
 
 
 _load_agent_skills = timed("system_prompt_assembly.agent_create.skills_load")(build_skills_toolkit)
@@ -1084,6 +1008,105 @@ def _generated_function_visible(
     return not tool_may_require_approval(config, function.name) and (
         tool_function_filter is None or tool_function_filter(function)
     )
+
+
+def _discoverable_functions(
+    entries: Sequence[_ToolkitEntry],
+    *,
+    portable_deferred_tools: bool,
+) -> tuple[ToolFunction, ...]:
+    """Return every final offered function the model can call directly or discover through tool search."""
+    portable_search_available = not portable_deferred_tools or (
+        _offers_function(entries, "tool_search") and _offers_function(entries, "call_tool")
+    )
+    return tuple(
+        function
+        for entry in entries
+        if entry.deferral is None or portable_search_available
+        for function in entry.adapted.functions
+    )
+
+
+def _function_accepts_output_path(function: ToolFunction) -> bool:
+    properties = function.parameters.get("properties")
+    return isinstance(properties, Mapping) and OUTPUT_PATH_ARGUMENT in properties
+
+
+def _is_workspace_writer(function: ToolFunction, tools: ToolRegistry) -> bool:
+    """Return whether ``function`` can write workspace files according to its registered tool metadata."""
+    if function.registered_toolkit is None or (metadata := tools.get(function.registered_toolkit)) is None:
+        return False
+    if metadata.workspace_writers:
+        return function.name in metadata.workspace_writers
+    return metadata.executes_code
+
+
+def _deferred_entry_writes_workspace(
+    entry: EffectiveToolConfig,
+    *,
+    agent_tools: AgentTools,
+    runtime_paths: constants.RuntimePaths,
+    worker_target: ResolvedWorkerTarget,
+    config: Config,
+    narrowed_tools: tuple[str, ...] | None,
+    supports_native_tool_approval: bool,
+) -> bool:
+    """Return whether a CLI-deferred toolkit entry still offers a workspace writer after filters and approval."""
+    metadata = agent_tools.tools.get(entry.name)
+    if metadata is None or (not metadata.workspace_writers and not metadata.executes_code):
+        return False
+    try:
+        functions, writes = agent_tools.functions_for(entry, runtime_paths, worker_target)
+    except (OSError, ValueError, TypeError):
+        return False
+    if not writes or (functions is not None and not functions):
+        return False
+    candidates = metadata.workspace_writers or (functions or ())
+    if not candidates:
+        return True
+    return any(
+        (functions is None or name in functions)
+        and (narrowed_tools is None or persona_allows(narrowed_tools, entry.name, name))
+        and (supports_native_tool_approval or not _approval_may_gate(config, agent_tools.tools, name, entry.name))
+        for name in candidates
+    )
+
+
+def _prompt_tool_capabilities(
+    offered: Sequence[_ToolkitEntry],
+    deferred_configs: Mapping[str, EffectiveToolConfig],
+    *,
+    agent_tools: AgentTools,
+    runtime_paths: constants.RuntimePaths,
+    worker_target: ResolvedWorkerTarget,
+    portable_deferred_tools: bool,
+    config: Config,
+    narrowed_tools: tuple[str, ...] | None,
+    supports_native_tool_approval: bool,
+) -> tuple[bool, bool]:
+    """Return ``(supports_output_redirect, supports_workspace_skill_authoring)`` for the final offered surface."""
+    discoverable = _discoverable_functions(offered, portable_deferred_tools=portable_deferred_tools)
+    has_skill_manage = any(
+        function.registered_toolkit == "skill_manage" and function.name == "skill_manage" for function in discoverable
+    )
+    has_workspace_skill_writer = any(
+        _is_workspace_writer(function, agent_tools.tools) for function in discoverable
+    ) or any(
+        _deferred_entry_writes_workspace(
+            entry,
+            agent_tools=agent_tools,
+            runtime_paths=runtime_paths,
+            worker_target=worker_target,
+            config=config,
+            narrowed_tools=narrowed_tools,
+            supports_native_tool_approval=supports_native_tool_approval,
+        )
+        for entry in deferred_configs.values()
+    )
+    supports_output_redirect = any(
+        _function_accepts_output_path(function) or function.registered_toolkit == "shell" for function in discoverable
+    ) or any(name not in _NO_OUTPUT_REDIRECT_TOOLKITS for name in deferred_configs)
+    return supports_output_redirect, not has_skill_manage and has_workspace_skill_writer
 
 
 def _agent_create_timing(label: str, **event_data: object) -> AbstractContextManager[None]:
@@ -1133,7 +1156,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     )
     persona_tools = persona.tools if persona is not None else None
     hook_middleware = build_tool_hook_middleware(HookBindings(registry=plugins.hooks), config, runtime_paths)
-    room_tools, matrix_room_tools = turn_room_flags(execution_identity)
+    room_tools = turn_keeps_room_tools(execution_identity)
     # Minimal mode calls deferred toolkits through mindroom-agent, so it attaches only initial ones and the toolkits a
     # saved approval needs; every other runtime attaches them all. Native tool search sends deferred ones marked as
     # deferred, portable tool search keeps them off the wire, and builds narrowed to an explicit tool list, plus voice
@@ -1141,7 +1164,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     selected = agent_tools.candidates(
         depth=delegation_depth,
         room_tools=room_tools,
-        matrix_room_tools=matrix_room_tools,
         deferred=required_tool_names if minimal_mode and not eager_deferred_tools else None,
         portable_search=portable_deferred_tools,
     )
@@ -1152,16 +1174,30 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     )
     deferred_configs = {}
     if minimal_mode:
-        complete = agent_tools.candidates(
-            depth=delegation_depth,
-            room_tools=room_tools,
-            matrix_room_tools=matrix_room_tools,
-        )
+        complete = agent_tools.candidates(depth=delegation_depth, room_tools=room_tools)
         deferred_configs = {
             entry.name: entry
             for entry in complete
             if entry.name not in resolved_tool_configs and entry.name not in disabled_tool_names
         }
+    if (
+        not disable_runtime_capabilities
+        and narrowed_tools is None
+        and "desktop" not in resolved_tool_configs
+        and "desktop" not in deferred_configs
+        and "desktop" not in disabled_tool_names
+        and "desktop" not in agent_tools.facts.disabled
+        and agent_tools.tools.available("desktop")
+        and execution_identity is not None
+        and turn_keeps_room_tools(execution_identity)
+        and has_ready_self_service_desktop(config, runtime_paths, agent_name, execution_identity.requester_id)
+    ):
+        resolved_tool_configs["desktop"] = EffectiveToolConfig(
+            name="desktop",
+            tool_config_overrides={},
+            authored_order=len(resolved_tool_configs) + len(deferred_configs),
+            authored_name="desktop",
+        )
     placement = tool_placement(runtime_paths, agent_tools.tools)
     workspace_in_worker = agent_tools.workspace_in_worker([*resolved_tool_configs, *deferred_configs], placement)
     entries: list[_ToolkitEntry] = []
@@ -1200,9 +1236,10 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             )
         if toolkit is None:
             return None
-        _reject_matrix_room_runtime_tool_function_collisions(tool_name, toolkit)
         # Adapted once, right after it is built; every step below works on the functions it offers.
         adapted = adapt_toolkit(toolkit, key=authored_name, registered=tool_name)
+        if not room_tools:
+            adapted = _keep_functions(adapted, lambda function: offered_without_room(tool_name, function.name))
         if narrowed_tools is not None:
             # Match the concrete toolkit; a preset's or implied tool's functions name the tool bringing them in.
             adapted = _keep_functions(
@@ -1219,6 +1256,7 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             adapted,
             toolkit,
             config,
+            tools=agent_tools.tools,
             registered_tool_name=tool_name,
             resumable=supports_native_tool_approval,
             approvals_as_jobs=toolkit_calls_as_jobs,
@@ -1303,8 +1341,6 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     for tool_name, tool_entry in tool_entries():
         try:
             entry = build_entry(tool_entry)
-        except _MatrixRoomRuntimeToolCollisionError:
-            raise
         except Exception as exc:
             # One toolkit's construction or adaptation failure must never stop the agent.
             if minimal_mode:
@@ -1321,6 +1357,14 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
             continue
         if entry is not None:
             entries.append(entry)
+            target_names = (
+                worker_routed_tool_names if agent_tools.runs_in_worker(tool_name, placement) else local_tool_names
+            )
+            target_names.append(tool_name)
+    if not disable_runtime_capabilities:
+        for tool_name in deferred_configs:
+            if config.is_tool_preset(tool_name):
+                continue
             target_names = (
                 worker_routed_tool_names if agent_tools.runs_in_worker(tool_name, placement) else local_tool_names
             )
@@ -1342,6 +1386,23 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     )
     if controls is not None:
         entries.append(_job_controls_entry(controls))
+    peer_tools = WorkflowPeerTools.build(enabled=not disable_runtime_capabilities)
+    if peer_tools is not None:
+        peer_adapted = adapt_toolkit(peer_tools, key=peer_tools.name)
+        if tool_function_filter is not None:
+            peer_adapted = _keep_functions(peer_adapted, tool_function_filter)
+        peer_adapted = apply_tool_approval_capability(
+            peer_adapted,
+            peer_tools,
+            config,
+            tools=agent_tools.tools,
+            registered_tool_name=peer_tools.name,
+            resumable=supports_native_tool_approval,
+            approvals_as_jobs=False,
+        )
+        if peer_adapted.functions:
+            entries.append(_ToolkitEntry(adapted=peer_adapted, toolkit=peer_tools))
+            local_tool_names.append(peer_tools.name)
     built = [
         *entries,
         *_generated_entries(
@@ -1354,10 +1415,36 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     offered, left_out = _offered_entries(built, agent_name=agent_name)
     if persona_tools is not None:
         require_built_persona_tools(persona_tools, persona_built, left_out)
+    supports_output_redirect, supports_workspace_skill_authoring = _prompt_tool_capabilities(
+        offered,
+        deferred_configs,
+        agent_tools=agent_tools,
+        runtime_paths=runtime_paths,
+        worker_target=agent_runtime.execution.worker_target,
+        portable_deferred_tools=portable_deferred_tools,
+        config=config,
+        narrowed_tools=narrowed_tools,
+        supports_native_tool_approval=supports_native_tool_approval,
+    )
     assembly = _AgentToolAssembly(
         entries=offered,
         instructions=toolkit_instructions(entry.adapted for entry in offered),
         cli_deferred=tuple(cli_deferred),
+        named_workers=any(
+            function.registered_toolkit == "shell" and "worker" in function.parameters.get("properties", {})
+            for entry in offered
+            for function in entry.adapted.functions
+        )
+        or (
+            # A deferred shell is not built yet; use the same routing and policy checks as its schema.
+            not disable_runtime_capabilities
+            and "shell" in deferred_configs
+            and agent_tools.runs_in_worker("shell", placement)
+            and (target := agent_runtime.execution.worker_target) is not None
+            and named_workers_refusal(target.routing_agent_name, config, runtime_paths) is None
+        ),
+        supports_output_redirect=supports_output_redirect,
+        supports_workspace_skill_authoring=supports_workspace_skill_authoring,
         local_tool_names=tuple(local_tool_names),
         worker_routed_tool_names=tuple(worker_routed_tool_names),
         tool_middleware=(hook_middleware,),
@@ -1373,10 +1460,12 @@ def _build_agent_role_context(
     agent_runtime: ResolvedAgentRuntime,
     *,
     model_name: str,
-    include_openai_compat_guidance: bool,
+    outside_matrix: bool,
+    headless: bool,
     disable_runtime_capabilities: bool,
     local_tool_names: tuple[str, ...],
     worker_routed_tool_names: tuple[str, ...],
+    has_other_tools: bool,
     tools: ToolRegistry,
     file_access: FileAccess,
     include_identity: bool,
@@ -1388,15 +1477,18 @@ def _build_agent_role_context(
     """
     runtime_facts = join_sections(
         (
-            _get_mind_runtime_context(agent_name, runtime_paths),
+            _get_mind_runtime_context(agent_name, config, runtime_paths),
             None
             if disable_runtime_capabilities
             else _render_tool_execution_environment(
                 runtime_paths=runtime_paths,
                 local_tool_names=local_tool_names,
                 worker_routed_tool_names=worker_routed_tool_names,
+                has_other_tools=has_other_tools,
                 worker_scope=agent_runtime.execution.execution_scope,
                 file_access=file_access,
+                workdir=current_tool_workdir(),
+                workspace_root=agent_runtime.workspace.root,
                 unconfined_tool_names=_unconfined_tool_names(
                     (*local_tool_names, *worker_routed_tool_names),
                     tools=tools,
@@ -1408,6 +1500,11 @@ def _build_agent_role_context(
                     requires_primary_runtime=True,
                 ),
                 shared_directories=describe_agent_shared_directories(config, runtime_paths, agent_name),
+                pending_shared_directory_invitations=describe_agent_pending_invitations(
+                    config,
+                    runtime_paths,
+                    agent_name,
+                ),
             ),
         ),
     )
@@ -1420,12 +1517,13 @@ def _build_agent_role_context(
     with _agent_create_timing("identity_context"):
         identity_context = _render_agent_identity_context(
             agent_name,
-            agent_config.display_name,
+            agent_config,
             config,
             runtime_paths,
             model_provider=model_provider,
             model_id=model_id,
-            include_openai_compat_guidance=include_openai_compat_guidance,
+            outside_matrix=outside_matrix,
+            headless=headless,
         )
 
     context_documents: list[_PreloadChunk] = []
@@ -1435,10 +1533,9 @@ def _build_agent_role_context(
         preloaded_files = _render_preloaded_files(
             agent_name,
             agent_config,
-            config.defaults.max_preload_chars,
+            config.defaults.max_preload_file_chars,
             personality_section_heading=config.get_prompt("PERSONALITY_CONTEXT_SECTION_HEADING"),
-            truncation_marker_template=config.get_prompt("CONTEXT_TRUNCATION_MARKER_TEMPLATE"),
-            chunk_marker_template=config.get_prompt("CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE"),
+            cut_marker_template=config.get_prompt("PRELOAD_FILE_CUT_MARKER_TEMPLATE"),
             workspace_context_files=workspace.context_files,
             workspace_root=workspace.root,
             context_documents=context_documents,
@@ -1470,7 +1567,7 @@ def _skill_usage_instructions(
     ]
     if skills is None or not skills.skills:
         return refusals
-    # This guidance and the skills prompt block both name every skill function, so name the ones the agent lacks.
+    # The skill usage guidance names every skill function, so name the ones the agent lacks.
     hidden = f"These skill functions are not available to you: {', '.join(sorted(hidden_functions))}."
     return [config.get_prompt("SKILLS_TOOL_USAGE_PROMPT"), *((hidden,) if hidden_functions else ()), *refusals]
 
@@ -1486,11 +1583,14 @@ def _build_agent_instructions(
     disable_runtime_capabilities: bool,
     native_deferred_tool_names: tuple[str, ...],
     portable_deferred_toolkits: Sequence[DeferredToolkit],
+    output_redirect: bool,
     skill_authoring: bool,
 ) -> list[str]:
     """Accumulate the configured and runtime instruction blocks for one agent instance.
 
-    ``skill_authoring`` adds the note on writing workspace skills, for agents that can use skills.
+    ``output_redirect`` adds ``OUTPUT_REDIRECT_PROMPT`` when offered tools accept ``mindroom_output_path`` or include
+    ``shell``; ``skill_authoring`` adds ``WORKSPACE_SKILL_AUTHORING_PROMPT`` when workspace writers are offered without
+    ``skill_manage``.
     """
     instructions = [*configured_instructions, *skill_instructions]
     if native_deferred_tool_names:
@@ -1506,10 +1606,16 @@ def _build_agent_instructions(
     if dynamic_tooling_block is not None:
         instructions.append(dynamic_tooling_block)
 
-    if not disable_runtime_capabilities:
-        instructions.append(config.get_prompt("OUTPUT_REDIRECT_PROMPT"))
-        # A conditional expression keeps this builder within the complexity limit.
-        instructions.extend((config.get_prompt("WORKSPACE_SKILL_AUTHORING_PROMPT"),) if skill_authoring else ())
+    # Beside a workdir the tools resolve relative paths there, so notes on writing into the workspace would misdirect.
+    if not disable_runtime_capabilities and current_tool_workdir() is None:
+        instructions.extend(
+            config.get_prompt(name)
+            for name, enabled in (
+                ("OUTPUT_REDIRECT_PROMPT", output_redirect),
+                ("WORKSPACE_SKILL_AUTHORING_PROMPT", skill_authoring),
+            )
+            if enabled
+        )
 
     file_mode_knowledge_instruction = (
         None
@@ -1625,7 +1731,7 @@ def create_agent(
     model: TurnModel,
     plugins: ConfigPlugins,
     include_interactive_questions: bool = True,
-    include_openai_compat_guidance: bool = False,
+    outside_matrix: bool = False,
     disable_runtime_capabilities: bool = False,
     tool_function_filter: Callable[[ToolFunction], bool] | None = None,
     delegation_depth: int = 0,
@@ -1658,8 +1764,8 @@ def create_agent(
         include_interactive_questions: Whether to include the interactive
             question authoring prompt. Set to False for channels that do not
             support Matrix reaction-based question flows.
-        include_openai_compat_guidance: Whether to include OpenAI-compatible
-            history-format guidance in the shared identity prompt.
+        outside_matrix: Whether the turn answers outside Matrix, through the OpenAI-compatible
+            API or a headless run, so the identity names no Matrix ID.
         disable_runtime_capabilities: Whether to omit tools, skills, knowledge,
             and preloaded context files for a restricted in-process agent run.
         tool_function_filter: Optional policy applied to each fully resolved
@@ -1704,7 +1810,7 @@ def create_agent(
 
     agent_config = config.get_agent(agent_name)
     if create_runtime_state:
-        ensure_default_agent_workspaces(config, runtime_paths.storage_root)
+        _ensure_agent_workspace(config, agent_name, runtime_paths)
 
     model_name = model.model_name
     if provider is None:
@@ -1801,11 +1907,13 @@ def create_agent(
         runtime_paths,
         agent_runtime,
         model_name=model_name,
-        include_openai_compat_guidance=include_openai_compat_guidance,
+        outside_matrix=outside_matrix,
+        headless=execution_identity is not None and execution_identity.channel == "headless",
         disable_runtime_capabilities=disable_runtime_capabilities,
         local_tool_names=tool_assembly.local_tool_names,
         tools=plugins.tools,
         worker_routed_tool_names=tool_assembly.worker_routed_tool_names,
+        has_other_tools=tool_assembly.has_offered_tools,
         file_access=agent.file_access,
         include_identity=persona is None,
     )
@@ -1836,7 +1944,8 @@ def create_agent(
         disable_runtime_capabilities=disable_runtime_capabilities,
         native_deferred_tool_names=() if portable_deferred_tools else tool_assembly.deferred_tool_names,
         portable_deferred_toolkits=tool_assembly.deferred_toolkits if portable_deferred_tools else (),
-        skill_authoring=persona is None and tool_names is None,
+        output_redirect=tool_assembly.supports_output_redirect,
+        skill_authoring=persona is None and tool_names is None and tool_assembly.supports_workspace_skill_authoring,
     )
 
     toolkits = tool_assembly.toolkits
@@ -1869,6 +1978,7 @@ def create_agent(
         role=role_context.role,
         instructions=tuple(instructions),
         markdown=agent.markdown,
+        markdown_format=MARKDOWN_OUTPUT_FORMAT if outside_matrix else MATRIX_MARKDOWN_OUTPUT_FORMAT,
         tool_instructions=tool_assembly.instructions,
         turn_context=render_session_context(config, agent.timezone),
         skills_block=None if offered_skills is None else offered_skills.prompt_block(),
@@ -1890,7 +2000,15 @@ def create_agent(
         # The roster names each toolkit by the registered tool the agent CLI reaches it under.
         # A persona's or narrowed build's roster names the toolkits it actually built, deferred ones it named included.
         roster = (
-            agent_tools.toolkit_names(agent_tools.candidates())
+            list(
+                dict.fromkeys(
+                    [
+                        *agent_tools.toolkit_names(agent_tools.candidates()),
+                        *tool_assembly.local_tool_names,
+                        *tool_assembly.worker_routed_tool_names,
+                    ],
+                ),
+            )
             if persona is None and tool_names is None
             else [*tool_assembly.local_tool_names, *tool_assembly.worker_routed_tool_names]
         )
@@ -1903,7 +2021,9 @@ def create_agent(
                 if workspace.file_memory_path is not None
                 else None
             ),
-            runtime_context=_get_mind_runtime_context(agent_name, runtime_paths),
+            runtime_context=_get_mind_runtime_context(agent_name, config, runtime_paths),
+            # Minimal Bash has no `worker` argument, so its prompt names the CLI command where the shell offers one.
+            named_workers=tool_assembly.named_workers,
             minimal_instructions=tuple(agent_config.minimal_instructions) if persona is None else (),
             interactive_prompt=config.get_prompt("INTERACTIVE_QUESTION_PROMPT")
             if include_interactive_questions

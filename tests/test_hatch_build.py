@@ -97,6 +97,7 @@ def test_editable_build_env_opt_in_builds_repo_frontend_dist(
         "which",
         lambda name: "/usr/local/bin/bun" if name == "bun" else None,
     )
+    monkeypatch.setattr(hatch_build_module, "_installed_bun_version", lambda _bun: "1.4.3")
     monkeypatch.setattr(hatch_build_module, "_build_frontend", fake_build_frontend)
 
     hook.initialize("editable", build_data)
@@ -122,6 +123,38 @@ def test_editable_build_env_opt_in_requires_bun(
 
     with pytest.raises(RuntimeError, match="MINDROOM_BUILD_FRONTEND=1"):
         hook.initialize("editable", {})
+
+
+@pytest.mark.parametrize(
+    ("bun_version", "builds"),
+    [("1.3.14", False), ("1.4.0-canary.20260820.1", True), ("1.10.0", True)],
+)
+def test_wheel_build_names_the_bun_version_the_lockfile_needs(
+    hatch_build_module: types.ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    bun_version: str,
+    builds: bool,
+) -> None:
+    """A Bun too old for the frontend lockfile should fail with the version it needs instead of a lockfile error."""
+    (tmp_path / "frontend").mkdir()
+    hook = hatch_build_module.FrontendBuildHook()
+    hook.target_name = "wheel"
+    hook.root = str(tmp_path)
+    hook.directory = str(tmp_path / "dist")
+    build_calls: list[str] = []
+
+    monkeypatch.setattr(hatch_build_module.shutil, "which", lambda _name: "/usr/local/bin/bun")
+    monkeypatch.setattr(hatch_build_module, "_installed_bun_version", lambda _bun: bun_version)
+    monkeypatch.setattr(hatch_build_module, "_build_frontend", lambda _frontend, _output, bun: build_calls.append(bun))
+
+    if builds:
+        hook.initialize("standard", {})
+        assert build_calls == ["/usr/local/bin/bun"]
+    else:
+        with pytest.raises(RuntimeError, match=r"needs Bun 1\.4 or newer, but /usr/local/bin/bun is Bun 1\.3\.14"):
+            hook.initialize("standard", {})
+        assert build_calls == []
 
 
 def test_run_command_retries_once_before_succeeding(
@@ -258,7 +291,7 @@ def test_wheel_force_include_does_not_bundle_avatar_assets() -> None:
 
 
 def test_runtime_dependency_requires_released_durable_nio() -> None:
-    """The wheel requires the release that sends and encrypts live reply frames (`room_send_ephemeral`, `room_encrypt`)."""
+    """The wheel requires the release whose Classic and Sliding sync runs send their first poll with timeout 0."""
     pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
     dependencies = tomllib.loads(pyproject.read_text())["project"]["dependencies"]
     requirement = Requirement(
@@ -268,25 +301,14 @@ def test_runtime_dependency_requires_released_durable_nio() -> None:
     assert requirement.name == "mindroom-nio"
     assert requirement.extras == {"e2e"}
     assert requirement.url is None
-    assert Version("0.40.0") not in requirement.specifier
-    assert Version("1.0.0") not in requirement.specifier
-    assert Version("1.0.1") not in requirement.specifier
-    assert Version("1.0.2") not in requirement.specifier
-    assert Version("1.0.3") not in requirement.specifier
-    assert Version("1.0.4") not in requirement.specifier
-    assert Version("1.0.5") not in requirement.specifier
-    assert Version("1.0.6") not in requirement.specifier
-    assert Version("1.0.7") not in requirement.specifier
-    assert Version("1.0.8") not in requirement.specifier
-    assert Version("1.0.9") not in requirement.specifier
-    assert Version("1.1.0") not in requirement.specifier
-    assert Version("1.1.1") not in requirement.specifier
-    assert Version("1.1.2") not in requirement.specifier
-    assert Version("1.1.3") not in requirement.specifier
-    assert Version("1.1.4") not in requirement.specifier
-    assert Version("1.1.5") not in requirement.specifier
-    assert Version("1.1.6") not in requirement.specifier
-    assert Version("1.2.0") not in requirement.specifier
-    assert Version("1.2.1") not in requirement.specifier
-    assert Version("1.3.0") in requirement.specifier
+    for older in (
+        "0.40.0",
+        "1.0.0", "1.0.1", "1.0.2", "1.0.3", "1.0.4", "1.0.5", "1.0.6", "1.0.7", "1.0.8", "1.0.9",
+        "1.1.0", "1.1.1", "1.1.2", "1.1.3", "1.1.4", "1.1.5", "1.1.6",
+        "1.2.0", "1.2.1",
+        "1.3.0",
+        "1.4.0", "1.4.1", "1.4.2", "1.4.3",
+    ):  # fmt: skip
+        assert Version(older) not in requirement.specifier
+    assert Version("1.4.4") in requirement.specifier
     assert Version("2.0.0") not in requirement.specifier

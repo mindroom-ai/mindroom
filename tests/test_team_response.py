@@ -21,7 +21,7 @@ from mindroom.agents import create_agent
 from mindroom.ai_runtime import queued_message_signal_context
 from mindroom.approval.response import require_ordered_pause_presentation
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
-from mindroom.constants import AI_RUN_METADATA_KEY, MATRIX_SEEN_EVENT_IDS_METADATA_KEY, ROUTER_AGENT_NAME
+from mindroom.constants import AI_RUN_METADATA_KEY, MATRIX_SEEN_EVENT_IDS_METADATA_KEY
 from mindroom.event_journal import ApprovalCall, approval_arguments_digest
 from mindroom.execution_preparation import render_prepared_messages_text
 from mindroom.history.interrupted_replay import _render_interrupted_replay_content
@@ -41,7 +41,6 @@ from mindroom.llm.request_context import current_llm_request_log_context
 from mindroom.llm.runs import RunRequirement, RunStatus, TeamRunRecord
 from mindroom.llm.usage import MessageMetrics
 from mindroom.media_inputs import MediaInputs
-from mindroom.mid_turn import QueuedMessage
 from mindroom.prompt_message_tags import render_msg_tag
 from mindroom.prompts import QUEUED_MESSAGE_NOTICE_TEXT
 from mindroom.response_turn import CompletedApprovalRun, PausedAttempt, ResponsePausedForApproval, TurnSinks
@@ -75,6 +74,7 @@ from tests.team_turn_helpers import (
     registered_probe,
     rendered,
 )
+from tests.tool_job_helpers import NewerMessageWaits
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Iterator, Sequence
@@ -320,18 +320,6 @@ async def test_the_leader_is_told_which_member_knowledge_is_unavailable_before_a
 
 
 @pytest.mark.asyncio
-async def test_the_router_in_a_direct_member_list_is_skipped(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    team = _team(tmp_path, monkeypatch, leader=[answer("General response")])
-    text = await team.respond(agent_names=[ROUTER_AGENT_NAME, "general"])
-
-    assert text == f"{HEADER}\n**Team Consensus**:\n\nGeneral response"
-    assert '<member id="general" name="GeneralAgent">' in str(_leader(team).requests[0].messages[0].content)
-
-
-@pytest.mark.asyncio
 async def test_the_leader_reads_each_member_s_authored_role_and_its_own_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -342,9 +330,10 @@ async def test_the_leader_reads_each_member_s_authored_role_and_its_own_identity
 
     leader_prompt = str(_leader(team).requests[0].messages[0].content)
     assert leader_prompt.startswith(
-        "<your_role>\n## Your Identity\nYou are Team (GeneralAgent, ResearchAgent), a team in the Mindroom",
+        "<your_role>\n## Your Identity\nYou are Team (GeneralAgent, ResearchAgent), a MindRoom team in a Matrix chatroom:",
     )
-    assert "<conversation>" in leader_prompt
+    assert "<msg>" in leader_prompt
+    assert "<conversation>" not in leader_prompt
     assert '<member id="general" name="GeneralAgent">\n  Role: Answers.\n</member>' in leader_prompt
     assert '<member id="research" name="ResearchAgent">\n  Role: Researches.\n</member>' in leader_prompt
     assert "Matrix ID: @mindroom_general" not in leader_prompt
@@ -569,7 +558,7 @@ async def test_the_leader_reads_the_turn_s_media_on_its_prompt(
 
 
 @pytest.mark.asyncio
-async def test_without_stored_history_the_leader_reads_the_thread_with_its_own_replies_as_assistant_turns(
+async def test_without_stored_history_the_leader_reads_the_thread_with_its_own_replies_as_its_thread_messages(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -582,11 +571,20 @@ async def test_without_stored_history_the_leader_reads_the_thread_with_its_own_r
 
     await team.respond(thread_history=thread_history, response_sender_id="@mindroom_team:localhost")
 
-    # Each thread message is capped at 200 characters; the team's own reply is its assistant turn.
+    # Each thread message is capped at 200 characters; the team's own reply is a thread message marked as sent by it,
+    # which needs no Matrix ID in the leader's prompt, never an assistant turn a provider would merge into an answer.
     assert _leader_turn_messages(team)[:-1] == [
         ("user", render_msg_tag(sender="@alice:localhost", body=f"{'x' * 199}…", event_id="$event-1")),
         ("user", render_msg_tag(sender="@bob:localhost", body="y" * 200, event_id="$event-2")),
-        ("assistant", "\n\nPrevious team reply"),
+        (
+            "user",
+            render_msg_tag(
+                sender="@mindroom_team:localhost",
+                body="Previous team reply",
+                event_id="$event-3",
+                sent_by_you=True,
+            ),
+        ),
     ]
 
 
@@ -631,7 +629,7 @@ async def test_system_enrichment_follows_the_leader_s_and_each_member_s_configur
     leader_system = system_text(_leader(team).requests[0].messages)
     member_system = system_text(team.models["general-model"].requests[0].messages)
     for system in (leader_system, member_system):
-        assert system.index("Timezone: UTC") < system.index('<item key="weather"') < system.index("72F and sunny")
+        assert system.index("(UTC, UTC).") < system.index('<item key="weather"') < system.index("72F and sunny")
 
 
 @pytest.mark.asyncio
@@ -845,16 +843,6 @@ async def test_a_turn_regenerated_after_an_edit_reads_the_thread_events_the_remo
 # ---------------------------------------------------------------------------
 
 
-class _PendingMessages:
-    """A newer human message waits for the turn."""
-
-    def has_pending_human_messages(self) -> bool:
-        return True
-
-    def pending_message_snapshot(self) -> tuple[QueuedMessage, ...]:
-        return (QueuedMessage("$pending", None),)
-
-
 def _notice(response_turn_id: str) -> Message:
     return Message(
         role="user",
@@ -897,7 +885,7 @@ async def test_a_team_turn_stores_its_own_notice_once_and_leaves_an_earlier_one_
     team.config.prompts["QUEUED_MESSAGE_NOTICE_TEXT"] = "Custom team queued notice."
     _seed_history(team, messages=[Message(role="user", content="Earlier"), _notice("prior-response")])
 
-    with queued_message_signal_context(_PendingMessages()) as notice_context:
+    with queued_message_signal_context(NewerMessageWaits()) as notice_context:
         await team.respond()
 
     assert _leader(team).requests[-1].messages[-1].content == "Custom team queued notice."
@@ -961,7 +949,7 @@ async def test_a_team_run_that_failed_after_its_notice_stores_none(
     )
     _seed_history(team)
 
-    with queued_message_signal_context(_PendingMessages()) as notice_context:
+    with queued_message_signal_context(NewerMessageWaits()) as notice_context:
         text = await team.respond()
 
     assert "boom" in text

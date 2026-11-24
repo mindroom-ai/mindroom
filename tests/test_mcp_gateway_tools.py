@@ -20,6 +20,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 from mindroom import agents, constants
 from mindroom.api.config_lifecycle import ApiSnapshot
 from mindroom.api.connection_agents import resolve_connection_agent, resolve_connection_user
+from mindroom.config.approval import ApprovalRuleConfig
 from mindroom.config.main import Config
 from mindroom.config.models import EffectiveToolConfig, ToolConfigEntry, lazy_loading_prohibited_reason
 from mindroom.config.plugin import PluginEntryConfig
@@ -57,6 +58,7 @@ from tests.oauth_test_utils import publish_oauth_credentials
 from tests.test_mcp_manager import _FakeClientSession, _patch_manager, _tool
 from tests.test_script_tool_broker import _routed_connection_calculator
 from tests.test_tool_hooks import _tool_runtime_context
+from tests.tool_approval_helpers import judge_test_tool_function_as_shell
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -155,7 +157,7 @@ async def test_agent_query_finds_later_selection_after_default_result_limit(cont
         ("callback_manager", "mint_callback"),
         ("claude_agent", "claude_send"),
         ("dynamic_workflow", "list_workflows"),
-        ("external_trigger_manager", "list_triggers"),
+        ("external_trigger_manager", "triggers"),
         ("matrix_api", "matrix_api"),
         ("matrix_message", "matrix_message"),
         ("matrix_room", "matrix_room"),
@@ -163,6 +165,7 @@ async def test_agent_query_finds_later_selection_after_default_result_limit(cont
         ("scheduler", "list_schedules"),
         ("thread_model", "list_models"),
         ("thread_summary", "set_thread_summary"),
+        ("triggers", "triggers"),
         ("usage_stats", "get_my_usage"),
         ("usage_stats", "get_my_private_usage"),
     ],
@@ -209,7 +212,7 @@ async def test_egress_credentials_is_offered_only_while_the_broker_is_on(tmp_pat
         process_env={
             "MINDROOM_CONNECTIONS_AGENT": "personal",
             "MATRIX_HOMESERVER": "https://example.org",
-            **({"MINDROOM_EGRESS_BROKER_PORT": "8768"} if broker_on else {}),
+            "MINDROOM_EGRESS_BROKER_PORT": "8768" if broker_on else "off",
         },
     )
     config = Config.validate_with_runtime(
@@ -503,6 +506,30 @@ async def test_policy_approval_is_excluded_and_rejected(context: AgentToolContex
     search_result = await gateway.search_tools(context, toolkit="calculator")
     assert "error" not in search_result
     assert search_result["results"] == []
+    await _assert_add_needs_approval(context)
+
+
+@pytest.mark.asyncio
+async def test_a_function_an_alias_judges_as_a_gated_function_is_excluded_and_rejected(
+    context: AgentToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rule on the shell blocks ``add`` once the calculator says its calls are shell commands, and only ``add``."""
+    judge_test_tool_function_as_shell(monkeypatch, "calculator", "add")
+    config = context.config.model_copy(deep=True)
+    config.tool_approval.rules = [ApprovalRuleConfig(match="run_shell_command", action="require_approval")]
+    context = replace(context, config=config)
+
+    search_result = await gateway.search_tools(context, toolkit="calculator")
+    assert "error" not in search_result
+    found = {item["function"] for item in search_result["results"]}
+    assert "add" not in found
+    assert "subtract" in found
+    await _assert_add_needs_approval(context)
+
+
+async def _assert_add_needs_approval(context: AgentToolContext) -> None:
+    """Assert the gateway neither describes nor runs the calculator's ``add``, which needs approval."""
     schema_result = await gateway.get_tool(context, toolkit="calculator", function="add")
     assert "inputSchema" not in schema_result
     assert schema_result["error"]["code"] == "approval_required"
@@ -1010,10 +1037,10 @@ async def test_close_failure_does_not_swallow_cancellation(
             super().__init__(name="calculator", tools=[self.wait])
             self._requires_connect = True
 
-        async def connect(self) -> None:  # ty: ignore[invalid-method-override]
+        async def connect(self) -> None:  # ty: ignore[incompatible-method-override]
             pass
 
-        async def close(self) -> None:  # ty: ignore[invalid-method-override]
+        async def close(self) -> None:  # ty: ignore[incompatible-method-override]
             message = "backend cleanup failed"
             raise RuntimeError(message)
 

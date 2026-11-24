@@ -43,7 +43,6 @@ type MemorySettings = MindRoomConfig["memory"];
 const MEMORY_EDITOR_FIELDS = [
   "backend",
   "embedder",
-  "file",
   "search",
   "auto_flush",
 ] as const;
@@ -62,10 +61,6 @@ const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
       model: "text-embedding-3-small",
       host: "",
     },
-  },
-  file: {
-    max_entrypoint_lines: 200,
-    max_entrypoint_tokens: 50000,
   },
   search: {
     mode: "keyword",
@@ -109,10 +104,6 @@ function normalizeMemorySettings(
         ...DEFAULT_MEMORY_SETTINGS.embedder.config,
         ...memory?.embedder?.config,
       },
-    },
-    file: {
-      ...DEFAULT_MEMORY_SETTINGS.file,
-      ...memory?.file,
     },
     search: {
       ...DEFAULT_MEMORY_SETTINGS.search,
@@ -249,7 +240,7 @@ export function MemoryConfig() {
     });
   };
 
-  const updateSection = <K extends "file" | "search" | "auto_flush">(
+  const updateSection = <K extends "search" | "auto_flush">(
     key: K,
     updates: Partial<NonNullable<MemorySettings[K]>>,
   ) => {
@@ -462,30 +453,6 @@ export function MemoryConfig() {
 
           {memory.backend === "file" && (
             <>
-              <NumberField
-                id="entrypoint-max-lines"
-                label="Entrypoint Max Lines"
-                helperText="Maximum lines preloaded from the entrypoint file."
-                min={1}
-                value={memory.file?.max_entrypoint_lines}
-                fallback={200}
-                onChange={(value) =>
-                  updateSection("file", { max_entrypoint_lines: value })
-                }
-              />
-
-              <NumberField
-                id="entrypoint-max-tokens"
-                label="Entrypoint Max Tokens"
-                helperText="Maximum tokens, as the turn's model counts them, of whole lines preloaded from the entrypoint file."
-                min={1}
-                value={memory.file?.max_entrypoint_tokens}
-                fallback={50000}
-                onChange={(value) =>
-                  updateSection("file", { max_entrypoint_tokens: value })
-                }
-              />
-
               <FieldGroup
                 label="Search Mode"
                 helperText="Keyword search is exact text matching; semantic search uses the memory embedder."

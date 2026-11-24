@@ -12,6 +12,9 @@ It covers which guarantees the redesign kept, weakened, or deliberately dropped,
   A `!command` posted after not-yet-dispatched conversational messages therefore runs before them; ordering commands against conversational turns was deliberately dropped.
   A command whose target conversation does not exist yet, such as a thread reply whose root is still pending ingress, fails visibly telling the user the target is not ready, instead of acting on the wrong scope or being dropped silently.
 
+- A composer submission marks its own completeness (`io.mindroom.submission`, 2026-11-17): an event that says `more` holds its batch up to a 10 second bound in place of the debounce window, and the submission's last event flushes at once, media included.
+  This replaced guessing from timing for MindRoom Chat, whose caption arrived after the 1 second media window under sync lag and was answered as a second turn; unmarked senders keep the debounce window and promotion unchanged.
+
 ## Accepted limitations
 
 - Receipt order is guaranteed per sender only, which is what issue #1241 requires, and its spec forbids enforcing more.

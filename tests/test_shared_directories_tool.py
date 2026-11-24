@@ -16,10 +16,16 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.shared_directories import SharedDirectoryTools
 from mindroom.message_target import MessageTarget
-from mindroom.shared_directories.paths import agent_shared_directory_views
+from mindroom.shared_directories.paths import (
+    agent_shared_directory_views,
+    describe_agent_pending_invitations,
+    describe_agent_shared_directories,
+)
 from mindroom.shared_directories.store import create_shared_directory, load_shared_directories
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.worker_routing import resolve_unscoped_worker_key
+from mindroom.workers.backends._dedicated_worker_common import SharedDirectoryMount, plan_shared_directory_mounts
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
@@ -34,6 +40,7 @@ pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
 _ROOM = "!room:localhost"
 _USER = "@user:localhost"
+_BOBS_USER = "@bobs-user:localhost"
 
 
 _DOCKER_WORKERS = {"MINDROOM_WORKER_BACKEND": "docker", "MINDROOM_DOCKER_WORKER_IMAGE": "worker:test"}
@@ -62,7 +69,7 @@ def _config(tmp_path: Path, *, dedicated_workers: bool = False, **bob_overrides:
     )
 
 
-def _context(config: Config, agent_name: str = "alice") -> ToolRuntimeContext:
+def _context(config: Config, agent_name: str = "alice", requester_id: str = _USER) -> ToolRuntimeContext:
     runtime_paths = runtime_paths_for(config)
     persist_entity_accounts(config, runtime_paths)
     client = AsyncMock(spec=nio.AsyncClient)
@@ -70,7 +77,7 @@ def _context(config: Config, agent_name: str = "alice") -> ToolRuntimeContext:
     return make_test_tool_runtime_context(
         agent_name=agent_name,
         target=MessageTarget.resolve(room_id=_ROOM, thread_id=None, reply_to_event_id=None),
-        requester_id=_USER,
+        requester_id=requester_id,
         client=client,
         config=config,
         runtime_paths=runtime_paths,
@@ -107,8 +114,10 @@ def test_owner_creates_invites_and_lists(tmp_path: Path) -> None:
             "members": ["bob"],
             "access": "read-write",
             "path": worker_path,
+            "pending": [],
         },
     ]
+    assert listed["invitations"] == []
 
 
 def test_member_sees_the_directory_read_only(tmp_path: Path) -> None:
@@ -143,16 +152,212 @@ def test_invite_refuses_invalid_targets(tmp_path: Path, target: str, fragment: s
     assert load_shared_directories(context.runtime_paths)[0].members == ()
 
 
-def test_invite_refuses_requester_without_access_to_the_invitee(tmp_path: Path) -> None:
-    """A requester cannot expose a directory to an agent they may not use themselves."""
-    context = _context(_config(tmp_path, access=ResponderAccessConfig(users=["@other:localhost"])))
-    _call(context, "create_shared_directory", "report")
+def _bobs_own_config(tmp_path: Path) -> Config:
+    """Alice's user cannot use bob, and bob's user cannot use alice."""
+    return _config(tmp_path, dedicated_workers=True, access=ResponderAccessConfig(users=[_BOBS_USER]))
 
-    payload = _call(context, "invite_to_shared_directory", "report", "bob")
+
+def _bob_mounts(config: Config) -> tuple[SharedDirectoryMount, ...]:
+    return plan_shared_directory_mounts(
+        worker_key=resolve_unscoped_worker_key("bob"),
+        runtime_paths=runtime_paths_for(config),
+        worker_visible_shared_storage_root=Path("/app/worker"),
+        resolved_agent_policies=config.get_agent_policies(),
+    )
+
+
+def _pending_report(config: Config) -> dict[str, object]:
+    _call(_context(config), "create_shared_directory", "report")
+    return _call(_context(config), "invite_to_shared_directory", "report", "bob")
+
+
+def test_invite_to_an_agent_the_requester_cannot_use_waits_for_acceptance(tmp_path: Path) -> None:
+    """The invitation is recorded as pending, so the invited agent gets no path, no mount, and only a prompt line."""
+    config = _bobs_own_config(tmp_path)
+
+    payload = _pending_report(config)
+
+    assert payload["status"] == "pending"
+    assert "waits until a user who may use bob accepts it through bob" in str(payload["message"])
+    assert "restart" not in str(payload["message"])
+    [directory] = load_shared_directories(runtime_paths_for(config))
+    assert directory.members == ()
+    assert [(invitation.agent, invitation.requester) for invitation in directory.pending] == [("bob", _USER)]
+    assert agent_shared_directory_views(config, runtime_paths_for(config), "bob") == ()
+    assert describe_agent_shared_directories(config, runtime_paths_for(config), "bob") == ()
+    assert describe_agent_pending_invitations(config, runtime_paths_for(config), "bob") == ("`alice/report`",)
+    assert _bob_mounts(config) == ()
+    bob_listing = _call(_context(config, "bob", _BOBS_USER), "list_shared_directories")
+    assert bob_listing["directories"] == []
+    assert bob_listing["invitations"] == [
+        {
+            "owner": "alice",
+            "name": "report",
+            "requested_by": _USER,
+            "requested_at": directory.pending[0].requested_at,
+        },
+    ]
+    [owner_entry] = _call(_context(config), "list_shared_directories")["directories"]
+    assert owner_entry["pending"] == [
+        {"agent": "bob", "requested_by": _USER, "requested_at": directory.pending[0].requested_at},
+    ]
+
+
+def test_accepting_through_the_invited_agent_for_its_user_makes_it_a_member(tmp_path: Path) -> None:
+    """Bob's own user accepts through bob, so bob sees the path and its worker mounts the directory read-only."""
+    config = _bobs_own_config(tmp_path)
+    _pending_report(config)
+
+    payload = _call(_context(config, "bob", _BOBS_USER), "accept_shared_directory", "alice", "report")
+
+    share = runtime_paths_for(config).storage_root / "shared_directories" / "alice" / "report"
+    assert payload["status"] == "ok"
+    assert payload["path"] == "/app/worker/shared_directories/alice/report"
+    assert "bob: worker restarts on the next tool call" in str(payload["message"])
+    [directory] = load_shared_directories(runtime_paths_for(config))
+    assert (directory.members, directory.pending) == (("bob",), ())
+    assert describe_agent_shared_directories(config, runtime_paths_for(config), "bob") == (
+        "`/app/worker/shared_directories/alice/report` (from alice, read-only)",
+    )
+    assert describe_agent_pending_invitations(config, runtime_paths_for(config), "bob") == ()
+    assert _bob_mounts(config) == (
+        SharedDirectoryMount(
+            local_path=share,
+            worker_visible_path=Path("/app/worker/shared_directories/alice/report"),
+            read_only=True,
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("acting_agent", "requester_id", "fragment"),
+    [
+        ("bob", _USER, "no access to bob outside the current room, so it cannot be accepted"),
+        ("alice", _USER, "alice has no pending invitation to alice's shared directory 'report'"),
+    ],
+)
+def test_accept_by_another_user_or_agent_is_refused(
+    tmp_path: Path,
+    acting_agent: str,
+    requester_id: str,
+    fragment: str,
+) -> None:
+    """Only the invited agent, acting for a user who may use it, accepts; the invitation stays pending otherwise."""
+    config = _bobs_own_config(tmp_path)
+    _pending_report(config)
+
+    payload = _call(_context(config, acting_agent, requester_id), "accept_shared_directory", "alice", "report")
 
     assert payload["status"] == "error"
-    assert "no access to bob outside the current room" in str(payload["message"])
-    assert load_shared_directories(context.runtime_paths)[0].members == ()
+    assert fragment in str(payload["message"])
+    [directory] = load_shared_directories(runtime_paths_for(config))
+    assert directory.members == ()
+    assert [invitation.agent for invitation in directory.pending] == ["bob"]
+
+
+def test_accept_refuses_when_no_user_is_acting(tmp_path: Path) -> None:
+    """An agent acting in its own name cannot accept."""
+    config = _bobs_own_config(tmp_path)
+    _pending_report(config)
+    context = _context(config, "bob", _BOBS_USER)
+
+    payload = _call(replace(context, requester_id=context.client.user_id), "accept_shared_directory", "alice", "report")
+
+    assert payload["status"] == "error"
+    assert "on behalf of a user" in str(payload["message"])
+    assert load_shared_directories(runtime_paths_for(config))[0].members == ()
+
+
+@pytest.mark.parametrize(
+    ("acting_agent", "requester_id", "function", "args", "fragment"),
+    [
+        ("bob", _BOBS_USER, "decline_shared_directory", ("alice", "report"), "Declined."),
+        ("alice", _USER, "remove_from_shared_directory", ("report", "bob"), "The invitation to bob is cancelled."),
+        ("alice", _USER, "delete_shared_directory", ("report",), "Deleted. alice: worker restarts"),
+    ],
+)
+def test_decline_remove_and_delete_clear_the_pending_invitation(
+    tmp_path: Path,
+    acting_agent: str,
+    requester_id: str,
+    function: str,
+    args: tuple[str, ...],
+    fragment: str,
+) -> None:
+    """The invited agent's user declines, or the owner cancels, and nothing waits for bob any more."""
+    config = _bobs_own_config(tmp_path)
+    _pending_report(config)
+
+    payload = _call(_context(config, acting_agent, requester_id), function, *args)
+
+    assert payload["status"] == "ok"
+    assert fragment in str(payload["message"])
+    assert "bob:" not in str(payload["message"])
+    assert all(directory.pending == () for directory in load_shared_directories(runtime_paths_for(config)))
+    assert describe_agent_pending_invitations(config, runtime_paths_for(config), "bob") == ()
+    accepted = _call(_context(config, "bob", _BOBS_USER), "accept_shared_directory", "alice", "report")
+    assert accepted["status"] == "error"
+
+
+def test_decline_by_a_user_who_cannot_use_the_invited_agent_is_refused(tmp_path: Path) -> None:
+    """Declining also needs a user who may use the invited agent."""
+    config = _bobs_own_config(tmp_path)
+    _pending_report(config)
+
+    payload = _call(_context(config, "bob", _USER), "decline_shared_directory", "alice", "report")
+
+    assert payload["status"] == "error"
+    assert "cannot be declined" in str(payload["message"])
+    assert [invitation.agent for invitation in load_shared_directories(runtime_paths_for(config))[0].pending] == ["bob"]
+
+
+def test_repeated_invitation_while_pending_is_idempotent(tmp_path: Path) -> None:
+    """Inviting again keeps the first invitation and says it is still waiting."""
+    config = _bobs_own_config(tmp_path)
+    _pending_report(config)
+    first = load_shared_directories(runtime_paths_for(config))[0].pending
+
+    again = _call(_context(config), "invite_to_shared_directory", "report", "bob")
+
+    assert again["status"] == "pending"
+    assert "already waiting to be accepted" in str(again["message"])
+    assert load_shared_directories(runtime_paths_for(config))[0].pending == first
+
+
+def test_an_agent_holds_at_most_ten_pending_invitations(tmp_path: Path) -> None:
+    """The eleventh pending invitation for one agent is refused, while members and other agents are unaffected."""
+    config = _bobs_own_config(tmp_path)
+    context = _context(config)
+    for index in range(11):
+        _call(context, "create_shared_directory", f"report{index}")
+    _call(_context(config, requester_id=_BOBS_USER), "invite_to_shared_directory", "report10", "bob")
+    for index in range(10):
+        assert _call(context, "invite_to_shared_directory", f"report{index}", "bob")["status"] == "pending"
+    _call(_context(config, requester_id=_BOBS_USER), "invite_to_shared_directory", "report0", "bob")
+    assert _call(context, "invite_to_shared_directory", "report9", "bob")["status"] == "pending"
+
+    _call(context, "create_shared_directory", "extra")
+    _call(context, "create_shared_directory", "again")
+    accepted_one = _call(context, "invite_to_shared_directory", "extra", "bob")
+    refused = _call(context, "invite_to_shared_directory", "again", "bob")
+
+    assert accepted_one["status"] == "pending"
+    assert refused["status"] == "error"
+    assert "bob already has 10 pending invitations" in str(refused["message"])
+    assert load_shared_directories(runtime_paths_for(config))[0].pending == ()
+    assert len(describe_agent_pending_invitations(config, runtime_paths_for(config), "bob")) == 10
+
+
+def test_invitation_by_a_user_of_the_invited_agent_replaces_the_pending_one(tmp_path: Path) -> None:
+    """A requester who may use both agents invites directly, which also settles the waiting invitation."""
+    config = _bobs_own_config(tmp_path)
+    _pending_report(config)
+
+    payload = _call(_context(config, requester_id=_BOBS_USER), "invite_to_shared_directory", "report", "bob")
+
+    assert payload["status"] == "ok"
+    [directory] = load_shared_directories(runtime_paths_for(config))
+    assert (directory.members, directory.pending) == (("bob",), ())
 
 
 def test_invite_refuses_when_no_user_is_acting(tmp_path: Path) -> None:

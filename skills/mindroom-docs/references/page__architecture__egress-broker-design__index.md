@@ -68,6 +68,14 @@ Services with an `oauth_provider` reuse the scope's native OAuth connections wit
 The tool already tells the agent about the broker, so listing it is the opt-in instead of a separate config field, and one rule decides for the sandbox proxy, the pages, and the request log, so they cannot disagree.
 A call without a configured agent gets no broker environment, because nothing shows that it opted in.
 
+**A shell that runs in the primary process gets the broker environment too; a primary `python` does not.**
+Operators who trust an agent with the primary, such as one with `worker_tools: []`, wanted its commands to use a stored key, for example a GitHub key to act as the owner, without copying it into the agent's environment.
+The guarantee above holds only for workers: a primary shell is already unconfined and can read the credential store and the primary's environment, so the broker adds convenience there and no new exposure.
+Each primary shell call gets a fresh token like a worker call, from the tool-call policy instead of the sandbox proxy, so the two never both apply to one call.
+It dials the bound listener on loopback, because the worker-facing URL, such as `host.docker.internal`, does not resolve on every host, and trusts the broker CA through files in the primary's storage, never through the primary's own process environment or system trust.
+Those files keep the certificates of the CA files the primary's own variables name, because they replace those variables for the command.
+A primary `python` runs inside the primary process, where no single call can get an environment of its own, so an agent whose only command tool it is still does not use the broker.
+
 **A connected account is used only after an explicit, per-service opt-in that states the approval bypass.**
 The tool opt-in says an agent may use Agent Keys, not that a user wants a connected account to work without the approvals of its native tools.
 Without a second opt-in, connecting a tool whose writes ask for approval silently gave the agent's commands the same account with its full scopes.

@@ -51,11 +51,11 @@
       },
       "messages": [
         {
-          "content": "You are Operator (operator) in minimal mode.\nBash starts in your workspace.\nFile memory: `MEMORY.md`, `memory/`.\nOther tools and full agent context: mindroom-agent --help.\nToolkits callable through mindroom-agent: calculator, scheduler, shell\nPrefer read-only commands.",
+          "content": "You are Operator (operator) in minimal mode.\nBash starts in your workspace.\nFile memory: `MEMORY.md`, `memory/`.\nOther tools and full agent context: mindroom-agent --help; call a tool with `mindroom-agent tools call TOOLKIT.FUNCTION '<json>'`.\nToolkits callable through mindroom-agent: calculator, scheduler, shell\nPrefer read-only commands.",
           "role": "system"
         },
         {
-          "content": "<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>",
+          "content": "<mindroom_session_context>\nCurrent date: <DATE> (UTC, UTC).\n</mindroom_session_context>",
           "role": "system"
         },
         {
@@ -70,7 +70,7 @@
       "tools": [
         {
           "name": "bash",
-          "description": "Run a Bash command and return its output.\nStart servers and other long work detached with ``nohup cmd > out.log 2>&1 &`` and read the log in later\ncommands.",
+          "description": "Run a Bash command and return its output.\nBy default the call waits at most 120 seconds in the foreground. A command still running after 120 seconds\n(with ``timeout`` omitted or > 120) moves to the background and returns its PID, live log path, and\nwait/stop commands; it stops automatically after ``timeout`` (if set) or when the turn ends, and cannot make\nnew ``mindroom-agent`` CLI calls after handoff. Start servers or work meant to outlive the turn detached with\n``nohup cmd > out.log 2>&1 &`` and read the log in later commands. Wait for something inside one command,\nsuch as ``until <check>; do sleep 10; done`` with a ``timeout``, not with repeated ``sleep`` calls: every\ncall is a model turn.",
           "parameters": {
             "type": "object",
             "properties": {
@@ -87,7 +87,7 @@
                     "type": "null"
                   }
                 ],
-                "description": "Seconds after which the command and every process it started are stopped, returning the output\nso far; null stops it after 120 seconds, or never when it runs as part of a background job."
+                "description": "Seconds after which the command and every process it started are stopped. Values <= 120 stop\nthe command inline and return the output so far; null or > 120 moves it to the background after 120\nseconds and stops it after ``timeout`` (if set) or when the turn ends."
               },
               "tail": {
                 "type": "integer",

@@ -55,7 +55,6 @@ from mindroom.tools.cartesia import cartesia_tools
 from mindroom.tools.chat_ui import chat_ui_tools
 from mindroom.tools.claude_agent import claude_agent_tools
 from mindroom.tools.clickup import clickup_tools
-from mindroom.tools.coding import coding_tools
 from mindroom.tools.composio import composio_tools
 from mindroom.tools.config_manager import config_manager_tools
 from mindroom.tools.confluence import confluence_tools
@@ -71,11 +70,11 @@ from mindroom.tools.duckduckgo import duckduckgo_tools
 from mindroom.tools.e2b import e2b_tools
 from mindroom.tools.eleven_labs import eleven_labs_tools
 from mindroom.tools.email import email_tools
+from mindroom.tools.email_invite import email_invite_tools
 from mindroom.tools.exa import exa_tools
-from mindroom.tools.external_trigger_manager import external_trigger_manager_tools
 from mindroom.tools.fal import fal_tools
-from mindroom.tools.file import file_tools
 from mindroom.tools.file_generation import file_generation_tools
+from mindroom.tools.filesystem import filesystem_tools
 from mindroom.tools.financial_datasets_api import financial_datasets_api_tools
 from mindroom.tools.firecrawl import firecrawl_tools
 from mindroom.tools.gemini import gemini_tools
@@ -102,6 +101,7 @@ from mindroom.tools.lumalabs import lumalabs_tools
 from mindroom.tools.matrix_api import matrix_api_tools
 from mindroom.tools.matrix_message import matrix_message_tools
 from mindroom.tools.matrix_room import matrix_room_tools
+from mindroom.tools.matrix_user import matrix_user_tools
 from mindroom.tools.matrix_voice_message import matrix_voice_message_tools
 from mindroom.tools.mem0 import mem0_tools
 from mindroom.tools.microsoft_files import microsoft_files_tools
@@ -150,15 +150,18 @@ from mindroom.tools.sql import sql_tools
 from mindroom.tools.stop_reply import stop_reply_tools
 from mindroom.tools.tavily import tavily_tools
 from mindroom.tools.telegram import telegram_tools
+from mindroom.tools.terminal import terminal_tools
 from mindroom.tools.thread_model import thread_model_tools
 from mindroom.tools.thread_move import thread_move_tools
 from mindroom.tools.thread_resolution import thread_resolution_tools
+from mindroom.tools.thread_snooze import thread_snooze_tools
 from mindroom.tools.thread_summary import register_thread_summary_tools
 from mindroom.tools.thread_tags import thread_tags_tools
 from mindroom.tools.todo import todo_tools
 from mindroom.tools.todoist import todoist_tools
 from mindroom.tools.trafilatura import trafilatura_tools
 from mindroom.tools.trello import trello_tools
+from mindroom.tools.triggers import triggers_tools
 from mindroom.tools.twilio import twilio_tools
 from mindroom.tools.unsplash import unsplash_tools
 from mindroom.tools.update_awareness import update_awareness_tools
@@ -169,6 +172,7 @@ from mindroom.tools.webex import webex_tools
 from mindroom.tools.website import website_tools
 from mindroom.tools.whatsapp import whatsapp_tools
 from mindroom.tools.wikipedia import wikipedia_tools
+from mindroom.tools.workflow import workflow_tools
 from mindroom.tools.x import x_tools
 from mindroom.tools.yfinance import yfinance_tools
 from mindroom.tools.youtube import youtube_tools
@@ -186,12 +190,12 @@ if TYPE_CHECKING:
     name="openclaw_compat",
     file_access=ToolFileAccess.NONE,
     display_name="OpenClaw Compat",
-    description="Convenience bundle that implies shell, coding, browser, and other common tools",
+    description="Convenience bundle that implies shell, filesystem, browser, and other common tools",
     docs_url="https://docs.mindroom.chat/openclaw/#openclaw_compat",
     category=ToolCategory.DEVELOPMENT,
     icon="Workflow",
     icon_color="text-orange-500",
-    helper_text="Implies: shell, coding, duckduckgo, website, browser, scheduler, matrix_message, attachments, matrix_room.",
+    helper_text="Implies: shell, filesystem, duckduckgo, website, browser, scheduler, matrix_message, attachments, matrix_room.",
 )
 def _openclaw_compat_tools() -> type[Toolkit]:
     """Return an empty toolkit — the real tools are loaded via tool preset expansion."""
@@ -270,7 +274,8 @@ def _homeassistant_tools() -> type[Toolkit]:
     requires_primary_runtime=True,
     display_name="Egress Credentials",
     description=(
-        "Opt this agent's worker-routed shell and python calls into Agent Keys and see which keys and accounts it can use"
+        "Opt this agent's shell calls and worker-routed python calls into Agent Keys, see which keys and accounts it "
+        "can use, and ask the user for a missing key"
     ),
     docs_url="https://docs.mindroom.chat/deployment/egress-broker/#agent-tool",
     category=ToolCategory.INTEGRATIONS,
@@ -283,10 +288,36 @@ def _homeassistant_tools() -> type[Toolkit]:
         ToolManagedInitArg.WORKER_TARGET,
     ),
     config_fields=[],
-    function_names=("list_egress_credentials",),
+    function_names=("list_egress_credentials", "request_secret"),
 )
 def _egress_credentials_tools() -> type[Toolkit]:
     """Return the egress broker credential status tool."""
     from mindroom.custom_tools.egress_credentials import EgressCredentialsTools
 
     return EgressCredentialsTools
+
+
+@register_tool_with_metadata(
+    name="temporary_secrets",
+    file_access=ToolFileAccess.NONE,
+    requires_primary_runtime=True,
+    display_name="Temporary Secrets",
+    description=(
+        "Ask the user for a password, token or code with a card in the conversation; this agent's shell commands "
+        "receive it as an environment variable for as long as the user chose, and the agent never sees it"
+    ),
+    docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#temporary_secrets",
+    category=ToolCategory.INTEGRATIONS,
+    icon="KeyRound",
+    icon_color="text-amber-600",
+    status=ToolStatus.AVAILABLE,
+    setup_type=SetupType.NONE,
+    managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
+    config_fields=[],
+    function_names=("request_temporary_secret",),
+)
+def _temporary_secrets_tools() -> type[Toolkit]:
+    """Return the tool that asks the user for a temporary secret."""
+    from mindroom.custom_tools.temporary_secrets import TemporarySecretsTools
+
+    return TemporarySecretsTools

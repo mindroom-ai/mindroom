@@ -16,13 +16,13 @@ from mindroom import constants
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.event_journal import turn_rows
 from mindroom.event_journal.legacy_turn_rows import import_legacy_ledger_file, legacy_summary_sources
-from mindroom.history.storage import remove_history_of_redacted_events, remove_runs_answering
+from mindroom.history.session_context import load_scope_session_from_storage, load_scrubbed_scope_session
+from mindroom.history.storage import remove_runs_answering
 from mindroom.logging_config import get_logger
 from mindroom.turn_record import (
     PreparedVoiceSource,
     RevisionSnapshotChangedError,
     SourceEventRevision,
-    SourceVisibleEcho,
     TurnRecord,
     canonicalize_turn_record,
 )
@@ -129,7 +129,7 @@ class _ClaimRegistry:
     ) -> TurnClaim | None:
         """Return a live claim sharing a source with these sources or an alias with these aliases.
 
-        Roles are compared separately: a human message and the router's relay of
+        Roles are compared separately: a human message and the route of
         it, which indexes that message as its alias, are different turns.
         """
         return next(
@@ -286,14 +286,9 @@ class TurnStore:
         """Return an exact physical source's voice checkpoint."""
         return await self.deps.turn_records.read(turn_rows.prepared_voice, source_event_id)
 
-    async def visible_echo(self, source_event_id: str) -> SourceVisibleEcho | None:
-        """Return the visible echo tracked for one source event, and how its replacement ended."""
+    async def visible_echo(self, source_event_id: str) -> str | None:
+        """Return the event ID of the visible echo tracked for one source event."""
         return await self.deps.turn_records.read(turn_rows.visible_echo, source_event_id)
-
-    async def finalized_visible_echoes(self, source_event_ids: Sequence[str]) -> tuple[str, ...]:
-        """Return every visible echo of these sources whose replacement succeeded, in source order."""
-        echoes = [await self.visible_echo(source_event_id) for source_event_id in source_event_ids]
-        return tuple(echo.event_id for echo in echoes if echo is not None and echo.is_fallback is not None)
 
     async def turn_record_for_response_event_id(self, response_event_id: str) -> TurnRecord | None:
         """Return the durable turn that owns one visible response event."""
@@ -447,21 +442,6 @@ class TurnStore:
             room_id=room_id,
             source_event_id=source_event_id,
             echo_event_id=echo_event_id,
-        )
-
-    async def record_finalized_visible_echo(
-        self,
-        source_event_id: str,
-        echo_event_id: str,
-        *,
-        is_fallback: bool,
-    ) -> None:
-        """Mark a tracked visible echo as successfully replaced; the turn's answer stays as it was."""
-        await self.deps.turn_records.write(
-            turn_rows.record_finalized_visible_echo,
-            source_event_id=source_event_id,
-            echo_event_id=echo_event_id,
-            is_fallback=is_fallback,
         )
 
     async def claim(self, turn_record: TurnRecord) -> TurnClaim | ClaimRefused | ClaimContended:
@@ -704,24 +684,28 @@ class TurnStore:
 
         History derived from redacted events goes first, so a loaded run holding a
         redacted event still retires a legacy summary before the edit removes that run.
+        The runs the edit's own regeneration stored stay: a retry of it, after a restart
+        cut it short, commits the edit again and then recovers them.
         """
         target = turn_record.conversation_target
         scope = turn_record.history_scope
         if target is None or scope is None:
             return
+        # Opened before the first suspension, so a failed open surfaces ahead of any pending cancellation.
         storage = self.deps.state_writer.create_storage(
             self.deps.tool_runtime.build_execution_identity(target=target, user_id=requester_user_id),
             scope=scope,
         )
-        session = await run_blocking_until_complete(storage.load_session, target.session_id)
-        if session is not None:
-            await remove_history_of_redacted_events(storage, session, partial(self.redacted_history_events, target))
+        load_scope = partial(load_scope_session_from_storage, scope, target.session_id, lambda: storage)
+        await load_scrubbed_scope_session(load_scope, partial(self.redacted_history_events, target))
         removed_any = await run_blocking_until_complete(
             _remove_runs_for_sources,
             storage,
             target.session_id,
             scope,
             turn_record.indexed_event_ids,
+            # A run that read every revision the turn now holds is an attempt of this edit's own regeneration.
+            frozenset(revision_id for _, revision_id in (turn_record.source_event_revisions or {}).values()),
         )
         if removed_any:
             self.deps.state_writer.deps.logger.info(
@@ -785,11 +769,16 @@ def _remove_runs_for_sources(
     session_id: str,
     scope: HistoryScope,
     source_event_ids: tuple[str, ...],
+    keeping: frozenset[str],
 ) -> bool:
-    """Remove what answered each source and everything after it; return whether anything went."""
+    """Remove what answered each source and everything after it; return whether anything went.
+
+    The removal starts at no run that read every revision of ``keeping`` (``remove_runs_answering``).
+    """
     removed_any = False
     for source_event_id in source_event_ids:
-        removed_any = remove_runs_answering(storage, session_id, scope, source_event_id) or removed_any
+        removed = remove_runs_answering(storage, session_id, scope, source_event_id, keeping=keeping)
+        removed_any = removed or removed_any
     return removed_any
 
 

@@ -13,6 +13,8 @@ Reasoning and finer progress the runtime already had never reached the user.
 
 - Frames are custom ephemeral room events (MSC2477 send route, unstable prefix) relayed by our Tuwunel fork from an in-memory buffer, because the runtime already reaches the homeserver from behind NAT, clients already hold a `/sync` connection with resume, and the homeserver already decides room membership.
 - Durable edits stay as checkpoints every `update_interval` plus semantic boundaries and the terminal edit, so every client converges on the same final message and recovery keeps reading only durable writes.
+- A Stop, a stream error, or an interruption ends the reply below what frames showed, not below the last checkpoint: once frames stop, the stream records their text in the reply's records, and the note, the only write a committed Stop allows, carries it.
+  A checkpoint edit after a committed Stop would break the reply lifecycle, and shorter intervals would bring back the edits frames remove.
 - Frames carry the Markdown the next durable edit renders, not HTML: rendering 40 KB of Markdown with markdown-it-py and Pygments took 38 ms on the development host and produced 62 KB of HTML, which at ten frames a second would cost most of a core per long reply and hit the frame size limit early.
   Chat renders it with markdown-it configured like the server; code highlighting differs slightly until the terminal edit (Prism versus Pygments), which was accepted.
 - Delivery is opt-in by sync filter: a custom ephemeral type reaches, and wakes, only a sync whose filter lists it in `room.ephemeral.types`.
@@ -24,9 +26,15 @@ Reasoning and finer progress the runtime already had never reached the user.
 - Every durable write of a reply that sent frames carries `io.mindroom.live_checkpoint: {sid, seq}`, the last frame it covers.
   Publisher ids start with zero-padded start milliseconds, so `(sid, seq)` orders live state across a restart.
   Chat shows the live state only while it is newer than the durable content's watermark, which removes both flicker back to an older edit and stale overlays without an end-of-stream frame.
-  Progress edits never carry reasoning, so Chat keeps showing the live reasoning over a checkpoint that covers its frames.
-- A frame too large to send (over 60000 bytes serialized) stops frames for that reply and forces a durable edit at once; durable edits then return to the ordinary cadence.
-- Reasoning reaches only streamed agent replies, is never part of the answer or history, and the terminal edit keeps it as `io.mindroom.reasoning: {text, duration_ms}` (sidecar-only for large messages).
+  Checkpoints never carry reasoning, so Chat keeps showing the live reasoning over a checkpoint that covers its frames.
+  Without frames (no relay, switched off, or stopped), progress edits carry the reasoning so far, fitted to an ordinary edit, so the reply keeps its thinking dropdown.
+- Frames cut each tool entry's `args_preview` and `result_preview` to 200 characters (ending in `…`), and a snapshot that still does not fit the 60,000-byte limit (encrypted size in an encrypted room) leaves out the previews of the fewest oldest entries that make it fit (oldest first, up to all of them), and `progress` is untouched.
+  An entry that lost any preview carries `clipped: true`; the durable trace keeps the whole previews, which Chat shows once the reply ends.
+  A result that is a background job handle (`{job_id, tool, status}`) keeps that handle, since Chat reads it for the call's status.
+  Only a snapshot widens that cut, every 5 s or when a delta would not fit, so fitting never strips previews from earlier entries in a delta.
+  Before this, whole traces stopped frames 17 times in production on 2026-11-17 (one reply: 61 calls, a 48 KB trace).
+- A frame too large to send even so, as when its Markdown and reasoning alone pass the limit, stops frames for that reply and forces a durable edit at once; durable edits then return to the ordinary cadence.
+- Reasoning reaches only streamed agent replies, is never part of the answer or history, and the terminal edit keeps it as `io.mindroom.reasoning: {text, duration_ms, segments}` (sidecar-only for large messages).
   Its duration runs from the start of each reasoning segment to the model's next output.
   OpenAI's Responses API streams a reasoning summary in parts, the first well after the model began reasoning, so its deltas carry when the reasoning item began; Anthropic, Gemini, and Ollama stream reasoning while the model produces it, so the first delta's arrival marks the start.
   Measured on Codex on 2026-11-01, the first part came about 5 s after reasoning began for GPT-6.1 Sol and GPT-6 Luna, but only at the end of 16 s of reasoning for GPT-6 Astra.
@@ -35,8 +43,8 @@ Reasoning and finer progress the runtime already had never reached the user.
 - A running tool call's latest output (what its tool reports as progress, such as a shell command's output tail) reaches only live frames, as an optional `progress` string on the call's tools entry, capped at its last 1000 characters and dropped when the call completes.
   Output changes many times a second and is noise once the result exists, so durable edits, the final message, and the stored tool trace never carry it; Element and other clients without frames see only the result.
   It is redacted like result previews, before it is cut to its latest characters, so a long credential keeps the label that identifies it and a script that prints a credential does not show it to the room; team replies do not forward members' or the leader's output.
-  Redaction fails closed on a line it cannot delimit, such as `password:` with its value on the next line, so the output shows `[redaction failed]`, as the call's result preview does, until newer output pushes that line out of the report.
-  Masking only the shown part when that happens was tried and rejected: each rule it needed to keep a value from showing without its label exposed another way to show one.
+  Redaction hides everything after a secret name that ends its line, such as `password:` with its value on the next line, as the call's result preview does, until newer output pushes that line out of the report.
+  Masking only the shown part of a report was tried and rejected: each rule it needed to keep a value from showing without its label exposed another way to show one.
   A call keeps only its newest report and shows it at most ten times a second, the rate live frames go out, so a worker that floods reports costs the primary at most ten redactions a second per call.
   A call's output stays with that call: a delegated agent's tool output does not reach the parent's delegation entry, which shows the delegation's own activity, and only a job forwards its output to the call that started it and may be waiting for it.
 
@@ -56,15 +64,86 @@ Reasoning and finer progress the runtime already had never reached the user.
 - Send: `PUT /_matrix/client/unstable/org.matrix.msc2477/rooms/{roomId}/ephemeral/io.mindroom.live/{sid}.{seq}`; the homeserver keeps at most 256 events, 1 MiB, and 30 s per room, allows 30 events per second per sender and room, and refuses `m.*` types, non-members, and bodies over 64 KiB.
 - Sync: `{type, content, sender, origin_server_ts}` in `rooms.join.*.ephemeral.events`, never on initial sync, only after `since`; clients take the room from the enclosing sync room.
 - Frame: `{"v": 1, "reply", "sid", "seq", "snapshot": {md, reasoning, tools, status, activity}}` or the same with `"delta"`, whose `md` and `reasoning` are splices `{at, del, ins, len}` in UTF-16 code units, `tools` is `{len, set: [[index, entry]]}`, and `status`/`activity` are new values.
+  A snapshot also carries `segments: [{start, after_tool}]`, where each reasoning segment begins (`start` in UTF-16 code units into `reasoning`), and a delta carries the whole list only when it changed; old clients ignore the key.
+  A snapshot also carries `compactions`, the reply's `io.mindroom.compactions` entries in start order (the reply keeps only its newest 8, fewer when they exceed 8 KiB of JSON), and a delta carries the whole list only when it changed; old clients ignore the key.
   `tests/live_frames/fixtures/live-frames-v1.json` pins the format; mindroom-chat carries the same file.
 - Cadence: a frame per 100 ms tick when something changed, one send in flight, a snapshot first, after a failed send, and every 5 s.
+  A tick of an unchanged reply reuses the Markdown it last rendered, so a reply waiting on a long tool call does not re-render it ten times a second.
+
+## Sub-agent frames
+
+Each running sub-agent, a delegated child run (`run_subagent`, `continue_subagent`, `delegate`) or a Dynamic Workflow participant, is published as `io.mindroom.subagents` frames, so MindRoom Chat can show a live Sub-agents panel.
+A run's frames have a reply frame's structure, so one delta format serves both: the run's transcript is projected into the live documents of a reply.
+`tests/live_frames/fixtures/subagent-frames-v1.json` pins the format; mindroom-chat carries the same file.
+
+- Send: the same route as reply frames, with `io.mindroom.subagents` as the event type and transaction ID `subagents.{sid}.{seq}`.
+  Encrypted rooms send `{"v": 1, "encrypted": <Megolm content>}` with the event type bound to `io.mindroom.subagents`, in the room's current outbound session and outside its rotation count, as reply frames do.
+- Sender: the account that answers the delegating turn in the room (the agent, or the team for a team turn), through its bot's current client at each send.
+  A sub-agent has no account of its own, so clients should accept these frames only from a MindRoom agent on their homeserver, as for reply frames.
+- Frame: `{"v": 1, "run", "sid", "seq", "meta", "snapshot"}` or the same with `"delta"` instead of `snapshot`.
+  - `run` is the delegation ID, which names the run across its frames.
+    A sub-agent continued with `continue_subagent` answers each turn as a new run with its own delegation ID; `meta.subagent` names the sub-agent, so a client can show its turns together.
+  - `sid` is a publisher ID like a reply's (zero-padded start milliseconds, a dash, 8 hex digits), `seq` starts at 0 within a `sid` and rises with each frame built, so a failed send leaves a gap; clients order frames by `(sid, seq)` and must not expect contiguous `seq`.
+    A run keeps its `sid` through pauses and resumes; it gets a new one, with `seq` back at 0, whenever its stream restarts: after the room refused a frame, and after the publisher stopped and started again, as when the sending account had no client past a retry, the relay check failed, or an error ended the publisher.
+  - `snapshot` and `delta` are exactly a reply's `LiveDocs` and live delta (`md` and `reasoning` as UTF-16 splices, `tools` as `{len, set}`, `status` and `activity` as new values).
+    `reasoning` and `activity` are always empty.
+- `meta` rides on every frame, so a client that missed the snapshot still knows the run's status.
+  - `agent`: the sub-agent's name; `model`: the model it runs on, which follows a switch during the run, as the `model` object of `io.mindroom.ai_run` (`config`, the configured model key such as `default`, plus `display_name`, `id`, and `provider` when known); `subagent`: the sub-agent this run is a turn of, the delegation ID of its first turn (equal to `run` for a first turn); `caller`: the agent or sub-agent that delegated to it; `root`: the agent in the room whose turn started the chain (equal to `caller` for a direct child); `parent`: the delegation ID of the run (the turn) that delegated to it, or `null`.
+  - `thread_id`: the Matrix thread the chain belongs to, or `null`; `source`: `"delegate"` or `"workflow"`.
+  - `status`: one of the statuses below; `started_at`: Unix seconds; `ended_at`: Unix seconds once the run ended, else `null`.
+  - `usage`: what the run has used so far, as `input_tokens`, the whole prompts with cache reads and writes included on every provider, and `output_tokens`, both summed over the run's model requests that ended, `tool_calls`, every call the run started, the ones whose rows the caps removed included, and `cost_usd`, those tokens at the deployment's prices, left out when none of them is of a priced model.
+    The tokens include what the turn's earlier runs used, before a pause or a restart, and leave out what the run's own sub-agents used, as the cost does.
+    A request's tokens are added once the tool calls it made have ended, the last request's at the run's end, however it ends, and they are zero until then.
+    Known limit: a call denied at an approval never completes, so a later call that reuses its ID is not counted in `tool_calls`.
+    New usage alone sends no frame; it goes out with the run's next frame, the 10-second snapshot at the latest.
+    Old clients ignore the key, and a client must show a frame without it.
+  - A snapshot's `meta` also carries `task` (at most 1,000 characters), `title` (one line of at most 80 characters, which the `run_subagent` call that started the sub-agent named and its follow-ups keep; absent when it named none) and, once the status is terminal, `result` (at most 1,000 characters, or `null` for a run that ended with none, such as one cancelled before it answered).
+    Deltas carry neither, so a client keeps them from the snapshot.
+- Documents: text items are concatenated as the Markdown of `md`.
+  Each tool call adds the marker line a reply shows for it (`🔧 \`name\` [n] ⏳`, with the hourglass replaced by the finished form once the call completes), numbered from 1 by its entry in `tools`, in order of appearance.
+  So the n-th marker of `md` belongs to `tools[n-1]`, and a client renders the documents with the reply renderer.
+  Text on both sides of a tool call is separated by the marker's blank lines; text items that meet because a cap removed what was between them are joined by a blank line.
+  A completed call's entry has `type: "tool_call_completed"`, a running call's `tool_call_started`; a paused call that resumes keeps its row.
+  Every entry also carries `started_at`: the Unix seconds when the call was first announced, which the row keeps when the call resumes after a pause and when it completes, so a client can show how long a running call has run; it is `null` for a row that only a completion made, as when the cap had removed its start; it is kept when previews are hidden; old clients ignore the key.
+- `docs.status` is `"streaming"` while `meta.status` is `running` or `awaiting_approval`, and `"pending"` otherwise, so a client takes the run's state from `meta.status`.
+- Statuses: `running` from the first frame, and again after an approval or a pause; `awaiting_approval` while the child waits for the person to decide its gated calls, as a background job child does through its job's cards; `paused` when the child stopped on an approval its parent's reply owns, until it resumes as `running`; `completed`, `failed`, `cancelled`, and `denied` end the run.
+  An attempt that settled no outcome ends as `cancelled` when it was cancelled and as `failed` otherwise, with the reason as `result`.
+  A turn a restart, shutdown, or event-loop teardown cut short ends `failed` with `interrupted_by_restart: true` in its `meta`, published as the attempt exits and not read from `result`, because its job may continue it with a later turn; any other run has no such key.
+  Known limit: the frame goes out before the turn is settled, so a turn whose settlement then finds a completed stored run still shows as interrupted, where earlier releases showed it cancelled.
+  Known limit: the key rides only on the terminal frame the live feed emits, so a turn a crash cut short keeps the frames it had, as no feed outlives the process.
+  A run's last frame is a snapshot of its end, and `ended_at` is set from then on.
+- Caps: the transcript's text is cut to its newest 5,000 characters once it passes 6,000, so the frames after a cut are appends again until the next cut; at most the 20 newest tool rows; `args_preview` and `result_preview` at 300 characters, with `truncated: true` on a row whose preview was cut.
+  Text and previews are redacted before any cut, so a secret is masked whole.
+  How many older items the caps removed is not part of the frame.
+- Size: a frame must fit the 60,000-byte limit as nio sends it (compact JSON with ASCII escapes, so a character outside ASCII takes 6 bytes; in an encrypted room the Megolm ciphertext, padding, base64, and envelope are counted as well).
+  A snapshot that does not fit drops the tool previews first, then cuts the oldest text from the front by the least that fits.
+  A snapshot that would fit with its previews without the usage in `meta` keeps both and cuts that much of the oldest text.
+  Known limit: a snapshot with too little text to cut, such as one of tool rows alone, drops its previews when the usage pushes it over the limit; the tool names stay.
+  A fitted frame is always a snapshot, and later deltas keep its fit, so they stay appends.
+  A delta that does not fit is replaced by a fitted snapshot.
+- A frame never carries an empty delta: when only `meta` changed, such as a status, the frame is a snapshot.
+- 🔒 Previews: `args_preview` and `result_preview` appear only when the turn in the room that started the chain shows its tool calls (`show_tool_calls`); nested sub-agents follow their root's turn.
+  Otherwise a row carries only `type` and `tool_name`, so the room sees for a sub-agent what it sees for the agent that delegated.
+- Budget: one publisher per (sending account, room) sends all of that account's runs in that room, one send in flight and at least 125 ms between sends, so at most 8 frames a second, which leaves at least 12 of the homeserver's 30 events a second per sender and room for the account's own reply frames.
+  Runs with something to send are served in turn.
+  A run's changes are coalesced to at most one per 250 ms before they reach the publisher, and a status change goes out at once.
+  A run sends a snapshot first, after a failed send, after the caps cut its transcript, when only `meta` changed, every 10 s while `running` or `awaiting_approval`, at its end, and when a delta would not fit; otherwise a delta from the last frame that landed.
+  A `paused` run sends its snapshot and then nothing until it resumes, so a client must not time a paused run out by silence; a `running` or `awaiting_approval` run sends at least every 10 s while its runtime is alive.
+  A run is forgotten after the frame of its end.
+- A refused frame (`M_TOO_LARGE`, `M_UNRECOGNIZED`, `M_FORBIDDEN`, `M_UNKNOWN`, `M_NOT_FOUND`, or a bare 4xx) stops that run's frames until it resumes from a pause or ends, and its end then gets one more attempt.
+  Other failures retry with a snapshot after a one second wait.
+- When no frames are sent: the delegating turn has no Matrix room (the OpenAI-compatible API) or runs outside a managed runtime; the turn is a silent schedule's, which shows nothing in the room while it runs (scheduled tasks and automations that post into a room do send frames); `defaults.streaming.live_frames` is off when the run starts (switching it off later does not stop a run already publishing); the homeserver does not list `io.mindroom.ephemeral_opt_in`, or the check failed, after which its runs send nothing for a minute before it is asked again; the sending account has no client for a whole retry.
+  Frames are best effort: a failure building or sending one stops frames and never fails the run.
+- Restart: frames are memory only and an interrupted child is not rerun.
+  After a crash no end is sent, because recovery runs in a new process that has no feed for the run.
+  On a graceful stop the old process may still publish the run as `failed` or `cancelled`, and that frame may or may not land.
+  A client should drop a `running` or `awaiting_approval` run that goes silent, and keep a `paused` or ended run for as long as it is useful.
 
 ## Limitations
 
 - Clients without frame support (Element, bridges, older Chat builds) see the reply in steps of `update_interval` instead of the former fast start.
 - Federated users and sliding-sync clients get no frames.
 - A crash loses what frames showed beyond the last checkpoint; Chat falls back to the checkpoint after 12 s without frames.
-- A Stop or a stream error ends the reply below its last checkpoint, so up to one `update_interval` of text Chat showed live disappears above the note; writing a checkpoint after a committed Stop would break the reply lifecycle, and shorter intervals bring back the edits frames remove.
 - A reply split into several messages (`large_message_strategy: split`) keeps no reasoning, which would otherwise repeat on every segment, and a final edit carries reasoning only in `m.new_content`, cut to the space the answer leaves, so reasoning never turns an ordinary reply into a sidecar or segments for Element and bridges.
 - Teams stream body and tool calls but no reasoning, and a reply that paused for an approval shows reasoning only until the pause and keeps none on its final message: the continuation that finishes it streams through the caller-owned progress path, which carries no reasoning.
 - Every opted-in device wakes once per frame while a reply streams in any of its rooms.

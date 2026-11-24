@@ -9,7 +9,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 from urllib.parse import urlsplit
 
-import httpx
+import httpx2
 import pytest
 from structlog.testing import capture_logs
 
@@ -571,7 +571,7 @@ def test_revoked_grant_needs_reconnect_without_leaking(
 ) -> None:
     """A grant the provider rejects asks for a reconnect; logs carry only the error type."""
     connect_account(manager, account_store("@alice:example.org"), "stale-access", expires_at=1.0)
-    serve_token_endpoint(monkeypatch, [httpx.Response(400, json={"error": "invalid_grant"})])
+    serve_token_endpoint(monkeypatch, [httpx2.Response(400, json={"error": "invalid_grant"})])
 
     with capture_logs() as logs:
         result = _resolve(config, runtime_paths, manager, _broker_target("@alice:example.org"))
@@ -591,17 +591,17 @@ def test_revoked_grant_needs_reconnect_without_leaking(
         assert leaked not in repr(logs)
 
 
-def _connect_failure(request: httpx.Request) -> Exception:
-    return httpx.ConnectError("token endpoint unreachable", request=request)
+def _connect_failure(request: httpx2.Request) -> Exception:
+    return httpx2.ConnectError("token endpoint unreachable", request=request)
 
 
-def _connect_timeout(request: httpx.Request) -> Exception:
-    return httpx.ConnectTimeout("token endpoint timed out", request=request)
+def _connect_timeout(request: httpx2.Request) -> Exception:
+    return httpx2.ConnectTimeout("token endpoint timed out", request=request)
 
 
 @pytest.mark.parametrize(
     "outcome",
-    [httpx.Response(503, json={"error": "temporarily_unavailable"}), _connect_failure, _connect_timeout],
+    [httpx2.Response(503, json={"error": "temporarily_unavailable"}), _connect_failure, _connect_timeout],
     ids=["provider-503", "network-error", "timeout"],
 )
 @pytest.mark.usefixtures("enable_reuse")
@@ -610,7 +610,7 @@ def test_transient_refresh_failure_is_retryable_and_backs_off(
     runtime_paths: RuntimePaths,
     manager: CredentialsManager,
     monkeypatch: pytest.MonkeyPatch,
-    outcome: httpx.Response | Callable[[httpx.Request], Exception],
+    outcome: httpx2.Response | Callable[[httpx2.Request], Exception],
 ) -> None:
     """An outage answers `SecretUnavailable`, not a reconnect, and the scope skips the grant until the backoff ends."""
     store = account_store("@alice:example.org")
@@ -654,7 +654,7 @@ def test_lookups_queued_behind_a_stalled_refresh_do_not_repeat_it(
 ) -> None:
     """Lookups waiting while a refresh stalls and then fails answer `SecretUnavailable` without another grant."""
     connect_account(manager, account_store("@alice:example.org"), "stale-access", expires_at=1.0)
-    stalled_failure = DelayedTokenEndpointOutcome(0.5, httpx.Response(503, json={"error": "temporarily_unavailable"}))
+    stalled_failure = DelayedTokenEndpointOutcome(0.5, httpx2.Response(503, json={"error": "temporarily_unavailable"}))
     presented = serve_token_endpoint(monkeypatch, [stalled_failure])
     target = _broker_target("@alice:example.org")
 
@@ -747,7 +747,7 @@ def test_shared_scope_connect_links_are_never_handed_out(
         provider=_DEMO,
         expires_at=1.0,
     )
-    serve_token_endpoint(monkeypatch, [httpx.Response(400, json={"error": "invalid_grant"})])
+    serve_token_endpoint(monkeypatch, [httpx2.Response(400, json={"error": "invalid_grant"})])
     revoked = _resolve(config, runtime_paths, manager, shared, provider_id="demo")
     private = _resolve(config, runtime_paths, manager, _broker_target("@alice:example.org"), provider_id="demo")
 
@@ -1317,7 +1317,7 @@ def test_a_refresh_outage_of_one_connection_never_holds_back_another(
     _connect_demo(manager, "stale-access", expires_at=1.0)
     _connect_demo(manager, "own-access", _OWN_DEMO)
     _allow_mine(manager, runtime_paths, _OWN_DEMO)
-    serve_token_endpoint(monkeypatch, [httpx.Response(503, json={"error": "temporarily_unavailable"})])
+    serve_token_endpoint(monkeypatch, [httpx2.Response(503, json={"error": "temporarily_unavailable"})])
 
     tools = _resolve(config, runtime_paths, manager, _broker_target("@alice:example.org"), provider_id="demo")
     own = _resolve_mine(config, runtime_paths, manager)
@@ -1336,6 +1336,6 @@ def test_a_separate_account_whose_grant_was_revoked_gets_no_connect_link(
     """A reconnect never offers the provider's link, which would connect the tools' account instead."""
     _connect_demo(manager, "stale-access", _OWN_DEMO, expires_at=1.0)
     _allow_mine(manager, runtime_paths, _OWN_DEMO)
-    serve_token_endpoint(monkeypatch, [httpx.Response(400, json={"error": "invalid_grant"})])
+    serve_token_endpoint(monkeypatch, [httpx2.Response(400, json={"error": "invalid_grant"})])
 
     assert _resolve_mine(config, runtime_paths, manager) == SecretNeedsReconnect(provider="demo", connect_url=None)

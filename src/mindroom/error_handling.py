@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.failure_text import failure_text
 from mindroom.llm.errors import (
     MISSING_API_KEY,
+    QUOTA_EXHAUSTED,
     TOKENS_PER_MINUTE,
     AuthenticationFailed,
     ContextWindowExceeded,
@@ -18,6 +19,7 @@ from mindroom.llm.errors import (
 from mindroom.logging_config import get_logger
 from mindroom.origins import configured_public_url
 from mindroom.redaction import redact_sensitive_text
+from mindroom.tool_system.runtime_context import current_execution_identity
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -26,6 +28,12 @@ logger = get_logger(__name__)
 
 _PROVIDER_UNAVAILABLE = "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
 _RATE_LIMITED = "⏱️ Rate limited. Please wait a moment and try again."
+# The provider's own text names its billing pages, which the person in the room may not be able to open.
+_QUOTA_EXHAUSTED_MESSAGE = (
+    "💳 The AI budget for this MindRoom is used up or its plan has expired{provider_hint}, so I can't answer right now. "
+    "Add credit, renew the plan, or raise the spending limit (from the dashboard or with the AI provider), "
+    "then try again."
+)
 
 
 class AvatarGenerationError(RuntimeError):
@@ -44,10 +52,17 @@ def minimal_mode_failure_message(reason: str, agent_name: str, *, subagent: bool
     """Include how to recover from unavailable minimal mode: the mode command, or a standard subagent."""
     if subagent:
         return f"{reason.rstrip('.')}. Start a new subagent without minimal."
-    return f"{reason.rstrip('.')}. Return to standard mode with `!mode {agent_name} standard`."
+    return f"{reason.rstrip('.')}. Return to standard mode with `/mode {agent_name} standard`."
 
 
-def _missing_provider_key_message(runtime_paths: RuntimePaths | None) -> str:
+def _missing_provider_key_message(runtime_paths: RuntimePaths | None, safe_error: str) -> str:
+    identity = current_execution_identity()
+    if runtime_paths is not None and identity is not None and identity.channel == "headless":
+        # A headless run has no dashboard: its keys come from the process environment or the storage's `.env`.
+        return (
+            f"🔑 No AI provider key is set up yet, so I can't reply. {safe_error.rstrip('.')}. "
+            f"A `.env` file at {runtime_paths.env_path} works too."
+        )
     dashboard_url = configured_public_url(runtime_paths) if runtime_paths else None
     dashboard = f"the MindRoom dashboard ({dashboard_url})" if dashboard_url else "the MindRoom dashboard"
     return (
@@ -66,25 +81,29 @@ def get_user_friendly_error_message(
 
     An error's type alone decides its message: a provider error was classified from the provider's status and wording
     where its adapter raised it, and any other error shows its own text, except that a timeout says so.
-    ``runtime_paths`` points a missing-key reply at the dashboard URL.
+    ``runtime_paths`` points a missing-key reply at the dashboard URL, or in a headless run at its `.env` file.
     """
     safe_error = redact_sensitive_text(failure_text(error))
     agent_prefix = f"[{agent_name}] " if agent_name else ""
+    provider_error = error if isinstance(error, ProviderError) else None
 
     logger.error(
         "agent_error",
         agent=agent_name or "agent",
         error_type=type(error).__name__,
         error=repr(error),
+        error_code=provider_error.code if provider_error else None,
+        status_code=provider_error.status_code if provider_error else None,
+        provider=provider_error.provider if provider_error else None,
     )
 
     if isinstance(error, ModelSafeguardRefusal):
         return (
             f"{agent_prefix}⚠️ This model's safeguards blocked the request. "
-            "Choose a different model (`!model list`) or revise the prompt, then try again."
+            "Choose a different model (`/model list`) or revise the prompt, then try again."
         )
     if needs_provider_key(error):
-        return f"{agent_prefix}{_missing_provider_key_message(runtime_paths)}"
+        return f"{agent_prefix}{_missing_provider_key_message(runtime_paths, safe_error)}"
     if isinstance(error, ProviderError):
         return f"{agent_prefix}{_provider_error_message(error, safe_error)}"
     if isinstance(error, TimeoutError):
@@ -101,9 +120,11 @@ def needs_provider_key(error: Exception) -> bool:
     return isinstance(error, AuthenticationFailed) and error.code == MISSING_API_KEY
 
 
-def _provider_error_message(error: ProviderError, safe_error: str) -> str:
+def _provider_error_message(error: ProviderError, safe_error: str) -> str:  # noqa: PLR0911 - one return per kind
+    provider_hint = f" ({error.provider})" if error.provider else ""
+    if error.code == QUOTA_EXHAUSTED:
+        return _QUOTA_EXHAUSTED_MESSAGE.format(provider_hint=provider_hint)
     if isinstance(error, AuthenticationFailed):
-        provider_hint = f" ({error.provider})" if error.provider else ""
         return f"❌ Authentication failed{provider_hint}: {safe_error}"
     if isinstance(error, ContextWindowExceeded) and error.code == TOKENS_PER_MINUTE:
         return (

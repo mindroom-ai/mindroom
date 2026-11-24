@@ -592,6 +592,23 @@ class TestUpdateOwnConfig:
         finally:
             config_path.unlink(missing_ok=True)
 
+    def test_update_tools_by_another_name_keeps_the_filesystem_entry_and_its_settings(self) -> None:
+        """Naming filesystem as coding or file in an edit keeps its one entry, read-only settings included."""
+        read_only = {"filesystem": {"exclude_tools": ["write_file", "edit_file"]}}
+        _, config_path = _make_config(
+            agents={"coder": AgentConfig(display_name="Coder", role="Code", tools=[read_only])},
+        )
+        try:
+            tool = _self_config_tools(agent_name="coder", config_path=config_path)
+            with _as_requester(tool):
+                result = tool.update_own_config(tools=["coding", "calculator", "file"])
+
+            assert "Successfully" in result, result
+            reloaded = load_config_yaml(config_path)
+            assert reloaded.agents["coder"].model_dump(exclude_none=True)["tools"] == [read_only, "calculator"]
+        finally:
+            config_path.unlink(missing_ok=True)
+
     def test_update_own_config_returns_invalid_plugin_manifest_error(self, tmp_path: Path) -> None:
         """Write self-config should keep runtime plugin validation in the invalid-config channel."""
         config_path = _invalid_plugin_config_path(tmp_path)

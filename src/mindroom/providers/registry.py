@@ -7,13 +7,21 @@ limit, the media fallback prompt, and the request log.
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING, Any, cast, get_args
 
+from mindroom.config.models import unsupported_level_message
+from mindroom.llm.errors import AuthenticationFailed
 from mindroom.logging_config import get_logger
 from mindroom.providers.anthropic.settings import ACCEPTED_KEYS as CLAUDE_ACCEPTED_KEYS
 from mindroom.providers.anthropic.settings import ENDPOINT_VARIABLES as CLAUDE_ENDPOINT_VARIABLES
 from mindroom.providers.anthropic.settings import ClaudeRouteKind
-from mindroom.providers.credentials import dashboard_api_key
+from mindroom.providers.claude_code.settings import ClaudeCodeSettings
+from mindroom.providers.credentials import (
+    api_key_env_reference,
+    model_with_dashboard_key,
+    resolve_api_key_reference,
+)
 from mindroom.providers.extra_kwargs import reject_unsupported_extra_kwargs, settings_keys
 from mindroom.providers.gemini.settings import GeminiSettings
 from mindroom.providers.names import provider_route
@@ -24,14 +32,18 @@ from mindroom.providers.openai.build import accepted_extra_kwargs as openai_acce
 from mindroom.providers.openai.build import build_provider as build_openai_provider
 from mindroom.providers.pipeline.compose import wrap_provider
 from mindroom.providers.pipeline.request_log import RequestLog
+from mindroom.providers.pipeline.wrapped import WrappedProvider
+from mindroom.providers.reasoning import apply_reasoning_level
 from mindroom.providers.synthetic_adapter import SyntheticSettings
 from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
-    from mindroom.llm.provider import ModelProvider, TokenCounter
+    from mindroom.llm.provider import ModelProvider, ModelRequest, StreamEvent, TokenCounter
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 __all__ = [
@@ -53,6 +65,7 @@ _LOCAL_STREAM_PROVIDERS = frozenset({"ollama", "llama_cpp"})
 _ENDPOINT_VARIABLES: dict[str, str] = {**OPENAI_ENDPOINT_VARIABLES, **CLAUDE_ENDPOINT_VARIABLES}
 # The ``extra_kwargs`` keys of each provider whose one settings type takes every key it declares.
 _SETTINGS_KEYS = {
+    "claude_code": settings_keys(ClaudeCodeSettings),
     "google": settings_keys(GeminiSettings),
     "ollama": settings_keys(OllamaSettings),
     "synthetic": settings_keys(SyntheticSettings),
@@ -60,15 +73,18 @@ _SETTINGS_KEYS = {
 
 
 def configured_model(config: Config, runtime_paths: RuntimePaths, model_name: str) -> ModelConfig:
-    """Return the model configured as ``model_name``, with the key the dashboard saved for it applied."""
+    """Return the model configured as ``model_name``, with its reasoning level and the dashboard's key applied.
+
+    A key written as ``${NAME}`` becomes that runtime env variable's value, and stays as written when it is unset.
+    """
     if model_name not in config.models:
-        available = ", ".join(sorted(config.models))
-        msg = f"Unknown model: {model_name}. Available models: {available}"
+        msg = unsupported_level_message(config.models, model_name)
+        if msg is None:
+            available = ", ".join(sorted(config.models))
+            msg = f"Unknown model: {model_name}. Available models: {available}"
         raise ValueError(msg)
-    model_config = config.models[model_name]
-    if dashboard_key := dashboard_api_key(model_name, runtime_paths):
-        return model_config.model_copy(update={"api_key": dashboard_key})
-    return model_config
+    model_config = model_with_dashboard_key(model_name, config.models[model_name], runtime_paths)
+    return resolve_api_key_reference(apply_reasoning_level(model_config), runtime_paths)
 
 
 def _build_adapter(
@@ -105,10 +121,22 @@ def _build_adapter(
         )
 
         return build_ollama_provider(model_config, runtime_paths)
+    if provider == "claude_code":
+        from mindroom.providers.claude_code.builder import (  # noqa: PLC0415 - loads only for a model that uses it
+            build_provider as build_claude_code_provider,
+        )
+
+        return build_claude_code_provider(model_config, runtime_paths, execution_identity=execution_identity)
     if provider == "synthetic":
         return build_synthetic_provider(model_config, runtime_paths)
     msg = f"Unsupported AI provider: {model_config.provider}"
     raise ValueError(msg)
+
+
+def _unset_key_stage(inner: ModelProvider, _request: ModelRequest, *, variable: str) -> AsyncIterator[StreamEvent]:
+    """Fail a request of a model whose key references an unset variable, so the reference is never sent as a key."""
+    msg = f"{variable} not set. This model's api_key reads the {variable} environment variable."
+    raise AuthenticationFailed(msg, provider=inner.identity.provider, status_code=401)
 
 
 def build_model_provider(
@@ -120,12 +148,16 @@ def build_model_provider(
 ) -> ModelProvider:
     """Return the provider for the model configured as ``model_name``, with the full request pipeline.
 
-    ``execution_identity`` scopes the prompt-cache and session keys of the Codex and Kimi routes.
+    ``execution_identity`` scopes the prompt-cache and session keys of the Codex and Kimi routes, and the Claude Code
+    processes of the ``claude_code`` route.
     Raises ``ValueError`` for an unknown model name, an unsupported provider, or ``extra_kwargs`` its route
     does not accept.
     """
     model_config = configured_model(config, runtime_paths, model_name)
     adapter = _build_adapter(model_config, config, runtime_paths, execution_identity=execution_identity)
+    # A reference ``configured_model`` left in place has no value, so it must not be sent as the key.
+    if variable := api_key_env_reference(model_config):
+        adapter = WrappedProvider(adapter, partial(_unset_key_stage, variable=variable))
     logger.info(
         "Using AI model",
         model=model_name,
@@ -196,4 +228,8 @@ def check_extra_kwargs(model_config: ModelConfig, runtime_paths: RuntimePaths) -
         allowed = CLAUDE_ACCEPTED_KEYS[cast("ClaudeRouteKind", provider)]
     else:
         allowed = _SETTINGS_KEYS[provider]
-    reject_unsupported_extra_kwargs(model_config.extra_kwargs, allowed, provider=model_config.provider)
+    extra_kwargs = dict(model_config.extra_kwargs or {})
+    # Each level writes the route's reasoning key, which the route must accept too.
+    for level in model_config.reasoning.levels if model_config.reasoning else ():
+        extra_kwargs.update(apply_reasoning_level(model_config.at_level(level)).extra_kwargs or {})
+    reject_unsupported_extra_kwargs(extra_kwargs, allowed, provider=model_config.provider)

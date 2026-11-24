@@ -16,10 +16,16 @@ from mindroom.authorization import ensure_room_membership_synced
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig, _VoiceLLMConfig
-from mindroom.constants import ATTACHMENT_IDS_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
+from mindroom.constants import (
+    ATTACHMENT_IDS_KEY,
+    MID_TURN_MODE_KEY,
+    SUBMISSION_CONTENT_KEY,
+    VOICE_RAW_AUDIO_FALLBACK_KEY,
+)
 from mindroom.llm.errors import ProviderError
 from mindroom.llm.media import Audio
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
+from mindroom.model_selection import THREAD_MODEL_CONTENT_KEY
 from mindroom.voice import handler as voice_handler
 from tests.access_schema_support import with_current_room_member_access
 from tests.authorization_helpers import isolated_membership_index
@@ -849,3 +855,46 @@ class TestVoiceHandler:
         assert download_started.is_set()
         assert prepared.source["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
         assert ATTACHMENT_IDS_KEY not in prepared.source["content"]
+
+    @pytest.mark.parametrize("is_edit", [False, True])
+    def test_build_prepared_voice_message_keeps_composer_metadata(self, is_edit: bool) -> None:
+        """Keep a voice pick only for the original event, even when dispatch rewrites its relation."""
+        config = _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))
+        marker = {"id": "upload-1", "more": True}
+        event = MagicMock(spec=nio.RoomMessageAudio)
+        event.event_id = "$marked_voice"
+        event.sender = "@alice:example.com"
+        pick = {
+            "version": 1,
+            "runtime_user_id": "@mindroom_helper:example.com",
+            "runtime_device_id": "DEVICE",
+            "model": "large",
+        }
+        event.source = {
+            "content": {
+                "body": "voice.ogg",
+                "msgtype": "m.audio",
+                SUBMISSION_CONTENT_KEY: marker,
+                MID_TURN_MODE_KEY: "steer",
+                THREAD_MODEL_CONTENT_KEY: pick,
+            },
+        }
+        if is_edit:
+            event.source["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": "$original"}
+
+        prepared = voice_handler._build_prepared_voice_message(
+            event,
+            config,
+            runtime_paths_for(config),
+            text="🎤 hello",
+            attachment_id=None,
+            thread_id="$root" if is_edit else None,
+            raw_audio_fallback=False,
+        )
+
+        assert prepared.source["content"][SUBMISSION_CONTENT_KEY] == marker
+        assert prepared.source["content"][MID_TURN_MODE_KEY] == "steer"
+        if is_edit:
+            assert THREAD_MODEL_CONTENT_KEY not in prepared.source["content"]
+        else:
+            assert prepared.source["content"][THREAD_MODEL_CONTENT_KEY] == pick

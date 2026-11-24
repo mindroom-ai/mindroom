@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import threading
 from copy import deepcopy
-from functools import partial
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
@@ -17,8 +16,7 @@ from mindroom.history.compaction import SummaryModel, _summarize_chunk, compact_
 from mindroom.history.request_size import request_sizer
 from mindroom.history.runtime import (
     PreparedScopeHistory,
-    _compact_before_reply,
-    _run_scope_compaction_with_lifecycle,
+    _compact_stored_scope,
     prepare_scope_history,
     resolve_entity_preparation_inputs,
 )
@@ -315,28 +313,24 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
     monkeypatch.setattr("mindroom.history.compaction._emit_compaction_hook", hook)
     install_model_providers(monkeypatch, {"default": summary_model(model_id="summary")})
     task = asyncio.create_task(
-        _run_scope_compaction_with_lifecycle(
-            mode="manual",
-            session_id=session.session_id,
-            scope=HistoryScope(kind="agent", scope_id="test_agent"),
-            execution_plan=resolved.execution_plan,
-            history_budget=1000,
-            current_history_tokens=11,
-            runs_before=1,
-            compaction_lifecycle=lifecycle,
-            compact=partial(
-                _compact_before_reply,
-                storage=storage,
-                session=session,
-                state=HistoryScopeState(force_compact_before_next_run=True),
-                resolved_inputs=resolved,
-                history_budget=1000,
-                max_summary_tokens=None,
-                before_tokens=11,
-                model=model,
-                config=config,
-                runtime_paths=paths,
+        _compact_stored_scope(
+            ScopeSessionContext(
+                HistoryScope(kind="agent", scope_id="test_agent"),
+                storage,
+                session,
+                session.session_id,
+                lambda: storage,
             ),
+            resolved,
+            model,
+            config,
+            paths,
+            state=HistoryScopeState(force_compact_before_next_run=True),
+            history_budget=1000,
+            max_summary_tokens=None,
+            before_tokens=11,
+            runs_before=1,
+            lifecycle=lifecycle,
         ),
     )
     try:

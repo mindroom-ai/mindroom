@@ -20,6 +20,7 @@ from mindroom.history.replay import (
     scope_visible_runs,
 )
 from mindroom.history.storage import (
+    ChunkBasis,
     FoldBasis,
     append_compaction_chunk,
     append_fold,
@@ -61,7 +62,7 @@ from mindroom.tool_system.runtime_context import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable, Coroutine, Sequence
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -87,6 +88,8 @@ class SummaryModel:
     model: ModelProvider
     name: str
     input_budget_tokens: int
+    # A model at its ``off`` reasoning level keeps the thinking switch the level sends, which summaries otherwise omit.
+    keeps_thinking_setting: bool = False
 
 
 @dataclass(frozen=True)
@@ -110,6 +113,24 @@ class Summarizer:
 def _load_compaction_model(config: Config, runtime_paths: RuntimePaths, model_name: str) -> ModelProvider:
     """Build the compaction model's provider with dedicated history-preparation timing."""
     return provider_registry.build_model_provider(config, runtime_paths, model_name)
+
+
+def _summary_model(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    model_name: str,
+    input_budget_tokens: int,
+) -> SummaryModel:
+    model = _load_compaction_model(config, runtime_paths, model_name)
+    # Loading the model already rejected a name the config lacks, so only a stand-in loader gets past it with one.
+    model_config = config.models.get(model_name)
+    reasoning = model_config.reasoning if model_config is not None else None
+    return SummaryModel(
+        model=model,
+        name=model_name,
+        input_budget_tokens=input_budget_tokens,
+        keeps_thinking_setting=reasoning is not None and reasoning.default == "off",
+    )
 
 
 def _compaction_fallback_is_distinct(
@@ -157,10 +178,11 @@ def load_summarizer(
 ) -> Summarizer:
     """Load the summary model and, when distinct and loadable, its safeguard fallback."""
     assert execution_plan.summary_input_budget_tokens is not None
-    summary_model = SummaryModel(
-        model=_load_compaction_model(config, runtime_paths, execution_plan.compaction_model_name),
-        name=execution_plan.compaction_model_name,
-        input_budget_tokens=execution_plan.summary_input_budget_tokens,
+    summary_model = _summary_model(
+        config,
+        runtime_paths,
+        execution_plan.compaction_model_name,
+        execution_plan.summary_input_budget_tokens,
     )
     fallback_model_name = execution_plan.compaction_fallback_model_name
     fallback_summary_input_budget = execution_plan.compaction_fallback_summary_input_budget_tokens
@@ -178,11 +200,7 @@ def load_summarizer(
         # fails (missing SDK, credentials, client setup), compaction still
         # runs on the healthy primary instead of aborting before any call.
         try:
-            fallback_model = SummaryModel(
-                model=_load_compaction_model(config, runtime_paths, fallback_model_name),
-                name=fallback_model_name,
-                input_budget_tokens=fallback_summary_input_budget,
-            )
+            fallback_model = _summary_model(config, runtime_paths, fallback_model_name, fallback_summary_input_budget)
         except Exception:
             logger.warning(
                 "Compaction fallback model failed to load; continuing without a fallback",
@@ -239,14 +257,6 @@ class _SummaryChunk:
     included_runs: list[AnyRunRecord]
     # The summarizer that served this chunk, which later chunks use: once a fallback served one, it serves the rest.
     summarizer: Summarizer
-
-
-@dataclass(frozen=True)
-class _CompactionRewriteResult:
-    summary_text: str
-    compacted_run_count: int
-    # The model that served the final persisted chunk, the fallback after a refusal switch.
-    served_by: SummaryModel
 
 
 async def clear_manual_compaction_request(
@@ -390,8 +400,49 @@ async def compact_scope_history(
             ),
         )
 
+    outcome = None
+
+    async def report(chunk: _SummaryChunk, compacted_run_count: int) -> None:
+        nonlocal outcome
+        await clear_manual_compaction_request(storage=storage, session=session, state=state)
+        summary_model = chunk.summarizer.model
+        logger.info(
+            "Compaction summary generated",
+            session_id=session.session_id,
+            scope=scope.key,
+            compacted_runs=compacted_run_count,
+            model=summary_model.model.identity.id,
+        )
+        after_tokens = await asyncio.to_thread(
+            estimate_prompt_visible_history_tokens,
+            session=session,
+            history_settings=history_settings,
+            model=model,
+        )
+        outcome = await _report_committed(
+            CompactionOutcome(
+                mode=mode,
+                session_id=session.session_id,
+                scope=scope.key,
+                summary=chunk.summary,
+                summary_model=summary_model.name,
+                before_tokens=before_tokens,
+                after_tokens=after_tokens,
+                window_tokens=replay_window_tokens or 0,
+                threshold_tokens=threshold_tokens or 0,
+                runs_before=len(visible_runs),
+                runs_after=len(scope_visible_runs(session)),
+                compacted_run_count=compacted_run_count,
+                compacted_at=_iso_utc_now(),
+                history_budget_tokens=available_history_budget,
+            ),
+            scope=scope,
+            transcript=compacted_transcript,
+            complete=complete,
+        )
+
     try:
-        rewrite_result = await _rewrite_working_session_for_compaction(
+        await _rewrite_working_session_for_compaction(
             storage=storage,
             persisted_session=session,
             working_session=working_session,
@@ -401,56 +452,15 @@ async def compact_scope_history(
             model=model,
             before_persist=before_persist,
             after_persist=after_persist,
+            report=report,
         )
     except ConversationChangedError:
         # The reply replays what the conversation holds now; a manual request stays for the next reply.
         await run_session_storage_operation(lambda: storage, lambda opened: opened.reload_log(session))
         raise
-    await clear_manual_compaction_request(storage=storage, session=session, state=state)
-    if rewrite_result is None:
-        return None
-
-    compacted_at = _iso_utc_now()
-    logger.info(
-        "Compaction summary generated",
-        session_id=session.session_id,
-        scope=scope.key,
-        compacted_runs=rewrite_result.compacted_run_count,
-        model=rewrite_result.served_by.model.identity.id,
-    )
-
-    async def report() -> CompactionOutcome:
-        after_tokens = await asyncio.to_thread(
-            estimate_prompt_visible_history_tokens,
-            session=session,
-            history_settings=history_settings,
-            model=model,
-        )
-        outcome = CompactionOutcome(
-            mode=mode,
-            session_id=session.session_id,
-            scope=scope.key,
-            summary=rewrite_result.summary_text,
-            summary_model=rewrite_result.served_by.name,
-            before_tokens=before_tokens,
-            after_tokens=after_tokens,
-            window_tokens=replay_window_tokens or 0,
-            threshold_tokens=threshold_tokens or 0,
-            runs_before=len(visible_runs),
-            runs_after=len(scope_visible_runs(session)),
-            compacted_run_count=rewrite_result.compacted_run_count,
-            compacted_at=compacted_at,
-            history_budget_tokens=available_history_budget,
-        )
-        return await _report_committed(
-            outcome,
-            scope=scope,
-            transcript=compacted_transcript,
-            complete=complete,
-        )
-
-    # Persistence has committed; finish reporting before releasing this request owner.
-    return await run_coroutine_until_complete(report())
+    if outcome is None:
+        await clear_manual_compaction_request(storage=storage, session=session, state=state)
+    return outcome
 
 
 @timed("system_prompt_assembly.history_prepare.compaction.rewrite_working_session")
@@ -465,17 +475,39 @@ async def _rewrite_working_session_for_compaction(
     model: ModelProvider,
     before_persist: Callable[[Sequence[AnyRunRecord]], Awaitable[None]],
     after_persist: Callable[[_SummaryChunk, int, int], Awaitable[None]],
-) -> _CompactionRewriteResult | None:
+    report: Callable[[_SummaryChunk, int], Coroutine[object, object, None]],
+) -> None:
     """Fold ``runs``, oldest first, into one appended summary row per chunk.
 
     Stops when the conversation changes or a chunk's summary, as ``model``'s route sizes it, exceeds ``max_summary_tokens``;
     with nothing stored yet, either stop fails the compaction.
     """
     scope = owner_scope(persisted_session)
-    summary_text: str | None = None
-    compacted_run_count = 0
+    last_chunk = None
     remaining = list(runs)
+
+    async def persist(chunk: _SummaryChunk, basis: ChunkBasis, runs_remaining: int) -> bool:
+        compacted_run_ids = tuple(run.run_id for run in chunk.included_runs)
+        if not await run_session_storage_operation(
+            lambda: storage,
+            partial(
+                append_compaction_chunk,
+                session=persisted_session,
+                basis=basis,
+                included_run_ids=compacted_run_ids,
+                summary=chunk.summary,
+            ),
+        ):
+            return False
+        working_session.summary = ScopeSummary(text=chunk.summary, updated_at=datetime.now(UTC))
+        working_session.runs = runs_without(working_session.runs, compacted_run_ids)
+        await after_persist(chunk, len(runs) - runs_remaining, runs_remaining)
+        if not runs_remaining:
+            await report(chunk, len(runs))
+        return True
+
     while remaining:
+        compacted_run_count = len(runs) - len(remaining)
         previous_summary = current_summary_text(working_session)
         basis = await run_blocking_until_complete(
             partial(
@@ -505,35 +537,16 @@ async def _rewrite_working_session_for_compaction(
             _stop_compaction(error, persisted_session.session_id, scope, compacted_run_count)
             break
         await before_persist(chunk.included_runs)
-        compacted_run_ids = tuple(run.run_id for run in chunk.included_runs)
-        appended = await run_session_storage_operation(
-            lambda: storage,
-            partial(
-                append_compaction_chunk,
-                session=persisted_session,
-                basis=basis,
-                included_run_ids=compacted_run_ids,
-                summary=chunk.summary,
-            ),
-        )
-        if not appended:
+        runs_remaining = len(remaining) - len(chunk.included_runs)
+        commit = persist(chunk, basis, runs_remaining)
+        # Once the final append starts, finish reporting before propagating cancellation.
+        if not await (commit if runs_remaining else run_coroutine_until_complete(commit)):
             _stop_compaction(ConversationChangedError(), persisted_session.session_id, scope, compacted_run_count)
             break
-        summarizer = chunk.summarizer
-        summary_text = chunk.summary
-        working_session.summary = ScopeSummary(text=chunk.summary, updated_at=datetime.now(UTC))
-        working_session.runs = runs_without(working_session.runs, compacted_run_ids)
-        compacted_run_count += len(chunk.included_runs)
-        remaining = remaining[len(chunk.included_runs) :]
-        await after_persist(chunk, compacted_run_count, len(remaining))
-
-    if summary_text is None:
-        return None
-    return _CompactionRewriteResult(
-        summary_text=summary_text,
-        compacted_run_count=compacted_run_count,
-        served_by=summarizer.model,
-    )
+        last_chunk = chunk
+        summarizer, remaining = chunk.summarizer, remaining[len(chunk.included_runs) :]
+    if remaining and last_chunk is not None:
+        await run_coroutine_until_complete(report(last_chunk, len(runs) - len(remaining)))
 
 
 def _summary_budget_error(summary_tokens: int, max_summary_tokens: int | None) -> RuntimeError | None:
@@ -823,6 +836,7 @@ async def _summarize_chunk(  # noqa: C901, PLR0915
                 summary_input=summary_input,
                 summary_prompt=summarizer.prompt,
                 timeout_seconds=summarizer.timeout_seconds,
+                keep_thinking_setting=summary_model.keeps_thinking_setting,
                 on_usage=(
                     partial(summarizer.on_usage, summary_model.model.identity)
                     if summarizer.on_usage is not None

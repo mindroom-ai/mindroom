@@ -131,7 +131,7 @@ def test_document_name_and_type_survive_inlining(
     path = tmp_path / "report one.txt"
     path.write_bytes(b"document")
 
-    def respond(_transport: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+    async def respond(_transport: httpx.AsyncHTTPTransport, request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
             stream=httpx.ByteStream(b"document"),
@@ -139,7 +139,7 @@ def test_document_name_and_type_survive_inlining(
             request=request,
         )
 
-    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", respond)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", respond)
     values: dict[str, Any] = (
         {"filepath": path} if source == "file" else {"url": "https://8.8.8.8/export/report%20one.txt?key=fixture"}
     )
@@ -175,10 +175,10 @@ def test_media_source_type_survives_inlining(
     path = tmp_path / f"generated.{kind}"
     path.write_bytes(b"media-content")
 
-    def respond(_transport: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+    async def respond(_transport: httpx.AsyncHTTPTransport, request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, stream=httpx.ByteStream(b"media-content"), request=request)
 
-    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", respond)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", respond)
     values: dict[str, Any] = {"filepath": path} if source == "file" else {"url": f"https://8.8.8.8/generated.{kind}"}
     if kind in {"mp3", "wav"}:
         field, media = "audios", Audio(**values)
@@ -232,7 +232,7 @@ def test_explicit_media_format_precedes_resource_name(tmp_path: Path) -> None:
 def test_unknown_file_type_remains_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     """A generic HTTP header must not introduce an unsupported File MIME value."""
 
-    def respond(_transport: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+    async def respond(_transport: httpx.AsyncHTTPTransport, request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
             stream=httpx.ByteStream(b"document"),
@@ -240,7 +240,7 @@ def test_unknown_file_type_remains_unset(monkeypatch: pytest.MonkeyPatch) -> Non
             request=request,
         )
 
-    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", respond)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", respond)
     result = ToolResult(content="Document", files=[File(url="https://8.8.8.8/download")])
     decoded = decode_media_result(serialize_worker_tool_result(result))
 
@@ -253,7 +253,7 @@ def test_unknown_file_type_remains_unset(monkeypatch: pytest.MonkeyPatch) -> Non
 def test_a_declared_type_files_cannot_take_leaves_the_file_name_to_type_it(monkeypatch: pytest.MonkeyPatch) -> None:
     """A header naming a type outside the File types the transport accepts gives way to the URL's name."""
 
-    def respond(_transport: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+    async def respond(_transport: httpx.AsyncHTTPTransport, request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
             stream=httpx.ByteStream(b"notes"),
@@ -261,7 +261,7 @@ def test_a_declared_type_files_cannot_take_leaves_the_file_name_to_type_it(monke
             request=request,
         )
 
-    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", respond)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", respond)
     result = ToolResult(content="Document", files=[File(url="https://8.8.8.8/export/notes.txt")])
     decoded = decode_media_result(serialize_worker_tool_result(result))
 
@@ -281,7 +281,7 @@ def test_worker_file_result_rejects_nonregular_file(tmp_path: Path) -> None:
 def test_worker_url_result_becomes_inline_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
     """Public media downloads happen on the worker through the guarded transport."""
 
-    def respond(_transport: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+    async def respond(_transport: httpx.AsyncHTTPTransport, request: httpx.Request) -> httpx.Response:
         assert str(request.url) == "https://8.8.8.8/generated.png"
         return httpx.Response(
             200,
@@ -290,7 +290,7 @@ def test_worker_url_result_becomes_inline_bytes(monkeypatch: pytest.MonkeyPatch)
             request=request,
         )
 
-    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", respond)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", respond)
     result = ToolResult(content="Generated image", images=[Image(url="https://8.8.8.8/generated.png")])
 
     envelope = serialize_worker_tool_result(result)
@@ -307,10 +307,10 @@ def test_worker_url_result_becomes_inline_bytes(monkeypatch: pytest.MonkeyPatch)
 def test_worker_url_rejects_local_resources(monkeypatch: pytest.MonkeyPatch, url: str) -> None:
     """Invalid destinations must fail before the HTTP transport opens a connection."""
 
-    def forbidden(_transport: httpx.HTTPTransport, _request: httpx.Request) -> httpx.Response:
+    async def forbidden(_transport: httpx.AsyncHTTPTransport, _request: httpx.Request) -> httpx.Response:
         pytest.fail("Forbidden media URL reached the network")
 
-    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", forbidden)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", forbidden)
     result = ToolResult(content="Invalid image", images=[Image(url=url)])
 
     with pytest.raises(ValueError, match="media"):
@@ -320,11 +320,11 @@ def test_worker_url_rejects_local_resources(monkeypatch: pytest.MonkeyPatch, url
 def test_worker_media_redirect_cannot_reach_localhost(monkeypatch: pytest.MonkeyPatch) -> None:
     """Redirect requests pass through the same destination guard."""
 
-    def redirect(_transport: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+    async def redirect(_transport: httpx.AsyncHTTPTransport, request: httpx.Request) -> httpx.Response:
         assert request.url.host == "8.8.8.8"
         return httpx.Response(302, headers={"Location": "http://127.0.0.1/private"}, request=request)
 
-    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", redirect)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", redirect)
     result = ToolResult(content="Redirect", images=[Image(url="https://8.8.8.8/media")])
 
     with pytest.raises(ValueError, match="media"):
@@ -342,10 +342,10 @@ def test_worker_resource_read_obeys_media_byte_limit(
     path = tmp_path / "oversized.png"
     path.write_bytes(b"12345")
 
-    def respond(_transport: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+    async def respond(_transport: httpx.AsyncHTTPTransport, request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, stream=httpx.ByteStream(b"12345"), request=request)
 
-    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", respond)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", respond)
     image = Image(filepath=path) if source == "file" else Image(url="https://8.8.8.8/media")
     with pytest.raises(ValueError, match="media"):
         serialize_worker_tool_result(ToolResult(content="Large", images=[image]))
@@ -385,7 +385,7 @@ def test_worker_audio_mime_fallback_reaches_provider(
 ) -> None:
     """OpenAI sees the audio type after worker resource references disappear."""
 
-    def respond(_transport: httpx.HTTPTransport, request: httpx.Request) -> httpx.Response:
+    async def respond(_transport: httpx.AsyncHTTPTransport, request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
             stream=httpx.ByteStream(b"audio-content"),
@@ -393,7 +393,7 @@ def test_worker_audio_mime_fallback_reaches_provider(
             request=request,
         )
 
-    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", respond)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", respond)
     source = Audio(
         url=f"https://8.8.8.8{path}",
         mime_type=explicit_mime,

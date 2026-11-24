@@ -10,6 +10,7 @@ from mindroom.error_handling import (
     minimal_mode_failure_message,
 )
 from mindroom.llm.errors import (
+    MISSING_API_KEY,
     MODEL_SAFEGUARD_REFUSAL_MESSAGE,
     TOKENS_PER_MINUTE,
     AuthenticationFailed,
@@ -21,7 +22,9 @@ from mindroom.llm.errors import (
     RateLimited,
 )
 from mindroom.llm.usage import MessageMetrics
-from mindroom.providers.errors import missing_api_key_error
+from mindroom.providers.errors import classify_provider_error, missing_api_key_error
+from mindroom.tool_system.runtime_context import detached_tool_scope
+from mindroom.tool_system.worker_routing import build_tool_execution_identity
 
 
 @pytest.mark.parametrize(
@@ -60,7 +63,7 @@ def test_model_safeguard_refusal_gives_actionable_guidance() -> None:
 
     assert message == (
         "[mind] ⚠️ This model's safeguards blocked the request. "
-        "Choose a different model (`!model list`) or revise the prompt, then try again."
+        "Choose a different model (`/model list`) or revise the prompt, then try again."
     )
     assert "stop_reason" not in message
 
@@ -215,6 +218,31 @@ def test_missing_provider_key_without_public_url_names_dashboard() -> None:
     assert "OPENROUTER_API_KEY" not in message
 
 
+def test_headless_missing_key_reply_keeps_the_error_its_own_sentence(tmp_path: Path) -> None:
+    """A headless run's reply ends the provider's own text before naming the `.env` file, whatever it ended with."""
+    runtime_paths = constants.resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    identity = build_tool_execution_identity(
+        channel="headless",
+        agent_name="coder",
+        runtime_paths=runtime_paths,
+        requester_id="@alice:localhost",
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="headless:1",
+    )
+    error = AuthenticationFailed(
+        "Azure OpenAI authentication not configured. Please provide one of: azure_ad_token_provider",
+        provider="Azure",
+        status_code=401,
+        code=MISSING_API_KEY,
+    )
+    with detached_tool_scope(identity):
+        message = get_user_friendly_error_message(error, runtime_paths=runtime_paths)
+
+    assert f"azure_ad_token_provider. A `.env` file at {tmp_path / '.env'} works too." in message
+
+
 def test_rejected_provider_key_is_still_an_authentication_failure() -> None:
     """A configured but invalid key is not reported as a missing key."""
     error = AuthenticationFailed("Incorrect API key provided", provider="OpenAI Chat", status_code=401)
@@ -233,5 +261,40 @@ def test_minimal_subagent_failure_suggests_a_standard_subagent() -> None:
         "Minimal Bash requires an active managed response owner. Start a new subagent without minimal."
     )
     assert minimal_mode_failure_message(reason, "helper", subagent=False) == (
-        "Minimal Bash requires an active managed response owner. Return to standard mode with `!mode helper standard`."
+        "Minimal Bash requires an active managed response owner. Return to standard mode with `/mode helper standard`."
     )
+
+
+@pytest.mark.parametrize(
+    ("status_code", "code", "message"),
+    [
+        pytest.param(
+            402,
+            None,
+            "Insufficient credits. Add more using https://openrouter.ai/settings/credits",
+            id="openrouter-402",
+        ),
+        pytest.param(
+            403,
+            None,
+            "Key limit exceeded (monthly limit). Manage it using https://openrouter.ai/settings/keys",
+            id="openrouter-key-limit",
+        ),
+        pytest.param(402, None, "Insufficient Balance", id="deepseek"),
+        pytest.param(429, "1113", "Insufficient balance or no resource package. Please recharge.", id="zai"),
+        pytest.param(429, "1309", "Your GLM Coding Plan package has expired.", id="zai-plan-expired"),
+        pytest.param(429, "1314", "Your enterprise package has expired.", id="zai-package-expired"),
+    ],
+)
+def test_a_used_up_ai_budget_says_so_without_the_providers_billing_text(
+    status_code: int,
+    code: str | None,
+    message: str,
+) -> None:
+    """A provider refusing for lack of credit gets one plain reply, not its own text and billing links."""
+    error = classify_provider_error(message, provider="openrouter", status_code=status_code, code=code)
+    reply = get_user_friendly_error_message(error, "assistant")
+    assert reply.startswith("[assistant] 💳 The AI budget for this MindRoom is used up or its plan has expired")
+    assert "renew the plan" in reply
+    assert "(openrouter)" in reply
+    assert "openrouter.ai" not in reply

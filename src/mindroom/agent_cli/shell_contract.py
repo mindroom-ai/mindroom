@@ -53,6 +53,16 @@ def bound_agent_cli_shell_env(shell_env: AgentCliShellEnv, *, window: str) -> It
         _CURRENT.reset(token)
 
 
+@contextmanager
+def unbound_agent_cli_shell_env() -> Iterator[None]:
+    """Start what is started here without the response's CLI environment, as a terminal that outlives the response."""
+    token = _CURRENT.set(None)
+    try:
+        yield
+    finally:
+        _CURRENT.reset(token)
+
+
 def current_agent_cli_shell_env() -> AgentCliShellEnv | None:
     """Return the CLI environment of the shell command being started, if any."""
     return _CURRENT.get()

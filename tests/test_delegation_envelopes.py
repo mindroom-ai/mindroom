@@ -221,7 +221,7 @@ def _continuation_turns(continuation: str) -> list[list[ScriptStep]]:
     if continuation == "nested_deferred_tool":
         turns.insert(0, calls(tool_call("run_subagent", "nested", agent_name="child", task="Add then list files")))
     if continuation in {"deferred_tool", "nested_deferred_tool"}:
-        turns.append(calls(_deferred_call("list-files", "list_files")))
+        turns.append(calls(_deferred_call("list-files", "ls")))
     if continuation == "preparation_error":
         # The continuation after this switch rebuilds the child, whose model preparation then fails.
         turns.append(
@@ -268,7 +268,7 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"]),
             "child": AgentConfig(
                 display_name="Child",
-                tools=["calculator", {"file": {"defer": True}}, "thread_model"],
+                tools=["calculator", {"filesystem": {"defer": True}}, "thread_model"],
                 delegate_to=["child"],
             ),
         },
@@ -355,7 +355,7 @@ async def test_native_child_finishes_through_its_normal_envelope(  # noqa: PLR09
             for event_path in tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/events.jsonl")
             for line in event_path.read_text().splitlines()
         ]
-        assert any(event["kind"] == "tool_result" and event["data"]["tool_name"] == "list_files" for event in events)
+        assert any(event["kind"] == "tool_result" and event["data"]["tool_name"] == "ls" for event in events)
 
 
 @pytest.mark.asyncio

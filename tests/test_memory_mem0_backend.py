@@ -981,7 +981,7 @@ async def test_conversation_memory_removes_credentials_before_mem0(
     """Mem0 extracts and stores memories from what it is given, so credential-like values are removed first."""
     config.memory.backend = "mem0"
     token = "ghp_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
-    # A line longer than redaction scans is dropped like an unreadable one.
+    # A line longer than redaction scans is dropped.
     oversized = "x" * 70_000
     history = [
         ResolvedVisibleMessage.synthetic(sender="@alice:example.org", body=f"My token is {token}", event_id="$1"),
@@ -995,7 +995,7 @@ async def test_conversation_memory_removes_credentials_before_mem0(
 
     with patch("mindroom.memory._backend.create_memory_instance", return_value=FakeScopedMemory()):
         await store_conversation_memory(
-            # A line redaction cannot read safely, such as an unclosed quote, is dropped without the rest.
+            # A line too long to redact is dropped without the rest; an unclosed quote hides the rest of its line.
             f'The staging token is {token}.\nenv:\n  password:\nSet the DB password: "correct horse\n{oversized}\n'
             "Use API key: my-secret-key for the local endpoint.\nThe launch is Friday.",
             "general",

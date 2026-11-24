@@ -1,4 +1,4 @@
-"""A person's cancel of background jobs from a client, and the jobs a bot leaves behind in a room it left."""
+"""A person's cancel of background jobs from a client or a reply's Stop, and the jobs a bot leaves in a room it left."""
 
 from __future__ import annotations
 
@@ -7,7 +7,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from mindroom.requester_identity import is_managed_entity_id
-from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, describe_job, get_background_runtime
+from mindroom.tool_jobs.runtime import (
+    TERMINAL_STATUSES,
+    describe_job,
+    get_background_runtime,
+    is_workflow_node_job,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -103,13 +108,24 @@ async def cancel_room_jobs(runtime: ToolJobRuntime, *, agent_name: str, room_id:
         await runtime.request_cancel(job.job_id)
 
 
+async def cancel_stopped_reply_jobs(runtime_paths: RuntimePaths, reply_id: str) -> None:
+    """Cancel the jobs a stopped reply started that still await approval, so a later approval runs nothing."""
+    runtime = get_background_runtime(runtime_paths)
+    if runtime is not None:
+        await runtime.cancel_stopped_reply(reply_id)
+
+
 def conversation_jobs(runtime: ToolJobRuntime, *, room_id: str, thread_id: str | None) -> list[BackgroundJob]:
-    """Return the live jobs of every entity in one thread, or in the whole room for ``None``, oldest first."""
+    """Return the live jobs of every entity in one thread, or in the whole room for ``None``, oldest first.
+
+    The jobs of a workflow run's calls are left out: the run is the job a person lists and cancels.
+    """
     return sorted(
         (
             job
             for job in runtime.retained_jobs()
             if job.status not in TERMINAL_STATUSES
+            and not is_workflow_node_job(job)
             and job.owner.room_id == room_id
             and thread_id in {None, job.owner.resolved_thread_id}
         ),
@@ -128,7 +144,7 @@ def jobs_listing(jobs: list[BackgroundJob]) -> str:
     lines = [
         f"- {describe_job(job, short=True)} {_LIVE_STATUS_TEXT[job.status]}, by {job.owner.recipient}" for job in jobs
     ]
-    stop = "Stop one with `!cancel_job <id>`, or all of them with `!cancel_job all`."
+    stop = "Stop one with `/cancel_job <id>`, or all of them with `/cancel_job all`."
     return "Background jobs running here:\n" + "\n".join(lines) + "\n\n" + stop
 
 
@@ -154,7 +170,7 @@ async def cancel_jobs_command(
     if not allowed:
         if prefix is None:
             return "No background jobs to cancel here."
-        return "No running background job here has that ID; `!jobs` lists them."
+        return "No running background job here has that ID; `/jobs` lists them."
     for job in allowed:
         await runtime.request_cancel(job.job_id)
     return "Cancelling " + ", ".join(describe_job(job, short=True) for job in allowed) + "."

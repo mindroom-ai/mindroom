@@ -18,7 +18,9 @@ helm upgrade --install mindroom-client ./cluster/k8s/client \
 
 The default values render a Deployment, Service, a client `config.json` ConfigMap, and an nginx ConfigMap.
 The Deployment carries checksum annotations for both chart-managed ConfigMaps, so config changes roll pods on upgrade.
-For production, pin `image.tag` or `image.digest` instead of the default `latest`.
+The default `image.tag` is a [MindRoom Chat release](https://github.com/mindroom-ai/mindroom-chat/releases) (`vYYYY.M.N`); set `image.tag` or `image.digest` to run another one.
+The pinned tag moves only when someone bumps it in `values.yaml`; new client releases do not update it.
+With a tag that moves, such as `latest`, also set `image.pullPolicy: Always`, because the default `IfNotPresent` keeps the image a node already has.
 
 ## Homeserver Configuration
 
@@ -152,10 +154,11 @@ Set `basePath` to serve the client under a URL prefix instead of the origin root
 basePath: /mindroom
 ```
 
+MindRoom Chat releases do not work under a sub-path yet: their asset URLs and `config.json` request start at `/`, so keep `basePath` at `/` with them.
 The chart-managed nginx config serves the app shell, `config.json`, and the service worker under the base path, redirects `/` and the bare base path to `basePath/`, and resolves hashed build assets referenced from any route depth.
 It also serves `version.json` under the base path without caching so the client can detect and load a newly published build.
-The bundled Element Call under `public/element-call/` resolves to its own `assets/` directory.
-Files under `assets/` and `public/` are cached as immutable, except Element Call's stable files such as its `index.html`, which revalidate on every use.
+Files under `assets/` are cached as immutable because their names change with their content.
+Files under `public/`, such as `public/locales/<lang>.json`, keep their names across releases, so they revalidate on every use; the hashed `public/element-call/assets/` that older images bundle stays immutable.
 Missing files there get no immutable caching header.
 The client always loads `/runtime-config.js` from the origin root, so route the full origin host to this Service even when `basePath` is not `/`.
 The chart serves `/runtime-config.js` directly from nginx because the image entrypoint would otherwise write it into the app directory, which the unprivileged read-only container forbids.
@@ -250,9 +253,11 @@ nginx:
 
 The chart rejects `nginx.serverSnippet` and `nginx.httpSnippet` when the nginx config is not chart-managed, because an external ConfigMap cannot receive the snippet.
 
-The app shell responses send `Content-Security-Policy: frame-ancestors 'self'` and `X-Frame-Options: SAMEORIGIN`, so only the client's own origin can frame the signed-in client.
-The device pairing page at `basePath/connect` sends `frame-ancestors 'none'` and `X-Frame-Options: DENY` instead, so no origin can frame it.
+Every response of the chart-managed nginx sends `Content-Security-Policy: frame-ancestors 'self'` and `X-Frame-Options: SAMEORIGIN`, so only the client's own origin can frame the client and its files, as the client does for its PDF viewer and client plugin pages.
+The device pairing page at `basePath/connect`, in any letter case, sends `frame-ancestors 'none'` and `X-Frame-Options: DENY` instead, so no origin can frame it.
 nginx ignores server-level `add_header` directives in any location that sets its own headers, as the app shell, configuration, and asset locations do, so response headers added through `nginx.serverSnippet` do not reach those responses.
+For the same reason, a location added through `nginx.serverSnippet` that sets its own `add_header` must repeat both framing headers.
+Response headers added through `nginx.httpSnippet` reach no response, because the server block sets its own framing headers.
 
 ## Custom nginx Config
 
@@ -271,6 +276,7 @@ When `rootServiceWorkerCleanup.enabled` is true, the same ConfigMap must also pr
 ## Notes
 
 - The chart does not create ingress, TLS, or a Matrix homeserver.
+- The chart runs nginx without the image's start scripts and replaces its nginx config, so an image must be based on the official nginx image and serve its build from `/usr/share/nginx/html`, where the chart mounts `config.json`.
 - The container runs as the unprivileged nginx user with a read-only root filesystem, so `nginx.port` must stay at 1024 or higher unless you grant extra privileges through `securityContext` or lower `net.ipv4.ip_unprivileged_port_start`.
 - The chart-managed nginx ConfigMap also replaces the image's main `nginx.conf`: nginx logs only warnings and errors, and the config sets the `user` directive, which only a root master can apply, only when `podSecurityContext` and `securityContext` may run nginx as root.
   With `nginx.existingConfigMap`, nginx keeps the image's main config.

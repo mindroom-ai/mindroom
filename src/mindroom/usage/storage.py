@@ -10,7 +10,7 @@ from mindroom.llm.runs import TeamRunRecord
 from mindroom.llm.usage import TOKEN_FIELDS, RequestUsage, TokenCounts
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     from mindroom.llm.messages import Message
     from mindroom.llm.runs import AnyRunRecord
@@ -20,6 +20,7 @@ if TYPE_CHECKING:
 COMPACTED_REQUESTS_METADATA_KEY = "mindroom_compacted_requests"
 
 type IndependentUsageKind = Literal[
+    "call_transcript",
     "claude_agent",
     "compaction_summary",
     "memory_auto_flush",
@@ -36,6 +37,7 @@ type IndependentUsageKind = Literal[
     "schedule_parse",
     "team_mode",
     "thread_summary",
+    "voice_dictation",
     "voice_normalization",
     "voice_transcription",
 ]
@@ -54,7 +56,7 @@ def run_usage_snapshot(record: AnyRunRecord, *, kind: IndependentUsageKind | Non
     """Return the ledger snapshot of ``record``'s usage, without the times of the save that records it.
 
     It keeps the run's attribution, its requester, its token counters in total and per model, and its requests: those
-    mid-turn compaction carried out of its messages, then those its messages answered (``message_request_snapshot``),
+    mid-turn compaction carried out of its messages, then those its messages answered (``_message_request_snapshot``),
     never conversation content. A run resumed from a row worker code wrote can hold values of any shape: an
     attribution value that is not a scalar is left out, and a parent or a counter of another shape becomes ``False``
     for the reporter (``project_token_counters``). ``kind`` records the run as that helper, as a turn no requester
@@ -79,7 +81,7 @@ def run_usage_snapshot(record: AnyRunRecord, *, kind: IndependentUsageKind | Non
     if isinstance(requester, str):
         snapshot["metadata"] = {"requester_id": requester}
     snapshot["metrics"] = {} if record.metrics is None else _project_run_metrics(record.metrics)
-    requests = (message_request_snapshot(message) for message in record.messages)
+    requests = (_message_request_snapshot(message) for message in record.messages)
     snapshot["requests"] = [
         *_carried_requests(record, metadata),
         *(request for request in requests if request is not None),
@@ -95,7 +97,7 @@ def request_usage(message: Message) -> RequestUsage | None:
     That is an assistant message of the run that holds it, not a history copy, that reported token counters, unless
     they sum a retried request's attempts, which describe no one request. Its model is the one its provenance stamp
     records; a message stored before stamps existed and a stamp of another shape name none alike, which
-    ``message_request_snapshot`` tells apart.
+    ``_message_request_snapshot`` tells apart.
     """
     provider_data = _provider_data(message)
     if (
@@ -112,7 +114,7 @@ def request_usage(message: Message) -> RequestUsage | None:
     )
 
 
-def message_request_snapshot(message: Message) -> dict[str, object] | None:
+def _message_request_snapshot(message: Message) -> dict[str, object] | None:
     """Return the ledger snapshot of the request ``message`` answered (``request_usage``), or None when it is not one.
 
     A provenance stamp of another shape, as a row worker code wrote can hold, stays visible to the reporter as invalid
@@ -150,6 +152,25 @@ def _carried_requests(record: AnyRunRecord, metadata: Mapping[str, object]) -> l
         if entry.get("message_id") not in saved:
             requests.append({key: value for key, value in entry.items() if key != "message_id"})
     return requests
+
+
+def carry_request_usage(record: AnyRunRecord, folded: Sequence[Message]) -> None:
+    """Keep the usage of folded requests in the run, since their messages leave it.
+
+    Each request keeps its message id, so a run that still saves that message (a reply that failed afterwards) is not
+    counted twice.
+    """
+    requests = [
+        {**request, "message_id": message.id}
+        for message in folded
+        if (request := _message_request_snapshot(message)) is not None
+    ]
+    if not requests:
+        return
+    metadata = dict(record.metadata or {})
+    carried = metadata.get(COMPACTED_REQUESTS_METADATA_KEY)
+    metadata[COMPACTED_REQUESTS_METADATA_KEY] = [*(carried if isinstance(carried, list) else []), *requests]
+    record.metadata = metadata
 
 
 def helper_usage_snapshot(

@@ -9,10 +9,11 @@ without booting an orchestrator or syncing with Matrix.
 from __future__ import annotations
 
 import asyncio
+import gc
 import html
 import inspect
 import json
-from contextlib import asynccontextmanager, contextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, nullcontext, suppress
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from functools import partial
@@ -52,6 +53,7 @@ from mindroom.config.main import Config
 from mindroom.config.mid_turn import MidTurnConfig
 from mindroom.config.models import ModelConfig
 from mindroom.constants import (
+    CONTINUED_RUNS_METADATA_KEY,
     MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
     STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
@@ -103,10 +105,12 @@ from mindroom.final_delivery import (
     TurnEnding,
     TurnProgress,
 )
-from mindroom.history.storage import new_scope_session
+from mindroom.history.run_checkpoint import save_run_checkpoint
+from mindroom.history.storage import new_scope_session, remove_history_of_redacted_events
 from mindroom.history.types import HistoryScope
 from mindroom.llm.events import TextDelta
 from mindroom.llm.media import Image
+from mindroom.llm.messages import Message
 from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus, TeamRunRecord, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.matrix import typing as typing_module
@@ -115,7 +119,7 @@ from mindroom.matrix.state import MatrixState
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.media_inputs import MediaInputs
 from mindroom.message_target import MessageTarget, ResponseLifecycleKey
-from mindroom.mid_turn import MidTurnGate, QueuedMessage
+from mindroom.mid_turn import MidTurnGate, MidTurnMode, MidTurnOutcome, QueuedMessage
 from mindroom.post_response_effects import PostResponseEffectsDeps, ResponseOutcome, apply_post_response_effects
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
 from mindroom.reply_turn.enrichment import prepare_memory_and_model_context
@@ -140,9 +144,9 @@ from mindroom.response_turn import (
     ResponsePausedForApproval,
     ResponseTurnContext,
     TurnSinks,
+    build_matrix_run_metadata,
     stream_response_turn,
 )
-from mindroom.room_model_overrides import set_room_model_override
 from mindroom.runtime_shutdown import (
     ENTITY_REMOVED_SHUTDOWN,
     ORDERLY_SHUTDOWN,
@@ -168,15 +172,22 @@ from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import follow_up_envelope
 from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.approval_exemptions import register_tool_approval_exemption
-from mindroom.tool_system.events import StructuredStreamChunk, ToolTraceEntry, format_tool_started_event
+from mindroom.tool_system.events import (
+    StructuredStreamChunk,
+    ToolTraceEntry,
+    format_tool_started_event,
+    tool_markers_in_text,
+)
 from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.turn_model import TurnModel
+from mindroom.turn_origin import SenderKind, TurnIntent
 from mindroom.turn_policy import PreparedDispatch
 from mindroom.turn_record import TurnRecord
 from mindroom.turn_store import SourcePreparation
+from tests.access_schema_support import OBSERVER_USER_ID, refresh_memberships
 from tests.approval_card_helpers import resolve_card_event
 from tests.approval_continuation_helpers import (
     advance_continuation,
@@ -190,7 +201,6 @@ from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
     SETTLE_TIMEOUT_SECONDS,
     FakeApprovalTransport,
-    initialize_approval_store_for_test,
     install_model_providers,
     live_turn_claim,
     live_turn_tools_for_test,
@@ -220,6 +230,7 @@ from tests.response_runner_helpers import (
     stream_transport,
     streamed_answer,
 )
+from tests.room_settings_helpers import set_room_model_override
 from tests.scripted_agent_helpers import stored_runs
 from tests.streaming_helpers import FakeReplyRecords
 from tests.test_agent_tool_calls import _catalog
@@ -233,7 +244,7 @@ from tests.test_response_turn import (
 from tests.tool_approval_helpers import gated_functions
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Coroutine, Iterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Mapping, Sequence
     from pathlib import Path
     from typing import Literal
 
@@ -244,7 +255,7 @@ if TYPE_CHECKING:
     from mindroom.hooks import MessageEnvelope
     from mindroom.judgment.state import JudgmentRequest
     from mindroom.reply_scope import ReplyRuntime, SpanHandle
-    from mindroom.response_lifecycle import ResponseLifecycle, _QueuedMessageState
+    from mindroom.response_lifecycle import ResponseLifecycle, _Conversation
     from mindroom.response_runner import ResponseRunner
     from mindroom.response_sources import SourceFate
     from mindroom.streaming import ProgressPublisher
@@ -522,14 +533,11 @@ async def _ended_with_its_note(runner: ResponseRunner, request: ResponseRequest)
 async def _begin_locked_turn_in_span(
     runner: ResponseRunner,
     request: ResponseRequest,
-    *,
-    resolved_target: MessageTarget,
 ) -> ResponseRequest | SourceFate:
     """Admit and prepare ``request`` inside a span scope, as its locked lifecycle does."""
     async with runner.deps.replies.span_scope():
         return await runner._begin_locked_turn(
             request,
-            resolved_target=resolved_target,
             history_scope=runner.deps.state_writer.history_scope(),
         )
 
@@ -574,7 +582,7 @@ def _ordered_pause(paused: PausedAttempt) -> PausedAttempt:
     for index, tool in enumerate(paused.tools, start=1):
         marker, entry = format_tool_started_event(tool.call, tool_index=index)
         assert entry is not None
-        body += marker
+        body += f"{marker}\n\n"
         trace.append(entry)
     return replace(paused, response_text=body.strip(), tool_trace=tuple(trace))
 
@@ -1331,7 +1339,13 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
 
     refresh_calls = 0
 
-    async def fake_fetch(room_id: str, thread_id: str) -> ThreadHistoryResult:
+    async def fake_fetch(
+        room_id: str,
+        thread_id: str,
+        *,
+        requester_id: str | None = None,
+    ) -> ThreadHistoryResult:
+        del requester_id
         nonlocal refresh_calls
         assert (room_id, thread_id) == ("!room:localhost", "$thread")
         refresh_calls += 1
@@ -1447,7 +1461,7 @@ async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycl
         room_id=grant_room_id,
     )
     memberships = runner.deps.runtime.agent_reply_memberships
-    await memberships.refresh(config, runner.deps.runtime_paths, membership_client)
+    await refresh_memberships(memberships, config, runner.deps.runtime_paths, membership_client)
 
     first_started = asyncio.Event()
     release_first = asyncio.Event()
@@ -1503,7 +1517,7 @@ async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycl
             config,
             grant_room_id,
             leave,
-            control_user_id="@mindroom_router:localhost",
+            control_user_id=OBSERVER_USER_ID,
         )
         if uncertain:
             memberships.invalidate(config, reason="uncertain_sync_response")
@@ -1514,7 +1528,7 @@ async def test_queued_response_rechecks_room_membership_after_acquiring_lifecycl
             with pytest.raises(ReplyMembershipPendingError):
                 await asyncio.wait_for(second, timeout=2)
             assert model_sources == ["$first"]
-            await memberships.refresh(config, runner.deps.runtime_paths, membership_client)
+            await refresh_memberships(memberships, config, runner.deps.runtime_paths, membership_client)
             assert await runner.generate_response(second_request) == Owned()
         else:
             # The revoked request leaves its source for its caller to settle.
@@ -1603,7 +1617,7 @@ async def test_final_source_gate_uses_refreshed_history_without_repeating_lifecy
         prepare_source_turn=prepare,
         on_lifecycle_lock_acquired=acquired,
     )
-    prepared = await _begin_locked_turn_in_span(runner, request, resolved_target=target)
+    prepared = await _begin_locked_turn_in_span(runner, request)
     assert [item.args[0] for item in prepare.await_args_list] == [[], history]
     acquired.assert_called_once_with()
     if final_result is True:
@@ -1639,7 +1653,7 @@ async def test_begin_locked_turn_waits_for_cancelled_source_preparation(tmp_path
         prepare_source_turn=prepare_source_turn,
     )
     preparation_task = asyncio.create_task(
-        _begin_locked_turn_in_span(runner, request, resolved_target=target),
+        _begin_locked_turn_in_span(runner, request),
     )
     await asyncio.wait_for(preparation_started.wait(), timeout=2)
 
@@ -1919,6 +1933,166 @@ def test_a_replay_account_lists_finished_and_running_tools_without_team_chrome(t
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("attempts", "natively"), [(1, True), (2, True), (3, False)])
+async def test_a_replay_continues_from_its_recovered_run_until_the_turn_keeps_being_interrupted(
+    tmp_path: Path,
+    attempts: int,
+    natively: bool,
+) -> None:
+    """A replay recovers its interrupted run until a third interruption; its prompt lists the recorded calls either way."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    scope = runner.deps.state_writer.history_scope()
+    storage = runner.deps.state_writer.create_storage(None)
+    call = {"id": "count", "type": "function", "function": {"name": "counter", "arguments": "{}"}}
+    checkpoint = RunRecord(
+        run_id="run-1",
+        session_id="session-1",
+        agent_id=scope.scope_id,
+        messages=[Message(role="user", content="hello"), Message(role="assistant", tool_calls=[call])],
+        metadata=build_matrix_run_metadata("$source", []),
+    )
+    await save_run_checkpoint(storage, new_scope_session(session_id="session-1", scope=scope), checkpoint)
+    finished = ToolTraceEntry(type="tool_call_completed", tool_name="counter", args_preview="{}", result_preview="1")
+    handle = SimpleNamespace(
+        span=SimpleNamespace(kind=rl.SpanKind.REPLAY),
+        resumed=None,
+        runtime=SimpleNamespace(
+            interrupted_tool_calls=AsyncMock(return_value=(finished,)),
+            restart_interruptions=AsyncMock(return_value=attempts),
+        ),
+    )
+
+    with patch("mindroom.response_runner.current_span", return_value=handle):
+        replayed = await runner._with_interrupted_attempt(
+            _plain_request(_target(), source_event_id="$source"),
+            session_id="session-1",
+            history_scope=scope,
+            execution_identity=None,
+        )
+
+    stored = storage.get_run("run-1")
+    assert stored is not None
+    assert stored.status is (RunStatus.completed if natively else RunStatus.cancelled)
+    assert [message.role for message in stored.messages] == ["user", "assistant", *(["tool"] if natively else [])]
+    # History may trim or fold the recovered run like any other, so the account never relies on it.
+    account = html.unescape(replayed.model_prompt or "")
+    assert 'The `counter` tool finished with input preview "{}" and output preview "1".' in account
+    assert "their effects stand: do not call a finished tool with side effects again" in account
+    assert "conversation above" not in account
+    # The turn's runs name its earlier attempt, recovered or not, so the answer links it.
+    assert (replayed.matrix_run_metadata or {}).get(CONTINUED_RUNS_METADATA_KEY) == ["run-1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("restarts", "recovers"), [(1, True), (0, False)], ids=["retry", "new edit"])
+async def test_a_regeneration_a_restart_cut_short_continues_from_its_recovered_run_and_a_new_one_starts_fresh(
+    tmp_path: Path,
+    restarts: int,
+    recovers: bool,
+) -> None:
+    """The retry of an edit's regeneration recovers that edit's attempt; a regeneration nothing interrupted does not."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    scope = runner.deps.state_writer.history_scope()
+    storage = runner.deps.state_writer.create_storage(None)
+    call = {"id": "count", "type": "function", "function": {"name": "counter", "arguments": "{}"}}
+    checkpoint = RunRecord(
+        run_id="run-1",
+        session_id="session-1",
+        agent_id=scope.scope_id,
+        messages=[Message(role="user", content="hello"), Message(role="assistant", tool_calls=[call])],
+        metadata=build_matrix_run_metadata("$source", []),
+    )
+    await save_run_checkpoint(storage, new_scope_session(session_id="session-1", scope=scope), checkpoint)
+    handle = SimpleNamespace(
+        span=SimpleNamespace(kind=rl.SpanKind.REGENERATION),
+        resumed=None,
+        runtime=SimpleNamespace(
+            interrupted_tool_calls=AsyncMock(return_value=()),
+            restart_interruptions=AsyncMock(return_value=restarts),
+        ),
+    )
+    request = replace(
+        _plain_request(_target(), source_event_id="$edit"),
+        sources=ResponseSources(pending_event_ids=("$edit",), logical_source_event_ids=("$source",)),
+    )
+
+    with patch("mindroom.response_runner.current_span", return_value=handle):
+        regenerated = await runner._with_interrupted_attempt(
+            request,
+            session_id="session-1",
+            history_scope=scope,
+            execution_identity=None,
+        )
+
+    stored = storage.get_run("run-1")
+    assert stored is not None
+    assert stored.status is (RunStatus.completed if recovers else RunStatus.cancelled)
+    assert (regenerated.matrix_run_metadata or {}).get(CONTINUED_RUNS_METADATA_KEY) == (["run-1"] if recovers else None)
+
+
+@pytest.mark.asyncio
+async def test_redacting_a_replayed_reply_removes_the_recovered_attempt_it_continued(tmp_path: Path) -> None:
+    """The reply's message links the run that answered and the recovered runs it continued, so a redaction cuts both."""
+    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
+    scope = runner.deps.state_writer.history_scope()
+    storage = runner.deps.state_writer.create_storage(None)
+    call = {"id": "count", "type": "function", "function": {"name": "counter", "arguments": "{}"}}
+    checkpoint = RunRecord(
+        run_id="run-1",
+        session_id="session-1",
+        agent_id=scope.scope_id,
+        messages=[Message(role="user", content="hello"), Message(role="assistant", tool_calls=[call])],
+        metadata=build_matrix_run_metadata("$source", []),
+    )
+    await save_run_checkpoint(storage, new_scope_session(session_id="session-1", scope=scope), checkpoint)
+    handle = SimpleNamespace(
+        span=SimpleNamespace(kind=rl.SpanKind.REPLAY),
+        resumed=None,
+        runtime=SimpleNamespace(
+            interrupted_tool_calls=AsyncMock(return_value=()),
+            restart_interruptions=AsyncMock(return_value=1),
+        ),
+    )
+    with patch("mindroom.response_runner.current_span", return_value=handle):
+        replayed = await runner._with_interrupted_attempt(
+            _plain_request(_target(), source_event_id="$source"),
+            session_id="session-1",
+            history_scope=scope,
+            execution_identity=None,
+        )
+    # The replay's run stores the turn's metadata, and its delivered answer is linked to it.
+    session = storage.load_session("session-1")
+    assert session is not None
+    answer_run = RunRecord(
+        run_id="run-2",
+        session_id="session-1",
+        agent_id=scope.scope_id,
+        status=RunStatus.completed,
+        messages=[Message(role="user", content="hello"), Message(role="assistant", content="answer")],
+        metadata=build_matrix_run_metadata("$source", [], extra_metadata=replayed.matrix_run_metadata),
+    )
+    assert storage.save_run(session, answer_run, record_usage=True) == "written"
+
+    await runner.deps.state_writer.apersist_response_event_id_in_session_run(
+        execution_identity=None,
+        scope=scope,
+        session_id="session-1",
+        run_id="run-2",
+        response_event_id="$reply",
+    )
+
+    async def redacted(event_ids: tuple[str, ...]) -> dict[str, str | None]:
+        return {"$reply": None} if "$reply" in event_ids else {}
+
+    linked = storage.load_session("session-1")
+    assert linked is not None
+    assert await remove_history_of_redacted_events(storage, linked, redacted) == ["$reply"]
+    remaining = storage.load_session("session-1")
+    assert remaining is not None
+    assert remaining.runs == []
+
+
+@pytest.mark.asyncio
 async def test_claimed_approval_generic_interruption_keeps_generic_marker(tmp_path: Path) -> None:
     """A generic cancellation preserves its provenance instead of claiming a restart."""
     runner_bot = _bot(tmp_path)
@@ -2090,7 +2264,6 @@ async def test_final_recovery_error_fences_current_claim(tmp_path: Path, *, canc
             with pytest.raises(asyncio.CancelledError):
                 await runner._run_owned_or_locked_response(
                     _plain_request(_target(thread_id="$thread"), source_event_id="$source"),
-                    target=_target(thread_id="$thread"),
                     locked_operation=AsyncMock(),
                 )
         else:
@@ -2098,7 +2271,6 @@ async def test_final_recovery_error_fences_current_claim(tmp_path: Path, *, canc
             assert (
                 await runner._run_owned_or_locked_response(
                     _plain_request(_target(thread_id="$thread"), source_event_id="$source"),
-                    target=_target(thread_id="$thread"),
                     locked_operation=AsyncMock(),
                 )
                 == Owned()
@@ -2127,7 +2299,6 @@ async def test_a_placeholder_its_reply_refuses_is_not_sent_and_the_turn_goes_on(
             )
             placeholder_event_id = await runner._send_placeholder(
                 request,
-                resolved_target=target,
                 history_scope=runner.deps.state_writer.history_scope(),
                 execution_identity=runner.deps.tool_runtime.build_execution_identity(
                     target=target,
@@ -2189,11 +2360,10 @@ async def test_claimed_request_preparation_excludes_early_placeholder_from_refre
     # The locked turn claims its reply span in the scope every response opens.
     async with runner.deps.replies.span_scope():
         history_scope = runner.deps.state_writer.history_scope()
-        admitted = await runner._admit_locked_turn(request, resolved_target=target, history_scope=history_scope)
+        admitted = await runner._admit_locked_turn(request, history_scope=history_scope)
         assert isinstance(admitted, ResponseRequest)
         placeholder_event_id = await runner._send_placeholder(
             admitted,
-            resolved_target=target,
             history_scope=history_scope,
             execution_identity=runner.deps.tool_runtime.build_execution_identity(
                 target=target,
@@ -2204,7 +2374,6 @@ async def test_claimed_request_preparation_excludes_early_placeholder_from_refre
         assert placeholder_event_id == "$placeholder"
         prepared_request = await runner._prepare_claimed_request(
             admitted,
-            resolved_target=target,
             placeholder_event_id=placeholder_event_id,
         )
 
@@ -2407,7 +2576,6 @@ async def test_replayed_source_adopts_journal_owned_approval_continuation(tmp_pa
     assert (
         await runner._run_owned_or_locked_response(
             request,
-            target=request.response_envelope.target,
             locked_operation=locked_operation,
         )
         == Owned()
@@ -2433,7 +2601,7 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
     follow_up_started = asyncio.Event()
     release_follow_up = asyncio.Event()
 
-    async def active_follow_up(_target: MessageTarget) -> SourceFate:
+    async def active_follow_up() -> SourceFate:
         follow_up_started.set()
         await release_follow_up.wait()
         return Owned()
@@ -2447,23 +2615,23 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
     )
     await asyncio.wait_for(follow_up_started.wait(), timeout=1.0)
     lifecycle = runner.lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal = lifecycle._conversation_for(target)
     resume_entered = asyncio.Event()
     begin_response_turn_notice = lifecycle._begin_response_turn_notice
     run_approval_continuation = AsyncMock(return_value=False)
 
     def observe_response_turn_start(
         *,
-        lifecycle_lock: asyncio.Lock,
-        queued_signal: _QueuedMessageState,
+        conversation: _Conversation,
         response_envelope: MessageEnvelope,
         signal_queued_message: bool,
+        mid_turn_mode: MidTurnMode = MidTurnMode.AUTO,
     ) -> str | None:
         notice = begin_response_turn_notice(
-            lifecycle_lock=lifecycle_lock,
-            queued_signal=queued_signal,
+            conversation=conversation,
             response_envelope=response_envelope,
             signal_queued_message=signal_queued_message,
+            mid_turn_mode=mid_turn_mode,
         )
         if response_envelope.source_event_id == "$source":
             resume_entered.set()
@@ -2491,6 +2659,44 @@ async def test_approval_resume_queued_behind_follow_up_does_not_signal_human_inp
 
 
 @pytest.mark.asyncio
+async def test_a_resumed_approval_answers_the_event_its_paused_turn_answered(tmp_path: Path) -> None:
+    """A routed turn's source is its hidden route; its tools and what its reply sends answer the person's message."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    store = runner.deps.replies.store
+    await _admit_approval_source(store)
+    tool_runtime = runner.deps.tool_runtime
+    continuation = approval_continuation(
+        approval_id="approval-routed",
+        run_id="run-paused",
+        reply_to_event_id="$person",
+    )
+    continuation = replace(
+        continuation,
+        execution_identity=tool_runtime.build_execution_identity(
+            target=continuation_target(continuation),
+            user_id=continuation.requester_id,
+        ),
+    )
+    assert await paused_for_approval(store, continuation) == continuation
+    await bot._take_over_replies()
+
+    async def continue_run(*_args: object, **_kwargs: object) -> CompletedApprovalRun:
+        return CompletedApprovalRun(response_text="done", metadata_content={})
+
+    deliver_final = AsyncMock(return_value=completed_outcome())
+    with (
+        patch.object(tool_runtime, "build_turn_context", wraps=tool_runtime.build_turn_context) as tool_context,
+        patch("mindroom.approval.execution.AgentApprovalExecution.continue_run", new=continue_run),
+        patch.object(DeliveryGateway, "deliver_final", new=deliver_final),
+    ):
+        await runner._resume_approval_source("$source")
+
+    assert [call.args[0].reply_to_event_id for call in tool_context.call_args_list] == ["$person"]
+    assert [call.args[0].target.reply_to_event_id for call in deliver_final.await_args_list] == ["$person"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("revoked_layer", ["room", "entity", "pending"])
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_ready_approval_replay_rechecks_current_authorization(
@@ -2515,7 +2721,8 @@ async def test_ready_approval_replay_rechecks_current_authorization(
         membership_client = AsyncMock(spec=nio.AsyncClient)
         membership_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[])
         if revoked_layer == "room":
-            await runner.deps.runtime.agent_reply_memberships.refresh(
+            await refresh_memberships(
+                runner.deps.runtime.agent_reply_memberships,
                 runner.deps.runtime.config,
                 runner.deps.runtime_paths,
                 membership_client,
@@ -2538,7 +2745,6 @@ async def test_ready_approval_replay_rechecks_current_authorization(
             with pytest.raises(ReplyMembershipPendingError):
                 await runner._run_owned_or_locked_response(
                     request,
-                    target=request.response_envelope.target,
                     locked_operation=AsyncMock(side_effect=AssertionError("approval source regenerated")),
                 )
             assert await runner.deps.approval_store.approval_continuation(continuation.approval_id) == continuation
@@ -2546,14 +2752,14 @@ async def test_ready_approval_replay_rechecks_current_authorization(
             settle_failure.assert_not_awaited()
             execute.assert_not_awaited()
             # The same owned source becomes a definitive denial after refresh.
-            await runner.deps.runtime.agent_reply_memberships.refresh(
+            await refresh_memberships(
+                runner.deps.runtime.agent_reply_memberships,
                 runner.deps.runtime.config,
                 runner.deps.runtime_paths,
                 membership_client,
             )
         fate = await runner._run_owned_or_locked_response(
             request,
-            target=request.response_envelope.target,
             locked_operation=AsyncMock(return_value=Unclaimed(UnclaimedReason.NOTHING_TO_RUN)),
         )
 
@@ -2615,7 +2821,6 @@ async def test_ready_team_approval_rechecks_every_persisted_member(tmp_path: Pat
     ):
         fate = await runner._run_owned_or_locked_response(
             request,
-            target=request.response_envelope.target,
             locked_operation=AsyncMock(return_value=Unclaimed(UnclaimedReason.NOTHING_TO_RUN)),
         )
 
@@ -2657,7 +2862,6 @@ async def test_incomplete_resume_failure_keeps_the_source_unhandled(tmp_path: Pa
     ):
         fate = await runner._run_owned_or_locked_response(
             request,
-            target=request.response_envelope.target,
             locked_operation=AsyncMock(return_value=Unclaimed(UnclaimedReason.NOTHING_TO_RUN)),
         )
 
@@ -2891,8 +3095,9 @@ async def test_approval_collaborators_read_live_config_after_hot_reload(tmp_path
             paused_answer=PausedAnswer(),
             tool_context=turn_tool_context(runner.deps.runtime.config, runner.deps.runtime_paths, identity),
             tool_trace_collector=[],
-            typing_log_context={},
+            quiet=False,
             progress=None,
+            system_enrichment_items=(),
         )
 
 
@@ -2919,41 +3124,6 @@ async def test_missing_approver_records_explicit_fail_closed_reason(tmp_path: Pa
     assert plan.calls[0].decision is ApprovalDecision.DENIED
     assert plan.calls[0].reason == NO_APPROVER_REASON
     assert plan.calls[0].human_approval_required is True
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("router_missing", [True, False])
-async def test_missing_router_denies_a_gated_call_so_the_agent_can_invite_it(
-    tmp_path: Path,
-    router_missing: bool,
-) -> None:
-    """A card cannot reach a room without the router, so the run resumes with a denial that says how to recover."""
-    runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    initialize_approval_store_for_test(runner.deps.runtime_paths, router_missing=lambda _room_id: router_missing)
-    tool = ToolExecution(tool_call_id="call-1", tool_name="dangerous", tool_args={})
-
-    with (
-        patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
-        patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
-    ):
-        plan = await plan_approval_calls(
-            ((tool, "general"),),
-            config=runner.deps.runtime.config,
-            runtime_paths=runner.deps.runtime_paths,
-            requester_id="@user:localhost",
-            toolkit_owners={("general", "dangerous"): "test_toolkit"},
-            room_id="!room:test",
-            thread_id="$thread",
-        )
-
-    if router_missing:
-        assert plan.calls[0].decision is ApprovalDecision.DENIED
-        assert plan.calls[0].reason is not None
-        assert "call `invite_router`" in plan.calls[0].reason
-        assert plan.waiting_text is None
-    else:
-        assert plan.calls[0].decision is None
-        assert plan.waiting_text == "Waiting for approval: `dangerous`"
 
 
 @pytest.mark.asyncio
@@ -3132,7 +3302,7 @@ async def test_automatic_pause_publishes_ordered_tools_and_wakes_continuation(tm
     )
     runner = unwrap_extracted_collaborator(bot._response_runner)
     await _admit_approval_source(runner.deps.replies.store)
-    request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
+    request = _plain_request(_target(thread_id="$thread", reply_to_event_id="$person"), source_event_id="$source")
     paused = _ordered_pause(
         PausedAttempt(
             session_id="session-1",
@@ -3183,6 +3353,10 @@ async def test_automatic_pause_publishes_ordered_tools_and_wakes_continuation(tm
     assert edit_request.tool_trace == list(paused.tool_trace)
     send_text.assert_not_awaited()
     retry_sources.assert_called_once_with(request.room_id, ("$source",))
+    # The pause keeps the event its turn answers, which is not its source when a steward routed the turn.
+    continuation = await runner.deps.approval_store.approval_continuation_for_source("$source")
+    assert continuation is not None
+    assert continuation.reply_to_event_id == "$person"
     assert outcome.final_visible_body == paused.response_text
     assert outcome.delivery_kind == "edited"
     assert outcome.extra_content == {STREAM_STATUS_KEY: STREAM_STATUS_PENDING}
@@ -3778,7 +3952,8 @@ def _approval_reply_edits(client: AsyncClient) -> list[tuple[str, str]]:
     for call in client.room_send.call_args_list:
         content = call.kwargs["content"]
         if content.get("m.relates_to", {}).get("event_id") == "$waiting" and "m.new_content" in content:
-            edits.append((content["m.new_content"][STREAM_STATUS_KEY], content["m.new_content"]["body"]))
+            shown = content["m.new_content"]
+            edits.append((shown[STREAM_STATUS_KEY], tool_markers_in_text(shown)["body"]))
     return edits
 
 
@@ -4147,6 +4322,7 @@ async def test_chained_pause_persists_and_publishes_only_human_gated_calls(
     assert edit_request.tool_trace == list(committed_trace)
     assert edit_request.extra_content == {
         STREAM_STATUS_KEY: STREAM_STATUS_APPROVAL_PENDING if expected_text else STREAM_STATUS_PENDING,
+        "io.mindroom.ai_run": {"version": 1, "model": {"config": "large"}},
     }
     assert [
         awaited.kwargs["tool_name"] for awaited in approval_store.prepare_reply_card.await_args_list
@@ -4562,7 +4738,7 @@ async def test_acknowledged_final_wins_cancellation_before_delivery_returns(tmp_
         )
         raise asyncio.CancelledError
 
-    lifecycle = MagicMock(finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
+    lifecycle = MagicMock(start_turn=AsyncMock(), finalize=AsyncMock(side_effect=lambda outcome, **_kwargs: outcome))
     async with resumed_approval(bot, continuation) as claimed:
         with (
             patch.object(runner.approvals, "_execute_claimed_approval", side_effect=acknowledge_then_cancel),
@@ -4615,7 +4791,6 @@ async def test_acknowledged_final_wins_cancellation_after_lifecycle_delivery(tmp
     ):
         fate = await runner._run_owned_or_locked_response(
             request,
-            target=request.response_envelope.target,
             locked_operation=AsyncMock(return_value=Unclaimed(UnclaimedReason.NOTHING_TO_RUN)),
         )
 
@@ -4835,17 +5010,18 @@ async def test_continuation_tool_context_preserves_original_correlation_id(tmp_p
         _plain_request(_target(thread_id="$thread"), source_event_id="$source"),
         correlation_id="correlation-original",
     )
-    observed: list[str | None] = []
+    observed: list[tuple[str | None, str]] = []
     receipts: list[str] = []
     progress = AsyncMock()
     forwarded_progress: list[object] = []
 
     def build_turn_context(
         *_args: object,
-        correlation_id: str | None = None,
+        correlation_id: str | None,
+        turn_id: str,
         **_kwargs: object,
     ) -> ToolRuntimeContext:
-        observed.append(correlation_id)
+        observed.append((correlation_id, turn_id))
         return turn_tool_context(runner.deps.runtime.config, runner.deps.runtime_paths, identity)
 
     async def continue_run(*_args: object, **kwargs: object) -> CompletedApprovalRun:
@@ -4874,7 +5050,8 @@ async def test_continuation_tool_context_preserves_original_correlation_id(tmp_p
                 cli_approval_handler=None,
             )
 
-    assert observed == ["correlation-original"]
+    # The resumed reply's tools run under the turn ID its request carries, the paused turn's.
+    assert observed == [("correlation-original", request.turn_id)]
     assert forwarded_progress == [progress]
     assert receipts == [
         "[SYSTEM NOTICE — TOOL APPROVAL RECEIPT] This trusted MindRoom runtime receipt records how "
@@ -6032,8 +6209,8 @@ async def test_response_lifecycle_reservation_is_not_its_own_queued_human_turn()
     observed_pending: list[int] = []
     observed_active_turns: list[int] = []
 
-    async def locked_operation(_target: MessageTarget) -> str:
-        queued_signal = coordinator._get_or_create_queued_signal(envelope.target)
+    async def locked_operation() -> str:
+        queued_signal = coordinator._conversation_for(envelope.target)
         observed_pending.append(queued_signal.pending_human_messages)
         observed_active_turns.append(queued_signal._active_response_turns)
         return "interactive"
@@ -6061,7 +6238,7 @@ async def test_queued_lifecycle_reservation_preserves_notice_for_older_active_re
     first_entered = asyncio.Event()
     release_first = asyncio.Event()
 
-    async def first_operation(_target: MessageTarget) -> str:
+    async def first_operation() -> str:
         first_entered.set()
         await release_first.wait()
         return "first"
@@ -6076,7 +6253,7 @@ async def test_queued_lifecycle_reservation_preserves_notice_for_older_active_re
     )
     await first_entered.wait()
     reservation = await coordinator.reserve_response_lifecycle(second_envelope)
-    queued_signal = coordinator._get_or_create_queued_signal(second_envelope.target)
+    queued_signal = coordinator._conversation_for(second_envelope.target)
     assert {message.event_id for message in queued_signal.pending_message_snapshot()} == {"$second"}
 
     with response_lifecycle_reservation_context(reservation):
@@ -6085,7 +6262,7 @@ async def test_queued_lifecycle_reservation_preserves_notice_for_older_active_re
                 target=second_envelope.target,
                 response_envelope=second_envelope,
                 pipeline_timing=None,
-                locked_operation=lambda _target: asyncio.sleep(0, result="second"),
+                locked_operation=lambda: asyncio.sleep(0, result="second"),
             ),
         )
 
@@ -6100,12 +6277,15 @@ async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_
     """Cancelling a queued reservation removes it without stealing the released lock."""
     coordinator = ResponseLifecycleCoordinator()
     envelope = _queued_envelope("$interactive")
-    lifecycle_lock = coordinator._response_lifecycle_lock(envelope.target)
+    queued_signal = coordinator._conversation_for(envelope.target)
+    lifecycle_lock = queued_signal.lock
+    # The running reply this reservation queues behind.
+    queued_signal.begin_response_turn()
     await lifecycle_lock.acquire()
     reservation = await coordinator.reserve_response_lifecycle(envelope)
-    queued_signal = coordinator._get_or_create_queued_signal(envelope.target)
     assert {message.event_id for message in queued_signal.pending_message_snapshot()} == {envelope.source_event_id}
-    assert queued_signal.has_active_response_turn()
+    # The reservation holds a turn of its own next to the running reply's.
+    assert queued_signal._active_response_turns == 2
 
     if consumed:
         with response_lifecycle_reservation_context(reservation):
@@ -6114,7 +6294,7 @@ async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_
                     target=envelope.target,
                     response_envelope=envelope,
                     pipeline_timing=None,
-                    locked_operation=lambda _target: asyncio.sleep(0, result="cancelled"),
+                    locked_operation=lambda: asyncio.sleep(0, result="cancelled"),
                 ),
             )
         await asyncio.sleep(0)
@@ -6126,8 +6306,10 @@ async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_
     await reservation.release()
     await reservation.release()
     assert {message.event_id for message in queued_signal.pending_message_snapshot()} == set()
-    assert not queued_signal.has_active_response_turn()
+    assert queued_signal._active_response_turns == 1
     lifecycle_lock.release()
+    queued_signal.finish_response_turn()
+    assert queued_signal._active_response_turns == 0
 
     assert (
         await asyncio.wait_for(
@@ -6135,7 +6317,7 @@ async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_
                 target=envelope.target,
                 response_envelope=envelope,
                 pipeline_timing=None,
-                locked_operation=lambda _target: asyncio.sleep(0, result="next"),
+                locked_operation=lambda: asyncio.sleep(0, result="next"),
             ),
             timeout=1.0,
         )
@@ -6144,11 +6326,113 @@ async def test_queued_response_lifecycle_reservation_cancellation_does_not_leak_
 
 
 @pytest.mark.asyncio
+async def test_a_cancelled_unreserved_response_frees_its_lock_before_it_returns() -> None:
+    """A reply that reserved no early place gives its lock back where it is cancelled, not in a later task."""
+    coordinator = ResponseLifecycleCoordinator()
+    envelope = _queued_envelope("$direct")
+    conversation = coordinator._conversation_for(envelope.target)
+    response = coordinator.run_locked_response(
+        target=envelope.target,
+        response_envelope=envelope,
+        pipeline_timing=None,
+        locked_operation=lambda: asyncio.Event().wait(),
+    )
+    # Stepped by hand, so nothing but the response itself runs between its cancellation and its return.
+    response.send(None)
+    assert conversation.lock.locked()
+
+    with pytest.raises(asyncio.CancelledError):
+        response.throw(asyncio.CancelledError())
+
+    assert not conversation.lock.locked()
+    assert not conversation.has_active_response_turn()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reserved_early", [True, False])
+async def test_a_message_arriving_as_a_reply_returns_waits_only_behind_an_early_place(*, reserved_early: bool) -> None:
+    """A place reserved early is given back a loop turn after its reply returns; any other place at once."""
+    coordinator = ResponseLifecycleCoordinator()
+    envelope = _queued_envelope("$interactive")
+    late = _queued_envelope("$late")
+    notices: list[object] = []
+
+    async def reply() -> None:
+        # Ingress for a newer message is already due to run when this reply returns.
+        asyncio.get_running_loop().call_soon(
+            lambda: notices.append(
+                coordinator.reserve_waiting_human_message(target=late.target, response_envelope=late),
+            ),
+        )
+
+    async def respond() -> None:
+        await coordinator.run_locked_response(
+            target=envelope.target,
+            response_envelope=envelope,
+            pipeline_timing=None,
+            locked_operation=reply,
+        )
+
+    if reserved_early:
+        reservation = await coordinator.reserve_response_lifecycle(envelope)
+        with response_lifecycle_reservation_context(reservation):
+            await respond()
+    else:
+        await respond()
+    await asyncio.sleep(0)
+
+    assert [notice is not None for notice in notices] == [reserved_early]
+    assert not coordinator.has_active_response_for_target(envelope.target)
+
+
+@pytest.mark.asyncio
+async def test_a_source_dispatched_again_while_it_is_answered_does_not_wait_for_the_next_reply() -> None:
+    """A reply that ends withdraws its source's notice once more, so a second dispatch of it is not news to the next."""
+    coordinator = ResponseLifecycleCoordinator()
+    first, second, third = (_queued_envelope(event_id) for event_id in ("$first", "$second", "$third"))
+    release_first = asyncio.Event()
+    second_running = asyncio.Event()
+    release_second = asyncio.Event()
+    waiting_during_third: list[bool] = []
+
+    def respond(envelope: MessageEnvelope, reply: Callable[[], Awaitable[object]]) -> asyncio.Task[object]:
+        return asyncio.create_task(
+            coordinator.run_locked_response(
+                target=envelope.target,
+                response_envelope=envelope,
+                pipeline_timing=None,
+                locked_operation=reply,
+            ),
+        )
+
+    async def second_reply() -> None:
+        second_running.set()
+        await release_second.wait()
+
+    async def third_reply() -> None:
+        waiting_during_third.append(coordinator.has_waiting_messages_from(third.target, third.requester_id))
+
+    replies = [respond(first, release_first.wait)]
+    await asyncio.sleep(0)
+    replies += [respond(second, second_reply), respond(third, third_reply)]
+    await asyncio.sleep(0)
+    release_first.set()
+    await second_running.wait()
+    replies.append(respond(second, lambda: asyncio.sleep(0)))
+    await asyncio.sleep(0)
+    assert coordinator.has_waiting_messages_from(second.target, second.requester_id)
+    release_second.set()
+    await asyncio.gather(*replies)
+
+    assert waiting_during_third == [False]
+
+
+@pytest.mark.asyncio
 async def test_response_lifecycle_reservation_surfaces_lock_acquire_failure() -> None:
     """A failed acquire task must wake reservation startup and remain observable."""
     coordinator = ResponseLifecycleCoordinator()
     envelope = _queued_envelope("$interactive")
-    lifecycle_lock = coordinator._response_lifecycle_lock(envelope.target)
+    lifecycle_lock = coordinator._conversation_for(envelope.target).lock
 
     async def fail_acquire() -> bool:
         msg = "lock acquire failed"
@@ -6167,6 +6451,27 @@ async def test_response_lifecycle_reservation_surfaces_lock_acquire_failure() ->
 
 
 @pytest.mark.asyncio
+async def test_a_reservation_released_unused_leaves_no_unretrieved_lock_acquire_failure() -> None:
+    """A place given back before anything waited for its lock collects the failure its queueing ended with."""
+    coordinator = ResponseLifecycleCoordinator()
+    envelope = _queued_envelope("$interactive")
+    reported: list[dict[str, Any]] = []
+    asyncio.get_running_loop().set_exception_handler(lambda _loop, context: reported.append(context))
+
+    async def fail_acquire() -> bool:
+        msg = "lock acquire failed"
+        raise RuntimeError(msg)
+
+    coordinator._conversation_for(envelope.target).lock.acquire = fail_acquire  # type: ignore[method-assign]
+    reservation = await coordinator.reserve_response_lifecycle(envelope)
+    await reservation.release()
+    del reservation
+    gc.collect()
+
+    assert reported == []
+
+
+@pytest.mark.asyncio
 async def test_response_lifecycle_reservation_rejects_wrong_target_and_coordinator() -> None:
     """A reservation can only enter its creating coordinator and lifecycle key."""
     coordinator = ResponseLifecycleCoordinator()
@@ -6175,6 +6480,19 @@ async def test_response_lifecycle_reservation_rejects_wrong_target_and_coordinat
     other_target = MessageTarget.resolve("!room:localhost", "$other-thread", "$other")
     reservation = await coordinator.reserve_response_lifecycle(envelope)
 
+    conversation = coordinator._conversation_for(envelope.target)
+    conversation.begin_response_turn()
+    rejected_notice = coordinator.reserve_waiting_human_message(
+        target=envelope.target,
+        response_envelope=_queued_envelope("$waiting-on-rejected"),
+    )
+    assert rejected_notice is not None
+    conversation.finish_response_turn()
+
+    async def _assert_lock_held() -> str:
+        assert conversation.lock.locked()
+        return "owned"
+
     try:
         with response_lifecycle_reservation_context(reservation):
             with pytest.raises(ValueError, match="different coordinator"):
@@ -6182,32 +6500,38 @@ async def test_response_lifecycle_reservation_rejects_wrong_target_and_coordinat
                     target=envelope.target,
                     response_envelope=envelope,
                     pipeline_timing=None,
-                    locked_operation=lambda _target: asyncio.sleep(0),
+                    locked_operation=lambda: asyncio.sleep(0),
+                    notices=(rejected_notice,),
                 )
+            assert not conversation.has_pending_human_messages()
+            assert conversation.lock.locked()
             with pytest.raises(ValueError, match="target does not match"):
                 await coordinator.run_locked_response(
                     target=other_target,
                     response_envelope=replace(envelope, target=other_target),
                     pipeline_timing=None,
-                    locked_operation=lambda _target: asyncio.sleep(0),
+                    locked_operation=lambda: asyncio.sleep(0),
                 )
+            assert conversation.lock.locked()
             assert (
                 await coordinator.run_locked_response(
                     target=envelope.target,
                     response_envelope=envelope,
                     pipeline_timing=None,
-                    locked_operation=lambda _target: asyncio.sleep(0, result="owned"),
+                    locked_operation=_assert_lock_held,
                 )
                 == "owned"
             )
+            assert not conversation.lock.locked()
         with response_lifecycle_reservation_context(reservation), pytest.raises(RuntimeError, match="already consumed"):
             await coordinator.run_locked_response(
                 target=envelope.target,
                 response_envelope=envelope,
                 pipeline_timing=None,
-                locked_operation=lambda _target: asyncio.sleep(0),
+                locked_operation=lambda: asyncio.sleep(0),
             )
     finally:
+        rejected_notice.release()
         await reservation.release()
 
 
@@ -6221,7 +6545,7 @@ async def test_queued_human_notice_is_registered_exactly_once() -> None:
     in_first_turn = asyncio.Event()
     pending_during_second_turn: list[int] = []
 
-    async def first_turn(_target: MessageTarget) -> str:
+    async def first_turn() -> str:
         in_first_turn.set()
         await gate.wait()
         return "first"
@@ -6242,9 +6566,7 @@ async def test_queued_human_notice_is_registered_exactly_once() -> None:
         response_envelope=second_envelope,
     )
     assert reservation is not None
-    queued_signal = coordinator._thread_queued_signals[
-        ResponseLifecycleKey(room_id="!room:localhost", thread_id="$thread")
-    ]
+    queued_signal = coordinator._conversations[ResponseLifecycleKey(room_id="!room:localhost", thread_id="$thread")]
     assert queued_signal.pending_human_messages == 1
     # A duplicate reservation for the same queued event must not double-register.
     assert (
@@ -6255,7 +6577,7 @@ async def test_queued_human_notice_is_registered_exactly_once() -> None:
     reservation.release()
     assert queued_signal.pending_human_messages == 0
 
-    async def second_turn(_target: MessageTarget) -> str:
+    async def second_turn() -> str:
         pending_during_second_turn.append(queued_signal.pending_human_messages)
         return "second"
 
@@ -6290,12 +6612,12 @@ async def test_duplicate_queued_request_without_reservation_registers_one_notice
     gate = asyncio.Event()
     in_first_turn = asyncio.Event()
 
-    async def first_turn(_target: MessageTarget) -> str:
+    async def first_turn() -> str:
         in_first_turn.set()
         await gate.wait()
         return "first"
 
-    async def queued_turn(_target: MessageTarget) -> str:
+    async def queued_turn() -> str:
         return "queued"
 
     def run_queued() -> asyncio.Task[str]:
@@ -6322,9 +6644,7 @@ async def test_duplicate_queued_request_without_reservation_registers_one_notice
     queued_two = run_queued()
     for _ in range(10):
         await asyncio.sleep(0)
-    queued_signal = coordinator._thread_queued_signals[
-        ResponseLifecycleKey(room_id="!room:localhost", thread_id="$thread")
-    ]
+    queued_signal = coordinator._conversations[ResponseLifecycleKey(room_id="!room:localhost", thread_id="$thread")]
     assert queued_signal.pending_human_messages == 1
 
     gate.set()
@@ -7575,7 +7895,11 @@ async def test_cli_approval_scope_retains_only_shutdown_waits(tmp_path: Path, ca
         model_prompt="test",
         active_model_name="default",
         show_tool_calls=False,
-        tool_context=runner.deps.tool_runtime.build_turn_context(target, user_id=request.user_id),
+        tool_context=runner.deps.tool_runtime.build_turn_context(
+            target,
+            user_id=request.user_id,
+            turn_id=request.turn_id,
+        ),
     )
     started = asyncio.Event()
 
@@ -7630,7 +7954,11 @@ async def test_cli_approval_scope_without_cli_pause_reads_no_approval_state(tmp_
         model_prompt="test",
         active_model_name="default",
         show_tool_calls=False,
-        tool_context=runner.deps.tool_runtime.build_turn_context(target, user_id=request.user_id),
+        tool_context=runner.deps.tool_runtime.build_turn_context(
+            target,
+            user_id=request.user_id,
+            turn_id=request.turn_id,
+        ),
     )
     progress = TurnProgress(ending=AwaitingApproval())
     with patch.object(
@@ -7667,7 +7995,11 @@ async def test_expired_cli_grant_hands_exact_approval_to_native_resume(  # noqa:
         model_prompt="test",
         active_model_name="default",
         show_tool_calls=False,
-        tool_context=runner.deps.tool_runtime.build_turn_context(target, user_id=request.user_id),
+        tool_context=runner.deps.tool_runtime.build_turn_context(
+            target,
+            user_id=request.user_id,
+            turn_id=request.turn_id,
+        ),
     )
     tool = ToolExecution(
         tool_call_id="inner",
@@ -7884,7 +8216,7 @@ async def test_cli_pause_after_control_rebuild_persists_spent_continuation_budge
     await _admit_approval_source(store)
     request = _plain_request(_target(thread_id="$thread"), source_event_id="$source")
     target = request.response_envelope.target
-    tool_context = runner.deps.tool_runtime.build_turn_context(target, user_id=request.user_id)
+    tool_context = runner.deps.tool_runtime.build_turn_context(target, user_id=request.user_id, turn_id=request.turn_id)
     tool = ToolExecution(
         tool_call_id="hidden",
         tool_name="dangerous",
@@ -8134,12 +8466,13 @@ async def test_mid_turn_uses_refreshed_public_context_before_current_sources(
     gate = MidTurnGate(active_text="Continue", evaluate=evaluate)
     with queued_message_signal_context(None, mid_turn_gate=gate):
         await runner._prepare_request_after_lock(request)
-        finish = await gate.defers((QueuedMessage("$new", "Only two more sleeps, please"),), current=lambda: True)
+        outcome = await gate.decide((QueuedMessage("$new", "Only two more sleeps, please"),), current=lambda: True)
     if failure not in {None, "oversized", "media"}:
-        assert not finish
+        # Context the judge cannot see whole skips judgment, which is never an explicit verdict.
+        assert outcome is MidTurnOutcome.PAUSE
         assert payloads == []
     else:
-        assert finish
+        assert outcome is MidTurnOutcome.WAIT
         conversation = payloads[0]["state"]["conversation"]
         evidence = conversation[-1]["text"]
         assert conversation[1:-1] == [{"role": "user", "text": "Actually, make each sleep three seconds"}]
@@ -8196,7 +8529,7 @@ async def test_approval_continuation_refreshes_mid_turn_context_without_replacin
     ):
         with pytest.raises(RuntimeError, match="stop before generation"):
             await runner.approvals._run_claimed_approval_lifecycle(continuation, target=target)
-        assert await gate.defers((QueuedMessage("$new", "Thanks"),), current=lambda: True)
+        assert await gate.decide((QueuedMessage("$new", "Thanks"),), current=lambda: True) is MidTurnOutcome.WAIT
     assert build_lifecycle.call_args.args[0].thread_history == original.thread_history
     assert captured[0][0] == {"role": "user", "text": "Thirty sleeps"}
 
@@ -8229,9 +8562,9 @@ async def test_mid_turn_empty_history_only_allows_a_proven_new_thread(
         ),
     ):
         await runner._prepare_request_after_lock(request)
-        assert (
-            await gate.defers((QueuedMessage("$new", "Only two more sleeps, please"),), current=lambda: True) is finish
-        )
+        outcome = await gate.decide((QueuedMessage("$new", "Only two more sleeps, please"),), current=lambda: True)
+        # An empty history that proves nothing skips the judge, so no explicit verdict reads as one.
+        assert outcome is (MidTurnOutcome.WAIT if finish else MidTurnOutcome.PAUSE)
     assert len(evaluated) == int(finish)
 
 
@@ -8693,3 +9026,381 @@ async def test_a_batch_whose_source_ended_answers_the_rest_only_while_no_reply_e
     request_preparer.prepare.assert_not_awaited()
     # Without a reply, the caller settles only the ended source and the rest answer as their own turn.
     assert fate == Unclaimed(UnclaimedReason.TERMINAL_SOURCES, None if reply_exists else preparation)
+
+
+def test_job_follow_up_request_resolves_managed_entity_requester_kind(tmp_path: Path) -> None:
+    """_job_follow_up_request distinguishes managed-entity requesters from humans."""
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    managed_id = runner.deps.matrix_full_id
+
+    managed_request = runner._job_follow_up_request(
+        ConversationKey("general", "!room:localhost", "$thread", managed_id, silent=False),
+        "job-follow-up:managed",
+    )
+    managed_origin = managed_request.response_envelope.origin
+    assert managed_origin.intent is TurnIntent.JOB_FOLLOW_UP
+    assert managed_origin.requester_entity_name == "general"
+    assert managed_origin.requester_kind is SenderKind.MANAGED_ENTITY
+    assert managed_origin.active_human_requester_id is None
+    assert not managed_origin.may_answer_interactive_prompt
+
+    human_request = runner._job_follow_up_request(
+        ConversationKey("general", "!room:localhost", "$thread", "@user:localhost", silent=False),
+        "job-follow-up:human",
+    )
+    human_origin = human_request.response_envelope.origin
+    assert human_origin.intent is TurnIntent.JOB_FOLLOW_UP
+    assert human_origin.requester_entity_name is None
+    assert human_origin.requester_kind is SenderKind.USER
+    assert human_origin.active_human_requester_id == "@user:localhost"
+    assert not human_origin.may_answer_interactive_prompt
+
+
+async def _seed_cross_room_fork_with_attachments(
+    bot: AgentBot,
+    tmp_path: Path,
+    *,
+    authorized: bool,
+    parent_attachment_ids: tuple[str, ...] = ("att_parent",),
+) -> tuple[str, str]:
+    """Configure a cross-room fork and register one vetted parent image and one unvetted other-room image."""
+    import base64  # noqa: PLC0415
+
+    from mindroom.attachments.storage import register_local_attachment  # noqa: PLC0415
+    from mindroom.constants import ATTACHMENT_IDS_KEY, FORK_CONTENT_KEY  # noqa: PLC0415
+    from tests.conftest import make_visible_message  # noqa: PLC0415
+    from tests.threading_helpers import seed_thread_history  # noqa: PLC0415
+
+    source_room_id, target_room_id = "!source:localhost", "!room:localhost"
+    source_room = nio.MatrixRoom(source_room_id, bot.client.user_id)
+    source_room.members_synced = True
+    source_room.add_member(bot.client.user_id, "General", None)
+    source_room.add_member("@user:localhost", "User", None)
+
+    target_room = nio.MatrixRoom(target_room_id, bot.client.user_id)
+    target_room.members_synced = True
+    target_room.add_member(bot.client.user_id, "General", None)
+    target_room.add_member("@user:localhost", "User", None)
+    if not authorized:
+        target_room.add_member("@outsider:localhost", "Outsider", None)
+
+    bot.client.rooms = {source_room_id: source_room, target_room_id: target_room}
+    bot.client.room_get_state = AsyncMock(
+        side_effect=lambda room_id: (
+            nio.RoomGetStateResponse(
+                room_id=room_id,
+                events=[
+                    {"type": "m.room.member", "state_key": user_id, "content": {"membership": "join"}}
+                    for user_id in bot.client.rooms[room_id].users
+                ],
+            )
+            if room_id in bot.client.rooms
+            else nio.RoomGetStateError("forbidden")
+        ),
+    )
+    bot.client.room_get_state_event = AsyncMock(
+        side_effect=lambda room_id, event_type, state_key="": (
+            nio.RoomGetStateEventResponse(
+                {"history_visibility": bot.client.rooms[room_id].history_visibility},
+                event_type,
+                state_key,
+                room_id,
+            )
+            if event_type == "m.room.history_visibility" and room_id in bot.client.rooms
+            else nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND")
+        ),
+    )
+    await seed_thread_history(
+        bot,
+        room_id=source_room_id,
+        thread_id="$parent",
+        messages=[
+            make_visible_message(
+                event_id="$parent",
+                sender="@user:localhost",
+                body="source with attachment",
+                content={"body": "source with attachment", ATTACHMENT_IDS_KEY: list(parent_attachment_ids)},
+            ),
+        ],
+    )
+    await seed_thread_history(
+        bot,
+        room_id=target_room_id,
+        thread_id="$fork",
+        messages=[
+            make_visible_message(
+                event_id="$fork",
+                sender="@user:localhost",
+                body="continue in target",
+                content={
+                    "body": "continue in target",
+                    FORK_CONTENT_KEY: {"room_id": source_room_id, "thread_id": "$parent", "event_id": "$parent"},
+                },
+            ),
+        ],
+    )
+    png_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=",
+    )
+    for filename, att_id, room_id, thread_id in (
+        ("parent.png", "att_parent", source_room_id, "$parent"),
+        ("other.png", "att_other", "!other:localhost", "$other"),
+    ):
+        img_path = tmp_path / filename
+        img_path.write_bytes(png_bytes)
+        assert (
+            register_local_attachment(
+                bot.storage_path,
+                img_path,
+                kind="image",
+                attachment_id=att_id,
+                mime_type="image/png",
+                room_id=room_id,
+                thread_id=thread_id,
+            )
+            is not None
+        )
+    return source_room_id, target_room_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authorized", [True, False], ids=["authorized-parent", "revoked-outsider"])
+async def test_approval_resume_restores_vetted_cross_room_fork_parent_scopes_for_get_attachment_view(
+    tmp_path: Path,
+    *,
+    authorized: bool,
+) -> None:
+    """Resumed approval turns rebuild fork_parent_scopes so vetted parent images stay viewable and unvetted ones fail."""
+    from mindroom.custom_tools.attachments import AttachmentTools  # noqa: PLC0415
+    from mindroom.tool_system.runtime_context import tool_runtime_context  # noqa: PLC0415
+    from mindroom.tool_system.tool_function import ToolValue  # noqa: PLC0415
+    from tests.agent_tool_helpers import toolkit_offers  # noqa: PLC0415
+
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    await _admit_approval_source(runner.deps.replies.store)
+    _source_room_id, target_room_id = await _seed_cross_room_fork_with_attachments(
+        bot,
+        tmp_path,
+        authorized=authorized,
+    )
+
+    target = _target(thread_id="$fork")
+    identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id="@user:localhost")
+    continuation = approval_continuation(
+        approval_id="approval-fork-attachment",
+        room_id=target_room_id,
+        thread_id="$fork",
+        attachment_ids=("att_parent", "att_other"),
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="get_attachment",
+                invoking_agent="general",
+                expires_at_ns=1,
+                decision=ApprovalDecision.APPROVED,
+                human_approval_required=True,
+            ),
+        ),
+        execution_identity=identity,
+    )
+    assert await paused_for_approval(runner.deps.replies.store, continuation) is not None
+    request = _plain_request(target, source_event_id="$source")
+
+    results: dict[str, object] = {}
+
+    async def continue_run(
+        *_args: object,
+        tool_context: ToolRuntimeContext,
+        **_kwargs: object,
+    ) -> CompletedApprovalRun:
+        with tool_runtime_context(tool_context):
+            get_attachment = toolkit_offers(AttachmentTools(), "get_attachment").entrypoint
+            results["parent"] = await get_attachment(attachment_id="att_parent", view=True)
+            results["other"] = await get_attachment(attachment_id="att_other", view=True)
+        return CompletedApprovalRun(response_text="done", metadata_content={})
+
+    with patch("mindroom.approval.execution.AgentApprovalExecution.continue_run", new=continue_run):
+        async with resumed_approval(bot, continuation) as claimed:
+            await runner.approvals._continue_entity_call(
+                claimed,
+                request=request,
+                target=target,
+                tool_trace_collector=[],
+                progress=None,
+                cli_approval_handler=None,
+            )
+
+    if authorized:
+        assert isinstance(results["parent"], ToolValue)
+        assert results["parent"].images
+    else:
+        assert "not available in this context" in str(results["parent"])
+    assert "not available in this context" in str(results["other"])
+
+
+def _register_test_pdfs(
+    bot: AgentBot,
+    tmp_path: Path,
+    *,
+    source_room_id: str,
+    target_room_id: str,
+) -> bytes:
+    """Register parent, same-room, and unrelated-room PDF attachments for approval-resume filtering tests."""
+    from mindroom.attachments.storage import register_local_attachment  # noqa: PLC0415
+
+    pdf_bytes = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n"
+    for filename, att_id, room_id, thread_id in (
+        ("parent.pdf", "att_parent_pdf", source_room_id, "$parent"),
+        ("local.pdf", "att_local_pdf", target_room_id, "$fork"),
+        ("other.pdf", "att_other_pdf", "!other:localhost", "$other"),
+    ):
+        pdf_path = tmp_path / filename
+        pdf_path.write_bytes(pdf_bytes)
+        assert (
+            register_local_attachment(
+                bot.storage_path,
+                pdf_path,
+                kind="file",
+                attachment_id=att_id,
+                mime_type="application/pdf",
+                room_id=room_id,
+                thread_id=thread_id,
+            )
+            is not None
+        )
+    return pdf_bytes
+
+
+def _assert_pdf_accessible(
+    results: dict[str, object],
+    prefix: str,
+    *,
+    workspace_dir: Path,
+    output_name: str,
+    pdf_bytes: bytes,
+) -> None:
+    """Assert view, inspect, and save-to-workspace all succeed for one PDF attachment."""
+    from mindroom.tool_system.tool_function import ToolValue  # noqa: PLC0415
+
+    viewed = results[f"{prefix}_view"]
+    assert isinstance(viewed, ToolValue)
+    assert viewed.files
+    assert viewed.files[0].mime_type == "application/pdf"
+    assert json.loads(str(results[f"{prefix}_inspect"]))["status"] == "ok"
+    assert json.loads(str(results[f"{prefix}_save"]))["status"] == "ok"
+    assert (workspace_dir / output_name).read_bytes() == pdf_bytes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["authorized", "denied", "refresh-failed"])
+async def test_approval_resume_filters_foreign_parent_pdf_attachment_when_reauthorization_fails(
+    tmp_path: Path,
+    *,
+    mode: str,
+) -> None:
+    """Approval resume filters foreign parent PDF IDs on denial or refresh failure while keeping same-room attachments."""
+    from mindroom.custom_tools.attachments import AttachmentTools  # noqa: PLC0415
+    from mindroom.tool_system.runtime_context import tool_runtime_context  # noqa: PLC0415
+    from tests.agent_tool_helpers import toolkit_offers  # noqa: PLC0415
+
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    await _admit_approval_source(runner.deps.replies.store)
+    source_room_id, target_room_id = await _seed_cross_room_fork_with_attachments(
+        bot,
+        tmp_path,
+        authorized=mode != "denied",
+        parent_attachment_ids=("att_parent_pdf",),
+    )
+    pdf_bytes = _register_test_pdfs(bot, tmp_path, source_room_id=source_room_id, target_room_id=target_room_id)
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    target = _target(thread_id="$fork")
+    identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id="@user:localhost")
+    continuation = approval_continuation(
+        approval_id=f"approval-fork-pdf-{mode}",
+        room_id=target_room_id,
+        thread_id="$fork",
+        attachment_ids=("att_parent_pdf", "att_local_pdf", "att_other_pdf"),
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="get_attachment",
+                invoking_agent="general",
+                expires_at_ns=1,
+                decision=ApprovalDecision.APPROVED,
+                human_approval_required=True,
+            ),
+        ),
+        execution_identity=identity,
+    )
+    assert await paused_for_approval(runner.deps.replies.store, continuation) is not None
+    request = _plain_request(target, source_event_id="$source")
+    results: dict[str, object] = {}
+
+    async def continue_run(
+        *_args: object,
+        tool_context: ToolRuntimeContext,
+        **_kwargs: object,
+    ) -> CompletedApprovalRun:
+        results["attachment_ids"] = tool_context.attachment_ids
+        tools = AttachmentTools(tool_output_workspace_root=workspace_dir, runtime_paths=bot.runtime_paths)
+        with tool_runtime_context(tool_context):
+            get_attachment = toolkit_offers(tools, "get_attachment").entrypoint
+            for prefix, att_id, out_name in (
+                ("parent", "att_parent_pdf", "parent.pdf"),
+                ("local", "att_local_pdf", "local.pdf"),
+            ):
+                results[f"{prefix}_view"] = await get_attachment(attachment_id=att_id, view=True)
+                results[f"{prefix}_inspect"] = await get_attachment(attachment_id=att_id)
+                results[f"{prefix}_save"] = await get_attachment(attachment_id=att_id, mindroom_output_path=out_name)
+            results["other_view"] = await get_attachment(attachment_id="att_other_pdf", view=True)
+        return CompletedApprovalRun(response_text="done", metadata_content={})
+
+    refresh_patch = (
+        patch.object(
+            runner.deps.resolver,
+            "fetch_thread_history",
+            new=AsyncMock(side_effect=RuntimeError("matrix unavailable")),
+        )
+        if mode == "refresh-failed"
+        else nullcontext()
+    )
+    with (
+        refresh_patch,
+        patch("mindroom.approval.execution.AgentApprovalExecution.continue_run", new=continue_run),
+    ):
+        async with resumed_approval(bot, continuation) as claimed:
+            await runner.approvals._continue_entity_call(
+                claimed,
+                request=request,
+                target=target,
+                tool_trace_collector=[],
+                progress=None,
+                cli_approval_handler=None,
+            )
+
+    if mode == "authorized":
+        assert results["attachment_ids"] == ("att_parent_pdf", "att_local_pdf")
+        _assert_pdf_accessible(
+            results,
+            "parent",
+            workspace_dir=workspace_dir,
+            output_name="parent.pdf",
+            pdf_bytes=pdf_bytes,
+        )
+    else:
+        assert results["attachment_ids"] == ("att_local_pdf",)
+        for key in ("parent_view", "parent_inspect", "parent_save"):
+            payload = json.loads(str(results[key]))
+            assert payload["status"] == "error"
+            assert "not available in this context" in payload["message"]
+        assert not (workspace_dir / "parent.pdf").exists()
+
+    _assert_pdf_accessible(results, "local", workspace_dir=workspace_dir, output_name="local.pdf", pdf_bytes=pdf_bytes)
+    other_payload = json.loads(str(results["other_view"]))
+    assert other_payload["status"] == "error"
+    assert "not available in this context" in other_payload["message"]

@@ -48,7 +48,8 @@ def _mock_owner_account_tables(mock_supabase: MagicMock) -> MagicMock:
     accounts_table.select.return_value.eq.return_value.limit.return_value.execute.return_value = Mock(
         data=[{"email": "Owner.User+Test@example.com"}]
     )
-    mock_supabase.table.side_effect = lambda table: {"accounts": accounts_table, "instances": instances_table}[table]
+    tables = {"accounts": accounts_table, "instances": instances_table, "subscriptions": MagicMock()}
+    mock_supabase.table.side_effect = tables.__getitem__
     return accounts_table
 
 
@@ -149,7 +150,7 @@ async def test_limit_update_repairs_a_missing_reset_schedule() -> None:
         patch("backend.services.provisioner_service.OPENROUTER_PROVISIONING_API_KEY", "test-management"),
         patch("backend.openrouter._send_http_request", return_value=(200, b"{}")) as request,
     ):
-        await set_instance_openrouter_key_limit(db, row, "hobby")
+        await set_instance_openrouter_key_limit(db, row, 15)
 
     method, url, _, body = request.call_args.args
     assert method == "PATCH"
@@ -157,7 +158,7 @@ async def test_limit_update_repairs_a_missing_reset_schedule() -> None:
     assert json.loads(body) == {"limit": 15, "limit_reset": "monthly"}
     assert row["openrouter_key_hash"] == "old_hash"
     assert row["openrouter_key_limit_reset"] == "monthly"
-    assert openrouter_key_matches_plan(row, "hobby")
+    assert openrouter_key_matches_plan(row, 15)
 
 
 @pytest.mark.asyncio

@@ -53,9 +53,7 @@ Use a canvas when seeing or clicking beats reading or typing; for a quick choice
 
 ## Turn canvases on
 
-Canvases need two switches, and both are off by default.
-
-First, give the agent the [`chat_ui`](https://docs.mindroom.chat/tools/chat-ui/) toolkit with `enable_show_canvas: true`:
+MindRoom Chat ships with canvases on, so an agent needs only the [`chat_ui`](https://docs.mindroom.chat/tools/chat-ui/) toolkit with `enable_show_canvas: true`:
 
 ```yaml
 agents:
@@ -70,25 +68,24 @@ agents:
 
 `enable_show_canvas` (boolean, default `false`) adds the `show_canvas` function; the rest of `chat_ui` works without it.
 It can also be set in the `chat_ui` tool's saved settings for every agent that uses `chat_ui`; an agent's own entry wins, as described in [How Settings Combine](https://docs.mindroom.chat/tools/#how-settings-combine).
-`mindroom config init` and newly provisioned hosted instances already turn it on for the starter Mind agent, so Mind needs only the Chat switch.
+`mindroom config init` and newly provisioned hosted instances already turn it on for the starter Mind agent, so Mind can show canvases without any setup.
 
-Second, enable canvases in the MindRoom Chat deployment's runtime `config.json`:
+A MindRoom Chat deployment can turn canvases off in its runtime `config.json`:
 
 ```json
 {
   "mindroom": {
     "canvas": {
-      "enabled": true
+      "enabled": false
     }
   }
 }
 ```
 
-The shipped MindRoom Chat configuration sets `enabled` to `false`, so only whoever deploys Chat can turn canvases on.
-
 ### Let pages load libraries
 
-Pages can also load libraries such as Chart.js, D3, Mermaid, or KaTeX from jsDelivr's npm CDN, `https://cdn.jsdelivr.net/npm/`.
+Chart.js, D3, Mermaid, and KaTeX need no switch: MindRoom Chat serves its own copies to pages whose agent names them in `show_canvas`, and no viewer's address reaches a CDN.
+Pages can also load any other npm library from jsDelivr's npm CDN, `https://cdn.jsdelivr.net/npm/`.
 This takes two more switches, both off by default; turn on both, because a page that needs a library breaks where Chat blocks it.
 
 ```yaml
@@ -116,7 +113,39 @@ agents:
 
 `enable_canvas_libraries` (boolean, default `false`) tells the agent it may use the source, and Chat's `libraries` lets pages load from it.
 Pages may then load scripts, styles, and fonts from `/npm/` paths only; fetching data, external images, workers, and every other site stay blocked, and libraries that evaluate strings, such as Alpine or Vue in-page templates, do not run.
-Opening a page that uses a library tells jsDelivr the viewer's IP address and which files they load, which is why Chat keeps libraries off unless its deployment allows them.
+Opening a page that uses a CDN library tells jsDelivr the viewer's IP address and which files they load, which is why Chat keeps libraries off unless its deployment allows them.
+
+### Let pages load remote assets
+
+To preview a website as a browser shows it, with its real images, fonts, and stylesheets, pages can load assets from any `https:` address.
+This also takes two switches, both off by default:
+
+```yaml
+agents:
+  designer:
+    display_name: Designer
+    role: Preview website elements as a browser shows them.
+    model: default
+    tools:
+      - chat_ui:
+          enable_show_canvas: true
+          enable_canvas_remote_assets: true
+```
+
+```json
+{
+  "mindroom": {
+    "canvas": {
+      "enabled": true,
+      "remoteAssets": true
+    }
+  }
+}
+```
+
+`enable_canvas_remote_assets` (boolean, default `false`) tells the agent it may load assets from any `https:` address, and Chat's `remoteAssets` lets pages load scripts, styles, images, fonts, and media from them.
+Fetching data, frames, workers, and form submissions stay blocked.
+Every host a page names then sees the viewer's IP address and when they look, and a page can put data in the addresses it loads, which is why Chat keeps remote assets off unless its deployment allows them.
 
 ## What the user sees
 
@@ -125,15 +154,35 @@ Chat opens the panel by itself under the same conditions as other [Chat UI actio
 The panel names the agent that made the page, and the user can resize it or expand it to the full width of the conversation.
 The room header's **Canvas** button lists the conversation's canvases, newest update first, and reopens one after the user closed it.
 
+### Pages in the thread
+
+With `inline=True`, `show_canvas` shows the page in the conversation itself, at the width of a reply, instead of in the panel; its height follows the content.
+Agents prefer it for anything the user should see or answer in the flow: charts, diagrams, mockups, pickers, short forms, and multi-step questions.
+They use the panel for what stays open beside the conversation: dashboards, slides, long documents, and pages the user returns to.
+An inline page sends answers and keeps inputs and saved state like a panel canvas.
+Chat never opens the panel for it; **Open canvas** shows it there, and the thread then shows "Shown in the panel" in its place.
+Updates keep a canvas inline.
+
+Chat rebuilds an inline page each time it scrolls back into view, so agents give form fields an `id` or `name`, or call `saveState`, to keep what the user entered.
+Forms use the themed mode, not `raw` or `width`, because a scaled-down preview shrinks fields and buttons.
+For the next step of a flow, the agent shows a new inline canvas with its reply or updates the same one.
+
+For an accurate preview of a website or app, the agent adds `raw=True`: Chat adds no styles or theme variables of its own, so browser defaults apply as in a normal tab.
+`width` (320 to 2560 pixels) renders the page at the viewport the design targets, such as 1440 for desktop or 390 for a phone, and scales it down to fit the conversation; it never scales up.
+A preview with `raw` or `width` is laid out in a browser window 16:10 of its width (568 to 1080 pixels tall), so `vh` units work as in a browser.
+The thread shows as much of that window as the page fills, and a taller page, such as one with a `100vh` hero section, scrolls inside it.
+Other inline pages grow with their content, so they must not use `vh` units.
+The panel shows raw pages too, at the panel's own width.
+`raw` and `width` belong to each update, so an update without them shows a themed page at reply width.
+
 When the panel cannot open, the **Open canvas** button is disabled and a message below it says why:
 
 | Message | Cause |
 |---|---|
-| Interactive panels are turned off in this app. | The Chat deployment has not enabled canvases. |
-| Interactive panels are not available in the app yet. Open this conversation in a browser. | The native mobile app does not show canvases; Chat in a browser does. |
+| Interactive panels are turned off in this app. | The Chat deployment has turned canvases off. |
 | End the call to open interactive panels. | Chat does not run canvases during a call. |
 
-Other people in the room who use MindRoom Chat on the agent's homeserver see the title without the button; everyone else sees only the notice text, `Interactive panel: <title>. Open it in MindRoom Chat to respond.`
+Other people in the room who use MindRoom Chat on the agent's homeserver see the title and **Open canvas**, not the inline page, and can answer in the panel; everyone else sees only the notice text, `Interactive panel: <title>. Open it in MindRoom Chat to respond.`
 
 ### Find a canvas again
 
@@ -222,7 +271,7 @@ chat_ui.show_canvas(
 )
 ```
 
-- **Self-contained:** write inline CSS and JavaScript. The page cannot fetch data or load external images, and it loads libraries only where [allowed](#let-pages-load-libraries); otherwise draw charts with inline SVG or a `<canvas>` element, and always embed images as `data:` URLs.
+- **Self-contained:** write inline CSS and JavaScript. The page cannot fetch data, and it loads libraries or external assets only where [libraries](#let-pages-load-libraries) or [remote assets](#let-pages-load-remote-assets) are allowed; otherwise draw charts with inline SVG or a `<canvas>` element, and always embed images as `data:` URLs.
 - **Submitting:** call `window.mindroom.submit(data, {label})` with JSON-serializable `data` and a short `label`, or use a `<form>`, whose fields become the data and whose `data-mindroom-label` attribute sets the label.
 - **Responsive:** the panel ranges from narrow to the full conversation width.
 - **Kept inputs:** inputs, selects, and textareas with an `id` or `name` keep their values on their own, across a reload, an update, and a switch to another version, matched by that `id` or `name` (a radio group by its name).
@@ -260,6 +309,6 @@ For choices the variables cannot make, such as a chart palette, `window.mindroom
 - In an encrypted room, the page, the answer, and a shared copy of the page's state are end-to-end encrypted like other messages.
 - A canvas shared with `share_state=True` lets its agent, and anyone else in the room, read what the page saved without asking each time; Chat says so in the panel.
   Passwords and fields with `autocomplete="off"` are never kept automatically, but whatever the page passes to `saveState` is shared, so pages must keep secrets out of it.
-- A canvas is not a safe place for secrets: browsers do not let a page block WebRTC, and a page that loads libraries can put data in the addresses it requests, so a malicious page could leak what the user types into it.
+- A canvas is not a safe place for secrets: browsers do not let a page block WebRTC, and a page that loads libraries or remote assets can put data in the addresses it requests, so a malicious page could leak what the user types into it.
   Chat therefore names the agent that made each canvas and reminds the user that what they enter may leave the panel.
 - Agents should show only pages they wrote, never downloaded or untrusted pages, because every canvas appears as the agent's own.

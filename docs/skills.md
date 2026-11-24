@@ -94,7 +94,7 @@ Hidden entries such as `.usage.json`, `.history/`, and `.archive/` are never loa
 
 Agents never need write access to a global skill root to create skills, so the bundled, plugin, and user roots can stay read-only, for example in container or Kubernetes deployments.
 An agent with workspace-rooted file or shell tools can write a skill to `<workspace>/skills/<skill-name>/SKILL.md`, which its file tools address as `skills/<skill-name>/SKILL.md`.
-Such agents are told how in their system prompt through the `WORKSPACE_SKILL_AUTHORING_PROMPT` built-in prompt, which you can change through [Built-In Prompt Overrides](configuration/index.md#built-in-prompt-overrides).
+Such agents (unless `skill_manage` is offered) are told how in their system prompt through the `WORKSPACE_SKILL_AUTHORING_PROMPT` built-in prompt, which you can change through [Built-In Prompt Overrides](configuration/index.md#built-in-prompt-overrides).
 A new or edited workspace skill is picked up on the agent's next run without a config change.
 
 Being able to write workspace skills does not make an agent create them.
@@ -118,11 +118,11 @@ Skills without `metadata.openclaw` are always eligible.
 
 ## Using skills at runtime
 
-Agents see their available skills in the system prompt and load details with these tools:
+Agents see the name and description of each available skill in the system prompt and load details with these tools:
 
-- `get_skill_instructions(skill_name)` loads the full instructions for a skill
-- `get_skill_reference(skill_name, reference_path)` reads a reference document
-- `get_skill_script(skill_name, script_path)` reads a script
+- `get_skill_instructions(skill_name)` loads the full instructions for a skill and lists its references and scripts
+- `get_skill_reference(skill_name, reference_path)` reads a reference document, and lists the skill's references when called without a path
+- `get_skill_script(skill_name, script_path)` reads a script, and lists the skill's scripts when called without a path
 
 `get_skill_script` never runs a script, whichever skill it comes from.
 Agents with a shell tool run scripts with it, where their shell commands run.

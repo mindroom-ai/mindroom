@@ -11,6 +11,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, cast
+from urllib.error import HTTPError
 from urllib.parse import quote, unquote, urlencode, urlsplit
 
 import jwt
@@ -29,13 +30,20 @@ from mindroom.api.auth_user import (
 )
 from mindroom.api.connections_session_cookie import connections_session_cookie, read_connections_session
 from mindroom.api.open_access import open_access_rejection
-from mindroom.authorization import is_platform_administrator
+from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import (
     matrix_user_id_from_email,
     try_parse_historical_matrix_user_id,
     validate_email_to_matrix_mapping,
 )
-from mindroom.origins import dashboard_origin, deployment_origin, normalized_origin
+from mindroom.origins import (
+    connections_chat_origin,
+    dashboard_origin,
+    deployment_origin,
+    normalized_origin,
+    published_reports_require_sign_in,
+)
+from mindroom.requester_identity import is_platform_administrator
 from mindroom.tool_system.dependencies import (
     auto_install_enabled,
     auto_install_optional_extra_for_import_retry,
@@ -45,9 +53,16 @@ from mindroom.tool_system.dependencies import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from mindroom.constants import RuntimePaths
+    from mindroom.api.connections_session_cookie import ConnectionsSession
+    from mindroom.constants import EnvValueSource, RuntimePaths
 
+logger = get_logger(__name__)
 router = APIRouter(tags=["auth"])
+
+
+def _api_key_matches(supplied: str, api_key: str) -> bool:
+    """Compare UTF-8 bytes, since `compare_digest` raises on non-ASCII strings and `encode` on lone surrogates."""
+    return secrets.compare_digest(supplied.encode(errors="surrogatepass"), api_key.encode(errors="surrogatepass"))
 
 
 def require_operator_key(request: Request, authorization: str | None) -> None:
@@ -57,7 +72,7 @@ def require_operator_key(request: Request, authorization: str | None) -> None:
     if not configured_key:
         raise HTTPException(status_code=503, detail="This operational check requires MINDROOM_API_KEY")
     token = _extract_bearer_token(authorization)
-    if token is None or not secrets.compare_digest(token.encode(), configured_key.encode()):
+    if token is None or not _api_key_matches(token, configured_key):
         raise HTTPException(status_code=401, detail="Missing or invalid credentials")
 
 
@@ -69,7 +84,10 @@ _PLATFORM_SSO_TICKET_TYPE = "mindroom_platform_sso_ticket"
 _PLATFORM_SSO_CLOCK_SKEW_SECONDS = 10
 # Ticket IDs already exchanged by this runtime, mapped to their expiry.
 _used_platform_sso_ticket_ids: dict[str, int] = {}
-_STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
+# Host-only by prefix over HTTPS, so other hosts under the domain can neither set nor override it.
+_HTTPS_STANDALONE_AUTH_COOKIE_NAME = "__Host-mindroom_api_key"
+# Browsers keep a `__Host-` cookie only when it is Secure, which they refuse to store over plain HTTP.
+_PLAIN_HTTP_STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
 # Set only by server code; ASGI scope keys cannot come from the client.
 _CONNECTIONS_SESSION_FLOW_SCOPE_KEY = "mindroom.connections_session_flow"
 # Each Connections page names the account it shows, so a stale tab cannot act as the browser's new account.
@@ -134,6 +152,7 @@ class _ApiAuthSettings:
     supabase_anon_key: str | None
     account_id: str | None
     mindroom_api_key: str | None
+    mindroom_api_key_source: EnvValueSource | None = None
     public_url: str | None = None
     dashboard_origin: str | None = None
     platform_sso_url: str | None = None
@@ -166,6 +185,8 @@ def _build_auth_settings(runtime_paths: RuntimePaths) -> _ApiAuthSettings:
             "and remove MINDROOM_BASE_URL"
         )
         raise ValueError(msg)
+    # Refuse to start with an access value for published reports that MindRoom does not know.
+    published_reports_require_sign_in(runtime_paths)
     trusted_upstream = _build_trusted_upstream_auth_settings(runtime_paths)
     dashboard = dashboard_origin(runtime_paths)
     # Only a gateway's signed identity reaches both hosts; dashboard sign-ins and Connections sessions stay on one.
@@ -176,11 +197,15 @@ def _build_auth_settings(runtime_paths: RuntimePaths) -> _ApiAuthSettings:
     if dashboard is not None and (public is None or urlsplit(public).netloc == urlsplit(dashboard).netloc):
         msg = "MINDROOM_DASHBOARD_URL must name another host or port than MINDROOM_PUBLIC_URL, which must be set"
         raise ValueError(msg)
+    resolved_api_key = runtime_paths.plain_env_value_with_source(("MINDROOM_API_KEY",))
+    mindroom_api_key = None if resolved_api_key is None else resolved_api_key[0]
+    mindroom_api_key_source = None if resolved_api_key is None else resolved_api_key[2]
     return _ApiAuthSettings(
         supabase_url=runtime_paths.env_value("SUPABASE_URL"),
         supabase_anon_key=runtime_paths.env_value("SUPABASE_ANON_KEY"),
         account_id=runtime_paths.env_value("ACCOUNT_ID"),
-        mindroom_api_key=runtime_paths.env_value("MINDROOM_API_KEY"),
+        mindroom_api_key=mindroom_api_key,
+        mindroom_api_key_source=mindroom_api_key_source,
         public_url=runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
         dashboard_origin=dashboard,
         platform_sso_url=_env_text(runtime_paths, "MINDROOM_PLATFORM_SSO_URL"),
@@ -240,6 +265,8 @@ def _build_trusted_upstream_jwt_client(settings: _TrustedUpstreamAuthSettings) -
         cache_jwk_set=True,
         lifespan=_TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS,
         timeout=_TRUSTED_UPSTREAM_JWKS_TIMEOUT_SECONDS,
+        # PyJWT 2.14 waits 30 seconds after a fetch before refetching for an unknown `kid`; rotated keys work at once.
+        cooldown_duration=0,
     )
 
 
@@ -349,6 +376,7 @@ async def _verified_trusted_upstream_jwt_claims(
     if not token:
         raise HTTPException(status_code=401, detail=f"Missing trusted upstream JWT header: {header}")
     if len(token.encode("utf-8")) > _JWT_MAX_BYTES:
+        logger.warning("Trusted upstream JWT rejected", detail=invalid_detail, error="too_large")
         raise HTTPException(status_code=401, detail=invalid_detail)
 
     try:
@@ -368,6 +396,22 @@ async def _verified_trusted_upstream_jwt_claims(
             options={"require": list(required_claims)},
         )
     except PyJWTError as exc:
+        if isinstance(exc, jwt.PyJWKClientConnectionError):
+            # PyJWT refuses JWKS redirects, so a URL that redirects never yields keys.
+            redirected = isinstance(exc.__cause__, HTTPError) and 300 <= exc.__cause__.code < 400
+            # Name the setting, not its value: the URL may carry a credential in its query string.
+            logger.warning(
+                "Trusted upstream JWKS fetch failed",
+                setting="MINDROOM_TRUSTED_UPSTREAM_JWKS_URL",
+                reason="redirect refused; configure the direct JWKS URL" if redirected else "unreachable",
+            )
+        # PyJWT messages can quote unverified header text such as `kid`, so log only the class and a missing claim.
+        logger.warning(
+            "Trusted upstream JWT rejected",
+            detail=invalid_detail,
+            error=type(exc).__name__,
+            claim=exc.claim if isinstance(exc, jwt.MissingRequiredClaimError) else None,
+        )
         raise HTTPException(status_code=401, detail=invalid_detail) from exc
     return claims
 
@@ -672,9 +716,26 @@ def login_redirect_for_request(request: Request, *, next_path: str | None = None
     return None
 
 
+def _standalone_login_key_hint(
+    runtime_paths: RuntimePaths,
+    api_key_source: EnvValueSource | None,
+) -> str:
+    """Return the login page hint paragraph for where `MINDROOM_API_KEY` is configured."""
+    if api_key_source == "process_env":
+        return "<p>Check <code>MINDROOM_API_KEY</code> in the environment configured for your MindRoom service.</p>"
+    if api_key_source == "env_file":
+        env_path = html.escape(str(runtime_paths.env_path))
+        return f"<p>Find it in <code>{env_path}</code> as <code>MINDROOM_API_KEY=...</code>.</p>"
+    return (
+        "<p>Check <code>MINDROOM_API_KEY</code> in the environment configured for your MindRoom service "
+        "or in the <code>.env</code> file beside <code>config.yaml</code>.</p>"
+    )
+
+
 def _render_standalone_login_page(
     next_path: str,
     runtime_paths: RuntimePaths,
+    api_key_source: EnvValueSource | None = None,
 ) -> str:
     """Return the standalone dashboard login page."""
     next_path_js = (
@@ -685,7 +746,7 @@ def _render_standalone_login_page(
         .replace("\u2028", "\\u2028")
         .replace("\u2029", "\\u2029")
     )
-    env_path = html.escape(str(runtime_paths.env_path))
+    key_hint = _standalone_login_key_hint(runtime_paths, api_key_source)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -754,7 +815,7 @@ def _render_standalone_login_page(
   <form id="login-form">
     <h1>MindRoom Dashboard</h1>
     <p>Enter the dashboard API key to continue.</p>
-    <p>Find it in <code>{env_path}</code> as <code>MINDROOM_API_KEY=...</code>.</p>
+    {key_hint}
     <input id="api-key" name="api-key" type="password" autocomplete="current-password" autofocus>
     <button type="submit">Continue</button>
     <div id="error" role="alert"></div>
@@ -807,11 +868,40 @@ def allow_connections_session_for_oauth_flow(request: Request) -> None:
 
 
 def _connections_session_path_honored(request: Request) -> bool:
-    """Honor sessions on portal paths and OAuth success pages, and on other OAuth browser routes only when granted."""
+    """Honor sessions on portal paths, OAuth success pages, and published reports; on other OAuth routes only when granted."""
     path = request.scope["path"]
     if _is_oauth_popup_path(path, frozenset({"authorize", "callback", "reset"})):
         return request.scope.get(_CONNECTIONS_SESSION_FLOW_SCOPE_KEY) is True
-    return _is_connections_path(path) or _is_oauth_popup_path(path, frozenset({"success"}))
+    # Only GET: the dashboard shell answers HEAD on every path.
+    published_report = request.method == "GET" and path.startswith("/reports/public/pub_")
+    return _is_connections_path(path) or _is_oauth_popup_path(path, frozenset({"success"})) or published_report
+
+
+def _read_request_connections_session(request: Request) -> ConnectionsSession | None:
+    """Return the valid Connections session this request's cookie carries, on any path; callers decide where it counts."""
+    settings = _request_auth_state(request).settings
+    token = request.cookies.get(
+        connections_session_cookie(deployment_origin(settings.public_url, str(request.base_url))),
+    )
+    return read_connections_session(token, now=time.time()) if token else None
+
+
+def non_administrator_chat_redirect(request: Request) -> RedirectResponse | None:
+    """Send someone signed in to Connections who is no administrator back to the MindRoom Chat that signed them in.
+
+    The dashboard is for administrators, so its login is a dead end for them, as when they trim `/connections` off the
+    portal's address. An administrator whose sign-in the dashboard does not accept keeps the login, and so does the
+    owner, who may hold the API key without being listed in `administrators`.
+    """
+    session = _read_request_connections_session(request)
+    if session is None:
+        return None
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
+    chat_origin = connections_chat_origin(snapshot.runtime_paths, session.chat_origin)
+    owner = snapshot.runtime_paths.env_value("MINDROOM_OWNER_USER_ID")
+    if chat_origin is None or session.matrix_user_id == owner or is_administrator(session.matrix_user_id, snapshot):
+        return None
+    return RedirectResponse(f"{chat_origin}/")
 
 
 def _connections_session_auth_user(request: Request) -> SignedMatrixUser | None:
@@ -822,9 +912,7 @@ def _connections_session_auth_user(request: Request) -> SignedMatrixUser | None:
     platform mode and never on OAuth callbacks without that grant.
     """
     auth_state = _request_auth_state(request)
-    cookie = connections_session_cookie(deployment_origin(auth_state.settings.public_url, str(request.base_url)))
-    token = request.cookies.get(cookie)
-    session = read_connections_session(token, now=time.time()) if token else None
+    session = _read_request_connections_session(request)
     if session is None:
         return None
     if not _connections_session_path_honored(request) and not (
@@ -981,17 +1069,21 @@ async def _require_service_jwt(
         audience=audience,
         issuer=settings.issuer,
         algorithms=("RS256",),
-        required_claims=("exp", "iat", "iss", "aud", "type", "common_name", "sub"),
+        required_claims=("exp", "iat", "iss", "aud", "type", "common_name"),
         invalid_detail=invalid_detail,
     )
 
-    if (
-        claims.get("type") != "app"
-        or claims.get("sub") != ""
-        or not isinstance(claims.get("common_name"), str)
-        or claims["common_name"] != client_id
-    ):
-        raise HTTPException(status_code=401, detail=invalid_detail)
+    # Cloudflare sends `sub: ""` for service tokens but has also sent none at all; a person's `sub` is never empty.
+    if claims.get("type") != "app":
+        failed_check = "type"
+    elif claims.get("sub", "") != "":
+        failed_check = "sub"
+    elif not isinstance(claims.get("common_name"), str) or claims["common_name"] != client_id:
+        failed_check = "common_name"
+    else:
+        return
+    logger.warning("Service JWT rejected", detail=invalid_detail, failed_check=failed_check)
+    raise HTTPException(status_code=401, detail=invalid_detail)
 
 
 async def _require_signed_matrix_user(request: Request, *, label: str) -> SignedMatrixUser:
@@ -1082,10 +1174,12 @@ async def authenticate_user(request: Request, authorization: str | None = Header
     if auth_state.supabase_auth is None:
         mindroom_api_key = auth_state.settings.mindroom_api_key
         if mindroom_api_key:
-            token = _extract_bearer_token(authorization) or request.cookies.get(_STANDALONE_AUTH_COOKIE_NAME) or None
+            token = (
+                _extract_bearer_token(authorization) or request.cookies.get(_standalone_auth_cookie(request)) or None
+            )
             if token is None:
                 raise HTTPException(status_code=401, detail="Missing or invalid credentials")
-            if not secrets.compare_digest(token, mindroom_api_key):
+            if not _api_key_matches(token, mindroom_api_key):
                 raise HTTPException(status_code=401, detail="Invalid API key")
             _require_browser_mutation_origin(request, authorization)
         else:
@@ -1113,6 +1207,13 @@ async def verify_user(request: Request, authorization: str | None = Header(None)
     return auth_user
 
 
+def _standalone_auth_cookie(request: Request) -> str:
+    """Name the dashboard sign-in cookie for the origin the browser opened."""
+    origin = browser_origin(request)
+    plain_http = origin is not None and origin.startswith("http://")
+    return _PLAIN_HTTP_STANDALONE_AUTH_COOKIE_NAME if plain_http else _HTTPS_STANDALONE_AUTH_COOKIE_NAME
+
+
 @router.post("/api/auth/session", include_in_schema=False)
 async def create_auth_session(request: Request, payload: _AuthSessionRequest, response: Response) -> dict[str, bool]:
     """Set a same-origin cookie for standalone dashboard auth."""
@@ -1120,14 +1221,15 @@ async def create_auth_session(request: Request, payload: _AuthSessionRequest, re
     if not mindroom_api_key:
         raise HTTPException(status_code=404, detail="Dashboard auth is not enabled")
 
-    if not payload.api_key or not secrets.compare_digest(payload.api_key, mindroom_api_key):
+    if not _api_key_matches(payload.api_key, mindroom_api_key):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
+    cookie = _standalone_auth_cookie(request)
     response.set_cookie(
-        key=_STANDALONE_AUTH_COOKIE_NAME,
+        key=cookie,
         value=payload.api_key,
         path="/",
-        secure=request.url.scheme == "https",
+        secure=cookie == _HTTPS_STANDALONE_AUTH_COOKIE_NAME,
         httponly=True,
         samesite="lax",
     )
@@ -1136,8 +1238,9 @@ async def create_auth_session(request: Request, payload: _AuthSessionRequest, re
 
 @router.delete("/api/auth/session", include_in_schema=False)
 async def clear_auth_session(response: Response) -> dict[str, bool]:
-    """Clear the standalone dashboard auth cookie."""
-    response.delete_cookie(key=_STANDALONE_AUTH_COOKIE_NAME, path="/")
+    """Clear the standalone dashboard auth cookie under both of its names."""
+    response.delete_cookie(key=_HTTPS_STANDALONE_AUTH_COOKIE_NAME, path="/", secure=True)
+    response.delete_cookie(key=_PLAIN_HTTP_STANDALONE_AUTH_COOKIE_NAME, path="/")
     return {"success": True}
 
 
@@ -1197,4 +1300,10 @@ async def standalone_login(request: Request, next: str = "/") -> Response:  # no
     if await request_has_frontend_access(request):
         return RedirectResponse(next_path)
 
-    return HTMLResponse(_render_standalone_login_page(next_path, auth_state.runtime_paths))
+    return HTMLResponse(
+        _render_standalone_login_page(
+            next_path,
+            auth_state.runtime_paths,
+            api_key_source=auth_state.settings.mindroom_api_key_source,
+        ),
+    )

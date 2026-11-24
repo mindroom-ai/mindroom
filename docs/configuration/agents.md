@@ -29,11 +29,11 @@ agents:
     role: Generate code, manage files, execute shell commands
     model: sonnet
     tools:
-      - file
+      - filesystem
       - github
       - shell:
           extra_env_passthrough: "DAWARICH_*"
-    worker_tools: [shell, file]
+    worker_tools: [shell, filesystem]
     instructions:
       - Always read files before modifying them
     context_files: [AGENTS.md, USER.md]
@@ -79,6 +79,7 @@ agents:
 | `participation` | object | `null` | Opt into adaptive replies in existing multi-human threads; see [Adaptive Participation](threads.md#adaptive-participation) |
 | `mid_turn` | object | `null` | Judge whether messages queued during a response can wait until it finishes; see [Mid-Turn Coalescing](threads.md#mid-turn-coalescing) |
 | `cold_cache` | object | `null` | Move an idle thread to `cheap_model` for good when a judge accepts it; see [Cold-Cache Model](models.md#cold-cache-model) |
+| `room_activity` | object | `defaults.room_activity` | Note in thread replies listing the room's other threads with new messages; omitted fields inherit `defaults.room_activity`. See [Activity in Other Threads](threads.md#activity-in-other-threads) |
 | `listen` | object | `null` | Hear chosen rooms and act silently after a quiet period; see [Listening](#listening) |
 | `contacts` | object | `null` | Let a personal agent talk to other people's personal agents and people after both owners approve; see [Agent Contacts](../agent-contacts.md) |
 | `thread_mode` | string | `"thread"` | `thread` replies in Matrix threads; `room` sends plain room messages with one continuous conversation per room, which suits bridges (Telegram, Signal, WhatsApp) and mobile clients |
@@ -88,7 +89,7 @@ agents:
 | `knowledge_graph_edits` | bool | `null` | Let the agent correct its knowledge graph: delete wrong facts and entities, merge duplicate entities, and rewrite summaries; needs `knowledge_graph`. See [Letting the Agent Fix Its Graph](../knowledge-graph.md#letting-the-agent-fix-its-graph) |
 | `timezone` | string | `null` | IANA timezone for this agent's dates, times, and schedules, such as `Europe/Amsterdam`; inherits the top-level `timezone`. See [Timezone](../scheduling.md#timezone) |
 | `memory_backend` | string | `null` | `mem0`, `file`, or `none`, overriding `memory.backend`; `none` disables memory. See [Memory](../memory.md) |
-| `memory_search` | object | `null` | File-memory search override (`mode`, `include`, `include_entrypoint`) when the backend is `file`; omitted fields inherit `memory.search`. See [Searching file memory](../memory.md#searching-file-memory) |
+| `memory_search` | object | `null` | File-memory search override (`mode`, `include`, `exclude`, `include_entrypoint`, `rerank`) when the backend is `file`; omitted fields inherit `memory.search`. See [Searching file memory](../memory.md#searching-file-memory) |
 | `automations` | list | `null` | Automations such as `prompt_curation`, `dreaming`, or one a plugin provides; `null` inherits the `defaults.automations` entries the agent can run and `[]` turns them off. See [Automations](../scheduling.md#automations) |
 | `knowledge_bases` | list | `[]` | Keys under top-level `knowledge_bases`, each at most once; see [Knowledge Bases](../knowledge.md) |
 | `context_files` | list | `[]` | Workspace files preloaded into the prompt; see [File-Based Context Loading](#file-based-context-loading) |
@@ -101,10 +102,12 @@ agents:
 | `show_reasoning` | bool | `null` | Show the model's reasoning on streamed replies to everyone in the room; see [Reasoning](../streaming.md#reasoning) |
 | `worker_tools` | list | `null` | Tools to run in an isolated worker instead of the primary process; `[]` runs everything in the primary process. When unset here and in `defaults`, the deployment's [execution mode](../deployment/sandbox-proxy.md#execution-modes) decides. See [Worker Routing](../deployment/sandbox-proxy.md#worker-routing) |
 | `worker_scope` | string | `null` | How worker runtimes are shared: `shared` (one per agent), `user` (one per user, across agents), or `user_agent` (one per user and agent). Not allowed together with `private`. See [Worker scopes](../deployment/sandbox-proxy.md#worker-scopes) |
-| `file_access` | string | `null` | `workspace` limits path-taking tools such as `file`, `coding`, `attachments`, and `matrix_message` to the agent workspace and its attachments, and lets `file` and `coding` also use the agent's [shared directories](../tools/execution-and-coding.md#shared_directories); `unrestricted` allows any path the tool's process can reach. `shell`, `python`, and other code-execution tools are never confined; isolate them with `worker_tools`. See [File access](../architecture/security-posture.md#file-access) |
+| `file_access` | string | `null` | `workspace` limits path-taking tools such as `filesystem`, `attachments`, and `matrix_message` to the agent workspace and its attachments, and lets `filesystem` also use the agent's [shared directories](../tools/execution-and-coding.md#shared_directories); `unrestricted` allows any path the tool's process can reach. `shell`, `python`, and other code-execution tools are never confined; isolate them with `worker_tools`. See [File access](../architecture/security-posture.md#file-access) |
+| `terminals` | string | `none` | What people in the agent's rooms may do with its [terminals](../tools/execution-and-coding.md#terminal): `none` shows them nothing, `watch` lets them watch, and `type` also lets people who may post open, close, and type in them where the agent's shell runs in a worker that mounts its workspace, and lets them only watch in a worker that does not. It applies to this agent only and is not inherited from `defaults`; the agent's own use of the `terminal` toolkit does not depend on it |
 | `allow_self_config` | bool | `null` | Give the agent a tool to read and change its own entry under `agents:`; see [`self_config`](../tools/agent-orchestration.md#self_config) |
 | `delegate_to` | list | `[]` | Agents this agent may run as subagents, including itself only when listed; see [Agent Delegation](../tools/agent-orchestration.md#agent-delegation) |
 | `dedicated_subagent_workers` | bool | `false` | Let this agent run a subagent in a worker of its own on the Docker or Kubernetes worker backend; see [Dedicated workers](../tools/agent-orchestration.md#dedicated-workers) |
+| `named_workers` | int | `0` | How many [named workers](../tools/execution-and-coding.md#named-workers) this agent's shell commands may have at once for one requester on the Kubernetes worker backend; the agent's workers must be per requester and agent (`worker_scope: user_agent`, or `private.per: user_agent`); `0` turns named workers off |
 | `thread_exports` | bool or object | `null` | Keep YAML exports of the agent's threads under `<workspace>/thread_exports/`; `true` uses the defaults. See [Thread Exports](../thread-exports.md#thread-exports) |
 
 Unset fields that appear in the inheritance table under [Defaults](#defaults) take the `defaults` value; a per-agent value overrides it.
@@ -126,8 +129,8 @@ agents:
     display_name: Mind
     role: A persistent personal AI companion
     model: sonnet
-    tools: [file, shell]
-    worker_tools: [file, shell]
+    tools: [filesystem, shell]
+    worker_tools: [filesystem, shell]
     memory_backend: file
     private:
       per: user
@@ -155,7 +158,7 @@ How a private agent behaves:
 - Private agents cannot be configured as team members, and a shared team member cannot reach one through `delegate_to`.
   Tagging a private agent together with other agents in a message still forms an ad hoc team for that requester.
 - A private agent runs only for a known requester; otherwise it fails with `Private agent '<name>' requires an active execution identity to resolve requester-local state`.
-- It never runs for MindRoom's own router, agent, and team accounts or the internal `mindroom_user` account, for example when a shared agent's automation mentions it or assigns it a todo; such a run fails with `Private agent '<name>' requires a human or bot-account requester to resolve requester-local state`.
+- It never runs for MindRoom's own owner, agent, and team accounts or the internal `mindroom_user` account, for example when a shared agent's automation mentions it or assigns it a todo; such a run fails with `Private agent '<name>' requires a human or bot-account requester to resolve requester-local state`.
   A delegation to it from such a turn is refused with `Cannot delegate to '<name>': a private agent runs only for a person or bot account.`
 
 ### Private Fields
@@ -185,10 +188,10 @@ How a private agent behaves:
 - Missing files are skipped with a warning in the logs.
 - Edits take effect on the next reply without a restart.
 
-`defaults.max_preload_chars` (default `50000`) caps the section.
-When it is exceeded, MindRoom drops whole files from the start of the list first and then trims the last remaining file from its end.
-Each affected file keeps its path and a marker with the omitted character count, so the agent can open the file for the rest.
-A cap too small to hold the headings and markers fails with `max_preload_chars=<n> cannot fit required context headings and omission markers`.
+`defaults.max_preload_file_chars` (default `30000`, at most `200000`) limits each file on its own, and the same limit applies to an inlined [`MEMORY.md`](../memory.md#backend-file).
+A longer file keeps its first whole lines that fit the limit, counted as they are in the file (only a line feed ends a line); only a first line longer than the limit keeps its first characters.
+A marker naming the file follows the kept text, says the rest is left out, and asks the agent to condense the file without losing information.
+One file growing never shortens or drops another, and the marker holds no count, so lines added past the cut leave the prompt unchanged.
 
 ## Listening
 
@@ -253,7 +256,7 @@ A silent turn calls only the tools it names, but each keeps its usual effects, h
 
 - `scheduler`, one of the default agent tools, schedules a later turn of the agent, and can edit or cancel any pending task in the room; an edited task becomes the agent's own.
   A scheduled message can also address other agents and teams in the room, which answer the listening agent's account under that account's access, not the heard sender's.
-- `file`, `coding`, `shell`, and `python` can write any workspace file, including `MEMORY.md` and the context files and skills the agent loads into every later turn; `script`, `shell`, and `python` run code with the agent's worker and credentials.
+- `filesystem`, `shell`, and `python` can write any workspace file, including `MEMORY.md` and the context files and skills the agent loads into every later turn; `script`, `shell`, and `python` run code with the agent's worker and credentials.
 - A tool with a shared connection acts on that connection's credentials, for example `github`, `sql`, `postgres`, `google_drive`, `homeassistant`, and `composio`.
 - `report_publishing` publishes workspace files at a public link.
 - A tool that starts a turn starts it with all of the agent's tools, as the agent's own account, and a tool that checks who asked sees that account, because no person asked for a silent turn.
@@ -263,7 +266,7 @@ List these only if you trust everyone whose messages the agent hears.
 
 MindRoom holds a silent turn to a few lines of its own:
 
-- Config load refuses `matrix_message`, presets, and the tools a contact turn never offers: `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `dynamic_workflow`, `claude_agent`, `skill_manage`, and `dynamic_tools`.
+- Config load refuses `matrix_message`, presets, and the tools a contact turn never offers: `contacts`, `delegate`, `agent_manager`, `self_config`, `config_manager`, `dynamic_workflow`, `claude_agent`, `skill_manage`, `dynamic_tools`, and `matrix_user`.
 - The turn's tool context carries `listen.tools`, so a tool that builds its own catalog from it, such as the functions a `script` may call, offers nothing outside the list.
 - No call may save its result to a file with `mindroom_output_path`, so a tool that writes no files of its own, such as `react`, cannot overwrite one.
 - A shell in a silent turn does not offer `mindroom-agent`, because no requester owns a grant for it.
@@ -312,9 +315,9 @@ The `defaults` section sets values every agent inherits unless it sets its own, 
 defaults:
   tools: [scheduler]
   max_tool_calls_per_turn: 200
-  worker_tools: [shell, file, python]
+  worker_tools: [shell, filesystem, python]
   enable_streaming: true
-  max_preload_chars: 50000
+  max_preload_file_chars: 30000
 ```
 
 These defaults apply to each agent that leaves the same field unset:
@@ -327,6 +330,7 @@ These defaults apply to each agent that leaves the same field unset:
 | `knowledge_graph_edits` | `true` |
 | `num_history_runs`, `num_history_messages`, `max_tool_calls_from_history` | `null` (no limit) |
 | `compaction` | enabled; see [Agent Compaction Settings](history.md#agent-compaction-settings) |
+| `room_activity` | off, `window_minutes: 120`, `max_threads: 5`; see [Activity in Other Threads](threads.md#activity-in-other-threads) |
 | `max_tool_calls_per_turn` | `1000` |
 | `show_tool_calls` | `true` |
 | `show_reasoning` | `true` |
@@ -346,10 +350,11 @@ These settings are global-only:
 | `enable_streaming` | `true` | Show replies as progressive message edits; see [Streaming](../streaming.md#configuration) |
 | `streaming` | see [Streaming](../streaming.md#configuration) | Timing settings for progressive edits |
 | `large_message_strategy` | `sidecar` | Oversized replies as a preview with the full text attached (`sidecar`) or as several complete messages (`split`); see [Large Messages](../streaming.md#large-messages) |
-| `coalescing.debounce_ms` | `1000` | Milliseconds (>= 0) to wait after media for more attachments or a trailing caption before replying; text replies immediately |
+| `coalescing.debounce_ms` | `1000` | Milliseconds (>= 0) to wait after unmarked media for more attachments or a trailing caption before replying; text replies immediately, and [marked submissions](../attachments.md#files-sent-with-text) use their own bound |
 | `show_stop_button` | `true` | Add a 🛑 reaction while an agent responds; see [Stop Button](../chat-commands.md#stop-button) |
 | `max_consecutive_agent_replies` | `50` | Consecutive agent or team messages (>= 1) before agents stop waking each other; see [Agents mentioning other agents](../authorization.md#agents-mentioning-other-agents) |
-| `max_preload_chars` | `50000` | Cap (>= 1) on preloaded context files; see [File-Based Context Loading](#file-based-context-loading) |
+| `max_preload_file_chars` | `30000` | Characters (1 to 200000) of each file inlined into the prompt, context files and `MEMORY.md` alike; see [File-Based Context Loading](#file-based-context-loading) |
 | `tool_output_auto_save_threshold_bytes` | `51200` | Larger tool outputs are saved to the workspace; see [Workspace and tool output files](../tools/execution-and-coding.md#workspace-and-tool-output-files) |
+| `allow_shell_without_worker` | `false` | Let the [`shell`](../tools/execution-and-coding.md#shell) tool run commands in the MindRoom process for agents whose `shell` does not run in a worker; when `false`, each such call is refused with a message naming this setting. `mindroom config init` sets it to `true` |
 | `worker_grantable_credentials` | `null` | Shared credential services available inside isolated workers (`null` grants none); Google OAuth client and token services, `google_vertex_adc`, and `slack_app` cannot be granted. See [Credential leases](../deployment/sandbox-proxy.md#credential-leases) |
 | `thread_summary_model`, `thread_summary_temperature`, `thread_summary_first_threshold`, `thread_summary_subsequent_interval` | `null`, `0.2`, `1`, `10` | Automatic thread summaries; see [Automatic Thread Summaries](../tools/matrix-and-attachments.md#automatic-thread-summaries) |

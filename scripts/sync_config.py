@@ -43,6 +43,8 @@ def saas_config() -> dict:
     # An explicit worker_tools list overrides the chart's sandbox routing, and [] would run
     # shell/file/python in the primary pod beside tenant credentials.
     config["defaults"].pop("worker_tools", None)
+    # Hosted shells run only in workers.
+    config["defaults"].pop("allow_shell_without_worker", None)
 
     # Voice messages transcribe through OpenRouter's OpenAI-compatible endpoint with the tenant's OpenRouter key.
     config["voice"] = {
@@ -60,7 +62,8 @@ def saas_config() -> dict:
     config.pop("mcp_servers")
     # The platform upgrades hosted instances, so tenants cannot act on update notices.
     config["defaults"]["tools"].remove("update_awareness")
-    hosted_excluded_tools = {"update_awareness", "script", "mcp_matrix_mcp"}
+    # Hosted tenants get thread_snooze only when someone adds it to an agent.
+    hosted_excluded_tools = {"update_awareness", "script", "mcp_matrix_mcp", "thread_snooze"}
     for agent in config["agents"].values():
         agent["tools"] = [
             tool

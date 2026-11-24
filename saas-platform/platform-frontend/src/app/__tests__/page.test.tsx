@@ -17,6 +17,22 @@ jest.mock('@/hooks/useDarkMode', () => ({
   useDarkMode: () => ({ isDarkMode: false }),
 }))
 
+const mockGetSession = jest.fn()
+const mockLoadInstance = jest.fn()
+
+jest.mock('@/lib/supabase/client', () => ({
+  createClient: () => ({ auth: { getSession: mockGetSession } }),
+}))
+
+jest.mock('@/lib/instance-resource', () => ({
+  loadInstance: (userId: string) => mockLoadInstance(userId),
+}))
+
+beforeEach(() => {
+  mockGetSession.mockResolvedValue({ data: { session: null } })
+  mockLoadInstance.mockReset()
+})
+
 const hero = () => within(document.querySelector('section') as HTMLElement)
 const selfHost = () => within(document.getElementById('self-host') as HTMLElement)
 
@@ -209,6 +225,17 @@ describe('LandingPage', () => {
 
     expect(screen.getByRole('link', { name: 'Open Chat' })).toHaveAttribute('href', 'https://chat.mindroom.chat')
     expect(screen.getByRole('link', { name: 'Open MindRoom Chat' })).toHaveAttribute('href', 'https://chat.mindroom.chat')
+  })
+
+  it('opens chat on the hosted instance server for a signed-in customer', async () => {
+    mockGetSession.mockResolvedValue({ data: { session: { user: { id: 'user-1' } } } })
+    mockLoadInstance.mockResolvedValue({ matrix_server_url: 'https://7.mindroom.chat' })
+    render(<LandingPage />)
+
+    const instanceChat = 'https://chat.mindroom.chat/login/https%3A%2F%2F7.mindroom.chat/'
+    await waitFor(() => expect(screen.getByRole('link', { name: 'Open Chat' })).toHaveAttribute('href', instanceChat))
+    expect(screen.getByRole('link', { name: 'Open MindRoom Chat' })).toHaveAttribute('href', instanceChat)
+    expect(mockLoadInstance).toHaveBeenCalledWith('user-1')
   })
 
   it('lists the MindRoom Chat apps', () => {

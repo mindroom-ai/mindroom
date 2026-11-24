@@ -195,6 +195,14 @@ def test_concurrent_constructors_recover_once_and_share_current_store(tmp_path: 
     _assert_old_row(_archived_database(tmp_path))
 
 
+def test_recovery_lock_descriptor_is_read_write(tmp_path: Path, flock_access_modes: list[int]) -> None:
+    """An exclusive lock on a read-only descriptor fails with EBADF on NFS."""
+    with session_storage_preflight(tmp_path / "state", TableNames("general"), timeout_seconds=1):
+        pass
+
+    assert flock_access_modes == [os.O_RDWR]
+
+
 @pytest.mark.parametrize("plant", ["held", "fifo", "link"])
 def test_worker_planted_recovery_lock_fails_promptly(tmp_path: Path, plant: str) -> None:
     """Sandbox runners write state roots, so a held, FIFO, or linked recovery lock fails instead of stalling or redirecting."""

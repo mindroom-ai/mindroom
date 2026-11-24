@@ -8,6 +8,7 @@ import json
 import stat
 import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass, replace
 from enum import Enum
@@ -20,6 +21,7 @@ from mindroom.atomic_file import atomic_write_bytes_at
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES, DEFAULT_TOOL_OUTPUT_MAX_BYTES
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import is_git_metadata_path, open_directory_within_root
+from mindroom.tool_system.progress import structured_result_requested
 from mindroom.workspaces import resolve_relative_path_within_root_preserving_leaf
 
 if TYPE_CHECKING:
@@ -30,17 +32,19 @@ logger = get_logger(__name__)
 
 OUTPUT_PATH_ARGUMENT = "mindroom_output_path"
 _OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
-    "Optional MindRoom-managed workspace-relative path. "
-    "If set, the full supported tool output is written to this file in your workspace and the tool returns only a "
-    "compact receipt. "
-    "Use this for large output you plan to inspect later with file, coding, python, or shell tools."
+    "Optional workspace-relative path: save the full supported output there and return a short receipt."
+)
+# Beside a workdir, the path is below the saved outputs, which tools working in the workdir open by absolute path.
+_WORKDIR_OUTPUT_PATH_ARGUMENT_DESCRIPTION = (
+    "Optional path under your saved tool outputs directory: save the full supported output there and return a short receipt "
+    "with its absolute path."
 )
 _MAX_BYTES_ENV = "MINDROOM_TOOL_OUTPUT_REDIRECT_MAX_BYTES"
 _AUTO_SAVE_PREVIEW_BYTES = 8192
 _AUTO_SAVE_ROOT = "mindroom_tool_outputs"
 _AUTO_SAVE_READ_HINT = (
     "Do not read this whole file: it is over threshold_bytes, so the result would be saved to a file again. "
-    "Read it in parts instead, such as a line range (for example with read_file_chunk) or a search for what you need."
+    "Read it in parts instead, such as a line range (for example read_file with offset and limit) or a search for what you need."
 )
 _TEXT_FALLBACK_HEADER = (
     "MindRoom tool output serialized with text fallback because the result was not JSON-normalizable.\n\n"
@@ -54,6 +58,9 @@ class ToolOutputFilePolicy:
     workspace_root: Path
     max_bytes: int = DEFAULT_TOOL_OUTPUT_MAX_BYTES
     auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
+    # Whether the agent's tools work in a directory other than its workspace, as in a headless run with a workdir: every
+    # saved output then goes to ``saved_output_dir``, which those tools can read, and receipts name it by absolute path.
+    tools_use_workdir: bool = False
 
     @classmethod
     def from_runtime(
@@ -62,13 +69,20 @@ class ToolOutputFilePolicy:
         runtime_paths: RuntimePaths,
         *,
         auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
+        tools_use_workdir: bool = False,
     ) -> ToolOutputFilePolicy:
         """Build a policy using the runtime-visible byte cap."""
         return cls(
             workspace_root=workspace_root,
             max_bytes=_output_redirect_max_bytes(runtime_paths),
             auto_save_threshold_bytes=auto_save_threshold_bytes,
+            tools_use_workdir=tools_use_workdir,
         )
+
+    @property
+    def saved_output_dir(self) -> Path:
+        """Return the workspace directory that holds automatically saved outputs."""
+        return self.workspace_root / _AUTO_SAVE_ROOT
 
 
 @dataclass(frozen=True)
@@ -96,6 +110,28 @@ class ToolOutputFileHandled:
 
 
 _active_output_request: ContextVar[ToolOutputFileRequest | None] = ContextVar("tool_output_file_request", default=None)
+# The directory a headless run's caller chose for its agents' tools to work in, in place of their workspaces.
+_TOOL_WORKDIR: ContextVar[Path | None] = ContextVar("tool_workdir", default=None)
+
+
+@contextmanager
+def tool_workdir(workdir: Path | None) -> Iterator[None]:
+    """Build the tools of the block's turns to work in ``workdir``, or in their agents' workspaces when None."""
+    token = _TOOL_WORKDIR.set(workdir)
+    try:
+        yield
+    finally:
+        _TOOL_WORKDIR.reset(token)
+
+
+def current_tool_workdir() -> Path | None:
+    """Return the workdir bound for the tools built now, if any."""
+    return _TOOL_WORKDIR.get()
+
+
+def active_tool_output_file_request() -> ToolOutputFileRequest | None:
+    """Return the active output-file request for this call, whether explicit redirect or auto-save."""
+    return _active_output_request.get()
 
 
 def current_tool_output_file_request() -> ToolOutputFileRequest | None:
@@ -114,7 +150,6 @@ class _SerializedToolOutput:
 class _ToolOutputWriteResult:
     """Result from writing caller-managed bytes to a validated output path."""
 
-    receipt: dict[str, object]
     absolute_path: Path
     byte_count: int
     overwritten: bool
@@ -191,6 +226,24 @@ def saved_tool_output_receipt(
     return receipt
 
 
+def saved_output_envelope(result: object) -> dict[str, object] | None:
+    """Return an already saved output receipt, not text or a redirect failure."""
+    if not isinstance(result, dict) or result.keys() != {"mindroom_tool_output"}:
+        return None
+    inner = cast("dict[str, object]", result)["mindroom_tool_output"]
+    if isinstance(inner, dict) and inner.get("status") == "saved_to_file" and isinstance(inner.get("path"), str):
+        return {"mindroom_tool_output": dict(inner)}
+    return None
+
+
+def is_tool_output_error(result: object) -> bool:
+    """Return whether ``result`` is a ``mindroom_tool_output`` error receipt."""
+    if not isinstance(result, dict) or result.keys() != {"mindroom_tool_output"}:
+        return False
+    inner = cast("dict[str, object]", result)["mindroom_tool_output"]
+    return isinstance(inner, dict) and inner.get("status") == "error"
+
+
 def _error_receipt(error: str) -> dict[str, object]:
     return {
         "mindroom_tool_output": {
@@ -200,19 +253,20 @@ def _error_receipt(error: str) -> dict[str, object]:
     }
 
 
-def _output_path_schema() -> dict[str, object]:
-    return {
-        "anyOf": [{"type": "string"}, {"type": "null"}],
-        "default": None,
-        "description": _OUTPUT_PATH_ARGUMENT_DESCRIPTION,
-    }
+def with_optional_output_path(parameters: Mapping[str, Any], *, tools_use_workdir: bool = False) -> dict[str, Any]:
+    """Return a copy of ``parameters`` offering MindRoom's reserved output-path argument as its last, optional property.
 
-
-def with_optional_output_path(parameters: Mapping[str, Any]) -> dict[str, Any]:
-    """Return a copy of ``parameters`` offering MindRoom's reserved output-path argument as its last, optional property."""
+    With ``tools_use_workdir``, the path is described as relative to the saved tool outputs, where such a policy puts it.
+    """
     finished = dict(parameters)
     properties = dict(finished.get("properties") or {})
-    properties[OUTPUT_PATH_ARGUMENT] = _output_path_schema()
+    properties[OUTPUT_PATH_ARGUMENT] = {
+        "anyOf": [{"type": "string"}, {"type": "null"}],
+        "default": None,
+        "description": _WORKDIR_OUTPUT_PATH_ARGUMENT_DESCRIPTION
+        if tools_use_workdir
+        else _OUTPUT_PATH_ARGUMENT_DESCRIPTION,
+    }
     finished["type"] = finished.get("type") or "object"
     finished["properties"] = properties
     required = finished.get("required")
@@ -269,6 +323,8 @@ def _validate_output_path(policy: ToolOutputFilePolicy, raw_path: object) -> _Va
         return raw_validation
 
     requested_path, relative_path = raw_validation
+    if policy.tools_use_workdir:
+        relative_path = Path(_AUTO_SAVE_ROOT, relative_path)
     try:
         candidate = resolve_relative_path_within_root_preserving_leaf(
             policy.workspace_root,
@@ -379,9 +435,19 @@ def _safe_tool_name(tool_name: str) -> str:
     return safe[:80] or "tool"
 
 
-def _auto_output_relative_path(tool_name: str, output_format: Literal["text", "json", "binary"]) -> str:
+def _auto_output_relative_path(
+    policy: ToolOutputFilePolicy,
+    tool_name: str,
+    output_format: Literal["text", "json", "binary"],
+) -> str:
     suffix = {"text": "txt", "json": "json", "binary": "bin"}[output_format]
-    return f"{_AUTO_SAVE_ROOT}/{_safe_tool_name(tool_name)}-{uuid.uuid4().hex}.{suffix}"
+    name = f"{_safe_tool_name(tool_name)}-{uuid.uuid4().hex}.{suffix}"
+    return name if policy.tools_use_workdir else f"{_AUTO_SAVE_ROOT}/{name}"
+
+
+def _receipt_path(policy: ToolOutputFilePolicy, validated_path: _ValidatedOutputPath) -> str:
+    """Name a saved file as the agent's tools can open it: from their workdir only by its absolute path."""
+    return str(validated_path.absolute_path) if policy.tools_use_workdir else validated_path.requested_path
 
 
 def _write_atomic(
@@ -410,7 +476,6 @@ def write_bytes_to_output_path(
     raw_path: object,
     payload: bytes,
     *,
-    output_format: Literal["binary"] = "binary",
     file_mode: int | None = None,
 ) -> _ToolOutputWriteResult | str:
     """Validate and atomically write caller-owned bytes to a MindRoom output path."""
@@ -432,12 +497,6 @@ def write_bytes_to_output_path(
         return write_error
 
     return _ToolOutputWriteResult(
-        receipt=_success_receipt(
-            path=validated_path.requested_path,
-            byte_count=byte_count,
-            output_format=output_format,
-            overwritten=validated_path.overwritten,
-        ),
         absolute_path=validated_path.absolute_path,
         byte_count=byte_count,
         overwritten=validated_path.overwritten,
@@ -469,7 +528,7 @@ def _redirect_result_to_file(
         return _error_receipt(write_error)
 
     return _success_receipt(
-        path=validated_path.requested_path,
+        path=_receipt_path(policy, validated_path),
         byte_count=byte_count,
         output_format=serialized.format,
         overwritten=validated_path.overwritten,
@@ -482,6 +541,8 @@ def _auto_save_large_result(
     policy: ToolOutputFilePolicy,
     tool_name: str,
 ) -> object:
+    if structured_result_requested():
+        return result
     try:
         serialized = _serialize_tool_output(result)
     except Exception as exc:
@@ -508,7 +569,7 @@ def _write_auto_saved_result(
             f"Tool output is {byte_count} bytes, which exceeds the {policy.max_bytes} byte auto-save limit.",
         )
 
-    relative_path = _auto_output_relative_path(tool_name, serialized.format)
+    relative_path = _auto_output_relative_path(policy, tool_name, serialized.format)
     validated_path = _validate_output_path(policy, relative_path)
     if isinstance(validated_path, str):
         return _error_receipt(validated_path)
@@ -522,7 +583,7 @@ def _write_auto_saved_result(
         return _error_receipt(write_error)
 
     return _auto_save_success_receipt(
-        path=validated_path.requested_path,
+        path=_receipt_path(policy, validated_path),
         byte_count=byte_count,
         output_format=serialized.format,
         threshold_bytes=policy.auto_save_threshold_bytes,
@@ -575,7 +636,7 @@ def with_output_files(function: ToolFunction, policy: ToolOutputFilePolicy) -> T
         return function
     return replace(
         function,
-        parameters=with_optional_output_path(function.parameters),
+        parameters=with_optional_output_path(function.parameters, tools_use_workdir=policy.tools_use_workdir),
         strict=False,
         entrypoint=_handling_output_files(function.entrypoint, policy, tool_name=function.name),
     )

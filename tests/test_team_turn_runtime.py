@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
@@ -50,7 +51,7 @@ from mindroom.hooks import (
     hook,
 )
 from mindroom.llm.errors import ProviderError
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import Message, system_text
 from mindroom.llm.provider import ModelRequest, NativeCompactionReplay, TextDelta, TurnCompleted, UsageReported
 from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
@@ -69,7 +70,7 @@ from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolManagedInitArg
-from mindroom.tool_system.events import FailedReply, StructuredStreamChunk
+from mindroom.tool_system.events import FailedReply, StructuredStreamChunk, tool_markers_in_text
 from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.runtime_context import (
@@ -904,7 +905,8 @@ async def test_the_leader_runs_with_compaction_bound_to_the_team_scope(
 ) -> None:
     """The leader loop gets the approval receipt hook and mid-turn compaction before each request, and the notices.
 
-    No approval receipt is bound around a fresh turn, so none of its requests carries one.
+    The leader's checkpoint follows them and also runs before each tool batch. No approval receipt is bound around a
+    fresh turn, so none of its requests carries one.
     """
     team = squad_turn(tmp_path, monkeypatch, leader=[answer("Alone.", usage(50, 5))])
     captured: dict[str, Any] = {}
@@ -931,7 +933,9 @@ async def test_the_leader_runs_with_compaction_bound_to_the_team_scope(
     assert [hook.__qualname__.split(".")[0] for hook in hooks.before_request] == [
         "approval_receipt_hook",
         "mid_turn_compaction_hook",
+        "checkpoint_hooks",
     ]
+    assert hooks.before_dispatch.__qualname__.split(".")[0] == "checkpoint_hooks"
     assert (len(hooks.after_tool_batch), len(hooks.on_resume_entry)) == (1, 1)
     assert hooks.tool_middleware == ()
     [compaction] = [kwargs for kwargs in compactions if kwargs["scope"].kind == "team"]
@@ -957,6 +961,74 @@ async def _pause_on_the_checker(
     with pytest.raises(ResponsePausedForApproval) as raised:
         await team.stream(show_tool_calls=show_tool_calls)
     return team, raised.value
+
+
+@pytest.mark.asyncio
+async def test_approved_team_member_shell_reaches_its_named_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The team resumes the persisted member shell call before running its follow-up."""
+    from mindroom.event_journal import ApprovalCall, approval_arguments_digest  # noqa: PLC0415
+    from mindroom.workers import named  # noqa: PLC0415
+    from mindroom.workers.runtime import idle_worker_cleanup_owner  # noqa: PLC0415
+    from tests.test_named_workers import (  # noqa: PLC0415
+        _FakeBackend,
+        _retired,
+        _route_through,
+        _static_worker_manager_lease,
+    )
+
+    args = {"args": ["printf", "approved"], "worker": "team-build"}
+    team = squad_turn(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "checker", "Run it"), answer("Done.")],
+        checker=[calls(tool_call("run_shell_command", "call-shell", **args)), answer("Approved.")],
+        approval_rules=[ApprovalRuleConfig(match="run_shell_command", action="require_approval")],
+    )
+    team.runtime_paths = replace(
+        team.runtime_paths,
+        process_env={
+            **team.runtime_paths.process_env,
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS": "30",
+            "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
+        },
+    )
+    checker = team.config.agents["checker"]
+    checker.tools = ["shell"]
+    checker.worker_scope = "user_agent"
+    checker.named_workers = 1
+    team.runtime = replace(team.runtime, runtime_paths=team.runtime_paths, turn_id="named-team-approval")
+    backend = _FakeBackend()
+    posts = _route_through(monkeypatch, backend)
+    monkeypatch.setattr(
+        named,
+        "lease_configured_primary_worker_manager",
+        lambda _paths: _static_worker_manager_lease(backend),
+    )
+    with idle_worker_cleanup_owner():
+        with pytest.raises(ResponsePausedForApproval) as raised:
+            await team.stream(show_tool_calls=False)
+        assert posts == []
+        paused = raised.value.paused
+        assert paused.toolkit_owners == {("checker", "run_shell_command"): "shell"}
+        call = ApprovalCall(
+            tool_call_id="call-shell",
+            tool_name="run_shell_command",
+            invoking_agent="checker",
+            toolkit_name="shell",
+            arguments_digest=approval_arguments_digest(args),
+            expires_at_ns=2**62,
+        )
+        result = await team.resume(paused, approved=True, approvals=(call,))
+
+    assert isinstance(result, CompletedApprovalRun)
+    assert len(posts) == 1, team.models["checker-model"].requests[-1].messages[-1].content
+    [worker] = backend.specs
+    assert posts[0][1]["worker_key"] == worker.worker_key
+    assert await _retired(backend) == [worker.worker_key]
 
 
 @pytest.mark.asyncio
@@ -1001,8 +1073,8 @@ async def test_a_member_approval_pauses_the_team_with_the_member_s_identity_and_
         pytest.param(
             True,
             f"{HEADER}**Checker**:\n\n🔧 `touch` [1] ⏳\n\n\n**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]",
-            "\n\n🔧 `touch` [1] ⏳\n\n",
-            "\n\n🔧 `delegate_task_to_member` [2]\n\n",
+            "🔧 `touch` [1] ⏳",
+            "🔧 `delegate_task_to_member` [2]",
             id="tool-calls-shown",
         ),
         # With tool calls hidden and no text yet, the pause shows no document of its own.
@@ -1270,6 +1342,30 @@ async def test_an_approval_resume_sends_the_receipt_to_the_member_and_the_leader
     record, members = team.stored_runs()
     stored = {run.agent_id: [message.content for message in run.messages].count(receipt) for run in members}
     assert ([message.content for message in record.messages].count(receipt), stored) == (1, {"checker": 1, "writer": 0})
+
+
+@pytest.mark.asyncio
+async def test_a_member_first_run_after_an_approval_resume_holds_the_resume_s_system_enrichment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member the resumed leader hands a new task runs with the resume's system enrichment in its system prompt."""
+    team, raised = await _pause_on_the_checker(tmp_path, monkeypatch)
+    team.models["default"] = ScriptedModel([delegate("call-polish", "writer", "Polish it"), answer("Done.")])
+    team.models["checker-model"] = ScriptedModel([answer("Touched.")])
+    team.models["writer-model"] = ScriptedModel([answer("Polished.")])
+    instruction = EnrichmentItem(key="plugin", text="Answer in one sentence.")
+
+    result = await team.resume(
+        raised.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous"),),
+        system_enrichment_items=(instruction,),
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    [request] = team.models["writer-model"].requests
+    assert instruction.text in system_text(request.messages)
 
 
 @pytest.mark.asyncio
@@ -3164,7 +3260,7 @@ async def test_an_ad_hoc_team_turn_is_dated_in_the_zone_of_the_agent_whose_bot_r
         )
 
     system, turn = _leader_request_text(team, "writer-model")
-    assert "Timezone: America/Los_Angeles (" in system
+    assert re.search(r"Current date: .+\(America/Los_Angeles, P[DS]T\)\.", system)
     assert ('ts="2026-03-20 08:15 PDT"' in turn) is coalesced
     assert 'ts="2026-03-20 08:16 PDT"' in turn
     assert "[2026-03-20 08:00 PDT] older text" in turn
@@ -3190,7 +3286,7 @@ async def test_a_configured_team_turn_is_dated_in_the_global_zone(
         )
 
     system, turn = _leader_request_text(team, "default")
-    assert "Timezone: UTC (UTC)" in system
+    assert re.search(r"Current date: .+\(UTC, UTC\)\.", system)
     assert 'ts="2026-03-20 15:16 UTC"' in turn
     assert "[2026-03-20 15:00 UTC] older text" in turn
     assert "PDT" not in turn
@@ -3322,7 +3418,12 @@ async def _approving_team_bot(
     bot = _team_bot(team)
     cards: list[MatrixDelivery] = []
 
-    async def prepare_event(_room_id: str, _thread_id: str | None, content: dict[str, Any]) -> dict[str, Any]:
+    async def prepare_event(
+        _room_id: str,
+        _thread_id: str | None,
+        content: dict[str, Any],
+        _sender_entity: str,
+    ) -> dict[str, Any]:
         return content
 
     async def send_card(delivery: MatrixDelivery) -> str:
@@ -3338,8 +3439,8 @@ async def _approving_team_bot(
         send_approval_delivery=send_card,
         resolve_approval_delivery=AsyncMock(return_value=None),
         cards=bot._journal_store.principal("router@shared"),
-        transport_sender_id=lambda: "@router:localhost",
-        transport_device_id=lambda: "DEVICE",
+        sender_bot=lambda _entity_name, _room_id: object(),
+        sender_device_id=AsyncMock(return_value="DEVICE"),
     )
     try:
         with patch_response_runner_module(should_use_streaming=AsyncMock(return_value=streaming)):
@@ -3371,9 +3472,10 @@ async def _approve(bot: AgentBot, card_event_id: str) -> None:
 
 
 def _shown(bot: AgentBot) -> str:
-    """Return what the reply shows now: the body of its last send or edit."""
+    """Return what the reply shows now: the body of its last send or edit, with its tool markers back."""
     content = bot.client.room_send.await_args_list[-1].kwargs["content"]
-    return str(content.get("m.new_content", content)["body"])
+    shown = content.get("m.new_content", content)
+    return str(tool_markers_in_text(shown)["body"])
 
 
 @pytest.mark.asyncio
@@ -3450,7 +3552,7 @@ async def test_a_member_s_next_gated_delegation_during_the_resume_posts_the_next
 
         assert _card_calls(cards) == [("run_subagent", "writer:call-sub"), ("run_subagent", "writer:call-sub-2")]
         assert _shown(bot) == (
-            f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1]\n\n\n\n🔧 `run_subagent` [2] ⏳\n\n\n"
+            f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1]\n\n🔧 `run_subagent` [2] ⏳\n\n\n"
             "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [3]"
         )
         continuation = await bot.journal_principal().approvals.approval_continuation_for_source(EVENT_ID)
@@ -3460,7 +3562,7 @@ async def test_a_member_s_next_gated_delegation_during_the_resume_posts_the_next
         await _approve(bot, "$card-2")
 
     assert _shown(bot) == (
-        f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1]\n\n\n\n🔧 `run_subagent` [2]\n\nWriter: dug twice.\n\n\n"
+        f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1]\n\n🔧 `run_subagent` [2]\n\nWriter: dug twice.\n\n\n"
         "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [3]\n\nConsensus."
     )
     assert await bot.journal_principal().approvals.approval_continuation_for_source(EVENT_ID) is None
@@ -3505,7 +3607,7 @@ async def test_a_member_s_child_s_gated_delegation_posts_its_card_in_the_team_sl
         # The writer's call still waits on its child; the child's call shows in the team's slot.
         assert _shown(bot) == (
             f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1] ⏳\n\n\n"
-            "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\n\n\n🔧 `run_subagent` [3] ⏳"
+            "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\n🔧 `run_subagent` [3] ⏳"
         )
         assert team.models["checker-model"].requests == []
 
@@ -3513,7 +3615,7 @@ async def test_a_member_s_child_s_gated_delegation_posts_its_card_in_the_team_sl
 
     assert _shown(bot) == (
         f"{HEADER}**Writer**:\n\n🔧 `run_subagent` [1]\n\nWriter: dug.\n\n\n"
-        "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\n\n\n🔧 `run_subagent` [3]\n\nConsensus."
+        "**Team Consensus**:\n\n🔧 `delegate_task_to_member` [2]\n\n🔧 `run_subagent` [3]\n\nConsensus."
     )
     assert await bot.journal_principal().approvals.approval_continuation_for_source(EVENT_ID) is None
     assert len(team.models["checker-model"].requests) == 1

@@ -8,7 +8,7 @@ import socket
 import ssl  # noqa: TC003 - Required for runtime get_type_hints on public transport constructors.
 from collections.abc import Awaitable, Callable, Iterable  # noqa: TC003
 from typing import NoReturn, TypeVar
-from urllib.parse import SplitResult, urljoin, urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 import httpcore
 import httpx
@@ -183,7 +183,7 @@ def _resolve_host_addresses(host: str, *, port: int | None, scheme: str) -> list
     addresses: list[_IPAddress] = []
     for result in results:
         sockaddr = result[4]
-        if not sockaddr:
+        if not sockaddr:  # ty: ignore[redundant-condition]  # defensive against malformed resolver output
             continue
         raw_address = str(sockaddr[0]).split("%", maxsplit=1)[0]
         address = _ip_address_from_host(raw_address)
@@ -220,8 +220,9 @@ def _validated_host_addresses(
     resolve_hostnames: bool,
     allow_loopback: bool = False,
     private_networks: tuple[_IPNetwork, ...] = (),
+    resolve_lan_names: bool = False,
 ) -> list[_IPAddress]:
-    """Validate a host and optionally return addresses that are safe to dial."""
+    """Validate a host and optionally return addresses that are safe to dial; `resolve_lan_names` admits `*.local`."""
     host = _normalize_hostname(hostname)
     direct_address = _ip_address_from_host(host)
     if direct_address is not None:
@@ -238,7 +239,8 @@ def _validated_host_addresses(
         _deny("metadata_hostname")
 
     loopback_hostname = ascii_host == "localhost" or ascii_host.endswith(".localhost")
-    if _is_local_hostname(ascii_host) and not (allow_private_networks or (allow_loopback and loopback_hostname)):
+    allowed = allow_private_networks or (resolve_lan_names and ascii_host.endswith(".local"))
+    if _is_local_hostname(ascii_host) and not (allowed or (allow_loopback and loopback_hostname)):
         _deny("private_hostname")
     if not resolve_hostnames:
         return []
@@ -314,18 +316,6 @@ def validate_server_fetch_url(
     )
 
 
-def validate_server_fetch_redirect_url(
-    current_url: str,
-    location: str | None,
-    *,
-    allow_private_networks: bool = False,
-) -> str:
-    """Resolve and validate an HTTP redirect Location value."""
-    if not location:
-        _deny("missing_redirect_location")
-    return validate_server_fetch_url(urljoin(current_url, location), allow_private_networks=allow_private_networks)
-
-
 def validated_connect_addresses(
     host: str,
     *,
@@ -333,6 +323,7 @@ def validated_connect_addresses(
     allow_private_networks: bool,
     allow_loopback: bool = False,
     private_networks: tuple[_IPNetwork, ...] = (),
+    resolve_lan_names: bool = False,
 ) -> list[_IPAddress]:
     """Resolve and validate the addresses used for an actual TCP connection.
 
@@ -347,45 +338,8 @@ def validated_connect_addresses(
         resolve_hostnames=True,
         allow_loopback=allow_loopback,
         private_networks=private_networks,
+        resolve_lan_names=resolve_lan_names,
     )
-
-
-class _ServerFetchSyncNetworkBackend(httpcore.NetworkBackend):
-    """httpcore network backend that validates the address it dials."""
-
-    def __init__(self, *, allow_private_networks: bool) -> None:
-        self._allow_private_networks = allow_private_networks
-        self._backend: httpcore.NetworkBackend = httpcore.SyncBackend()
-
-    def connect_tcp(
-        self,
-        host: str,
-        port: int,
-        timeout: float | None = None,
-        local_address: str | None = None,
-        socket_options: Iterable[SOCKET_OPTION] | None = None,
-    ) -> httpcore.NetworkStream:
-        return _connect_validated_sync(
-            validated_connect_addresses(host, port=port, allow_private_networks=self._allow_private_networks),
-            lambda address: self._backend.connect_tcp(
-                address.compressed,
-                port,
-                timeout=timeout,
-                local_address=local_address,
-                socket_options=socket_options,
-            ),
-        )
-
-    def connect_unix_socket(
-        self,
-        path: str,
-        timeout: float | None = None,
-        socket_options: Iterable[SOCKET_OPTION] | None = None,
-    ) -> httpcore.NetworkStream:
-        return self._backend.connect_unix_socket(path, timeout=timeout, socket_options=socket_options)
-
-    def sleep(self, seconds: float) -> None:
-        self._backend.sleep(seconds)
 
 
 class _ServerFetchAsyncNetworkBackend(httpcore.AsyncNetworkBackend):
@@ -433,21 +387,6 @@ class _ServerFetchAsyncNetworkBackend(httpcore.AsyncNetworkBackend):
         await self._backend.sleep(seconds)
 
 
-def _connect_validated_sync(
-    addresses: list[_IPAddress],
-    connect: Callable[[_IPAddress], httpcore.NetworkStream],
-) -> httpcore.NetworkStream:
-    last_error: httpcore.ConnectError | httpcore.ConnectTimeout | None = None
-    for address in addresses:
-        try:
-            return connect(address)
-        except (httpcore.ConnectError, httpcore.ConnectTimeout) as e:
-            last_error = e
-    if last_error is not None:
-        raise last_error
-    _deny("dns_resolution_failed")
-
-
 async def connect_validated_async(
     addresses: list[_IPAddress],
     connect: Callable[[_IPAddress], Awaitable[_AsyncNetworkStreamT]],
@@ -464,52 +403,6 @@ async def connect_validated_async(
     if last_error is not None:
         raise last_error
     _deny("dns_resolution_failed")
-
-
-class ServerFetchHTTPTransport(httpx.HTTPTransport):
-    """HTTPX transport that validates server-fetch URLs and dialed addresses."""
-
-    def __init__(
-        self,
-        *,
-        allow_private_networks: bool = False,
-        verify: ssl.SSLContext | str | bool = True,
-        cert: CertTypes | None = None,
-        trust_env: bool = True,
-        http1: bool = True,
-        http2: bool = False,
-        limits: httpx.Limits = DEFAULT_LIMITS,
-        local_address: str | None = None,
-        retries: int = 0,
-        socket_options: Iterable[SOCKET_OPTION] | None = None,
-    ) -> None:
-        self._allow_private_networks = allow_private_networks
-        ssl_context = create_ssl_context(verify=verify, cert=cert, trust_env=trust_env)
-        self._pool: httpcore.ConnectionPool = httpcore.ConnectionPool(
-            ssl_context=ssl_context,
-            max_connections=limits.max_connections,
-            max_keepalive_connections=limits.max_keepalive_connections,
-            keepalive_expiry=limits.keepalive_expiry,
-            http1=http1,
-            http2=http2,
-            local_address=local_address,
-            network_backend=_ServerFetchSyncNetworkBackend(allow_private_networks=allow_private_networks),
-            retries=retries,
-            socket_options=socket_options,
-        )
-
-    def handle_request(self, request: httpx.Request) -> httpx.Response:
-        """Validate each request before HTTPX sends it."""
-        _validate_server_fetch_url(
-            str(request.url),
-            allow_private_networks=self._allow_private_networks,
-            resolve_hostnames=False,
-        )
-        return super().handle_request(request)
-
-    def close(self) -> None:
-        """Close the underlying connection pool."""
-        self._pool.close()
 
 
 class ServerFetchAsyncHTTPTransport(httpx.AsyncHTTPTransport):

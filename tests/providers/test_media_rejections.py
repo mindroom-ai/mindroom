@@ -243,24 +243,72 @@ async def test_chat_timing_out_on_a_quoted_image_url_retries_without_only_that_i
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("family", ["openai_chat", "openrouter"])
-async def test_a_chat_rejection_that_names_no_part_retries_without_any_media(family: str, tmp_path: Path) -> None:
-    """A path to a whole message names no part, and OpenRouter's paths index the body it sent its upstream.
-
-    Either way the retry is the media-free request the fallback always sent.
-    """
+async def test_a_chat_rejection_that_names_no_part_or_kind_retries_without_any_media(tmp_path: Path) -> None:
+    """A whole-message rejection names neither a rejected part nor a kind, so the retry is media-free."""
     spec = FAMILIES["openai_chat"]
-    if family == "openrouter":
-        spec = replace(spec, config={"provider": "openrouter", "id": "z-ai/glm-5.3", "api_key": "test-key"})
-    rejection = _CHAT_AUDIO if family == "openai_chat" else _CHAT_MARKDOWN_FILE
     notes = File(id="att_notes", content=b"# notes one", filename="notes.md", mime_type="text/markdown")
     message = Message(role="user", content=_PROMPT, images=[_PHOTO], audio=[_CLIP], files=[notes])
-    wire = Wire(_rejected(rejection), spec.reply())
+    wire = Wire(_rejected(_CHAT_AUDIO), spec.reply())
 
     await complete(pipeline_provider(spec.adapter(tmp_path, wire)), ModelRequest(messages=[message]))
 
     assert len(wire.requests) == 2
     assert wire.body()["messages"][-1]["content"] == f"{_PROMPT}\n\n{_NOTE}"
+
+
+@pytest.mark.asyncio
+async def test_openrouter_rejecting_file_data_preserves_images_and_audio(tmp_path: Path) -> None:
+    """OpenRouter's upstream path is untrusted, but the MIME rejection names files, not images or audio."""
+    spec = replace(
+        FAMILIES["openai_chat"],
+        config={"provider": "openrouter", "id": "z-ai/glm-5.3", "api_key": "test-key"},
+    )
+    notes = File(id="att_notes", content=b"# notes one", filename="notes.md", mime_type="text/markdown")
+    message = Message(role="user", content=_PROMPT, images=[_PHOTO], audio=[_CLIP], files=[notes])
+    wire = Wire(_rejected(_CHAT_MARKDOWN_FILE), spec.reply())
+
+    await complete(pipeline_provider(spec.adapter(tmp_path, wire)), ModelRequest(messages=[message]))
+
+    assert len(wire.requests) == 2
+    retry = wire.body()
+    assert prompt_text(retry) == f"{_PROMPT}\n\n{_NOTE}"
+    assert [part["type"] for part in user_parts(retry)] == ["text", "image_url", "input_audio"]
+    assert sends(retry, b"PNG photo")
+    assert sends(retry, b"RIFF clip")
+    assert not sends(retry, b"# notes one")
+
+
+@pytest.mark.asyncio
+async def test_openrouter_404_video_rejection_preserves_other_media_and_learns_gap(tmp_path: Path) -> None:
+    """OpenRouter's 404 video capability gap retries without video, keeps other media, and skips video next turn."""
+    spec = replace(
+        FAMILIES["openai_chat"],
+        config={"provider": "openrouter", "id": "z-ai/glm-5.3", "api_key": "test-key"},
+    )
+    video = Video(id="att_video", content=b"mp4 video", mime_type="video/mp4")
+    message = Message(role="user", content=_PROMPT, images=[_PHOTO], audio=[_CLIP], videos=[video], files=[_REPORT])
+    error = {"message": "No endpoints found that support input video", "code": 404}
+    wire = Wire(httpx.Response(404, json={"error": error}), spec.reply(), spec.reply())
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
+
+    await complete(provider, ModelRequest(messages=[message]))
+
+    assert len(wire.requests) == 2
+    first_types = [part["type"] for part in user_parts(wire.body(0))]
+    assert first_types == ["text", "image_url", "input_audio", "video_url", "file"]
+    retry = wire.body(1)
+    assert prompt_text(retry) == f"{_PROMPT}\n\n{_NOTE}"
+    assert [part["type"] for part in user_parts(retry)] == ["text", "image_url", "input_audio", "file"]
+    assert all(sends(retry, data) for data in (b"PNG photo", b"RIFF clip", b"%PDF-1.4 report"))
+    assert not sends(retry, b"mp4 video")
+
+    await complete(provider, ModelRequest(messages=[message]))
+
+    assert len(wire.requests) == 3
+    second = wire.body(2)
+    assert prompt_text(second) == f"{_PROMPT}\n\n{_NOTE}"
+    assert [part["type"] for part in user_parts(second)] == ["text", "image_url", "input_audio", "file"]
+    assert not sends(second, b"mp4 video")
 
 
 # --- OpenAI Responses ---------------------------------------------------------------------------------------------

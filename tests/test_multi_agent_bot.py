@@ -165,6 +165,8 @@ class TestAgentBot(AgentBotTestBase):
 
     @pytest.mark.asyncio
     @patch("mindroom.constants.runtime_matrix_homeserver", new=lambda *_args, **_kwargs: "http://localhost:8008")
+    # A value unlike nio's default, so the assertion fails if the timeout is not passed through.
+    @patch("mindroom.bot._SYNC_TIMEOUT_MS", 12_345)
     @patch("mindroom.bot.login_agent_owned_session")
     async def test_agent_bot_start(
         self,
@@ -195,14 +197,22 @@ class TestAgentBot(AgentBotTestBase):
         assert type(login_kwargs["new_consumer_generation"]) is UUID
         ingestion_config = login_kwargs["config"]
         assert isinstance(ingestion_config, DurableSyncConfig)
-        assert ingestion_config.sync_timeout_ms == 5_000
-        assert ingestion_config.sync_filter == {"room": {"timeline": {"limit": 5000}}}
+        assert ingestion_config.sync_timeout_ms == 12_345
+        assert ingestion_config.sync_filter == {
+            "presence": {"senders": []},
+            "room": {"timeline": {"limit": 5000}},
+        }
         # The owned ingestion pump is the sole durable source owner. The
         # public client keeps only compatibility callbacks; it must not retain
         # either of the superseded public sync/admission engines.
         mock_client.add_event_admission_callback.assert_not_called()
         mock_client.add_response_callback.assert_not_called()
-        mock_client.add_event_callback.assert_called_once_with(bot._room_lifecycle.on_invite, nio.InviteEvent)
+        assert mock_client.add_event_callback.call_args_list == [
+            call(bot._room_lifecycle.on_invite, nio.InviteEvent),
+            call(bot._room_lifecycle.on_space_child, nio.RoomSpaceChildEvent),
+            call(bot._on_room_state_event, nio.UnknownEvent),
+            call(bot.steward_duties.power_levels_event, nio.PowerLevelsEvent),
+        ]
         assert bot._journal_dispatcher.callbacks.on_room_lifecycle == bot._on_room_member
 
     @pytest.mark.asyncio
@@ -310,7 +320,7 @@ class TestAgentBot(AgentBotTestBase):
             before_admission: object,
             after_admission: object,
             on_decryption_failure: object,
-            schedule_trigger_sender_is_managed: object,
+            sender_is_managed: object,
         ) -> None:
             assert after_sync == bot._on_ingestion_frame_completion
             assert after_ack == bot._ingestion_admission_progress.set
@@ -318,7 +328,7 @@ class TestAgentBot(AgentBotTestBase):
             assert wait_for_delivery_projection == bot._wait_for_delivery_projection
             assert after_admission == bot._after_ingestion_admission
             assert on_decryption_failure == bot._decryption_diagnostics.schedule
-            assert schedule_trigger_sender_is_managed == bot._ingress_validator.sender_is_trusted_for_ingress_metadata
+            assert sender_is_managed == bot._ingress_validator.sender_is_trusted_for_ingress_metadata
             pump_calls.append(
                 (
                     session,
@@ -399,17 +409,18 @@ class TestAgentBot(AgentBotTestBase):
         assert next_batch() is None
         next_batch.reset_mock()
 
-        await bot._on_ingestion_frame_completion()
+        await bot._on_ingestion_frame_completion(True)
         next_batch.assert_not_called()
         assert bot._first_sync_done is True
         bot._run_sync_response_side_effects.assert_awaited_once_with(
+            receipt_new=True,
             first_sync_response=True,
         )
-        await bot._on_ingestion_frame_completion()
+        await bot._on_ingestion_frame_completion(True)
         assert bot._mark_sync_progress.call_count == 2
         assert bot._run_sync_response_side_effects.await_args_list == [
-            call(first_sync_response=True),
-            call(first_sync_response=False),
+            call(receipt_new=True, first_sync_response=True),
+            call(receipt_new=True, first_sync_response=False),
         ]
 
     @pytest.mark.asyncio
@@ -1121,8 +1132,8 @@ class TestAgentBot(AgentBotTestBase):
         ).with_thread_root("$root_b")
 
         lifecycle = ResponseLifecycleCoordinator()
-        assert lifecycle._response_lifecycle_lock(first) is lifecycle._response_lifecycle_lock(first)
-        assert lifecycle._response_lifecycle_lock(first) is not lifecycle._response_lifecycle_lock(second)
+        assert lifecycle._conversation_for(first).lock is lifecycle._conversation_for(first).lock
+        assert lifecycle._conversation_for(first).lock is not lifecycle._conversation_for(second).lock
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

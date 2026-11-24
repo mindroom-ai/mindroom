@@ -16,7 +16,7 @@ from mindroom.config.models import BackgroundToolJobsConfig
 from mindroom.event_journal import AdmissionFacts, IngestionBatchAdmission, RoomMembershipPosition
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
-from tests.conftest import start_call_manager
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, start_call_manager
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_bot_ready_hook import (
     _CONSUMER_GENERATION,
@@ -64,10 +64,13 @@ async def test_owned_departure_reconciles_app_state_on_receipt_replay(
             bot._room_lifecycle,
             "forget_invited_room",
         ) as forget,
+        patch.object(bot._room_lifecycle, "on_contact_room_left") as contact_left,
     ):
         await bot._after_ingestion_admission(admission, facts, None)
     manager.on_sync_room_membership.assert_awaited_once_with(joined_room_ids=set(), left_room_ids={room_id})
     forget.assert_called_once_with(room_id)
+    # The agent's own departure reaches no member event of the room, so contacts learn of it here.
+    contact_left.assert_awaited_once_with(room_id)
 
 
 @pytest.mark.asyncio
@@ -183,7 +186,7 @@ async def test_authoritative_join_requests_call_reconciliation_after_frame_publi
     ):
         await bot._after_ingestion_admission(admission, AdmissionFacts(True, False), None)
         await _complete_frame(bot)
-        assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
     manager.reconcile_joined_rooms.assert_awaited_once_with(frozenset({room_id}))
 
@@ -222,6 +225,6 @@ async def test_call_room_updates_are_preserved_while_reconciliation_is_running(t
             await asyncio.wait_for(second_started.wait(), timeout=1)
         finally:
             release_first.set()
-            assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+            assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
     assert reconciled_scopes == [frozenset({first_room_id}), frozenset({second_room_id})]

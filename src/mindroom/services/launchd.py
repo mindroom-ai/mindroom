@@ -256,7 +256,6 @@ def _uninstall_service() -> UninstallResult:
     return UninstallResult(
         success=True,
         message="Service stopped and removed" if was_running else "Service removed",
-        was_running=was_running,
     )
 
 

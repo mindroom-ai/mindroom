@@ -35,6 +35,18 @@ The default chat website is `https://chat.mindroom.chat`; for a self-hosted clie
 Use **Open in Browser** to use your browser session or a sign-in provider that requires a browser.
 **Reload** returns to the configured chat website, or reloads the approval page while you connect local agents.
 
+## Install MindRoom Chat
+
+MindRoom Chat is the separate chat app for the Mac, with voice messages, Quick Capture, and its own updates.
+On **Overview**, select **Install MindRoom Chat**, or choose **Install MindRoom Chat…** from the menu bar.
+MindRoom downloads the newest release from GitHub, checks that it is the notarized MindRoom Chat signed by MindRoom, and copies it to `/Applications/MindRoom Chat.app`, or to `~/Applications` when you cannot write to `/Applications`.
+It installs only into a folder that just you and this Mac's administrators can change.
+It then opens the app, and the button and menu item change to **Open MindRoom Chat**.
+If MindRoom Chat is already on this Mac, from the Mac App Store, Homebrew, or a disk image, MindRoom opens that copy and installs nothing.
+MindRoom checks the copy's signature first; if **Overview** says a copy was not opened because it is not the MindRoom Chat that MindRoom publishes, remove the app at the path it names and install again.
+MindRoom never replaces or updates MindRoom Chat; the app updates itself.
+The **Chat** section keeps working with or without it.
+
 ## Set Up Local Agents
 
 **Local agents** has four numbered steps, each with its own status.
@@ -150,6 +162,25 @@ Applications start observe-only.
 Controlling a terminal, a scripting or automation app, the primary screen, or a browser or Matrix client signed in as you gives the agent your own authority; see [Security Model](../tools/desktop.md#security-model).
 Optional browser settings and redacted diagnostics are in expandable sections; see the [Desktop guide](../tools/desktop.md#use-the-signed-in-browser-profile) for browser-extension setup.
 
+### Full Control of This Mac
+
+**Full control of this Mac**, at the top of **Computer access**, lets the paired agent see and use every app and the primary screen, with no expiry, the way Codex computer use works.
+Turning it on asks once for confirmation, naming the controller, requester, and agent, adds the primary screen to the saved apps if it is missing, makes MindRoom open at login, and starts access; the status reads **Full control** while it runs.
+If macOS needs approval for the login item, the app says so under the switch; allow it under System Settings > General > Login Items.
+While full control is on, **Settings** > **Open menu bar app at login** stays on and cannot be changed there.
+If the connection changes while the confirmation is open, full control is not turned on; review the connection and confirm again.
+At every later launch, including after a restart or reboot, MindRoom starts access by itself and grants full control again while the switch is on.
+The switch is a preference of the app on this Mac; the bridge itself never saves control.
+
+Full control gives the agent your own authority over everything you can do at this Mac: Terminal, scripting apps, System Settings, password managers, and browsers and chat apps signed in as you.
+It does not add folder or shell access, which stay separate, and it never targets MindRoom's own app by name, though the agent can still click MindRoom's windows through the primary screen.
+macOS still needs Accessibility and Screen Recording for MindRoom.
+
+Turn the switch off, or select **Revoke Now** or **Revoke Computer Control**, to end it and keep it off.
+Turning it off removes the login item only if full control added it; a login item you chose yourself stays.
+**Stop Access** ends it until you start access again or MindRoom next opens.
+Connecting the Mac to another agent, or removing the primary screen from the saved apps, turns it off.
+
 ### Folders and Shell Commands
 
 In **Access**, **Read-only folders** lists the folders agents may list and read; **Add Folder…** adds one and **Remove** drops one.
@@ -185,10 +216,10 @@ See the [Desktop guide](../tools/desktop.md) for pairing recovery and device rot
 ## Window, Menu Bar, and Login
 
 Closing the window keeps the app and its background work running in the menu bar; reopen it with **Open MindRoom…** or by opening the app again.
-The menu shows local-agent and computer-access status as shortcuts to their sections, plus chat, dashboard, start and stop, **Revoke Computer Control** while a control lease is active, **Revoke Shell Access** while shell auto-approval or a command is active, settings, and quit actions.
+The menu shows local-agent and computer-access status as shortcuts to their sections, plus chat, dashboard, start and stop, **Revoke Computer Control** while control is active, **Revoke Shell Access** while shell auto-approval or a command is active, settings, and quit actions.
 
 **Settings** > **Open menu bar app at login** launches the menu app at login.
-Local agents start at login through their own launchd service, while computer access always needs an explicit start in the app.
+Local agents start at login through their own launchd service, while computer access needs an explicit start in the app unless full control is on.
 
 **Quit MindRoom** stops computer access but leaves the local-agent service running; use **Stop Local Agents** to stop it.
 Let a running runtime action finish before quitting.

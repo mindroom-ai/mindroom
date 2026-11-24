@@ -9,6 +9,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
+from mindroom.active_runs import pause_current_active_run
 from mindroom.agent_cli.events import emit_cli_suspension
 from mindroom.agent_cli.lifetime import current_cli_lifetime
 from mindroom.approval.continuation_rules import CliExit
@@ -149,8 +150,9 @@ class CliApprovalWaits:
                     raise RuntimeError(msg)
                 return tuple(apply_exact_approval_decisions(deepcopy(paused.requirements), claimed.calls))
             try:
-                async with asyncio.timeout(None if deadline is None else max(0, (deadline - time.time_ns()) / 1e9)):
-                    await waiter.wait()
+                with pause_current_active_run():
+                    async with asyncio.timeout(None if deadline is None else max(0, (deadline - time.time_ns()) / 1e9)):
+                        await waiter.wait()
             except TimeoutError:
                 raise ResponsePausedForApproval(paused) from None
 

@@ -35,7 +35,7 @@ from mindroom.path_confinement import open_directory_within_root, open_regular_f
 from mindroom.tool_system.worker_routing import (
     WORKER_CREDENTIALS_DIRNAME,
     WORKER_SHARED_CREDENTIALS_DIRNAME,
-    subagent_worker_state_scope_key,
+    pinned_worker_state_scope_key,
     worker_log_id,
     worker_root_path,
 )
@@ -118,6 +118,10 @@ _credentials_manager_lock = threading.Lock()
 
 class WorkerCredentialPathError(RuntimeError):
     """Raised when a worker credential directory is not a real directory."""
+
+
+class CredentialsUnreadableError(RuntimeError):
+    """Raised when a saved credential document exists but cannot be read, for example under another key."""
 
 
 def validate_service_name(service: str) -> str:
@@ -608,6 +612,18 @@ class CredentialsManager:
         credentials_path = self._credentials_file(normalized_service)
         return self._load_credentials_file(normalized_service, credentials_path)
 
+    def read_saved_credentials(self, service: str) -> dict[str, Any] | None:
+        """Return the document saved for ``service``, None when none is, never a declared one.
+
+        Unlike ``load_credentials``, a document that exists but cannot be read raises ``CredentialsUnreadableError``.
+        """
+        normalized_service = validate_service_name(service)
+        try:
+            return self._read_saved(normalized_service, self._credentials_file(normalized_service))
+        except _UNREADABLE_CREDENTIALS_ERRORS as exc:
+            msg = f"Stored credentials for {normalized_service} could not be loaded"
+            raise CredentialsUnreadableError(msg) from exc
+
     def _read_saved(self, normalized_service: str, credentials_path: Path) -> dict[str, Any] | None:
         """Return the document saved at ``credentials_path``, raising ``_UNREADABLE_CREDENTIALS_ERRORS`` if unreadable."""
         payload = _read_credentials_payload(credentials_path)
@@ -631,25 +647,34 @@ class CredentialsManager:
         declared = self._declared.get(normalized_service)
         return dict(declared.credentials) if declared is not None else None
 
-    def save_credentials(self, service: str, credentials: dict[str, Any]) -> None:
+    def save_credentials(self, service: str, credentials: dict[str, Any], *, replace_unreadable: bool = False) -> None:
         """Save credentials for a service.
 
         Args:
             service: Name of the service
             credentials: Credentials dictionary to save
+            replace_unreadable: Replace a saved document this store cannot read, which it refuses by default,
+                in the same one atomic publish as any save, so readers meet the old document or the new one.
 
         """
         normalized_service = validate_service_name(service)
         credentials_path = self._credentials_file(normalized_service)
-        self._save_credentials_file(normalized_service, credentials_path, credentials)
+        self._save_credentials_file(
+            normalized_service,
+            credentials_path,
+            credentials,
+            replace_unreadable=replace_unreadable,
+        )
 
     def _save_credentials_file(
         self,
         normalized_service: str,
         credentials_path: Path,
         credentials: dict[str, Any],
+        *,
+        replace_unreadable: bool = False,
     ) -> None:
-        stored_payload = _read_credentials_payload(credentials_path)
+        stored_payload = None if replace_unreadable else _read_credentials_payload(credentials_path)
         if stored_payload is not None:
             if (
                 self._encryption_key is not None
@@ -932,14 +957,14 @@ def _resolve_worker_credentials_manager(
 ) -> CredentialsManager:
     """Return the store of one worker, reusing the manager when this runtime is that worker.
 
-    A subagent's own worker serves its normal worker's key from its own store, where the primary mirrors the shared
-    credentials that worker gets.
+    A pinned worker, a subagent's own or a named one, serves its normal worker's key from its own store, where the
+    primary mirrors the shared credentials that worker gets.
     """
     current_storage_root = credentials_manager.storage_root.expanduser().resolve()
     current_worker_key = credentials_manager.current_worker_key
     if (
         current_worker_key is not None
-        and worker_key in (current_worker_key, subagent_worker_state_scope_key(current_worker_key))
+        and worker_key in (current_worker_key, pinned_worker_state_scope_key(current_worker_key))
         and credentials_manager.current_worker_root is not None
         and current_storage_root == credentials_manager.current_worker_root
     ):

@@ -6,7 +6,7 @@ import json
 import os
 import tracemalloc
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import pytest
@@ -35,6 +35,7 @@ from mindroom.thread_export.storage import (
 from mindroom.thread_summary.state import SummaryState
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
 
@@ -310,6 +311,30 @@ def test_markerless_destructive_operations_fail_closed(
     )
 
 
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda output_dir: remove_stale_thread_exports(output_dir, _room(), []),
+        lambda output_dir: write_room_index(output_dir, _room()),
+        lambda output_dir: thread_export_storage.thread_file_identities(output_dir, _room()),
+    ],
+    ids=["stale removal", "room index", "file identities"],
+)
+def test_room_operations_refuse_a_markerless_root(tmp_path: Path, operation: Callable[[Path], object]) -> None:
+    """Pruning a room, rebuilding its index, and listing its files all require the root's marker."""
+    output_dir = tmp_path / "thread_exports"
+    room_dir = output_dir / "lobby"
+    room_dir.mkdir(parents=True)
+    thread_file = room_dir / _thread_filename("$gone:localhost")
+    thread_file.write_text("messages: []\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="unowned thread export root"):
+        operation(output_dir)
+
+    assert thread_file.exists()
+    assert not (room_dir / "index.json").exists()
+
+
 def test_reconcile_deletes_only_recognizable_room_directories(
     tmp_path: Path,
 ) -> None:
@@ -557,7 +582,7 @@ def test_thread_export_yaml_with_aliases_is_refused(tmp_path: Path) -> None:
     write_room_index(output_dir, room)
     assert json.loads((output_dir / "lobby" / "index.json").read_text(encoding="utf-8"))["threads"] == []
 
-    assert write_thread_payload(output_dir, room, "$aliased:localhost", payload) is True
+    assert write_thread_payload(output_dir, room, "$aliased:localhost", payload).replaced is True
     assert "*id" not in planted.read_text(encoding="utf-8")
 
 
@@ -583,7 +608,7 @@ def test_thread_export_yaml_with_too_many_nodes_is_refused(tmp_path: Path) -> No
     assert entry["thread_id"] == "$planted:localhost"
     assert entry["participants"] == []
 
-    assert write_thread_payload(output_dir, room, "$planted:localhost", payload) is True
+    assert write_thread_payload(output_dir, room, "$planted:localhost", payload).replaced is True
     assert "padding" not in planted.read_text(encoding="utf-8")
 
 
@@ -608,14 +633,19 @@ def test_thread_too_long_to_parse_whole_stays_indexed_and_is_not_rewritten(
             "messages": messages,
         }
 
-    assert write_thread_payload(output_dir, room, "$long:localhost", payload("2026-10-01T00:00:00+00:00")) is True
+    assert (
+        write_thread_payload(output_dir, room, "$long:localhost", payload("2026-10-01T00:00:00+00:00")).replaced is True
+    )
     write_room_index(output_dir, room)
     [entry] = json.loads((output_dir / "lobby" / "index.json").read_text(encoding="utf-8"))["threads"]
     assert entry["thread_id"] == "$long:localhost"
     assert entry["message_count"] == 100
 
     with patch.object(thread_export_storage, "_atomic_write_at", side_effect=AssertionError("rewrote an export")):
-        assert write_thread_payload(output_dir, room, "$long:localhost", payload("2026-10-02T00:00:00+00:00")) is False
+        assert (
+            write_thread_payload(output_dir, room, "$long:localhost", payload("2026-10-02T00:00:00+00:00")).replaced
+            is False
+        )
         write_room_index(output_dir, room)
 
 
@@ -639,7 +669,8 @@ def test_thread_above_the_read_cap_stays_indexed_and_is_not_rewritten(
         }
 
     assert (
-        write_thread_payload(output_dir, room, "$long:localhost", payload("2026-10-01T00:00:00.123456+00:00")) is True
+        write_thread_payload(output_dir, room, "$long:localhost", payload("2026-10-01T00:00:00.123456+00:00")).replaced
+        is True
     )
     write_room_index(output_dir, room)
     [entry] = json.loads((output_dir / "lobby" / "index.json").read_text(encoding="utf-8"))["threads"]
@@ -652,7 +683,10 @@ def test_thread_above_the_read_cap_stays_indexed_and_is_not_rewritten(
 
     # The new export is shorter than the existing file by its timestamp alone, and the comparison still reads all of it.
     with patch.object(thread_export_storage, "_atomic_write_at", side_effect=AssertionError("rewrote an export")):
-        assert write_thread_payload(output_dir, room, "$long:localhost", payload("2026-10-02T00:00:00+00:00")) is False
+        assert (
+            write_thread_payload(output_dir, room, "$long:localhost", payload("2026-10-02T00:00:00+00:00")).replaced
+            is False
+        )
         write_room_index(output_dir, room)
 
 
@@ -671,7 +705,7 @@ def test_thread_whose_file_passes_the_cap_fails_and_keeps_its_previous_export(
             "messages": [{"event_id": "$e:localhost", "sender": "@user:localhost", "body": body}],
         }
 
-    assert write_thread_payload(output_dir, room, "$emoji:localhost", payload("short")) is True
+    assert write_thread_payload(output_dir, room, "$emoji:localhost", payload("short")).replaced is True
     path = output_dir / "lobby" / _thread_filename("$emoji:localhost")
     previous = path.read_bytes()
     monkeypatch.setattr(thread_export_storage, "_MAX_THREAD_FILE_BYTES", 4_096)
@@ -694,12 +728,17 @@ def test_unchanged_thread_check_holds_one_copy_of_each_export(tmp_path: Path) ->
             "messages": [{"event_id": "$e:localhost", "sender": "@user:localhost", "body": "x" * (4 << 20)}],
         }
 
-    assert write_thread_payload(output_dir, room, "$large:localhost", payload("2026-10-01T00:00:00.123456+00:00"))
+    assert write_thread_payload(
+        output_dir,
+        room,
+        "$large:localhost",
+        payload("2026-10-01T00:00:00.123456+00:00"),
+    ).replaced
     size = (output_dir / "lobby" / _thread_filename("$large:localhost")).stat().st_size
     unchanged = payload("2026-10-02T00:00:00+00:00")
     tracemalloc.start()
     try:
-        assert write_thread_payload(output_dir, room, "$large:localhost", unchanged) is False
+        assert write_thread_payload(output_dir, room, "$large:localhost", unchanged).replaced is False
         _current, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
@@ -920,3 +959,207 @@ def test_export_reads_never_block_on_a_planted_fifo(tmp_path: Path, filename: st
             assert thread_export_storage._read_bytes_at(root_fd, "index.yaml", max_bytes=1_024) is None
     finally:
         os.close(root_fd)
+
+
+# Values a dump must quote, escape, or fold for a parse to give them back unchanged.
+_ROUND_TRIP_VALUES = (
+    "",
+    " leading and trailing ",
+    "true",
+    "null",
+    "~",
+    "123",
+    "0o17",
+    "1:30",
+    "2026-10-01",
+    "- dash",
+    "key: value",
+    "# hash",
+    "two\nlines",
+    "line\n  indented",
+    "tab\there",
+    "crlf\r\nend",
+    "next\x85line",
+    "line\u2028separator",
+    "emoji \U0001f600",
+    "quotes ' and \"",
+    "%TAG ! tag:x,2026:",
+    "\nmessages: planted",
+    "*alias &anchor !tag",
+    "word " * 40,
+)
+
+
+def _thread_with_bodies(
+    thread_id: str,
+    bodies: Sequence[str],
+    *,
+    sender: str = "@alice:localhost",
+    exported_at: datetime = datetime(2026, 10, 1, 12, 0, 0, 123_456, tzinfo=UTC),
+) -> dict[str, object]:
+    """Build one thread export whose first message is Bob's, later ones the sender's, and the second a notice."""
+    messages = [
+        ResolvedVisibleMessage.synthetic(
+            sender=sender if index else "@bob:localhost",
+            body=body,
+            timestamp=index * 1_000,
+            event_id=f"$event-{index}:localhost",
+            content={"body": body, "msgtype": "m.notice"} if index == 1 else None,
+        )
+        for index, body in enumerate(bodies)
+    ]
+    summary = bodies[0] if bodies else None
+    return thread_payload(
+        room=_room(),
+        thread_id=thread_id,
+        messages=messages,
+        exported_at=exported_at,
+        summary=summary,
+    )
+
+
+def _body_for_file_size(output_dir: Path, thread_id: str, file_size: int) -> str:
+    """Write a two-message thread and return the second body that makes its export file take ``file_size`` bytes."""
+    write_thread_payload(output_dir, _room(), thread_id, _thread_with_bodies(thread_id, ["first", "y"]))
+    return "y" * (1 + file_size - (output_dir / "lobby" / _thread_filename(thread_id)).stat().st_size)
+
+
+def test_written_thread_entries_index_a_room_as_a_rebuild_from_disk_would(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pass indexes the threads it wrote from their payloads, byte for byte as parsing every file would."""
+    read_cap = 4_096
+    monkeypatch.setattr(thread_export_storage, "MAX_READ_BYTES", read_cap)
+    output_dir = tmp_path / "thread_exports"
+    room = _room()
+    room_dir = output_dir / "lobby"
+    payloads = {
+        f"$value-{index}:localhost": _thread_with_bodies(f"$value-{index}:localhost", [value, value], sender=value)
+        for index, value in enumerate(_ROUND_TRIP_VALUES)
+    }
+    payloads["$empty:localhost"] = _thread_with_bodies("$empty:localhost", [])
+    payloads["$above-read-cap:localhost"] = _thread_with_bodies("$above-read-cap:localhost", ["first", "x" * 5_000])
+    payloads["$at-node-limit:localhost"] = _thread_with_bodies("$at-node-limit:localhost", ["short"] * 8)
+    at_limit = yaml_io.safe_dump(payloads["$at-node-limit:localhost"], sort_keys=False, allow_unicode=True)
+    monkeypatch.setattr(
+        yaml_io,
+        "_MAX_UNTRUSTED_NODES",
+        sum(isinstance(event, yaml.NodeEvent) for event in yaml.parse(at_limit)),
+    )
+    # A scalar in the message list is one more node, though not a message.
+    one_past = _thread_with_bodies("$one-past-node-limit:localhost", ["short"] * 8)
+    payloads["$one-past-node-limit:localhost"] = {
+        **one_past,
+        "messages": [*cast("list[object]", one_past["messages"]), "note"],
+    }
+    at_cap_body = _body_for_file_size(output_dir, "$at-read-cap:localhost", read_cap)
+    payloads["$at-read-cap:localhost"] = _thread_with_bodies("$at-read-cap:localhost", ["first", at_cap_body])
+    # This thread's existing file passes the read cap only by its longer exported_at.
+    straddling_id = "$straddles-read-cap:localhost"
+    straddling_body = _body_for_file_size(output_dir, straddling_id, read_cap + 1)
+    payloads[straddling_id] = _thread_with_bodies(straddling_id, ["first", straddling_body])
+    write_thread_payload(output_dir, room, "$stale:localhost", _thread_with_bodies("$stale:localhost", ["earlier"]))
+    assert all(
+        write_thread_payload(output_dir, room, thread_id, value).replaced for thread_id, value in payloads.items()
+    )
+    # The oldest file is left out of the budget, which charges each file the bytes a capped read returns.
+    files = sorted(room_dir.glob("*.yaml"), key=lambda path: path.name != _thread_filename("$value-0:localhost"))
+    for position, path in enumerate(files):
+        os.utime(path, ns=(position * 1_000_000_000, position * 1_000_000_000))
+    # A later pass finds every thread unchanged, and the straddling one only by a shorter exported_at.
+    payloads[straddling_id] = _thread_with_bodies(
+        straddling_id,
+        ["first", straddling_body],
+        exported_at=datetime(2026, 10, 2, tzinfo=UTC),
+    )
+    written = [write_thread_payload(output_dir, room, thread_id, value) for thread_id, value in payloads.items()]
+    assert not any(result.replaced for result in written)
+    sizes = {path.name: path.stat().st_size for path in files}
+    assert sizes[_thread_filename("$at-read-cap:localhost")] == read_cap
+    assert sizes[_thread_filename(straddling_id)] == read_cap + 1
+    budget = sum(min(size, read_cap + 1) for size in sizes.values()) - 1
+    monkeypatch.setattr(thread_export_storage, "_MAX_ROOM_INDEX_BYTES", budget)
+
+    with patch.object(
+        thread_export_storage,
+        "_thread_index_entry",
+        wraps=thread_export_storage._thread_index_entry,
+    ) as parse:
+        write_room_index(
+            output_dir,
+            room,
+            written_entries=[result.index_entry for result in written if result.index_entry is not None],
+        )
+    assert [call.args[0] for call in parse.call_args_list] == [_thread_filename("$stale:localhost")]
+    index_path = room_dir / "index.json"
+    from_payloads = index_path.read_bytes()
+    index_path.unlink()
+    write_room_index(output_dir, room)
+
+    assert index_path.read_bytes() == from_payloads
+    index = json.loads(from_payloads)
+    assert index["unindexed_files"] == [files[0].name]
+    participants = {entry["thread_id"]: entry["participants"] for entry in index["threads"]}
+    assert len(participants) == len(files) - 1
+    assert participants["$value-2:localhost"] == ["@bob:localhost", "true"]
+    for thread_id in ("$at-node-limit:localhost", "$at-read-cap:localhost"):
+        assert participants[thread_id] == ["@alice:localhost", "@bob:localhost"]
+    for thread_id in ("$one-past-node-limit:localhost", "$above-read-cap:localhost", straddling_id):
+        assert participants[thread_id] == []
+
+
+@pytest.mark.parametrize("changed", ["inode", "size", "mtime"])
+def test_written_entry_is_not_used_for_a_file_changed_since(tmp_path: Path, changed: str) -> None:
+    """An overlapping pass or worker code can replace or edit a thread file after a pass wrote it, so the index parses it."""
+    output_dir = tmp_path / "thread_exports"
+    room = _room()
+    path = output_dir / "lobby" / _thread_filename("$thread:localhost")
+    first = write_thread_payload(
+        output_dir,
+        room,
+        "$thread:localhost",
+        _thread_with_bodies("$thread:localhost", ["a", "b"]),
+    )
+    written_mtime = path.stat().st_mtime_ns
+    # Carol's ID is as long as Alice's, so only the changed part of the file's identity differs.
+    bodies = ["a", "b", "c"] if changed == "size" else ["a", "b"]
+    newer = _thread_with_bodies("$thread:localhost", bodies, sender="@carol:localhost")
+    if changed == "inode":
+        assert write_thread_payload(output_dir, room, "$thread:localhost", newer).replaced is True
+    else:
+        path.write_bytes(yaml_io.safe_dump(newer, sort_keys=False, allow_unicode=True, encoding="utf-8"))
+    mtime = written_mtime + (1_000_000_000 if changed == "mtime" else 0)
+    os.utime(path, ns=(mtime, mtime))
+    assert first.index_entry is not None
+
+    write_room_index(output_dir, room, written_entries=[first.index_entry])
+
+    [entry] = json.loads((output_dir / "lobby" / "index.json").read_text(encoding="utf-8"))["threads"]
+    assert entry["participants"] == ["@bob:localhost", "@carol:localhost"]
+
+
+def test_written_thread_whose_file_cannot_be_checked_after_the_write_is_still_written(tmp_path: Path) -> None:
+    """A failed check of the file just written leaves the thread written and its entry to the index rebuild."""
+    output_dir = tmp_path / "thread_exports"
+    room = _room()
+    filename = _thread_filename("$thread:localhost")
+    real_stat = os.stat
+
+    def stat_failing_for_the_thread(path: object, *args: object, **kwargs: object) -> os.stat_result:
+        if path == filename:
+            raise PermissionError(path)
+        return real_stat(path, *args, **kwargs)
+
+    with patch.object(thread_export_storage.os, "stat", side_effect=stat_failing_for_the_thread):
+        written = write_thread_payload(
+            output_dir,
+            room,
+            "$thread:localhost",
+            _thread_with_bodies("$thread:localhost", ["a"]),
+        )
+
+    assert written == (True, None)
+    write_room_index(output_dir, room)
+    [entry] = json.loads((output_dir / "lobby" / "index.json").read_text(encoding="utf-8"))["threads"]
+    assert entry["thread_id"] == "$thread:localhost"

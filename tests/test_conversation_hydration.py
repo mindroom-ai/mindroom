@@ -25,14 +25,14 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
+    UNREADABLE_EDIT_NOTICE,
 )
-from mindroom.event_journal import EventClass, EventKind, HistoryRecoveryState, HydrationPolicy, ProjectedEvent
+from mindroom.event_journal import EventClass, EventKind, HistoryRecoveryState, HydrationPolicy, ProjectedEvent, reads
 from mindroom.execution_preparation import _get_unseen_messages_for_sender
 from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_hydration import (
     _MESSAGES_PAGE_LIMIT,
-    _UNREADABLE_EDIT_NOTICE,
     HYDRATED_PROMPT_WINDOW_MESSAGES,
     ConversationHydrator,
     ConversationReadError,
@@ -51,6 +51,7 @@ from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from tests.conftest import TEST_ACCESS_TOKEN, FakeMediaResponse, serve_media_download
 from tests.journal_helpers import record_room_history_recovery
+from tests.tool_position_helpers import _SENT_CASES, _sent, _wire, reply_with_calls
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
@@ -167,6 +168,7 @@ class FakeClient:
     relations: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     history: list[dict[str, Any]] = field(default_factory=list)
     reported_depth: int | None = 3
+    event_calls: int = 0
     relation_calls: int = 0
     relation_events: int = 0
     # A relation tree that outlives any one walk, which is what a long thread of
@@ -236,6 +238,7 @@ class FakeClient:
     ) -> nio.RoomGetEventResponse | nio.RoomGetEventError:
         """Return one stored event."""
         del room_id
+        self.event_calls += 1
         if event_id in self.hidden_events:
             errcode = self.hidden_events[event_id]
             return nio.RoomGetEventError(f"{errcode}: Event not found.", errcode)
@@ -903,7 +906,7 @@ class TestThreadHydrationBounds:
 
     @pytest.mark.parametrize(
         ("ceiling", "expected"),
-        [(3, f"root\n\n{_UNREADABLE_EDIT_NOTICE}"), (4, "root edited")],
+        [(3, f"root\n\n{UNREADABLE_EDIT_NOTICE}"), (4, "root edited")],
         ids=["edits_past_ceiling", "edit_before_ceiling"],
     )
     async def test_others_edits_filling_the_root_edit_fetch_do_not_pass_the_root_off_as_unedited(
@@ -2538,6 +2541,41 @@ class TestSidecarResolution:
         assert [message.content["body"] for message in page.messages] == ["answer v3"]
         assert client.downloads == ["mxc://s/v3"]
 
+    async def test_a_strict_read_retries_when_a_streaming_edit_lands_during_refetch(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A newer sidecar edit admitted mid-refetch moves the debt rather than failing the read."""
+        original = self._sidecar_source("$m", "p0 [Message continues in attached file]", "mxc://s/v0", ts=1_000)
+        edit_1 = self._sidecar_source("$e1", "p1 [continues]", "mxc://s/v1", ts=2_000)
+        edit_1["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": "$m"}
+        edit_2 = self._sidecar_source("$e2", "p2 [continues]", "mxc://s/v2", ts=3_000)
+        edit_2["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": "$m"}
+        await admit_all(alice, [original, edit_1])
+
+        class _StreamingEditClient(FakeClient):
+            async def download(self, mxc: str) -> nio.DownloadResponse | nio.DownloadError:
+                if mxc == "mxc://s/v1" and edit_2 not in self.relations["$m"]:
+                    self.relations["$m"].append(edit_2)
+                    await admit_all(alice, [edit_2])
+                return await super().download(mxc)
+
+        client = _StreamingEditClient(
+            events={"$m": original},
+            relations={"$m": [edit_1]},
+            sidecars={
+                "mxc://s/v1": self._payload("answer v1"),
+                "mxc://s/v2": self._payload("answer v2"),
+            },
+        )
+        reader = await self._reader(alice, client)
+
+        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [message.content["body"] for message in page.messages] == ["answer v2"]
+        assert page.refresh_pending == ()
+        assert client.downloads == ["mxc://s/v1", "mxc://s/v2"]
+
     @pytest.mark.parametrize(
         "sidecar",
         [
@@ -2664,6 +2702,35 @@ class TestSidecarResolution:
         ]
         assert page.refresh_pending == ()
 
+    async def test_an_edit_whose_attachment_holds_its_replacement_alone_installs_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A reply row wrapped as an edit only when it was sent had uploaded its replacement, not the edit."""
+        original = raw("$m", "first answer", ts=1_000)
+        preview = self._sidecar_source("$e1", "The edit beg [continues]", "mxc://s/edit", ts=2_000)
+        # As a claimed row is wrapped: the fallback repeats the preview, sidecar reference included.
+        wrapped = build_edit_event_content(
+            event_id="$m",
+            new_content=preview["content"],
+            new_text=preview["content"]["body"],
+        )
+        edit = {**preview, "content": wrapped}
+        await admit_all(alice, [original, edit])
+        client = FakeClient(
+            events={"$m": original},
+            relations={"$m": [edit]},
+            sidecars={"mxc://s/edit": json.dumps({"msgtype": "m.text", "body": "The edit, whole"})},
+        )
+        reader = await self._reader(alice, client)
+
+        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [dict(message.content) for message in page.messages] == [
+            {"msgtype": "m.text", "body": "The edit, whole"},
+        ]
+        assert page.refresh_pending == ()
+
     async def test_an_unreadable_edit_with_a_nested_edit_layer_settles_once(
         self,
         alice: PrincipalStore,
@@ -2767,7 +2834,7 @@ class TestPointRefetch:
 
     @pytest.mark.parametrize(
         ("ceiling", "expected"),
-        [(3, f"first\n\n{_UNREADABLE_EDIT_NOTICE}"), (5, "second")],
+        [(3, f"first\n\n{UNREADABLE_EDIT_NOTICE}"), (5, "second")],
         ids=["edits_past_ceiling", "edit_before_ceiling"],
     )
     async def test_others_relations_filling_the_walk_do_not_pass_the_original_off_as_unedited(
@@ -3188,7 +3255,7 @@ class TestEncryptedRelations:
         assert await hydrator(alice, client).refresh(
             (await refreshes(alice))[0],
         )
-        assert await bodies(alice) == [f"first\n\n{_UNREADABLE_EDIT_NOTICE}"]
+        assert await bodies(alice) == [f"first\n\n{UNREADABLE_EDIT_NOTICE}"]
         assert await refreshes(alice) == ()
 
     async def test_an_unreadable_edit_older_than_the_winning_one_adds_no_notice(
@@ -3351,6 +3418,108 @@ class TestEncryptedRelations:
         assert not await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
 
 
+AGENT = "@mindroom_other:example.org"
+
+
+class TestRepliesWithToolCalls:
+    """A fetched reply is stored as a synced one is: an agent's with its tool markers in its text."""
+
+    @pytest.mark.parametrize("sender", [AGENT, ALICE])
+    async def test_a_refresh_past_an_unreadable_edit_puts_the_notice_after_the_reply_as_its_agent_built_it(
+        self,
+        alice: PrincipalStore,
+        sender: str,
+    ) -> None:
+        """The notice follows the whole reply, and nobody else's message gets marker lines its sender never wrote."""
+        built, held = reply_with_calls("Before.\n\n🔧 `shell` [1]", 1)
+        await redact_current_edit(alice)
+        edit_of_it = {"rel_type": "m.replace", "event_id": "$m"}
+        client = FakeClient(
+            events={"$m": {**raw("$m", "first", sender=sender), "content": held}},
+            relations={"$m": [encrypted("$e2", sender=sender, ts=4_000, relates_to=edit_of_it)]},
+            olm=object(),
+        )
+
+        assert await hydrator(alice, client).refresh((await refreshes(alice))[0])
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50)
+        read_as = built if sender == AGENT else held
+        assert [m.content for m in page.messages] == [
+            {**read_as, "body": f"{read_as['body']}\n\n{UNREADABLE_EDIT_NOTICE}"},
+        ]
+
+    async def test_a_hydrated_thread_holds_each_reply_of_an_agent_as_it_was_built(self, alice: PrincipalStore) -> None:
+        """History, summaries, exports, judges and the read tool read these rows with main's code, unchanged."""
+        thread = {"m.relates_to": {"rel_type": "m.thread", "event_id": "$root"}}
+        replies = [
+            {**raw(f"$reply{ts}", "", sender=AGENT, ts=ts), "content": {**_wire(case), **thread}}
+            for ts, case in enumerate(_SENT_CASES, start=2)
+        ]
+        client = FakeClient(events={"$root": raw("$root", "root")}, relations={"$root": replies})
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id="$root", limit=50)
+        held = {m.logical_event_id: m.content for m in page.messages}
+        for ts, case in enumerate(_SENT_CASES, start=2):
+            assert held[f"$reply{ts}"] == {**_sent(case), **thread}
+
+    @pytest.mark.parametrize("sender", [AGENT, ALICE])
+    async def test_a_refreshed_v3_sidecar_restores_markers_only_for_an_agent_sender(
+        self,
+        alice: PrincipalStore,
+        sender: str,
+    ) -> None:
+        """Sidecar refresh passes the revision sender so any v3 attachment restores markers for agent senders alone."""
+        thread = {"m.relates_to": {"rel_type": "m.thread", "event_id": "$root"}}
+        built, held = reply_with_calls("Before.\n\n🔧 `shell` [1]\n\nAfter.", 1)
+        preview = {
+            "msgtype": "m.file",
+            "body": "Before. [Message continues in attached file]",
+            "url": "mxc://s/v3sidecar",
+            "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+            **thread,
+        }
+        event = {**raw("$m", "", sender=sender, ts=2_000), "content": preview}
+        client = FakeClient(
+            events={"$root": raw("$root", "root"), "$m": event},
+            relations={"$root": [event]},
+            sidecars={"mxc://s/v3sidecar": json.dumps({**held, **thread})},
+        )
+        reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
+
+        page = await reader.read_strict(room_id=ROOM, thread_id="$root", limit=10)
+
+        expected = {**(built if sender == AGENT else held), **thread}
+        assert page.messages[-1].content == expected
+
+    async def test_a_hydrated_thread_fills_its_pages_as_a_synced_one_does(
+        self,
+        journal_store: EventJournalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A page ends at a size, so the same replies must have the same size whichever way they arrived."""
+        built, held = reply_with_calls("\n\n".join(["Looked.", *(f"🔧 `shell` [{index}]" for index in range(1, 9))]), 8)
+        sizes = [len(json.dumps(content, separators=(",", ":"))) for content in (built, held)]
+        monkeypatch.setattr(reads, "PAGE_CONTENT_BUDGET_BYTES", sum(sizes))
+
+        async def page_of(principal: str, content: dict[str, Any]) -> tuple[list[object], bool]:
+            """Return the bodies of the newest page of a thread of two such replies, and whether it is the whole thread."""
+            store = journal_store.principal(principal)
+            thread = {"m.relates_to": {"rel_type": "m.thread", "event_id": "$root"}}
+            replies = [
+                {**raw(f"$reply{ts}", "", sender=AGENT, ts=ts), "content": {**content, **thread}} for ts in (2, 3)
+            ]
+            client = FakeClient(events={"$root": raw("$root", "root")}, relations={"$root": replies})
+            await hydrator(store, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+            page = await store.read_conversation(room_id=ROOM, thread_id="$root", limit=50)
+            return [m.content["body"] for m in page.messages], page.next_cursor is None
+
+        page = await page_of("agent@held", held)
+        assert page == await page_of("agent@built", built)
+        assert (len(page[0]), page[1]) == (2, False)
+
+
 class TestReplyFallback:
     """What a thread-blind client is told this message is replying to."""
 
@@ -3477,6 +3646,7 @@ class TestReadModes:
 
         with pytest.raises(ConversationReadError, match="awaiting a server refetch"):
             await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+        assert client.event_calls == 1
 
     @pytest.mark.parametrize(
         "read",

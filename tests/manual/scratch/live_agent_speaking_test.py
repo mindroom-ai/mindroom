@@ -530,7 +530,7 @@ async def main() -> int:  # noqa: C901, PLR0915
                         memory_backend="file",
                     ),
                 },
-                models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
+                models={"default": ModelConfig(provider="openai", id="gpt-6.2-astra")},
                 memory=MemoryConfig(backend="none"),
                 calls=call_config(openai_key),
             )

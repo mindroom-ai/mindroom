@@ -7,15 +7,17 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.delegation.sessions import SubagentSessionError, subagent_recovery_lock
-from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild
+from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild, interrupted_by_restart
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload
 from mindroom.tool_jobs.runtime import BackgroundJob, BackgroundOutcome, JobRecoveryBlockedError, JobSpec
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterable
 
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationTerminalStatus
+
+ACKNOWLEDGED_BY = "acknowledged_by_run"
 
 
 def child_snapshot(child: DelegationChild) -> dict[str, Any]:
@@ -31,6 +33,19 @@ def delegation_child(job: BackgroundJob) -> DelegationChild:
     return DelegationChild.from_dict(job.adapter["child"])
 
 
+def job_acknowledgers(jobs: Iterable[BackgroundJob]) -> dict[str, str | None]:
+    """Return the run that acknowledged each subagent job, by the delegation id its saved child names.
+
+    Its adapter keeps the parent run whose saved result first acknowledged it (``ACKNOWLEDGED_BY``); None stands for a
+    job none acknowledged yet, or one a release that kept no such record acknowledged. Nothing else of a child is read,
+    so one no reader decodes stops no replay; a job whose adapter or child is no mapping, or names no id, is no receipt's.
+    """
+    owned = (job for job in jobs if job.kind == "delegation" and isinstance(job.adapter, dict))
+    read = ((job.adapter.get("child"), job.adapter.get(ACKNOWLEDGED_BY) if job.consumed else None) for job in owned)
+    named = ((child.get("delegation_id"), by) for child, by in read if isinstance(child, dict))
+    return {key: by if isinstance(by, str) else None for key, by in named if isinstance(key, str)}
+
+
 def delegation_outcome(status: DelegationTerminalStatus, text: str) -> BackgroundOutcome:
     """Keep a child's full text in the job payload; job metadata keeps only its summary."""
     return BackgroundOutcome(status, text, result_payload=encode_result_payload(ToolResultPayload(value=text)))
@@ -40,7 +55,11 @@ def _terminal(child: DelegationChild) -> BackgroundOutcome | None:
     # A child rebuilt from its saved snapshot has no result, so cleanup must settle it.
     if child.result is None or child.status not in TERMINAL_CHILD_STATUSES:
         return None
-    return delegation_outcome(cast("DelegationTerminalStatus", child.status), child.result)
+    outcome = delegation_outcome(cast("DelegationTerminalStatus", child.status), child.result)
+    if interrupted_by_restart(child):
+        # A turn a restart cut short interrupts its job, which the runtime may continue; any other end is the job's.
+        outcome.status = "interrupted"
+    return outcome
 
 
 async def reconcile_delegation(

@@ -2,21 +2,28 @@
 
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path  # noqa: TC003
 
 import pytest
 
 from mindroom.shared_directories.store import (
+    PendingInvitation,
     SharedDirectory,
     SharedDirectoryError,
+    accept_shared_directory_invitation,
     add_shared_directory_member,
     create_shared_directory,
+    decline_shared_directory_invitation,
     delete_shared_directory,
+    invite_pending_shared_directory_member,
     load_shared_directories,
     remove_shared_directory_member,
 )
 from tests.conftest import test_runtime_paths
+
+_INVITATION = PendingInvitation(agent="bob", requester="@a:localhost", requested_at="2026-11-12T10:00:00+00:00")
 
 
 def test_create_writes_ledger_and_real_directory(tmp_path: Path) -> None:
@@ -78,9 +85,10 @@ def test_members_add_and_remove(tmp_path: Path) -> None:
     assert added.members == ("ann", "bob")
     assert load_shared_directories(runtime_paths)[0].members == ("ann", "bob")
 
-    removed, changed = remove_shared_directory_member(runtime_paths, owner="alice", name="report", member="bob")
-    assert (removed.members, changed) == (("ann",), True)
-    assert remove_shared_directory_member(runtime_paths, owner="alice", name="report", member="bob")[1] is False
+    before, after = remove_shared_directory_member(runtime_paths, owner="alice", name="report", member="bob")
+    assert (before.members, after.members) == (("ann", "bob"), ("ann",))
+    before, after = remove_shared_directory_member(runtime_paths, owner="alice", name="report", member="bob")
+    assert before == after
     assert load_shared_directories(runtime_paths)[0].members == ("ann",)
 
 
@@ -122,6 +130,18 @@ def test_delete_succeeds_when_the_tree_is_already_gone(tmp_path: Path) -> None:
         lambda runtime_paths: add_shared_directory_member(runtime_paths, owner="alice", name="nope", member="bob"),
         lambda runtime_paths: remove_shared_directory_member(runtime_paths, owner="alice", name="nope", member="bob"),
         lambda runtime_paths: delete_shared_directory(runtime_paths, owner="alice", name="nope"),
+        lambda runtime_paths: invite_pending_shared_directory_member(
+            runtime_paths,
+            owner="alice",
+            name="nope",
+            invitation=_INVITATION,
+        ),
+        lambda runtime_paths: accept_shared_directory_invitation(
+            runtime_paths,
+            owner="alice",
+            name="nope",
+            agent_name="bob",
+        ),
     ],
 )
 def test_unknown_directory_is_refused(tmp_path: Path, operation: object) -> None:
@@ -212,3 +232,61 @@ def test_delete_keeps_the_record_when_the_owner_directory_is_a_link(tmp_path: Pa
 
     assert (moved / "report").is_dir()
     assert [directory.name for directory in load_shared_directories(runtime_paths)] == ["report"]
+
+
+def test_pending_invitations_stay_out_of_what_older_readers_read(tmp_path: Path) -> None:
+    """A pending invitation lives beside the record's members, which is all an older reader reads, so it grants nothing.
+
+    An older reader parses ``owner``, ``name``, and a list of string ``members``, and ignores other fields.
+    """
+    runtime_paths = test_runtime_paths(tmp_path)
+    create_shared_directory(runtime_paths, owner="alice", name="report")
+    add_shared_directory_member(runtime_paths, owner="alice", name="report", member="ann")
+
+    invite_pending_shared_directory_member(runtime_paths, owner="alice", name="report", invitation=_INVITATION)
+
+    ledger = runtime_paths.storage_root / "tracking" / "shared_directories.json"
+    assert json.loads(ledger.read_text(encoding="utf-8")) == {
+        "alice/report": {
+            "owner": "alice",
+            "name": "report",
+            "members": ["ann"],
+            "pending": [
+                {"agent": "bob", "requester": "@a:localhost", "requested_at": "2026-11-12T10:00:00+00:00"},
+            ],
+        },
+    }
+    assert load_shared_directories(runtime_paths)[0].pending == (_INVITATION,)
+
+
+def test_a_record_without_pending_invitations_reads_as_having_none(tmp_path: Path) -> None:
+    """Records an older image wrote have no pending field and read as directories nobody is waiting to join."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    ledger = runtime_paths.storage_root / "tracking" / "shared_directories.json"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_text(
+        json.dumps({"alice/report": {"owner": "alice", "name": "report", "members": ["bob"]}}),
+        encoding="utf-8",
+    )
+
+    assert load_shared_directories(runtime_paths) == (SharedDirectory(owner="alice", name="report", members=("bob",)),)
+
+
+def test_accept_and_decline_need_a_pending_invitation(tmp_path: Path) -> None:
+    """Accepting moves the invited agent into members once; declining drops the invitation once."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    create_shared_directory(runtime_paths, owner="alice", name="report")
+    invite_pending_shared_directory_member(runtime_paths, owner="alice", name="report", invitation=_INVITATION)
+
+    accepted = accept_shared_directory_invitation(runtime_paths, owner="alice", name="report", agent_name="bob")
+
+    assert (accepted.members, accepted.pending) == (("bob",), ())
+    for answer in (accept_shared_directory_invitation, decline_shared_directory_invitation):
+        with pytest.raises(SharedDirectoryError, match="bob has no pending invitation"):
+            answer(runtime_paths, owner="alice", name="report", agent_name="bob")
+    carl = PendingInvitation(agent="carl", requester="@a:localhost", requested_at="2026-11-12T10:00:00+00:00")
+    invite_pending_shared_directory_member(runtime_paths, owner="alice", name="report", invitation=carl)
+
+    declined = decline_shared_directory_invitation(runtime_paths, owner="alice", name="report", agent_name="carl")
+
+    assert (declined.members, declined.pending) == (("bob",), ())

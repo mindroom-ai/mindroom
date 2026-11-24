@@ -97,7 +97,7 @@ _GOOGLE_PROVIDERS = {
         display_name="Google Docs",
         tool_config_service="google_docs",
         service_scopes=("https://www.googleapis.com/auth/documents",),
-        status_capabilities=("Docs create and read", "Docs text editing"),
+        status_capabilities=("Docs create and read", "Docs editing"),
         include_granted_scopes=False,
     ),
     "google_drive": _GoogleProviderSpec(

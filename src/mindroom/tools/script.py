@@ -78,6 +78,7 @@ if TYPE_CHECKING:
         "cancel_script",
         "list_scripts",
     ),
+    workspace_writers=("start_script",),
     supports_toolkit_filters=False,
 )
 def script_tools() -> type[ScriptTools]:

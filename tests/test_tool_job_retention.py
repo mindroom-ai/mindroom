@@ -11,7 +11,6 @@ import pytest
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.event_journal import (
     ApprovalCall,
-    ApprovalContinuation,
     ApprovalDecision,
     EventClass,
     EventKind,
@@ -22,7 +21,7 @@ from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_jobs.runtime import BackgroundOutcome, JobAccessError
 from mindroom.turn_record import TurnRecord
-from tests.conftest import message_origin
+from tests.approval_continuation_helpers import approval_continuation
 from tests.reply_span_helpers import paused_for_approval
 from tests.response_runner_helpers import _bot
 from tests.tool_job_helpers import (
@@ -130,22 +129,17 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
             ),
             None,
         )
-        continuation = ApprovalContinuation(
+        continuation = approval_continuation(
             approval_id="pending",
             run_id="paused-run",
             session_id=owner.session_id,
-            entity_kind="agent",
-            entity_name="general",
             room_id=owner.room_id,
             thread_id=owner.thread_id,
             requester_id=owner.requester_id,
-            origin=message_origin(sender_id=owner.requester_id),
             execution_identity=owner,
             response_event_id="$response",
             sources=ResponseSources(("$later",), ("$later",)),
-            final_delivery_id="$later",
             calls=(ApprovalCall("call", "tool", "general", 2**62, decision=ApprovalDecision.APPROVED),),
-            state="ready",
         )
         assert await paused_for_approval(principal, continuation) is not None
     try:

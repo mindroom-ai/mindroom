@@ -50,10 +50,10 @@ from backend.services.provisioner_service import (
     InstanceClaimLostError,
     account_pending_deletion,
     account_row_pending_deletion,
+    allowed_openrouter_limit_usd,
     openrouter_key_exceeds_plan,
     openrouter_key_matches_plan,
     provision_instance,
-    revoke_instance_openrouter_key,
     set_instance_openrouter_key_disabled,
     set_instance_openrouter_key_limit,
     start_instance,
@@ -510,7 +510,7 @@ async def _resume(
     instance_id = instance["instance_id"]
     torn_down = instance.get("status") == "deprovisioned"
     # Apply the tier's resources and key limit before re-enabling a held instance.
-    plan_mismatch = not _deployed_plan_matches(instance, subscription["tier"])
+    plan_mismatch = not _deployed_plan_matches(instance, subscription)
     # After any failed resume or provision, only a full reprovision republishes the key and deployment.
     failed_before = bool(instance.get("lifecycle_error")) or instance.get("status") == "error"
     if torn_down or plan_mismatch or failed_before or not await check_deployment_exists(str(instance_id)):
@@ -551,25 +551,31 @@ async def _hold_for_pending_deletion(
     return True
 
 
-def _deployed_plan_matches(instance: dict[str, Any], tier: str) -> bool:
+def _deployed_plan_matches(instance: dict[str, Any], subscription: dict[str, Any]) -> bool:
     """Return whether an instance was last deployed for the tier, with exactly the platform-paid key it includes."""
-    return instance.get("tier") == tier and openrouter_key_matches_plan(instance, tier)
+    tier = subscription["tier"]
+    limit = allowed_openrouter_limit_usd(tier, subscription)
+    return instance.get("tier") == tier and openrouter_key_matches_plan(instance, limit)
 
 
-def _plan_alignment(instance: dict[str, Any], tier: str) -> Literal["redeploy", "limit"] | None:
+def _plan_alignment(instance: dict[str, Any], subscription: dict[str, Any]) -> Literal["redeploy", "limit"] | None:
     """Return how an instance the lifecycle does not hold must change to run only what its tier pays for."""
+    tier = subscription["tier"]
     status = instance.get("status")
     if status == "error" and instance.get("lifecycle_error"):
         # A redeploy by this function failed, and provisioning marked the instance errored; retry it.
         return "redeploy"
-    if _deployed_plan_matches(instance, tier):
+    if _deployed_plan_matches(instance, subscription):
         return None
+    if instance.get("tier") == tier and instance.get("openrouter_key_hash"):
+        # Deployed for the tier, so only the key limit differs, as it does around a trial conversion.
+        return "limit"
     if status == "running":
         # Provisioning applies the tier's resources and updates the key limit.
         return "redeploy"
     # Any other instance is not redeployed, which would start a customer-stopped one or race a provision; it only
     # gets a lower key limit when required, and the rest follows once it runs again.
-    return "limit" if openrouter_key_exceeds_plan(instance, tier) else None
+    return "limit" if openrouter_key_exceeds_plan(instance, allowed_openrouter_limit_usd(tier, subscription)) else None
 
 
 def _needs_change(instance: dict[str, Any], subscription: dict[str, Any], *, entitled: bool) -> bool:
@@ -577,21 +583,31 @@ def _needs_change(instance: dict[str, Any], subscription: dict[str, Any], *, ent
         return instance.get("status") != "deprovisioned"
     if instance.get("lifecycle_stopped_at"):
         return True
-    return _plan_alignment(instance, subscription["tier"]) is not None
+    return _plan_alignment(instance, subscription) is not None
 
 
 async def _align_plan(sb: Client, instance: dict[str, Any], subscription: dict[str, Any]) -> None:
     """Keep an entitled instance the lifecycle does not hold on what its subscription tier pays for."""
     instance_id = instance["instance_id"]
-    alignment = _plan_alignment(instance, subscription["tier"])
+    alignment = _plan_alignment(instance, subscription)
     if alignment == "redeploy":
         logger.info("Redeploying instance %s for the %s tier of its subscription", instance_id, subscription["tier"])
         await _reprovision(sb, instance, subscription, resume_lifecycle_hold=False)
     elif alignment == "limit":
         try:
-            await set_instance_openrouter_key_limit(sb, instance, subscription["tier"])
+            limit = allowed_openrouter_limit_usd(subscription["tier"], subscription)
+            await set_instance_openrouter_key_limit(sb, instance, limit)
         except OpenRouterKeyNotFoundError:
-            await revoke_instance_openrouter_key(sb, instance_id)
+            # The key is gone on OpenRouter; forget it unless another run recorded a replacement meanwhile, and give a
+            # running instance a new key now. A stopped one gets its key when it starts again.
+            update_instance(
+                sb,
+                instance_id,
+                CLEARED_OPENROUTER_KEY_METADATA,
+                expected_openrouter_key_hash=instance["openrouter_key_hash"],
+            )
+            if instance.get("status") == "running":
+                await _reprovision(sb, instance, subscription, resume_lifecycle_hold=False)
     # The instance now carries only what its tier pays for, so an earlier failed step is resolved.
     if instance.get("lifecycle_error"):
         update_instance(sb, instance_id, _CLEARED_LIFECYCLE_ERROR)

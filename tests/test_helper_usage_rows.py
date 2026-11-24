@@ -27,7 +27,11 @@ from openai.types import CompletionUsage
 
 from mindroom import routing, topic_generator
 from mindroom.agents import create_agent
+from mindroom.call_transcripts.notes import ModelNotesWriter
+from mindroom.call_transcripts.service import CallTranscript, _Turn
+from mindroom.call_transcripts.transcriber import SpeechTranscriber
 from mindroom.config.agent import AgentConfig
+from mindroom.config.calls import CallsConfig, CallTranscriptsConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionOverrideConfig, ModelConfig
 from mindroom.config.resolution import entity_model_name
@@ -35,8 +39,10 @@ from mindroom.config.voice import VoiceConfig, VoiceSTTConfig
 from mindroom.custom_tools import claude_agent
 from mindroom.custom_tools.dynamic_workflow import _run_room_agent_turn
 from mindroom.helper_usage import HelperUsageOwner, helper_usage_owner_context
-from mindroom.history.runtime import _compact_before_reply, resolve_entity_preparation_inputs
+from mindroom.history.runtime import _compact_stored_scope, resolve_entity_preparation_inputs
+from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import read_scope_state, with_force_compaction
+from mindroom.history.types import HistoryScope
 from mindroom.knowledge.chunk_context import chunk_contexts
 from mindroom.knowledge_graph.clients import MindRoomLLMClient
 from mindroom.knowledge_graph.usage import UsageTarget, usage_target
@@ -62,7 +68,7 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.voice import handler as voice_handler
 from tests.conftest import bind_runtime_paths, install_model_providers, seed_session, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel, answer, usage
-from tests.history_helpers import _forced_compaction_context, _make_config, _reported, _session
+from tests.history_helpers import _forced_compaction_context, _make_config, _session
 from tests.identity_helpers import persist_actual_entity_accounts
 from tests.turn_model_helpers import turn_model
 
@@ -168,7 +174,7 @@ async def _room_topic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 async def _thread_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     paths = test_runtime_paths(tmp_path)
     config = _system_config(paths)
-    _scripted(monkeypatch, json.dumps({"summary": "A summary"}))
+    _scripted(monkeypatch, json.dumps({"title": "A summary"}))
     await generate_summary(
         [ResolvedVisibleMessage.synthetic(sender="@person:localhost", body="Help", event_id="$message")],
         config,
@@ -204,9 +210,8 @@ async def _voice_normalization(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     return paths.storage_root
 
 
-async def _voice_transcription(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    paths = test_runtime_paths(tmp_path)
-    config = Config(voice=VoiceConfig(enabled=True, stt=VoiceSTTConfig(api_key="test-key", model="gpt-transcribe")))
+def _transcription_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Answer speech-to-text with a transcript and its token usage."""
     client_type = httpx.AsyncClient
     reply = {
         "text": "transcript",
@@ -226,7 +231,39 @@ async def _voice_transcription(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
             timeout=timeout,
         ),
     )
+
+
+async def _voice_transcription(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    paths = test_runtime_paths(tmp_path)
+    config = Config(voice=VoiceConfig(enabled=True, stt=VoiceSTTConfig(api_key="test-key", model="gpt-transcribe")))
+    _transcription_reply(monkeypatch)
     await voice_handler._transcribe_audio(b"audio", config, paths)
+    return paths.storage_root
+
+
+async def _call_transcript(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """One stretch of a call transcribed, then the call's notes written."""
+    paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            voice=VoiceConfig(stt=VoiceSTTConfig(api_key="test-key", model="gpt-transcribe")),
+            calls=CallsConfig(transcripts=CallTranscriptsConfig(enabled=True, notes_model="default")),
+        ),
+        paths,
+    )
+    _transcription_reply(monkeypatch)
+    await SpeechTranscriber(lambda: config, paths).transcribe(b"audio", call_id="call", user_id="@a:x", seconds=1.0)
+    notes = {"summary": "A call.", "decisions": [], "action_items": [], "open_questions": []}
+    _scripted(monkeypatch, json.dumps(notes))
+    transcript = CallTranscript(
+        call_id="call",
+        room_id="!room:x",
+        duration_seconds=60,
+        turns=(_Turn(sender="@a:x", text="transcript"),),
+        names={},
+    )
+    await ModelNotesWriter(lambda: config, paths).write_notes(transcript)
     return paths.storage_root
 
 
@@ -363,21 +400,26 @@ async def _compaction_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
         active_model_name=entity_model_name(config, "test_agent"),
         active_context_window=None,
     )
-    outcome = await _compact_before_reply(
-        None,
-        _reported,
-        storage=storage,
-        session=session,
+    result = await _compact_stored_scope(
+        ScopeSessionContext(
+            HistoryScope(kind="agent", scope_id=session.owner_id),
+            storage,
+            session,
+            session.session_id,
+            lambda: storage,
+        ),
+        inputs,
+        ScriptedModel([]),
+        config,
+        paths,
         state=read_scope_state(session),
-        resolved_inputs=inputs,
         history_budget=None,
         max_summary_tokens=None,
         before_tokens=0,
-        model=ScriptedModel([]),
-        config=config,
-        runtime_paths=paths,
+        runs_before=1,
+        lifecycle=None,
     )
-    assert outcome is not None
+    assert result.outcome is not None
     return paths.storage_root
 
 
@@ -418,6 +460,7 @@ async def _realtime_voice(tmp_path: Path, _monkeypatch: pytest.MonkeyPatch) -> P
 
 
 _CASES: dict[str, Callable[[Path, pytest.MonkeyPatch], Awaitable[Path]]] = {
+    "call_transcript": _call_transcript,
     "claude_agent": _claude_agent,
     "compaction_summary": _compaction_summary,
     "dynamic_workflow": _dynamic_workflow,

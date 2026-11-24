@@ -56,7 +56,8 @@ def runner(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[TestClie
 
 
 def _refresh_runner() -> None:
-    runtime_paths = resolve_primary_runtime_paths(process_env=dict(os.environ))
+    # Every runner runs in runner mode, as its startup sets it.
+    runtime_paths = resolve_primary_runtime_paths(process_env={**os.environ, "MINDROOM_SANDBOX_RUNNER_MODE": "true"})
     config = sandbox_runner_module._runtime_config_or_empty(runtime_paths)
     sandbox_runner_module.initialize_sandbox_runner_app(sandbox_runner_app, runtime_paths, config=config)
 
@@ -73,7 +74,7 @@ def _stream(client: TestClient, **request: Any) -> list[dict[str, Any]]:  # noqa
 
 
 def _result(result: object) -> dict[str, Any]:
-    return {"ok": True, "result": result, "error": None, "failure_kind": None}
+    return {"ok": True, "result": result, "error": None, "failure_kind": None, "shell_backgrounded": False}
 
 
 def test_a_call_streams_its_progress_and_keepalives_before_its_result(

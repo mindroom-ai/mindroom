@@ -53,7 +53,7 @@ def test_agents_are_named_by_display_name_and_known_by_key_and_matrix_id() -> No
         == scout
     )
     assert names.speaker(None, {}, "scout") == scout
-    assert names.speaker(None, {}, "router").name == "RouterAgent"
+    assert names.speaker(None, {}, "router").name == "MindRoom"
     assert names.canonical("@MINDROOM_SCOUT:example.test") == "Scout Bot"
     assert names.canonical("scout") == "Scout Bot"
 

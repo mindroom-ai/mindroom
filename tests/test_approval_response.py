@@ -398,7 +398,7 @@ async def test_agent_chained_pause_anchors_a_terminal_only_pending_tool() -> Non
         progress=None,
     )
 
-    assert presentation.response_text.endswith("🔧 `publish_report` [1] ⏳\n\n")
+    assert presentation.response_text == "Before approval.\n\n🔧 `publish_report` [1] ⏳"
     assert len(presentation.tool_trace) == 1
     assert presentation.tool_trace[0].type == "tool_call_started"
     assert presentation.tool_trace[0].tool_call_id == "call-2"

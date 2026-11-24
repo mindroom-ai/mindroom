@@ -15,7 +15,7 @@ import typer
 
 from mindroom.matrix.health import matrix_versions_url, response_has_matrix_versions
 
-from .config import activate_cli_runtime, console
+from .config import activate_cli_runtime, console, print_literal
 from .env_file import env_path_for_config, upsert_env_values
 
 if TYPE_CHECKING:
@@ -25,8 +25,8 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
 
-_CINNY_DEFAULT_IMAGE = "ghcr.io/mindroom-ai/mindroom-chat:latest"
-_CINNY_DEFAULT_CONTAINER = "mindroom-cinny-local"
+_CHAT_DEFAULT_IMAGE = "ghcr.io/mindroom-ai/mindroom-chat:latest"
+_CHAT_DEFAULT_CONTAINER = "mindroom-chat-local"
 
 
 def _httpx_get(url: str) -> httpx.Response:
@@ -52,22 +52,22 @@ def local_stack_setup(
         "--server-name",
         help="Matrix server name (default: inferred from --homeserver-url hostname).",
     ),
-    cinny_port: int = typer.Option(
+    chat_port: int = typer.Option(
         8080,
-        "--cinny-port",
+        "--chat-port",
         min=1,
         max=65535,
         help="Local host port for the MindRoom Chat container.",
     ),
-    cinny_image: str = typer.Option(
-        _CINNY_DEFAULT_IMAGE,
-        "--cinny-image",
+    chat_image: str = typer.Option(
+        _CHAT_DEFAULT_IMAGE,
+        "--chat-image",
         help="Docker image for MindRoom Chat.",
     ),
-    cinny_container_name: str = typer.Option(
-        _CINNY_DEFAULT_CONTAINER,
-        "--cinny-container-name",
-        help="Container name for MindRoom Chat (legacy default retained for compatibility).",
+    chat_container_name: str = typer.Option(
+        _CHAT_DEFAULT_CONTAINER,
+        "--chat-container-name",
+        help="Container name for MindRoom Chat.",
     ),
     skip_synapse: bool = typer.Option(
         False,
@@ -94,29 +94,29 @@ def local_stack_setup(
 
     _wait_for_service(matrix_versions_url(homeserver_url), "Synapse", response_has_matrix_versions)
 
-    cinny_config_path = _write_local_cinny_config(
+    chat_config_path = _write_local_chat_config(
         homeserver_url,
         inferred_server_name,
         runtime_paths,
     )
-    console.print(f"MindRoom Chat config written: [dim]{cinny_config_path}[/dim]")
+    print_literal("MindRoom Chat config written: ", chat_config_path)
 
-    cinny_url = f"http://localhost:{cinny_port}"
-    _start_cinny_container(
-        cinny_container_name=cinny_container_name,
-        cinny_port=cinny_port,
-        cinny_config_path=cinny_config_path,
-        cinny_image=cinny_image,
+    chat_url = f"http://localhost:{chat_port}"
+    _start_chat_container(
+        chat_container_name=chat_container_name,
+        chat_port=chat_port,
+        chat_config_path=chat_config_path,
+        chat_image=chat_image,
     )
-    _wait_for_service(f"{cinny_url}/config.json", "MindRoom Chat")
+    _wait_for_service(f"{chat_url}/config.json", "MindRoom Chat")
 
     _print_local_stack_summary(
         homeserver_url=homeserver_url,
-        cinny_url=cinny_url,
+        chat_url=chat_url,
         server_name=inferred_server_name,
         config_path=runtime_paths.config_path,
         persist_env=persist_env,
-        cinny_container_name=cinny_container_name,
+        chat_container_name=chat_container_name,
         synapse_dir=synapse_dir,
         skip_synapse=skip_synapse,
     )
@@ -126,12 +126,12 @@ def _infer_server_name(homeserver_url: str) -> str:
     """Infer Matrix server_name from a homeserver URL."""
     parsed = urlparse(homeserver_url)
     if not parsed.scheme or not parsed.hostname:
-        console.print(f"[red]Error:[/red] Invalid homeserver URL: {homeserver_url}")
+        print_literal("[red]Error:[/red] Invalid homeserver URL: ", homeserver_url)
         raise typer.Exit(1)
     return parsed.hostname
 
 
-def _write_local_cinny_config(
+def _write_local_chat_config(
     homeserver_url: str,
     server_name: str,
     runtime_paths: RuntimePaths,
@@ -151,31 +151,22 @@ def _write_local_cinny_config(
         "sidebar": {"showExploreCommunity": False, "showAddSpace": False},
         "auth": {"hideServerPickerWhenSingle": True},
     }
-    target = runtime_paths.storage_root / "local" / "cinny-config.json"
+    target = runtime_paths.storage_root / "local" / "chat-config.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(f"{json.dumps(config, indent=2)}\n", encoding="utf-8")
     return target
 
 
-def _needs_ssl_verify_override(homeserver_url: str) -> bool:
-    """Return whether the local homeserver needs MATRIX_SSL_VERIFY=false for its self-signed certificate.
+def _local_matrix_env_values(homeserver_url: str, server_name: str) -> dict[str, str]:
+    """Return the Matrix settings that point MindRoom at the local stack.
 
+    An https:// homeserver gets MATRIX_SSL_VERIFY=false for its self-signed certificate.
     Plain HTTP needs no certificate override, and a persisted one would stop verifying a hosted homeserver set later.
     """
-    return urlparse(homeserver_url).scheme == "https"
-
-
-def _persist_local_matrix_env(
-    homeserver_url: str,
-    server_name: str,
-    *,
-    config_path: Path,
-) -> Path:
-    """Write local Matrix settings to .env next to the active config file."""
     values = {"MATRIX_HOMESERVER": homeserver_url, "MATRIX_SERVER_NAME": server_name}
-    if _needs_ssl_verify_override(homeserver_url):
+    if urlparse(homeserver_url).scheme == "https":
         values["MATRIX_SSL_VERIFY"] = "false"
-    return upsert_env_values(env_path_for_config(config_path), values)
+    return values
 
 
 def _require_supported_platform() -> None:
@@ -190,39 +181,39 @@ def _start_synapse_stack(synapse_dir: Path) -> None:
     """Start Synapse via docker compose in the provided directory."""
     compose_file = synapse_dir / "docker-compose.yml"
     if not compose_file.exists():
-        console.print(f"[red]Error:[/red] Synapse compose file not found: {compose_file}")
+        print_literal("[red]Error:[/red] Synapse compose file not found: ", compose_file)
         raise typer.Exit(1)
 
-    console.print(f"Starting Synapse stack from [bold]{synapse_dir}[/bold]...")
+    print_literal("Starting Synapse stack from ", synapse_dir, "...")
     result = _run_command(["docker", "compose", "up", "-d"], cwd=synapse_dir)
     if result.returncode != 0:
         _print_command_failure(result, "Failed to start Synapse stack")
         raise typer.Exit(1)
 
 
-def _start_cinny_container(
+def _start_chat_container(
     *,
-    cinny_container_name: str,
-    cinny_port: int,
-    cinny_config_path: Path,
-    cinny_image: str,
+    chat_container_name: str,
+    chat_port: int,
+    chat_config_path: Path,
+    chat_image: str,
 ) -> None:
     """Start (or replace) the local MindRoom Chat container."""
-    _run_command(["docker", "rm", "-f", cinny_container_name])
+    _run_command(["docker", "rm", "-f", chat_container_name])
 
     run_cmd = [
         "docker",
         "run",
         "-d",
         "--name",
-        cinny_container_name,
+        chat_container_name,
         "--restart",
         "unless-stopped",
         "-p",
-        f"{cinny_port}:80",
+        f"{chat_port}:80",
         "-v",
-        f"{cinny_config_path}:/app/config.json:ro",
-        cinny_image,
+        f"{chat_config_path}:/app/config.json:ro",
+        chat_image,
     ]
     result = _run_command(run_cmd)
     if result.returncode != 0:
@@ -238,7 +229,7 @@ def _wait_for_service(
     """Wait up to 60 seconds for a service URL to answer with success, or with a response ``response_matches``."""
     import httpx  # noqa: PLC0415 - httpx loads only when the stack is probed, not during CLI help rendering
 
-    console.print(f"Waiting for {service_name}: [dim]{url}[/dim]")
+    print_literal(f"Waiting for {service_name}: ", url)
     deadline = time.monotonic() + 60
     matcher = response_matches or (lambda response: response.is_success)
     while time.monotonic() < deadline:
@@ -248,43 +239,40 @@ def _wait_for_service(
         except httpx.HTTPError:
             pass
         time.sleep(1)
-    console.print(f"[red]Error:[/red] {service_name} did not become healthy at {url}")
+    print_literal("[red]Error:[/red] ", f"{service_name} did not become healthy at {url}")
     raise typer.Exit(1)
 
 
 def _print_local_stack_summary(
     *,
     homeserver_url: str,
-    cinny_url: str,
+    chat_url: str,
     server_name: str,
     config_path: Path,
     persist_env: bool,
-    cinny_container_name: str,
+    chat_container_name: str,
     synapse_dir: Path,
     skip_synapse: bool,
 ) -> None:
     """Print final setup instructions."""
     console.print("\n[green]Local stack is ready.[/green]")
-    console.print(f"  Synapse: {homeserver_url}")
-    console.print(f"  MindRoom Chat: {cinny_url}")
-    console.print(f"  Server:  {server_name}")
+    print_literal("  Synapse: ", homeserver_url)
+    console.print(f"  MindRoom Chat: {chat_url}")
+    print_literal("  Server:  ", server_name)
+    env_values = _local_matrix_env_values(homeserver_url, server_name)
     if persist_env:
-        env_path = _persist_local_matrix_env(
-            homeserver_url,
-            server_name,
-            config_path=config_path,
-        )
-        console.print(f"  Env:     {env_path}")
+        env_path = upsert_env_values(env_path_for_config(config_path), env_values)
+        print_literal("  Env:     ", env_path)
         console.print("\nRun MindRoom backend:")
         console.print("  uv run mindroom run")
     else:
-        ssl_override = " MATRIX_SSL_VERIFY=false" if _needs_ssl_verify_override(homeserver_url) else ""
+        assignments = " ".join(f"{name}={value}" for name, value in env_values.items())
         console.print("\nRun MindRoom backend against this stack:")
-        console.print(f"  MATRIX_HOMESERVER={homeserver_url}{ssl_override} uv run mindroom run")
+        print_literal("  ", f"{assignments} uv run mindroom run")
     console.print("\nStop commands:")
-    console.print(f"  docker rm -f {cinny_container_name}")
+    print_literal("  ", f"docker rm -f {chat_container_name}")
     if not skip_synapse:
-        console.print(f"  cd {synapse_dir} && docker compose down")
+        print_literal("  ", f"cd {synapse_dir} && docker compose down")
 
 
 def _run_command(cmd: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -295,4 +283,4 @@ def _run_command(cmd: list[str], *, cwd: Path | None = None) -> subprocess.Compl
 def _print_command_failure(result: subprocess.CompletedProcess[str], prefix: str) -> None:
     """Print a compact subprocess failure summary."""
     details = result.stderr.strip() or result.stdout.strip() or "no error details"
-    console.print(f"[red]Error:[/red] {prefix}: {details}")
+    print_literal("[red]Error:[/red] ", f"{prefix}: {details}")

@@ -10,9 +10,13 @@ import pytest
 from mindroom.contacts.parties import (
     agent_party,
     owner_contact_agents,
+    party_label,
     party_matrix_ids,
+    party_reference,
     person_party,
     personal_room_of,
+    remote_party,
+    remote_target,
     resolve_target,
 )
 from mindroom.contacts.store import ContactParty
@@ -173,3 +177,43 @@ def test_owner_contact_agents_lists_only_the_owners_agents_with_contacts(tmp_pat
     assert owner_contact_agents(config, CAROL) == []
     config, _ = _setup(tmp_path / "off")
     assert owner_contact_agents(config, OWNER) == []
+
+
+REMOTE = "@mindroom_mind_dana:other.org"
+
+
+def test_a_matching_matrix_id_is_an_agent_of_another_deployment(tmp_path: Path) -> None:
+    """An ID the agent's remote_agents match, and that nobody here owns, is another deployment's agent."""
+    config, paths = _setup(tmp_path, contacts={"remote_agents": ["@mindroom_*:other.org"]})
+    assert remote_target(config, paths, "mind_alice", REMOTE) == ContactParty(
+        kind="remote_agent",
+        id=REMOTE,
+        owner=None,
+    )
+    assert remote_target(config, paths, "mind_alice", "@dana:other.org") is None
+    assert remote_target(config, paths, "mind_alice", "mind_bob") is None
+
+
+def test_no_remote_agents_keeps_contacts_within_the_deployment(tmp_path: Path) -> None:
+    """Without remote_agents, another deployment's agent is taken for a person, as before."""
+    config, paths = _setup(tmp_path, contacts={})
+    assert remote_target(config, paths, "mind_alice", REMOTE) is None
+    assert resolve_target(config, paths, REMOTE).kind == "person"
+
+
+def test_this_deployments_accounts_and_people_are_never_remote(tmp_path: Path) -> None:
+    """A pattern that also matches this deployment's agents, router, or people with a personal agent here names none of them."""
+    config, paths = _setup(tmp_path, contacts={"remote_agents": ["@*"]})
+    for user_id in (current_entity_id("mind_bob", paths).full_id, current_entity_id("router", paths).full_id, CO_OWNER):
+        assert remote_target(config, paths, "mind_alice", user_id) is None
+    assert remote_target(config, paths, "mind_alice", CAROL) == remote_party(CAROL)
+
+
+def test_an_agent_of_another_deployment_speaks_only_for_itself(tmp_path: Path) -> None:
+    """Only its own account speaks for it, and prompts name it by Matrix ID as another deployment's agent."""
+    config, paths = _setup(tmp_path, contacts={})
+    remote = remote_party(REMOTE)
+    assert party_matrix_ids(remote, paths) == frozenset({REMOTE})
+    expected = f"{REMOTE}, an agent of another MindRoom deployment"
+    assert party_reference(remote) == expected
+    assert party_label(config, remote) == expected

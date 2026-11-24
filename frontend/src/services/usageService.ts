@@ -1,5 +1,13 @@
 import { isPlainObject } from "@/lib/configSchema";
-import type { TokenTotals, UsagePollResult, UsageReport } from "@/types/usage";
+import type {
+  ProviderLimitAccount,
+  ProviderLimitWindow,
+  ProviderUsageDailyRow,
+  ProviderUsageSnapshot,
+  TokenTotals,
+  UsagePollResult,
+  UsageReport,
+} from "@/types/usage";
 
 const DEFAULT_RETRY_AFTER_MS = 5_000;
 const MIN_RETRY_AFTER_MS = 1_000;
@@ -187,4 +195,155 @@ export async function fetchUsage(
     throw new Error(INVALID_RESPONSE_MESSAGE);
   }
   return { status: "ready", report: payload };
+}
+
+const WINDOW_KINDS = new Set(["session", "weekly", "monthly"]);
+const UNAVAILABLE_REASONS = new Set([
+  "unsupported",
+  "not_signed_in",
+  "probe_failed",
+]);
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isOptionalString(value: unknown): boolean {
+  return value === undefined || typeof value === "string";
+}
+
+function isProviderLimitWindow(value: unknown): value is ProviderLimitWindow {
+  return (
+    isPlainObject(value) &&
+    typeof value.id === "string" &&
+    typeof value.kind === "string" &&
+    WINDOW_KINDS.has(value.kind) &&
+    typeof value.label === "string" &&
+    isFiniteNumber(value.used_percent) &&
+    isFiniteNumber(value.remaining_percent) &&
+    (value.window_duration_mins === undefined ||
+      isCount(value.window_duration_mins)) &&
+    isOptionalString(value.resets_at) &&
+    isOptionalString(value.detail)
+  );
+}
+
+function isProviderLimitAccount(value: unknown): value is ProviderLimitAccount {
+  return (
+    isPlainObject(value) &&
+    typeof value.id === "string" &&
+    typeof value.provider === "string" &&
+    typeof value.display_name === "string" &&
+    isOptionalString(value.account_label) &&
+    isOptionalString(value.plan) &&
+    Array.isArray(value.model_keys) &&
+    value.model_keys.every((key) => typeof key === "string") &&
+    Array.isArray(value.windows) &&
+    value.windows.every(isProviderLimitWindow) &&
+    (value.unavailable_reason === undefined ||
+      (typeof value.unavailable_reason === "string" &&
+        UNAVAILABLE_REASONS.has(value.unavailable_reason))) &&
+    isOptionalString(value.checked_at) &&
+    typeof value.stale === "boolean" &&
+    isCount(value.tokens_7d) &&
+    (value.cost_usd_7d === null || isFiniteNumber(value.cost_usd_7d)) &&
+    typeof value.cost_estimated === "boolean"
+  );
+}
+
+function isProviderUsageDailyRow(
+  value: unknown,
+): value is ProviderUsageDailyRow {
+  return (
+    isPlainObject(value) &&
+    typeof value.day === "string" &&
+    isPlainObject(value.by_account) &&
+    Object.values(value.by_account).every(isCount) &&
+    isCount(value.unattributed_tokens)
+  );
+}
+
+export function isProviderUsageSnapshot(
+  value: unknown,
+): value is ProviderUsageSnapshot {
+  return (
+    isPlainObject(value) &&
+    value.version === 1 &&
+    isOptionalString(value.request_id) &&
+    typeof value.checked_at === "string" &&
+    typeof value.partial === "boolean" &&
+    Array.isArray(value.accounts) &&
+    value.accounts.every(isProviderLimitAccount) &&
+    Array.isArray(value.daily_7d) &&
+    value.daily_7d.every(isProviderUsageDailyRow) &&
+    isCount(value.unattributed_tokens_7d) &&
+    (value.unattributed_cost_usd_7d === null ||
+      isFiniteNumber(value.unattributed_cost_usd_7d))
+  );
+}
+
+export class ProviderLimitsHttpError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ProviderLimitsHttpError";
+    this.status = status;
+  }
+}
+
+export async function fetchProviderLimits(
+  refresh = false,
+  signal?: AbortSignal,
+): Promise<ProviderUsageSnapshot> {
+  const url = refresh
+    ? "/api/usage/provider-limits?refresh=true"
+    : "/api/usage/provider-limits";
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      cache: "no-store",
+      credentials: "same-origin",
+      signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw error;
+    }
+    throw new Error("Could not reach the server. Try again.");
+  }
+  if (response.status === 401) {
+    throw new ProviderLimitsHttpError(
+      "Your session has expired. Reload this page to sign in again.",
+      401,
+    );
+  }
+  if (response.status === 403) {
+    throw new ProviderLimitsHttpError(
+      "You do not have permission to view provider limits.",
+      403,
+    );
+  }
+  if (response.status === 503) {
+    throw new ProviderLimitsHttpError(
+      "Provider limits are temporarily unavailable. Try again.",
+      503,
+    );
+  }
+  if (!response.ok) {
+    throw new ProviderLimitsHttpError(
+      "Could not load provider limits. Try again.",
+      response.status,
+    );
+  }
+  let payload: unknown;
+  try {
+    payload = await response.json();
+  } catch {
+    throw new Error(INVALID_RESPONSE_MESSAGE);
+  }
+  if (!isProviderUsageSnapshot(payload)) {
+    throw new Error(INVALID_RESPONSE_MESSAGE);
+  }
+  return payload;
 }

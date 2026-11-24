@@ -28,7 +28,7 @@ personal_rooms:
 ```
 
 `mind` is the template key, never an agent itself, and `personal_rooms.agent: mind` gives each user's personal room that user's own agent.
-Because `access` is omitted, only the owner and platform administrators may use each generated agent.
+Because `access` is omitted, only the owner may use each generated agent; to admit anyone else, platform administrators included, set `access` under the template's `agent:`.
 
 ## Configuration
 
@@ -41,6 +41,7 @@ A key follows the [agent naming rules](https://docs.mindroom.chat/configuration/
 | `matrix_username` | string | `mindroom_<agent key>` | Matrix localpart pattern; it contains `{username}` exactly once plus at least one other character, so no agent takes a person's bare localpart, and renders to `[a-z0-9._=/-]`. `_<MINDROOM_NAMESPACE>` is appended when a namespace is set, and the default account carries the same suffix. |
 | `agent` | object | Required | Any [agent](https://docs.mindroom.chat/configuration/agents/#configuration-options) fields; the defaults for every user's agent. |
 | `users` | object | `{}` | Per-user overrides keyed by concrete Matrix user ID, with no patterns. Each override is an agent field that replaces the template's value whole, so a list or object is not merged. |
+| `workspace_template` | string or null | `mind` | Files copied into each user's agent workspace, as described in [Starter workspace](#starter-workspace). |
 
 In the template's `delegate_to`, the template key names each user's own agent, so `delegate_to: [mind]` lets every user's agent run fresh copies of itself as [subagents](https://docs.mindroom.chat/tools/agent-orchestration/#agent-delegation).
 
@@ -68,6 +69,16 @@ Config validation rejects `private` and `allow_self_config: true` in the templat
 It also rejects `matrix_username` there, because the template's own `matrix_username` names every user's account.
 A template or override that would produce an invalid agent fails validation as soon as you save or load it, even before anyone has onboarded, with `personal_agents would generate an invalid agent for a new user:` and the reason.
 
+## Starter Workspace
+
+By default every generated agent's workspace starts with the files `mindroom config init` gives the `mind` agent: `SOUL.md`, `AGENTS.md`, `USER.md`, `IDENTITY.md`, `TOOLS.md`, `HEARTBEAT.md`, `MEMORY.md`, and an empty `memory/` folder.
+The first six load into the agent's prompt as [`context_files`](https://docs.mindroom.chat/configuration/agents/#configuration-options), about 16 KB of text, unless the template's `agent` sets `context_files`, in which case exactly those load.
+Set `workspace_template` to a directory, relative to `config.yaml` or absolute, to copy its files instead; then only the template's `context_files` load, and a missing directory is a config error (`workspace_template is invalid`).
+Set `workspace_template: null` to start every workspace empty.
+
+Files are copied when the agent starts and before each reply, and a file the workspace already has is never overwritten, so the agent's own edits, its `MEMORY.md`, and its notes stay as they are.
+An agent onboarded before you changed the template gets only the files its workspace lacks.
+
 ## Generated Agents
 
 Generated agents are ordinary agents in the running config, and workers receive them too.
@@ -83,7 +94,7 @@ They never appear in the saved config file, and the dashboard and `config_manage
 
 ## Letting Agents Talk to Each Other
 
-By default nobody except the owner and administrators can use a generated agent, so agents do not reach each other.
+By default nobody except the owner can use a generated agent, so agents do not reach each other.
 To let them, set `access` under the template's `agent:`, for example `members_of_rooms: [lobby]` or `current_room_members: true`.
 With `members_of_rooms: [lobby]` and the lobby as the onboarding room, every onboarded user can use every other user's agent.
 To let two people's agents talk only after both owners approve, with each agent acting for its own owner under rules set for that pair, use [Agent Contacts](https://docs.mindroom.chat/agent-contacts/) instead.
@@ -104,7 +115,7 @@ calls:
   profiles:
     openai-live:
       backend: live
-      model: gpt-live-1
+      model: gpt-live-1.1
       credentials_service: openai-live
       voice: marin
   agents:
@@ -118,11 +129,11 @@ Neither the template's `agent` nor its `users` overrides may list `rooms`, becau
 
 ## Onboarding Behavior
 
-The router handles a join, a `commands` entry, or a `backfill` hit in an onboarding room like any [personal-room](https://docs.mindroom.chat/personal-rooms/#onboarding-behavior) trigger, with these differences:
+The MindRoom account handles a join, a `commands` entry, or a `backfill` hit in an onboarding room like any [personal-room](https://docs.mindroom.chat/personal-rooms/#onboarding-behavior) trigger, with these differences:
 
 1. MindRoom registers the agent's Matrix account and starts the agent without a restart; a failed registration leaves no agent behind.
 2. The usual personal-room flow runs with that user's own agent once the agent has finished its first sync.
-   Until then the trigger is pending, which does not hold up the onboarding room for anyone else, and the router logs `Personal agent is starting`.
+   Until then the trigger is pending, which does not hold up the onboarding room for anyone else, and MindRoom logs `Personal agent is starting`.
 3. The user keeps the agent, its account, and its room when they leave the onboarding room or are banned, and MindRoom has no command that removes them.
 
 A [bridge alias](https://docs.mindroom.chat/authorization/#bridge-aliases) onboards onto its person's agent, which gives the alias account its own personal room.
@@ -193,7 +204,7 @@ agents:
     display_name: Mind
     role: Personal assistant
     model: sonnet
-    tools: [calculator, file]
+    tools: [calculator, filesystem]
     created_agents_per_owner: 2
 ```
 
@@ -205,7 +216,7 @@ The person asks `mind` for a helper, and `mind` calls `create_agent` with a `nam
   Asking for a tool the creator lacks is refused with the list of names it may use.
 - `instructions` replace the creator's, and omitting them keeps the creator's.
 - Everything else is copied from the creator, including its model, memory backend, knowledge bases, skills, and worker settings, except `matrix_username`: the new agent gets its own default Matrix account.
-- Only the person who asked, any co-owners they add, and platform administrators may use the agent, and only the owners may invite it.
+- Only the person who asked and any co-owners they add may use the agent, and only the owners may invite it.
   Its `credential_managers` stay the creator's, because an unscoped agent shares its creator's credentials and OAuth connections; with a `user` or `user_agent` worker scope, each owner still manages their own connections.
   It starts with no rooms and no delegation, takes its automations from `defaults`, gets no `self_config` from `allow_self_config`, and cannot create agents of its own.
 
@@ -243,9 +254,6 @@ The card shows the exact arguments, and only that person can approve it.
 The 5, 10, and 30 minute options on a card are never offered for these calls, but the person asking can skip their cards in a thread with [`!auto_approve`](https://docs.mindroom.chat/tool-approval/#auto-approve-everything).
 `agent_settings` only reads and asks for no approval of its own, so it shows a card only when a `tool_approval` default or rule requires one.
 
-In a room without the router the call is denied with `Tool approval needs the router in this room`.
-The agent then calls `invite_router` and retries, as described in [When the Router Is Missing](https://docs.mindroom.chat/tool-approval/#when-the-router-is-missing).
-
 ### Changing the Creator Later
 
 A created agent is built again from its creator at every config load, so changing the creator changes its agents.
@@ -267,12 +275,12 @@ A created agent is built again from its creator at every config load, so changin
 
 A failure affects only that user's onboarding.
 Failed onboarding retries after 30 seconds, then at doubling intervals up to one hour, and a config reload retries it immediately.
+The retry log lines are described in [Troubleshooting Personal Rooms](https://docs.mindroom.chat/personal-rooms/#troubleshooting-personal-rooms).
 
 | Log message | Meaning |
 | --- | --- |
 | `Personal agent is starting` | Normal: the user's agent was just created or has not finished its first sync, and the trigger is retried when it has. |
 | `Personal-room onboarding trigger failed` | Onboarding one user failed. For a personal agent, `error` is usually the homeserver refusing the registration, `No free personal agent name for <user>` when the plain and the hashed names are both taken, `<user> cannot own an agent: brackets in a Matrix ID are not supported` for an ID with `[` or `]`, `<user> cannot own a personal agent: <reason>` for another unsupported Matrix ID such as one with a space, `*`, or `?`, or `<user> is a MindRoom account and cannot own a personal agent`. |
-| `Personal-room reconciliation failed` | A retry failed, with the attempt number and the delay before the next try. |
 | `Personal agent roster unavailable` | The roster file cannot be read, and the pass is retried. |
 | `created_agent_skipped` | A created agent did not load; `reason` is `pending` while it is still being created, or until the next `create_agent` removes one a crash interrupted, `creator_missing`, `over_cap`, or `name_taken`. |
 | `generated_agent_tool_dropped` | A tool an owner chose is no longer among the tools of the template or creator, so the agent loads without it. |

@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from functools import wraps
 from typing import Protocol, cast
 
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.shell.background_scope import (
+    ShellBackgroundScope,
+    bind_shell_background_scope,
+    current_shell_background_scope,
+    shell_background_scope,
+)
 from mindroom.tool_jobs.consumption import ConsumptionOwner, consumption_context, finalize_consumption
 from mindroom.tool_jobs.notices import JobNotices, job_notice_context
 from mindroom.tool_jobs.resources import ExecutionResources, bind_execution_resources, execution_resources
@@ -19,8 +25,13 @@ class _OwnedExecution(Protocol):
     def __call__[FunctionT: Callable[..., object]](self, function: FunctionT, /) -> FunctionT: ...
 
 
+async def _close_shell_scope(scope: ShellBackgroundScope | None) -> None:
+    if scope is not None:
+        await run_coroutine_until_complete(scope.close())
+
+
 def owned_tool_execution(*, enabled: Callable[..., bool]) -> _OwnedExecution:
-    """Decorate a coroutine or async stream to own resources, durable result claims, and job notices when ``enabled``.
+    """Own execution resources for a response, and durable claims and notices when jobs are enabled.
 
     The decorated function keeps its signature for type checking.
     """
@@ -30,18 +41,21 @@ def owned_tool_execution(*, enabled: Callable[..., bool]) -> _OwnedExecution:
 
             @wraps(function)
             def streaming(*args: object, **kwargs: object) -> AsyncIterator[object]:
-                if not enabled(*args, **kwargs):
-                    return cast("Callable[..., AsyncIterator[object]]", function)(*args, **kwargs)
+                jobs_enabled = enabled(*args, **kwargs)
                 resources = ExecutionResources()
                 consumption = ConsumptionOwner()
                 notices = JobNotices()
+                owned_shell_scope = ShellBackgroundScope() if current_shell_background_scope() is None else None
 
                 @contextmanager
                 def bind() -> Iterator[None]:
                     with (
-                        bind_execution_resources(resources),
-                        consumption_context(consumption),
-                        job_notice_context(notices),
+                        bind_execution_resources(resources, response=True, jobs_enabled=jobs_enabled),
+                        bind_shell_background_scope(owned_shell_scope)
+                        if owned_shell_scope is not None
+                        else nullcontext(),
+                        consumption_context(consumption) if jobs_enabled else nullcontext(),
+                        job_notice_context(notices) if jobs_enabled else nullcontext(),
                     ):
                         yield
 
@@ -53,9 +67,13 @@ def owned_tool_execution(*, enabled: Callable[..., bool]) -> _OwnedExecution:
                                 yield chunk
                     finally:
                         try:
-                            await finalize_consumption()
+                            if jobs_enabled:
+                                await finalize_consumption()
                         finally:
-                            await run_coroutine_until_complete(resources.release_parent())
+                            try:
+                                await _close_shell_scope(owned_shell_scope)
+                            finally:
+                                await run_coroutine_until_complete(resources.release_parent())
 
                 return context_bound_async_stream(context_factory=bind, stream_factory=stream)
 
@@ -63,10 +81,14 @@ def owned_tool_execution(*, enabled: Callable[..., bool]) -> _OwnedExecution:
 
         @wraps(function)
         async def blocking(*args: object, **kwargs: object) -> object:
-            if not enabled(*args, **kwargs):
-                return await cast("Callable[..., Awaitable[object]]", function)(*args, **kwargs)
+            jobs_enabled = enabled(*args, **kwargs)
             # Consumption finalizes, even for a cancelled parent, before response resources are released.
-            async with execution_resources():
+            async with (
+                execution_resources(response=True, jobs_enabled=jobs_enabled),
+                shell_background_scope(reuse_bound=True),
+            ):
+                if not jobs_enabled:
+                    return await cast("Callable[..., Awaitable[object]]", function)(*args, **kwargs)
                 with consumption_context(ConsumptionOwner()), job_notice_context(JobNotices()):
                     try:
                         return await cast("Callable[..., Awaitable[object]]", function)(*args, **kwargs)

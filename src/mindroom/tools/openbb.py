@@ -3,28 +3,18 @@
 from __future__ import annotations
 
 import importlib
-import os
+import importlib.util
+import subprocess
+import sys
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+from mindroom.file_locks import advisory_file_lock
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
 
 if TYPE_CHECKING:
     from agno.tools.openbb import OpenBBTools
-
-
-def _load_openbb_tools() -> type[OpenBBTools]:
-    """Import OpenBB tools without triggering OpenBB's package auto-build in this process."""
-    previous_auto_build = os.environ.get("OPENBB_AUTO_BUILD")
-    os.environ["OPENBB_AUTO_BUILD"] = "false"
-    try:
-        module = importlib.import_module("agno.tools.openbb")
-    finally:
-        if previous_auto_build is None:
-            os.environ.pop("OPENBB_AUTO_BUILD", None)
-        else:
-            os.environ["OPENBB_AUTO_BUILD"] = previous_auto_build
-    return cast("type[OpenBBTools]", module.OpenBBTools)
 
 
 @register_tool_with_metadata(
@@ -98,7 +88,7 @@ def _load_openbb_tools() -> type[OpenBBTools]:
             default=False,
         ),
     ],
-    dependencies=["openbb"],
+    dependencies=["openbb", "polars", "pyarrow"],
     docs_url="https://docs.mindroom.chat/tools/data-and-databases/#openbb",
     function_names=(
         "get_company_news",
@@ -109,5 +99,22 @@ def _load_openbb_tools() -> type[OpenBBTools]:
     ),
 )
 def openbb_tools() -> type[OpenBBTools]:
-    """Return OpenBB tools for financial data."""
-    return _load_openbb_tools()
+    """Return OpenBB tools, letting one process at a time run OpenBB's package build on first import.
+
+    OpenBB builds its command package into its own install on first import and fails the import
+    of any other process that starts while the build holds its non-blocking lock, so every process
+    using that install waits on a lock beside it instead.
+    """
+    spec = importlib.util.find_spec("openbb")
+    if spec is None or spec.origin is None:
+        msg = "No module named 'openbb'"
+        raise ModuleNotFoundError(msg, name="openbb")
+    with advisory_file_lock(Path(spec.origin).parent / ".mindroom-build.lock"):
+        try:
+            module = importlib.import_module("agno.tools.openbb")
+        except ValueError:
+            # OpenBB's build installs a signal handler, which only the main thread may do,
+            # so a build needed off the main thread runs in a child process before the import retries.
+            subprocess.run([sys.executable, "-c", "import openbb"], check=True)
+            module = importlib.import_module("agno.tools.openbb")
+    return cast("type[OpenBBTools]", module.OpenBBTools)

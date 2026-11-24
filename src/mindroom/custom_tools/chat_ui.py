@@ -9,7 +9,7 @@ import json
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, get_args
 
 import nio
 from nio.api import RelationshipType
@@ -48,6 +48,8 @@ _SettingsSection = Literal[
     "about",
 ]
 _SidePanel = Literal["members", "computer"]
+# The libraries MindRoom Chat serves to canvas pages itself.
+_CanvasLibrary = Literal["chartjs", "d3", "mermaid", "katex"]
 
 logger = get_logger(__name__)
 
@@ -98,10 +100,14 @@ _FUNCTION_INSTRUCTIONS: dict[str, str] = {
         "open_panel(panel='members') shows the Members panel: the people and agents in this room."
     ),
     "show_canvas": (
-        "show_canvas(...) shows the Canvas panel: a web page you write yourself, which cannot load any "
-        "website. Use it to present results (dashboards, reports, slides) or to let the user choose or fill "
-        "something in; their answer comes back as their next message. For a quick choice between a few "
-        "options, just ask in your reply."
+        "show_canvas(...) shows a canvas: a web page you write yourself, which cannot load any "
+        "website. Use it to present visual results (diagrams, charts, dashboards, reports, slides) or to let "
+        "the user choose or fill something in; their answer comes back as their next message. Prefer "
+        "show_canvas over ASCII art or Mermaid fences, since chat Markdown does not render Mermaid. For a "
+        "quick choice between a few options, just ask in your reply. Prefer inline=True, which shows the page "
+        "in the conversation, for anything the user should see or answer in the flow; use the panel for what "
+        "stays open beside it. A new canvas is posted as a separate message; in normal replies it appears "
+        "below your reply text, so refer to it as below (or by title on quiet turns)."
     ),
     "read_canvas_state": (
         "read_canvas_state(canvas_event_id) reads what the user last did in a canvas you showed with "
@@ -120,10 +126,17 @@ _REAL_WEBSITE_HINT = (
 )
 # Only for agents whose operator says the user's Chat allows libraries; where it does not, such pages break.
 _CANVAS_LIBRARIES_HINT = (
-    "Canvas pages may load scripts, styles, and fonts from https://cdn.jsdelivr.net/npm/ at a pinned version, "
-    'such as <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>, '
+    "For packages show_canvas's libraries do not cover, canvas pages may load scripts, styles, and fonts from "
+    "https://cdn.jsdelivr.net/npm/ at a pinned version, "
+    'such as <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>, '
     "or as ES modules through /+esm; no other source works. Fetching data (inline it instead), workers, and "
     "code that evaluates strings, such as Alpine or Vue in-page templates, stay blocked."
+)
+
+_CANVAS_REMOTE_ASSETS_HINT = (
+    "Canvas pages may load images, styles, fonts, media and scripts from any https: address, "
+    "so a preview can use the real assets of the site it shows. "
+    "Fetching data, workers and nested frames stay blocked."
 )
 
 
@@ -155,6 +168,15 @@ def _canvas_title_is_valid(title: str) -> bool:
     )
 
 
+def _canvas_presentation_error(width: int | None, libraries: list[_CanvasLibrary] | None) -> str | None:
+    if width is not None and (isinstance(width, bool) or not isinstance(width, int) or not 320 <= width <= 2560):
+        return "Canvas width must be an integer from 320 to 2560 (not a boolean)."
+    known = get_args(_CanvasLibrary)
+    if libraries is not None and (not isinstance(libraries, list) or any(name not in known for name in libraries)):
+        return f"Canvas libraries must be a list of: {', '.join(known)}."
+    return None
+
+
 class ChatUITools(Toolkit):
     """Ask MindRoom Chat to show the user one bounded part of its interface."""
 
@@ -165,10 +187,12 @@ class ChatUITools(Toolkit):
         file_access: FileAccess = "workspace",
         enable_show_canvas: bool = False,
         enable_canvas_libraries: bool = False,
+        enable_canvas_remote_assets: bool = False,
     ) -> None:
         self._workspace_root = tool_output_workspace_root
         self._file_access = file_access
         self._canvas_libraries = enable_canvas_libraries
+        self._canvas_remote_assets = enable_canvas_remote_assets
         tools: list[Callable[..., Awaitable[str]]] = [self.open_settings, self.open_panel]
         # Canvases are opt-in, like Chat's own switch, so existing chat_ui agents do not send pages
         # their users' clients refuse to show.
@@ -177,7 +201,7 @@ class ChatUITools(Toolkit):
         super().__init__(name="chat_ui", tools=tools)
 
     @property
-    def instructions(self) -> str:
+    def instructions(self) -> str:  # ty: ignore[incompatible-property-override]  # Toolkit writes it only when passed one
         """Map the built functions; ``with_offered_instructions`` narrows them to the ones an agent is offered."""
         return self.instructions_for(self.functions)
 
@@ -187,7 +211,10 @@ class ChatUITools(Toolkit):
         lines = [line for name, line in _FUNCTION_INSTRUCTIONS.items() if name in enabled]
         if {"show_canvas", "open_panel"} <= enabled:
             lines.append(_REAL_WEBSITE_HINT)
-        if "show_canvas" in enabled and self._canvas_libraries:
+        # Remote assets include the library source, and the libraries hint says no other source works.
+        if "show_canvas" in enabled and self._canvas_remote_assets:
+            lines.append(_CANVAS_REMOTE_ASSETS_HINT)
+        elif "show_canvas" in enabled and self._canvas_libraries:
             lines.append(_CANVAS_LIBRARIES_HINT)
         return "\n".join([_CHAT_UI_INSTRUCTIONS, *(f"- {line}" for line in lines)])
 
@@ -439,23 +466,48 @@ class ChatUITools(Toolkit):
         path: str | None = None,
         canvas_event_id: str | None = None,
         share_state: bool = False,
+        inline: bool = False,
+        raw: bool = False,
+        width: int | None = None,
+        libraries: list[_CanvasLibrary] | None = None,
     ) -> str:
-        """Show the user the Canvas panel: an interactive web page you wrote, beside this conversation.
+        """Show the user a canvas: an interactive web page you wrote, in this conversation or beside it.
 
-        Use a canvas when seeing or clicking beats reading or typing: dashboards,
-        reports, charts, slides, menus, forms, pickers, and multi-step flows. The page
-        cannot load any website, so it cannot show the user a real website. Pass the
-        page as ``html``, or as a workspace-relative ``path`` (e.g. ``slides/deck.html``)
-        to an HTML file, which suits pages you build and refine such as slides. Pages up
-        to 4 MB are supported. Only show pages you wrote: a canvas appears as yours and
-        whatever the user types into it could leave the panel.
+        Use a canvas when seeing or clicking beats reading or typing. The page cannot
+        load any website, so it cannot show the user a real website. Pass the page as
+        ``html``, or as a workspace-relative ``path`` to an HTML file (e.g.
+        ``slides/deck.html``) for pages you build and refine. Pages up to 4 MB are
+        supported. Only show pages you wrote: a canvas appears as yours and whatever
+        the user types into it could leave the page.
 
-        Design it like a polished web app. Write self-contained HTML with inline CSS
-        and JavaScript. Fetch, XHR, and WebSocket requests and external images are
-        blocked, and so are external scripts, styles, and fonts unless your
-        instructions name a library source; otherwise draw charts with inline SVG.
-        Embed images as data: URLs.
-        The panel can be resized from narrow to full width, so use a responsive layout.
+        Prefer ``inline=True``, which shows the page in the conversation at reply
+        width (about 700px on desktop, 360px on phones), for anything the user should
+        see or answer in the flow: charts, diagrams, mockups, pickers, short forms,
+        multi-step questions. Use the panel for what stays open beside the
+        conversation: dashboards, slides, long documents, pages the user returns to.
+        A new canvas is posted as a separate message; in normal replies it appears
+        below your reply text, so refer to it as below (or by title on quiet turns).
+        Inline, leave ``html`` and ``body`` without a background, card, title banner
+        or side padding; give charts fixed pixel heights; do not use ``vh`` units or
+        ``height:100%`` on ``html`` or ``body``. The page restarts when it scrolls out
+        of view, so give fields an ``id`` or ``name`` or call ``saveState``. For forms
+        use the themed mode, not ``raw`` or ``width``. Show the next step as a new
+        inline canvas or an update.
+
+        To preview a website or app as it will really look, use ``inline=True`` with
+        ``raw=True``: Chat adds no styles or theme variables, so browser defaults
+        apply until your CSS sets them. Set ``width`` to the viewport the design
+        targets, such as 1440 for desktop or 390 for a phone; the page renders at that
+        width, scaled down to fit. A page with ``raw`` or ``width`` ignores the inline
+        layout rules: it shows in a browser window at most 16:10 of its width tall
+        (568 to 1080px), where ``vh`` units work as in a browser and taller content
+        scrolls. The panel shows raw pages too, at the panel's own width.
+
+        Design it like a polished web app. Fetch, XHR, and WebSockets are always
+        blocked. External images, scripts, styles, and fonts are blocked too
+        unless your instructions name a source that works; embed images as data: URLs.
+        For Chart.js, D3, Mermaid, or KaTeX, pass ``libraries``, never a CDN address.
+        The panel resizes from narrow to full width, so use a responsive layout.
         Chat exposes its current theme as CSS variables so the page matches light and
         dark mode: --mr-bg, --mr-surface, --mr-surface-raised, --mr-border, --mr-text,
         --mr-text-muted, --mr-accent, --mr-accent-text, --mr-success, --mr-warning,
@@ -511,10 +563,16 @@ class ChatUITools(Toolkit):
 
         Args:
             title: Short single-line panel title; when updating, omit it to keep the canvas's first title.
-            html: Self-contained HTML with inline CSS and JavaScript. Give html or path.
+            html: HTML with inline CSS and JavaScript. Give html or path.
             path: Workspace-relative path of an HTML file you wrote, shown instead of html.
             canvas_event_id: Event ID of an earlier canvas from this conversation to update in place.
             share_state: Let read_canvas_state read what the user does in this new canvas; updates keep the choice.
+            inline: Show the page in the conversation instead of the side panel;
+                decided when the canvas is first shown, updates keep it.
+            raw: Add no Chat styles or theme variables for this revision; updates must set it again.
+            width: Target viewport width in CSS pixels (integer 320-2560) for this revision;
+                updates must set it again, and the panel uses its own width.
+            libraries: For this revision; updates must set them again.
 
         """
         validated = self._validated_context("show_canvas")
@@ -524,7 +582,8 @@ class ChatUITools(Toolkit):
         # Models often send an empty string for an omitted optional argument.
         canvas_event_id = canvas_event_id or None
         title = (title or "").strip()
-        page = self._canvas_input_error(title, html, path, canvas_event_id) or await self._read_canvas_page(html, path)
+        input_error = self._canvas_input_error(title, html, path, canvas_event_id, width, libraries)
+        page = input_error or await self._read_canvas_page(html, path)
         if isinstance(page, str):
             return page
         target = await self._canvas_metadata(context, requester_id, canvas_event_id, title, share_state=share_state)
@@ -532,7 +591,17 @@ class ChatUITools(Toolkit):
             return target
         metadata, title = target
         body = f"Interactive panel: {title}. Open it in MindRoom Chat to respond."
-        canvas = await self._canvas_field(context, metadata, body, title, page, canvas_event_id)
+        canvas = await self._canvas_field(
+            context,
+            metadata,
+            body,
+            title,
+            page,
+            canvas_event_id,
+            raw=raw,
+            width=width,
+            libraries=libraries,
+        )
         if isinstance(canvas, str):
             return canvas
         if canvas_event_id is None:
@@ -541,7 +610,11 @@ class ChatUITools(Toolkit):
                 requester_id,
                 "show_canvas",
                 body,
-                {"canvas": canvas, **({"share_state": True} if share_state else {})},
+                {
+                    "canvas": canvas,
+                    **({"share_state": True} if share_state else {}),
+                    **({"inline": True} if inline else {}),
+                },
                 formatted_body=html_lib.escape(body),
             )
         return await self._update_canvas(context, canvas_event_id, body, {**metadata, "canvas": canvas})
@@ -619,6 +692,8 @@ class ChatUITools(Toolkit):
         # Chat accepts an edit only when its authority fields equal the original request's, and
         # whether a canvas shares its state is one of them, so the user is told before anything is shared.
         metadata["thread_id"] = original.get("thread_id")
+        if original.get("inline") is True:
+            metadata["inline"] = True
         if original.get("share_state") is True:
             metadata["share_state"] = True
         elif share_state:
@@ -640,7 +715,11 @@ class ChatUITools(Toolkit):
         html: str | None,
         path: str | None,
         canvas_event_id: str | None,
+        width: int | None,
+        libraries: list[_CanvasLibrary] | None,
     ) -> str | None:
+        if presentation_error := _canvas_presentation_error(width, libraries):
+            return cls._canvas_error(presentation_error)
         if canvas_event_id is not None and not canvas_event_id.startswith("$"):
             return cls._canvas_error(_CANVAS_EVENT_ID_ERROR, canvas_event_id=canvas_event_id)
         # An update may omit the title; it is checked once the canvas's own title is known.
@@ -721,11 +800,22 @@ class ChatUITools(Toolkit):
         title: str,
         page: bytes,
         canvas_event_id: str | None,
+        *,
+        raw: bool = False,
+        width: int | None = None,
+        libraries: list[_CanvasLibrary] | None = None,
     ) -> dict[str, object] | str:
         """Carry a page inside the event when an edit of it fits, otherwise as uploaded media."""
+        presentation: dict[str, object] = {}
+        if raw:
+            presentation["raw"] = True
+        if width is not None:
+            presentation["width"] = width
+        if libraries:
+            presentation["libraries"] = list(dict.fromkeys(libraries))
         # Serialized JSON is never smaller than the UTF-8 page, so larger pages skip the measurement.
         if len(page) < EDIT_MESSAGE_SIZE_LIMIT:
-            inline: dict[str, object] = {"title": title, "html": page.decode("utf-8")}
+            inline: dict[str, object] = {"title": title, "html": page.decode("utf-8"), **presentation}
             probe = _canvas_edit_content(
                 canvas_event_id or _CANVAS_SIZE_PROBE_EVENT_ID,
                 cls._canvas_replacement(body, {**metadata, "canvas": inline}),
@@ -752,7 +842,7 @@ class ChatUITools(Toolkit):
             document["file"] = encrypted_file
         else:
             document["url"] = mxc_uri
-        return {"title": title, "document": document}
+        return {"title": title, "document": document, **presentation}
 
     @classmethod
     def _canvas_error(cls, message: str, **fields: object) -> str:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
+import nio
 import pytest
 
 from mindroom.config.main import Config
@@ -33,7 +34,7 @@ def _bind_runtime(config: Config, tmp_path: Path) -> Config:
 def _bot_with_scheduled_task_runtime(
     agent_name: str,
     config: Config,
-    joined_rooms: dict[str, object],
+    joined_room_ids: tuple[str, ...],
 ) -> tuple[AgentBot, AsyncMock]:
     """Return a bot whose orchestrator's scheduled-task runtime records each restored room."""
     user = AgentMatrixUser(
@@ -49,7 +50,7 @@ def _bot_with_scheduled_task_runtime(
         rooms=["lobby"],
     )
     bot.client = make_matrix_client_mock(user_id=user.user_id)
-    bot.client.rooms = joined_rooms
+    bot.client.rooms = {room_id: nio.MatrixRoom(room_id, user.user_id) for room_id in joined_room_ids}
     install_runtime_journal_support(bot)
     restore_room = AsyncMock(return_value=2)
     bot.orchestrator.scheduled_tasks.restore_room = restore_room
@@ -59,7 +60,7 @@ def _bot_with_scheduled_task_runtime(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_name", [ROUTER_AGENT_NAME, "general"])
 async def test_configured_join_restores_schedules_for_every_bot(tmp_path: Path, agent_name: str) -> None:
-    """Router and agents restore the schedules they own; only the router restores config changes and welcomes."""
+    """Every bot restores the schedules it owns; only the owner account welcomes."""
     config = _bind_runtime(
         Config(
             agents={"general": {"display_name": "GeneralAgent", "role": "General assistant", "rooms": ["lobby"]}},
@@ -67,7 +68,7 @@ async def test_configured_join_restores_schedules_for_every_bot(tmp_path: Path, 
         ),
         tmp_path,
     )
-    bot, restore_room = _bot_with_scheduled_task_runtime(agent_name, config, {})
+    bot, restore_room = _bot_with_scheduled_task_runtime(agent_name, config, ())
 
     with (
         patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=[]),
@@ -77,46 +78,33 @@ async def test_configured_join_restores_schedules_for_every_bot(tmp_path: Path, 
             return_value=RoomJoinOutcome.JOINED,
         ) as mock_join,
         patch(
-            "mindroom.bot.config_confirmation.restore_pending_changes",
-            new_callable=AsyncMock,
-            return_value=0,
-        ) as mock_restore_configs,
-        patch(
             "mindroom.bot_room_lifecycle.BotRoomLifecycle.send_welcome_message_if_empty",
             new_callable=AsyncMock,
         ) as mock_welcome,
     ):
-        await bot.join_configured_rooms()
+        await bot._room_lifecycle.join_configured_rooms()
 
     mock_join.assert_awaited_once_with(bot.client, "lobby")
     restore_room.assert_awaited_once_with(bot, "lobby")
-    is_router = agent_name == ROUTER_AGENT_NAME
-    assert mock_restore_configs.await_count == int(is_router)
-    assert mock_welcome.await_count == int(is_router)
+    assert mock_welcome.await_count == int(agent_name == ROUTER_AGENT_NAME)
 
 
 @pytest.mark.asyncio
 async def test_router_restores_tasks_without_rejoining_existing_room(tmp_path: Path) -> None:
     """Restart setup runs even when the room is already joined."""
     config = _bind_runtime(Config(models={"default": {"provider": "openai", "id": "test-model"}}), tmp_path)
-    bot, restore_room = _bot_with_scheduled_task_runtime(ROUTER_AGENT_NAME, config, {"lobby": object()})
+    bot, restore_room = _bot_with_scheduled_task_runtime(ROUTER_AGENT_NAME, config, ("lobby",))
 
     with (
         patch("mindroom.bot_room_lifecycle.get_joined_rooms", new_callable=AsyncMock, return_value=["lobby"]),
         patch("mindroom.matrix.client_room_admin.join_room", new_callable=AsyncMock) as mock_join,
         patch(
-            "mindroom.bot.config_confirmation.restore_pending_changes",
-            new_callable=AsyncMock,
-            return_value=1,
-        ) as mock_restore_configs,
-        patch(
             "mindroom.bot_room_lifecycle.BotRoomLifecycle.send_welcome_message_if_empty",
             new_callable=AsyncMock,
         ) as mock_welcome,
     ):
-        await bot.join_configured_rooms()
+        await bot._room_lifecycle.join_configured_rooms()
 
     mock_join.assert_not_awaited()
     restore_room.assert_awaited_once_with(bot, "lobby")
-    mock_restore_configs.assert_awaited_once_with(bot.client, "lobby")
     mock_welcome.assert_awaited_once_with("lobby")

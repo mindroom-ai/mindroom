@@ -17,31 +17,41 @@ The broker replaces any value the client sent in the header or query parameter i
 Workers authenticate to the broker with a signed token in `HTTP_PROXY` and `HTTPS_PROXY`: the user name in `http://<token>:mindroom@<broker host>:<port>`, whose fixed password `mindroom` is not a secret, so curl, Python `urllib`, and Node `fetch` (with `NODE_USE_ENV_PROXY`) work as is.
 The broker checks the token, resolves the worker's scope, and loads that scope's API key or connected-account token (see [Secret sources](#secret-sources)), which never reaches the worker process, its environment, or the filesystem it can read.
 
-Each `shell` and `python` call that an agent with the [`egress_credentials` tool](#agent-tool) routes to a worker gets a fresh token valid for `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` (default 7 days), so long-running commands keep working while a leaked token expires on its own.
+Each `shell` call of an agent with the [`egress_credentials` tool](#agent-tool), and each of its `python` calls that runs in a worker, gets a fresh token valid for `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` (default 7 days), so long-running commands keep working while a leaked token expires on its own.
 The TTL applies to new requests: an expired token gets 407 on every new request, but websocket splices and raw tunnels that were already open continue until they close.
 
 Those calls' `NO_PROXY` is replaced with `localhost,127.0.0.1,::1,.svc,.cluster.local` plus the hosts of the primary's own callback URLs, so a call to any other internal host goes to the broker, which refuses private addresses with 403 `destination_blocked`.
 That includes LAN and Tailscale addresses and names that resolve to them, unless [`private_networks`](#private-networks) lists them.
 Without that, a command that needs one can bypass the broker, for example with `curl --noproxy '*'`, where the worker's network allows direct connections.
+A `shell` call that runs in the primary process can always bypass the broker that way, so the broker does not refuse private addresses for it; see [Private networks](#private-networks).
 
 ## Configuration
 
 ### Environment variables
 
-Set these on the primary runtime to enable the broker:
+The broker is on by default.
+With none of these set, it listens on `127.0.0.1` on a free port the system picks, and only `shell` calls that run in the primary process use it: no worker-facing URL is known, so worker-routed calls get no broker environment.
+The port is picked at each start, so two MindRoom instances on one machine never collide; nothing outside the primary needs to know it.
+Set the port and URL to serve workers too:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `MINDROOM_EGRESS_BROKER_PORT` | Yes (when using the broker) | Unset (broker disabled) | Port the broker listens on, such as 8768; when unset the broker stays off |
-| `MINDROOM_EGRESS_BROKER_HOST` | No | `0.0.0.0` | Bind address for the broker listener |
+| `MINDROOM_EGRESS_BROKER_PORT` | Yes (to serve workers) | Unset (loopback broker for primary shells) | Port the broker listens on, such as 8768; `off` or `0` turns the broker off |
+| `MINDROOM_EGRESS_BROKER_HOST` | No | `0.0.0.0` (`127.0.0.1` when the port is unset) | Bind address for the broker listener; used only when the port is set |
 | `MINDROOM_EGRESS_BROKER_URL` | Yes (when port is set) | None | Worker-facing first hop, such as `http://host.docker.internal:8768` for Docker workers or `http://squid:3128` in an approved-egress chain |
 | `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` | No | `604800` (7 days) | How long each minted worker token remains valid |
 
-When `MINDROOM_EGRESS_BROKER_PORT` is unset, the broker does not start, workers get no broker environment, and Agent Keys is hidden: its pages, API routes, dashboard panel, and the `egress_credentials` tool are unavailable.
-Keys and accounts can only be entered while the port is set.
-With the port set, the request log and CA download routes return 409 while the broker is not running.
+A `shell` command that runs in the primary process does not use `MINDROOM_EGRESS_BROKER_URL`, which may not resolve on the primary's host: it reaches the broker at `http://127.0.0.1:<port>` when `MINDROOM_EGRESS_BROKER_HOST` is `0.0.0.0`, at `http://[::1]:<port>` when it is `::`, and at the bound address otherwise.
+Its CA variables (`SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO` and `NODE_EXTRA_CA_CERTS`) point at files under `<storage>/egress_broker/primary_ca/` that add the broker CA to the system roots and to the certificates of the CA files the primary's own values of those variables name, exported or set in the `.env` beside `config.yaml`, read when the broker starts.
+Every tool gets the same files, and their system roots are the file the primary's exported `SSL_CERT_FILE` names when one is set, otherwise OpenSSL's default file or certifi, so a tool that used roots of its own before, such as Python Requests with certifi, trusts these instead.
+On macOS, Go programs such as `gh` verify certificates with the system keychain and ignore these variables, so from a primary shell there they do not trust the broker CA.
 
-Running MindRoom with `--no-api` disables the broker along with the API.
+With `MINDROOM_EGRESS_BROKER_PORT=off`, the broker does not start, workers get no broker environment, and Agent Keys is hidden: its pages, API routes, dashboard panel, and the `egress_credentials` tool are unavailable.
+Keys and accounts can only be entered while the broker is on.
+While it is on, the request log and CA download routes return 409 when the broker is not running.
+
+Running MindRoom with `--no-api` disables the broker along with the API, since nobody could answer a key request; with a set port, MindRoom logs a warning and keeps running.
+Without a port, the broker is also off when the primary's `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` is set in any case, exported or in the `.env` beside `config.yaml`, so shell calls on a proxied network keep using that proxy as before; set a port to use the broker there. It is off as well when it fails to start, for example on an invalid token TTL, unreadable broker state, or a loopback port it cannot bind. MindRoom stops whatever the broker started, logs a warning, and keeps running without it. With a set port, a failure to start stops startup instead.
 
 ### Service rules
 
@@ -78,13 +88,14 @@ The service name is yours to choose; it names the stored `egress_<name>` credent
 | `google_docs` | `google_docs` | `docs.googleapis.com` bearer | None |
 | `google_tasks` | `google_tasks` | `tasks.googleapis.com` bearer; `www.googleapis.com` path `/tasks/`, bearer | None |
 | `atlassian` | `atlassian` | `api.atlassian.com` bearer | None |
+| `overleaf` | None | `git.overleaf.com` basic with username `git` | None |
 | `openai` | None | `api.openai.com` bearer | `OPENAI_API_KEY` |
 | `anthropic` | None | `api.anthropic.com` header `x-api-key` | `ANTHROPIC_API_KEY` |
 
 Placeholder values are `mindroom-brokered`.
 Presets without a connected account take an API key only.
 A preset's connected account is used only after someone allows Agent Keys to use it; see [Using a connected account](#using-a-connected-account).
-The Google presets and `atlassian` also set [`read_only`](#read-only-accounts), with `google_calendar` listing `/calendar/v3/freeBusy`, so their accounts can be allowed read only; `github` does not, because git clone and fetch read with `POST`.
+The Google presets and `atlassian` also set [`read_only`](#read-only-accounts), with `google_calendar` listing `/calendar/v3/freeBusy`, so their accounts can be allowed read only; `github` and `overleaf` do not, because git clone and fetch read with `POST`.
 
 Several Google presets share `www.googleapis.com`.
 Longest path prefix matching picks the right service, and a request to another path on that host is forwarded without injection, because the host has rules and so does not count as unmatched.
@@ -92,6 +103,27 @@ Longest path prefix matching picks the right service, and a request to another p
 Any field you set next to `preset` replaces the preset's value for that field as a whole, such as `display_name: Work GitHub`, or `placeholder_env: {}` to drop the `github` preset's `GH_TOKEN` and `GITHUB_TOKEN`.
 Fields you leave out keep coming from the preset, so MindRoom updates to a preset reach your service, and an authored `rules` list replaces all of the preset's rules.
 A service must end up with at least one rule, from `rules` or from its preset.
+
+#### Overleaf
+
+Overleaf has no API for agents, only its Git bridge at `https://git.overleaf.com/<project_id>`, which takes a Git authentication token as the password of user `git`.
+The token comes from **Git integration** in Overleaf's [Account Settings](https://www.overleaf.com/user/settings), and Git access needs an Overleaf premium plan.
+Add the `overleaf` preset, on the Agent Keys page with **Add service** or in `config.yaml`, and store the token as its key, or let the agent ask for it with [`request_secret`](#asking-in-chat).
+The agent's `git clone`, `git pull`, and `git push` then authenticate without the token in the URL or the agent's environment.
+Give the agent the bundled `overleaf` skill, which covers cloning, pushing to `master`, and Overleaf's errors:
+
+```yaml
+egress_broker:
+  services:
+    overleaf:
+      preset: overleaf
+agents:
+  writer:
+    tools: [shell, egress_credentials]
+    skills: [overleaf]
+```
+
+For a self-hosted Overleaf Server Pro, define a custom service for its host with `auth: {type: basic, username: git}`.
 
 #### Custom services
 
@@ -228,7 +260,11 @@ On the personal page, users who can manage the agent get **Limit to repositories
 ### Private networks
 
 The broker refuses private addresses, so by default worker calls through it cannot reach your LAN or your Tailscale network.
-List the ranges agents may reach in `private_networks`:
+`shell` calls that run in the primary process are the exception: they can reach any address directly, so the guard would protect nothing and only break Home Assistant, a NAS, or Ollama.
+The broker dials private, unique-local, and Tailscale addresses for them as if every range were listed, and still refuses loopback, link-local, and cloud metadata addresses.
+It also resolves `*.local` names for them, such as `homeassistant.local`, and checks the addresses they resolve to by the same rule.
+The token of each call says which kind it is, signed by the broker, so a worker cannot claim the primary's rule.
+List the ranges worker calls may reach in `private_networks`:
 
 ```yaml
 egress_broker:
@@ -258,7 +294,7 @@ A service can take its secret from two sources in a worker's scope:
 
 - **API key**: a key stored for the scope, set by hand.
 - **Connected account**: an OAuth login that the user connected through MindRoom's OAuth providers (the GitHub App user login, the Google providers, Atlassian).
-  A service uses this source when it has an `oauth_provider`, which every preset except `openai` and `anthropic` sets, and only after someone allows Agent Keys to use the account; see [Using a connected account](#using-a-connected-account).
+  A service uses this source when it has an `oauth_provider`, which every preset except `openai`, `anthropic`, and `overleaf` sets, and only after someone allows Agent Keys to use the account; see [Using a connected account](#using-a-connected-account).
 
 A [GitHub App](#github-app) service uses only tokens of its App instead.
 
@@ -337,7 +373,7 @@ Connected accounts live in MindRoom's OAuth credential stores under the same pri
 Agents without a worker scope do not get a store of their own: they all read the one global key per service, so setting or removing it affects every such agent.
 
 Set secrets and connect accounts in the **Agent Keys** panel on the dashboard's Credentials page, or on the personal egress page at `/connections/egress`, linked from the Connections portal.
-The panel's **Keys for** selector lists the `shared` agents that use Agent Keys (with the [`egress_credentials` tool](#agent-tool) and `shell` or `python` running in a worker) and, when such an agent exists, **Agents without a scope**.
+The panel's **Keys for** selector lists the `shared` agents that use Agent Keys (with the [`egress_credentials` tool](#agent-tool) and `shell`, or `python` running in a worker) and, when such an agent exists, **Agents without a scope**.
 Keys for `user` and `user_agent` agents, private agents included, belong to each requester, so the panel does not list them and each user sets them on the personal egress page.
 The pages show, for each service and scope, whether a key is set and when it was last updated, and the state of the connected account, never a secret or token.
 Secrets are rejected when they are empty, whitespace-only, contain ASCII control characters, or exceed 16 KiB.
@@ -636,9 +672,10 @@ Rows are kept for up to 30 days, at most the newest 100,000.
 
 ## Agent tool
 
-Adding the `egress_credentials` tool to an agent with `shell` or `python` is what opts it into Agent Keys: only such agents' worker-routed `shell` and `python` calls go through the broker and get keys, and only they appear on the Agent Keys pages.
+Adding the `egress_credentials` tool to an agent with `shell` or `python` is what opts it into Agent Keys: such an agent's `shell` calls, wherever they run, and its `python` calls that run in a worker go through the broker and get keys, and only such agents appear on the Agent Keys pages.
+A `shell` in the primary process, for example under `worker_tools: []`, works the same as one in a worker, but there the broker keeps nothing from the agent (see [Code in the primary process](#what-the-broker-cannot-protect-against)).
 An agent without the tool gets no key or connected account through the broker, even when its scope has one, and its requests go out as with the broker off.
-So does an agent whose `shell` and `python` run in the primary process, for example because its `worker_tools` leave them out: the broker never sees those calls, so the agent is left off the Agent Keys pages, its tool says so instead of listing services, and MindRoom logs a warning at startup and on each config reload.
+So does an agent whose only command tool is `python` running in the primary process, which runs inside MindRoom itself where the broker cannot reach it: the agent is left off the Agent Keys pages, its tool says so instead of listing services, and MindRoom logs a warning at startup and on each config reload.
 The tool also lets the agent tell a user which keys or accounts are missing when a brokered request fails with `credential_not_configured`.
 
 ```yaml
@@ -649,7 +686,7 @@ agents:
       - egress_credentials
 ```
 
-Its one function, `list_egress_credentials`, takes no arguments and returns JSON:
+`list_egress_credentials` takes no arguments and returns JSON:
 
 ```json
 {
@@ -684,8 +721,40 @@ Its one function, `list_egress_credentials`, takes no arguments and returns JSON
   A `true` value says the provider can be connected, not that this user may connect it: for the Google providers, or an Atlassian connection with `requester_scoped=False`, on a shared agent, only administrators and credential managers can.
 - `manage_url` is the personal egress page when it is served and the dashboard otherwise; it is `null` when `MINDROOM_PUBLIC_URL` is not set, and the note then tells the agent to ask the operator.
 - For a `user` or `user_agent` agent when the personal page is not served, `manage_url` is `null`, and the note says that nobody can sign in to the page for the agent's keys here, that an administrator can enable Connections sign-in or make the agent shared, that only that page can allow an account for Agent Keys, and that an allowed account can still be connected at the `connect_url` in the broker's refusal.
-- The tool never returns secret values, access tokens, or connect links, and its note tells the agent not to ask users to paste a key into the chat.
+- The tool never returns secret values, access tokens, or connect links, and its note tells the agent to ask for a missing key with [`request_secret`](#asking-in-chat), never by having users paste it into the chat.
 - Without a worker target, the tool returns an empty `services` list and a note saying a worker-scoped agent is required.
+
+### Asking in chat
+
+For a missing key, the agent calls `request_secret` with a `service` (a name from `list_egress_credentials`) and a `reason`, and waits for the answer.
+It can also give the `url` of the page where the user gets or creates the key and a `placeholder` for the empty field.
+
+- MindRoom Chat shows the requester a card with the reason, the service, the hosts the key is sent to, and a masked field.
+  Other people in the thread see who the card waits for.
+  When the service already has a key in that scope, the card says that saving replaces it.
+- A `url` becomes a button that names the page's host and opens it in the browser, and a `placeholder` becomes the hint in the empty field, as on a [temporary secret's card](https://docs.mindroom.chat/tools/execution-and-coding/#temporary_secrets).
+- Chat sends the key to this MindRoom's API with the user's client session.
+  MindRoom stores it as that service's Agent Keys key in the agent's scope, and the broker sends it only to the service's hosts.
+  The key never goes through Matrix, the model, the worker, or the logs.
+- For a service that does not exist yet, the agent passes `new_service` with the fields of a [user service](#user-services) (`display_name`, `description`, `preset`, `rules`, `placeholder_env`, `restrict_to_rules`), and `service` names the new service.
+  The card then also shows the new service: each rule's host, path prefix, port, and how the key is sent, and the variables the agent's commands get.
+  Saving adds it as one of the requester's own services in the agent's scope and stores the key, both or neither; declining or expiring adds nothing.
+  Such a service only ever uses that key: a preset's account login is dropped, and fields only config.yaml sets are refused.
+  The tool posts no card for a proposal the Agent Keys page would refuse, such as a name already in use, an invalid rule, a disallowed placeholder, or a host `unmatched_hosts: deny` keeps closed; the error says why.
+  A card whose new service could no longer be added when the user saves, for example because config.yaml now has a service of that name, expires.
+- The tool returns `saved`, `declined`, or `expired`, so the agent can retry the failed request.
+  After `saved`, the agent makes one request through Agent Keys to the service, and when it is refused, it tells the user why (for example a token of the wrong owner or read-only access) and asks again.
+  A card expires after 15 minutes or when the reply is stopped, and a restart of MindRoom ends every pending request.
+  It also expires when an answer arrives after its service changed or the agent's keys moved to another scope; the agent can then ask again with a new card.
+- When the call runs as a [background job](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs), the reply waits for the answer for `background_tool_jobs.approval_wait_timeout` seconds (default 300) and then goes on; the outcome arrives later as the job's result.
+  Stop withdraws the card only while the reply still waits for it.
+- The requester answers.
+  For a shared agent, the requester must also be a credential manager or an administrator, as on the Agent Keys pages.
+- The tool refuses, and posts no card, for an unknown service without `new_service`, a [GitHub App](#github-app) service, a [service with its own account](#a-services-own-account), an [administrator key](#administrator-keys), and a service that only limits paths.
+  The refusal names the Agent Keys page where one exists.
+- For a secret that is no service's API key, such as a password or a pairing code, an agent with the [`temporary_secrets`](https://docs.mindroom.chat/tools/execution-and-coding/#temporary_secrets) tool asks with a card of its own, and its shell commands receive the value for a limited time.
+- Chat signs in to this API with a client session, so Chat's origin must be in `MINDROOM_COMPUTER_ALLOWED_ORIGINS` (see [Primary MindRoom runtime](https://docs.mindroom.chat/deployment/sandbox-proxy/#primary-mindroom-runtime-proxy-client)), and the homeserver must bind OpenID tokens to this deployment (`mindroom_openid_audience` on Tuwunel, see [Token Binding](https://docs.mindroom.chat/connections-portal/#token-binding)).
+  Without either, the tool posts no card and sends the user to the Agent Keys page instead.
 
 ## Deployment
 
@@ -810,6 +879,7 @@ Each of these is a choice you make, so make it on purpose.
 
 - **Code in the primary process.** An agent whose code runs in the primary process can read every stored key and token.
   That is the case when no sandbox runner or dedicated worker is configured, so tools run in the primary process (the default when `MINDROOM_SANDBOX_PROXY_URL` is unset), with `MINDROOM_SANDBOX_EXECUTION_MODE` set to `off`, `local`, or `disabled`, with a `MINDROOM_SANDBOX_PROXY_TOOLS` list that leaves a tool out (unless the mode is `all`), with `worker_tools: []`, and with primary-only tools such as `duckdb`, `pandas`, `sql`, and `script`.
+  Its `shell` commands still get the broker environment, so its stored keys work there as in a worker, but that is a convenience, not a protection: the same commands can read the keys directly.
   Path tools that run in the primary process, such as `attachments` or `gmail`, can also open any file the primary can reach under `file_access: unrestricted`.
   Use a dedicated worker backend or a sandbox runner, keep `file_access` at `workspace`, and keep such tools off agents that should not see secrets.
 - **Write access to the configuration.** `config_manager`, and any other way to write the `egress_broker` config, can point a service at another host, and the broker then sends that service's key there.

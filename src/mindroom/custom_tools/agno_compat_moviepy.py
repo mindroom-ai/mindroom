@@ -16,8 +16,7 @@ from moviepy import ColorClip, CompositeVideoClip, TextClip, VideoClip, VideoFil
 from moviepy.config import FFMPEG_BINARY
 from PIL import ImageFont
 
-from mindroom.file_access import resolve_agent_file
-from mindroom.tools.path_safety import write_agent_file
+from mindroom.file_access import resolve_agent_file, write_agent_file
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -91,7 +90,7 @@ _PLAIN_MEDIA_FORMATS = "mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,avi,mpegts,mpeg,fl
 # Coverage: tests/test_moviepy_video_tools.py::test_default_caption_output_lands_next_to_the_input.
 
 # AGNO_COMPAT: MoviePyVideoTools reads and writes model-chosen media paths by name.
-# Reason: Agno 3.0.9 hands video, caption, and output paths to open(), os.replace, and FFmpeg
+# Reason: Agno 3.2.1 hands video, caption, and output paths to open(), os.replace, and FFmpeg
 # in whichever process runs the toolkit, so a prompt could replace MindRoom's config.yaml with
 # create_srt, read any file, or point FFmpeg at a URL, whatever the agent's file_access.
 # FFmpeg also follows the paths and URLs inside an HLS playlist or DASH manifest, which it

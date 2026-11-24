@@ -334,7 +334,6 @@ class TestDMIntegration:
             ),
             patch("mindroom.conversation_resolver.check_agent_mentioned", return_value=([], False, False)),
             patch("mindroom.matrix.event_info.EventInfo.from_event") as mock_thread_info,
-            patch("mindroom.conversation_resolver._should_skip_mentions", return_value=False),
         ):
             # Mock thread info to return no thread
             mock_thread_info.return_value = EventInfo(
@@ -425,7 +424,6 @@ class TestDMIntegration:
             ),
             patch("mindroom.conversation_resolver.check_agent_mentioned", return_value=([], False, False)),
             patch("mindroom.matrix.event_info.EventInfo.from_event") as mock_thread_info,
-            patch("mindroom.conversation_resolver._should_skip_mentions", return_value=False),
         ):
             # Mock thread info to return no thread
             mock_thread_info.return_value = EventInfo(

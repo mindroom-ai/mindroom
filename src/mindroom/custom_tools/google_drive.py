@@ -8,7 +8,7 @@ import re
 from contextlib import contextmanager
 from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from agno.tools.google.drive import GoogleDriveTools as AgnoGoogleDriveTools
 from agno.tools.google.drive import MediaIoBaseDownload, WorkspaceType, authenticate
@@ -185,14 +185,15 @@ class GoogleDriveTools(
     _oauth_provider = google_oauth_provider("google_drive")
     _oauth_tool_name = "google_drive"
     # AGNO_COMPAT: Drive `download_file` exports Google Vids, which the Drive API never exports.
-    # Reason: Agno 3.0.9 maps `application/vnd.google-apps.vid` to a `video/mp4` export, but `files.export` refuses
+    # Reason: Agno 3.2.1 maps `application/vnd.google-apps.vid` to a `video/mp4` export, but `files.export` refuses
     # every Vids file with `fileNotExportable`, so a Vids download, and the download advice a refused read gives,
     # end in an API error. Without the mapping, MindRoom refuses Vids as an unsupported Workspace type.
     # Upstream issue: Tracking gap; no matching issue identified.
     # Upstream PR: None identified.
     # Remove when: Agno's `DOWNLOAD_EXPORT_TYPES` no longer maps Google Vids to a `files.export` format.
     # Coverage: tests/test_google_drive_oauth_tool.py::test_google_drive_read_refusal_advises_download_only_for_files_the_download_saves.
-    DOWNLOAD_EXPORT_TYPES: ClassVar[dict[str, tuple[str, str]]] = {
+    # Agno leaves its class attribute unannotated, so ty reads it as an instance variable.
+    DOWNLOAD_EXPORT_TYPES: ClassVar[dict[str, tuple[str, str]]] = {  # ty: ignore[incompatible-attribute-override]
         mime_type: export
         for mime_type, export in AgnoGoogleDriveTools.DOWNLOAD_EXPORT_TYPES.items()
         if mime_type != WorkspaceType.VID
@@ -394,8 +395,16 @@ class GoogleDriveTools(
         folder_id: str | None = None,
         name: str | None = None,
         mime_type: str | None = None,
+        convert_to: Literal["document", "spreadsheet", "presentation"] | None = None,
     ) -> str:
-        """Upload one local file, resolving relative paths from the agent workspace."""
+        """Upload one local file, resolving relative paths from the agent workspace.
+
+        With convert_to, Drive converts the file into a Google Workspace file instead of storing it as it is:
+        "document" makes a Google Doc from HTML, Markdown, Word, or plain text, importing the formatting Docs
+        supports, such as headings, tables, lists, links, and the images a Word file embeds; "spreadsheet" a
+        Google Sheet from Excel or CSV; "presentation" Google Slides from PowerPoint.
+        The converted file takes the local file's name without its extension unless name is given.
+        """
         try:
             authorized = self._resolve_upload_file(local_path)
         except ValueError as exc:
@@ -405,6 +414,9 @@ class GoogleDriveTools(
         body: dict[str, object] = {"name": name or authorized.name}
         if folder_id:
             body["parents"] = [folder_id]
+        if convert_to:
+            body["name"] = name or Path(authorized.name).stem
+            body["mimeType"] = f"{_GOOGLE_WORKSPACE_MIME_PREFIX}{convert_to}"
         try:
             service = cast("Any", self.service)
             with _open_upload_media(authorized, resolved_mime_type) as media_body:
@@ -427,24 +439,19 @@ class GoogleDriveTools(
 
     @authenticate
     def update_file(self, file_id: str, local_path: str, mime_type: str | None = None) -> str:
-        """Replace the contents of one binary Drive file from the agent workspace."""
+        """Replace the contents of one Drive file from the agent workspace, keeping its ID, link, and sharing.
+
+        A Google Doc, Sheet, or Slides file is replaced whole by Drive's conversion of the local file, as an upload's
+        convert_to converts it, so formatting that is not in the local file is lost and comments on the replaced
+        content lose their place.
+        To change part of such a file, use the Google Docs or Google Sheets tool instead.
+        """
         try:
             authorized = self._resolve_upload_file(local_path)
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
 
         try:
-            metadata = self._get_file_metadata(file_id, "id,name,mimeType")
-            existing_mime_type = metadata.get("mimeType")
-            if isinstance(existing_mime_type, str) and existing_mime_type.startswith(_GOOGLE_WORKSPACE_MIME_PREFIX):
-                return json.dumps(
-                    {
-                        "error": (
-                            "Google Drive content replacement only supports binary files; "
-                            f"{existing_mime_type} requires its Google Workspace API"
-                        ),
-                    },
-                )
             resolved_mime_type = mime_type or named_mime_type(authorized.name) or "application/octet-stream"
             service = cast("Any", self.service)
             with _open_upload_media(authorized, resolved_mime_type) as media_body:
@@ -536,7 +543,7 @@ class GoogleDriveTools(
             return json.dumps({"error": f"Unexpected error: {type(exc).__name__}: {exc}"})
 
     # AGNO_COMPAT: Drive `read_file` refuses text by MIME type and names a download function that may not exist.
-    # Reason: Agno 3.0.9 refuses every `application/octet-stream` file, including text MindRoom's own uploads
+    # Reason: Agno 3.2.1 refuses every `application/octet-stream` file, including text MindRoom's own uploads
     # store that way, and ends errors with "Use download_file instead." although MindRoom exposes
     # `google_drive_download_file` or disables it, and although its `download_file` refuses folders and other
     # Workspace types it cannot export. This override decides text by content instead, and refuses a binary type
@@ -544,7 +551,7 @@ class GoogleDriveTools(
     # MIME-based branch would extract without tables, grouped shapes, or line breaks, or reject with an install
     # hint when the extraction packages are missing.
     # Upstream issue: Tracking gap; no matching issue identified.
-    # Upstream PR: https://github.com/agno-agi/agno/pull/10473 (in 3.0.11; MindRoom pins 3.0.9) covers only grouped
+    # Upstream PR: https://github.com/agno-agi/agno/pull/10473 (in 3.0.11, so in the pinned 3.2.1) covers only grouped
     # shapes and line breaks in `.pptx` text; https://github.com/agno-agi/agno/pull/10501 (open) covers only `.docx` tables.
     # Remove when: Agno's `read_file` decides text by content rather than MIME type, lets a toolkit word the advice
     # after a refused read, and extracts complete Office text with dependencies MindRoom ships or refuses it;

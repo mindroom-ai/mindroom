@@ -62,16 +62,17 @@ def test_config_accepts_thread_summary_enrichment_prompt_fields() -> None:
     )
 
 
-def test_config_rejects_unsupported_thread_summary_prompt_field() -> None:
-    """The summary prompt rejects placeholders absent from its call site."""
+@pytest.mark.parametrize(
+    ("name", "template"),
+    [
+        ("THREAD_SUMMARY_USER_PROMPT_TEMPLATE", "{conversation} {room_id}"),
+        ("THREAD_SUMMARY_ROOM_INSTRUCTIONS_TEMPLATE", "{instructions} {conversation}"),
+    ],
+)
+def test_config_rejects_unsupported_thread_summary_prompt_field(name: str, template: str) -> None:
+    """The summary prompts reject placeholders absent from their call sites."""
     with pytest.raises(ValidationError, match="Unsupported prompt placeholder"):
-        Config.model_validate(
-            {
-                "prompts": {
-                    "THREAD_SUMMARY_USER_PROMPT_TEMPLATE": "{conversation} {room_id}",
-                },
-            },
-        )
+        Config.model_validate({"prompts": {name: template}})
 
 
 def test_config_rejects_unknown_prompt_override() -> None:
@@ -174,3 +175,31 @@ def test_render_prompt_template_rejects_missing_field_value() -> None:
     """Runtime rendering fails clearly when a call site forgets a field value."""
     with pytest.raises(PromptTemplateError, match="Missing prompt placeholder value: agents_info"):
         render_prompt_template("{message} {agents_info}", message="hello")
+
+
+def test_config_accepts_and_validates_cross_room_fork_prompt_override() -> None:
+    """Cross-room fork prompt accepts its four fields while same-room fork template stays untouched."""
+    config = Config.model_validate(
+        {
+            "prompts": {
+                "CROSS_ROOM_THREAD_FORK_CONTEXT_TEMPLATE": (
+                    "Forked from {parent_room_label} ({parent_room_id}) thread {parent_thread_id} at {fork_point_event_id}."
+                ),
+            },
+        },
+    )
+
+    assert (
+        config.render_prompt(
+            "CROSS_ROOM_THREAD_FORK_CONTEXT_TEMPLATE",
+            parent_room_id="!src:localhost",
+            parent_room_label="'Source' (room ID !src:localhost)",
+            parent_thread_id="$parent",
+            fork_point_event_id="$point",
+        )
+        == "Forked from 'Source' (room ID !src:localhost) (!src:localhost) thread $parent at $point."
+    )
+    with pytest.raises(ValidationError, match="Unsupported prompt placeholder"):
+        Config.model_validate({"prompts": {"CROSS_ROOM_THREAD_FORK_CONTEXT_TEMPLATE": "{unknown_field}"}})
+    with pytest.raises(ValidationError, match="Unsupported prompt placeholder"):
+        Config.model_validate({"prompts": {"THREAD_FORK_CONTEXT_TEMPLATE": "{parent_room_id}"}})

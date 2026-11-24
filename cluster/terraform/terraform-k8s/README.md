@@ -1,6 +1,7 @@
 # MindRoom K8s Infrastructure
 
 Terraform configuration for deploying MindRoom on Kubernetes, with separate cluster bootstrap and platform deployment steps.
+For local testing without Hetzner or Terraform, see the [local `kind` quick start](../../../docs/deployment/kubernetes.md#quick-start-local-kind-cluster).
 
 ## Prerequisites
 

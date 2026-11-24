@@ -54,7 +54,7 @@ Helper work adds tokens without adding runs, including retries and rejected outp
 | `knowledge_graph` | Fact extraction for the [knowledge graph](knowledge-graph.md) |
 | `listening` | Silent turns of a [listening agent](configuration/agents.md#listening), which no requester asked for |
 | `realtime_voice` | Speech-model tokens of a realtime voice call, one request per response |
-| `routing`, `room_topic`, `schedule_parse`, `team_mode`, `thread_summary`, `voice_normalization`, `voice_transcription` | Internal AI work, reported under the entity `system:internal` |
+| `routing`, `room_topic`, `schedule_parse`, `team_mode`, `thread_summary`, `voice_dictation`, `voice_normalization`, `voice_transcription`, `call_transcript` | Internal AI work, reported under the entity `system:internal`; `voice_dictation` is streaming composer dictation, and `call_transcript` is the speech-to-text and notes of transcribed calls between people |
 
 Helpers are attributed to the conversation and requester that triggered them, and stay unattributed when no requester is known.
 `system:internal` usage has no human requester, appears only in organization reports, and transcription is counted only when the provider reports tokens.
@@ -78,7 +78,8 @@ Totals support cost estimates, but provider-specific charging rules and calls ou
 With [prices](configuration/models.md#model-config-fields) set on a model, each agent or team reply that uses it records its cost in USD, priced the same way as [budget spend](budgets.md#how-spend-is-counted).
 In MindRoom Chat, open **Reply details** from a reply's ⓘ button or message menu to see its cost and the conversation's cost up to that reply.
 A reply's cost covers every model call made within the reply, including team members on other models and [native compaction](configuration/history.md#native-compaction).
-Subagents it delegates to and separate helper work, such as text compaction summaries, memory-backend extraction, and thread titles, are left out of it but still count toward budgets.
+Separate helper work, such as text compaction summaries, memory-backend extraction, and thread titles, is left out of it but still counts toward budgets.
+The subagents whose results the reply received, including the subagents those ran, have their cost recorded beside the reply's own; a background subagent counts on the reply that waited for or collected its result, and one whose result is never read counts on no reply.
 The conversation cost adds up the replies MindRoom Chat has loaded and reads "at least" while older messages are not loaded.
 A regenerated reply shows the cost of its latest run only.
 Replies on models without prices, and replies that report no token usage, show no cost.
@@ -192,12 +193,13 @@ MINDROOM_USAGE_SERVICE_CLIENT_ID=usage-export-client.example.org
 
 The service sends its assertion in the trusted-upstream JWT header on every request, including polls.
 The assertion must be signed with `RS256` by the trusted-upstream issuer and JWKS, and contain valid `exp`, `iat`, `iss`, and `aud` claims, where `aud` is `MINDROOM_USAGE_SERVICE_JWT_AUDIENCE` rather than the browser audience.
-It must also contain `type=app`, `common_name` exactly equal to `MINDROOM_USAGE_SERVICE_CLIENT_ID`, and an empty `sub`.
+It must also contain `type=app` and `common_name` exactly equal to `MINDROOM_USAGE_SERVICE_CLIENT_ID`, and its `sub` must be empty or absent.
 
 | Status | Meaning |
 | --- | --- |
 | `503` `Usage export service authentication is not configured` | Trusted upstream auth, one of its JWT settings, or a service setting is missing |
-| `401` `Invalid usage service JWT` | Missing or invalid assertion |
+| `401` `Invalid usage service JWT` | Invalid assertion; a `Service JWT rejected` or `Trusted upstream JWT rejected` warning in the MindRoom log names the failed check |
+| `401` `Missing trusted upstream JWT header: <header>` | The request carried no assertion |
 
 A service assertion authorizes only `/api/usage/export`, not `/api/usage`, personal usage, configuration, or other administrator routes.
 

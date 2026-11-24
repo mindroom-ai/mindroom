@@ -360,10 +360,11 @@ async def test_a_team_turn_whose_run_a_cut_removed_leaves_it_and_its_members_out
 
     await team.respond()
 
-    # The writer's run had joined the session under the team run before the cut.
-    [earlier, writer] = held_before_cut
+    # The team run's checkpoint and, under it, the writer's run had joined the session before the cut.
+    [earlier, checkpoint, writer] = held_before_cut
     assert isinstance(earlier, TeamRunRecord)
     assert earlier.run_id == "team-0"
+    assert (checkpoint.run_id, checkpoint.status) == ("run-1", RunStatus.cancelled)
     assert isinstance(writer, RunRecord)
     assert (writer.agent_id, writer.parent_run_id) == ("writer", "run-1")
     session = _loaded_session(opened_scopes, "squad")

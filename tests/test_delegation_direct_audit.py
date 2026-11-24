@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
@@ -17,8 +18,10 @@ from mindroom.ai import TurnResult, run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.delegation.lifecycle import (
+    child_run_context,
     observe_child_event,
     prepare_child_turn,
+    start_child_turn,
 )
 from mindroom.delegation.state import child_execution_identity
 from mindroom.llm.errors import ProviderError
@@ -195,7 +198,7 @@ async def test_real_parent_tool_call_records_direct_provenance_without_schema_fi
     context = _delegate_runtime_context(config, runtime_paths, execution_identity=_identity())
     function = toolkit_offers(tools, "run_subagent")
     # Minimal mode is hidden here because no allowed subagent can run it.
-    assert set(function.parameters["properties"]) == {"agent_name", "task", "model"}
+    assert set(function.parameters["properties"]) == {"agent_name", "task", "title", "model"}
 
     async def complete_child(
         ctx: ResponseTurnContext,
@@ -364,7 +367,9 @@ async def test_a_subagent_reports_what_it_says_and_calls_as_progress(tmp_path: P
     ):
         await tools.run_subagent(agent_name="child", task="Inspect the logs")
 
-    assert reports == ["Reading ", "Reading the logs.", "Reading the logs.\nCalling lookup\n"]
+    assert reports[:2] == ["Reading ", "Reading the logs."]
+    assert re.fullmatch(r"Reading the logs\.\nCalling lookup \(started \d\d:\d\d:\d\d UTC\)\n", reports[2])
+    assert len(reports) == 3
 
 
 @pytest.mark.asyncio
@@ -631,18 +636,28 @@ async def test_native_delegation_leaves_record_ownership_to_driver(tmp_path: Pat
             previous=None,
             persona=None,
         )
-        result = await run_delegated_child_response(
+        # The driver starts the child's record and runs the envelope inside the child's run.
+        await start_child_turn(
             child,
-            prompt=child.task,
+            parent_run_id=None,
             config=config,
             runtime_paths=runtime_paths,
-            refresh_scheduler=None,
-            supports_native_tool_approval=True,
+            caller_execution_identity=_identity(),
         )
+        async with child_run_context(child, config=config, runtime_paths=runtime_paths):
+            result = await run_delegated_child_response(
+                child,
+                prompt=child.task,
+                config=config,
+                runtime_paths=runtime_paths,
+                refresh_scheduler=None,
+                supports_native_tool_approval=True,
+            )
 
     assert result == "native child answer"
     response.assert_awaited_once()
-    assert not list(tmp_path.glob("agents/child/workspace/.mindroom/delegations/*/*/run.json"))
+    # The driver's record is the only one.
+    _only_run(tmp_path)
 
 
 @pytest.mark.asyncio
@@ -676,14 +691,22 @@ async def test_a_delegated_child_runs_its_tools_as_itself(tmp_path: Path) -> Non
             previous=None,
             persona=None,
         )
-        await run_delegated_child_response(
+        await start_child_turn(
             child,
-            prompt=child.task,
+            parent_run_id=None,
             config=config,
             runtime_paths=runtime_paths,
-            refresh_scheduler=None,
-            supports_native_tool_approval=True,
+            caller_execution_identity=identity,
         )
+        async with child_run_context(child, config=config, runtime_paths=runtime_paths):
+            await run_delegated_child_response(
+                child,
+                prompt=child.task,
+                config=config,
+                runtime_paths=runtime_paths,
+                refresh_scheduler=None,
+                supports_native_tool_approval=True,
+            )
         assert current_execution_identity() == identity
 
     assert seen == [child_execution_identity(child)]

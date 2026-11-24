@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -20,17 +21,20 @@ from mindroom.config.main import Config
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
-    ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
+    SUBMISSION_CONTENT_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
+    VOICE_TRANSCRIPT_KEY,
 )
 from mindroom.conversation_resolver import MessageContext
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.llm.media import Audio
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.thread_membership import ThreadResolution
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
 from mindroom.turns.dispatch import TurnDispatcher
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
@@ -39,7 +43,6 @@ from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
-    install_edit_message_mock,
     install_generate_response_mock,
     install_runtime_journal_support,
     install_send_response_mock,
@@ -56,13 +59,13 @@ from tests.turn_dispatch_helpers import prepared_turn_recorder
 if TYPE_CHECKING:
     from mindroom.bot import AgentBot
     from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
+    from mindroom.response_lifecycle import _Conversation
     from mindroom.turn_record import TurnRecord
 
 
 def _agent_bot(*, agent_user: AgentMatrixUser, config: Config, rooms: list[str]) -> AgentBot:
-    """Construct an agent bot in a runtime whose router has not finished its first sync, so no voice echo is expected."""
+    """Construct an agent bot in a ready runtime."""
     runtime = ready_runtime(config, runtime_paths_for(config))
-    runtime.not_ready.add(ROUTER_AGENT_NAME)
     return install_runtime_journal_support(
         make_test_agent_bot(agent_user=agent_user, rooms=rooms, orchestrator=runtime),
     )
@@ -89,7 +92,8 @@ def mock_home_bot(generate_response_mock: AsyncMock) -> AgentBot:
         Config(
             agents={"home": {"display_name": "HomeAssistant", "rooms": ["!test:server"]}},
             authorization={},
-            voice={"enabled": True},
+            # These tests are about threading; the one about the transcript turns it on.
+            voice={"enabled": True, "visible_router_echo": False},
         ),
     )
     config = bind_runtime_paths(config, test_runtime_paths(tmpdir))
@@ -279,6 +283,7 @@ def _normalized_voice_result(
         "body": text,
         "msgtype": "m.text",
         SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+        VOICE_TRANSCRIPT_KEY: True,
     }
     if thread_id is not None:
         content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
@@ -536,9 +541,15 @@ async def test_voice_plain_reply_unproven_thread_candidate_is_not_admitted(
         await bot._conversation_resolver.coalescing_thread_id(room, voice_event)
 
 
+async def _waiting(queued_signal: _Conversation) -> None:
+    """Return once a message waits for the active response."""
+    while not queued_signal.has_pending_human_messages():  # noqa: ASYNC110
+        await asyncio.sleep(0.001)
+
+
 @pytest.mark.asyncio
-async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: AgentBot) -> None:
-    """Audio follow-ups should notify an active response before transcription finishes."""
+async def test_voice_message_signals_active_turn_once_transcribed(mock_home_bot: AgentBot) -> None:
+    """An audio follow-up notifies an active response only once it is transcribed, so the judge reads its transcript."""
     bot = mock_home_bot
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
@@ -564,7 +575,7 @@ async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: Agent
         event_source=voice_event.source,
     )
     lifecycle = unwrap_extracted_collaborator(bot._response_runner).lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal = lifecycle._conversation_for(target)
     prepare_started = asyncio.Event()
     allow_prepare = asyncio.Event()
 
@@ -590,9 +601,11 @@ async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: Agent
         ):
             task = asyncio.create_task(bot._on_media_message(room, voice_event))
             await asyncio.wait_for(prepare_started.wait(), timeout=1.0)
-            assert queued_signal.pending_human_messages == 1
+            assert queued_signal.pending_human_messages == 0
             allow_prepare.set()
             await task
+            await asyncio.wait_for(_waiting(queued_signal), timeout=1.0)
+            assert [message.text for message in queued_signal.pending_message_snapshot()] == ["voice transcript"]
             queued_signal.finish_response_turn()
             turn_active = False
             await drain_coalescing(bot)
@@ -608,93 +621,16 @@ async def test_voice_message_signals_active_turn_before_stt(mock_home_bot: Agent
     assert not queued_signal.has_pending_human_messages()
 
 
-@pytest.mark.parametrize(
-    "echo_error",
-    [
-        RuntimeError("echo failed"),
-        asyncio.CancelledError(),
-    ],
-)
 @pytest.mark.asyncio
-async def test_voice_message_clears_active_turn_signal_when_post_stt_echo_fails(
-    mock_home_bot: AgentBot,
-    echo_error: BaseException,
-) -> None:
-    """Post-STT failures before dispatch handoff should release the pre-STT reservation."""
-    bot = mock_home_bot
-    room = MagicMock(spec=nio.MatrixRoom)
-    room.room_id = "!test:server"
-    room.canonical_alias = None
-    room.users = {
-        "@mindroom_home:localhost": MagicMock(),
-        "@user:example.com": MagicMock(),
-    }
-    room.members_synced = True
-
-    voice_event = _make_voice_event(
-        event_id="$voice-echo-fails",
-        source={
-            "content": {
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root"},
-            },
-        },
-    )
-    target = bot._turn_ingress.deps.resolver.build_message_target(
-        room_id=room.room_id,
-        thread_id="$thread_root",
-        reply_to_event_id=voice_event.event_id,
-        event_source=voice_event.source,
-    )
-    lifecycle = unwrap_extracted_collaborator(bot._response_runner).lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
-    normalized_voice = inbound_turn_normalizer._VoiceNormalizationResult(
-        event=PreparedIngress(
-            sender=voice_event.sender,
-            event_id=voice_event.event_id,
-            body="🎤 continue",
-            source={"content": {"body": "🎤 continue", SOURCE_KIND_KEY: "voice"}},
-            server_timestamp=voice_event.server_timestamp,
-            payload_trusted=True,
-        ),
-    )
-
-    async def fail_visible_echo(*_args: object, **_kwargs: object) -> None:
-        assert queued_signal.pending_human_messages == 1
-        raise echo_error
-
-    replace_turn_deps(bot, agent_name=ROUTER_AGENT_NAME)
-    install_send_response_mock(bot, AsyncMock(return_value="$voice-placeholder"))
-    install_edit_message_mock(bot, AsyncMock(side_effect=fail_visible_echo))
-    turn_active = True
-    queued_signal.begin_response_turn()
-    try:
-        with (
-            patch.object(
-                bot._turn_ingress.deps.normalizer,
-                "prepare_voice_event",
-                new=AsyncMock(return_value=normalized_voice),
-            ),
-            patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        ):
-            await bot._on_media_message(room, voice_event)
-            queued_signal.finish_response_turn()
-            turn_active = False
-            await drain_coalescing(bot)
-    finally:
-        if turn_active:
-            queued_signal.finish_response_turn()
-
-    assert queued_signal.pending_human_messages == 0
-    assert not queued_signal.has_pending_human_messages()
-
-
-@pytest.mark.asyncio
-async def test_non_router_skips_visible_echo_and_dispatches_canonical_voice(
+async def test_answering_agent_posts_the_transcript_and_dispatches_canonical_voice(
     mock_home_bot: AgentBot,
     generate_response_mock: AsyncMock,
 ) -> None:
-    """A non-router should dispatch canonical voice without posting a visible echo."""
+    """The agent that answers posts the transcript in the voice message's thread, then dispatches canonical voice."""
     bot = mock_home_bot
+    bot.config.voice.visible_router_echo = True
+    install_send_response_mock(bot, AsyncMock(return_value="$transcript"))
+    install_generate_response_mock(bot, generate_response_mock)
     room = _threaded_room()
     _install_test_coalescing_gate(bot, debounce_seconds=0.0)
     voice_event = _make_threaded_voice_event(event_id="$voice-visible-echo")
@@ -728,14 +664,49 @@ async def test_non_router_skips_visible_echo_and_dispatches_canonical_voice(
 
     generate_response_mock.assert_called_once()
     assert generate_response_mock.call_args.kwargs["prompt"].startswith("canonical voice transcript")
-    assert await bot._turn_store.visible_echo(voice_event.event_id) is None
+    assert await bot._turn_store.visible_echo(voice_event.event_id) == "$transcript"
+    transcript = bot._delivery_gateway.send_text.await_args.args[0]
+    assert transcript.response_text == "canonical voice transcript"
+    assert transcript.target.resolved_thread_id == "$thread_root"
 
 
 @pytest.mark.asyncio
-async def test_voice_message_uses_canonical_target_for_queued_notice_before_stt(
+async def test_transcript_retry_sends_the_same_matrix_transaction(mock_home_bot: AgentBot) -> None:
+    """A transcript sent again after a lost acknowledgement carries its first send's transaction ID.
+
+    The homeserver then answers with the event it already accepted instead of a second transcript.
+    """
+    bot = mock_home_bot
+    bot.config.voice.visible_router_echo = True
+    echo = unwrap_extracted_collaborator(bot._visible_voice_echo)
+    target = MessageTarget.resolve("!test:server", "$thread_root", "$voice")
+    transcript = _normalized_voice_result(event=_make_threaded_voice_event(event_id="$voice"), text="hello").event
+    send = AsyncMock(
+        side_effect=[
+            MatrixDeliveryFailure(MatrixDeliveryFailureKind.SEND_EXCEPTION, "acknowledgement lost"),
+            DeliveredMatrixEvent("$transcript", {}),
+            DeliveredMatrixEvent("$other-transcript", {}),
+        ],
+    )
+
+    with patch("mindroom.delivery_gateway.send_message_outcome", new=send):
+        with pytest.raises(RuntimeError, match="could not be sent"):
+            await echo.publish(target, transcript)
+        await echo.publish(target, transcript)
+        await echo.publish(target, replace(transcript, event_id="$other-voice"))
+
+    failed, retried, other = (call.kwargs["transaction_id"] for call in send.await_args_list)
+    assert failed is not None
+    assert failed == retried
+    assert other not in (None, failed)
+    assert await bot._turn_store.visible_echo("$voice") == "$transcript"
+
+
+@pytest.mark.asyncio
+async def test_voice_message_queued_notice_uses_the_conversation_fixed_before_stt(
     mock_home_bot: AgentBot,
 ) -> None:
-    """Voice reserves the canonical dispatch target before STT normalization finishes."""
+    """Once transcribed, voice reserves its queued notice on the conversation fixed before STT, not a later one."""
     bot = mock_home_bot
     room = MagicMock(spec=nio.MatrixRoom)
     room.room_id = "!test:server"
@@ -778,8 +749,8 @@ async def test_voice_message_uses_canonical_target_for_queued_notice_before_stt(
         event_source=normalized_event.source,
     )
     lifecycle = unwrap_extracted_collaborator(bot._response_runner).lifecycle_coordinator
-    pre_stt_signal = lifecycle._get_or_create_queued_signal(pre_stt_target)
-    alternate_signal = lifecycle._get_or_create_queued_signal(alternate_target)
+    pre_stt_signal = lifecycle._conversation_for(pre_stt_target)
+    alternate_signal = lifecycle._conversation_for(alternate_target)
     dispatch_count = 0
 
     async def capture_dispatch(*_args: object, **_kwargs: object) -> None:
@@ -812,6 +783,8 @@ async def test_voice_message_uses_canonical_target_for_queued_notice_before_stt(
             patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
         ):
             await bot._on_media_message(room, voice_event)
+            await asyncio.wait_for(_waiting(pre_stt_signal), timeout=1.0)
+            assert alternate_signal.pending_human_messages == 0
             pre_stt_signal.finish_response_turn()
             pre_stt_turn_active = False
             alternate_signal.finish_response_turn()
@@ -834,7 +807,7 @@ async def test_voice_message_uses_canonical_target_for_queued_notice_before_stt(
 async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
     mock_home_bot: AgentBot,
 ) -> None:
-    """Room-mode voice should signal the room-level active turn before STT finishes."""
+    """Room-mode voice signals the room-level active turn once transcribed, until queued dispatch owns the notice."""
     bot = mock_home_bot
     bot.config.agents["home"].thread_mode = "room"
     room = MagicMock(spec=nio.MatrixRoom)
@@ -871,7 +844,7 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
         event_source=voice_event.source,
     )
     lifecycle = unwrap_extracted_collaborator(bot._response_runner).lifecycle_coordinator
-    queued_signal = lifecycle._get_or_create_queued_signal(target)
+    queued_signal = lifecycle._conversation_for(target)
     dispatch_count = 0
     prepare_started = asyncio.Event()
     allow_prepare = asyncio.Event()
@@ -908,9 +881,10 @@ async def test_room_mode_voice_notice_survives_until_queued_dispatch_owns_it(
         ):
             task = asyncio.create_task(bot._on_media_message(room, voice_event))
             await asyncio.wait_for(prepare_started.wait(), timeout=1.0)
-            assert queued_signal.pending_human_messages == 1
+            assert queued_signal.pending_human_messages == 0
             allow_prepare.set()
             await task
+            await asyncio.wait_for(_waiting(queued_signal), timeout=1.0)
             queued_signal.finish_response_turn()
             turn_active = False
             await drain_coalescing(bot)
@@ -1629,6 +1603,59 @@ async def test_text_only_voice_fallback_drops_sender_supplied_attachment_ids(moc
         thread_id="$thread_root",
     )
     assert ATTACHMENT_IDS_KEY not in dispatched_event.source["content"]
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [{"id": "upload-1", "more": True}, {"id": "upload-1", "more": False}, {"id": 7}, "not-a-marker", None],
+)
+@pytest.mark.asyncio
+async def test_text_only_voice_fallback_keeps_the_submission_marker(mock_home_bot: AgentBot, marker: object) -> None:
+    """The last-resort fallback copies the sender's marker unchanged, and adds none to unmarked voice."""
+    bot = mock_home_bot
+    room = _threaded_room()
+    voice_event = _make_threaded_voice_event(event_id="$audio-marked-preparers-fail")
+    if marker is not None:
+        voice_event.source["content"][SUBMISSION_CONTENT_KEY] = marker
+    dispatches: list[tuple[PreparedIngress | nio.RoomMessageText, list[str]]] = []
+
+    async def record_dispatch(
+        _room: nio.MatrixRoom,
+        dispatched_event: PreparedIngress | nio.RoomMessageText,
+        _requester_user_id: str,
+        *,
+        handled_turn: TurnRecord | None = None,
+        **_metadata: object,
+    ) -> None:
+        dispatches.append((dispatched_event, _handled_source_event_ids(handled_turn)))
+
+    normalizer = bot._turn_ingress.deps.normalizer
+    with (
+        patch.object(normalizer, "prepare_voice_event", new=AsyncMock(side_effect=RuntimeError("stt failed"))),
+        patch.object(
+            normalizer,
+            "prepare_raw_voice_fallback_event",
+            new=AsyncMock(side_effect=RuntimeError("registration failed")),
+        ),
+        patch.object(
+            TurnDispatcher,
+            "dispatch_turn",
+            new=AsyncMock(side_effect=prepared_turn_recorder(record_dispatch)),
+        ),
+        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
+    ):
+        await bot._on_media_message(room, voice_event)
+        await drain_coalescing(bot)
+
+    dispatched_event = _assert_voice_fallback_dispatch(
+        dispatches,
+        source_event_id="$audio-marked-preparers-fail",
+        thread_id="$thread_root",
+    )
+    if marker is None:
+        assert SUBMISSION_CONTENT_KEY not in dispatched_event.source["content"]
+    else:
+        assert dispatched_event.source["content"][SUBMISSION_CONTENT_KEY] == marker
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,7 @@ from mindroom.constants import (
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
 )
+from mindroom.delivery_gateway import _with_note
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
     TEAM_PLACEHOLDER,
@@ -221,3 +222,15 @@ def test_an_ending_note_no_longer_shows_a_running_call_as_running(kind: NoteKind
     assert [entry.type for entry in ended.tool_trace] == ["tool_call_completed"]
     assert waiting[0] == "🔧 `counter` [1] ⏳"
     assert [entry.type for entry in waiting[1]] == ["tool_call_started"]
+
+
+@pytest.mark.parametrize("kind", [NoteKind.DELIVERY_FAILED, NoteKind.CANCELLED])
+def test_a_delivery_failed_note_shows_alone_where_a_cancellation_keeps_the_answer(kind: NoteKind) -> None:
+    """Matrix refused the answer, so its delivery-failed note replaces it; a cancellation keeps the answer above it.
+
+    So what live frames showed past the last saved edit never reaches a delivery-failed note.
+    """
+    body, _trace = render_body(_with_note(Presentation(segments=(_answer("Partial answer"),)), note_segment(kind)))
+
+    assert body.endswith(str(note_segment(kind).text))
+    assert ("Partial answer" in body) is (kind is NoteKind.CANCELLED)

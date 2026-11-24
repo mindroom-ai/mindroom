@@ -10,6 +10,7 @@ import nio
 import pytest
 
 from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.contacts.parties import remote_party
 from mindroom.contacts.store import ContactParty, ContactRecord, ContactSide, update_contacts
 from mindroom.custom_tools.attachment_helpers import room_access_allowed
 from mindroom.custom_tools.matrix_api import MatrixApiTools
@@ -92,13 +93,17 @@ def _setup(tmp_path: Path, *, administrators: tuple[str, ...] = ()) -> tuple[Con
     return config, paths
 
 
-def _contact(paths: RuntimePaths, status: ContactStatus = "active") -> None:
-    """Store contact ``c1`` between Alice's and Bob's agents, whose room is the contact room."""
+def _contact(
+    paths: RuntimePaths,
+    status: ContactStatus = "active",
+    target: ContactParty = ContactParty(kind="agent", id="mind_bob", owner=CO_OWNER),  # noqa: B008 - immutable here
+) -> None:
+    """Store contact ``c1`` between Alice's agent and ``target``, Bob's agent by default, in the contact room."""
     record = ContactRecord(
         id="c1",
         status=status,
         requester=ContactParty(kind="agent", id="mind_alice", owner=OWNER),
-        target=ContactParty(kind="agent", id="mind_bob", owner=CO_OWNER),
+        target=target,
         reason="Plan the dinner",
         requester_side=ContactSide(),
         target_side=ContactSide(),
@@ -782,3 +787,22 @@ async def test_the_agent_message_limit_ends_an_exchange_between_the_two_agents(t
         "ok",
         "Not sent: The conversation already has 3 agent messages in a row; wait for a person to write.",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_another_deployments_agent_is_a_recipient_by_its_matrix_id(tmp_path: Path) -> None:
+    """Alice's agent wakes the other deployment's agent by naming it, which mentions its Matrix ID."""
+    config, paths = _setup(tmp_path)
+    remote = "@mindroom_mind_dana:other.org"
+    _contact(paths, target=remote_party(remote))
+    context = _context(config, paths)
+
+    with tool_runtime_context(context):
+        listed = json.loads(await MatrixRoomTools().matrix_room(action="agents", room_id=CONTACT_ROOM))
+    payload = await _call(context, message="Is Dana free on Friday?", recipient=remote)
+
+    assert remote in [agent["name"] for agent in listed["agents"]]
+    assert payload["status"] == "ok"
+    (content,) = _sent(context)
+    assert content["m.mentions"] == {"user_ids": [remote]}

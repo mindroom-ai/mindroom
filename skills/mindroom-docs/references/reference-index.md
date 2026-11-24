@@ -14,6 +14,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 |  | Home | `index.md` | `index.md` | `page__index.md` |
 |  | Showcase | `showcase.md` | `showcase/index.md` | `page__showcase__index.md` |
 | Get Started | Install & First Run | `getting-started.md` | `getting-started/index.md` | `page__getting-started__index.md` |
+| Get Started | MindRoom Chat | `mindroom-chat.md` | `mindroom-chat/index.md` | `page__mindroom-chat__index.md` |
 | Get Started | macOS App | `installation/macos-app.md` | `installation/macos-app/index.md` | `page__installation__macos-app__index.md` |
 | Get Started | iOS App | `ios.md` | `ios/index.md` | `page__ios__index.md` |
 | Get Started | Dashboard | `dashboard.md` | `dashboard/index.md` | `page__dashboard__index.md` |
@@ -39,6 +40,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Features | Interactive Questions | `interactive.md` | `interactive/index.md` | `page__interactive__index.md` |
 | Features | Interactive Canvases | `canvases.md` | `canvases/index.md` | `page__canvases__index.md` |
 | Features | Thread Exports | `thread-exports.md` | `thread-exports/index.md` | `page__thread-exports__index.md` |
+| Features | Workspace Files | `workspace-files.md` | `workspace-files/index.md` | `page__workspace-files__index.md` |
 | Features | Bug Reports | `bug-reports.md` | `bug-reports/index.md` | `page__bug-reports__index.md` |
 | Features | Custom Emoji | `custom-emoji.md` | `custom-emoji/index.md` | `page__custom-emoji__index.md` |
 | Features | Usage Tracking | `usage.md` | `usage/index.md` | `page__usage__index.md` |
@@ -55,6 +57,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Tools | Dynamic Tools | `tools/dynamic-tools.md` | `tools/dynamic-tools/index.md` | `page__tools__dynamic-tools__index.md` |
 | Tools | Minimal Agent Mode | `tools/agent-cli.md` | `tools/agent-cli/index.md` | `page__tools__agent-cli__index.md` |
 | Tools | Background Python Scripts | `tools/background-scripts.md` | `tools/background-scripts/index.md` | `page__tools__background-scripts__index.md` |
+| Tools | Workflows | `tools/workflows.md` | `tools/workflows/index.md` | `page__tools__workflows__index.md` |
 | Tools | Worker Computer | `tools/worker-computer.md` | `tools/worker-computer/index.md` | `page__tools__worker-computer__index.md` |
 | Tools | Desktop Bridge | `tools/desktop.md` | `tools/desktop/index.md` | `page__tools__desktop__index.md` |
 | Tools > Tool Catalog | Execution & Coding | `tools/execution-and-coding.md` | `tools/execution-and-coding/index.md` | `page__tools__execution-and-coding__index.md` |
@@ -79,6 +82,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Tools > Tool Catalog | Location, Commerce & Home | `tools/location-commerce-and-home.md` | `tools/location-commerce-and-home/index.md` | `page__tools__location-commerce-and-home__index.md` |
 | Security & Access | Access Control | `authorization.md` | `authorization/index.md` | `page__authorization__index.md` |
 | Security & Access | Tool Approval | `tool-approval.md` | `tool-approval/index.md` | `page__tool-approval__index.md` |
+| Security & Access | Email Invites | `email-invites.md` | `email-invites/index.md` | `page__email-invites__index.md` |
 | Security & Access | Credentials & OAuth | `oauth-framework.md` | `oauth-framework/index.md` | `page__oauth-framework__index.md` |
 | Security & Access | Connections Portal | `connections-portal.md` | `connections-portal/index.md` | `page__connections-portal__index.md` |
 | Security & Access | Connect Google Accounts | `deployment/google-services-user-oauth.md` | `deployment/google-services-user-oauth/index.md` | `page__deployment__google-services-user-oauth__index.md` |
@@ -89,15 +93,18 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Extend & Integrate | Hooks | `hooks.md` | `hooks/index.md` | `page__hooks__index.md` |
 | Extend & Integrate | External Triggers | `external-triggers.md` | `external-triggers/index.md` | `page__external-triggers__index.md` |
 | Extend & Integrate | OpenAI-Compatible API | `openai-api.md` | `openai-api/index.md` | `page__openai-api__index.md` |
+| Extend & Integrate | Headless Runs | `headless.md` | `headless/index.md` | `page__headless__index.md` |
 | Extend & Integrate | MCP Gateway | `deployment/mcp-gateway.md` | `deployment/mcp-gateway/index.md` | `page__deployment__mcp-gateway__index.md` |
 | Deployment | Deployment Overview | `deployment/index.md` | `deployment/index.md` | `page__deployment__index.md` |
 | Deployment | Hosted Matrix + Local Backend | `deployment/hosted-matrix.md` | `deployment/hosted-matrix/index.md` | `page__deployment__hosted-matrix__index.md` |
 | Deployment | Docker | `deployment/docker.md` | `deployment/docker/index.md` | `page__deployment__docker__index.md` |
 | Deployment | Kubernetes | `deployment/kubernetes.md` | `deployment/kubernetes/index.md` | `page__deployment__kubernetes__index.md` |
 | Deployment | Workers & Sandboxing | `deployment/sandbox-proxy.md` | `deployment/sandbox-proxy/index.md` | `page__deployment__sandbox-proxy__index.md` |
+| Deployment | Tailnet SSH | `tailnet-ssh.md` | `tailnet-ssh/index.md` | `page__tailnet-ssh__index.md` |
 | Deployment | Agent Keys | `deployment/egress-broker.md` | `deployment/egress-broker/index.md` | `page__deployment__egress-broker__index.md` |
 | Deployment | Approved Egress | `deployment/approved-egress.md` | `deployment/approved-egress/index.md` | `page__deployment__approved-egress__index.md` |
 | Deployment | Trusted Upstream Auth | `deployment/trusted-upstream-auth.md` | `deployment/trusted-upstream-auth/index.md` | `page__deployment__trusted-upstream-auth__index.md` |
+| Deployment | OIDC & Single Sign-On | `deployment/oidc-sso.md` | `deployment/oidc-sso/index.md` | `page__deployment__oidc-sso__index.md` |
 | Deployment | Cloudflare Access & Tunnel | `deployment/cloudflare-access.md` | `deployment/cloudflare-access/index.md` | `page__deployment__cloudflare-access__index.md` |
 | Deployment | Data Storage & Journal | `deployment/storage.md` | `deployment/storage/index.md` | `page__deployment__storage__index.md` |
 | Deployment | Config Bundles | `deployment/config-bundles.md` | `deployment/config-bundles/index.md` | `page__deployment__config-bundles__index.md` |

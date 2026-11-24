@@ -24,7 +24,7 @@ If an agent calls either tool before the account is connected, the tool returns 
 
 `google_calendar` provides `list_events()`, `get_event()`, `fetch_all_events()`, `find_available_slots()`, `list_calendars()`, `check_availability()`, `get_event_attendees()`, `search_events()`, `create_event()`, `update_event()`, `delete_event()`, `quick_add_event()`, `move_event()`, and `respond_to_event()`.
 `find_available_slots()` finds weekday openings around the user's timed events, within working hours inferred from their Google Calendar locale rather than their custom working-hours setting; all-day events do not block slots.
-Dates without a time or offset, such as `2026-10-05`, are read as UTC, so the returned slots use UTC hours; convert them to the user's timezone before presenting them.
+It reads dates and working hours in the calendar's own timezone and returns ISO timestamps with that timezone's offset, falling back to UTC only when the calendar's timezone cannot be loaded; the result's `timezone` field names the one used.
 `list_calendars()` returns the IDs of the other calendars the connected account can use.
 
 | Option | Type | Required | Default | Notes |

@@ -14,7 +14,6 @@ from mindroom.history.interrupted_replay import (
     InterruptedReplaySnapshot,
     _build_interrupted_replay_run,
     build_interrupted_replay_snapshot,
-    persist_interrupted_replay,
     persist_interrupted_replay_snapshot,
     render_stopped_attempt,
     split_interrupted_tool_trace,
@@ -388,7 +387,7 @@ def test_the_retained_tool_context_says_which_calls_are_whole_and_which_are_prev
     assert content.splitlines()[2:] == [header, *(whole if line else preview for line in carried)]
 
 
-@pytest.mark.parametrize("original_status", [RunStatus.cancelled, RunStatus.error, RunStatus.paused])
+@pytest.mark.parametrize("original_status", [RunStatus.cancelled, RunStatus.error])
 def test_build_interrupted_replay_run_tracks_replay_and_seen_event_metadata(original_status: RunStatus) -> None:
     """Interrupted replay runs should preserve the event-consumption metadata used by prompt prep."""
     snapshot = InterruptedReplaySnapshot(
@@ -413,7 +412,7 @@ def test_build_interrupted_replay_run_tracks_replay_and_seen_event_metadata(orig
         "mindroom_original_status": original_status.name,
         "mindroom_replay_state": "interrupted",
     }
-    summary = {RunStatus.cancelled: "stopped", RunStatus.error: "failed", RunStatus.paused: "paused"}[original_status]
+    summary = {RunStatus.cancelled: "stopped", RunStatus.error: "failed"}[original_status]
     assert summary in _assistant_text(run)
 
 
@@ -546,16 +545,18 @@ def test_an_interrupted_replay_through_a_stand_in_session_joins_or_starts_the_st
             ),
         )
 
-    persist_interrupted_replay(
+    persist_interrupted_replay_snapshot(
         storage=storage,
         session=_session(),
         run_id="cancelled-run",
-        user_message="Please continue",
-        user_message_is_structured=False,
-        partial_text="Text emitted before interruption",
-        completed_tools=(),
-        interrupted_tools=(),
-        run_metadata=None,
+        snapshot=build_interrupted_replay_snapshot(
+            user_message="Please continue",
+            user_message_is_structured=False,
+            partial_text="Text emitted before interruption",
+            completed_tools=(),
+            interrupted_tools=(),
+            run_metadata=None,
+        ),
     )
 
     expected_run_ids = ["earlier-run", "cancelled-run"] if stored else ["cancelled-run"]

@@ -21,7 +21,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig, ModelPricing, RouterConfig
+from mindroom.config.models import ModelConfig, ModelPricing, ReasoningConfig, RouterConfig
 from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.custom_tools import dynamic_workflow as dynamic_workflow_module
 from mindroom.custom_tools.delegate import DelegateTools
@@ -632,6 +632,90 @@ async def test_workflow_permissions_still_bound_over_budget_callers(tmp_path: Pa
 
     assert payload["status"] == "error"
     assert "not allowed by permissions.models" in payload["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("participant_model", "allowed"),
+    [("cheap@low", True), ("cheap@high", False), ("lookalike", False), ("twin@low", False)],
+)
+async def test_a_level_permission_admits_only_its_fallbacks_level(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    participant_model: str,
+    allowed: bool,
+) -> None:
+    """Over budget, a permitted ``sol@low`` admits its fallback ``cheap@low`` only.
+
+    Not ``cheap`` at another level, nor a model whose provider ID reads ``cheap@low`` or equals the fallback's.
+    """
+    config = _subagent_workflow_config()
+    reasoning = ReasoningConfig(levels=["low", "high"], default="high")
+    pricing = ModelPricing(input=5, output=30)
+    config.models["sol"] = ModelConfig(provider="openai", id="sol-model", reasoning=reasoning, pricing=pricing)
+    config.models["cheap"] = ModelConfig(provider="openai", id="cheap-model", reasoning=reasoning)
+    config.models["twin"] = ModelConfig(provider="openai", id="cheap-model", reasoning=reasoning)
+    config.models["lookalike"] = ModelConfig(provider="openai", id="cheap@low")
+    config.budgets = BudgetsConfig(fallback_model="cheap@low", monthly_limit_usd=0)
+    workflow = _SubagentWorkflow(tmp_path, monkeypatch, config)
+    participant = {"id": "writer", "system_prompt": "Write.", "tools": [], "model": participant_model}
+    spec = _subagent_workflow_spec([participant], models=["sol@low"])
+
+    with workflow.context():
+        payload = json.loads(await workflow.tools.validate_workflow(spec))
+
+    assert (payload["status"] == "ok") is allowed, payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fallback", "requested", "permitted", "runs"),
+    [("cheap", "cheap@low", "cheap@low", "cheap@low"), ("cheap@low", "cheap@high", "cheap", "cheap@low")],
+    ids=["fallback-without-a-level", "fallback-at-a-level"],
+)
+async def test_a_level_of_the_fallback_model_runs_at_a_fixed_level_over_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fallback: str,
+    requested: str,
+    permitted: str,
+    runs: str,
+) -> None:
+    """Over budget, a level of the fallback model keeps its level unless the fallback names one, which then wins.
+
+    Either way a reload of the model's default cannot move a later step.
+    """
+
+    def config(default: str) -> Config:
+        loaded = _subagent_workflow_config()
+        reasoning = ReasoningConfig(levels=["low", "high"], default=default)
+        pricing = ModelPricing(input=1, output=2)
+        loaded.models["cheap"] = ModelConfig(provider="openai", id="cheap-model", reasoning=reasoning, pricing=pricing)
+        loaded.budgets = BudgetsConfig(fallback_model=fallback, monthly_limit_usd=0)
+        return loaded
+
+    workflow = _SubagentWorkflow(tmp_path, monkeypatch, config("low"))
+    live = [workflow.config]
+    loaded: list[str] = []
+
+    def load_model(*args: object, **_kwargs: object) -> object:
+        loaded.append(str(args[2]))
+        live[0] = config("high")
+        return workflow.model
+
+    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", load_model)
+    context = _delegate_runtime_context(workflow.config, workflow.paths, execution_identity=_identity())
+    monkeypatch.setattr(
+        workflow,
+        "context",
+        lambda: tool_runtime_context(replace(context, config_provider=lambda: live[0])),
+    )
+    participant = {"id": "writer", "system_prompt": "Write.", "tools": [], "model": requested}
+
+    run = await workflow.run(_subagent_workflow_spec([participant], steps=2, models=[permitted]))
+
+    assert run["status"] == "completed", run
+    assert loaded == [runs, runs]
 
 
 @pytest.mark.asyncio

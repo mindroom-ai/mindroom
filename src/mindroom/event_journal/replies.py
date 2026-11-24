@@ -56,8 +56,15 @@ class ApprovalEnded:
     reply_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class ReplyStopped:
+    """After commit: a Stop reached this reply, so the jobs its calls started stop waiting for approval."""
+
+    reply_id: str
+
+
 # Effects the caller runs after the transaction commits.
-type PostCommitEffect = CancelSpan | WakeApproval | ApprovalEnded
+type PostCommitEffect = CancelSpan | WakeApproval | ApprovalEnded | ReplyStopped
 
 
 type Decide = Callable[[Reply, Span], Transition]
@@ -442,10 +449,13 @@ def _apply_stop(
     receipt_order: int,
     now_ns: int,
 ) -> AppliedTransition:
-    """Apply a Stop to a reply, cancelling its span when this bot instance runs it."""
+    """Apply a Stop to a reply, cancelling its span when this bot instance runs it and its jobs that await approval."""
     span_live = _runs_here(transaction, principal_id, reply, span)
     facts = rl.StopFacts(receipt_order=receipt_order, span_live=span_live)
-    return apply(transaction, principal_id, rl.stop(reply, span, facts, now_ns=now_ns))
+    applied = apply(transaction, principal_id, rl.stop(reply, span, facts, now_ns=now_ns))
+    if not applied.transition.applied:
+        return applied
+    return replace(applied, post_commit=(ReplyStopped(reply.reply_id), *applied.post_commit))
 
 
 def _runs_here(transaction: Transaction, principal_id: str, reply: Reply, span: Span | None) -> bool:
@@ -524,7 +534,8 @@ def drop_replays(
 
 
 def end_entity_replies(transaction: Transaction, ends: Callable[[str], bool], *, now_ns: int) -> int:
-    """End the open replies of entities with no bot any more, without writing to Matrix."""
+    """End the open replies and settle the runtime sources of entities with no bot any more; nothing goes to Matrix."""
+    journal.settle_runtime_sources_of(transaction, ends)
     ended = 0
     for principal_id, found in reply_messages.open_replies(transaction):
         if not ends(found.entity_name):
@@ -564,6 +575,16 @@ def _owner_lost(
         if transition.applied:
             applied.append(apply(transaction, principal_id, transition))
     return tuple(applied)
+
+
+def _continued_sources(transaction: Transaction, principal_id: str) -> frozenset[str]:
+    """Return the sources still pending in the journal of the replies that have not ended, which replay continues."""
+    continued: set[str] = set()
+    for found in reply_messages.in_states(transaction, principal_id, (rl.ReplyState.ACTIVE, rl.ReplyState.PAUSED)):
+        last = reply_spans.load(transaction, principal_id, found.last_span_id)
+        assert last is not None
+        continued.update(journal.pending_among(transaction, principal_id, last.sources.pending_event_ids))
+    return frozenset(continued)
 
 
 # ---------------------------------------------------------------------------
@@ -758,6 +779,7 @@ def _write_ahead(
     previous: rl.ProgressConfirmation | None,
     active_generation: str,
     now_ns: int,
+    shown_live: bool,
 ) -> AppliedTransition:
     """Record a span's next direct progress edit against the reply's unresolved durable writes."""
     return decide_on_span(
@@ -774,6 +796,7 @@ def _write_ahead(
             active_generation=active_generation,
             durable_write_debt=has_unresolved_rows(transaction, principal_id, reply_id),
             now_ns=now_ns,
+            shown_live=shown_live,
         ),
     )
 
@@ -913,6 +936,7 @@ class ReplyStore(PrincipalRows):
         previous: rl.ProgressConfirmation | None,
         active_generation: str,
         now_ns: int,
+        shown_live: bool = False,
     ) -> AppliedTransition:
         """Record a span's next direct progress edit, deferring it while earlier durable writes are unresolved."""
         return await self._write(
@@ -923,6 +947,7 @@ class ReplyStore(PrincipalRows):
             previous=previous,
             active_generation=active_generation,
             now_ns=now_ns,
+            shown_live=shown_live,
         )
 
     async def update(self, reply_id: str, decide: Callable[[Reply], Transition]) -> AppliedTransition | None:
@@ -936,6 +961,10 @@ class ReplyStore(PrincipalRows):
     async def owner_lost(self, active_generation: str, *, now_ns: int) -> tuple[AppliedTransition, ...]:
         """End what an older bot instance left running on these replies; see ``_owner_lost``."""
         return await self._write(_owner_lost, active_generation=active_generation, now_ns=now_ns)
+
+    async def continued_sources(self) -> frozenset[str]:
+        """Return the pending sources of the replies that have not ended; see ``_continued_sources``."""
+        return await self._read(_continued_sources)
 
     async def supersede_replay(self, source_event_ids: tuple[str, ...], *, now_ns: int) -> AppliedTransition | None:
         """Settle a superseded replay's sources with the reply they left; see ``_supersede_replay``."""

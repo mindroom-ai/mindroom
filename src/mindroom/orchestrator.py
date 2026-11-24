@@ -8,7 +8,7 @@ import time
 from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, ExitStack, suppress
 from contextvars import Context
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING, NoReturn, cast, overload
 from uuid import uuid4
@@ -16,12 +16,12 @@ from uuid import uuid4
 import uvicorn
 
 from mindroom.agent_cli.session import TurnToolRegistry
-from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex, RefreshOutcome
 from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.api.app_state import EmbeddedRuntime
 from mindroom.api.startup_probes import serve_startup_probes
-from mindroom.approval.manager import initialize_approval_store
+from mindroom.approval.manager import approval_card_store, initialize_approval_store
 from mindroom.approval.recovery import ApprovalRecovery
 from mindroom.approval.tool_approval import shutdown_approval_runtime
 from mindroom.approval.transport import ApprovalMatrixTransport
@@ -53,6 +53,8 @@ from mindroom.hooks import (
     HookRegistryLifetime,
     HookRegistryState,
     emit,
+    service_bot_ready_emission,
+    service_hook_bindings,
 )
 from mindroom.integrations import bind_integrations, unbind_integrations
 from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler, runtime_refresh_scheduler
@@ -68,10 +70,16 @@ from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import MemoryAutoFlushService
 from mindroom.memory.legacy_team_memory import migrate_team_memory
+from mindroom.plugin_lifecycle import PluginLifespans
 from mindroom.providers.model_http_client import aclose_model_http_client
 from mindroom.response_activity import ActiveResponseIdentity
 from mindroom.response_admission import ResponseAdmissionGate
-from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN, gather_shutdown_phase, run_process_shutdown_closers
+from mindroom.runtime_shutdown import (
+    CONFIG_RELOAD_SHUTDOWN,
+    ORDERLY_SHUTDOWN,
+    gather_shutdown_phase,
+    run_process_shutdown_closers,
+)
 from mindroom.runtime_state import (
     clear_api_server_address,
     reset_runtime_state,
@@ -85,6 +93,7 @@ from mindroom.skill_learning.runner import SkillReviewRunner
 from mindroom.startup_errors import EventJournalLostError, PermanentStartupError
 from mindroom.startup_maintenance import StartupMaintenanceController
 from mindroom.token_counting.families import start_loading_o200k
+from mindroom.tool_system.plugin_imports import PluginValidationError
 from mindroom.tool_system.plugins import (
     PluginGeneration,
     PluginReloadResult,
@@ -106,7 +115,8 @@ from . import file_watcher
 from .bot import AgentBot, create_bot_for_entity
 from .event_journal.opening import OpenEventJournal, bind_event_journal, open_event_journal
 from .logging_config import get_logger, setup_logging
-from .orchestration.accounts import prepare_managed_accounts, validate_entity_accounts
+from .orchestration.accounts import prepare_managed_accounts, prepare_owner_account, validate_entity_accounts
+from .orchestration.call_transcripts_runtime import CallTranscriptsRuntimeCoordinator
 from .orchestration.computer_runtime import ComputerRuntimeCoordinator
 from .orchestration.config_lifecycle import ConfigReloadLifecycle, load_published_config, load_startup_config
 from .orchestration.config_updates import (
@@ -125,15 +135,21 @@ from .orchestration.runtime import (
     is_permanent_startup_error,
     log_startup_phase_finished,
     log_startup_phase_started,
+    matrix_sync_startup_timeout_seconds,
     run_shutdown_step,
     run_with_retry,
     wait_for_matrix_homeserver,
 )
 from .orchestration.script_runtime import ScriptRuntimeLifecycle, build_script_runtime, optional_script_gateway_url
 from .orchestration.storage_preparation import prepare_runtime_storage
+from .orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoordinator
 from .orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from .orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
 from .orchestration.turn_recovery import TurnJournalRecovery
+from .orchestration.workflow_runtime import WorkflowRuntimeLifecycle, build_workflow_runtime
+from .reactive_triggers.service import ReactiveTriggerService
+from .room_steward import membership_observers, room_poster, room_steward
+from .steward_duties import reconcile_held_room_states, runs_room_hooks
 from .thread_export.workspace_sync import WorkspaceThreadExportDeps, WorkspaceThreadExportRunner
 
 if TYPE_CHECKING:
@@ -146,18 +162,20 @@ if TYPE_CHECKING:
 
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.event_journal import ApprovalContinuation, ApprovalDeliveryView
-    from mindroom.hooks import HookContextSupport
+    from mindroom.event_journal.approval_signals import EndedApproval
 
     from .config.main import Config
     from .constants import RuntimePaths
     from .event_journal import EventJournalStore
     from .orchestration.config_updates import ConfigUpdatePlan
     from .orchestration.services import RuntimeService
+    from .workflow_runs.engine import WorkflowEngine
 logger = get_logger(__name__)
 
 
 _EMBEDDED_API_SHUTDOWN_GRACE_SECONDS = 5.0
 _EVENT_JOURNAL_CHECK_SECONDS = 30.0
+_FIRST_SYNC_POLL_SECONDS = 0.05
 
 
 type _PluginWatchCapture = tuple[tuple[Path, ...], dict[Path, dict[Path, int]]]
@@ -264,6 +282,8 @@ class _MultiAgentOrchestrator:
     api_enabled: bool = True
     fleet: EntityFleet = field(init=False)
     scheduled_tasks: ScheduledTaskRuntime = field(init=False)
+    thread_snooze: ThreadSnoozeRuntimeCoordinator = field(init=False)
+    reactive_triggers: ReactiveTriggerService = field(init=False)
     # The one journal every bot in this process borrows a store from, opened on
     # first use and closed after the last bot stops.
     _open_journal: OpenEventJournal | None = field(default=None, init=False, repr=False)
@@ -288,6 +308,7 @@ class _MultiAgentOrchestrator:
     _mcp_catalog_change_task_owner: object = field(default_factory=object, init=False, repr=False)
     _pending_mcp_catalog_restarts: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
     plugin_watch: PluginWatchState = field(init=False)
+    _plugin_lifespans: PluginLifespans = field(init=False, repr=False)
     agent_cli_registry: TurnToolRegistry = field(default_factory=TurnToolRegistry, init=False)
     _knowledge_refresh_scheduler: KnowledgeRefreshScheduler = field(init=False)
     _knowledge_source_watcher: KnowledgeSourceWatcher = field(init=False)
@@ -301,17 +322,14 @@ class _MultiAgentOrchestrator:
     _hook_lifetime: HookRegistryLifetime = field(init=False, repr=False)
     _runtime_shutdown_event: asyncio.Event | None = field(default=None, init=False, repr=False)
     _runtime_ready_event: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
-    _router_reply_memberships_live_sync_ready: asyncio.Event = field(
-        default_factory=asyncio.Event,
-        init=False,
-        repr=False,
-    )
     _computer_runtime: ComputerRuntimeCoordinator = field(init=False, repr=False)
     _external_trigger_runtime: ExternalTriggerRuntimeCoordinator = field(init=False, repr=False)
+    _call_transcripts_runtime: CallTranscriptsRuntimeCoordinator = field(init=False, repr=False)
     _approval_transport: ApprovalMatrixTransport = field(init=False, repr=False)
     _startup_maintenance: StartupMaintenanceController = field(init=False, repr=False)
     _rooms: RoomSetup = field(init=False, repr=False)
     _script_runtime: ScriptRuntimeLifecycle = field(init=False, repr=False)
+    _workflow_runtime: WorkflowRuntimeLifecycle = field(init=False, repr=False)
     agent_reply_memberships: AgentReplyMembershipIndex = field(
         default_factory=AgentReplyMembershipIndex,
         init=False,
@@ -321,10 +339,12 @@ class _MultiAgentOrchestrator:
 
     def __post_init__(self) -> None:
         """Build the runtime's collaborators around its paths and published config."""
+        self.hook_registry_state.room_hook_owner = partial(runs_room_hooks, self)
         self._hook_lifetime = self.hook_registry_state.lifetime()
         self.fleet = EntityFleet(
             EntityFleetHooks(
                 create_bots=self._create_bots,
+                before_start=self._prepare_owner_account,
                 start_blocked=self._entities_blocked_by_failed_mcp_servers,
                 entities_changing=self._entities_changing,
                 entities_started=self._entities_started,
@@ -339,6 +359,17 @@ class _MultiAgentOrchestrator:
             bots=lambda: self.agent_bots,
             hooks=self.hook_registry_state.lifetime(),
         )
+        self.thread_snooze = ThreadSnoozeRuntimeCoordinator(
+            runtime_paths=self.runtime_paths,
+            config_provider=lambda: self.config,
+            bots=lambda: self.agent_bots,
+        )
+        self.reactive_triggers = ReactiveTriggerService(
+            runtime_paths=self.runtime_paths,
+            config_provider=lambda: self.config,
+            bots=lambda: self.agent_bots,
+            memberships=self.agent_reply_memberships,
+        )
         self._knowledge_refresh_scheduler = runtime_refresh_scheduler(self.runtime_paths)
         self._knowledge_source_watcher = KnowledgeSourceWatcher(self._knowledge_refresh_scheduler, self.runtime_paths)
         self.agent_reply_membership_sync = AgentReplyMembershipSync(
@@ -346,6 +377,7 @@ class _MultiAgentOrchestrator:
             lambda: self.agent_bots.values(),
         )
         self.plugin_watch = PluginWatchState(runtime_paths=self.runtime_paths)
+        self._plugin_lifespans = PluginLifespans(self.runtime_paths, lambda: self.config)
         self.turn_recovery = TurnJournalRecovery(
             config=lambda: self.config,
             bots=lambda: self.agent_bots,
@@ -356,8 +388,17 @@ class _MultiAgentOrchestrator:
             runtime_paths=self.runtime_paths,
             api_enabled=self.api_enabled,
             agent_reply_memberships=self.agent_reply_memberships,
+            refresh_agent_reply_memberships_when_needed=self.refresh_agent_reply_memberships_when_needed,
         )
-        self._external_trigger_runtime = ExternalTriggerRuntimeCoordinator(api_enabled=self.api_enabled)
+        self._external_trigger_runtime = ExternalTriggerRuntimeCoordinator(
+            api_enabled=self.api_enabled,
+            on_reactive_event=self.reactive_triggers.notify_work,
+        )
+        self._call_transcripts_runtime = CallTranscriptsRuntimeCoordinator(
+            runtime_paths=self.runtime_paths,
+            config_provider=lambda: self.config,
+            bots=lambda: self.agent_bots,
+        )
         self._skill_reviews = SkillReviewRunner(self.runtime_paths, lambda agent_name: self.agent_bots.get(agent_name))
         self._automations = AutomationRunner(
             runtime_paths=self.runtime_paths,
@@ -384,12 +425,15 @@ class _MultiAgentOrchestrator:
             bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
             agent_reply_memberships=self.agent_reply_memberships,
             journal_provider=self.event_journal_store,
+            entity_unavailable=self.fleet.is_disabled,
+            workflow_engine=lambda: self._workflow_runtime.engine,
         )
         self._thread_export_runner = WorkspaceThreadExportRunner(
             WorkspaceThreadExportDeps(
                 runtime_paths=self.runtime_paths,
                 config_provider=lambda: self.config,
                 bot_provider=lambda entity_name: self.agent_bots.get(entity_name),
+                steward_provider=self.room_steward,
                 response_admission_gate=self.response_admission_gate,
                 agent_reply_memberships=self.agent_reply_memberships,
             ),
@@ -411,6 +455,8 @@ class _MultiAgentOrchestrator:
             self._knowledge_source_watcher,
             self._knowledge_graph,
             self._todo_poke_runtime,
+            self.thread_snooze,
+            self.reactive_triggers,
             self._automations,
             self._budgets,
             self._thread_export_runner,
@@ -425,6 +471,15 @@ class _MultiAgentOrchestrator:
             ),
             api_enabled=self.api_enabled,
         )
+        self._workflow_runtime = build_workflow_runtime(self._script_runtime)
+        self._rooms = RoomSetup(
+            runtime_paths=self.runtime_paths,
+            config_provider=lambda: self.config,
+            owner_client=lambda: self.running_entity_client(ROUTER_AGENT_NAME),
+            refresh_agent_reply_memberships=lambda: self.refresh_agent_reply_memberships(),
+            reconcile_room_states=lambda: reconcile_held_room_states(self),
+            publication_allowed=lambda: not self.response_admission_gate.closed,
+        )
         self.config_reload = ConfigReloadLifecycle(
             runtime_paths=self.runtime_paths,
             is_running=lambda: self.running,
@@ -436,15 +491,19 @@ class _MultiAgentOrchestrator:
             before_runtime_replacement=self._thread_export_runner.prepare_runtime_replacement,
             rebind_published_config_consumers=lambda: self._bind_trigger_runtimes(),
             finish_reload=self._script_runtime.finish_reload,
+            after_reload=self._rooms.publish_room_state,
             config_update_lock=self._config_update_lock,
         )
         self._approval_transport = ApprovalMatrixTransport(
-            bot_provider=lambda agent_name: self.agent_bots.get(agent_name),
+            bots=lambda: self.agent_bots,
+            room_poster=self.room_poster,
+            cards=self._approval_cards,
         )
         self._approval_recovery = ApprovalRecovery(
             deliver_unavailable_notice=self._approval_transport.deliver_unavailable_notice,
             journal_provider=self.event_journal_store,
             entity_configured=lambda name: name in self.config.agents or name in self.config.teams,
+            owner_absent=lambda: not self.config.needs_owner_account(),
             entity_permanently_unavailable=self.fleet.is_disabled,
             recover_unavailable_final=self._recover_unavailable_final,
             cancel_delegations=lambda continuation, reason: cancel_approval_delegations(
@@ -453,12 +512,6 @@ class _MultiAgentOrchestrator:
                 runtime_paths=self.runtime_paths,
                 reason=reason,
             ),
-        )
-        self._rooms = RoomSetup(
-            runtime_paths=self.runtime_paths,
-            config_provider=lambda: self.config,
-            router_client=self._router_client,
-            refresh_agent_reply_memberships=lambda: self.refresh_agent_reply_memberships(),
         )
         self._startup_maintenance = StartupMaintenanceController(
             setup_rooms_and_memberships=self._setup_startup_rooms_and_memberships,
@@ -480,6 +533,11 @@ class _MultiAgentOrchestrator:
     def script_runtime(self) -> ScriptRuntimeLifecycle:
         """Return the process-local background-script lifecycle collaborator."""
         return self._script_runtime
+
+    @property
+    def workflow_engine(self) -> WorkflowEngine:
+        """Return the process-local workflow engine."""
+        return self._workflow_runtime.engine
 
     def active_call_identities(self) -> list[ActiveResponseIdentity]:
         """Return one identity per voice call that any bot has joined or is joining."""
@@ -595,17 +653,9 @@ class _MultiAgentOrchestrator:
         finally:
             self.response_admission_gate.release()
 
-    def _approval_cards(self) -> ApprovalDeliveryView | None:
-        """Return the router principal's approval-card store, once it exists.
-
-        Bound before the router bot is built as well as after, because the
-        transport is configured on every config reload. The store belongs to
-        the bot, so the early call has nothing to give; the manager treats a
-        missing store as "no card is recoverable", and the rebind that follows
-        bot construction supplies the real one.
-        """
-        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        return None if router_bot is None else router_bot.journal_principal()
+    def _approval_cards(self) -> ApprovalDeliveryView:
+        """Return the one principal that keeps every approval's books, whichever account sends a card."""
+        return approval_card_store(self.event_journal_store, self.runtime_paths)
 
     def _bind_started_runtime_support_services(self) -> None:
         """Bind current runtime support objects needed by live callbacks."""
@@ -617,6 +667,7 @@ class _MultiAgentOrchestrator:
         self._bind_started_runtime_support_services()
         await self._tool_job_runtime.sync()
         await self._script_runtime.start()
+        await self._workflow_runtime.start()
 
     async def _setup_startup_rooms_and_memberships(self, bots: list[AgentBot]) -> None:
         """Run startup room setup, then publish trigger delivery runtime."""
@@ -671,12 +722,6 @@ class _MultiAgentOrchestrator:
             recovery=self._approval_recovery,
         )
 
-    def _running_startup_maintenance_bots(self) -> list[AgentBot]:
-        """Return currently running bots in startup-maintenance order."""
-        return self._running_bots_for_entities(
-            (ROUTER_AGENT_NAME, *(name for name in self.agent_bots if name != ROUTER_AGENT_NAME)),
-        )
-
     def _running_bots_for_entities(self, entity_names: Iterable[str]) -> list[AgentBot]:
         """Return running bots for the given entity names."""
         running_bots: list[AgentBot] = []
@@ -695,7 +740,7 @@ class _MultiAgentOrchestrator:
                 config,
                 self.runtime_paths,
             )
-        ensure_default_agent_workspaces(config, self.runtime_paths.storage_root)
+        await asyncio.to_thread(ensure_default_agent_workspaces, config, self.runtime_paths)
         self._configure_approval_store_transport()
         for service in self._services:
             await service.sync(config)
@@ -765,6 +810,13 @@ class _MultiAgentOrchestrator:
             for entity_name in sorted(entity_names)
         }
 
+    async def _prepare_owner_account(self, bot: AgentBot) -> AgentBot:
+        """Build the optional owner's bot from the account its start prepares, so its failure blocks no agent's start."""
+        if bot.agent_name != ROUTER_AGENT_NAME or (bot.agent_user.password or bot.agent_user.access_token) is not None:
+            return bot
+        user = await prepare_owner_account(self.config, self.runtime_paths)
+        return create_bot_for_entity(ROUTER_AGENT_NAME, user, self)
+
     def observe_room_activity(self, room_id: str) -> None:
         """Let thread exports know that a bot admitted a conversation event in one room."""
         self._thread_export_runner.mark_room_activity(room_id)
@@ -773,9 +825,7 @@ class _MultiAgentOrchestrator:
         """Withdraw capabilities bound to these entities before any of them stops."""
         self._external_trigger_runtime.unbind()
         self._computer_runtime.unbind()
-        if ROUTER_AGENT_NAME in entity_names:
-            # Fence room-backed grants before stopping their sole control client.
-            self.agent_reply_membership_sync.invalidate(self.config, reason="router_replacement")
+        self._call_transcripts_runtime.unbind()
         await self.scheduled_tasks.release(entity_names)
 
     async def _reconcile_removed_entities(self, entity_names: set[str]) -> set[str]:
@@ -790,7 +840,7 @@ class _MultiAgentOrchestrator:
         self.turn_recovery.schedule()
 
     async def _setup_rooms_after_retry(self, entity_name: str) -> None:
-        """Reconcile rooms after a background retry started one entity, and every bot's rooms after the router started."""
+        """Reconcile rooms after a background retry started one entity, and every bot's rooms after the owner started."""
         bots_to_setup = self._running_bots_for_entities(
             self.agent_bots if entity_name == ROUTER_AGENT_NAME else (entity_name,),
         )
@@ -800,11 +850,12 @@ class _MultiAgentOrchestrator:
         )
 
     def _bind_trigger_runtimes(self) -> None:
-        """Bind external-trigger and computer delivery once their router and targets run, never after shutdown began."""
+        """Bind external-trigger, computer, and call-transcript work once their targets run, never after shutdown began."""
         if not self.running:
             return
         self._external_trigger_runtime.bind_if_ready(self.config, self.agent_bots)
         self._computer_runtime.bind_if_ready(self.config, self.agent_bots)
+        self._call_transcripts_runtime.bind_if_ready(self.config, self.agent_bots)
 
     async def _end_entity_replies(self, entity_names: set[str]) -> None:
         """End the journal replies of removed entities; no bot remains to finish them."""
@@ -880,6 +931,7 @@ class _MultiAgentOrchestrator:
                     )
                     raise
                 result = self._commit_plugins(generation, config, watch)
+                await self._plugin_lifespans.apply_published()
                 logger.info(
                     "Plugin reload complete",
                     source=source,
@@ -921,7 +973,11 @@ class _MultiAgentOrchestrator:
         await preload_matrix_call_dependencies(config)
         freeze_startup_heap()
         watch = self.plugin_watch.capture(config)
-        generation = prepare_plugins(config, self.runtime_paths)
+        try:
+            generation = prepare_plugins(config, self.runtime_paths)
+        except PluginValidationError as exc:
+            # A refused plugin set, such as one missing a required plugin, fails until it or the config changes.
+            raise PermanentStartupError(str(exc)) from exc
         try:
             entity_names = configured_entity_names(config)
             entity_users = await prepare_managed_accounts(
@@ -938,6 +994,7 @@ class _MultiAgentOrchestrator:
             dispose_plugins(generation)
             raise
         self._commit_plugins(generation, config, watch)
+        await self._plugin_lifespans.apply_published()
         warn_about_config_risks(config, self.runtime_paths)
         await self._sync_mcp_manager(config)
         self._configure_approval_store_transport()
@@ -961,28 +1018,17 @@ class _MultiAgentOrchestrator:
         """Return once startup has published runtime readiness."""
         await self._runtime_ready_event.wait()
 
-    async def _start_router_bot(self) -> AgentBot:
-        """Start the router bot, retrying until it succeeds."""
-        if self._entities_blocked_by_failed_mcp_servers({ROUTER_AGENT_NAME}):
-            msg = "Router bot depends on unavailable MCP servers"
-            raise RuntimeError(msg)
-        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        if router_bot is None:
-            msg = "Router bot is required for startup"
-            raise RuntimeError(msg)
+    def service_hook_bindings(self) -> HookBindings:
+        """Return the hook bindings of the runtime's own emissions, which each room's poster and steward back."""
+        return service_hook_bindings(self, self._hook_lifetime)
 
-        set_runtime_starting("Starting router Matrix account")
-        await run_with_retry(
-            "Starting router Matrix account",
-            router_bot.start,
-            permanent_error_check=is_permanent_startup_error,
-        )
-        return router_bot
+    def room_steward(self, room_id: str) -> AgentBot | None:
+        """Return the bot that does one room's shared invisible work now."""
+        return room_steward(self.agent_bots, room_id)
 
-    def router_hook_context(self) -> HookContextSupport | None:
-        """Return the router bot's hook support, whose client backs what another bot's own cannot."""
-        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        return None if router_bot is None else router_bot.hook_context
+    def room_poster(self, room_id: str, sender: tuple[str | None, str] | None = None) -> AgentBot | None:
+        """Return the bot that posts in one room where no agent answers, for a retry only its first sender."""
+        return room_poster(self.agent_bots, room_id, sender)
 
     def running_entity_client(self, entity_name: str) -> nio.AsyncClient | None:
         """Return the Matrix client of one running managed entity."""
@@ -1014,7 +1060,7 @@ class _MultiAgentOrchestrator:
         return await bot.redacted_event_ids(room_id, event_ids)
 
     def _log_degraded_startup(self, failed_agents: list[str]) -> None:
-        """Log degraded startup status for failed non-router bots."""
+        """Log degraded startup status for the bots that did not start."""
         if failed_agents:
             logger.warning(
                 "System starting in degraded mode",
@@ -1028,26 +1074,28 @@ class _MultiAgentOrchestrator:
 
     async def handle_bot_ready(self, bot: AgentBot) -> None:
         """Handle bot-ready notifications through the public runtime protocol."""
-        if bot.agent_name == ROUTER_AGENT_NAME:
-            self._router_reply_memberships_live_sync_ready.set()
-        if bot.agent_name == ROUTER_AGENT_NAME and bot.running and bot.client is not None:
-            await self._approval_recovery.mark_router_ready()
         if self.config.personal_agent_instance(bot.agent_name) is not None:
-            router = self.agent_bots.get(ROUTER_AGENT_NAME)
-            if router is not None:
-                router.personal_room_target_ready()
+            for observer in self.agent_bots.values():
+                observer.personal_room_target_ready()
         self.turn_recovery.schedule()
 
-    async def refresh_agent_reply_memberships(self) -> None:
-        """Refresh room-backed reply grants through the router's Matrix client."""
+    async def refresh_agent_reply_memberships(self) -> RefreshOutcome:
+        """Refresh room-backed reply grants, each room read through the one synced bot that observes it."""
         config = self.config
-        router_client = self._router_client()
-        if router_client is None:
-            self.agent_reply_membership_sync.invalidate(config, reason="router_unavailable")
-            return
-        await self.agent_reply_memberships.refresh(config, self.runtime_paths, router_client)
-        self.turn_recovery.schedule()
-        await self.agent_reply_membership_sync.apply_grant_change()
+        observers = partial(membership_observers, self.agent_bots)
+        outcome = await self.agent_reply_memberships.refresh(config, self.runtime_paths, observers)
+        if outcome != "voided":
+            self.turn_recovery.schedule()
+        await self.agent_reply_membership_sync.apply_grant_change(published=outcome != "voided")
+        return outcome
+
+    async def refresh_agent_reply_memberships_when_needed(self) -> None:
+        """Refresh room-backed reply grants as above when they need it, for an access check.
+
+        A refresh in flight serves instead of another, so every refresh runs once and with the runtime's follow-up.
+        """
+        membership_sync = self.agent_reply_membership_sync
+        await membership_sync.refresh_for_access_check(self.config, self.refresh_agent_reply_memberships)
 
     async def _end_unconfigured_entity_replies(self, config: Config) -> None:
         """End the replies of entities removed while MindRoom was stopped; no bot finishes them."""
@@ -1061,7 +1109,6 @@ class _MultiAgentOrchestrator:
         """Run the startup sequence before handing off to the sync loops."""
         runtime_shutdown_event = self._reset_runtime_shutdown_event()
         self._runtime_ready_event.clear()
-        self._router_reply_memberships_live_sync_ready.clear()
         self._approval_recovery.reset_startup_cleanup_gate()
         phase_started = log_startup_phase_started("wait_for_matrix_homeserver")
         await wait_for_matrix_homeserver(runtime_paths=self.runtime_paths)
@@ -1072,16 +1119,12 @@ class _MultiAgentOrchestrator:
             await self.initialize()
             log_startup_phase_finished("initialize_runtime", phase_started)
 
-        phase_started = log_startup_phase_started("start_router_bot")
-        router_bot = await self._start_router_bot()
-        log_startup_phase_finished("start_router_bot", phase_started)
+        set_runtime_starting("Starting Matrix bot accounts")
+        phase_started = log_startup_phase_started("start_bots")
+        start_results = await self.fleet.try_start(self.fleet.names)
+        log_startup_phase_finished("start_bots", phase_started)
 
-        set_runtime_starting("Starting remaining Matrix bot accounts")
-        phase_started = log_startup_phase_started("start_remaining_bots")
-        start_results = await self.fleet.try_start(self.fleet.names - {ROUTER_AGENT_NAME})
-        log_startup_phase_finished("start_remaining_bots", phase_started)
-
-        started_bots = [router_bot, *start_results.started_bots]
+        started_bots = start_results.started_bots
         self._log_degraded_startup(
             [*start_results.retryable_entities, *start_results.permanently_failed_entities],
         )
@@ -1094,7 +1137,7 @@ class _MultiAgentOrchestrator:
         await self._start_runtime_support()
         log_startup_phase_finished("bind_runtime_support", phase_started)
 
-        async with self.config_reload.startup_publication_admission():
+        async with self.config_reload.startup_publication_admission() as apply_lock:
             self.running = True
 
             # Owned membership commands need the source and admission pump.
@@ -1105,95 +1148,91 @@ class _MultiAgentOrchestrator:
             log_startup_phase_finished("start_matrix_sync_loops", phase_started)
 
             self._startup_maintenance.start(started_bots, config)
-            room_membership_policy_configured = self.agent_reply_memberships.needs_refresh(config)
-            if room_membership_policy_configured:
-                set_runtime_starting("Waiting for the router's first Matrix sync")
-
             if runtime_shutdown_event.is_set():
                 return
 
-            # Publish semantic callbacks once the router's initial owned sync has
-            # rebuilt room-backed reply grants from Matrix. Room setup keeps
-            # running in the background: a grant room it has not joined or
-            # created yet stays pending, and its sources replay after setup
+            # Publish semantic callbacks once every started bot's first own sync
+            # settled, or its deadline passed, and this gate has waited up to 10 s for room-backed
+            # reply grants to be rebuilt from Matrix; sources that need a grant
+            # not yet rebuilt stay pending and replay once the refresh publishes. Room setup
+            # keeps running in the background: a grant room it has not joined
+            # or created yet stays pending, and its sources replay after setup
             # refreshes the grants.
-            sync_ready = await self._wait_for_initial_membership_sync(
-                runtime_shutdown_event,
-                room_membership_policy_configured=room_membership_policy_configured,
-            )
-            if not sync_ready:
-                return
-
+            # Scheduled before the wait, which a reload may run in: replacing a bot ends its retry.
             self.fleet.schedule_retries(start_results.retryable_entities)
+            if self.agent_reply_memberships.needs_refresh(config):
+                set_runtime_starting("Waiting for the first Matrix sync")
+                if not await self._wait_for_first_syncs(runtime_shutdown_event, started_bots):
+                    return
 
             create_background_task(
                 check_embedder_health(config, self.runtime_paths, reason="startup"),
                 name="embedder_startup_health_check",
             )
-            self.config_reload.startup_published(config)
-            set_runtime_ready()
-            self._runtime_ready_event.set()
-            self.turn_recovery.schedule()
+            # The wait above holds no apply lock; a replacement that began during it finishes before this, and
+            # none begins until startup acknowledged, reopened admission and captured the service's ready hooks.
+            async with apply_lock:
+                if runtime_shutdown_event.is_set():
+                    return
+                self.config_reload.startup_published(config)
+                set_runtime_ready()
+                self._runtime_ready_event.set()
+                self.turn_recovery.schedule()
+                emit_service_bot_ready = service_bot_ready_emission(self)
         # Stay alive until explicit shutdown. Hot reload replaces the fleet's sync
         # tasks, so awaiting the initial task generation would let a
         # config-triggered restart look like normal orchestrator completion.
+        if emit_service_bot_ready is not None and not runtime_shutdown_event.is_set():
+            await emit_service_bot_ready()
         await runtime_shutdown_event.wait()
 
-    async def _wait_for_initial_membership_sync(
-        self,
-        runtime_shutdown_event: asyncio.Event,
-        *,
-        room_membership_policy_configured: bool,
-    ) -> bool:
-        """Keep semantic dispatch parked until the router has observed owned sync."""
-        if not room_membership_policy_configured:
-            return True
+    async def _wait_for_first_syncs(self, runtime_shutdown_event: asyncio.Event, started_bots: list[AgentBot]) -> bool:
+        """Keep semantic dispatch parked until every started bot synced once or stopped; False when shutdown wins.
 
-        assert self.response_admission_gate.closed, "startup publication must own response admission"
-        return await self._wait_for_router_reply_memberships_or_shutdown(runtime_shutdown_event)
+        A bot still unsynced at the first-sync deadline, however often its receive loop restarted, is left behind,
+        not observing: its rooms' grants stay closed until its own loop syncs.
+        """
+        deadline = time.monotonic() + matrix_sync_startup_timeout_seconds(self.runtime_paths)
 
-    async def _wait_for_router_reply_memberships_or_shutdown(
-        self,
-        runtime_shutdown_event: asyncio.Event,
-    ) -> bool:
-        """Wait until router sync closes the startup snapshot gap, or shutdown wins."""
-        ready_wait = asyncio.create_task(self._router_reply_memberships_live_sync_ready.wait())
+        async def bots_synced_and_grants_rebuilt() -> None:
+            # Polled, because a bot's stop has no event to await.
+            while time.monotonic() < deadline and any(  # noqa: ASYNC110
+                bot.running and not bot.first_sync_complete for bot in started_bots
+            ):
+                await asyncio.sleep(_FIRST_SYNC_POLL_SECONDS)
+            # Sync frames only request the rebuild; startup publication alone waits for it, at most 10 s.
+            await self.agent_reply_membership_sync.refresh_if_needed(self.config, self.refresh_agent_reply_memberships)
+
+        ready_wait = asyncio.create_task(bots_synced_and_grants_rebuilt())
         shutdown_wait = asyncio.create_task(runtime_shutdown_event.wait())
         try:
-            done, _pending = await asyncio.wait(
-                {ready_wait, shutdown_wait},
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            return (
-                shutdown_wait not in done
-                and ready_wait in done
-                and self._router_reply_memberships_live_sync_ready.is_set()
-            )
+            done, _pending = await asyncio.wait({ready_wait, shutdown_wait}, return_when=asyncio.FIRST_COMPLETED)
+            return shutdown_wait not in done
         finally:
             for task in (ready_wait, shutdown_wait):
                 if not task.done():
                     task.cancel()
             await asyncio.gather(ready_wait, shutdown_wait, return_exceptions=True)
 
-    async def _refresh_running_bots_presence(self) -> None:
-        """Let each bot this reload keeps running show its presence under the published config."""
+    async def _refresh_running_bots(self, previous_config: Config) -> None:
+        """Let each bot this reload keeps running show its presence and server state under the published config."""
         for entity_name, bot in self.agent_bots.items():
             try:
                 await bot.refresh_presence()
             except Exception:
                 logger.exception("bot_presence_update_failed", agent=entity_name)
             logger.debug("bot_config_updated", agent=entity_name)
+        # Each bot writes only its own state, so all write at once and a slow homeserver holds the reload for one
+        # publish timeout instead of one per bot.
+        await asyncio.gather(*(bot.refresh_server_state(previous_config) for bot in self.agent_bots.values()))
 
     async def _emit_config_reloaded(self, plan: ConfigUpdatePlan, changed_entities: set[str]) -> None:
         """Emit the config:reloaded observer event after applying a new snapshot."""
         if not self.hook_registry.has_hooks(EVENT_CONFIG_RELOADED):
             return
 
-        router = self.router_hook_context()
-        bindings = HookBindings(runtime_started_at=time.time()) if router is None else router.bindings()
         context = ConfigReloadedContext(
-            # The router's Matrix capabilities, under the runtime's hook lifetime rather than the router bot's.
-            **replace(bindings, registry_state=self._hook_lifetime).context_kwargs(
+            **self.service_hook_bindings().context_kwargs(
                 EVENT_CONFIG_RELOADED,
                 config=plan.new_config,
                 runtime_paths=self.runtime_paths,
@@ -1266,7 +1305,7 @@ class _MultiAgentOrchestrator:
         """Pause startup maintenance across a runtime replacement, then replay it with the bots running after it."""
         return self._startup_maintenance.paused(
             config_provider=lambda: self.config if self.running else None,
-            running_bots=self._running_startup_maintenance_bots,
+            running_bots=lambda: self._running_bots_for_entities(self.agent_bots),
         )
 
     async def _reconcile_post_update_rooms(
@@ -1314,15 +1353,16 @@ class _MultiAgentOrchestrator:
             async with self._paused_startup_maintenance():
                 staged = self._stage_plugins(plan)
                 try:
-                    # Removal first, while the current router still delivers its approval notices
-                    # and before a replacement router's orphan cleanup could kick the removed accounts.
+                    # Removal first, while the removed entities' bots still edit their approval cards
+                    # and before the owner account's orphan cleanup could kick the removed accounts.
                     unsettled_removals = await self.fleet.remove(plan.remove)
-                    await self.fleet.stop(plan.restart)
+                    await self.fleet.stop(plan.restart | plan.stop, intent=CONFIG_RELOAD_SHUTDOWN)
                 except BaseException:
                     if staged is not None:
                         dispose_plugins(staged.generation)
                     raise
                 self._publish_config(plan, staged)
+                await self._plugin_lifespans.apply_published()
                 # Now that the removal is published, recovery can judge the removed owners as gone.
                 await self._approval_recovery.reconcile_unavailable_entities(unsettled_removals)
                 await self._script_runtime.reopen_script_calls()
@@ -1342,16 +1382,20 @@ class _MultiAgentOrchestrator:
                     # Replies may still be running, so these dependents restart behind their own drain.
                     await self._notify_mcp_catalog_change(deferred_server_id)
                 await self.fleet.stop(catalog_restarts)
-                await self._refresh_running_bots_presence()
-                if plan.router_invite_policy_changed and ROUTER_AGENT_NAME not in plan.restart:
-                    router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-                    if router_bot is not None:
-                        router_bot.schedule_pending_invite_reconciliation()
+                await self._refresh_running_bots(current_config)
 
                 changed_entities = set(plan.restart | plan.start | catalog_restarts)
                 await self.fleet.create(changed_entities)
                 start_results = await self.fleet.start(changed_entities)
-                await self._reconcile_post_update_rooms(plan, changed_entities)
+                try:
+                    await self._reconcile_post_update_rooms(plan, changed_entities)
+                except Exception:
+                    # The new config is published, so what serves it still binds when its rooms could not be settled.
+                    try:
+                        await self._finalize_config_reload(current_config, plan, changed_entities | plan.live_updated)
+                    except Exception:
+                        logger.exception("config_reload_finalize_failed_after_room_setup_failed")
+                    raise
                 if start_results.permanently_failed_entities:
                     logger.warning(
                         "Configuration update left some bots disabled due to permanent startup errors",
@@ -1363,14 +1407,6 @@ class _MultiAgentOrchestrator:
                 return bool(changed_entities)
         finally:
             await self._script_runtime.reopen_script_calls()
-
-    def _router_client(self) -> nio.AsyncClient | None:
-        """Return the router's Matrix client when the router runs one."""
-        router_bot = self.agent_bots.get(ROUTER_AGENT_NAME)
-        client = None if router_bot is None else router_bot.client
-        if client is None:
-            logger.warning("Router client not available")
-        return client
 
     async def _bind_event_journal(self) -> None:
         """Refuse startup unless the configured database is this install's journal.
@@ -1396,6 +1432,15 @@ class _MultiAgentOrchestrator:
         self._journal_held = True
         # Every bot follows the paused replies of its principal from these on.
         await store.load_approval_signals()
+        # Each paused turn ends as its approval does: the approval's end is the one place every paused turn ends.
+        store.approval_signals.follow_ended_approvals(self._end_paused_turn)
+
+    def _end_paused_turn(self, ended: EndedApproval) -> None:
+        """End a paused turn through the bot of its entity, or through any running bot for an entity now gone."""
+        running = self._running_bots_for_entities(self.agent_bots)
+        bot = self.agent_bots.get(ended.continuation.entity_name) or (running[0] if running else None)
+        if bot is not None:
+            bot.end_paused_turn(ended)
 
     async def event_journal_still_usable(self) -> bool:
         """Return whether this runtime still holds the journal it claimed and can still use it; true before it claims one."""
@@ -1407,6 +1452,7 @@ class _MultiAgentOrchestrator:
         return EmbeddedRuntime(
             knowledge_refresh_scheduler=self.knowledge_refresh_scheduler,
             agent_reply_memberships=self.agent_reply_memberships,
+            refresh_agent_reply_memberships_when_needed=self.refresh_agent_reply_memberships_when_needed,
             response_admission_gate=self.response_admission_gate,
             budget_monitor=self.budgets,
             scheduled_tasks=self.scheduled_tasks,
@@ -1418,7 +1464,10 @@ class _MultiAgentOrchestrator:
             config_reload_status=lambda: self.config_reload.status,
             agent_cli_registry=self.agent_cli_registry,
             script_broker=self._script_runtime.broker,
+            workflow_engine=self._workflow_runtime.engine,
             script_worker_keepalive=self._script_runtime.touch_live_workers,
+            call_transcripts=self._call_transcripts_runtime.service,
+            agent_call_room=self._call_transcripts_runtime.agent_call_room,
         )
 
     def event_journal_store(self) -> EventJournalStore:
@@ -1454,6 +1503,8 @@ class _MultiAgentOrchestrator:
         self._computer_runtime.unbind()
         # Runners borrow bots' clients, so they end before any bot stops.
         await run_shutdown_step("scheduled_tasks", self.scheduled_tasks.stop())
+        await run_shutdown_step("call_transcripts", self._call_transcripts_runtime.stop())
+        await run_shutdown_step("workflow_runtime", self._workflow_runtime.shutdown())
         try:
             await run_shutdown_step("script_runtime", self._script_runtime.shutdown())
         except Exception:
@@ -1492,6 +1543,9 @@ class _MultiAgentOrchestrator:
         await run_shutdown_step("mcp_manager", self._stop_mcp_manager())
 
         fleet_shutdown = await self.fleet.stop_all()
+        # No bot owns the grant refresh, and after the last bot stopped no sync frame asks for another.
+        await run_shutdown_step("reply_membership_refresh", self.agent_reply_membership_sync.close())
+        await run_shutdown_step("plugin_lifespans", self._plugin_lifespans.stop())
         await run_shutdown_step("attachment_cleanup", wait_for_attachment_cleanup_tasks())
         # Last, because every bot borrows it: closing it earlier would pull the
         # store out from under a bot still draining its outbox.
@@ -1560,14 +1614,17 @@ async def _run_api_server(
 ) -> None:
     """Serve the bundled dashboard/API, lending it the runtime's shared state for exactly as long as it serves."""
     from mindroom.api import main as api_main  # noqa: PLC0415
+    from mindroom.api.plugin_origins import serve_plugin_origins  # noqa: PLC0415
     from mindroom.api.script_gateway import serve_script_gateway_listener  # noqa: PLC0415
+    from mindroom.api.tailnet_ssh_gateway import serve_tailnet_ssh_gateway_listener  # noqa: PLC0415
     from mindroom.egress_broker.service import serve_egress_broker  # noqa: PLC0415
 
     runtime_paths = orchestrator.runtime_paths
     script_runtime = orchestrator.script_runtime
     api_server = _EmbeddedApiServerContext(host=host, port=port)
-    api_main.bind_embedded_runtime(api_main.app, orchestrator.embedded_runtime())
-    # The reader picks a running bot at each call, so restarts and reloads never need to withdraw it.
+    embedded_runtime = orchestrator.embedded_runtime()
+    api_main.bind_embedded_runtime(api_main.app, embedded_runtime)
+    # The reader picks a running bot at each lookup, so restarts and reloads never need to withdraw it.
     bind_room_members(api_main.app, orchestrator.agent_bots)
     config = uvicorn.Config(
         api_main.app,
@@ -1599,6 +1656,21 @@ async def _run_api_server(
                     broker=script_runtime.broker,
                     log_level=log_level,
                     agent_cli_registry=orchestrator.agent_cli_registry,
+                    workflow_engine=embedded_runtime.workflow_engine,
+                ),
+                serve_plugin_origins(
+                    runtime_paths,
+                    host=host,
+                    api_port=port,
+                    api_app=api_main.app,
+                    log_level=log_level,
+                ),
+                serve_tailnet_ssh_gateway_listener(
+                    runtime_paths,
+                    host=host,
+                    api_port=port,
+                    api_app=api_main.app,
+                    log_level=log_level,
                 ),
             ):
                 await server.serve()
@@ -1948,6 +2020,10 @@ async def _run_runtime(  # noqa: PLR0915
 
         shorten_gil_switch_interval()
         stall_detector = start_event_loop_stall_detector(runtime_paths)
+        # Deferred: the broker loads h11 and its TLS stack.
+        from mindroom.egress_broker.service import turn_off_unusable_default_broker  # noqa: PLC0415
+
+        runtime_paths = turn_off_unusable_default_broker(runtime_paths, api=api)
 
         # The first start after an upgrade converts every conversation database before the API binds, which can take
         # minutes, so probes meanwhile see a live process that is not ready yet instead of a closed port.

@@ -29,6 +29,7 @@ import pytest
 import mindroom.knowledge.git_source as knowledge_git_source_module
 import mindroom.knowledge.legacy_git_checkout as legacy_git_checkout_module
 import mindroom.knowledge.refresh_locks as knowledge_refresh_locks
+import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
 from mindroom import file_locks
 from mindroom.config.knowledge import KnowledgeGitConfig
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
@@ -53,7 +54,7 @@ from mindroom.knowledge.registry import (
 )
 from mindroom.knowledge.vector_store import KnowledgeCollection, list_collection_names
 from mindroom.redaction import redact_url_credentials
-from tests.conftest import runtime_paths_for
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, runtime_paths_for
 from tests.knowledge_test_support import (
     _config,
     patch_vector_store,  # noqa: F401  # requested via pytestmark below
@@ -965,6 +966,8 @@ async def test_crashed_git_subprocess_recovers_index_lock_on_next_refresh(  # no
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A real crashed checkout must not block the next subprocess refresh."""
+    # The blocking filter ignores TERM, so it lasts the whole grace period before it is killed.
+    monkeypatch.setattr(knowledge_refresh_runner, "_TERMINATE_GRACE_SECONDS", 0.5)
     remote_work = tmp_path / "remote-work"
     remote_work.mkdir()
 
@@ -1045,7 +1048,7 @@ async def test_crashed_git_subprocess_recovers_index_lock_on_next_refresh(  # no
         release_path.touch()
         watchdog_stop.set()
         if watchdog is not None:
-            watchdog.join(timeout=1)
+            watchdog.join(timeout=SETTLE_TIMEOUT_SECONDS)
         if not refresh_task.done():
             refresh_task.cancel()
             done, _pending = await asyncio.wait({refresh_task}, timeout=5)
@@ -1141,11 +1144,11 @@ async def test_direct_refresh_timeout_drains_git_descendants_before_releasing_so
     finally:
         watchdog_stop.set()
         release_path.touch()
-        watchdog.join(timeout=1)
+        watchdog.join(timeout=SETTLE_TIMEOUT_SECONDS)
         if filter_pid is not None:
             with suppress(ProcessLookupError):
                 os.kill(filter_pid, signal.SIGKILL)
-        for _attempt in range(100):
+        for _attempt in range(int(SETTLE_TIMEOUT_SECONDS / 0.01)):
             if not file_locks.file_lock_is_held(refresh_lock_path):
                 break
             await asyncio.sleep(0.01)

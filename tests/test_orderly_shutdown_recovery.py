@@ -32,6 +32,7 @@ from mindroom.runtime_shutdown import (
     RuntimeShutdownIntent,
 )
 from mindroom.session_storage.agent_storage import create_state_storage
+from tests.access_schema_support import OBSERVER_USER_ID, refresh_memberships
 from tests.conftest import make_ingress_facts, unwrap_extracted_collaborator
 from tests.journal_helpers import admit_dispatch_event
 from tests.matrix_state_helpers import save_matrix_state
@@ -80,7 +81,7 @@ def _dispatcher(
             source_has_live_owner=source_has_live_owner,
             turn_has_live_claim=lambda _event_id: False,
             replies_ended=lambda _reply_ids: None,
-            on_job_follow_up=AsyncMock(),
+            on_runtime_source=AsyncMock(),
             on_job_cancel=AsyncMock(),
         ),
         room_for_id=lambda room_id: nio.MatrixRoom(room_id, "@bot:localhost"),
@@ -97,7 +98,7 @@ async def test_orderly_shutdown_preserves_edit_callback_and_revision(
 ) -> None:
     """The edit is left pending for the successor runtime, then replay commits the exact edit."""
     # The store's storage is a mock here; which runs the edit removes is covered by the summary-row tests.
-    monkeypatch.setattr("mindroom.turn_store.remove_runs_answering", lambda *_args: False)
+    monkeypatch.setattr("mindroom.turn_store.remove_runs_answering", lambda *_args, **_kwargs: False)
     principal = journal_store.principal("agent@alice")
     store = await _store_with_storage(
         journal_store,
@@ -210,7 +211,7 @@ async def test_shutdown_closes_callbacks_before_membership_invalidation(  # noqa
         room_id="!grant:localhost",
     )
     memberships = runner.deps.runtime.agent_reply_memberships
-    await memberships.refresh(bot.config, bot.runtime_paths, membership_client)
+    await refresh_memberships(memberships, bot.config, bot.runtime_paths, membership_client)
     entered = asyncio.Event()
     exited = asyncio.Event()
     release = asyncio.Event()
@@ -276,7 +277,7 @@ async def test_shutdown_closes_callbacks_before_membership_invalidation(  # noqa
             bot.config,
             "!grant:localhost",
             leave,
-            control_user_id="@mindroom_router:localhost",
+            control_user_id=OBSERVER_USER_ID,
         )
         await release_callback()
     with patch.object(type(orchestrator._script_runtime), "shutdown", side_effect=release_callback):
@@ -605,7 +606,10 @@ async def test_process_shutdown_fence_survives_late_sync_start(  # noqa: C901, P
             assert await principal.is_pending(EDIT_EVENT_ID)
             assert attempted == []
             assert receive_starts == [1]
-            assert invalidations == before_shutdown_invalidations
+            # The shutdown latch closes the account's observation itself; no restarted loop reports anything more.
+            assert [
+                reason for reason in invalidations if reason != "observer_stopping"
+            ] == before_shutdown_invalidations
             assert not await bot._runtime_view.wait_for_admission_or_shutdown()
         finally:
             release_retry.set()

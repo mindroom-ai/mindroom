@@ -13,7 +13,6 @@ import tempfile
 import threading
 import uuid
 from contextlib import contextmanager
-from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import cached_property, partial
 from pathlib import Path
@@ -32,11 +31,21 @@ from mindroom.embeddings.errors import (
     embedder_failure_is_transient,
 )
 from mindroom.knowledge.chunk_context import chunk_contexts
-from mindroom.knowledge.chunking import SafeFixedSizeChunking
+from mindroom.knowledge.chunking import LegacyDocumentChunking, LegacyFixedSizeChunking, SafeFixedSizeChunking
 from mindroom.knowledge.collections import KnowledgeChunk, write_file_rows
 from mindroom.knowledge.corpus_signature import file_signature
 from mindroom.knowledge.index_retry import EmbeddingRetryPolicy, run_with_embedding_retry
-from mindroom.knowledge.readers import Document, JSONReader, MarkdownReader, Reader, ReaderFactory, TextReader
+from mindroom.knowledge.memory_entries import split_memory_entries
+from mindroom.knowledge.readers import (
+    Document,
+    DocumentChunking,
+    FixedSizeChunking,
+    JSONReader,
+    MarkdownReader,
+    Reader,
+    ReaderFactory,
+    TextReader,
+)
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
@@ -91,6 +100,13 @@ def max_concurrent_file_indexes(runtime_paths: RuntimePaths) -> int:
     return value
 
 
+# Agno 3.2's chunkers keep whitespace that every chunk indexed so far had collapsed; each maps to its legacy twin.
+_LEGACY_WHITESPACE_CHUNKING: dict[type, type[LegacyFixedSizeChunking | LegacyDocumentChunking]] = {
+    FixedSizeChunking: LegacyFixedSizeChunking,
+    DocumentChunking: LegacyDocumentChunking,
+}
+
+
 class _MalformedJSONSourceError(Exception):
     """A JSON parser failure carrying the already-read source text."""
 
@@ -124,6 +140,30 @@ class _InMemoryTextReader(TextReader):
 
     def read(self, file: Path | IO[Any], name: str | None = None) -> list[Document]:
         return self.chunk_document(Document(name=name or str(file), id=str(uuid.uuid4()), content=self._source_text))
+
+
+class _MemoryEntryChunking(SafeFixedSizeChunking):
+    """Make each memory entry its own chunk, with its whitespace collapsed as in fixed-size chunks.
+
+    An entry over the chunk size is split at whitespace into pieces of at most that size. A file without entries,
+    such as a lone heading, is chunked at the fixed size instead, so it still indexes.
+    """
+
+    def chunk(self, document: Document) -> list[Document]:
+        """Split one memory file into one document per entry."""
+        chunks: list[Document] = []
+        for entry in split_memory_entries(document.content, self.chunk_size):
+            number = len(chunks) + 1
+            content = self.clean_text(entry)
+            chunks.append(
+                Document(
+                    id=self._generate_chunk_id(document, number, content),
+                    name=document.name,
+                    meta_data={**(document.meta_data or {}), "chunk": number, "chunk_size": len(content)},
+                    content=content,
+                ),
+            )
+        return chunks or super().chunk(document)
 
 
 class _PermanentEmbeddingError(Exception):
@@ -258,7 +298,8 @@ class FileIndexer:
     def _configure_text_reader(self, reader: TextReader | MarkdownReader) -> TextReader | MarkdownReader:
         """Apply this base's text chunking policy to ``reader`` in place."""
         base_config = self.config.get_knowledge_base_config(self.base_id)
-        chunking_strategy = SafeFixedSizeChunking(chunk_size=base_config.chunk_size, overlap=base_config.chunk_overlap)
+        strategy = _MemoryEntryChunking if base_config.chunk_strategy == "memory_entries" else SafeFixedSizeChunking
+        chunking_strategy = strategy(chunk_size=base_config.chunk_size, overlap=base_config.chunk_overlap)
         reader.chunk = True
         reader.chunk_size = chunking_strategy.chunk_size
         reader.chunking_strategy = chunking_strategy
@@ -266,20 +307,25 @@ class FileIndexer:
 
     def _build_reader(self, file_path: Path) -> Reader:
         """Build a per-file reader with conservative chunking for text-like content."""
+        # ReaderFactory builds a new reader for each call, so configuring it changes no other caller's reader.
         reader = ReaderFactory.get_reader_for_extension(file_path.suffix.lower())
 
-        # ReaderFactory hands out cached shared instances, so any branch that
-        # configures a reader copies it first instead of mutating the cache.
+        strategy = reader.chunking_strategy
+        legacy = _LEGACY_WHITESPACE_CHUNKING.get(type(strategy))
+        if legacy is not None and isinstance(strategy, FixedSizeChunking | DocumentChunking):
+            # JSON, PDF, DOCX, and PPTX readers keep Agno's split algorithm and its size, with the legacy whitespace.
+            reader.chunking_strategy = legacy(chunk_size=strategy.chunk_size, overlap=strategy.overlap)
+
         if isinstance(reader, JSONReader):
             # Carry the factory reader's configuration (encoding, chunking) onto
             # the subclass that tags its own decode failures for the text fallback.
-            return _FallbackAwareJSONReader(**deepcopy(vars(reader)))
+            return _FallbackAwareJSONReader(**vars(reader))
 
         # Large markdown/plain-text files are the common source of oversized embed requests.
         if not isinstance(reader, (TextReader, MarkdownReader)):
             return reader
 
-        return self._configure_text_reader(deepcopy(reader))
+        return self._configure_text_reader(reader)
 
     def _read_file(self, file_path: Path) -> _PreparedFile | None:
         """Read and chunk one listed file through a private snapshot; None when its reader dependency is missing.
@@ -444,7 +490,7 @@ class FileIndexer:
                 try:
                     vectors.update(
                         await run_with_embedding_retry(
-                            partial(asyncio.to_thread, self.embedder.embed_texts, planned_batch, stop=stop),
+                            partial(asyncio.to_thread, partial(self.embedder.embed_texts, planned_batch, stop=stop)),
                             policy=_EMBEDDING_RETRY_POLICY,
                             sleep=_EMBEDDING_RETRY_SLEEP,
                             on_retry=self._record_embedding_retry,

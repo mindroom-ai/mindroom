@@ -306,6 +306,7 @@ async def run_script_in_worker(request: Request, payload: SandboxScriptRunReques
         snapshot=snapshot,
         workspace=workspace,
         max_runtime_seconds=payload.max_runtime_seconds,
+        entry=payload.entry,
     )
     return SandboxScriptRunResponse(ok=refusal is None, error=refusal)
 

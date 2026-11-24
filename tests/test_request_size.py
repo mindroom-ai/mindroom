@@ -8,22 +8,32 @@ records it (``llm.request_identity``).
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING
 
 import pytest
 
 from mindroom.config.main import Config
 from mindroom.history.request_size import RequestSize, request_sizer
-from mindroom.llm.media import File, Image
+from mindroom.llm.media import Audio, File, Image
 from mindroom.llm.messages import (
     QUEUED_MESSAGE_NOTICE_MARKER_KEY,
     Message,
     model_provenance,
 )
-from mindroom.llm.provider import DeferredTools, ModelIdentity, ModelRequest, NativeCompactionReplay, ToolSpec
+from mindroom.llm.provider import (
+    Capabilities,
+    DeferredTools,
+    ModelIdentity,
+    ModelRequest,
+    NativeCompactionReplay,
+    ToolSpec,
+)
 from mindroom.llm.request_identity import REQUEST_IDENTITY_KEY, request_prefixes
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import NATIVE_CHECKPOINT_KEY
+from mindroom.providers.pipeline.media import media_fallback_projection, media_fallback_stream
+from mindroom.providers.pipeline.wrapped import WrappedProvider
 from mindroom.session_storage.agent_storage import create_session_storage
 from tests.conftest import bind_runtime_paths, prepare_history_for_run_for_test, seed_session, test_runtime_paths
 from tests.fakes.scripted_model import ScriptedModel
@@ -44,7 +54,7 @@ def _config(tmp_path: Path) -> Config:
     return bind_runtime_paths(Config.model_validate(authored), test_runtime_paths(tmp_path))
 
 
-def _answered(model: ScriptedModel, request: ModelRequest, content: str, *, reported: int = _REPORTED) -> Message:
+def _answered(model: ModelProvider, request: ModelRequest, content: str, *, reported: int = _REPORTED) -> Message:
     """Return the answer ``model`` gave ``request``, stamped as the loop stamps it."""
     answer = Message(
         role="assistant",
@@ -57,7 +67,7 @@ def _answered(model: ScriptedModel, request: ModelRequest, content: str, *, repo
     return answer
 
 
-def _sized(tmp_path: Path, model: ScriptedModel, request: ModelRequest) -> RequestSize:
+def _sized(tmp_path: Path, model: ModelProvider, request: ModelRequest) -> RequestSize:
     return request_sizer(model, _config(tmp_path), "default").size(request)
 
 
@@ -283,6 +293,58 @@ async def test_the_latest_answer_s_replayed_reasoning_counts_before_the_next_rep
     reasoning = kimi.request_tokens(ModelRequest(messages=(Message(role="user", content=_REASONING),)))
     assert prepared.compaction_decision.request_tokens is not None
     assert prepared.compaction_decision.request_tokens >= _REPORTED + reasoning
+
+
+def test_answered_audio_does_not_anchor_follow_up_sizing_on_audio_capable_routes(tmp_path: Path) -> None:
+    """Request 2 skips an audio-inclusive anchor (falling back to an earlier one or estimate); request 3 anchors on 2."""
+    inner = ScriptedModel([])
+    model = WrappedProvider(
+        inner,
+        partial(media_fallback_stream, fallback_prompt="Fallback"),
+        media_fallback_projection("Fallback"),
+    )
+    voice = Message(role="user", content="Voice transcript", audio=[Audio(id="att_v1", content=b"RIFF", format="wav")])
+    req_1 = _first(voice)
+    asst_1 = _answered(model, req_1, "Calling tool", reported=5_022)
+    tool_1 = Message(role="tool", tool_call_id="call_1", content="ok")
+    req_2 = replace(req_1, messages=(*req_1.messages, asst_1, tool_1))
+
+    # First turn with no earlier answer: skips audio-inclusive asst_1 and estimates without audio allowance.
+    assert _sized(tmp_path, model, req_2) == RequestSize(model.request_tokens(req_2), reported=False)
+    assert model.request_tokens(req_2) < 5_000
+
+    # Request 3 anchors on asst_2 (which answered the audio-omitted request 2).
+    asst_2 = _answered(model, req_2, "Calling tool 2", reported=61)
+    req_3 = replace(
+        req_2,
+        messages=(*req_2.messages, asst_2, Message(role="tool", tool_call_id="call_2", content="ok")),
+    )
+    assert _sized(tmp_path, model, req_3) == RequestSize(61 + model.request_tokens(req_3, start=4), reported=True)
+
+    # With an earlier text turn, request 2 falls back to that turn's anchor instead of asst_1.
+    req_0 = _first(Message(role="user", content="Earlier"))
+    asst_0 = _answered(model, req_0, "Earlier reply", reported=800)
+    with_prior_1 = replace(req_0, messages=(*req_0.messages, asst_0, voice))
+    prior_asst_1 = _answered(model, with_prior_1, "Calling tool", reported=5_900)
+    with_prior_2 = replace(with_prior_1, messages=(*with_prior_1.messages, prior_asst_1, tool_1))
+    assert _sized(tmp_path, model, with_prior_2) == RequestSize(
+        800 + model.request_tokens(with_prior_2, start=2),
+        reported=True,
+    )
+
+    # An audio-omitting route never sent the audio, so asst_1 still anchors request 2.
+    omitting_inner = ScriptedModel([], capabilities=Capabilities(omitted_media=frozenset({"audio"})))
+    omitting = WrappedProvider(
+        omitting_inner,
+        partial(media_fallback_stream, fallback_prompt="Fallback"),
+        media_fallback_projection("Fallback"),
+    )
+    omitting_asst = _answered(omitting, req_1, "Calling tool", reported=90)
+    omitting_req_2 = replace(req_1, messages=(*req_1.messages, omitting_asst, tool_1))
+    assert _sized(tmp_path, omitting, omitting_req_2) == RequestSize(
+        90 + omitting.request_tokens(omitting_req_2, start=2),
+        reported=True,
+    )
 
 
 def _kimi_route(tmp_path: Path) -> ModelProvider:

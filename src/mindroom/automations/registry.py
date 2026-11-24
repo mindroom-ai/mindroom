@@ -71,9 +71,14 @@ def iter_module_automations(module: ModuleType) -> list[CheckFn]:
 class _AutomationPlugin(Protocol):
     """The loaded-plugin fields compilation reads."""
 
-    name: str
-    entry_config: PluginEntryConfig
-    discovered_automations: tuple[CheckFn, ...]
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def entry_config(self) -> PluginEntryConfig: ...
+
+    @property
+    def discovered_automations(self) -> tuple[CheckFn, ...]: ...
 
 
 @dataclass(frozen=True)

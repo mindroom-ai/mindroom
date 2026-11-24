@@ -44,9 +44,15 @@ from mindroom.llm.provider import (
     complete,
 )
 from mindroom.llm.usage import MessageMetrics, TokenCounts
+from mindroom.providers.anthropic import messages as claude_messages
 from mindroom.providers.anthropic.messages import build_provider
 from mindroom.providers.anthropic.settings import parse_claude_settings
-from mindroom.providers.anthropic.wire import checks_thinking_prefix, supports_prefill, supports_structured_outputs
+from mindroom.providers.anthropic.wire import (
+    checks_thinking_prefix,
+    supports_forced_tool_use,
+    supports_prefill,
+    supports_structured_outputs,
+)
 from mindroom.providers.pipeline import retry as retry_stage
 from tests.providers.anthropic_family_support import (
     CLAUDE_USAGE,
@@ -70,6 +76,8 @@ from tests.providers.golden_support import (
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.providers.anthropic.settings import ClaudeRouteKind
 
 # Sonnet 5.5, the model these tests default to, asks the Anthropic and Vertex routes to drop stale replayed thinking.
 _THINKING_BINDING_BETA = "thinking-binding-controls-2026-08-01"
@@ -488,8 +496,8 @@ async def test_transport_failures_are_retryable_provider_unavailable(tmp_path: P
 
 
 @pytest.mark.asyncio
-async def test_summary_overrides_drop_thinking_cache_markers_and_apply_sampling(tmp_path: Path) -> None:
-    """One-off summary requests send no thinking setting and no cache writes, with their own limits."""
+async def test_summary_overrides_drop_thinking_cache_markers_and_sampling(tmp_path: Path) -> None:
+    """One-off summary requests send no thinking setting, no cache writes, and no sampling, with their own limits."""
     wire = Wire(sse_reply([{"type": "text", "text": "Summary."}]))
     provider = route_provider(
         "anthropic",
@@ -509,8 +517,7 @@ async def test_summary_overrides_drop_thinking_cache_markers_and_apply_sampling(
     body = wire.body()
     assert "thinking" not in body
     assert body["max_tokens"] == 512
-    assert body["temperature"] == 0.1
-    assert body["top_k"] == 4
+    assert not {"temperature", "top_p", "top_k"} & body.keys()
     assert "cache_control" not in json.dumps(body)
     # Sonnet 4.5 accepts prefill, and thinking is off, so the history may end with the assistant turn.
     assert body["messages"][-1]["role"] == "assistant"
@@ -548,19 +555,92 @@ async def test_default_sampling_models_lose_sampling_controls_everywhere(
 
 
 @pytest.mark.asyncio
-async def test_vertex_keeps_an_older_claude_s_authored_sampling_and_ignores_the_override(tmp_path: Path) -> None:
-    """Vertex leaves overriding sampling to the provider, but only the newest generations lose the authored values."""
+@pytest.mark.parametrize(
+    ("route", "model_id", "version", "sampling"),
+    [
+        ("anthropic", "claude-sonnet-4-5", "2026-10-21", {}),
+        ("vertexai_claude", "claude-sonnet-4-5", "2026-10-21", {}),
+        ("bedrock_claude", "anthropic.claude-haiku-5-5", "2026-10-21", {}),
+        # Bedrock serves 2026-10-21 for Claude 4.7 and later only, so an older model keeps 2023-06-01 and sampling.
+        ("bedrock_claude", "anthropic.claude-haiku-4-5", "2023-06-01", {"temperature": 0.2, "top_k": 3, "top_p": 0.9}),
+    ],
+)
+async def test_only_an_older_claude_on_bedrock_keeps_the_old_api_version_and_sampling(
+    tmp_path: Path,
+    route: str,
+    model_id: str,
+    version: str,
+    sampling: dict[str, float],
+) -> None:
+    """API version 2026-10-21 rejects sampling on every model; Bedrock keeps a model older than 4.7 on 2023-06-01."""
     wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
     provider = route_provider(
-        "vertexai_claude",
+        route,
         tmp_path,
         wire,
-        id="claude-sonnet-4-5",
-        extra_kwargs={"temperature": 0.7, "top_k": 3},
+        id=model_id,
+        extra_kwargs={"temperature": 0.7, "top_k": 3, "request_params": {"top_p": 0.9}},
     )
+    assert provider.capabilities.provider_default_sampling == (not sampling)
     await claude_turn(provider, ModelRequest(messages=_user(), overrides=RequestOverrides(temperature=0.2)))
     body = wire.body()
-    assert (body["temperature"], body["top_k"]) == (0.7, 3)
+    assert {name: body[name] for name in ("temperature", "top_p", "top_k") if name in body} == sampling
+    sent = (
+        body.get("anthropic_version") if route == "vertexai_claude" else wire.requests[0].headers["anthropic-version"]
+    )
+    assert sent == version
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", sorted(ROUTE_CONFIGS))
+async def test_env_custom_headers_reach_only_the_direct_api(tmp_path: Path, route: str) -> None:
+    """``ANTHROPIC_CUSTOM_HEADERS`` stays off Vertex and Bedrock requests, where a header the model configures goes."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+    provider = route_provider(route, tmp_path, wire, extra_kwargs={"default_headers": {"X-Shared": "configured"}})
+    with isolated_provider_environment(), pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "X-Env-Marker: from-env\nX-Shared: from-env")
+        assert [event async for event in provider.stream(ModelRequest(messages=_user()))]
+    headers = wire.requests[0].headers
+    assert (headers.get("x-env-marker"), headers["x-shared"]) == (
+        "from-env" if route == "anthropic" else None,
+        "configured",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "request_params",
+    [{"model": "anthropic.claude-haiku-4-5"}, {"extra_body": {"model": "anthropic.claude-haiku-4-5"}}],
+    ids=["model", "extra-body-model"],
+)
+async def test_the_bedrock_api_version_follows_the_model_the_body_names(
+    tmp_path: Path,
+    request_params: dict[str, Any],
+) -> None:
+    """A raw ``model`` override decides the Bedrock API version and sampling, not the configured id."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+    authored = {"temperature": 0.7, "request_params": request_params}
+    provider = route_provider("bedrock_claude", tmp_path, wire, id="anthropic.claude-haiku-5-5", extra_kwargs=authored)
+    await claude_turn(provider, ModelRequest(messages=_user()))
+    body = wire.body()
+    assert (body["model"], body.get("temperature")) == ("anthropic.claude-haiku-4-5", 0.7)
+    assert wire.requests[0].headers["anthropic-version"] == "2023-06-01"
+
+
+@pytest.mark.asyncio
+async def test_dropped_sampling_controls_are_logged_once_per_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A config whose sampling controls go unsent hears so once, naming them; a model that sends them hears nothing."""
+    monkeypatch.setattr(claude_messages, "_SAMPLING_WARNED", set())
+    authored = {"temperature": 0.7, "request_params": {"extra_body": {"top_k": 3}}}
+    with capture_logs() as logs:
+        for _ in range(2):
+            route_provider("anthropic", tmp_path, Wire(), extra_kwargs=authored)
+            route_provider("bedrock_claude", tmp_path, Wire(), id="anthropic.claude-haiku-4-5", extra_kwargs=authored)
+    warnings = [log for log in logs if log["event"] == "claude_sampling_controls_dropped"]
+    assert [(log["route"], log["names"]) for log in warnings] == [("anthropic", ["temperature", "top_k"])]
 
 
 @pytest.mark.asyncio
@@ -650,7 +730,7 @@ class _Answer(BaseModel):
 
 @pytest.mark.asyncio
 async def test_direct_route_sends_strict_tools_and_schemas_under_the_structured_outputs_beta(tmp_path: Path) -> None:
-    """Strict tools and a pydantic response format use the beta endpoint with its header."""
+    """Strict tools and a pydantic response format use the SDK's beta method with its header."""
     wire = Wire(sse_reply([{"type": "text", "text": '{"city": "Paris"}'}]))
     provider = route_provider("anthropic", tmp_path, wire)
     tools = [
@@ -666,7 +746,7 @@ async def test_direct_route_sends_strict_tools_and_schemas_under_the_structured_
         ModelRequest(messages=_user(), tools=tools, output_schema=_Answer),
     )
     request = wire.requests[0]
-    assert str(request.url) == "https://api.anthropic.com/v1/messages?beta=true"
+    assert str(request.url) == "https://api.anthropic.com/v1/messages"
     assert request.headers["anthropic-beta"] == f"structured-outputs-2025-11-13,{_THINKING_BINDING_BETA}"
     body = wire.body()
     assert body["stream"] is True
@@ -783,21 +863,24 @@ async def test_a_route_without_native_structured_output_forces_the_answer_tool(
 
 
 @pytest.mark.parametrize(
-    ("model_id", "extra_kwargs"),
+    ("route", "model_id", "extra_kwargs"),
     [
-        ("anthropic.claude-sonnet-5-5", {}),
-        ("anthropic.claude-opus-5-5", {}),
-        ("anthropic.claude-haiku-4-5", {"thinking": {"type": "enabled", "budget_tokens": 2048}}),
+        ("bedrock_claude", "anthropic.claude-sonnet-5-5", {}),
+        ("bedrock_claude", "anthropic.claude-opus-5-5", {}),
+        ("vertexai_claude", "claude-fable-5-2", {}),
+        ("vertexai_claude", "claude-mythos-5-2", {}),
+        ("bedrock_claude", "anthropic.claude-haiku-4-5", {"thinking": {"type": "enabled", "budget_tokens": 2048}}),
     ],
-    ids=["sonnet-5-5", "opus-5-5", "manual-thinking"],
+    ids=["sonnet-5-5", "opus-5-5", "fable-5-2", "mythos-5-2", "manual-thinking"],
 )
 def test_a_model_that_rejects_forced_tool_use_answers_in_json_mode(
     tmp_path: Path,
+    route: str,
     model_id: str,
     extra_kwargs: dict[str, Any],
 ) -> None:
     """Some models reject forced tool use on every request, and manual extended thinking rejects it on every model."""
-    provider = route_provider("bedrock_claude", tmp_path, Wire(sse_reply([])), id=model_id, extra_kwargs=extra_kwargs)
+    provider = route_provider(route, tmp_path, Wire(sse_reply([])), id=model_id, extra_kwargs=extra_kwargs)
 
     assert provider.capabilities.structured_output == "json_mode"
 
@@ -986,6 +1069,7 @@ def _two_turns_with_a_tool_loop() -> list[Message]:
             id="haiku-disabled",
         ),
         pytest.param("bedrock_claude", "anthropic.claude-sonnet-5-5", {}, False, False, id="bedrock"),
+        pytest.param("bedrock_claude", "anthropic.claude-mythos-5-1", {}, False, True, id="bedrock-mythos-5-1"),
         pytest.param(
             "bedrock_claude",
             "anthropic.claude-sonnet-5-5",
@@ -1017,8 +1101,8 @@ async def test_a_request_without_the_binding_replays_thinking_only_inside_the_cu
     """Where no binding is sent, a stale earlier block would fail the request, so earlier turns lose thinking.
 
     The API requires the current tool loop's thinking exactly as received and allows leaving out earlier turns'.
-    An authored binding is the operator's choice and gets the beta it needs on every route, and a model without
-    the check keeps every block.
+    An authored binding is the operator's choice and gets the beta it needs on every route, and a model the route
+    does not check keeps every block.
     """
     wire = Wire(sse_reply([{"type": "text", "text": "Done."}]))
     provider = route_provider(route, tmp_path, wire, id=model_id, extra_kwargs=extra_kwargs)
@@ -1059,6 +1143,27 @@ async def test_an_earlier_turn_of_only_thinking_is_left_out_whole(tmp_path: Path
             RequestOverrides(),
             {"type": "adaptive", "display": "summarized", "block_binding": _DROP_STALE},
             id="authored-adaptive",
+        ),
+        pytest.param(
+            "claude-fable-5-2",
+            {"thinking": {"type": "adaptive", "display": "summarized"}},
+            RequestOverrides(),
+            {"type": "adaptive", "display": "summarized", "block_binding": _DROP_STALE},
+            id="authored-adaptive-fable-5-2",
+        ),
+        pytest.param(
+            "claude-mythos-5-1",
+            {},
+            RequestOverrides(),
+            {"type": "adaptive", "block_binding": _DROP_STALE},
+            id="checked-mythos-5-1",
+        ),
+        pytest.param(
+            "claude-mythos-5-2",
+            {},
+            RequestOverrides(),
+            {"type": "adaptive", "block_binding": _DROP_STALE},
+            id="checked-mythos-5-2",
         ),
         pytest.param(
             "claude-opus-5-5",
@@ -1117,7 +1222,6 @@ async def test_an_earlier_turn_of_only_thinking_is_left_out_whole(tmp_path: Path
             id="thinking-setting-omitted",
         ),
         pytest.param("claude-opus-5", {}, RequestOverrides(), None, id="unchecked-model"),
-        pytest.param("claude-mythos-5-1", {}, RequestOverrides(), None, id="unchecked-mythos"),
     ],
 )
 async def test_the_thinking_binding_rides_on_adaptive_thinking_of_checked_models(
@@ -1162,29 +1266,63 @@ async def test_a_reply_that_dropped_replayed_thinking_says_so_in_the_log(tmp_pat
 
 
 @pytest.mark.parametrize(
-    ("model_id", "checked"),
+    ("route", "model_id", "checked"),
     [
-        ("claude-fable-5-1", True),
-        ("anthropic.claude-opus-5-5", True),
-        ("claude-sonnet-5-5@20261001", True),
-        ("anthropic/claude-haiku-5-5", True),
-        ("claude-fable-5", False),
-        ("claude-mythos-5-1", False),
-        ("claude-sonnet-4-5", False),
+        ("anthropic", "claude-fable-5-1", True),
+        ("anthropic", "claude-fable-5-2", True),
+        ("anthropic", "claude-mythos-5-1", True),
+        ("vertexai_claude", "claude-mythos-5-1", True),
+        ("anthropic", "claude-mythos-5-2", True),
+        ("bedrock_claude", "anthropic.claude-opus-5-5", True),
+        ("vertexai_claude", "claude-sonnet-5-5@20261001", True),
+        ("anthropic", "anthropic/claude-haiku-5-5", True),
+        ("bedrock_claude", "anthropic.claude-mythos-5-1", False),
+        ("anthropic", "claude-fable-5", False),
+        ("anthropic", "claude-sonnet-4-5", False),
     ],
 )
-def test_the_thinking_prefix_check_reads_the_model_behind_route_decorated_ids(model_id: str, *, checked: bool) -> None:
-    """Fable 5.1 and the 5.5 models check replayed thinking under every route's spelling; older models and Mythos 5.1 do not."""
-    assert checks_thinking_prefix(model_id) is checked
+def test_the_thinking_prefix_check_reads_the_model_behind_route_decorated_ids(
+    route: ClaudeRouteKind,
+    model_id: str,
+    *,
+    checked: bool,
+) -> None:
+    """Fable and Mythos 5.1 and 5.2 and the 5.5 models check replayed thinking under every route's spelling.
+
+    Bedrock does not check Mythos 5.1, and Fable 5 and older models are checked nowhere.
+    """
+    assert checks_thinking_prefix(model_id, route) is checked
+
+
+@pytest.mark.parametrize(
+    ("model_id", "forced"),
+    [
+        ("claude-fable-5-1", False),
+        ("claude-fable-5-2", False),
+        ("claude-mythos-5-1", False),
+        ("claude-mythos-5-2", False),
+        ("claude-opus-5-5", False),
+        ("claude-sonnet-5-5", False),
+        ("claude-fable-5", True),
+        ("claude-opus-5", True),
+        ("claude-haiku-5-5", True),
+    ],
+)
+def test_forced_tool_use_is_left_out_for_models_that_reject_it(model_id: str, *, forced: bool) -> None:
+    """Fable and Mythos 5.1 and 5.2, Opus 5.5, and Sonnet 5.5 reject a forced tool call.
+
+    Fable 5, Opus 5, and Haiku 5.5 accept one.
+    """
+    assert supports_forced_tool_use(model_id, manual_thinking=False) is forced
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("route", "strict_sent", "url_suffix", "beta_header"),
     [
-        ("anthropic", True, "/v1/messages?beta=true", f"structured-outputs-2025-11-13,{_THINKING_BINDING_BETA}"),
+        ("anthropic", True, "/v1/messages", f"structured-outputs-2025-11-13,{_THINKING_BINDING_BETA}"),
         ("vertexai_claude", False, ":streamRawPredict", _THINKING_BINDING_BETA),
-        ("bedrock_claude", True, "/v1/messages?beta=true", None),
+        ("bedrock_claude", True, "/v1/messages", None),
     ],
 )
 async def test_tool_definitions_send_each_schema_as_authored(
@@ -1199,7 +1337,7 @@ async def test_tool_definitions_send_each_schema_as_authored(
     A strict tool, on a route that takes it, closes its objects as strict tool use requires.
 
     The direct API adds the structured-outputs beta header for a strict tool; Bedrock sends the strict tool
-    through the beta endpoint without one.
+    without one.
     """
     wire = Wire(sse_reply([{"type": "text", "text": "Ok."}]))
     provider = route_provider(route, tmp_path, wire, extra_kwargs={"cache_system_prompt": False})
@@ -1347,7 +1485,19 @@ async def test_claude_native_tools_cannot_execute_during_decision(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpoint(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("base_url", "host", "path"),
+    [
+        ("https://api.anthropic.com", "api.anthropic.com", "/v1/messages"),
+        ("https://openrouter.ai/api", "openrouter.ai", "/api/v1/messages"),
+    ],
+)
+async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpoint(
+    tmp_path: Path,
+    base_url: str,
+    host: str,
+    path: str,
+) -> None:
     """The request asks Claude to compact; the checkpoint it returns replaces the earlier prefix next time."""
     checkpoint = {"type": "compaction", "content": "Summary so far.", "encrypted_content": "opaque"}
     usage = {
@@ -1374,7 +1524,7 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
         sse_reply([checkpoint, {"type": "text", "text": "Done."}], usage=usage),
         sse_reply([{"type": "text", "text": "Next."}]),
     )
-    provider = route_provider("anthropic", tmp_path, wire)
+    provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"base_url": base_url})
     replay = native_settings(provider, history_generation="gen-1")
     assert replay is not None
     assert replay.threshold == 60000
@@ -1389,8 +1539,8 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
         ),
     )
     request = wire.requests[0]
+    assert (request.url.host, request.url.path) == (host, path)
     assert request.headers["anthropic-beta"] == f"compact-2026-01-12,{_THINKING_BINDING_BETA}"
-    assert str(request.url).endswith("?beta=true")
     edit = wire.body(0)["context_management"]["edits"][0]
     assert (edit["type"], edit["trigger"], edit["pause_after_compaction"]) == (
         "compact_20260112",
@@ -1421,6 +1571,107 @@ async def test_native_compaction_sends_the_edit_and_replays_the_recorded_checkpo
     # The canonical history is untouched: the stored message still starts with its compaction block.
     assert (first.message.provider_data or {})["claude_blocks"][0]["type"] == "compaction"
     assert messages[0].content == "Be brief."
+
+
+def test_native_compaction_checkpoints_are_bound_to_the_endpoint(tmp_path: Path) -> None:
+    """Two Messages endpoints do not share a checkpoint, even for the same Claude ID."""
+    wire = Wire(sse_reply([]))
+    direct = native_settings(route_provider("anthropic", tmp_path, wire))
+    proxied = native_settings(
+        route_provider("anthropic", tmp_path, wire, extra_kwargs={"base_url": "https://openrouter.ai/api"}),
+    )
+    assert direct is not None
+    assert proxied is not None
+    assert direct.route != proxied.route
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("request_params", "sent_id", "supported"),
+    [
+        ({"model": "claude-haiku-5-5"}, "claude-haiku-5-5", True),
+        ({"model": "claude-haiku-4-5-20251001"}, "claude-haiku-4-5-20251001", False),
+        ({"extra_body": {"model": "claude-haiku-4-5-20251001"}}, "claude-haiku-4-5-20251001", False),
+        (
+            {"model": "claude-haiku-4-5-20251001", "extra_body": {"model": "claude-haiku-5-5"}},
+            "claude-haiku-5-5",
+            True,
+        ),
+    ],
+)
+async def test_native_compaction_eligibility_uses_the_sent_model_id(
+    tmp_path: Path,
+    request_params: dict[str, Any],
+    sent_id: str,
+    *,
+    supported: bool,
+) -> None:
+    """The model override determines eligibility without changing the configured model's checkpoint route."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Ok."}]))
+    endpoint = {"base_url": "https://openrouter.ai/api"}
+    provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={**endpoint, "request_params": request_params})
+    replay = native_settings(provider)
+    await claude_turn(provider, ModelRequest(messages=_user(), native_compaction=replay))
+    body = wire.body()
+    assert body["model"] == sent_id
+    assert provider.capabilities.native_compaction is supported
+    assert ("context_management" in body) is supported
+    if supported:
+        assert replay is not None
+        configured_model = route_provider("anthropic", tmp_path, wire, extra_kwargs=endpoint)
+        assert replay == native_settings(configured_model)
+    else:
+        assert replay is None
+
+
+def test_null_model_override_keeps_the_configured_checkpoint_id(tmp_path: Path) -> None:
+    """A raw null cannot become a literal model name in the checkpoint route."""
+    wire = Wire(sse_reply([]))
+    direct = route_provider("anthropic", tmp_path, wire)
+    override = route_provider("anthropic", tmp_path, wire, extra_kwargs={"request_params": {"model": None}})
+    assert native_settings(direct) is not None
+    assert native_settings(override) == native_settings(direct)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("routing", [{"fallbacks": [{"model": "claude-opus-4-6"}]}, {"models": ["claude-opus-4-6"]}])
+async def test_openrouter_model_fallbacks_are_sent_without_managed_compaction(
+    tmp_path: Path,
+    routing: dict[str, Any],
+) -> None:
+    """Messages requests preserve OpenRouter's routing fields without sending a managed edit."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Ok."}]))
+    provider = route_provider(
+        "anthropic",
+        tmp_path,
+        wire,
+        id="claude-sonnet-4-6",
+        extra_kwargs={"base_url": "https://openrouter.ai/api", "request_params": {"extra_body": routing}},
+    )
+    replay = native_settings(provider)
+    assert replay is None
+    await claude_turn(provider, ModelRequest(messages=_user(), native_compaction=replay))
+    body = wire.body()
+    assert routing.items() <= body.items()
+    assert "context_management" not in body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["anthropic", "vertexai_claude"])
+async def test_anthropic_and_vertex_fallbacks_keep_managed_compaction(tmp_path: Path, route: str) -> None:
+    """Sonnet 4.6 needs the managed edit to select the beta SDK method, which accepts `fallbacks`."""
+    wire = Wire(sse_reply([{"type": "text", "text": "Ok."}]))
+    fallbacks = [{"model": "claude-opus-4-6"}]
+    provider = route_provider(
+        route,
+        tmp_path,
+        wire,
+        id="claude-sonnet-4-6",
+        extra_kwargs={"request_params": {"fallbacks": fallbacks}},
+    )
+    await claude_turn(provider, ModelRequest(messages=_user(), native_compaction=native_settings(provider)))
+    assert wire.body()["fallbacks"] == fallbacks
+    assert wire.body()["context_management"]["edits"][0]["type"] == "compact_20260112"
 
 
 @pytest.mark.asyncio
@@ -1468,7 +1719,6 @@ async def test_an_authored_context_edit_records_what_the_response_applied(tmp_pa
     authored = {"edits": [{"type": "clear_tool_uses_20250919"}]}
     provider = route_provider("anthropic", tmp_path, wire, extra_kwargs={"context_management": authored})
     completed = await claude_turn(provider, ModelRequest(messages=_user()))
-    assert str(wire.requests[0].url).endswith("?beta=true")
     assert wire.body()["context_management"] == authored
     assert (completed.message.provider_data or {})["context_management"] == applied
 
@@ -1647,25 +1897,69 @@ def test_bedrock_reads_the_region_variables_in_the_order_aws_tools_read_them(tmp
     assert bedrock.settings.aws_region == "eu-central-1"
 
 
-def test_anthropic_base_url_sets_the_direct_endpoint_only_where_client_params_set_none(tmp_path: Path) -> None:
-    """``ANTHROPIC_BASE_URL`` from the runtime env is the direct route's endpoint unless the model configures one."""
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+@pytest.mark.asyncio
+async def test_the_direct_endpoint_is_client_params_then_base_url_then_anthropic_base_url(tmp_path: Path) -> None:
+    """The endpoint is ``client_params.base_url``, else ``base_url`` (a root the SDK appends ``/v1`` to), else the env.
+
+    A null or empty ``base_url`` or ``client_params.base_url`` sets no endpoint.
+    """
     runtime_paths = resolve_runtime_paths(
-        config_path=config_path,
+        config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "data",
         process_env={"ANTHROPIC_BASE_URL": "https://env-gateway.example/"},
     )
-    own = {"client_params": {"base_url": "https://own-gateway.example"}}
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+    params = {"client_params": {"base_url": "https://params-gateway.example"}}
+    own = {"base_url": "https://gateway.example/anthropic/"}
+    openrouter = {"base_url": "https://openrouter.ai/api/"}
+    unset = (
+        {"base_url": ""},
+        {"base_url": None},
+        {"client_params": {"base_url": ""}},
+        {"client_params": {"base_url": None}},
+    )
     with isolated_provider_environment():
-        from_env = build_provider(ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="k"), runtime_paths)
-        configured = build_provider(
-            ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="k", extra_kwargs=own),
-            runtime_paths,
-        )
-    assert from_env.identity.endpoint == "https://env-gateway.example"
-    assert configured.identity.endpoint == "https://own-gateway.example"
-    assert configured.settings.client_params == own["client_params"]
+        providers = [
+            build_provider(
+                ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="k", extra_kwargs=extra_kwargs),
+                runtime_paths,
+            )
+            for extra_kwargs in (None, params, own, {**own, **params}, openrouter, *unset)
+        ]
+        for provider in providers:
+            await claude_turn(replace(provider, http_client=wire.client), ModelRequest(messages=_user()))
+
+    assert [(sent.url.host, sent.url.path) for sent in wire.requests] == [
+        ("env-gateway.example", "/v1/messages"),
+        ("params-gateway.example", "/v1/messages"),
+        ("gateway.example", "/anthropic/v1/messages"),
+        ("params-gateway.example", "/v1/messages"),
+        ("openrouter.ai", "/api/v1/messages"),
+        *[("env-gateway.example", "/v1/messages")] * len(unset),
+    ]
+    assert [provider.identity.endpoint for provider in providers] == [
+        "https://env-gateway.example",
+        "https://params-gateway.example",
+        "https://gateway.example/anthropic",
+        "https://params-gateway.example",
+        "https://openrouter.ai/api",
+        *["https://env-gateway.example"] * len(unset),
+    ]
+    assert providers[1].settings.client_params == params["client_params"]
+    # MindRoom allows its own compaction trigger on OpenRouter's Messages root, not arbitrary gateways.
+    assert providers[2].capabilities.native_compaction is False
+    assert providers[4].capabilities.native_compaction is True
+
+
+def test_openrouter_versioned_base_url_does_not_enable_native_compaction(tmp_path: Path) -> None:
+    """The Chat Completions base URL is not the Anthropic SDK's Messages root."""
+    provider = route_provider(
+        "anthropic",
+        tmp_path,
+        Wire(sse_reply([])),
+        extra_kwargs={"base_url": "https://openrouter.ai/api/v1"},
+    )
+    assert provider.capabilities.native_compaction is False
 
 
 def test_a_blank_exported_anthropic_base_url_keeps_the_direct_route_on_anthropics_api(
@@ -1724,6 +2018,41 @@ def test_a_blank_exported_vertex_endpoint_or_region_fails_the_build_and_names_th
     assert getattr(build_provider(model, env_file_paths).settings, setting) == value
 
 
+@pytest.mark.asyncio
+async def test_a_null_or_empty_vertex_project_or_region_falls_back_to_the_runtime_env(tmp_path: Path) -> None:
+    """A null or empty ``project_id`` or ``region``, top-level or in ``client_params``, sets neither."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env={"ANTHROPIC_VERTEX_PROJECT_ID": "env-project", "CLOUD_ML_REGION": "us-east5"},
+    )
+    wire = Wire(sse_reply([{"type": "text", "text": "Hi."}]))
+    credentials = Credentials(token="unset-google-token")  # noqa: S106 - synthetic SDK credential
+    unset = ({"project_id": "", "region": ""}, {"project_id": None, "region": None})
+    with isolated_provider_environment():
+        providers = [
+            build_provider(
+                ModelConfig(provider="vertexai_claude", id="claude-sonnet-5-5", extra_kwargs=extra_kwargs),
+                runtime_paths,
+            )
+            for values in unset
+            for extra_kwargs in (
+                {**values, "client_params": {"credentials": credentials}},
+                {"client_params": {**values, "credentials": credentials}},
+            )
+        ]
+        for provider in providers:
+            await claude_turn(replace(provider, http_client=wire.client), ModelRequest(messages=_user()))
+
+    assert [str(sent.url) for sent in wire.requests] == [
+        "https://us-east5-aiplatform.googleapis.com/v1/projects/env-project/locations/us-east5/publishers/anthropic/"
+        "models/claude-sonnet-5-5:streamRawPredict",
+    ] * len(providers)
+    assert {provider.identity.endpoint for provider in providers} == {
+        "https://us-east5-aiplatform.googleapis.com/v1|env-project|us-east5",
+    }
+
+
 def test_a_blank_exported_vertex_project_still_builds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The Vertex SDK reads a blank project as unset and takes the credentials' project, so the build goes on."""
     config_path = tmp_path / "config.yaml"
@@ -1756,7 +2085,7 @@ async def test_client_params_override_route_settings_but_not_headers_or_the_http
     )
     await claude_turn(direct, ModelRequest(messages=_user()))
     request = wire.requests[-1]
-    assert str(request.url) == "https://gateway.example/anthropic/v1/messages?beta=true"
+    assert str(request.url) == "https://gateway.example/anthropic/v1/messages"
     assert request.headers["x-api-key"] == "params-key"
     assert request.headers["x-mindroom"] == "authored"
 
@@ -1963,6 +2292,48 @@ async def test_the_stable_prompt_stays_cacheable_when_the_turn_context_changes(
     assert monday["system"][1] != tuesday["system"][1]
     assert monday["messages"][-1]["content"][-1]["cache_control"] == cache_control
     assert len(_markers(monday)) <= 4
+
+
+def _without_moving_marker(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the messages without the cache marker on the last block, which moves to the next turn's last block."""
+    *earlier, last = json.loads(json.dumps(messages))
+    assert last["content"][-1].pop("cache_control")
+    return [*earlier, last]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", sorted(ROUTE_CONFIGS))
+async def test_the_next_turn_resends_the_cached_prefix_byte_for_byte(tmp_path: Path, route: str) -> None:
+    """A follow-up turn resends the tools, system, and earlier messages as sent, under the same version and betas.
+
+    Only the message cache marker moves to the new last turn; the API matches a cached prefix by content, not by its
+    markers. Each turn's usage, cache reads and writes included, reaches the turn's metrics.
+    """
+    wire = Wire(
+        sse_reply([{"type": "text", "text": "First answer."}]),
+        sse_reply([{"type": "text", "text": "Second answer."}], usage={**CLAUDE_USAGE, "cache_read_input_tokens": 30}),
+    )
+    provider = route_provider(route, tmp_path, wire)
+    tools = [ToolSpec(name="pick", description="Pick.", parameters={"type": "object", "properties": {}}, strict=None)]
+    history = _user("First request.")
+    first = await claude_turn(provider, ModelRequest(messages=history, tools=tools))
+    history = [*history, first.message, Message(role="user", content="Follow-up request.")]
+    second = await claude_turn(provider, ModelRequest(messages=history, tools=tools))
+
+    one, two = wire.body(0), wire.body(1)
+    assert json.dumps(one["tools"]) == json.dumps(two["tools"])
+    assert json.dumps(one["system"]) == json.dumps(two["system"])
+    sent = len(one["messages"])
+    assert json.dumps(_without_moving_marker(one["messages"])) == json.dumps(two["messages"][:sent])
+    for name in ("anthropic-version", "anthropic-beta"):
+        assert wire.requests[0].headers.get(name) == wire.requests[1].headers.get(name)
+    versions = [
+        body.get("anthropic_version") if route == "vertexai_claude" else request.headers["anthropic-version"]
+        for body, request in zip((one, two), wire.requests, strict=True)
+    ]
+    assert versions == ["2026-10-21", "2026-10-21"]
+    tokens = (first.message.metrics.tokens, second.message.metrics.tokens)
+    assert [(t.cache_read_tokens, t.cache_write_tokens) for t in tokens] == [(5, 3), (30, 3)]
 
 
 @pytest.mark.asyncio

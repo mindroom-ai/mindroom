@@ -1,0 +1,104 @@
+# Multi-user MindRoom runtime values
+# Copy to values-multi-user.yaml, pair with config-multi-user.example.yaml
+# (in the mindroom-config ConfigMap), and replace placeholder values.
+
+# Pin image.tag or image.digest in production (the companion config omits update_awareness).
+# image:
+#   tag: ""
+#   digest: ""
+
+# Mount config.yaml read-only from a pre-created ConfigMap.
+config:
+  create: false
+  existingConfigMap: mindroom-config
+  key: config.yaml
+
+# Dedicated workers across nodes need RWX storage.
+# On RWO-only clusters, keep ReadWriteOnce and set
+# workers.kubernetes.colocateWithControlPlaneNode: true below.
+# Warning: Kubernetes cannot upgrade a bound RWO PVC to RWX in place;
+# create a new RWX claim and migrate data instead.
+storage:
+  accessModes:
+    - ReadWriteMany
+  # storageClassName: ""
+  size: 50Gi
+
+# Existing Matrix homeserver (deploy cluster/k8s/tuwunel or point at your own).
+# For passwordless bot/agent accounts, switch to:
+#   managedAccountAuth: appservice
+#   appserviceToken: {existingSecret: mindroom-appservice, key: MATRIX_APPSERVICE_TOKEN}
+# and remove registrationToken. (Separately, the optional matrix_user toolkit reads
+# MATRIX_USER_APPSERVICE_TOKEN or _FILE from mindroom-secrets for an appservice covering human users.)
+matrix:
+  homeserverUrl: http://matrix.example.svc.cluster.local:8008
+  serverName: example.com
+  registrationToken:
+    existingSecret: mindroom-secrets
+    key: MATRIX_REGISTRATION_TOKEN
+
+# Provide model-provider keys (for example OPENROUTER_API_KEY) via mindroom-secrets,
+# or bind individual keys with providerCredentials.
+env:
+  envFrom:
+    - secretRef:
+        name: mindroom-secrets
+  # extra:
+  #   # Cluster-wide cap on concurrent named workers (default 16); size alongside
+  #   # personal_agents.mind.agent.named_workers in config.yaml.
+  #   - name: MINDROOM_KUBERNETES_NAMED_WORKERS_MAX
+  #     value: "16"
+  #   # Reachable HTTPS runtime URL so MindRoom Chat discovers the runtime and
+  #   # the egress broker returns Connections links.
+  #   - name: MINDROOM_PUBLIC_URL
+  #     value: "https://assistant.example.com"
+  #   # JSON array of self-hosted MindRoom Chat origins allowed for Connections portal sign-in
+  #   # (unset allows only hosted https://chat.mindroom.chat with homeserver token binding).
+  #   - name: MINDROOM_CONNECTIONS_ALLOWED_ORIGINS
+  #     value: '["https://chat.example.com"]'
+  #   # JSON array of trusted MindRoom Chat origins for Worker Computer and in-chat Agent Keys cards
+  #   # (in-chat cards also require mindroom_openid_audience token binding on Tuwunel).
+  #   - name: MINDROOM_COMPUTER_ALLOWED_ORIGINS
+  #     value: '["https://chat.example.com"]'
+
+workers:
+  backend: kubernetes
+  # Opt-in live worker browser view in MindRoom Chat (also set MINDROOM_COMPUTER_ALLOWED_ORIGINS above):
+  # computerEnabled: true
+  sandbox:
+    # Default worker-routed tools for agents that leave worker_tools unset
+    # (personal_agents.mind sets worker_tools explicitly). Never add browser under static_runner.
+    proxyTools: shell,file,python,coding,browser
+    proxyToken:
+      existingSecret: mindroom-sandbox-proxy
+      key: MINDROOM_SANDBOX_PROXY_TOKEN
+  kubernetes:
+    # colocateWithControlPlaneNode: true  # Required when storage uses ReadWriteOnce
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: "2"
+        memory: 4Gi
+
+# Agent Keys: inject stored credentials from the primary so workers never hold raw secrets.
+egressBroker:
+  enabled: true
+
+# Optional: human-approved worker egress proxy + isolated background-script gateway.
+# Requires a CNI enforcing Kubernetes NetworkPolicies (workers.kubernetes.networkPolicy.create
+# and egressProxy.networkPolicy.create default to true) and a pinned proxy image tag or digest.
+# Because personal_agents.mind sets include_default_tools: false, add approved_egress explicitly
+# to mind's tools list, and keep manageRuntimeConfig: true (the default) so the chart still
+# enforces request_network_access: require_approval.
+# approvedEgress:
+#   enabled: true
+#   image:
+#     tag: v0.1.10  # Pin a released tag or set digest
+#   allowlist:
+#     domains:
+#       - pypi.org
+#       - files.pythonhosted.org
+# scriptGateway:
+#   enabled: true

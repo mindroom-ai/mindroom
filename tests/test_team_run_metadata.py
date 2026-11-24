@@ -171,11 +171,11 @@ async def test_a_failed_team_reply_still_publishes_the_usage_it_was_billed(
 
 
 @pytest.mark.asyncio
-async def test_a_team_reply_that_fails_before_its_run_stored_a_record_shows_why_and_publishes_nothing(
+async def test_a_team_reply_that_fails_before_its_run_stored_a_record_shows_why_and_seals_error_status(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A team run that fails before it stores its record has no metadata to publish, so its reply says why it failed."""
+    """A team run that fails before storing a record seals terminal error metadata without a run ID or usage."""
 
     async def fails_before_storing(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
         msg = "team start failed"
@@ -189,7 +189,7 @@ async def test_a_team_reply_that_fails_before_its_run_stored_a_record_shows_why_
     text = await team.respond(run_metadata_collector=collector)
 
     assert "team start failed" in text
-    assert collector == {}
+    assert collector == {AI_RUN_METADATA_KEY: {"version": 1, "status": "error"}}
 
 
 def test_a_team_reply_on_priced_models_publishes_its_cost_at_each_model_s_prices(tmp_path: Path) -> None:

@@ -14,15 +14,18 @@ from structlog.testing import capture_logs
 
 from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT, output_limit_policy
 from mindroom.ai import ai_response
+from mindroom.ai_runtime import queued_message_signal_context, queued_notice_after_tool_batch
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig, RouterConfig
 from mindroom.llm.errors import ModelOutputLimitError
 from mindroom.llm.messages import Message
+from mindroom.loop_hooks import _answer_tool_calls
 from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import bind_runtime_paths, make_turn_context, runtime_paths_for, test_runtime_paths
 from tests.providers.golden_support import httpx2_transport
+from tests.tool_job_helpers import NewerMessageWaits
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -53,8 +56,8 @@ def _cut_off_write(contents: str = "print(1)\n") -> dict[str, Any]:
             {
                 "type": "tool_use",
                 "id": "toolu_cut",
-                "name": "save_file",
-                "input": {"file_name": "big.py", "contents": contents},
+                "name": "write_file",
+                "input": {"path": "big.py", "content": contents},
             },
         ],
         stop_reason="max_tokens",
@@ -69,8 +72,8 @@ def _small_write() -> dict[str, Any]:
             {
                 "type": "tool_use",
                 "id": "toolu_part",
-                "name": "save_file",
-                "input": {"file_name": "part1.py", "contents": "print(1)\n"},
+                "name": "write_file",
+                "input": {"path": "part1.py", "content": "print(1)\n"},
             },
         ],
         stop_reason="tool_use",
@@ -312,7 +315,7 @@ def test_each_run_gets_its_own_cut_off_retries() -> None:
     """
     first, second = output_limit_policy(), output_limit_policy()
     for _ in range(2):
-        [result] = first(_cut_off_call(), "output_limit") or []
+        [result] = first([_cut_off_call()], "output_limit") or []
         assert (result.role, result.tool_call_id, result.tool_name, result.content, result.tool_call_error) == (
             "tool",
             "toolu_cut",
@@ -320,10 +323,24 @@ def test_each_run_gets_its_own_cut_off_retries() -> None:
             CUT_OFF_TOOL_CALL_RESULT,
             True,
         )
-        assert second(_cut_off_call(), "output_limit")
-    assert first(_cut_off_call(), "tool_use") is None
+        assert second([_cut_off_call()], "output_limit")
+    assert first([_cut_off_call()], "tool_use") is None
     with pytest.raises(ModelOutputLimitError, match="smaller steps"):
-        first(_cut_off_call(), "output_limit")
+        first([_cut_off_call()], "output_limit")
+
+
+@pytest.mark.asyncio
+async def test_a_cut_off_response_after_the_pause_notice_ends_the_run() -> None:
+    """A response the output limit cut off after the model read the pause notice ends the run, as any calls would.
+
+    Cut-off answers would send the model another request, though the notice asked it to end its turn.
+    """
+    messages = [Message(role="user", content="Save the file.")]
+    with queued_message_signal_context(NewerMessageWaits()):
+        await queued_notice_after_tool_batch("Pause and answer the newer message.")(messages, ())
+        [result] = _answer_tool_calls()([*messages, _cut_off_call()], "output_limit") or []
+    assert "newer message" in str(result.content)
+    assert result.stop_after_tool_call
 
 
 @pytest.mark.asyncio

@@ -252,6 +252,7 @@ def cut_at_event(
     event_id: str,
     match: Literal["answered", "any"],
     session: ConversationSession | None = None,
+    keeping: Collection[str] = (),
 ) -> bool:
     """Delete the earliest element of the scope's log that holds ``event_id`` and everything after it.
 
@@ -259,12 +260,13 @@ def cut_at_event(
     event through its stored metadata unless the latest barrier retired it, and a fold's row through its provenance, so
     the fold's summary is cut even once its run's row is gone. Returns whether any element held the event.
     ``session``, when given, is the loaded session whose log is cut, named by ``session_id``; it then holds the runs
-    and summary a load returns.
+    and summary a load returns. No cut starts at an element that read every event of ``keeping``, when it names any.
     """
     names = storage.names
     with storage.log_transaction(session_id, session=session) as connection:
         basis = read_redaction_basis(connection, names, session_id=session_id, scope_key=scope_key)
-        holder = _first_holder(basis.holders, {event_id}, match)
+        holders = [holder for holder in basis.holders if not (keeping and holder[2].issuperset(keeping))]
+        holder = _first_holder(holders, {event_id}, match)
         if holder is None:
             return False
         _cut(connection, names, session_id, basis.rows, basis.runs, holder)
@@ -374,9 +376,7 @@ def retire(storage: ConversationStore, *, session: ConversationSession, scope_ke
             "VALUES (?, ?, ?, ?)",
             (session_id, scope_key, rows[-1].through if rows else 0, int(time())),
         )
-        owners = {row.fold_run_id for row in rows if row.fold_run_id is not None}
-        removed = delete_runs_in_transaction(connection, names, owners, session_id=session_id)
-        _record_removed(connection, names, session_id, owners | removed)
+        _remove_runs(connection, names, session_id, {row.fold_run_id for row in rows if row.fold_run_id is not None})
 
 
 def _cut(
@@ -391,11 +391,10 @@ def _cut(
 
     ``runs`` are the scope's top-level runs as read in the caller's transaction. A run goes whole (``_expanded``). Every
     deleted run and the running run of every deleted fold row count as removed, which also fences a running run whose
-    row is gone.
+    row is gone; such a run's member rows go too, as a member saved after its team run's row went may hold one.
     """
     expanded = _expanded(rows, runs, cut)
-    removed = delete_runs_in_transaction(connection, names, expanded.run_ids, session_id=session_id)
-    _record_removed(connection, names, session_id, expanded.owners | removed)
+    _remove_runs(connection, names, session_id, expanded.owners)
     connection.execute(
         f"DELETE FROM {quote_identifier(names.log_summaries)} "  # noqa: S608
         "WHERE id IN (SELECT value FROM json_each(?))",
@@ -405,10 +404,9 @@ def _cut(
 
 @dataclass(frozen=True, slots=True)
 class _Expanded:
-    """Where a cut starts once it takes every run whole, and the top-level runs, rows, and running runs it removes."""
+    """Where a cut starts once it takes every run whole, and the rows, top-level runs, and running runs it removes."""
 
     start: _Key
-    run_ids: set[str]
     rows: list[_SummaryRow]
     owners: set[str]
 
@@ -425,7 +423,7 @@ def _expanded(rows: Sequence[_SummaryRow], runs: Sequence[tuple[str, int]], cut:
         owners = top_level | {row.fold_run_id for row in deleted_rows if row.fold_run_id is not None}
         earlier = [row.key for row in rows if row.fold_run_id in owners and row.key < cut]
         if not earlier:
-            return _Expanded(cut, top_level, deleted_rows, owners)
+            return _Expanded(cut, deleted_rows, owners)
         cut = min(earlier)
 
 
@@ -483,16 +481,16 @@ def _first_holder(
     return None
 
 
-def _record_removed(
-    connection: sqlite3.Connection,
-    names: TableNames,
-    session_id: str,
-    run_ids: Collection[str],
-) -> None:
+def _remove_runs(connection: sqlite3.Connection, names: TableNames, session_id: str, run_ids: set[str]) -> None:
+    """Delete runs ``run_ids`` with their member runs, and record them and every run deleted as removed.
+
+    A run without a row is recorded too, so neither it nor a member of it writes again.
+    """
+    deleted = delete_runs_in_transaction(connection, names, run_ids, session_id=session_id)
     connection.execute(
         f"INSERT OR IGNORE INTO {quote_identifier(names.log_removed)} (run_id, session_id) "  # noqa: S608
         "SELECT value, ? FROM json_each(?)",
-        (session_id, json.dumps(sorted(run_ids))),
+        (session_id, json.dumps(sorted(run_ids | deleted))),
     )
 
 

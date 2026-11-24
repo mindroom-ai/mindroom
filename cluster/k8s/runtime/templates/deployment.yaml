@@ -203,6 +203,11 @@ spec:
               containerPort: {{ .Values.egressBroker.port }}
               protocol: TCP
             {{- end }}
+            {{- if .Values.tailnetSsh.enabled }}
+            - name: tailnet-ssh
+              containerPort: {{ .Values.tailnetSsh.port }}
+              protocol: TCP
+            {{- end }}
           env:
             - name: MINDROOM_STORAGE_PATH
               value: {{ .Values.storage.mountPath | quote }}
@@ -281,6 +286,9 @@ spec:
             {{- if eq .Values.workers.backend "static_runner" }}
             - name: MINDROOM_SANDBOX_PROXY_URL
               value: {{ printf "http://localhost:%v" .Values.workers.staticRunner.port | quote }}
+            # The static runner sidecar mounts the agents' storage, so people in a room may type in agents' terminals.
+            - name: MINDROOM_STATIC_RUNNER_AGENT_STORAGE
+              value: "true"
             {{- else if eq .Values.workers.backend "kubernetes" }}
             - name: MINDROOM_WORKER_COMPUTER_ENABLED
               value: {{ .Values.workers.computerEnabled | quote }}
@@ -328,6 +336,10 @@ spec:
             {{- end }}
             - name: MINDROOM_KUBERNETES_WORKER_LABELS_JSON
               value: {{ toJson .Values.workers.kubernetes.extraLabels | quote }}
+            {{- if .Values.tailnetSsh.enabled }}
+            - name: MINDROOM_KUBERNETES_WORKER_TAILNET_SSH_RELEASE_ID
+              value: {{ include "mindroom-runtime.tailnetSshReleaseId" . | quote }}
+            {{- end }}
             - name: MINDROOM_KUBERNETES_WORKER_ANNOTATIONS_JSON
               value: {{ toJson .Values.workers.kubernetes.extraAnnotations | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_EXTRA_VOLUMES_JSON
@@ -367,6 +379,14 @@ spec:
               value: {{ .Values.egressBroker.tokenTtlSeconds | quote }}
             {{- end }}
             {{- end }}
+            {{- if .Values.tailnetSsh.enabled }}
+            # The listener the tailnet SSH gateway alone calls; see templates/tailnet-ssh.yaml.
+            - name: MINDROOM_TAILNET_SSH_PORT
+              value: {{ .Values.tailnetSsh.port | quote }}
+            - name: MINDROOM_TAILNET_SSH_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef: {{ include "mindroom-runtime.tailnetSshTokenSecretKeyRef" . }}
+            {{- end }}
             {{- if .Values.workers.kubernetes.nodeName }}
             - name: MINDROOM_KUBERNETES_WORKER_NODE_NAME
               value: {{ .Values.workers.kubernetes.nodeName | quote }}
@@ -383,6 +403,11 @@ spec:
             - name: MINDROOM_KUBERNETES_WORKER_OWNER_DEPLOYMENT_NAME
               value: {{ default $fullname .Values.workers.kubernetes.ownerDeploymentName | quote }}
             {{- end }}
+            {{- end }}
+            {{- if not .Values.egressBroker.enabled }}
+            # MindRoom runs a loopback broker unless told otherwise, on every worker backend.
+            - name: MINDROOM_EGRESS_BROKER_PORT
+              value: "off"
             {{- end }}
             {{- if .Values.matrix.homeserverUrl }}
             - name: MATRIX_HOMESERVER

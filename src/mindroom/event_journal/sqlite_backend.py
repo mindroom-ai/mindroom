@@ -16,12 +16,12 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import threading
-import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from mindroom.file_locks import release_file_lock, try_exclusive_file_lock
 from mindroom.logging_config import get_logger
+from mindroom.sqlite_utils import enter_wal
 
 from .offloading import ThreadOffload, settled
 from .schema import SQLITE_DIALECT, SchemaDialect, render
@@ -39,10 +39,6 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _BUSY_TIMEOUT_MILLISECONDS = 10_000
-# How long to wait between attempts at the one statement SQLite's own busy
-# handler will not retry. Short enough that a contended open is not noticeably
-# slower than an uncontended one, long enough not to spin.
-_WAL_RETRY_SECONDS = 0.05
 # The first SQLite release with a built-in ``octet_length``.
 _OCTET_LENGTH_VERSION = (3, 43, 0)
 
@@ -91,39 +87,6 @@ class _SqliteSchemaInspector:
         )
 
 
-def _enter_wal(connection: sqlite3.Connection) -> None:
-    """Put one connection into WAL, waiting out a lock another process holds.
-
-    ``busy_timeout`` bounds every contention this file can meet except this
-    one. Entering WAL is a journal-mode change, and SQLite answers a mode
-    change it cannot lock with ``SQLITE_BUSY`` straight away rather than
-    calling the busy handler -- so the single statement here that can block on
-    another process was the single statement with no timeout at all, and it
-    failed on the spot instead of after ten seconds.
-
-    Only ever reachable across processes, and only while the database was
-    still being made: one already in WAL stays in it, and re-entering locks
-    nothing. So a second opener met this exactly once, on the first open of a
-    new journal -- an export pass starting while the bot was still creating the
-    database it meant to read.
-
-    Bounded by the same ten seconds as everything else, because a wait that
-    cannot fail is not a bound. Past it the refusal is the caller's to see, and
-    so is any refusal that was never about a lock: retrying one of those would
-    turn an unopenable database into the same error ten seconds later.
-    """
-    deadline = time.monotonic() + _BUSY_TIMEOUT_MILLISECONDS / 1000
-    while True:
-        try:
-            connection.execute("PRAGMA journal_mode = WAL")
-        except sqlite3.OperationalError as error:
-            if error.sqlite_errorcode != sqlite3.SQLITE_BUSY or time.monotonic() >= deadline:
-                raise
-            time.sleep(_WAL_RETRY_SECONDS)
-        else:
-            return
-
-
 def _octet_length(value: str | bytes | None) -> int | None:
     """Return a stored value's size in bytes, as SQLite 3.43's ``octet_length`` does."""
     if value is None:
@@ -147,7 +110,7 @@ def _configure(connection: sqlite3.Connection, *, synchronous: str) -> None:
         # This stand-in loads each value to measure it, as ``length`` would.
         connection.create_function("octet_length", 1, _octet_length, deterministic=True)
     connection.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MILLISECONDS}")
-    _enter_wal(connection)
+    enter_wal(connection, timeout_seconds=_BUSY_TIMEOUT_MILLISECONDS / 1000)
     connection.execute(f"PRAGMA synchronous = {synchronous}")
     connection.execute("PRAGMA foreign_keys = ON")
 

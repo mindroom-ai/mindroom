@@ -22,6 +22,8 @@ _SLIDING_SYNC_REQUIRED_STATE: tuple[tuple[str, str], ...] = (
     ("m.room.avatar", ""),
     ("m.room.encryption", ""),
     ("m.room.member", "$LAZY"),
+    # The rooms each room lists under it, which the bots in that room join.
+    ("m.space.child", "*"),
 )
 
 

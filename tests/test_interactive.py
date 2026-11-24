@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
 
 from mindroom import interactive
+from mindroom.matrix.message_builder import markdown_to_html
 from tests.conftest import make_matrix_client_mock
 from tests.cpu_budget_helpers import cpu_budget
 
@@ -212,6 +214,18 @@ Whichever you pick, tell the other tool."""
         assert response.interactive_metadata is not None
         assert response.interactive_metadata.option_map == {"✅": "approve", "1": "approve"}
 
+    def test_interactive_question_with_unloadable_image_renders_a_note(self) -> None:
+        """An image with no uploaded file inside a question reaches formatted_body as a note."""
+        response_text = """```interactive
+{"question": "Which logo? ![logo](mxc://placeholder)", "options": [{"emoji": "✅", "label": "This", "value": "a"}]}
+```"""
+
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+        html = markdown_to_html(response.formatted_text)
+
+        assert "Which logo? ⚠️ Image not sent: logo (no uploaded file)" in html
+        assert "<img" not in html
+
     def test_parse_and_format_interactive_renders_extra_blocks_as_plain_text(self) -> None:
         """Only the first block gets reactions; later blocks render readably instead of as raw JSON."""
         response_text = """First question:
@@ -341,6 +355,68 @@ Second question:
             {"emoji": "❓", "label": "Option", "value": "option"},
         ]
         assert response.interactive_metadata.option_labels == {"❓": "Option", "1": "Option"}
+
+    def test_parse_and_format_interactive_replaces_repeated_emojis(self) -> None:
+        """A repeated emoji would merge two options into one reaction, so later repeats get their own keycap or a spare."""
+        response_text = """```interactive
+{
+    "question": "How?",
+    "options": [
+        {"emoji": "🛟", "label": "Backup and PR", "value": "both"},
+        {"emoji": "🛟", "label": "Backup only", "value": "backup"},
+        {"emoji": "2️⃣", "label": "Cleanup", "value": "cleanup"},
+        {"emoji": "🛟", "label": "Nothing", "value": "nothing"}
+    ]
+}
+```"""
+
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+
+        assert response.interactive_metadata is not None
+        assert [opt["emoji"] for opt in response.interactive_metadata.options_as_list()] == [
+            "🛟",
+            "🔹",
+            "2️⃣",
+            "4️⃣",
+        ]
+        assert response.interactive_metadata.option_map == {
+            "🛟": "both",
+            "🔹": "backup",
+            "2️⃣": "cleanup",
+            "4️⃣": "nothing",
+            "1": "both",
+            "2": "backup",
+            "3": "cleanup",
+            "4": "nothing",
+        }
+        assert "2. 🔹 Backup only" in response.formatted_text
+
+    @pytest.mark.parametrize(
+        ("emojis", "expected"),
+        [
+            (["🛟", "🛟", "2\u20e3"], ["🛟", "🔹", "2\u20e3"]),
+            (["☎", "☎\ufe0e"], ["☎", "2️⃣"]),
+            (["2", "2"], ["1️⃣", "2️⃣"]),
+            (["❶", "❷"], ["❶", "❷"]),
+            (["🛟", "🛟", "2️⃣ ", " "], ["🛟", "🔹", "2️⃣", "❓"]),
+            (["🛟", "🛟", "2\u20e3 \ufe0f"], ["🛟", "🔹", "2\u20e3 \ufe0f"]),
+            (["2\ufe0e", "✅"], ["1️⃣", "✅"]),
+            (["2\ufe0f", "✅"], ["1️⃣", "✅"]),
+        ],
+    )
+    def test_parse_and_format_interactive_treats_lookalike_and_digit_emojis_as_taken(
+        self,
+        emojis: list[str],
+        expected: list[str],
+    ) -> None:
+        """Emojis differing only by a variation selector look alike, and a bare digit is a numbered reply, so neither is free."""
+        options = [{"emoji": emoji, "label": f"Option {i}", "value": f"v{i}"} for i, emoji in enumerate(emojis)]
+        response_text = f"```interactive\n{json.dumps({'question': 'Q?', 'options': options})}\n```"
+
+        response = interactive.parse_and_format_interactive(response_text, extract_mapping=True)
+
+        assert response.interactive_metadata is not None
+        assert [opt["emoji"] for opt in response.interactive_metadata.options_as_list()] == expected
 
     def test_parse_and_format_interactive_removes_malformed_extra_blocks(self) -> None:
         """Malformed extra blocks should not leak raw interactive fences into the message."""

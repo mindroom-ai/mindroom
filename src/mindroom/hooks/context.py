@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Any, Literal
@@ -10,8 +11,10 @@ from typing import TYPE_CHECKING, Any, Literal
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.logging_config import get_logger
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
-from mindroom.tool_system.plugin_identity import validate_plugin_name
+from mindroom.tool_system.events import tool_args_chat_preview
+from mindroom.tool_system.plugin_identity import plugin_state_root
 from mindroom.tool_system.tool_environment import ToolEnvironment
 
 from .registry import HookRegistry
@@ -27,8 +30,10 @@ from .types import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
     EVENT_TOOL_ENVIRONMENT,
+    EVENT_TOOL_RESULT_TRANSFORM,
     EnrichmentCachePolicy,
     EnrichmentItem,
+    TurnOutcome,
     format_hook_source,
 )
 
@@ -40,19 +45,21 @@ class _UnsetType:
 _UNSET = _UnsetType()
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
     from typing import Protocol
 
     import nio
     import structlog
 
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.types import HistoryScope
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.message_target import MessageTarget
+    from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.scheduling.tasks import ScheduledWorkflow
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.turn_origin import TurnOrigin
@@ -116,7 +123,7 @@ class HookBindings:
 
 @dataclass
 class HookContextSupport:
-    """Own a bot's hook capabilities: its own live client first, and the router's for what that client cannot do."""
+    """Own a bot's hook capabilities: its own live client first, and each room's poster or steward for what that cannot do."""
 
     runtime: SupportsClientConfigOrchestrator
     runtime_paths: RuntimePaths
@@ -139,6 +146,8 @@ class HookContextSupport:
         extra_content: dict[str, Any] | None,
         *,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
         """Send a hook-originated Matrix message as this bot, with the client and config it has when sending."""
         client = self.runtime.client
@@ -155,6 +164,8 @@ class HookContextSupport:
             source_hook,
             extra_content,
             trigger_dispatch=trigger_dispatch,
+            mentions=mentions,
+            wake_mentioned=wake_mentioned,
             conversation_reader=self.conversation_reader,
         )
         if event_id:
@@ -180,38 +191,32 @@ class HookContextSupport:
             sender=sender,
         )
 
-    def _router(self) -> HookContextSupport | None:
-        """Return the router's hook support, or None for the router itself, which never asks for its own."""
-        return None if self.agent_name == ROUTER_AGENT_NAME else self.runtime.orchestrator.router_hook_context()
-
     def message_sender(self) -> HookMessageSender | None:
-        """Return the sender bound into hook contexts: this bot's own while it has a client, as the router always does."""
-        if self.runtime.client is not None or self.agent_name == ROUTER_AGENT_NAME:
+        """Return the sender bound into hook contexts: this bot's own while it has a client, else each room's poster."""
+        if self.runtime.client is not None:
             return self.send_message
-        router = self._router()
-        return None if router is None else router.send_message
+        return _room_poster_sender(self.runtime.orchestrator)
 
-    def room_state_querier(self) -> HookRoomStateQuerier | None:
-        """Return the room-state querier bound into hook contexts."""
-        router = self._router()
-        return chain_hook_room_state_queriers(
-            _client_room_state_querier(self.runtime.client),
-            None if router is None else _client_room_state_querier(router.runtime.client),
-        )
+    def room_state_querier(self) -> HookRoomStateQuerier:
+        """Return the room-state querier: own client; steward for unjoined rooms or non-``M_NOT_FOUND`` errors."""
+        client = self.runtime.client
+        steward = _steward_state_querier(self.runtime.orchestrator)
+        if client is None:
+            return steward
+        return chain_hook_room_state_queriers(client, steward)
 
-    def room_state_putter(self) -> HookRoomStatePutter | None:
-        """Return the room-state putter bound into hook contexts."""
-        router = self._router()
+    def room_state_putter(self) -> HookRoomStatePutter:
+        """Return the room-state putter bound into hook contexts: this bot's own client, else the room's steward."""
+        client = self.runtime.client
         return chain_hook_room_state_putters(
-            _client_room_state_putter(self.runtime.client),
-            None if router is None else _client_room_state_putter(router.runtime.client),
+            None if client is None else build_hook_room_state_putter(client),
+            _steward_state_putter(self.runtime.orchestrator),
         )
 
     def matrix_admin(self) -> HookMatrixAdmin | None:
-        """Return the Matrix admin helper bound into hook contexts, which only the router's client backs."""
+        """Return the Matrix admin helper bound into hook contexts, which only the owner account's client backs."""
         if self.agent_name != ROUTER_AGENT_NAME:
-            router = self._router()
-            return None if router is None else router.matrix_admin()
+            return _owner_matrix_admin(self.runtime.orchestrator)
         if self.runtime.client is None:
             return None
         # Imported on first use so the tool-registry import chain stays free
@@ -243,12 +248,63 @@ class HookContextSupport:
         )
 
 
-def _client_room_state_querier(client: nio.AsyncClient | None) -> HookRoomStateQuerier | None:
-    return None if client is None else build_hook_room_state_querier(client)
+def _as_room_bot[T](
+    pick: Callable[[str], AgentBot | None],
+    capability: Callable[[AgentBot, nio.AsyncClient], Callable[..., Awaitable[T]]],
+    refused: T,
+) -> Callable[..., Awaitable[T]]:
+    """Return one capability of the bot ``pick`` names for each call's room, which a reload waits for.
+
+    A room with no such bot, or with one that is stopping or closed its client, gives ``refused``.
+    """
+
+    async def call(room_id: str, *args: Any, **options: Any) -> T:  # noqa: ANN401
+        # Imported on first use: the slim plugin-API import path must not pull nio.
+        import nio  # noqa: PLC0415
+
+        bot = pick(room_id)
+        if bot is None:
+            return refused
+        try:
+            async with bot.admission_fence():
+                return refused if bot.client is None else await capability(bot, bot.client)(room_id, *args, **options)
+        except (ResponseAdmissionRefusedError, nio.LocalProtocolError):
+            return refused
+
+    return call
 
 
-def _client_room_state_putter(client: nio.AsyncClient | None) -> HookRoomStatePutter | None:
-    return None if client is None else build_hook_room_state_putter(client)
+def _room_poster_sender(orchestrator: OrchestratorRuntime) -> HookMessageSender:
+    """Return a sender that sends each message as the poster of its room."""
+    return _as_room_bot(orchestrator.room_poster, lambda poster, _client: poster.hook_context.send_message, None)
+
+
+def _steward_state_querier(orchestrator: OrchestratorRuntime) -> HookRoomStateQuerier:
+    return _as_room_bot(orchestrator.room_steward, lambda _bot, client: build_hook_room_state_querier(client), None)
+
+
+def _steward_state_putter(orchestrator: OrchestratorRuntime) -> HookRoomStatePutter:
+    return _as_room_bot(orchestrator.room_steward, lambda _bot, client: build_hook_room_state_putter(client), False)
+
+
+def _owner_matrix_admin(orchestrator: OrchestratorRuntime) -> HookMatrixAdmin | None:
+    """Return the owner account's Matrix admin helper while that account runs, None in a runtime without one."""
+    owner = orchestrator.agent_bots.get(ROUTER_AGENT_NAME)
+    return None if owner is None else owner.hook_context.matrix_admin()
+
+
+def service_hook_bindings(orchestrator: OrchestratorRuntime, registry_state: HookRegistrySource) -> HookBindings:
+    """Return the bindings of a runtime's own hooks: each room's poster sends, and its steward reads and writes state."""
+    started = (bot.hook_context.runtime.runtime_started_at for bot in orchestrator.agent_bots.values())
+    return HookBindings(
+        registry=registry_state.registry,
+        registry_state=registry_state,
+        message_sender=_room_poster_sender(orchestrator),
+        matrix_admin=_owner_matrix_admin(orchestrator),
+        room_state_querier=_steward_state_querier(orchestrator),
+        room_state_putter=_steward_state_putter(orchestrator),
+        runtime_started_at=min(started, default=time.time()),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -348,6 +404,9 @@ class HookContext:
     matrix_admin: HookMatrixAdmin | None = field(default=None, kw_only=True)
     room_state_querier: HookRoomStateQuerier | None = field(default=None, kw_only=True)
     room_state_putter: HookRoomStatePutter | None = field(default=None, kw_only=True)
+    # The agent turn this hook runs in, and in a delegated child's turn the turn that delegated it; None outside a turn.
+    turn_id: str | None = field(default=None, kw_only=True)
+    parent_turn_id: str | None = field(default=None, kw_only=True)
 
     def is_active(self) -> bool:
         """Return whether this hook still belongs to the live registry snapshot."""
@@ -359,10 +418,8 @@ class HookContext:
 
     @property
     def state_root(self) -> Path:
-        """Return the plugin state root, creating it on first access."""
-        plugin_root = self.runtime_paths.storage_root / "plugins" / validate_plugin_name(self.plugin_name)
-        plugin_root.mkdir(parents=True, exist_ok=True)
-        return plugin_root
+        """Return the plugin's own state directory, created at mode 0700 on first access."""
+        return plugin_state_root(self.runtime_paths.storage_root, self.plugin_name)
 
     async def send_message(
         self,
@@ -372,6 +429,8 @@ class HookContext:
         thread_id: str | None = None,
         extra_content: dict[str, Any] | None = None,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
         """Send a Matrix message from a hook and return the event ID when available.
 
@@ -385,6 +444,10 @@ class HookContext:
         plugin on the first synthetic hop, then suppresses deeper
         ``message:received`` re-entry for the rest of that synthetic
         chain to avoid cross-plugin feedback loops.
+        *mentions* lists every Matrix user ID the message mentions, so
+        names quoted in *text* mention nobody else, and *wake_mentioned*
+        False keeps every agent it mentions from being activated by that
+        mention.
         """
         if self.message_sender is None:
             self.logger.warning("send_message called but no sender registered")
@@ -401,6 +464,8 @@ class HookContext:
             format_hook_source(self.plugin_name, self.event_name),
             resolved_extra_content,
             trigger_dispatch=trigger_dispatch,
+            mentions=mentions,
+            wake_mentioned=wake_mentioned,
         )
 
     async def query_room_state(
@@ -453,6 +518,8 @@ class MessageReceivedContext(HookContext):
     envelope: MessageEnvelope
     skip_plugin_names: frozenset[str] = field(default_factory=frozenset)
     suppress: bool = False
+    # Whether the envelope is a steward's hidden route of a person's message, which ran the room's hooks as it arrived.
+    _routed: bool = field(default=False, kw_only=True, repr=False, compare=False)
 
 
 @dataclass(slots=True)
@@ -535,6 +602,15 @@ class CancelledResponseContext(HookContext):
 
 
 @dataclass(slots=True)
+class TurnLifecycleContext(HookContext):
+    """Context for turn:started, turn:paused, turn:resumed, and turn:ended hooks."""
+
+    envelope: MessageEnvelope
+    # How the turn ended; set only for turn:ended.
+    outcome: TurnOutcome | None = None
+
+
+@dataclass(slots=True)
 class AgentLifecycleContext(HookContext):
     """Context for agent lifecycle observer hooks."""
 
@@ -595,6 +671,8 @@ class ScheduleFiredContext(HookContext):
         thread_id: str | None | _UnsetType = _UNSET,
         extra_content: dict[str, Any] | None = None,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
         """Send a Matrix message from a schedule hook and return the event ID when available."""
         # Named base call: zero-argument super() breaks in slots dataclasses.
@@ -605,6 +683,8 @@ class ScheduleFiredContext(HookContext):
             thread_id=self.thread_id if isinstance(thread_id, _UnsetType) else thread_id,
             extra_content=extra_content,
             trigger_dispatch=trigger_dispatch,
+            mentions=mentions,
+            wake_mentioned=wake_mentioned,
         )
 
 
@@ -696,8 +776,14 @@ class ToolBeforeCallContext(HookContext):
     requester_id: str | None
     session_id: str | None
     message_received_depth: int = 0
+    # Whether the reply the call runs in shows it, which a turn no reply shows, such as a listening turn's, never does.
+    shown: bool = False
     declined: bool = False
     decline_reason: str = ""
+
+    def chat_preview(self) -> str | None:
+        """Return the call's arguments as its reply's tool trace previews them, or None when the reply hides the call."""
+        return tool_args_chat_preview(self.arguments) if self.shown else None
 
     def decline(self, reason: str) -> None:
         """Mark the tool call as declined with one model-facing reason."""
@@ -722,6 +808,29 @@ class ToolAfterCallContext(HookContext):
     blocked: bool
     duration_ms: float
     message_received_depth: int = 0
+    # Whether the reply the call ran in shows it, which a turn no reply shows, such as a listening turn's, never does.
+    shown: bool = False
+
+    def chat_preview(self) -> str | None:
+        """Return the call's arguments as its reply's tool trace previews them, or None when the reply hides the call."""
+        return tool_args_chat_preview(self.arguments) if self.shown else None
+
+
+@dataclass(slots=True, kw_only=True)
+class ToolResultTransformContext(HookContext):
+    """Context passed to tool:result_transform hooks: ``result`` is the text the model reads for a successful call."""
+
+    event_name: str = EVENT_TOOL_RESULT_TRANSFORM
+    tool_name: str
+    arguments: dict[str, Any]
+    agent_name: str
+    room_id: str | None
+    thread_id: str | None
+    requester_id: str | None
+    session_id: str | None
+    result: str
+    message_received_depth: int = 0
+    shown: bool = False
 
 
 @dataclass(slots=True, kw_only=True)
@@ -817,7 +926,13 @@ class ContactBeforeSendContext(HookContext):
 
 
 # The contexts of hooks that run during one of an agent's tool calls, which name its agent, room, and requester.
-CallHookContext = ToolBeforeCallContext | ToolAfterCallContext | ToolEnvironmentContext | ContactBeforeSendContext
+CallHookContext = (
+    ToolBeforeCallContext
+    | ToolAfterCallContext
+    | ToolResultTransformContext
+    | ToolEnvironmentContext
+    | ContactBeforeSendContext
+)
 
 
 def _check_env_name(name: str) -> None:
@@ -858,7 +973,7 @@ def _message_received_depth_for_hook_send(context: HookContext) -> int:
 
 def message_envelope_for_hook_context(context: HookContext) -> MessageEnvelope | None:
     """Return the message envelope carried by one hook context when present."""
-    if isinstance(context, MessageReceivedContext | MessageEnrichContext | SystemEnrichContext):
+    if isinstance(context, MessageReceivedContext | MessageEnrichContext | SystemEnrichContext | TurnLifecycleContext):
         return context.envelope
     if isinstance(context, BeforeResponseContext | FinalResponseTransformContext):
         return context.draft.envelope

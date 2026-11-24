@@ -67,7 +67,7 @@ def _contact_target_error(
         return None
     record, side = contact
     report = action == "send" and recipient is None and idempotency_key is None and thread_id in {None, "room"}
-    if report and personal_room_of(config, paths, record.party(side).owner) == (context.agent_name, room_id):
+    if report and personal_room_of(config, paths, record.party(side).local_owner) == (context.agent_name, room_id):
         return None
     return _CONTACT_TURN_ERROR
 

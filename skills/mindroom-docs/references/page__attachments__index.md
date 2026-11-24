@@ -14,15 +14,35 @@ Send a file, image, or video in a Matrix room and mention the agent or team in t
 A media event's `body` counts as a caption only when the event also has a `filename` field with a different value, following [MSC2530](https://github.com/matrix-org/matrix-spec-proposals/pull/2530), so a body that only repeats the filename is not a caption.
 
 The responder answers only when it would answer a text message there (mention, thread participation, or DM).
-Without an `@mention`, the router uses the caption to choose among several eligible agents or teams.
+Without an `@mention`, routing uses the caption to choose among several eligible agents or teams.
 Both unencrypted and end-to-end encrypted media are supported.
 
 The responder's model receives the media directly, so it must support that input type (vision for images, file or video input for documents and videos).
 Models without that support can still work with the file through the [`attachments` tool](#the-attachments-tool).
 When a provider rejects inline media, MindRoom retries without it and tells the agent the content was not inspected; see [Media Fallback](https://docs.mindroom.chat/images/#media-fallback).
 Some provider integrations never send certain media kinds, so MindRoom leaves those out from the start with the same note.
-Only models using the `google` provider receive video, Claude and OpenAI Responses models (including Codex) also receive no audio, Ollama and Groq models receive only images, and Cerebras models receive no media.
+Only models using the `google` provider, the `openrouter` provider, or OpenAI Responses at OpenRouter's endpoint (`https://openrouter.ai/api/v1`) receive video, Claude and OpenAI Responses models (including Codex) also receive no audio, Ollama and Groq models receive only images, and Cerebras models receive no media.
 Claude models (the `anthropic`, `vertexai_claude`, and `bedrock_claude` providers) and models using the `google` provider read documents only as PDF or text; other file types, such as Office files and archives, reach them as a note naming the file type.
+
+## Files Sent with Text
+
+A message with several files, or with files and text, reaches the room as one event per file with the text last, and the agent answers them as one turn.
+After an unmarked file, MindRoom waits `coalescing.debounce_ms` (1 second by default) for another file or the text before replying, and text replies at once.
+
+MindRoom Chat marks each event of such a submission so MindRoom does not have to guess when it is complete:
+
+```json
+"io.mindroom.submission": {"id": "<one ID per submission>", "more": true}
+```
+
+- `more: true` says the client sends another event of this submission without the person doing anything, so MindRoom waits up to 10 seconds after that event for the next one instead of `debounce_ms`, which covers sync delays between the events.
+- The submission's last event carries `more: false`, and MindRoom replies at once, even when that event is a file.
+- When the last event never arrives, MindRoom answers what did after those 10 seconds; shutdown never waits for an open submission.
+- A text-only message carries no marker.
+  MindRoom Chat always writes both fields; MindRoom reads a missing `more` as `false`.
+  A marker that is not an object with a non-empty string `id`, or whose `more` is present but not a boolean, is ignored, so other clients, bridges, and older app builds keep the `debounce_ms` behavior.
+
+The wait only holds the sender's own submission, and only while no response to its conversation is already running.
 
 ## Attachment IDs
 
@@ -42,7 +62,7 @@ Earlier attachments appear in the conversation history as annotations, and the a
 [attachments: att_def456 (image, "house.jpg")]
 ```
 
-Attachment IDs are scoped to their room and thread, so an ID from one conversation cannot be used in another.
+Attachment IDs are scoped to their room and thread, so an ID from one conversation cannot be used in another, except that an authorized [forked thread](https://docs.mindroom.chat/configuration/threads/#forked-threads) (same-room or cross-room) can use attachments carried by its parent prefix up to the fork point, while each attachment stays registered under its original room and thread.
 Within a conversation, an authorized response can open files uploaded by any participant.
 When a message's file is replaced by an edit, later turns use the new file under a new attachment ID.
 
@@ -64,6 +84,7 @@ agents:
 | `get_attachment(attachment_id, mindroom_output_path=None, view=False)` | Return metadata, save the file into the workspace, or show its content to the model |
 | `view_file(path)` | Show an image from the workspace to the model |
 | `register_attachment(file_path)` | Turn a local file into a new attachment ID for this conversation |
+| `inline_image(reference, alt=None)` | Upload an image and return Markdown to embed it in a reply (unencrypted rooms only) |
 
 ```python
 list_attachments()
@@ -88,7 +109,8 @@ The model and its provider must support that media type and may have stricter li
 If the model cannot take the media, the agent is told so and can save the file and use other extraction or transcription tools instead.
 
 `view_file` shows one image to the calling model in one call; to view an attachment, use `get_attachment(attachment_id, view=True)`, and use `read_file` for ordinary text and code.
-Workspace paths resolve inside the agent's worker when it has one, otherwise inside its workspace.
+Workspace paths resolve inside the agent's worker when it has one, otherwise inside its workspace, or in a [headless run](https://docs.mindroom.chat/headless/#files) with a `workdir`, inside that directory.
+Turns without a Matrix room, in [headless runs](https://docs.mindroom.chat/headless/) and through the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/), offer `view_file` alone of the `attachments` functions.
 It accepts PNG, JPEG, GIF, and WebP images up to 20 MiB and 40 million pixels.
 Images larger than 2048 pixels on the longest edge or 5 MiB are scaled down, animated images show only the first frame, and the result metadata reports these changes.
 Image viewing through `get_attachment(view=True)` follows the same limits.
@@ -99,10 +121,23 @@ Conversation history keeps up to four recently viewed images within 10 MiB in to
 ### Saving Files to the Workspace
 
 `get_attachment(attachment_id, mindroom_output_path="incoming/file.ext")` saves the file into the agent workspace and returns a receipt with the path, byte count, and SHA-256.
-Save attachments this way before processing them with `file`, `coding`, `python`, or `shell` on a worker, because attachment storage is not visible inside the worker.
+Save attachments this way before processing them with `filesystem`, `python`, or `shell` on a worker, because attachment storage is not visible inside the worker.
 The path must be a workspace-relative file path; it cannot be absolute, contain `..`, start with `~`, or contain `$` or `%`.
 Saves into a worker are limited by [`MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES`](https://docs.mindroom.chat/deployment/sandbox-proxy/#environment-variable-reference), which defaults to 64 MiB so that every attachment MindRoom accepts can be saved.
 See [Sandbox Proxy](https://docs.mindroom.chat/deployment/sandbox-proxy/) for how the workspace appears as `$MINDROOM_AGENT_WORKSPACE` and `~` inside worker tools.
+
+### Inline Images
+
+`inline_image(reference, alt=None)` accepts a context attachment ID (`att_*`) or a workspace file path,
+using the same path rules as sending attachments. It uploads the image to Matrix and returns
+`attachment_id`, `mxc_uri`, and `markdown`, for example `![cat.png](mxc://homeserver/media-id)`.
+Paste the returned `markdown` into the reply or `matrix_message` text where the image should appear.
+The alt text defaults to the filename.
+
+Only images with an `image/*` MIME type and a recognized image byte signature are accepted,
+up to the existing 20 MiB media read limit. Uploads use the MIME type detected from the bytes.
+Inline images require plaintext media and an unencrypted room because Markdown cannot carry decryption keys.
+In encrypted rooms, send the image through `matrix_message(attachments=[reference])` instead.
 
 ### Registering Local Files
 

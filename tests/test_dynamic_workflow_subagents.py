@@ -11,7 +11,7 @@ import yaml
 
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig, ReasoningConfig
 from mindroom.custom_tools import dynamic_workflow as workflow_module
 from mindroom.custom_tools.delegate import DelegateTools
 from mindroom.custom_tools.dynamic_workflow import DynamicWorkflowTools
@@ -19,12 +19,16 @@ from mindroom.delegation.personas import inline_persona
 from mindroom.dynamic_workflows.spec import DynamicWorkflowError, SubagentParticipant, parse_workflow_spec
 from mindroom.dynamic_workflows.store import DynamicWorkflowStore
 from mindroom.llm.errors import ProviderError
+from mindroom.tool_system.declarations import ApprovalAlias
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from tests.conftest import register_test_tool
 from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
 from tests.test_delegation_direct_audit import _identity
+from tests.tool_approval_helpers import judge_test_tool_function_as_shell
 
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
@@ -45,7 +49,7 @@ def _config(
             "leader": AgentConfig(
                 display_name="Leader",
                 role="Configured role",
-                tools=tools if tools is not None else ["dynamic_workflow", "file", "calculator"],
+                tools=tools if tools is not None else ["dynamic_workflow", "filesystem", "calculator"],
                 memory_backend="file",
             ),
         },
@@ -196,6 +200,25 @@ async def test_participant_may_use_any_configured_model(tmp_path: Path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_a_preapproval_under_an_old_toolkit_name_stays_dormant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """allowed_tools naming file or coding pre-approves nothing; a participant may still name the toolkit by them."""
+    spec = _spec([{"id": "reader", "system_prompt": "Read.", "tools": ["coding"]}], tools=["file"])
+    statuses = {}
+    for allowed in (["coding", "file"], ["filesystem"]):
+        tools = [{"dynamic_workflow": {"allowed_tools": allowed}}, "filesystem"]
+        workflow = _Workflow(tmp_path / allowed[0], monkeypatch, _config(tools=tools))
+        with workflow.context():
+            statuses[allowed[0]] = json.loads(await workflow.tools.validate_workflow(spec))
+
+    assert statuses["coding"]["status"] == "error"
+    assert "participant 'reader' tool 'filesystem' is not pre-approved" in statuses["coding"]["message"]
+    assert statuses["filesystem"]["status"] == "ok", statuses["filesystem"]
+
+
+@pytest.mark.asyncio
 async def test_unapproved_participant_tool_is_refused_before_saving(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -271,10 +294,132 @@ async def test_minimal_participant_needs_pre_approved_shell(tmp_path: Path, monk
     assert approved["status"] == "ok", approved
 
 
+_ALIAS_REFUSAL = (
+    "calls run_shell_command through add, which requires approval, and workflow participants cannot pause for "
+    "approval; check the operator tool_approval rules and the dynamic_workflow allowed_tools setting."
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tools", "allowed", "rules", "refused"),
+    [
+        pytest.param(["calculator.add"], ["calculator"], None, True, id="function"),
+        pytest.param(["calculator.subtract"], ["calculator"], None, False, id="other-function"),
+        pytest.param(["calculator.add", "shell"], ["calculator", "shell"], None, False, id="shell-pre-approved"),
+        pytest.param(
+            ["calculator.add"],
+            ["calculator"],
+            {"run_shell_command": "auto_approve"},
+            False,
+            id="shell-auto-approved",
+        ),
+    ],
+)
+async def test_a_named_function_judged_as_a_gated_function_is_refused_before_saving(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tools: list[str],
+    allowed: list[str],
+    rules: dict[str, str] | None,
+    refused: bool,
+) -> None:
+    """The calculator says ``add`` runs shell commands, so a participant may name it only where the shell needs no approval.
+
+    The shell runs without approval when the participant's own pre-approved tools include it or an operator rule
+    auto-approves it; otherwise validation refuses the participant that names ``add``, as it refuses one naming a
+    function an operator rule gates.
+    """
+    judge_test_tool_function_as_shell(monkeypatch, "calculator", "add")
+    toolkits = sorted({entry.partition(".")[0] for entry in tools})
+    config = _config(tools=[{"dynamic_workflow": {"allowed_tools": allowed}}, *toolkits], rules=rules)
+    workflow = _Workflow(tmp_path, monkeypatch, config)
+
+    with workflow.context():
+        spec = _spec([{"id": "adder", "system_prompt": "Add.", "tools": tools}])
+        validated = json.loads(await workflow.tools.validate_workflow(spec))
+
+    if refused:
+        assert validated["status"] == "error", validated
+        assert validated["message"] == f"Dynamic Workflow participant 'adder' tool '{tools[0]}' {_ALIAS_REFUSAL}"
+    else:
+        assert validated["status"] == "ok", validated
+
+
+@pytest.mark.asyncio
+async def test_a_whole_toolkit_leaves_a_function_judged_as_a_gated_function_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A participant naming the whole calculator gets its functions but ``add``, as when an operator rule gates ``add``."""
+    judge_test_tool_function_as_shell(monkeypatch, "calculator", "add")
+    config = _config(tools=[{"dynamic_workflow": {"allowed_tools": ["calculator"]}}, "calculator"])
+    workflow = _Workflow(tmp_path, monkeypatch, config)
+
+    run = await workflow.run(_spec([{"id": "adder", "system_prompt": "Add.", "tools": ["calculator"]}]))
+
+    assert run["status"] == "completed", run
+    assert "subtract" in workflow.model.offered[0]
+    assert "add" not in workflow.model.offered[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tools", "error"),
+    [
+        pytest.param(["calculator.add", "filesystem"], None, id="pre-approved"),
+        pytest.param(
+            ["calculator.add", "filesystem.write_file"],
+            "Dynamic Workflow participant 'adder' tool 'calculator.add' calls read_file through add, which requires "
+            "approval, and workflow participants cannot pause for approval; check the operator tool_approval rules "
+            "and the dynamic_workflow allowed_tools setting.",
+            id="not-selected",
+        ),
+    ],
+)
+async def test_a_judged_function_a_toolkit_shows_only_once_built_is_judged_by_the_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tools: list[str],
+    error: str | None,
+) -> None:
+    """Only a built ``file`` toolkit shows it has ``read_file``, which the calculator says ``add`` reads.
+
+    Validation cannot tell whether the participant pre-approves ``read_file``, so it accepts the workflow; the run,
+    which builds the toolkit, offers ``add`` when the participant's pre-approved ``file`` has ``read_file`` and
+    otherwise fails before the participant starts.
+    """
+    alias = ApprovalAlias(judged_as="read_file", judge=lambda _arguments: None)
+    register_test_tool(
+        monkeypatch,
+        replace(builtin_tool_registry().entries["calculator"], approval_aliases={"add": alias}),
+    )
+    declared = workflow_module.declared_function_names
+    monkeypatch.setattr(
+        workflow_module,
+        "declared_function_names",
+        lambda toolkit, registry: None if toolkit == "filesystem" else declared(toolkit, registry),
+    )
+    config = _config(
+        tools=[{"dynamic_workflow": {"allowed_tools": ["calculator", "filesystem"]}}, "calculator", "filesystem"],
+    )
+    workflow = _Workflow(tmp_path, monkeypatch, config)
+
+    run = await workflow.run(_spec([{"id": "adder", "system_prompt": "Add.", "tools": tools}]))
+
+    if error is None:
+        assert run["status"] == "completed", run
+        assert "add" in workflow.model.offered[0]
+    else:
+        assert run["status"] == "failed", run
+        assert run["error"] == error
+        assert workflow.model.authored_prompts == []
+
+
 @pytest.mark.asyncio
 async def test_participant_without_tools_gets_none(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A participant uses only the tools it names, so one that names none is offered no functions."""
-    config = _config(tools=[{"dynamic_workflow": {"allowed_tools": ["*"]}}, "file", "calculator"])
+    config = _config(tools=[{"dynamic_workflow": {"allowed_tools": ["*"]}}, "filesystem", "calculator"])
     workflow = _Workflow(tmp_path, monkeypatch, config)
 
     run = await workflow.run(_spec([{"id": "thinker", "system_prompt": "Think."}]))
@@ -425,6 +570,33 @@ async def test_legacy_revision_runs_as_subagent(tmp_path: Path, monkeypatch: pyt
     assert workflow.models_loaded == ["haiku"]
 
 
+@pytest.mark.asyncio
+async def test_a_saved_workflow_naming_filesystem_by_an_old_name_stays_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A new spec may say coding; a saved revision that says it is read as written, through an unrelated patch too."""
+    tools = [{"dynamic_workflow": {"allowed_tools": ["*"]}}, "filesystem"]
+    workflow = _Workflow(tmp_path, monkeypatch, _config(tools=tools))
+    spec = _spec([{"id": "reader", "system_prompt": "Read.", "tools": ["coding"]}], tools=["file"])
+    created = await workflow.create(spec)
+    assert created["status"] == "ok", created
+    [revision] = workflow.paths.storage_root.glob("**/review/revisions/000001.yaml")
+    saved = revision.read_text()
+    assert saved.count("- filesystem") == 2, saved
+    assert "coding" not in saved
+    revision.write_text(saved.replace("- filesystem", "- coding"))
+
+    with workflow.context():
+        run = json.loads(await workflow.tools.run_workflow(workflow_id="review", input={}))
+        patch = {"description": "Updated."}
+        updated = json.loads(await workflow.tools.update_workflow(workflow_id="review", patch=patch, reason="edit"))
+
+    assert "tool 'coding'" in run["error"], run
+    assert updated["status"] == "error", updated
+    assert "tool 'coding'" in updated["message"], updated
+
+
 def test_update_of_legacy_revision_writes_current_format(tmp_path: Path) -> None:
     """Updating a legacy workflow publishes a revision without the retired participant fields."""
     store = _write_legacy_revision(tmp_path)
@@ -450,7 +622,7 @@ async def test_profile_tools_must_be_granted_by_permissions(tmp_path: Path, monk
     workflow = _Workflow(tmp_path, monkeypatch, _config())
     workflow.profile("adder", "---\ndescription: Adds.\ntools: [calculator]\n---\nYou add.\n")
 
-    created = await workflow.create(_spec([{"id": "adder", "profile": "adder"}], tools=["file"]))
+    created = await workflow.create(_spec([{"id": "adder", "profile": "adder"}], tools=["filesystem"]))
 
     assert created["status"] == "error"
     assert "tool 'calculator' is not granted by permissions.tools" in created["message"]
@@ -462,21 +634,24 @@ async def test_participant_runs_the_profile_validated_at_run_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An earlier step that rewrites a later participant's profile cannot change how that participant runs."""
-    config = _config(tools=[{"dynamic_workflow": {"allowed_tools": ["file"]}}, "file"])
+    config = _config(tools=[{"dynamic_workflow": {"allowed_tools": ["filesystem"]}}, "filesystem"])
     rewritten = "---\ndescription: B.\ntools: []\nmodel: haiku\n---\nRewritten prompt.\n"
     workflow = _Workflow(
         tmp_path,
         monkeypatch,
         config,
         turns=[
-            calls(tool_call("save_file", "save-1", contents=rewritten, file_name="subagents/second.md")),
+            calls(tool_call("write_file", "save-1", path="subagents/second.md", content=rewritten)),
             answer("Rewrote it."),
             answer("Second answer."),
         ],
     )
     profile = workflow.profile("second", "---\ndescription: B.\ntools: []\n---\nOriginal prompt.\n")
     spec = _spec(
-        [{"id": "first", "system_prompt": "You edit files.", "tools": ["file"]}, {"id": "second", "profile": "second"}],
+        [
+            {"id": "first", "system_prompt": "You edit files.", "tools": ["filesystem"]},
+            {"id": "second", "profile": "second"},
+        ],
     )
     spec["workflow"] = [
         {"id": "edit", "participant": "first", "prompt": "Rewrite the profile."},
@@ -507,18 +682,20 @@ async def test_declared_toolkits_are_never_built_just_for_approvals(
     monkeypatch.setattr(workflow_module, "_resolve_participant_toolkits", resolve)
     config = _config(
         tools=[
-            {"dynamic_workflow": {"allowed_tools": ["file"]}},
-            {"file": {"include_tools": ["read_file", "list_files"]}},
+            {"dynamic_workflow": {"allowed_tools": ["filesystem"]}},
+            {"filesystem": {"include_tools": ["read_file", "ls"]}},
         ],
-        rules={"save_file": "require_approval"},
+        rules={"write_file": "require_approval"},
     )
     workflow = _Workflow(tmp_path, monkeypatch, config)
 
-    run = await workflow.run(_spec([{"id": "reader", "system_prompt": "Read files.", "tools": ["file"]}], steps=2))
+    run = await workflow.run(
+        _spec([{"id": "reader", "system_prompt": "Read files.", "tools": ["filesystem"]}], steps=2),
+    )
 
     assert run["status"] == "completed", run
     assert all(not names for names in built)
-    assert all("read_file" in offered and "save_file" not in offered for offered in workflow.model.offered)
+    assert all("read_file" in offered and "write_file" not in offered for offered in workflow.model.offered)
 
 
 @pytest.mark.asyncio
@@ -565,20 +742,60 @@ async def test_later_step_fails_when_its_named_function_becomes_gated(
 
 
 @pytest.mark.asyncio
+async def test_a_participant_keeps_the_reasoning_level_it_was_validated_at(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plain model name runs at the default level of the config that validated it, whatever a later reload sets."""
+
+    def config(default: str) -> Config:
+        reasoning = ReasoningConfig(levels=["low", "high"], default=default)
+        loaded = _config()
+        loaded.models["sol"] = ModelConfig(provider="openai", id="sol-model", reasoning=reasoning)
+        return loaded
+
+    workflow = _Workflow(tmp_path, monkeypatch, config("low"))
+    live = [workflow.config]
+    loaded: list[str] = []
+
+    def load_model(*args: object, **_kwargs: object) -> _ChildModel:
+        loaded.append(str(args[2]))
+        live[0] = config("high")
+        return workflow.model
+
+    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", load_model)
+    context = _delegate_runtime_context(workflow.config, workflow.paths, execution_identity=_identity())
+    monkeypatch.setattr(
+        workflow,
+        "context",
+        lambda: tool_runtime_context(replace(context, config_provider=lambda: live[0])),
+    )
+    participant = {"id": "writer", "system_prompt": "Write.", "tools": [], "model": "sol"}
+
+    run = await workflow.run(_spec([participant], steps=2, models=["sol@low"]))
+
+    assert run["status"] == "completed", run
+    assert loaded == ["sol@low", "sol@low"]
+
+
+@pytest.mark.asyncio
 async def test_participant_naming_a_filtered_function_fails_its_step(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A participant whose named function the caller's configuration removes fails instead of answering without it."""
     config = _config(
-        tools=[{"dynamic_workflow": {"allowed_tools": ["file"]}}, {"file": {"include_tools": ["read_file"]}}],
+        tools=[
+            {"dynamic_workflow": {"allowed_tools": ["filesystem"]}},
+            {"filesystem": {"include_tools": ["read_file"]}},
+        ],
     )
     workflow = _Workflow(tmp_path, monkeypatch, config)
 
-    run = await workflow.run(_spec([{"id": "writer", "system_prompt": "Write.", "tools": ["file.save_file"]}]))
+    run = await workflow.run(_spec([{"id": "writer", "system_prompt": "Write.", "tools": ["filesystem.write_file"]}]))
 
     assert run["status"] == "failed", run
-    assert "'file.save_file' is not available to you" in run["error"]
+    assert "'filesystem.write_file' is not available to you" in run["error"]
     assert workflow.model.authored_prompts == []
 
 
@@ -591,11 +808,11 @@ async def test_create_checks_grants_against_the_normalized_spec(
     workflow = _Workflow(
         tmp_path,
         monkeypatch,
-        _config(tools=[{"dynamic_workflow": {"allowed_tools": ["file"]}}, "file"]),
+        _config(tools=[{"dynamic_workflow": {"allowed_tools": ["filesystem"]}}, "filesystem"]),
     )
 
     created = await workflow.create(
-        _spec([{"id": "reader", "system_prompt": "Read.", "tools": ["file"]}], tools=[" file "]),
+        _spec([{"id": "reader", "system_prompt": "Read.", "tools": ["filesystem"]}], tools=[" file "]),
     )
 
     assert created["status"] == "ok", created
@@ -623,16 +840,16 @@ def test_participant_from_authored_child_stays_within_its_tools(tmp_path: Path) 
     entity_ids(config, paths)
     context = replace(
         _delegate_runtime_context(config, paths, execution_identity=_identity()),
-        persona=inline_persona("P", ["file"], None, None),
+        persona=inline_persona("P", ["filesystem"], None, None),
     )
 
     request = workflow_module._participant_request(
         context,
-        SubagentParticipant.model_validate({"id": "p", "system_prompt": "P", "tools": ["file"]}),
+        SubagentParticipant.model_validate({"id": "p", "system_prompt": "P", "tools": ["filesystem"]}),
         workflow_id="w",
     )
     assert request.persona is not None
-    assert request.persona.tools == ("file",)
+    assert request.persona.tools == ("filesystem",)
     with pytest.raises(DynamicWorkflowError, match="unknown tool 'calculator'"):
         workflow_module._participant_request(
             context,

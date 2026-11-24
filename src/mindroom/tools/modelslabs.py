@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -122,7 +122,7 @@ def modelslabs_tools() -> type[ModelsLabTools]:
             model_id: str | None = None,
             width: int = 512,
             height: int = 512,
-            **kwargs: object,
+            **kwargs: Any,  # noqa: ANN401 - forwarded to ModelsLabTools, whose options have several types
         ) -> None:
             if isinstance(file_type, str):
                 normalized_file_type = file_type.strip().lower()

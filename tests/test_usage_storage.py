@@ -20,7 +20,7 @@ from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.stats_storage import UsageSessionRow, UsageStorageSource, iter_usage_storage_rows
 from mindroom.usage.storage import (
     COMPACTED_REQUESTS_METADATA_KEY,
-    message_request_snapshot,
+    _message_request_snapshot,
     request_usage,
     run_usage_snapshot,
 )
@@ -306,7 +306,7 @@ def test_a_request_names_the_model_that_answered_it_and_a_retried_request_s_sum_
         provider_data={**answered, "mindroom_aggregate_usage": True},
     )
 
-    requests = [request for message in (single, retried) if (request := message_request_snapshot(message))]
+    requests = [request for message in (single, retried) if (request := _message_request_snapshot(message))]
 
     assert [(request["model"], request["model_provider"], request["metrics"]) for request in requests] == [
         ("reply-model", "test-provider", {"input_tokens": 100, "output_tokens": 1}),
@@ -322,7 +322,7 @@ def test_an_assistant_message_from_history_is_no_request_of_the_run() -> None:
         from_history=True,
     )
 
-    assert (request_usage(replayed), message_request_snapshot(replayed)) == (None, None)
+    assert (request_usage(replayed), _message_request_snapshot(replayed)) == (None, None)
 
 
 @pytest.mark.parametrize(
@@ -341,7 +341,7 @@ def test_a_request_whose_recorded_model_has_another_shape_has_invalid_attributio
         provider_data={"mindroom_model": recorded},
     )
 
-    request = message_request_snapshot(message)
+    request = _message_request_snapshot(message)
 
     assert request is not None
     assert (request["model"], request["model_provider"]) == (False, False)
@@ -359,7 +359,7 @@ def test_carried_request_usage_is_not_counted_again_while_its_message_is_saved()
         content="done",
         metrics=MessageMetrics(tokens=TokenCounts(input_tokens=50, output_tokens=1)),
     )
-    request = message_request_snapshot(folded)
+    request = _message_request_snapshot(folded)
     assert request is not None
     carried = [{**request, "message_id": folded.id}]
     run = RunRecord(

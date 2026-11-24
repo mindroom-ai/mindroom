@@ -7,11 +7,19 @@ of them added.
 
 from __future__ import annotations
 
+import operator
 from dataclasses import fields
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+)
 
+from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 # 2: workers mount only agent workspaces and never write private-instance identity records.
@@ -22,8 +30,14 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerSco
 #    protocol, so mixed releases fail instead of dropping fields; a request names its workspace in `base_dir`.
 # 7: a call's arguments arrive as the model sent them, and the worker validates and coerces them.
 # 8: a worker pinned to one subagent (`subagent=<id>` in its key) serves its normal worker's workspaces and credentials.
-# A wire model change bumps this; `tests/test_worker_protocol_schema.py` pins each version's schema.
-WORKER_PROTOCOL_VERSION = 8
+# 9: so does a worker a reply's calls name (`named=<id>` in its key).
+# 10: a shell call with `stream_io` streams its command's raw output as frames before its result line, and
+#     /execute/{request_id}/stdin writes the command's stdin.
+# 11: a shell call with `sandbox` runs in sandbox mode: empty execution env, no workspace env hook, writable worker HOME.
+# 12: scoped shell calls carry `shell_scope_id`, report `shell_backgrounded`, and stop on /execute/shell-scope/kill.
+# A wire model change bumps this, except an opt-in field declared with ``exclude_if``;
+# `tests/test_worker_protocol_schema.py` pins each version's schema.
+WORKER_PROTOCOL_VERSION = 12
 
 FailureKind = Literal["tool", "worker"]
 
@@ -81,7 +95,7 @@ class CallEnvironment(_WireModel):
 class ExecuteRequest(WorkerRoute):
     """One tool call, with credentials by lease and the environment execution tools receive."""
 
-    tool_name: str
+    tool_name: Annotated[str, AfterValidator(canonical_tool_name)]
     function_name: str
     args: list[Any] = Field(default_factory=list)
     kwargs: dict[str, Any] = Field(default_factory=dict)
@@ -95,6 +109,14 @@ class ExecuteRequest(WorkerRoute):
     request_id: str | None = Field(default=None, max_length=64)
     # A background job's call runs as long as its tool does, and its tools know they run as part of a job.
     run_as_job: bool = False
+    # A shell call whose command's stdout and stderr stream as raw bytes while it runs, for `workers run`.
+    stream_io: bool = False
+    # A sandboxed named-worker call: strips call env, workspace env hook, and shared credentials, with writable HOME.
+    sandbox: bool = False
+    # Turn-scoped shell background owner ID for auto-backgrounding non-job shell calls.
+    shell_scope_id: str | None = Field(default=None, max_length=64)
+    # The caller stores the result itself: no size moves it to a workspace file, and the answer carries `metadata`.
+    structured_result: bool = Field(default=False, exclude_if=operator.not_)
 
 
 class SaveAttachmentRequest(WorkerRoute):
@@ -117,7 +139,7 @@ class LeaseRequest(_WireModel):
     """Credentials for one upcoming tool call, held by the worker until the call consumes them."""
 
     protocol: int
-    tool_name: str
+    tool_name: Annotated[str, AfterValidator(canonical_tool_name)]
     function_name: str
     credential_overrides: dict[str, Any] = Field(default_factory=dict)
     ttl_seconds: int
@@ -129,6 +151,24 @@ class CancelRequest(_WireModel):
 
     protocol: int
     request_id: str = Field(max_length=64)
+
+
+class StdinRequest(_WireModel):
+    """The next bytes, base64, for the stdin of a streamed execute request's command; ``eof`` closes it after them.
+
+    ``seq`` counts a command's chunks from 0, so a chunk sent twice is written once.
+    """
+
+    protocol: int
+    seq: int = Field(ge=0)
+    b: str = ""
+    eof: bool = False
+
+
+class StdinResponse(_WireModel):
+    """Whether the command still takes stdin, answered once the chunk has left for it."""
+
+    open: bool
 
 
 class WorkerFailure(_WireModel):
@@ -146,6 +186,9 @@ class ExecuteResponse(_WireModel):
     result: Any | None = None
     error: str | None = None
     failure_kind: FailureKind | None = None
+    shell_backgrounded: bool = False
+    # What the tool reported about a structured result, such as a command's exit status.
+    metadata: dict[str, Any] | None = Field(default=None, exclude_if=operator.not_)
 
 
 class SaveAttachmentResponse(_WireModel):
@@ -180,3 +223,16 @@ class CancelResponse(_WireModel):
     """Whether the request was running when its cancel arrived."""
 
     cancelled: bool
+
+
+class KillShellScopeRequest(_WireModel):
+    """Stop every auto-backgrounded shell process owned by one turn scope."""
+
+    protocol: int = WORKER_PROTOCOL_VERSION
+    shell_scope_id: str = Field(min_length=1, max_length=64)
+
+
+class KillShellScopeResponse(_WireModel):
+    """Acknowledgment that scoped shell processes were stopped."""
+
+    ok: bool = True

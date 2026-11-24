@@ -80,7 +80,7 @@ from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
-from mindroom.response_turn import CompletedAttempt
+from mindroom.response_turn import CompletedAttempt, detached_turn_context
 from mindroom.routing import ResponderSelection
 from mindroom.teams import leader as leader_module
 from mindroom.teams.envelope import PreparedTeamExecution
@@ -374,7 +374,7 @@ def test_openai_compatible_agent_hides_approval_gated_tools(
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
-        include_openai_compat_guidance=True,
+        outside_matrix=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, "code"),
         plugins=config_plugins(config, runtime_paths),
@@ -418,7 +418,7 @@ def test_openai_compatible_agent_hides_context_bound_todo_tool(tmp_path: Path, m
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
-        include_openai_compat_guidance=True,
+        outside_matrix=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, "code"),
         plugins=config_plugins(config, runtime_paths),
@@ -478,7 +478,7 @@ def test_openai_compatible_dynamic_tools_hide_deferred_context_bound_todo(
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
-        include_openai_compat_guidance=True,
+        outside_matrix=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, "code"),
         plugins=config_plugins(config, runtime_paths),
@@ -533,7 +533,7 @@ def test_openai_compatible_agent_hides_script_gated_tools(
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
-        include_openai_compat_guidance=True,
+        outside_matrix=True,
         knowledge=None,
         model=turn_model(config, runtime_paths, "code"),
         plugins=config_plugins(config, runtime_paths),
@@ -1806,7 +1806,7 @@ class TestStreamingCompletion:
                 resolved_thread_id=None,
             )
             response = await openai_compat._stream_completion(
-                openai_compat._openai_turn_context(
+                detached_turn_context(
                     "general",
                     session_id="session-123",
                     model_name="default",
@@ -1867,7 +1867,7 @@ class TestStreamingCompletion:
 
         with patch("mindroom.api.openai_compat.stream_agent_response", side_effect=mock_stream):
             response = await openai_compat._stream_completion(
-                openai_compat._openai_turn_context(
+                detached_turn_context(
                     "general",
                     session_id="session-123",
                     model_name="default",
@@ -1955,7 +1955,7 @@ class TestStreamingCompletion:
             thread_id=None,
             resolved_thread_id=None,
         )
-        turn = openai_compat._openai_turn_context(
+        turn = detached_turn_context(
             "general",
             session_id="session-123",
             execution_identity=execution_identity,
@@ -2630,7 +2630,7 @@ async def test_an_agent_stream_the_client_left_tells_budgets_its_cost_is_unknown
         thread_id=None,
         resolved_thread_id=None,
     )
-    turn = openai_compat._openai_turn_context(
+    turn = detached_turn_context(
         "general",
         session_id="session-123",
         execution_identity=execution_identity,
@@ -3536,9 +3536,9 @@ class TestTeamCompletion:
             f"<your_role>\n{opening}## Your Identity\nYou are Super Team, the MindRoom team exposed through the"
             " OpenAI-compatible API: you lead its members, hand them work, and write the team's answer.\n"
             "Team purpose: Collaborative engineering team\n"
-            "In OpenAI-compatible API contexts, prior turns may instead appear as plain `role: body` lines.",
+            "In OpenAI-compatible API contexts, prior turns can appear as plain `role: body` lines;",
         )
-        for matrix_text in ("Matrix chatroom", "<conversation>", "complete Matrix ID"):
+        for matrix_text in ("Matrix chatroom", "<msg>", "full Matrix ID"):
             assert matrix_text not in leader_prompt
         for member in built.spec.members:
             assert "the MindRoom agent exposed through the OpenAI-compatible API" in str(

@@ -17,8 +17,9 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from mindroom.agent_loop.model_loop import SendRequest
-from mindroom.constants import AI_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY
+from mindroom.constants import AI_RUN_METADATA_KEY, PRIOR_USAGE_BY_RUN_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY
 from mindroom.helper_usage import get_helper_usage_owner
+from mindroom.history.conversation_text import is_own_thread_message
 from mindroom.history.policy import context_budget_after_reserve
 from mindroom.history.replay import HistorySummaryBudgetError
 from mindroom.history.request_size import request_sizer
@@ -43,7 +44,7 @@ from mindroom.session_storage.lanes import run_session_storage_operation
 from mindroom.session_storage.summary_rows import Fold, summarized_tool_call_ids
 from mindroom.token_counting.counts import count, fit_text, utf8_byte_bound
 from mindroom.tool_system.runtime_context import current_requester_id
-from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, message_request_snapshot
+from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY, carry_request_usage
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -72,7 +73,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # Run metadata keys holding usage that belongs to the run whose record holds them, which a run seeded from it drops.
-_RUN_USAGE_METADATA_KEYS = frozenset({COMPACTED_REQUESTS_METADATA_KEY, PRIOR_USAGE_RUN_METADATA_KEY})
+_PRIOR_USAGE_KEYS = (PRIOR_USAGE_RUN_METADATA_KEY, PRIOR_USAGE_BY_RUN_METADATA_KEY)
+_RUN_USAGE_METADATA_KEYS = frozenset({COMPACTED_REQUESTS_METADATA_KEY, *_PRIOR_USAGE_KEYS})
 
 
 @dataclass
@@ -311,7 +313,7 @@ async def _summarize(
 
 def _finish(messages: list[Message], layout: _Layout, summary_message: Message, record: AnyRunRecord) -> None:
     _rewrite(messages, layout, summary_message)
-    _carry_request_usage(record, layout.folded)
+    carry_request_usage(record, layout.folded)
 
 
 async def _compact_scope(
@@ -494,6 +496,7 @@ def _current_prompt(messages: Sequence[Message], prompt_id: str | None) -> Messa
             and message.add_to_agent_memory
             and not is_compaction_summary(message)
             and not is_queued_notice_message(message)
+            and not is_own_thread_message(message)
         ),
         None,
     )
@@ -620,25 +623,6 @@ def _rewrite(messages: list[Message], layout: _Layout, summary_message: Message)
     if after_prompt and is_scope_summary(summary_message):
         mark_summary_follows(layout.kept[after_prompt - 1])
     messages[:] = [*leading, *layout.kept[:after_prompt], summary_message, *layout.kept[after_prompt:]]
-
-
-def _carry_request_usage(record: AnyRunRecord, folded: Sequence[Message]) -> None:
-    """Keep the usage of folded requests in the run, since their messages leave it.
-
-    Each request keeps its message id, so a run that still saves that message (a reply that failed afterwards) is not
-    counted twice.
-    """
-    requests = [
-        {**request, "message_id": message.id}
-        for message in folded
-        if (request := message_request_snapshot(message)) is not None
-    ]
-    if not requests:
-        return
-    metadata = dict(record.metadata or {})
-    carried = metadata.get(COMPACTED_REQUESTS_METADATA_KEY)
-    metadata[COMPACTED_REQUESTS_METADATA_KEY] = [*(carried if isinstance(carried, list) else []), *requests]
-    record.metadata = metadata
 
 
 __all__ = ["mid_turn_compaction_hook", "without_run_usage"]

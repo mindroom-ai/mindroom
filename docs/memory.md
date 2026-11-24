@@ -13,6 +13,11 @@ This page covers choosing a memory backend, configuring embeddings and extractio
 | `file` | Markdown files (`MEMORY.md` plus dated notes in `memory/`) that are the source of truth | You want memory you can read and edit, or an OpenClaw-style workspace |
 | `none` | No built-in memory | The agent should keep no memories |
 
+Before each reply, the `mem0` and `file` backends add the three memories most relevant to the message to the prompt.
+File memory in `semantic` [search mode](#searching-file-memory) adds up to five of the agent's own semantic matches instead: the closest match and any scored within 0.05 of it, at most 800 tokens together, so a closest match longer than that adds nothing; its teams' three best keyword matches follow, each only if it fits what is left of those 800 tokens, and until the semantic index is ready its own three best keyword matches are used.
+With [`rerank`](#searching-file-memory), on by default with an `openai_decisions` or `typesafe` [`reranker`](knowledge.md#reranking), a reranker chooses the semantic matches instead.
+`search_memories` returns up to its own `limit` in every mode.
+
 <video controls playsinline preload="metadata" aria-label="The agent remembers each person's diet and plans the week's dinners" style="width: 100%" poster="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-light="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-dark="https://github.com/user-attachments/assets/00d4a4fc-58c3-4968-855a-61089cf19e0b">
   <source src="https://github.com/user-attachments/assets/92f62053-ff1e-4982-80c2-bbbac3c5c757" type="video/mp4" media="(prefers-color-scheme: dark)">
   <source src="https://github.com/user-attachments/assets/f1d8e8ce-8160-46bf-811d-2a3e71cde673" type="video/mp4">
@@ -166,6 +171,7 @@ With `provider: ollama`, `config.host` names the Ollama server only when no `OLL
 With `provider: openai`, use `gpt-6-luna`; other GPT-5 and GPT-6 models that support Chat Completions also work.
 With `provider: openai`, `config.openai_base_url` sets the server; without it, extraction uses [`OPENAI_BASE_URL`](configuration/index.md#model-providers), else OpenAI's API.
 With `provider: anthropic`, `config.anthropic_base_url` sets the server; without it, extraction uses [`ANTHROPIC_BASE_URL`](configuration/index.md#model-providers), else Anthropic's API.
+With `provider: anthropic`, Mem0 sends no `temperature`, `top_p`, or `top_k`, which Claude API version `2026-10-21` rejects on every model, so `config` sampling values have no effect.
 For GPT-5 and GPT-6 models, with `provider: openai` or as `openai/<model>` with `provider: openrouter`, Mem0 sends no `temperature`, `top_p`, or `max_tokens` from `config` unless `config.is_reasoning_model` is `false`; set `config.reasoning_effort`, for example `low`, to choose their reasoning effort.
 
 ```yaml
@@ -203,9 +209,6 @@ File memory keeps `MEMORY.md` and dated notes under `memory/` in the agent's wor
 ```yaml
 memory:
   backend: file
-  file:
-    max_entrypoint_lines: 200
-    max_entrypoint_tokens: 50000
   search:
     mode: keyword
     include:
@@ -218,11 +221,13 @@ memory:
 For a single agent, the file backend writes memory only when the agent uses the [`memory` tool](#memory) or edits the files, or when [auto-flush](#file-auto-flush-worker) is enabled; it does not extract memories after every turn like `mem0`.
 A team whose members all use `file` appends each message it answers to the team's `MEMORY.md`, even without auto-flush.
 Before each reply, MindRoom inlines `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
-An ongoing conversation's inlined copy can miss entries added to `MEMORY.md` since it last loaded the file, for example from another conversation, until an hour passes without replies, its history is compacted, or MindRoom restarts; edited or deleted lines apply from its next reply, new conversations see every change right away, and the agent can read the file directly.
-`memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines, and `memory.file.max_entrypoint_tokens` (default `50000`, minimum `1`) caps their size in the turn model's tokens ([how tokens are counted](configuration/history.md#how-tokens-are-counted)).
-Because `add_memory` appends, a file over either cap keeps the lines before its first `- [id=...]` entry and as many of the newest entries as fit, and withholds the older ones; a file without entries, or whose lines before the first entry already reach a cap, keeps its first lines.
-Only whole lines are inlined, never part of a line.
-When either cap truncates, a marker reports the included and total line counts, both caps, and the path to read for the rest.
+An ongoing conversation's inlined copy can miss lines added to `MEMORY.md` since it last loaded the file, for example from another conversation: lines added anywhere while the file fits the preload limit below, and lines added at the end of a file the limit cuts, until an hour passes without a model request that sends that copy or its history is compacted; edited or deleted lines apply from its next reply, new conversations load the current file (its first lines that fit, when the limit cuts it), and the agent can read the file directly.
+On a route that keeps the system prompt unchanged while its cache is warm and sends changes as a system prompt update, such as Claude Opus through OpenRouter with the hour-long prompt cache, an edited or deleted line that an update can state exactly reaches the conversation as such an update, and the old line can stay quoted in that conversation's later requests until its held prompt starts over: when it idles past the cache lifetime, its history is compacted or its updates alone would need that, the route or model changes, or a change comes that an update cannot state, such as one too long or one whose lines appear more than once in the prompt.
+Such a change, and the first request after the hold starts over, sends the current prompt without the old line.
+`MEMORY.md` is cut by the rule that cuts every [context file](configuration/agents.md#file-based-context-loading): `defaults.max_preload_file_chars` (default `30000`, minimum `1`) characters per file.
+A longer file inlines its first whole lines that fit the limit, counted as they are in the file (only a line feed ends a line), and withholds the rest; only a first line longer than the limit inlines its first characters.
+Lines `add_memory` appends past the cut never reach the prompt until the file is condensed, and they leave the inlined copy unchanged.
+After a cut, a marker names the file, says the rest is left out of the prompt, and asks the agent to condense it without losing information (moving detail into files it can read or search on demand); it holds no counts, so it stays the same while the file grows.
 
 ### File layout
 
@@ -245,15 +250,40 @@ Each file is read up to 1 MiB, cut at its last complete line, and updating a tru
 |---|---|---|
 | `mode` | `keyword` | `keyword` or `semantic` |
 | `include` | `[memory/**/*.md]` | Glob patterns relative to the file-memory root that semantic search indexes; must be non-empty |
+| `exclude` | `[]` | Glob patterns relative to the file-memory root that semantic search leaves out of `include`, such as `exclude: [memory/archive/**]` for archived notes |
 | `include_entrypoint` | `false` | Also index `MEMORY.md` for semantic search |
+| `rerank` | unset | In `semantic` mode, rerank the hits with the root [`reranker`](knowledge.md#reranking); unset reranks only when that reranker's `provider` is `openai_decisions` or `typesafe` |
 
 In `keyword` mode, `search_memories` matches structured entries with IDs in `MEMORY.md`, plus entries and plain-text lines in `memory/**/*.md`.
-Ordinary prose in `MEMORY.md` reaches the agent through the prompt preload, not keyword search; to reach lines beyond the preload cap, read the file directly or use semantic search with `include_entrypoint: true`.
+Ordinary prose in `MEMORY.md` reaches the agent through the prompt preload, not keyword search; to reach lines beyond the preload limit, read the file directly or use semantic search with `include_entrypoint: true`.
 
-In `semantic` mode, MindRoom builds a vector index of the `include` files with `memory.embedder` on first use and stores it under `<storage-root>/knowledge_db/` (see [Knowledge storage](knowledge.md#storage)).
+In `semantic` mode, MindRoom builds a vector index of the `include` files not matched by `exclude` with `memory.embedder` on first use and stores it under `<storage-root>/knowledge_db/` (see [Knowledge storage](knowledge.md#storage)).
+Each memory entry (a `- [id=...]` line, or a Markdown section up to `###`) is indexed and returned on its own, split at 1,200 characters; a `#` line inside a fenced code block is code, not a new section.
 Until the index is ready, or when embeddings fail, search falls back to keyword results.
 Writes through the `memory` tool, auto-flush, and an applied [dreaming](scheduling.md#dreaming) proposal refresh the index, but a ready index does not notice direct file edits until a later such write refreshes it.
 Semantic mode covers the agent's own memory; team file memory is always keyword searched.
+
+Reranking is on with `rerank: true`, and with `rerank` unset when the [`reranker`](knowledge.md#reranking) is `openai_decisions` or `typesafe`, the two that improved recall in the benchmark below; `rerank: false` turns it off, globally or in `agents.<name>.memory_search`.
+With reranking on and a reranker configured, semantic searches fetch 20 hits, or a `search_memories` call's larger `limit`, and the reranker orders them.
+Per-turn recall then adds, in the reranker's order, up to five hits that score at least the reranker's `threshold` (default `0.5`, or `0.3` for [judgment rerankers](knowledge.md#judgment-rerankers)) within the same 800 tokens, instead of the hits within 0.05 of the closest; when no hit reaches the threshold, it adds none.
+If the reranker fails or takes more than 2 seconds, recall adds the hits it would add without reranking and logs a warning, so a reranker never holds up a reply.
+A hosted reranker, which `vertex_ai`, `typesafe` and `openai_decisions` always are and `cohere` is unless its `url` names your own server, adds its response time to every reply.
+So with an `openai_decisions` or `typesafe` reranker, every reply in `semantic` mode sends about 20 memory entries, clipped and with credential-like values redacted, to OpenAI or System One unless `memory.search.rerank` is `false`.
+With `rerank: true` and a `cohere` or `vertex_ai` reranker, memory entries and the message go to that service unredacted; only the judgment rerankers redact.
+
+On three sets of real conversation turns (132 to 1,247 held-out turns each), judged by a language model for whether recall added a relevant memory, reranked recall at threshold `0.3` compared with recall without a reranker as follows.
+
+| Reranker | Turns with a relevant memory | Relevant memories per 1,000 recalled tokens | Recalled tokens per turn | Added latency (median / 95th percentile) | Cost per turn |
+|---|---|---|---|---|---|
+| none | 36.6% to 76.2% | baseline | 633 to 701 | none | none |
+| `typesafe` | +5.3 to +31.3 points | 1.59 to 2.36 times | 412 to 553 | 118 ms / 178 ms | $0.00023 to $0.00033 |
+| `openai_decisions` | +2.0 to +4.8 points | 1.46 to 2.22 times | 410 to 528 | 290 ms / 578 ms | $0.00060 to $0.00088 |
+
+Latency was measured on 200 turns of one set run one at a time, none of which fell back to recall without reranking; a second judge model gave gains of the same sign on that set and on the largest one.
+A local `BAAI/bge-reranker-v2-m3` with `sentence_transformers` did not improve recall over recall without a reranker, and its scores bunch near 0, so the default threshold `0.5` makes recall add nothing for most turns; if you turn on `memory.search.rerank` with a local cross-encoder, set `reranker.threshold: 0`.
+
+**Behaviour change:** memory reranking is on by default only with the `openai_decisions` and `typesafe` rerankers, which earlier releases did not offer, so a config from an earlier release recalls as before.
+`memory.search.rerank: false` stops reranking in recall and `search_memories`, but `search_knowledge_base` still reranks the agent's semantic file-memory hits with the root reranker.
 
 ```yaml
 agents:
@@ -325,7 +355,7 @@ The retired `max_dirty_age_seconds` and `max_cross_session_reprioritize` setting
 ## Prompt Curation
 
 Agents append to `MEMORY.md` and their context files more often than they condense them, so the prompt they send on every turn keeps growing.
-Enable the [`prompt_curation`](scheduling.md#prompt_curation) automation to have MindRoom check their size daily and, once they pass a trigger or the preload has to withhold part of `MEMORY.md`, ask the agent in a visible thread to condense them gradually, fold corrections into the entries they correct, and move detail into searchable `memory/` files, then measure the result and ask the agent to re-check a cut outside the bounds.
+Enable the [`prompt_curation`](scheduling.md#prompt_curation) automation to have MindRoom check their size daily and, once they pass a trigger or the preload has to withhold part of one of them, ask the agent in a visible thread to condense them gradually, fold corrections into the entries they correct, and move detail into searchable `memory/` files, then measure the result and ask the agent to re-check a cut outside the bounds.
 
 ```yaml
 agents:
@@ -382,6 +412,6 @@ A silent turn stores no run, so neither automatic extraction nor the file auto-f
 
 ## UI Configuration
 
-The Dashboard **Memory** page edits the `memory` section: backend, embedder provider, model, credential service, and host, file settings (`max_entrypoint_lines`, `max_entrypoint_tokens`), search settings, and all auto-flush settings.
+The Dashboard **Memory** page edits the `memory` section: backend, embedder provider, model, credential service, and host, search settings, and all auto-flush settings.
 The remaining fields, such as `llm`, are under **More settings**.
 Save from the Memory page to write the changes to `config.yaml`.

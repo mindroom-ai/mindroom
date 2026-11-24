@@ -5,11 +5,15 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import nio
 import pytest
+from aiohttp import web
+from nio.durable import open_durable_sync
 from nio.exceptions import OlmUnverifiedDeviceError
 from PIL import Image, JpegImagePlugin, PngImagePlugin
+from structlog.testing import capture_logs
 
 from mindroom.matrix.client_delivery import (
     _msgtype_for_mimetype,
@@ -21,6 +25,7 @@ from mindroom.matrix.client_delivery import (
     send_runtime_encrypted_media_message,
 )
 from mindroom.matrix.client_room_admin import RoomJoinOutcome, join_room
+from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.media import extract_media_caption
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 
@@ -29,10 +34,13 @@ if TYPE_CHECKING:
     from pathlib import Path
     from typing import BinaryIO
 
+    from nio.durable import DurableSync
+
 
 def _mock_client(*, encrypted: bool = False) -> AsyncMock:
     """Create a mock nio.AsyncClient with room state."""
     client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = "@mindroom_test:localhost"
     room = MagicMock()
     room.encrypted = encrypted
     client.rooms = {"!room:localhost": room}
@@ -452,6 +460,7 @@ class TestSendAudioMessage:
     async def test_uncached_unencrypted_room_uses_raw_send_fallback(self) -> None:
         """Voice audio sends should match text delivery's uncached-room fallback."""
         client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = "@mindroom_test:localhost"
         client.rooms = {}
         client.olm = None
         client.access_token = "token"  # noqa: S105
@@ -523,6 +532,7 @@ class TestSendMessageResult:
     async def test_falls_back_to_raw_send_when_room_missing_from_cache_but_room_is_unencrypted(self) -> None:
         """Unencrypted sends should not depend on nio's room cache."""
         client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = "@mindroom_test:localhost"
         client.rooms = {}
         client.olm = None
         client.access_token = "token"  # noqa: S105
@@ -550,6 +560,7 @@ class TestSendMessageResult:
             "!room:localhost",
             content,
             room_encrypted=False,
+            sidecar_required=False,
         )
         client.room_get_state_event.assert_awaited_once_with("!room:localhost", "m.room.encryption")
         client.room_send.assert_not_awaited()
@@ -559,6 +570,7 @@ class TestSendMessageResult:
     async def test_returns_none_for_uncached_encrypted_room_without_olm(self) -> None:
         """Encrypted sends should fail closed until nio has synced the room cache."""
         client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = "@mindroom_test:localhost"
         client.rooms = {}
         client.olm = None
         client.access_token = "token"  # noqa: S105
@@ -641,8 +653,9 @@ class TestSendMessageResult:
             _content: dict[str, object],
             *,
             room_encrypted: bool,
+            sidecar_required: bool,
         ) -> dict[str, str]:
-            assert room_encrypted is True
+            assert (room_encrypted, sidecar_required) == (True, False)
             client.rooms.clear()
             return {"body": "prepared", "msgtype": "m.text"}
 
@@ -755,6 +768,54 @@ class TestSendMessageResult:
         assert mock_error.call_args.args == ("matrix_message_delivery_exception",)
         assert mock_error.call_args.kwargs["exception_type"] == "RuntimeError"
         assert mock_error.call_args.kwargs["error_message"] == "Matrix delivery raised an unexpected local exception."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "log_level"),
+    [("stopped", "warning"), ("stopped_mid_send", "warning"), ("poisoned", "error")],
+)
+async def test_send_refused_by_a_stopped_owner_logs_at_warning(tmp_path: Path, case: str, log_level: str) -> None:
+    """An encrypted send its stopping bot's closed sync session refuses, before or during it, logs at warning.
+
+    A send whose own crypto transaction poisons the live session (a malformed keys reply) still logs at error.
+    """
+    room_id, user_id = "!room:localhost", "@bot:localhost"
+    session: DurableSync | None = None
+
+    async def handle(request: web.Request) -> web.Response:
+        if request.path.endswith("/joined_members"):
+            return web.json_response({"joined": {user_id: {}, "@peer:localhost": {}}})
+        if request.path.endswith("/keys/query"):
+            if case == "stopped_mid_send":
+                assert session is not None
+                await session.close()
+            return web.json_response({"device_keys": 5} if case == "poisoned" else {"device_keys": {}, "failures": {}})
+        return web.json_response({"event_id": "$sent"})
+
+    app = web.Application()
+    app.router.add_route("*", "/{path:.*}", handle)
+    http = web.AppRunner(app)
+    await http.setup()
+    await web.TCPSite(http, "127.0.0.1", 0).start()
+    host, port = http.addresses[0]
+    client = MindRoomAsyncClient(f"http://{host}:{port}", user_id, "BOT", store_path=None)
+    client.restore_login(user_id, "BOT", "token")
+    session = open_durable_sync(client, consumer_id=uuid4(), store_path=tmp_path)
+    client.rooms[room_id] = nio.MatrixRoom(room_id, user_id, encrypted=True)
+    if case == "stopped":
+        await session.close()
+
+    try:
+        with capture_logs() as logs:
+            result = await send_message_result(client, room_id, {"body": "hello", "msgtype": "m.text"})
+    finally:
+        await session.close()
+        await client.close()
+        await http.cleanup()
+
+    assert result is None
+    assert [log["log_level"] for log in logs if log["event"] == "matrix_message_delivery_exception"] == [log_level]
 
 
 class TestJoinRoom:
@@ -1060,6 +1121,7 @@ class TestEncryptionEnabledDuringMediaUpload:
     async def test_uncached_room_audio_send_refuses_plaintext_upload(self) -> None:
         """The post-upload state read decides, so an uncached room is protected too."""
         client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = "@mindroom_test:localhost"
         client.rooms = {}
         client.olm = MagicMock()
         client.olm.device_id = "DEVICE"
@@ -1081,6 +1143,7 @@ class TestEncryptionEnabledDuringMediaUpload:
     async def test_unreadable_state_after_upload_refuses_plaintext_upload(self) -> None:
         """A post-upload state read that fails cannot prove the room stayed plaintext."""
         client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = "@mindroom_test:localhost"
         client.rooms = {}
         client.olm = None
         client.access_token = "token"  # noqa: S105
@@ -1100,6 +1163,7 @@ class TestEncryptionEnabledDuringMediaUpload:
     async def test_uncached_encrypted_room_never_takes_the_plaintext_raw_send(self) -> None:
         """An encrypted upload to an uncached room goes through nio's encrypting send path."""
         client = AsyncMock(spec=nio.AsyncClient)
+        client.user_id = "@mindroom_test:localhost"
         client.rooms = {}
         client.olm = MagicMock()
         client.olm.device_id = "DEVICE"

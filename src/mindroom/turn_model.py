@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.budgets.monitor import budget_model
 from mindroom.config.resolution import entity_model_name
 from mindroom.entity_resolution import resolve_room_scoped_value
-from mindroom.room_model_overrides import resolve_room_model_override
+from mindroom.room_settings import resolve_room_model_override
 from mindroom.thread_models import resolve_thread_model_override
 
 if TYPE_CHECKING:
@@ -19,6 +19,11 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
 _AD_HOC_MODEL_NAME = "default"
+
+# What chose a requested model; the first three are overrides.
+type ModelSource = Literal["explicit", "thread", "room", "room_config", "agent"]
+# What chose a model an entity inherits in a room without a thread choice.
+type InheritedModelSource = Literal["room", "room_config", "agent"]
 
 
 @dataclass(frozen=True)
@@ -54,7 +59,7 @@ class TurnModel:
     model_name: str
     requested_model_name: str
     context_window: int | None
-    # An explicit choice, a thread override, or a saved room override chose the requested model.
+    # An explicit choice, a thread override, or the room's `model` setting chose the requested model.
     overridden: bool
 
 
@@ -72,23 +77,44 @@ def _thread_model(config: Config, runtime_paths: RuntimePaths, scope: ModelScope
     return resolve_thread_model_override(runtime_paths, scope.thread_id, config=config).active.get(scope.entity)
 
 
-def _requested_model(config: Config, runtime_paths: RuntimePaths, scope: ModelScope) -> tuple[str, bool]:
+def _requested_choice(config: Config, runtime_paths: RuntimePaths, scope: ModelScope) -> tuple[str, ModelSource]:
     if scope.explicit is not None:
-        return scope.explicit, True
+        return scope.explicit, "explicit"
     if scope.entity is None:
-        return _AD_HOC_MODEL_NAME, False
+        return _AD_HOC_MODEL_NAME, "agent"
     # The authored model also checks that the entity exists, so an unknown name never runs any model.
     authored = entity_model_name(config, scope.entity)
     thread_model = _thread_model(config, runtime_paths, scope)
     if thread_model is not None:
-        return thread_model, True
+        return thread_model, "thread"
     if scope.room_id is None:
-        return authored, False
+        return authored, "agent"
     room_override = resolve_room_model_override(runtime_paths, scope.room_id, configured_models=config.models).active
     if room_override is not None:
-        return room_override, True
+        return room_override, "room"
     room_model = resolve_room_scoped_value(config.room_models, scope.room_id, runtime_paths)
-    return room_model or authored, False
+    return (room_model, "room_config") if room_model else (authored, "agent")
+
+
+def _requested_model(config: Config, runtime_paths: RuntimePaths, scope: ModelScope) -> tuple[str, bool]:
+    requested, source = _requested_choice(config, runtime_paths, scope)
+    return requested, source in ("explicit", "thread", "room")
+
+
+def resolve_inherited_model(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    entity: str,
+    room_id: str,
+) -> tuple[str, InheritedModelSource]:
+    """Return the model ``entity`` runs in a room without a thread choice, and what chose it, from one read.
+
+    The source is the room's `model` setting, its authored `room_models` entry, or the entity's own model.
+    """
+    model_name, source = _requested_choice(config, runtime_paths, ModelScope(entity=entity, room_id=room_id))
+    # A scope without a thread or an explicit choice never names either.
+    assert source not in ("explicit", "thread")
+    return model_name, source
 
 
 def _budgeted(config: Config, runtime_paths: RuntimePaths, model_name: str, budget: TurnBudget | None) -> str:
@@ -112,7 +138,7 @@ def resolve_turn_model(
 ) -> TurnModel:
     """Return the model one entity's turn runs.
 
-    Precedence: an explicit choice, the thread's saved choice for the entity, the room's saved choice, the authored
+    Precedence: an explicit choice, the thread's saved choice for the entity, the room's `model` setting, the authored
     `room_models` entry, then the entity's authored model; the requester's budget may then swap in its fallback.
     ``budget`` None skips the budget, for a turn that runs a model already budgeted or no requester's turn.
     """

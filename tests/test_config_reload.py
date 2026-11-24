@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 import tempfile
 from contextlib import suppress
@@ -79,7 +80,6 @@ if TYPE_CHECKING:
     from collections.abc import Set as AbstractSet
 
     from mindroom.constants import RuntimePaths
-    from mindroom.message_target import MessageTarget
     from mindroom.orchestration.entity_fleet import EntityFleet
     from mindroom.orchestration.rooms import RoomSetup
 
@@ -916,6 +916,29 @@ def test_plugin_tree_snapshot_ignores_git_metadata(tmp_path: Path) -> None:
     assert git_ref not in snapshot
 
 
+def test_plugin_tree_snapshot_never_reads_ignored_directories(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The watcher scans every plugin root each second, so it must not stat what it ignores, such as Git objects."""
+    plugin_root = tmp_path / "plugins" / "demo"
+    hooks_path = plugin_root / "hooks.py"
+    ignored = [plugin_root / ".git" / "objects" / "ab" / "cdef", plugin_root / "__pycache__" / "hooks.cpython-314.pyc"]
+    for path in [hooks_path, *ignored]:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x\n", encoding="utf-8")
+    statted: list[str] = []
+    real_stat = os.stat
+
+    def recording_stat(path: str | os.PathLike[str], *, follow_symlinks: bool = True) -> os.stat_result:
+        statted.append(os.fspath(path))
+        return real_stat(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(os, "stat", recording_stat)
+
+    snapshot = _tree_snapshot(plugin_root)
+
+    assert list(snapshot) == [hooks_path]
+    assert not [path for path in statted if "/.git/" in path or "/__pycache__/" in path]
+
+
 @pytest.mark.asyncio
 async def test_plugin_watcher_does_not_retry_failed_reload_without_new_change(
     monkeypatch: pytest.MonkeyPatch,
@@ -1357,19 +1380,20 @@ async def test_initialize_binds_nothing_when_entity_account_preparation_fails(tm
 
 
 @pytest.mark.asyncio
-async def test_ready_personal_agent_nudges_router_reconciliation(tmp_path: Path) -> None:
-    """A generated agent's first sync lets the router onboard its owner at once instead of after a retry delay."""
+async def test_ready_personal_agent_nudges_every_bots_reconciliation(tmp_path: Path) -> None:
+    """A generated agent's first sync lets whichever bot observes onboarding onboard its owner at once."""
     paths = test_runtime_paths(tmp_path)
     _append_personal_agent_roster_entry(paths, personal_agent_entry())
     data = deepcopy(PERSONAL_AGENTS_BASE) | {"agents": {"general": {"display_name": "General"}}}
     orchestrator = _MultiAgentOrchestrator(paths, config=Config.validate_with_runtime(data, paths))
-    router = MagicMock(spec=AgentBot)
-    install_bots(orchestrator, {ROUTER_AGENT_NAME: router})
+    router, general = MagicMock(spec=AgentBot), MagicMock(spec=AgentBot)
+    install_bots(orchestrator, {ROUTER_AGENT_NAME: router, "general": general})
 
     await orchestrator.handle_bot_ready(MagicMock(spec=AgentBot, agent_name="general"))
     router.personal_room_target_ready.assert_not_called()
     await orchestrator.handle_bot_ready(MagicMock(spec=AgentBot, agent_name="mind_alice_smith"))
     router.personal_room_target_ready.assert_called_once_with()
+    general.personal_room_target_ready.assert_called_once_with()
 
 
 @pytest.mark.asyncio
@@ -1655,7 +1679,7 @@ async def test_queued_config_reload_waits_for_in_flight_response(
 
     config = _runtime_bound_config(
         Config(
-            agents={"agent1": AgentConfig(display_name="Agent 1")},
+            agents={"agent1": AgentConfig(display_name="Agent 1", rooms=["lobby"])},
             router=RouterConfig(model="default"),
         ),
         tmp_path,
@@ -1673,7 +1697,7 @@ async def test_queued_config_reload_waits_for_in_flight_response(
     runner = unwrap_extracted_collaborator(bot._response_runner)
     request = _reply_request(bot.agent_name)
 
-    async def run_response(_target: MessageTarget) -> SourceFate:
+    async def run_response() -> SourceFate:
         response_started.set()
         await release_response.wait()
         return Owned()
@@ -1955,7 +1979,7 @@ def test_config_update_plan_restarts_running_entities_when_construction_prompts_
     """Construction-time root prompt overrides should restart running agents, teams, and router."""
     old_config = _runtime_bound_config(
         Config(
-            agents={"general": AgentConfig(display_name="General Agent")},
+            agents={"general": AgentConfig(display_name="General Agent", rooms=["lobby"])},
             teams={
                 "team1": TeamConfig(
                     display_name="Team 1",
@@ -1968,7 +1992,7 @@ def test_config_update_plan_restarts_running_entities_when_construction_prompts_
     )
     new_config = _runtime_bound_config(
         Config(
-            agents={"general": AgentConfig(display_name="General Agent")},
+            agents={"general": AgentConfig(display_name="General Agent", rooms=["lobby"])},
             teams={
                 "team1": TeamConfig(
                     display_name="Team 1",
@@ -2077,7 +2101,6 @@ def test_config_update_plan_reconciles_room_metadata_without_restarting_bots() -
         pytest.param({"bot_accounts": ["@bridge:localhost"]}, True, id="bot-accounts"),
         pytest.param({"room_defaults": {"invite_users": ["@alice:localhost"]}}, True, id="room-defaults"),
         pytest.param({"router": {"access": {"users": ["@alice:localhost"]}}}, True, id="router-access"),
-        pytest.param({"router": {"accept_invites": False}}, True, id="router-invites"),
         pytest.param({"external_trigger_policy": {"enabled": False}}, True, id="trigger-policy"),
     ],
 )
@@ -2088,6 +2111,7 @@ def test_config_update_plan_drains_responses_only_for_restarts_or_reply_authoriz
     """Edits that restart nothing and leave reply authorization alone may publish during replies."""
     base = {
         "agents": {"general": {"display_name": "General"}},
+        "server_emoji": {"enabled": True},
         "models": {
             "default": {"provider": "openai", "id": "gpt-6.1-sol"},
             "fast": {"provider": "openai", "id": "gpt-6-luna"},
@@ -2223,23 +2247,47 @@ def _two_call_agents_config(change: Callable[[dict[str, Any]], object] | None = 
             id="tool-approval",
         ),
         pytest.param(lambda d: d["models"]["default"].update(id="new-default"), set(), id="agent-model-definition"),
-        pytest.param(lambda d: d["calls"]["profiles"]["realtime"].update(voice="cedar"), {"general"}, id="voice"),
+        pytest.param(lambda d: d["calls"]["profiles"]["realtime"].update(voice="cedar"), set(), id="voice"),
         pytest.param(
             lambda d: d["calls"]["profiles"]["realtime"].update(model="gpt-realtime-new"),
-            {"general"},
+            set(),
             id="realtime-model",
         ),
-        pytest.param(lambda d: d["models"]["call"].update(id="new-call-model"), {"writer"}, id="profile-model"),
-        pytest.param(lambda d: d["calls"]["agents"].update(general="cascaded"), {"general"}, id="profile-assignment"),
+        pytest.param(lambda d: d["models"]["call"].update(id="new-call-model"), set(), id="profile-model"),
+        pytest.param(
+            lambda d: d["calls"]["agents"].update(general="cascaded"),
+            {"general"},
+            id="backend-change-profile-assignment",
+        ),
+        pytest.param(
+            lambda d: d["calls"]["profiles"]["realtime"].update(backend="live"),
+            {"general"},
+            id="backend-change-on-profile",
+        ),
         pytest.param(
             lambda d: d["calls"]["agents"].update(general="realtime-copy"),
-            {"general"},
-            id="equal-profile-assignment",
+            set(),
+            id="same-backend-profile-assignment",
         ),
         pytest.param(
             lambda d: d["calls"].update(livekit_service_url="https://livekit.example.org"),
-            {"general", "writer"},
+            set(),
             id="livekit-service-url",
+        ),
+        pytest.param(
+            lambda d: d["calls"]["agents"].update(helper="realtime"),
+            {"helper"},
+            id="add-call-agent",
+        ),
+        pytest.param(
+            lambda d: d["calls"]["agents"].pop("writer"),
+            {"writer"},
+            id="remove-call-agent",
+        ),
+        pytest.param(
+            lambda d: d["calls"].update(enabled=False),
+            {"general", "writer"},
+            id="calls-disabled",
         ),
     ],
 )
@@ -2249,7 +2297,7 @@ def test_config_update_plan_restarts_call_agents_for_their_call_setup_or_a_call_
     expected_call_restarts: set[str],
     in_call: frozenset[str],
 ) -> None:
-    """Idle call agents restart only for their own call setup; an agent in a call restarts for any change."""
+    """Idle call agents restart only for construction-time call setup; an agent in a call restarts for any change."""
     running_entities = {ROUTER_AGENT_NAME, "general", "writer", "helper"}
 
     plan = build_config_update_plan(
@@ -2258,7 +2306,7 @@ def test_config_update_plan_restarts_call_agents_for_their_call_setup_or_a_call_
         bots=_call_bots(running_entities, in_call=in_call),
     )
 
-    assert plan.restart & {"general", "writer"} == expected_call_restarts | in_call
+    assert plan.restart & {"general", "writer", "helper"} == expected_call_restarts | in_call
 
 
 def test_a_knowledge_graph_change_leaves_an_agent_in_a_call_running() -> None:
@@ -2390,8 +2438,52 @@ def test_config_update_plan_restarts_call_agent_when_worker_routing_changes() ->
 
 
 @pytest.mark.parametrize("backend", ["cascaded", "live"])
-def test_config_update_plan_restarts_delegated_call_agent_when_referenced_model_changes(backend: str) -> None:
-    """A delegated call agent rebuilds when its named model definition changes."""
+@pytest.mark.parametrize("in_call", [frozenset(), frozenset({"general"})], ids=["idle", "in-call"])
+def test_config_update_plan_restarts_delegated_call_agent_only_in_call_when_profile_model_changes(
+    backend: str,
+    in_call: frozenset[str],
+) -> None:
+    """Editing a call profile's agent_model/model leaves an idle agent running and restarts one in a call."""
+    models = {
+        "default": ModelConfig(provider="openai", id="default-model"),
+        "call": ModelConfig(provider="openai", id="call-model"),
+        "local": ModelConfig(provider="openai", id="local-model"),
+    }
+    old_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            models=models,
+            calls=_delegated_calls_for("general", model="call", backend=backend),
+            router=RouterConfig(model="default"),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            models=models,
+            calls=_delegated_calls_for("general", model="local", backend=backend),
+            router=RouterConfig(model="default"),
+        ),
+    )
+    running_entities = {"general"}
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        bots=_call_bots(running_entities, in_call=in_call),
+    )
+
+    assert plan.restart == in_call
+    assert plan.requires_response_drain is bool(in_call)
+
+
+@pytest.mark.parametrize("backend", ["cascaded", "live"])
+@pytest.mark.parametrize("in_call", [frozenset(), frozenset({"general"})], ids=["idle", "in-call"])
+def test_config_update_plan_restarts_delegated_call_agent_when_referenced_model_changes(
+    backend: str,
+    in_call: frozenset[str],
+) -> None:
+    """Editing a call profile's referenced model leaves an idle agent running and restarts one in a call."""
     old_config = _runtime_bound_config(
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
@@ -2414,15 +2506,16 @@ def test_config_update_plan_restarts_delegated_call_agent_when_referenced_model_
             router=RouterConfig(model="default"),
         ),
     )
-    running_entities = {ROUTER_AGENT_NAME, "general"}
+    running_entities = {"general"}
 
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        bots=_call_bots(running_entities),
+        bots=_call_bots(running_entities, in_call=in_call),
     )
 
-    assert plan.restart == {"general"}
+    assert plan.restart == in_call
+    assert plan.requires_response_drain is bool(in_call)
 
 
 @pytest.mark.parametrize("backend", ["cascaded", "live"])
@@ -2781,9 +2874,9 @@ async def test_in_flight_response_count_nonzero_during_send_response(
     runner = unwrap_extracted_collaborator(bot._response_runner)
     request = _reply_request(bot.agent_name)
 
-    async def run_response(target: MessageTarget) -> SourceFate:
+    async def run_response() -> SourceFate:
         await bot._delivery_gateway.send_text(
-            SendTextRequest(target=target, response_text="the answer"),
+            SendTextRequest(target=request.response_envelope.target, response_text="the answer"),
         )
         return Owned()
 
@@ -2834,7 +2927,7 @@ async def test_in_flight_response_count_stays_per_entity_across_bots(
     entered = asyncio.Event()
     release = asyncio.Event()
 
-    async def blocked_response(_target: MessageTarget) -> SourceFate:
+    async def blocked_response() -> SourceFate:
         entered.set()
         await release.wait()
         return Owned()
@@ -2885,7 +2978,7 @@ async def test_closed_admission_defers_response_until_gate_reopens(
     admission_gate = bot.orchestrator.response_admission_gate
     response_started = asyncio.Event()
 
-    async def run_response(_target: MessageTarget) -> SourceFate:
+    async def run_response() -> SourceFate:
         response_started.set()
         return Owned()
 
@@ -3020,3 +3113,98 @@ async def test_shutdown_during_active_drain_cancels_reload(
     # The reload task should have been cancelled
     assert task.done()
     orchestrator.config_reload.apply_update_plan.assert_not_awaited()
+
+
+def _owner_reload_config(rooms: list[str], *, display_name: str = "General") -> Config:
+    """Return a config with no root Space whose `general` agent lists ``rooms`` and whose `other` agent lists none.
+
+    `general` answers the members of the room it is asked in, so its room list is no reply grant.
+    """
+    access = {"current_room_members": True, "members_of_rooms": []}
+    return _runtime_bound_config(
+        Config.model_validate(
+            {
+                "agents": {
+                    "general": {"display_name": display_name, "rooms": rooms, "access": access},
+                    "other": {"display_name": "Other"},
+                },
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
+                "matrix_space": {"enabled": False},
+            },
+        ),
+    )
+
+
+async def _reload_with_bots(
+    current_config: Config,
+    new_config: Config,
+    entities: Iterable[str],
+) -> tuple[_MultiAgentOrchestrator, dict[str, AsyncMock], MagicMock]:
+    """Reload a running runtime from one config to another; return it, its first bots, and the whole-index fence."""
+    orchestrator = _MultiAgentOrchestrator(runtime_paths_for(current_config), config=current_config)
+    orchestrator.running = True
+    bots = {
+        name: AsyncMock(
+            spec=AgentBot,
+            agent_name=name,
+            running=True,
+            pending_response_owner_count=0,
+            pending_response_phase_counts={},
+            deferred_stop_phase=None,
+            deferred_stop_required=False,
+        )
+        for name in entities
+    }
+    install_bots(orchestrator, bots)
+    with (
+        patch.object(orchestrator.config_reload, "load_config", return_value=published_config_load(new_config)),
+        patch.object(orchestrator, "_sync_runtime_support_services", new=AsyncMock()),
+        patch.object(orchestrator.fleet, "create", new=AsyncMock()),
+        patch.object(orchestrator.agent_reply_membership_sync, "invalidate") as fence_every_room,
+    ):
+        await orchestrator.config_reload._update_config()
+    return orchestrator, bots, fence_every_room
+
+
+def test_adding_first_room_starts_owner() -> None:
+    """A reload that configures the first room starts the owner, and nothing else."""
+    plan = build_config_update_plan(
+        current_config=_owner_reload_config([]),
+        new_config=_owner_reload_config(["lobby"]),
+        bots={"general": MagicMock(), "other": MagicMock()},
+    )
+
+    assert plan.start == {ROUTER_AGENT_NAME}
+    assert (plan.remove, plan.stop) == (frozenset(), frozenset())
+
+
+@pytest.mark.asyncio
+async def test_removing_last_room_stops_owner_without_fencing_other_rooms() -> None:
+    """A reload that removes the last room stops the owner, which keeps its rooms, and fences no other room."""
+    orchestrator, bots, fence_every_room = await _reload_with_bots(
+        _owner_reload_config(["lobby"]),
+        _owner_reload_config([]),
+        (ROUTER_AGENT_NAME, "general", "other"),
+    )
+
+    owner = bots[ROUTER_AGENT_NAME]
+    owner.stop.assert_awaited_once()
+    owner.leave_rooms.assert_not_awaited()
+    assert set(orchestrator.agent_bots) == {"general", "other"}
+    bots["other"].stop.assert_not_awaited()
+    fence_every_room.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_replacing_an_agent_unreadies_only_rooms_it_observes() -> None:
+    """A reload that replaces one agent stops only its bot, whose stop unreadies its own rooms; no room is fenced whole."""
+    orchestrator, bots, fence_every_room = await _reload_with_bots(
+        _owner_reload_config(["lobby"]),
+        _owner_reload_config(["lobby"], display_name="Generalist"),
+        (ROUTER_AGENT_NAME, "general", "other"),
+    )
+
+    bots["general"].stop.assert_awaited_once()
+    assert set(orchestrator.agent_bots) == {ROUTER_AGENT_NAME, "other"}
+    bots[ROUTER_AGENT_NAME].stop.assert_not_awaited()
+    fence_every_room.assert_not_called()

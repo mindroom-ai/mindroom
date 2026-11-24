@@ -52,6 +52,7 @@ from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.google import google_oauth_provider
 from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.runtime_state import reset_runtime_state, set_runtime_ready, set_runtime_starting
+from mindroom.tool_system import dependencies as tool_dependencies
 from mindroom.tool_system.plugins import ConfigPlugins, config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, resolve_worker_target
@@ -244,7 +245,7 @@ def test_init_supabase_auth_raises_when_auto_install_disabled(
 
     monkeypatch.setattr(auth.importlib, "import_module", _missing_supabase)
     monkeypatch.setattr(auth, "auto_install_enabled", lambda _runtime_paths: False)
-    monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", _auto_install)
+    monkeypatch.setattr(tool_dependencies, "_auto_install_optional_extra", _auto_install)
 
     with pytest.raises(ImportError, match="MINDROOM_NO_AUTO_INSTALL_TOOLS"):
         auth._init_supabase_auth(runtime_paths, _supabase_settings("https://supabase.test", "anon-key"))
@@ -267,7 +268,7 @@ def test_init_supabase_auth_raises_when_auto_install_fails(monkeypatch: pytest.M
 
     monkeypatch.setattr(auth.importlib, "import_module", _missing_supabase)
     monkeypatch.setattr(auth, "auto_install_enabled", lambda _runtime_paths: True)
-    monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", _auto_install)
+    monkeypatch.setattr(tool_dependencies, "_auto_install_optional_extra", _auto_install)
 
     with pytest.raises(ImportError, match=r"mindroom\[supabase\]") as err:
         auth._init_supabase_auth(runtime_paths, _supabase_settings("https://supabase.test", "anon-key"))
@@ -304,7 +305,7 @@ def test_init_supabase_auth_retries_import_after_auto_install(
         return True
 
     monkeypatch.setattr(auth.importlib, "import_module", import_module)
-    monkeypatch.setattr("mindroom.tool_system.dependencies._auto_install_optional_extra", auto_install)
+    monkeypatch.setattr(tool_dependencies, "_auto_install_optional_extra", auto_install)
 
     supabase_auth = auth._init_supabase_auth(runtime_paths, _supabase_settings("https://supabase.test", "anon-key"))
 
@@ -435,6 +436,7 @@ def test_ensure_frontend_dist_dir_builds_repo_checkout(
     monkeypatch.setattr(frontend_assets, "_REPO_FRONTEND_DIST_DIR", frontend_dist_dir)
     monkeypatch.setattr(frontend_assets, "_FRONTEND_BUILD_ATTEMPTED", False)
     monkeypatch.setattr(frontend_assets.shutil, "which", lambda name: "/usr/bin/bun" if name == "bun" else None)
+    monkeypatch.setattr(frontend_assets, "_installed_bun_version", lambda _bun: "1.4.3")
     monkeypatch.setattr(frontend_assets.subprocess, "run", _fake_run)
 
     assert frontend_assets.ensure_frontend_dist_dir(_runtime_paths(tmp_path)) == frontend_dist_dir
@@ -442,6 +444,29 @@ def test_ensure_frontend_dist_dir_builds_repo_checkout(
         (["/usr/bin/bun", "install", "--frozen-lockfile"], frontend_source_dir),
         (["/usr/bin/bun", "run", "build"], frontend_source_dir),
     ]
+
+
+def test_ensure_frontend_dist_dir_names_the_bun_version_the_lockfile_needs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A Bun too old for the dashboard lockfile should fail with the version it needs, before installing anything."""
+    frontend_source_dir = tmp_path / "frontend"
+    frontend_source_dir.mkdir()
+    (frontend_source_dir / "package.json").write_text("{}")
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(frontend_assets, "_PACKAGE_FRONTEND_DIR", tmp_path / "package-assets")
+    monkeypatch.setattr(frontend_assets, "_REPO_FRONTEND_SOURCE_DIR", frontend_source_dir)
+    monkeypatch.setattr(frontend_assets, "_REPO_FRONTEND_DIST_DIR", frontend_source_dir / "dist")
+    monkeypatch.setattr(frontend_assets, "_FRONTEND_BUILD_ATTEMPTED", False)
+    monkeypatch.setattr(frontend_assets.shutil, "which", lambda name: "/usr/bin/bun" if name == "bun" else None)
+    monkeypatch.setattr(frontend_assets, "_installed_bun_version", lambda _bun: "1.3.14")
+    monkeypatch.setattr(frontend_assets.subprocess, "run", lambda command, **_kwargs: commands.append(command))
+
+    with pytest.raises(RuntimeError, match=r"needs Bun 1\.4 or newer, but /usr/bin/bun is Bun 1\.3\.14"):
+        frontend_assets.ensure_frontend_dist_dir(_runtime_paths(tmp_path))
+    assert commands == []
 
 
 def test_ensure_frontend_dist_dir_respects_disable_flag(
@@ -729,10 +754,10 @@ async def test_worker_cleanup_loop_uses_current_runtime_after_runtime_swap(
         runtime_paths: constants.RuntimePaths,
         *,
         touch_live_workers: Callable[[WorkerBackend], None],
-        computer_worker_keys: frozenset[str] = frozenset(),
+        held_worker_keys: frozenset[str] = frozenset(),
     ) -> int:
         assert touch_live_workers is touch_live_workers_of_the_runtime
-        assert computer_worker_keys == frozenset()
+        assert held_worker_keys == frozenset()
         cleanup_paths.append(runtime_paths.config_path)
         if len(cleanup_paths) == 1:
             main.initialize_api_app(main.app, second_runtime)
@@ -838,12 +863,12 @@ def test_worker_cleanup_touches_workers_with_a_call_in_flight_before_maintenance
         workers_api.maintain_leased_workers(
             worker_manager,
             touch_live_workers=lambda _backend: None,
-            computer_worker_keys=frozenset(),
+            held_worker_keys=frozenset(),
         )
     workers_api.maintain_leased_workers(
         worker_manager,
         touch_live_workers=lambda _backend: None,
-        computer_worker_keys=frozenset(),
+        held_worker_keys=frozenset(),
     )
 
     assert actions == ["touch agent:busy", "maintain", "maintain"]
@@ -1355,7 +1380,7 @@ def test_get_tools(test_client: TestClient) -> None:
     # Check that some expected tools are present
     tool_names = {tool["name"] for tool in data["tools"]}
     assert "calculator" in tool_names
-    assert "file" in tool_names
+    assert "filesystem" in tool_names
     assert "shell" in tool_names
 
     # Check that tools have the expected structure
@@ -3515,12 +3540,93 @@ def test_frontend_redirects_to_login_when_api_key_auth_is_enabled(api_key_client
 
 
 def test_frontend_login_page_renders_for_api_key_auth(api_key_client: TestClient) -> None:
-    """Standalone API-key auth should expose a simple login form."""
+    """Standalone API-key auth from the process env should hint at the service environment."""
+    assert isinstance(api_key_client.app, FastAPI)
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
     response = api_key_client.get("/login?next=/agents")
     assert response.status_code == 200
     assert "Enter the dashboard API key to continue" in response.text
-    assert "MINDROOM_API_KEY" in response.text
-    assert ".env" in response.text
+    assert (
+        "<p>Check <code>MINDROOM_API_KEY</code> in the environment configured for your MindRoom service.</p>"
+        in response.text
+    )
+    assert ".env" not in response.text
+    assert str(runtime_paths.env_path) not in response.text
+
+
+@pytest.mark.parametrize(
+    ("process_env", "expected_source", "expected_key"),
+    [
+        ({}, "env_file", "file-key"),
+        ({"MINDROOM_API_KEY": "process-key"}, "process_env", "process-key"),
+        ({"MINDROOM_API_KEY": ""}, "env_file", "file-key"),
+        ({"MINDROOM_API_KEY": "   "}, "env_file", "file-key"),
+    ],
+    ids=["env-file", "process-env-shadows-env-file", "blank-process-env", "whitespace-process-env"],
+)
+def test_frontend_login_page_hint_matches_api_key_source(
+    temp_config_file: Path,
+    process_env: dict[str, str],
+    expected_source: constants.EnvValueSource,
+    expected_key: str,
+) -> None:
+    """The login hint should point to whichever layer actually supplied `MINDROOM_API_KEY`."""
+    (temp_config_file.parent / ".env").write_text("MINDROOM_API_KEY=file-key\n", encoding="utf-8")
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=temp_config_file,
+        process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org", **process_env},
+    )
+    main.initialize_api_app(main.app, runtime_paths)
+    bind_test_embedded_runtime(main.app)
+    config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app)
+    response = TestClient(main.app, base_url="http://localhost").get("/login?next=/agents")
+
+    assert response.status_code == 200
+    auth_state = config_lifecycle.app_state(main.app).api_auth_state
+    assert auth_state is not None
+    assert (auth_state.settings.mindroom_api_key, auth_state.settings.mindroom_api_key_source) == (
+        expected_key,
+        expected_source,
+    )
+    if expected_source == "env_file":
+        assert (
+            f"<p>Find it in <code>{runtime_paths.env_path}</code> as <code>MINDROOM_API_KEY=...</code>.</p>"
+            in response.text
+        )
+        assert "environment configured for your MindRoom service" not in response.text
+    else:
+        assert (
+            "<p>Check <code>MINDROOM_API_KEY</code> in the environment configured for your MindRoom service.</p>"
+            in response.text
+        )
+        assert ".env" not in response.text
+        assert str(runtime_paths.env_path) not in response.text
+
+
+def test_frontend_login_page_falls_back_when_api_key_source_is_unavailable(api_key_client: TestClient) -> None:
+    """When key source metadata is unavailable, the login hint should cover both locations without leaking paths."""
+    assert isinstance(api_key_client.app, FastAPI)
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+    config_lifecycle.app_state(api_key_client.app).api_auth_state = auth.ApiAuthState(
+        runtime_paths=runtime_paths,
+        settings=auth._ApiAuthSettings(
+            supabase_url=None,
+            supabase_anon_key=None,
+            account_id=None,
+            mindroom_api_key="test-key",
+            mindroom_api_key_source=None,
+        ),
+        supabase_auth=None,
+    )
+
+    response = api_key_client.get("/login?next=/agents")
+
+    assert response.status_code == 200
+    assert (
+        "<p>Check <code>MINDROOM_API_KEY</code> in the environment configured for your MindRoom service "
+        "or in the <code>.env</code> file beside <code>config.yaml</code>.</p>" in response.text
+    )
+    assert str(runtime_paths.env_path) not in response.text
 
 
 def test_frontend_login_page_serializes_oauth_next_path_without_html_entities(
@@ -3651,19 +3757,85 @@ def test_cookie_mutations_use_configured_public_origin(
     app_state = config_lifecycle.app_state(api_key_client.app)
     auth_state = auth._app_auth_state(api_key_client.app, main._app_runtime_paths(api_key_client.app))
     app_state.api_auth_state = replace(auth_state, settings=replace(auth_state.settings, public_url=public_url))
-    api_key_client.cookies.set("mindroom_api_key", "test-key")
+    api_key_client.cookies.set("__Host-mindroom_api_key", "test-key")
     response = api_key_client.post("/api/config/load", headers={"Origin": origin})
     assert response.status_code == expected, response.text
 
 
-def test_api_key_cookie_auth_allows_protected_requests(api_key_client: TestClient) -> None:
-    """A valid standalone auth session cookie should work without bearer headers."""
-    response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"})
+@pytest.mark.usefixtures("api_key_client")
+@pytest.mark.parametrize(
+    ("base_url", "name", "secure"),
+    [("http://localhost", "mindroom_api_key", False), ("https://localhost", "__Host-mindroom_api_key", True)],
+)
+def test_api_key_cookie_auth_allows_protected_requests(base_url: str, name: str, *, secure: bool) -> None:
+    """The session cookie is host-only and `__Host-` over HTTPS, which browsers refuse without `Secure` over HTTP."""
+    client = TestClient(main.app, base_url=base_url, headers={"Origin": base_url})
+    response = client.post("/api/auth/session", json={"api_key": "test-key"})
     assert response.status_code == 200
-    assert response.cookies.get("mindroom_api_key") == "test-key"
 
-    response = api_key_client.post("/api/config/load", headers={"Origin": "http://localhost"})
-    assert response.status_code == 200
+    [set_cookie] = response.headers.get_list("set-cookie")
+    attributes = [part.strip().lower() for part in set_cookie.split(";")]
+    assert attributes[0] == f"{name.lower()}=test-key"
+    assert {"httponly", "path=/", "samesite=lax"} <= set(attributes)
+    assert ("secure" in attributes) is secure
+    assert not any(attribute.startswith("domain") for attribute in attributes)
+    assert client.cookies.get(name) == "test-key"
+    assert client.post("/api/config/load").status_code == 200
+
+
+def test_api_key_cookie_follows_https_public_url_behind_proxy(api_key_client: TestClient) -> None:
+    """Behind a TLS-terminating proxy the HTTPS `MINDROOM_PUBLIC_URL`, not the proxied scheme, picks the prefixed name."""
+    app_state = config_lifecycle.app_state(api_key_client.app)
+    auth_state = auth._app_auth_state(api_key_client.app, main._app_runtime_paths(api_key_client.app))
+    public_url = "https://public.example.org"
+    app_state.api_auth_state = replace(auth_state, settings=replace(auth_state.settings, public_url=public_url))
+    headers = {"Origin": public_url}
+
+    response = api_key_client.post("/api/auth/session", json={"api_key": "test-key"}, headers=headers)
+    [set_cookie] = response.headers.get_list("set-cookie")
+    assert set_cookie.startswith("__Host-mindroom_api_key=test-key;")
+    assert "secure" in set_cookie.lower()
+    cookie = "__Host-mindroom_api_key=test-key"
+    assert api_key_client.post("/api/config/load", headers={**headers, "Cookie": cookie}).status_code == 200
+    cookie = "mindroom_api_key=test-key"
+    assert api_key_client.post("/api/config/load", headers={**headers, "Cookie": cookie}).status_code == 401
+
+
+@pytest.mark.parametrize(
+    ("cookie", "expected"),
+    [
+        ("mindroom_api_key=wrong; __Host-mindroom_api_key=test-key", 200),
+        ("__Host-mindroom_api_key=test-key; mindroom_api_key=wrong", 200),
+        ("mindroom_api_key=test-key; __Host-mindroom_api_key=wrong", 401),
+        ("mindroom_api_key=test-key", 401),
+    ],
+)
+def test_api_key_cookie_over_https_reads_only_prefixed_name(
+    api_key_client: TestClient,
+    cookie: str,
+    expected: int,
+) -> None:
+    """Over HTTPS an unprefixed cookie of the same name never authenticates or overrides the prefixed one."""
+    response = api_key_client.post(
+        "https://localhost/api/config/load",
+        headers={"Origin": "https://localhost", "Cookie": cookie},
+    )
+    assert response.status_code == expected, response.text
+
+
+@pytest.mark.usefixtures("api_key_client")
+@pytest.mark.parametrize("base_url", ["http://localhost", "https://localhost"])
+def test_api_key_sign_out_clears_both_cookie_names(base_url: str) -> None:
+    """Sign-out expires the prefixed and the unprefixed session cookie."""
+    client = TestClient(main.app, base_url=base_url)
+    login_with_api_key(client)
+
+    set_cookies = client.delete("/api/auth/session").headers.get_list("set-cookie")
+    cleared = {header.split("=", 1)[0]: header.lower() for header in set_cookies}
+    assert set(cleared) == {"mindroom_api_key", "__Host-mindroom_api_key"}
+    assert all("max-age=0" in header and "path=/" in header for header in cleared.values())
+    assert "secure" in cleared["__Host-mindroom_api_key"]
+    assert not client.cookies
 
 
 @pytest.mark.usefixtures("frontend_dist")
@@ -3980,6 +4152,24 @@ def test_api_key_wrong_key_rejects(api_key_client: TestClient) -> None:
         headers={"Authorization": "Bearer wrong-key"},
     )
     assert response.status_code == 401
+
+
+def test_api_key_with_non_ascii_characters_rejects(api_key_client: TestClient) -> None:
+    """A wrong key with non-ASCII characters gets 401 at sign-in, as bearer token, and as cookie."""
+    wrong = "tést-kéy"
+    assert api_key_client.post("/api/auth/session", json={"api_key": wrong}).status_code == 401
+    bearer = {"Authorization": f"Bearer {wrong}".encode()}
+    assert api_key_client.post("/api/config/load", headers=bearer).status_code == 401
+    cookie = {"Cookie": f"mindroom_api_key={wrong}".encode()}
+    assert api_key_client.post("/api/config/load", headers=cookie).status_code == 401
+    lone_surrogate = api_key_client.post(
+        "/api/auth/session",
+        content='{"api_key": "\\ud800"}',
+        headers={"Content-Type": "application/json"},
+    )
+    assert lone_surrogate.status_code == 401
+    login_with_api_key(api_key_client)
+    assert api_key_client.post("/api/config/load").status_code == 200
 
 
 def _trusted_auth_test_app(runtime_paths: constants.RuntimePaths) -> FastAPI:

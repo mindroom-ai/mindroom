@@ -33,7 +33,14 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.event_journal import ConversationCursor, ConversationPage, ConversationReadView, RoomPage
+    from mindroom.event_journal import (
+        ConversationCursor,
+        ConversationPage,
+        ConversationReadView,
+        RoomPage,
+        VisibleMessage,
+    )
+    from mindroom.event_journal.reads import ThreadActivity
     from mindroom.matrix.conversation_hydration import ConversationHydrator
 
 logger = get_logger(__name__)
@@ -43,6 +50,10 @@ logger = get_logger(__name__)
 # a long time would turn a status probe into a history read, so the answer is
 # "nothing recent" rather than a page-by-page search.
 _LATEST_SENDER_MESSAGE_WINDOW_MESSAGES = 50
+
+# Bounded refetch passes for a strict read when a streaming edit replaces a
+# pending revision while its refetch is in flight.
+_MAX_STRICT_READ_REFRESH_PASSES = 3
 
 
 class ThreadReadMode(Enum):
@@ -66,24 +77,25 @@ def projected_visible_messages(page: ConversationPage | RoomPage) -> list[Resolv
     MindRoom renders, so a prompt and an exported thread cannot disagree about
     which revision is current or when it was made.
     """
-    messages = [
-        ResolvedVisibleMessage.from_message_data(
-            {
-                "sender": message.sender,
-                "body": str(message.content.get("body", "")),
-                "timestamp": message.created_ts,
-                "event_id": message.logical_event_id,
-                "content": dict(message.content),
-            },
-            thread_id=message.thread_id,
-            latest_event_id=message.revision_event_id,
-        )
-        for message in page.messages
-    ]
-    for message, projected in zip(messages, page.messages, strict=True):
-        if projected.revision_event_id != projected.logical_event_id:
-            message.edited_timestamp = projected.revision_ts
-    return messages
+    return [projected_visible_message(message) for message in page.messages]
+
+
+def projected_visible_message(projected: VisibleMessage) -> ResolvedVisibleMessage:
+    """Render one projection row as a visible message, its edit time set when its visible revision is an edit."""
+    message = ResolvedVisibleMessage.from_message_data(
+        {
+            "sender": projected.sender,
+            "body": str(projected.content.get("body", "")),
+            "timestamp": projected.created_ts,
+            "event_id": projected.logical_event_id,
+            "content": dict(projected.content),
+        },
+        thread_id=projected.thread_id,
+        latest_event_id=projected.revision_event_id,
+    )
+    if projected.revision_event_id != projected.logical_event_id:
+        message.edited_timestamp = projected.revision_ts
+    return message
 
 
 def projected_thread_history(
@@ -307,6 +319,33 @@ class ConversationReader:
         """Return the position of a room's newest visible message, in any thread, or nothing when it has none."""
         return await self.store.latest_room_cursor(room_id=room_id)
 
+    async def room_thread_activity(
+        self,
+        *,
+        room_id: str,
+        since_ts: int,
+        until_ts: int,
+        exclude_thread_id: str | None,
+        thread_limit: int,
+        row_limit: int,
+        summary_tail: int,
+        summary_key: str,
+    ) -> tuple[ThreadActivity, ...]:
+        """Return the room's threads with messages in a window, most recent first, from the projection alone.
+
+        Never waits for a hydration or a refetch, so a thread nobody walked counts only what sync delivered.
+        """
+        return await self.store.room_thread_activity(
+            room_id=room_id,
+            since_ts=since_ts,
+            until_ts=until_ts,
+            exclude_thread_id=exclude_thread_id,
+            thread_limit=thread_limit,
+            row_limit=row_limit,
+            summary_tail=summary_tail,
+            summary_key=summary_key,
+        )
+
     async def read_strict(
         self,
         *,
@@ -317,6 +356,11 @@ class ConversationReader:
     ) -> ConversationPage:
         """Return a complete bounded page, hydrating and refetching as needed.
 
+        Retries resolving up to a small bound when a newer revision moves the
+        pending debt underneath an in-flight refetch (for example, a streaming
+        sidecar edit landing during download), while failing after one pass
+        when the debt is unchanged.
+
         Raises ``ConversationReadError`` rather than returning a page with
         content missing. A caller building a prompt cannot tell an omitted
         message from a conversation that never had one, so silently dropping it
@@ -324,21 +368,26 @@ class ConversationReader:
         """
         with _homeserver_failure_fails_the_read(room_id, thread_id):
             await self.hydrator.ensure_hydrated(room_id=room_id, thread_id=thread_id)
-            page = await self.store.read_conversation(
-                room_id=room_id,
-                thread_id=thread_id,
-                limit=limit,
-                before=before,
-            )
-            if not page.refresh_pending:
-                return page
-            await self.hydrator.resolve_refreshes(page.refresh_pending)
         page = await self.store.read_conversation(
             room_id=room_id,
             thread_id=thread_id,
             limit=limit,
             before=before,
         )
+        for _ in range(_MAX_STRICT_READ_REFRESH_PASSES):
+            if not page.refresh_pending:
+                return page
+            pending = page.refresh_pending
+            with _homeserver_failure_fails_the_read(room_id, thread_id):
+                await self.hydrator.resolve_refreshes(pending)
+            page = await self.store.read_conversation(
+                room_id=room_id,
+                thread_id=thread_id,
+                limit=limit,
+                before=before,
+            )
+            if page.refresh_pending == pending:
+                break
         if page.refresh_pending:
             msg = (
                 f"Conversation {room_id}/{thread_id} has "
@@ -389,16 +438,21 @@ async def consecutive_agent_messages(
     room_id: str,
     thread_id: str | None,
     limit: int,
+    agent_ids: frozenset[str] = frozenset(),
 ) -> int:
     """Count the newest messages in one conversation that agents or teams wrote, looking back at most ``limit``.
 
-    Any other sender, the router included, ends the run: it writes only for a person.
+    ``agent_ids`` are agents this deployment does not run that count too. Any other sender, the router included, ends
+    the run: it writes only for a person.
     """
     page = await reader.read(room_id=room_id, thread_id=thread_id, limit=limit)
     registry = entity_identity_registry(config, runtime_paths)
     count = 0
     for message in reversed(page.messages):
-        if registry.current_entity_name_for_user_id(message.sender, include_router=False) is None:
+        if (
+            message.sender not in agent_ids
+            and registry.current_entity_name_for_user_id(message.sender, include_router=False) is None
+        ):
             break
         count += 1
     return count

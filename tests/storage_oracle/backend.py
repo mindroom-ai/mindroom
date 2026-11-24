@@ -22,7 +22,6 @@ from mindroom.constants import (
 )
 from mindroom.delegation.state import DelegationState
 from mindroom.history.interrupted_replay import build_interrupted_replay_snapshot
-from mindroom.history.mid_turn_compaction import _carry_request_usage
 from mindroom.history.replay import current_summary_text
 from mindroom.history.request_messages import scope_history_messages
 from mindroom.history.run_visibility import replays_in_scope
@@ -36,6 +35,7 @@ from mindroom.llm.usage import MessageMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.schema import TableNames
 from mindroom.session_storage.types import session_state_snapshot
 from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.usage.storage import carry_request_usage
 from tests.storage_oracle.actions import Action
 
 if TYPE_CHECKING:
@@ -831,7 +831,7 @@ class Driver(ABC):
         turn.folded_members |= {member.run_id for member in members}
         mark_summary_follows(turn.prompt)
         turn.summary = compaction_summary_message(summary, run_local=False)
-        _carry_request_usage(turn.record, folded)
+        carry_request_usage(turn.record, folded)
         return {"appended": True, "racer": racer, "folded": sorted(folded_ids)}
 
     def _fold_first_turn(self, action: Action) -> object:

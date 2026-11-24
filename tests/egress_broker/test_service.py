@@ -13,10 +13,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlsplit
 
 import httpx
+import httpx2
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -30,7 +32,13 @@ from mindroom.credentials.manager import CredentialsManager
 from mindroom.egress_broker import oauth_source, service, user_services
 from mindroom.egress_broker.audit import AuditLog
 from mindroom.egress_broker.dial import DialPolicy
-from mindroom.egress_broker.env import apply_runner_ca_bundle
+from mindroom.egress_broker.env import (
+    BROKER_CA_PEM_ENV,
+    EGRESS_BROKER_ENV_BY_KEY,
+    RUNNER_CA_BUNDLE_ENV,
+    apply_runner_ca_bundle,
+    egress_broker_enabled,
+)
 from mindroom.egress_broker.github_app import GITHUB_APP_PERMISSIONS
 from mindroom.egress_broker.secrets import (
     Secret,
@@ -43,6 +51,7 @@ from mindroom.egress_broker.secrets import (
 from mindroom.egress_broker.service import (
     active_audit_log,
     active_ca_pem,
+    execution_env_for_primary_shell,
     execution_env_for_worker,
     manage_url,
     serve_egress_broker,
@@ -56,6 +65,7 @@ from mindroom.egress_broker.user_services import (
 from mindroom.github_app_auth import GitHubAppTokenProvider
 from mindroom.oauth.google import google_oauth_provider
 from mindroom.tool_system.plugins import ConfigPlugins
+from mindroom.tool_system.tool_environment import ToolEnvironment
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, resolve_worker_target
 from tests.oauth_test_utils import (
     DelayedTokenEndpointOutcome,
@@ -73,12 +83,12 @@ from .conftest import (
     free_port,
     host_not_allowed,
     proxy_authorization,
+    tool_identity,
     worker_target,
 )
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
-    from pathlib import Path
 
     from mindroom.constants import RuntimePaths
     from mindroom.egress_broker.secrets import SecretResult
@@ -213,14 +223,16 @@ async def _worker_client(env: dict[str, str], runner_dir: Path) -> AsyncIterator
         yield client
 
 
+@pytest.mark.parametrize("off", ["off", "0"])
 @pytest.mark.asyncio
-async def test_disabled_without_port(
+async def test_turned_off_by_its_port_setting(
     tmp_runtime_paths: Callable[..., RuntimePaths],
     manager: CredentialsManager,
     tmp_path: Path,
+    off: str,
 ) -> None:
-    """Without a port the context is a no-op: no thread, no state, and worker calls get no broker env."""
-    runtime_paths = tmp_runtime_paths()
+    """With the port set to off the context is a no-op: no thread, no state, and worker calls get no broker env."""
+    runtime_paths = tmp_runtime_paths(MINDROOM_EGRESS_BROKER_PORT=off)
     config = _config(github=_GITHUB)
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         assert _broker_threads() == []
@@ -241,7 +253,7 @@ async def test_runtime_credentials_manager_is_built_only_when_the_broker_starts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Without a port no credentials manager is built for the broker; with one it uses the runtime's own."""
+    """While the broker is off no credentials manager is built for it; once it runs it uses the runtime's own."""
     built: list[RuntimePaths] = []
 
     def runtime_manager(runtime_paths: RuntimePaths) -> CredentialsManager:
@@ -249,7 +261,7 @@ async def test_runtime_credentials_manager_is_built_only_when_the_broker_starts(
         return CredentialsManager(tmp_path / "mindroom_data" / "credentials")
 
     monkeypatch.setattr(service, "get_runtime_credentials_manager", runtime_manager)
-    async with serve_egress_broker(tmp_runtime_paths(), config_provider=lambda: None):
+    async with serve_egress_broker(tmp_runtime_paths(MINDROOM_EGRESS_BROKER_PORT="off"), config_provider=lambda: None):
         assert built == []
 
     runtime_paths = tmp_runtime_paths(**_broker_env(free_port()))
@@ -275,7 +287,6 @@ async def test_requires_url_when_port_set(
 @pytest.mark.parametrize(
     ("name", "value"),
     [
-        ("MINDROOM_EGRESS_BROKER_PORT", "0"),
         ("MINDROOM_EGRESS_BROKER_PORT", "65536"),
         ("MINDROOM_EGRESS_BROKER_PORT", "http"),
         ("MINDROOM_EGRESS_BROKER_PORT", "8_768"),
@@ -328,6 +339,293 @@ async def test_end_to_end_inject_through_running_service(
         assert audit is not None
         [record] = await audit_records(audit, 1)
         assert (record.host, record.service, record.agent_name) == ("localhost", "github", "code")
+
+
+@pytest.mark.asyncio
+async def test_by_default_the_broker_serves_primary_shells_on_a_free_loopback_port(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    get_through: GetThrough,
+) -> None:
+    """Without any broker setting a primary shell gets keys through a loopback broker on a port the system picked.
+
+    Worker calls get no broker env, since no worker-facing URL is known.
+    """
+    runtime_paths = tmp_runtime_paths()
+    config = _primary_shell_config()
+    save_secret(manager, worker_target(scope=None), "github", "s3cret")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        env = execution_env_for_primary_shell(
+            runtime_paths,
+            config=config,
+            agent_name="code",
+            execution_identity=tool_identity("@alice:example.org"),
+        ).applied({}, {})
+        response = await get_through(env)
+        worker_env = execution_env_for_worker(runtime_paths, config=config, worker_target=_routable_target())
+
+    proxy = urlsplit(env["HTTPS_PROXY"])
+    assert proxy.hostname == "127.0.0.1"
+    assert proxy.port not in {None, 0}
+    assert response.json()["headers"]["authorization"] == ["Bearer s3cret"]
+    assert worker_env == {}
+
+
+@pytest.mark.asyncio
+async def test_only_primary_shell_tokens_carry_the_primary_shell_claim(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+) -> None:
+    """The broker dials private addresses for a primary shell's token alone; a worker call's token never says so."""
+    runtime_paths = tmp_runtime_paths(**_broker_env(free_port()))
+    config = _primary_shell_config()
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        runtime = service._active.runtime
+        assert runtime is not None
+        primary = execution_env_for_primary_shell(
+            runtime_paths,
+            config=config,
+            agent_name="code",
+            execution_identity=tool_identity("@alice:example.org"),
+        ).applied({}, {})
+        worker = execution_env_for_worker(runtime_paths, config=config, worker_target=_routable_target())
+        primary_claims = runtime.signer.verify(_token(primary))
+        worker_claims = runtime.signer.verify(_token(worker))
+
+    assert primary_claims is not None
+    assert primary_claims.primary_shell is True
+    assert worker_claims is not None
+    assert worker_claims.primary_shell is False
+
+
+def _primary_shell_config(**agent: object) -> Config:
+    """Return the GitHub service and an unscoped `code` agent with shell and `egress_credentials`, changed by `agent`."""
+    return Config(
+        agents={
+            "code": {
+                "display_name": "Code",
+                "tools": ["shell", "egress_credentials"],
+                "include_default_tools": False,
+                **agent,
+            },
+        },
+        egress_broker={"services": {"github": _GITHUB}},
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_primary_shell_reaches_the_broker_on_loopback_and_trusts_it_through_files(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    get_through: GetThrough,
+    tmp_path: Path,
+) -> None:
+    """A shell command run in the primary dials the bound broker on loopback, never the worker-facing URL.
+
+    It trusts the broker CA through files in the primary's storage instead of the PEM variable workers get, and its
+    Git config entries go after the ones the command already has.
+    """
+    port = free_port()
+    runtime_paths = tmp_runtime_paths(
+        MINDROOM_EGRESS_BROKER_PORT=str(port),
+        MINDROOM_EGRESS_BROKER_HOST="0.0.0.0",  # noqa: S104 - the wildcard bind primary commands reach on loopback
+        MINDROOM_EGRESS_BROKER_URL=f"http://host.docker.internal:{port}",
+    )
+    config = _primary_shell_config()
+    save_secret(manager, worker_target(scope=None), "github", "s3cret")
+    command_env = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.askPass", "GIT_CONFIG_VALUE_0": ""}
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        environment = execution_env_for_primary_shell(
+            runtime_paths,
+            config=config,
+            agent_name="code",
+            execution_identity=tool_identity("@alice:example.org"),
+        )
+        env = environment.applied(command_env, {})
+        response = await get_through(env)
+
+    proxy = urlsplit(env["HTTPS_PROXY"])
+    assert (proxy.hostname, proxy.port) == ("127.0.0.1", port)
+    assert response.status_code == 200
+    assert response.json()["headers"]["authorization"] == ["Bearer s3cret"]
+    assert env["GH_TOKEN"] == _PLACEHOLDER
+    assert BROKER_CA_PEM_ENV not in env
+    ca_dir = tmp_path / "mindroom_data" / "egress_broker" / "primary_ca"
+    assert stat.S_IMODE(ca_dir.stat().st_mode) == 0o700
+    assert {name: env[name] for name in RUNNER_CA_BUNDLE_ENV} == dict.fromkeys(
+        RUNNER_CA_BUNDLE_ENV,
+        env["SSL_CERT_FILE"],
+    )
+    assert {Path(env["SSL_CERT_FILE"]).parent, Path(env["NODE_EXTRA_CA_CERTS"]).parent} == {ca_dir}
+    assert [env[f"GIT_CONFIG_KEY_{index}"] for index in range(3)] == [
+        "core.askPass",
+        "http.proxy",
+        "http.proxyAuthMethod",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_primary_shell_still_trusts_the_private_cas_its_own_variables_named(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    tmp_path: Path,
+) -> None:
+    """The CA files a primary shell command gets keep the certificates of the files the primary's variables name.
+
+    Those variables are replaced, so a command that reached a private HTTPS service through them would otherwise
+    stop trusting it. A shell command inherits them from the exported environment and from the `.env` beside the
+    config, so both count. A variable that names a missing file adds nothing.
+    """
+    company_roots = "-----BEGIN CERTIFICATE-----\ncompany-root\n-----END CERTIFICATE-----"
+    node_roots = "-----BEGIN CERTIFICATE-----\nnode-root\n-----END CERTIFICATE-----\n"
+    (tmp_path / "company-ca.pem").write_text(company_roots, encoding="utf-8")
+    (tmp_path / "node-ca.pem").write_text(node_roots, encoding="utf-8")
+    (tmp_path / ".env").write_text(f"NODE_EXTRA_CA_CERTS={tmp_path / 'node-ca.pem'}\n", encoding="utf-8")
+    runtime_paths = tmp_runtime_paths(
+        **_broker_env(
+            free_port(),
+            CURL_CA_BUNDLE=str(tmp_path / "company-ca.pem"),
+            REQUESTS_CA_BUNDLE=str(tmp_path / "missing.pem"),
+        ),
+    )
+    config = _primary_shell_config()
+    save_secret(manager, worker_target(scope=None), "github", "s3cret")
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        env = execution_env_for_primary_shell(
+            runtime_paths,
+            config=config,
+            agent_name="code",
+            execution_identity=tool_identity("@alice:example.org"),
+        ).applied({}, {})
+
+    node_file = Path(env["NODE_EXTRA_CA_CERTS"]).read_text(encoding="utf-8")
+    assert node_file.startswith(node_roots)
+    broker_ca = node_file.removeprefix(node_roots)
+    assert broker_ca.count("-----BEGIN CERTIFICATE-----") == 1
+    bundle = Path(env["CURL_CA_BUNDLE"]).read_text(encoding="utf-8")
+    assert bundle.endswith(f"{company_roots}\n{broker_ca}")
+    assert "node-root" not in bundle
+    assert "company-root" not in node_file
+
+
+@pytest.mark.parametrize(
+    ("host", "url"),
+    [
+        pytest.param("0.0.0.0", "http://127.0.0.1:8768", id="ipv4-wildcard"),  # noqa: S104
+        pytest.param("::", "http://[::1]:8768", id="ipv6-wildcard"),
+        pytest.param("127.0.0.1", "http://127.0.0.1:8768", id="loopback"),
+        pytest.param("::1", "http://[::1]:8768", id="ipv6-loopback"),
+        pytest.param("10.0.0.5", "http://10.0.0.5:8768", id="one-interface"),
+    ],
+)
+def test_primary_commands_dial_the_bound_broker_address(host: str, url: str) -> None:
+    """A wildcard bind is reached on the loopback of its address family; any other bound address is dialed as it is."""
+    settings = service._BrokerSettings(
+        host=host,
+        port=8768,
+        url="http://host.docker.internal:8768",
+        token_ttl_seconds=60,
+    )
+
+    assert settings.primary_url == url
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::"])  # noqa: S104 - the wildcard binds primary commands dial
+@pytest.mark.asyncio
+async def test_primary_commands_connect_to_a_broker_bound_to_a_wildcard(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    host: str,
+) -> None:
+    """The loopback address a wildcard bind maps to accepts connections; a `::` listener takes only IPv6 here."""
+    if host == "::":
+        try:
+            with socket.socket(socket.AF_INET6) as probe:
+                probe.bind(("::1", 0))
+        except OSError:
+            pytest.skip("no IPv6 loopback")
+    port = free_port()
+    runtime_paths = tmp_runtime_paths(
+        MINDROOM_EGRESS_BROKER_PORT=str(port),
+        MINDROOM_EGRESS_BROKER_HOST=host,
+        MINDROOM_EGRESS_BROKER_URL=f"http://host.docker.internal:{port}",
+    )
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: None, credentials_manager=manager):
+        runtime = service._active.runtime
+        assert runtime is not None
+        url = urlsplit(runtime.primary_url)
+        assert url.port == port
+        _reader, writer = await asyncio.open_connection(url.hostname, url.port)
+        writer.close()
+        await writer.wait_closed()
+
+
+@pytest.mark.parametrize(
+    ("agent", "sandbox_env"),
+    [
+        pytest.param(
+            {"worker_tools": ["shell"]},
+            {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox-runner.test"},
+            id="shell-in-worker",
+        ),
+        pytest.param({"tools": ["shell"]}, {}, id="no-egress-tool"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_only_a_primary_shell_of_a_broker_agent_gets_the_primary_env(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    agent: dict[str, object],
+    sandbox_env: dict[str, str],
+) -> None:
+    """A worker-routed shell gets the env from the sandbox proxy alone, and an agent without the tool never does."""
+    runtime_paths = tmp_runtime_paths(**_broker_env(free_port()), **sandbox_env)
+    config = _primary_shell_config(**agent)
+    identity = tool_identity("@alice:example.org")
+    stopped = execution_env_for_primary_shell(
+        runtime_paths,
+        config=_primary_shell_config(),
+        agent_name="code",
+        execution_identity=identity,
+    )
+    assert stopped == ToolEnvironment(), "the broker is not running"
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        environment = execution_env_for_primary_shell(
+            runtime_paths,
+            config=config,
+            agent_name="code",
+            execution_identity=identity,
+        )
+    assert environment == ToolEnvironment()
+
+
+@pytest.mark.asyncio
+async def test_a_primary_shell_runs_without_the_broker_env_when_building_it_fails(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure resolving the call's scope is logged, and the command runs as with the broker off."""
+    runtime_paths = tmp_runtime_paths(**_broker_env(free_port()))
+    config = _primary_shell_config()
+
+    def unresolvable(*_args: object, **_kwargs: object) -> None:
+        msg = "no requester"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(service, "resolve_agent_execution", unresolvable)
+    async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
+        with capture_logs() as logs:
+            environment = execution_env_for_primary_shell(
+                runtime_paths,
+                config=config,
+                agent_name="code",
+                execution_identity=None,
+            )
+    assert environment == ToolEnvironment()
+    assert [log["error_type"] for log in logs if log["event"] == "egress_broker_primary_shell_env_failed"] == [
+        "ValueError",
+    ]
 
 
 @pytest.mark.asyncio
@@ -709,6 +1007,98 @@ async def test_unused_all_proxy_does_not_stop_startup(
         assert active_ca_pem() is not None
 
 
+@pytest.mark.usefixtures("no_proxy_env")
+@pytest.mark.parametrize(
+    ("env", "dotenv", "api", "on"),
+    [
+        pytest.param({}, "", True, True, id="default"),
+        # Any proxy a primary shell would inherit keeps the default broker off, so proxied networks work as before.
+        pytest.param({"HTTPS_PROXY": "http://user:hunter2@proxy:3128"}, "", True, False, id="default-https-proxy"),
+        pytest.param({"http_proxy": "http://proxy:3128"}, "", True, False, id="default-http-proxy-only"),
+        pytest.param({"ALL_PROXY": "socks5://x:1080"}, "", True, False, id="default-socks"),
+        pytest.param({}, "HTTPS_PROXY=http://user:hunter2@proxy:3128\n", True, False, id="default-dotenv-proxy"),
+        pytest.param({}, "Https_Proxy=http://proxy:3128\n", True, False, id="default-dotenv-mixed-case-proxy"),
+        # Without the API nobody can answer a key card, so the default broker and its tool stay off.
+        pytest.param({}, "", False, False, id="default-no-api"),
+        # An explicit port keeps its loud refusal at startup and its warning without the API.
+        pytest.param({**_broker_env(8768), "HTTPS_PROXY": "http://user:hunter2@proxy:3128"}, "", True, True, id="set"),
+        pytest.param(_broker_env(8768), "", False, True, id="set-no-api"),
+    ],
+)
+def test_the_default_broker_turns_off_where_it_cannot_run(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    tmp_path: Path,
+    env: dict[str, str],
+    dotenv: str,
+    *,
+    api: bool,
+    on: bool,
+) -> None:
+    """The implicit broker never stops MindRoom: where it cannot run, Agent Keys is off and a warning says why."""
+    (tmp_path / ".env").write_text(dotenv, encoding="utf-8")
+    with capture_logs() as logs:
+        runtime_paths = service.turn_off_unusable_default_broker(tmp_runtime_paths(**env), api=api)
+
+    assert egress_broker_enabled(runtime_paths) is on
+    assert "hunter2" not in str(logs)
+    assert any(log["event"] == "egress_broker_default_off" for log in logs) is (not on and api)
+
+
+class _RefusedBrokerThread(threading.Thread):
+    """A thread the OS refuses to start, only for the broker's own thread."""
+
+    def start(self) -> None:
+        if self.name == service._THREAD_NAME:
+            msg = "can't start new thread"
+            raise RuntimeError(msg)
+        super().start()
+
+
+@pytest.mark.usefixtures("no_proxy_env")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["bind", "ttl", "audit", "ca-bundle", "thread"])
+async def test_a_default_broker_that_cannot_start_leaves_mindroom_running(
+    tmp_runtime_paths: Callable[..., RuntimePaths],
+    manager: CredentialsManager,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    """Any startup failure of the implicit broker is logged, leaves nothing running, and MindRoom runs on; a set port raises."""
+
+    async def refuse(_broker: object, _host: str, _port: int) -> None:
+        raise OSError(98, "Address already in use")
+
+    def refuse_bundle(*_args: object, **_kwargs: object) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    env = {EGRESS_BROKER_ENV_BY_KEY["token_ttl_seconds"]: "soon"} if failure == "ttl" else {}
+    if failure == "thread":
+        monkeypatch.setattr(service.threading, "Thread", _RefusedBrokerThread)
+    if failure == "bind":
+        monkeypatch.setattr(service.EgressBroker, "start", refuse)
+    if failure == "ca-bundle":
+        monkeypatch.setattr(service, "apply_runner_ca_bundle", refuse_bundle)
+    for broker_env in ({}, _broker_env(free_port())):
+        runtime_paths = tmp_runtime_paths(**broker_env, **env)
+        if failure == "audit":
+            (runtime_paths.storage_root / "egress_broker").mkdir(parents=True, exist_ok=True)
+            (runtime_paths.storage_root / "egress_broker" / "requests.sqlite3").write_bytes(b"not a database" * 100)
+        broker = serve_egress_broker(runtime_paths, config_provider=lambda: None, credentials_manager=manager)
+        if broker_env:
+            with pytest.raises(Exception):  # noqa: B017, PT011 - each failure keeps its own loud error.
+                async with broker:
+                    pytest.fail("the broker must not start")
+            assert _broker_threads() == []
+            continue
+        with capture_logs() as logs:
+            async with broker:
+                assert active_ca_pem() is None
+                assert active_audit_log() is None
+                assert _broker_threads() == []
+        warnings = [log["event"] for log in logs if log["log_level"] == "warning"]
+        assert warnings == ["egress_broker_default_unavailable"]
+
+
 @pytest.mark.asyncio
 async def test_bind_error_propagates(
     tmp_runtime_paths: Callable[..., RuntimePaths],
@@ -731,8 +1121,16 @@ async def test_bind_error_propagates(
     [
         ({}, None),
         ({"MINDROOM_PUBLIC_URL": "  "}, None),
-        ({"MINDROOM_PUBLIC_URL": "https://chat.example.org"}, "https://chat.example.org/"),
-        ({"MINDROOM_PUBLIC_URL": "https://chat.example.org/"}, "https://chat.example.org/"),
+        (
+            {"MINDROOM_PUBLIC_URL": "https://chat.example.org", "MINDROOM_EGRESS_BROKER_PORT": "off"},
+            "https://chat.example.org/",
+        ),
+        (
+            {"MINDROOM_PUBLIC_URL": "https://chat.example.org/", "MINDROOM_EGRESS_BROKER_PORT": "off"},
+            "https://chat.example.org/",
+        ),
+        # The default broker serves the personal page too.
+        ({"MINDROOM_PUBLIC_URL": "https://chat.example.org"}, "https://chat.example.org/connections/egress"),
         (
             {
                 **_broker_env(8768),
@@ -1174,7 +1572,7 @@ async def test_revoked_grant_returns_oauth_connection_required(
     config = _config(github=_GITHUB_OAUTH)
     connect_account(manager, account_store("@alice:example.org"), "stale-oauth", expires_at=1.0)
     allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"))
-    serve_token_endpoint(monkeypatch, [httpx.Response(400, json={"error": "invalid_grant"})])
+    serve_token_endpoint(monkeypatch, [httpx2.Response(400, json={"error": "invalid_grant"})])
     async with serve_egress_broker(runtime_paths, config_provider=lambda: config, credentials_manager=manager):
         env = execution_env_for_worker(runtime_paths, config=config, worker_target=_routable_target())
         with capture_logs() as logs:
@@ -1249,7 +1647,7 @@ async def test_provider_outage_is_a_retryable_503_off_the_shared_executor(
     connect_account(manager, account_store("@alice:example.org"), "stale-oauth", expires_at=1.0)
     allow_oauth_reuse(manager, runtime_paths, account_store("@alice:example.org"))
     grant_started = threading.Event()
-    outage = httpx.Response(503, json={"error": "temporarily_unavailable"})
+    outage = httpx2.Response(503, json={"error": "temporarily_unavailable"})
     presented = serve_token_endpoint(
         monkeypatch,
         [DelayedTokenEndpointOutcome(2.0, outage)],

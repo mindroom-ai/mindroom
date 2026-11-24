@@ -7,11 +7,11 @@ acknowledgement belong to matrix/durable_ingestion.py.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, TypeIs, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import nio
 
-from mindroom.constants import SILENT_SCHEDULE_EVENT_TYPE
+from mindroom.constants import ROUTE_EVENT_TYPE, ROUTE_REVISION_KEY, SILENT_SCHEDULE_EVENT_TYPE
 from mindroom.event_journal import (
     EventClass,
     EventKind,
@@ -20,13 +20,21 @@ from mindroom.event_journal import (
     thread_root,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.event_types import CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TYPE
+from mindroom.matrix.agent_authored import carries_agent_authored_marker
+from mindroom.matrix.event_types import (
+    CALL_MEMBER_EVENT_TYPE,
+    RTC_NOTIFICATION_EVENT_TYPE,
+    WORKFLOW_ANSWER_EVENT_TYPE,
+    WORKFLOW_CONTROL_EVENT_TYPE,
+)
 from mindroom.matrix.media import (
     MATRIX_MEDIA_EVENT_TYPES,
     is_encrypted_media_event_source,
     parse_matrix_media_event_source,
 )
 from mindroom.matrix.transport_progress import is_transport_progress_revision, is_unfinished_reply
+from mindroom.matrix_identifiers import has_agent_username
+from mindroom.tool_system.events import tool_markers_in_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
@@ -38,9 +46,33 @@ logger = get_logger(__name__)
 _TOOL_APPROVAL_RESPONSE_EVENT_TYPE = "io.mindroom.tool_approval_response"
 _BACKGROUND_JOB_CANCEL_EVENT_TYPE = "io.mindroom.background_job_cancel"
 _SECURITY_METADATA_KEY = "io.mindroom.dispatch_recovery_security"
-_RTC_EVENT_TYPES = frozenset({CALL_MEMBER_EVENT_TYPE, RTC_NOTIFICATION_EVENT_TYPE})
+# Custom events reach nio as `UnknownEvent`, so only their type string tells them apart.
+_UNKNOWN_EVENT_KINDS = {
+    SILENT_SCHEDULE_EVENT_TYPE: EventKind.SCHEDULE_TRIGGER,
+    ROUTE_EVENT_TYPE: EventKind.ROUTE,
+    CALL_MEMBER_EVENT_TYPE: EventKind.RTC,
+    RTC_NOTIFICATION_EVENT_TYPE: EventKind.RTC,
+    _TOOL_APPROVAL_RESPONSE_EVENT_TYPE: EventKind.APPROVAL,
+    _BACKGROUND_JOB_CANCEL_EVENT_TYPE: EventKind.JOB_CANCEL,
+    WORKFLOW_CONTROL_EVENT_TYPE: EventKind.WORKFLOW_CONTROL,
+    WORKFLOW_ANSWER_EVENT_TYPE: EventKind.WORKFLOW_ANSWER,
+}
+# Kinds only an account MindRoom manages may send; anyone else's is settled without work.
+_MANAGED_SENDER_KINDS = frozenset({EventKind.SCHEDULE_TRIGGER, EventKind.ROUTE})
 # Kinds whose events carry conversation content, and so update the projection.
 _PROJECTED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.REDACTION})
+# Kinds a person sends to ask for something, the only ones the agent-authored marker demotes to context.
+_AGENT_AUTHORED_MARKER_KINDS = frozenset(
+    {
+        EventKind.MESSAGE,
+        EventKind.MEDIA,
+        EventKind.REACTION,
+        EventKind.APPROVAL,
+        EventKind.JOB_CANCEL,
+        EventKind.WORKFLOW_CONTROL,
+        EventKind.WORKFLOW_ANSWER,
+    },
+)
 
 # What an `m.room.message` must have parsed to before MindRoom can treat it as
 # work: nio's base class for every msgtype that carries a textual body, which
@@ -65,31 +97,9 @@ class _RoomIdEvent(Protocol):
     room_id: str
 
 
-def _is_tool_approval_response(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
-    """Return whether one event is a tool-approval response."""
-    return isinstance(event, nio.UnknownEvent) and event.type == _TOOL_APPROVAL_RESPONSE_EVENT_TYPE
-
-
-def _is_background_job_cancel(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
-    """Return whether one event asks to cancel background jobs."""
-    return isinstance(event, nio.UnknownEvent) and event.type == _BACKGROUND_JOB_CANCEL_EVENT_TYPE
-
-
-def _is_silent_schedule_trigger(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
-    """Return whether one event is an internal silent schedule trigger."""
-    return isinstance(event, nio.UnknownEvent) and event.type == SILENT_SCHEDULE_EVENT_TYPE
-
-
-def _is_rtc_event(event: nio.Event) -> TypeIs[nio.UnknownEvent]:
-    """Return whether one event is a supported MatrixRTC room event."""
-    return isinstance(event, nio.UnknownEvent) and event.type in _RTC_EVENT_TYPES
-
-
 # Ordered: the first matching rule owns the event. Media is matched before the
 # general message rule because every media class subclasses `RoomMessage` and
-# would otherwise be swallowed by it, and both are matched before the approval
-# predicate because they are concrete nio classes while an approval is an
-# `UnknownEvent` distinguished only by its type string.
+# would otherwise be swallowed by it.
 _KIND_RULES: tuple[tuple[Callable[[nio.Event], bool], EventKind], ...] = (
     (lambda event: isinstance(event, nio.RedactionEvent), EventKind.REDACTION),
     (lambda event: isinstance(event, nio.ReactionEvent), EventKind.REACTION),
@@ -107,10 +117,6 @@ _KIND_RULES: tuple[tuple[Callable[[nio.Event], bool], EventKind], ...] = (
     # `TEXTUAL_MESSAGE_EVENT_TYPE`'s. Generalizing here while `journal_dispatch`
     # still enumerated dropped emotes a second time, one layer further in.
     (lambda event: isinstance(event, nio.RoomMessage), EventKind.MESSAGE),
-    (_is_silent_schedule_trigger, EventKind.SCHEDULE_TRIGGER),
-    (_is_rtc_event, EventKind.RTC),
-    (_is_tool_approval_response, EventKind.APPROVAL),
-    (_is_background_job_cancel, EventKind.JOB_CANCEL),
     (lambda event: isinstance(event, nio.MegolmEvent), EventKind.OPAQUE_HISTORY),
 )
 
@@ -125,7 +131,7 @@ def _event_kind(event: nio.Event) -> EventKind | None:
     for matches, kind in _KIND_RULES:
         if matches(event):
             return kind
-    return None
+    return _UNKNOWN_EVENT_KINDS.get(event.type) if isinstance(event, nio.UnknownEvent) else None
 
 
 def _happened_while_member(provenance: nio.TimelineEventProvenance) -> bool:
@@ -137,7 +143,13 @@ def _happened_while_member(provenance: nio.TimelineEventProvenance) -> bool:
     return provenance is not nio.TimelineEventProvenance.HISTORY
 
 
-def _event_class_for(provenance: nio.TimelineEventProvenance, event: nio.Event) -> EventClass:
+def _event_class_for(
+    provenance: nio.TimelineEventProvenance,
+    event: nio.Event,
+    kind: EventKind,
+    *,
+    sender_is_managed: Callable[[str], bool],
+) -> EventClass:
     """Return whether events with this provenance may start semantic work.
 
     Live and recovered events are both things that happened while this bot was
@@ -162,17 +174,38 @@ def _event_class_for(provenance: nio.TimelineEventProvenance, event: nio.Event) 
     not the same mistake as enumerating msgtypes -- the set stays correct as
     Matrix grows -- and it still projects, so the conversation keeps the event.
 
-    A text message whose status says it will be revised again is the last one:
+    A text message whose status says it will be revised again is another:
     an agent's `pending` placeholder is `m.text`, and the turn engine never
     answers an unfinished reply, only its terminal edit. Every agent in a room
     receives every agent's placeholder, so admitting them as work queued each
     one in every agent's ordered room lane, ahead of the prompts behind it.
+
+    A message, media, reaction, approval or job cancel marked agent-authored,
+    from a sender MindRoom does not manage, is the last one. Such an account
+    acts for a person, and the marker says an agent wrote the event there, so
+    acting on it would let the agent speak for the person: answer its own
+    approval card, run a command with the person's rights, or stop a reply.
+    The marker can only take authority away, so its presence decides and its
+    value is never read. An entity's own account already speaks only for that
+    entity, so the marker takes nothing from it. A message or media event
+    still projects, so history keeps it as it is. Every other kind keeps the
+    class it would have unmarked: a membership, call or redaction event
+    changes the room itself, and its handlers must see that change whoever
+    wrote its content.
     """
     if not _happened_while_member(provenance):
         return EventClass.CONTEXT_ONLY
     if isinstance(event, nio.RoomMessageNotice | nio.RoomMessageUnknown):
         return EventClass.CONTEXT_ONLY
-    if isinstance(event, TEXTUAL_MESSAGE_EVENT_TYPE) and is_unfinished_reply(event.source.get("content") or {}):
+    content = event.source.get("content")
+    if isinstance(event, TEXTUAL_MESSAGE_EVENT_TYPE) and is_unfinished_reply(content or {}):
+        return EventClass.CONTEXT_ONLY
+    if (
+        kind in _AGENT_AUTHORED_MARKER_KINDS
+        and isinstance(content, dict)
+        and carries_agent_authored_marker(content)
+        and not sender_is_managed(event.sender)
+    ):
         return EventClass.CONTEXT_ONLY
     return EventClass.ACTIONABLE
 
@@ -206,7 +239,10 @@ def _inbound_event(
     event_class: EventClass,
 ) -> InboundEvent:
     """Return the admission view of one timeline event."""
-    content = event.source.get("content")
+    content, source = event.source.get("content"), _event_source(event)
+    if kind is not EventKind.ROUTE and isinstance(stored := source.get("content"), dict):
+        # Which edit a waiting message's text is, only its journal row's revision says: its sender's word is dropped.
+        source["content"] = {key: value for key, value in stored.items() if key != ROUTE_REVISION_KEY}
     return InboundEvent(
         event_id=event.event_id,
         room_id=room_id,
@@ -215,7 +251,7 @@ def _inbound_event(
         event_class=event_class,
         sender=event.sender,
         origin_server_ts=event.server_timestamp,
-        source=_event_source(event),
+        source=source,
     )
 
 
@@ -261,7 +297,7 @@ def _projected_event(
     return projected
 
 
-def _ingested_kind(parsed: nio.Event, schedule_trigger_sender_is_managed: Callable[[str], bool]) -> EventKind | None:
+def _ingested_kind(parsed: nio.Event, sender_is_managed: Callable[[str], bool]) -> EventKind | None:
     """Return the kind one parsed timeline event is admitted as, or None to settle it without work."""
     if parsed.decrypted and (isinstance(parsed, nio.RedactionEvent) or "state_key" in parsed.source):
         # Redactions and state are never encrypted, so a decrypted one is a sender's claim the homeserver never checked.
@@ -270,7 +306,7 @@ def _ingested_kind(parsed: nio.Event, schedule_trigger_sender_is_managed: Callab
         # Nio's schema accepts an empty target, which deletes nothing and which batch validation would reject.
         return None
     kind = _event_kind(parsed)
-    if kind is EventKind.SCHEDULE_TRIGGER and not schedule_trigger_sender_is_managed(parsed.sender):
+    if kind in _MANAGED_SENDER_KINDS and not sender_is_managed(parsed.sender):
         return None
     if kind is None and isinstance(parsed, nio.RoomMemberEvent):
         return EventKind.ROOM_LIFECYCLE
@@ -285,10 +321,12 @@ def ingestion_timeline_views(
     provenance: nio.TimelineEventProvenance,
     expected_event_id: str | None = None,
     security_metadata: Mapping[str, object] | None = None,
-    schedule_trigger_sender_is_managed: Callable[[str], bool] = lambda _sender: False,
+    sender_is_managed: Callable[[str], bool] = lambda _sender: False,
 ) -> tuple[InboundEvent, ProjectedEvent | None] | None:
     """Classify one durable timeline input, or return its compatibility fate."""
     message = "Unsupported ingestion event"
+    if isinstance(content := source.get("content"), dict) and has_agent_username(source.get("sender")):
+        source = {**source, "content": tool_markers_in_text(cast("dict[str, object]", content))}
     parsed = parse_matrix_media_event_source(source) if is_encrypted_media_event_source(source) else None
     if not isinstance(parsed, MATRIX_MEDIA_EVENT_TYPES):
         parsed = nio.Event.parse_event(dict(source))
@@ -306,10 +344,10 @@ def ingestion_timeline_views(
         # Nio owns ciphertext recovery. Only historical identities need an
         # application tombstone so later decryption cannot revive old work.
         return None
-    kind = _ingested_kind(parsed, schedule_trigger_sender_is_managed)
+    kind = _ingested_kind(parsed, sender_is_managed)
     if kind is None:
         return None
-    event_class = _event_class_for(provenance, parsed)
+    event_class = _event_class_for(provenance, parsed, kind, sender_is_managed=sender_is_managed)
     return (
         _inbound_event(room_id, parsed, kind, event_class),
         _projected_event(room_id, parsed, kind, self_sender=self_sender),
@@ -320,6 +358,11 @@ def parse_journal_event(stored: JournalEvent) -> nio.Event:
     """Rebuild one typed nio event from its stored replay payload."""
     source = dict(stored.source)
     security_metadata = source.pop(_SECURITY_METADATA_KEY, None)
+    # What marks a message as a route is written only by the dispatch of a route event, so no stored event keeps a
+    # mark of its own: not beside its content, and not in the content of anything but a route.
+    source.pop(ROUTE_EVENT_TYPE, None)
+    if stored.kind is not EventKind.ROUTE and isinstance(content := source.get("content"), dict):
+        source["content"] = {key: value for key, value in content.items() if key != ROUTE_EVENT_TYPE}
     event = parse_matrix_media_event_source(source) if stored.kind is EventKind.MEDIA else nio.Event.parse_event(source)
     if not isinstance(event, nio.Event) or event.event_id != stored.event_id:
         msg = f"Journal event {stored.event_id!r} does not replay as itself"

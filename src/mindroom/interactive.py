@@ -163,6 +163,8 @@ _INTERACTIVE_PATTERN = re.compile(
 )
 _INLINE_INTERACTIVE_JSON_FENCE_PATTERN = r"```[ \t]*interactive(?:[ \t]+json)?[ \t]+(?:\{|\[)[^\r\n`]*```"
 _MAX_OPTIONS = 5
+_KEYCAP_EMOJIS = tuple(f"{digit}\ufe0f\u20e3" for digit in "12345")
+_SPARE_EMOJIS = ("🔹", "🔸", "🟢", "🟣", "🟠", "🟤", "⚪", "⚫", "🔺")
 _DEFAULT_QUESTION = "Please choose an option:"
 _INSTRUCTION_TEXT = "React with an emoji or type the number to respond."
 
@@ -255,7 +257,7 @@ def _coerce_interactive_option(raw_option: object) -> dict[str, str] | None:
     label = str(option_data.get("label") or "Option")
     value = str(option_data.get("value") or label.lower())
     return {
-        "emoji": str(option_data.get("emoji") or "❓"),
+        "emoji": str(option_data.get("emoji") or "").strip() or "❓",
         "label": label,
         "value": value,
     }
@@ -301,7 +303,32 @@ def _coerce_interactive_payload(raw_json: str) -> tuple[str, list[dict[str, str]
             break
     if not options:
         return None
-    return question, options
+    return question, _with_distinct_emojis(options)
+
+
+def _with_distinct_emojis(options: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Give each option its own emoji, since the emoji is the option's reaction key.
+
+    A repeat gets the keycap of its own number, or a spare emoji when that keycap is taken, so a keycap never
+    names another option's number. Emojis that differ only by a variation selector look the same, and bare digits
+    collide with the numbered replies, so both count as taken.
+    """
+
+    def look(emoji: str) -> str:
+        return emoji.replace("\ufe0f", "").replace("\ufe0e", "").strip()
+
+    def is_number(emoji: str) -> bool:
+        return look(emoji).isascii() and look(emoji).isdigit()
+
+    used = {look(opt["emoji"]) for opt in options if not is_number(opt["emoji"])}
+    seen: set[str] = set()
+    for position, opt in enumerate(options):
+        if look(opt["emoji"]) in seen or is_number(opt["emoji"]):
+            candidates = (_KEYCAP_EMOJIS[position], *_SPARE_EMOJIS)
+            opt["emoji"] = next(key for key in candidates if look(key) not in used)
+            used.add(look(opt["emoji"]))
+        seen.add(look(opt["emoji"]))
+    return options
 
 
 def _render_question_text(question: str, options: list[dict[str, str]], *, include_instruction: bool) -> str:

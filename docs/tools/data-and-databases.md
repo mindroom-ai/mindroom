@@ -258,8 +258,8 @@ agents:
 | `google_drive_search_files(query)` | Searches file metadata with a Drive query such as `name contains 'budget'`. |
 | `google_drive_read_file(file_id)` | Returns Google Docs, Sheets, Slides, and Apps Script files as text, and plain-text files up to `max_read_size`. |
 | `google_drive_download_file(file_id, export_format=None)` | Saves a file into `google-drive-downloads/<file id>/` in the agent workspace and returns its path, size, and MIME type, exporting Workspace files to a native format such as `.xlsx` for a whole spreadsheet, or to the MIME type in `export_format`, such as `application/pdf`. |
-| `google_drive_upload_file(local_path, folder_id=None, name=None, mime_type=None)` | Uploads a local file; relative paths start at the agent workspace. |
-| `google_drive_update_file(file_id, local_path, mime_type=None)` | Replaces the contents of an existing non-Workspace file. |
+| `google_drive_upload_file(local_path, folder_id=None, name=None, mime_type=None, convert_to=None)` | Uploads a local file; relative paths start at the agent workspace. With `convert_to` set to `document`, `spreadsheet`, or `presentation`, Drive converts the file into a Google Doc, Sheet, or Slides file. |
+| `google_drive_update_file(file_id, local_path, mime_type=None)` | Replaces the contents of an existing file, which keeps its ID, link, and sharing. |
 | `google_drive_create_folder(name, parent_id=None)` | Creates a folder under the Drive root or a parent folder. |
 | `google_drive_move_file(file_id, new_parent_id, name=None)` | Moves a file and optionally renames it. |
 | `google_drive_trash_file(file_id)` | Moves a file to trash; the tool never deletes permanently. |
@@ -271,7 +271,9 @@ Downloads larger than `max_download_size` are refused without leaving a partial 
 Files with the same name never overwrite each other, downloading the same file again under the same name replaces its earlier copy, and characters such as `/` in a Drive name become `_` in the saved name.
 On an agent that is not `private`, every requester shares the agent workspace and can read what another person downloaded, so use a `private` agent when each person connects their own Google account.
 Uploads and content replacement read local files according to the agent's [`file_access`](../architecture/security-posture.md#file-access) setting.
-To change the content of a native Google Doc, use [`google_docs`](#google_docs).
+To make a formatted Google Doc, upload an HTML, Markdown, or Word file with `convert_to="document"`: Drive imports the formatting Google Docs supports, such as headings, tables, lists, and links.
+Replacing the contents of a Google Doc, Sheet, or Slides file converts the local file the same way and replaces the whole file, so formatting that is not in the local file is lost and comments on the replaced content lose their place.
+To change part of a Google Doc, use [`google_docs`](#google_docs).
 If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link; see [Google Services OAuth For Local Installs](../deployment/google-services-user-oauth.md#connect).
 A connection that granted only read-only Drive access keeps working for reads, while writes ask the user to reconnect; see [Scope Rationale](../deployment/google-services-oauth.md#scope-rationale).
 Set the `GOOGLE_CLOUD_QUOTA_PROJECT_ID` environment variable to charge Drive API quota and billing to that Google Cloud project.
@@ -305,7 +307,7 @@ tool_approval:
 
 ## [`google_docs`]
 
-`google_docs` creates, reads, edits, and formats Google Docs through its own OAuth connection, separate from Google Drive.
+`google_docs` creates, reads, and edits Google Docs through its own OAuth connection, separate from Google Drive.
 
 | Function | What it does |
 | --- | --- |
@@ -313,15 +315,10 @@ tool_approval:
 | `google_docs_get_document(document_id)` | Returns the full document structure and content, including every tab, paragraph, style, table, and list. |
 | `google_docs_insert_text(document_id, text, index=None, tab_id=None)` | Inserts text at a body index (1 is the first position), or appends to the end of the tab when `index` is omitted. |
 | `google_docs_replace_text(document_id, find_text, replace_text, match_case=False, tab_ids=None)` | Replaces every match across all tabs or the listed tabs and reports the count. |
-| `google_docs_format_document(document_id, tab_id, expected_revision_id, operations)` | Atomically formats ranges in one tab with paragraph styles, text styles, native lists, or hyperlinks only when the document is still at the revision read by the caller. |
+| `google_docs_batch_update(document_id, requests)` | Applies Google Docs API `batchUpdate` requests in order, all or none, for changes the text functions cannot make, such as tables, headings, styles, lists, links, and images. Requests can also delete content. |
 
 Each `document_id` accepts either a document ID or a full Google Docs URL.
 Every successful call returns the document's edit URL.
-`google_docs_format_document()` accepts only `paragraph_style`, `text_style`, `native_list`, `remove_native_list`, and `hyperlink` operations, and it applies the call's immutable `tab_id` to every operation.
-Style operations use a style object and explicit dotted field paths; an empty style resets the listed fields, and `hyperlink` sets a link.
-`paragraph_style` and `text_style` use `style` and `fields`, `native_list` uses `bullet_preset`, `remove_native_list` uses only its range, and `hyperlink` uses `url`.
-Put `native_list` operations after every operation whose indexes came from the preceding read, in descending start-index order when several list operations are needed, because Docs can remove leading tab characters and shift later indexes.
-Read the document immediately before formatting it, then use its `revisionId` as `expected_revision_id`; Docs rejects the full batch if another edit changes the document first.
 If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link.
 Before public production use, the Docs scope needs Google verification; see [Production Verification Follow-up](../deployment/google-services-oauth.md#production-verification-follow-up).
 
@@ -329,8 +326,7 @@ Before public production use, the Docs scope needs Google verification; see [Pro
 | --- | --- | --- | --- |
 | `create_document` | `boolean` | `true` | Enable document creation. |
 | `read_document` | `boolean` | `true` | Enable structure and content reads. |
-| `edit_document` | `boolean` | `true` | Enable text insertion and replacement. |
-| `format_document` | `boolean` | `false` | Enable revision-checked formatting operations. Requires `read_document` to obtain the revision ID. |
+| `edit_document` | `boolean` | `true` | Enable text insertion, text replacement, and batch updates. |
 
 ## [`google_sheets`]
 

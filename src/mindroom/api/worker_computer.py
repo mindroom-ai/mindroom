@@ -1,7 +1,8 @@
-"""Runner-authenticated computer routes and filtered private RFB transport."""
+"""A dedicated worker's Computer routes: its status and control, its desktop stream, and the agent's browser bridge."""
 
 import asyncio
 import secrets
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from typing import Annotated, Literal
 
@@ -9,6 +10,7 @@ from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, WebSock
 from pydantic import BaseModel, Field
 
 from mindroom.api.sandbox_runner import app_runner_token, validate_runner_token
+from mindroom.api.worker_services import worker_services
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.logging_config import get_logger
 from mindroom.worker_computer.protocol import ComputerStatus
@@ -100,25 +102,76 @@ async def _display_to_client(reader: asyncio.StreamReader, websocket: WebSocket)
         await websocket.send_bytes(data)
 
 
-@router.websocket("/stream")
-async def stream(websocket: WebSocket, session_id: str, generation: str) -> None:  # noqa: C901, PLR0915 - one owned stream lifecycle
-    """Bridge only this worker's private display with per-message input checks."""
+async def _attach_stream(
+    websocket: WebSocket,
+    session_id: str,
+    generation: str,
+) -> tuple[WorkerComputerRuntime, asyncio.Event] | None:
+    """Lease one viewer's stream to the authenticated backend, or refuse the socket."""
     token = app_runner_token(websocket.app)
     supplied = websocket.headers.get("x-mindroom-sandbox-token", "")
-    if not token or not secrets.compare_digest(supplied, token):
-        await websocket.close(code=1008)
-        return
-    if not 1 <= len(session_id) <= 256 or not 1 <= len(generation) <= 256:
-        await websocket.close(code=1008)
-        return
+    if (
+        token
+        and secrets.compare_digest(supplied, token)
+        and 1 <= len(session_id) <= 256
+        and 1 <= len(generation) <= 256
+    ):
+        try:
+            computer = _app_computer(websocket.app)
+            return computer, await computer.attach_stream(session_id, generation)
+        except (HTTPException, ComputerControlError):
+            pass
+    await websocket.close(code=1008)
+    return None
+
+
+async def _end_stream(
+    websocket: WebSocket,
+    computer: WorkerComputerRuntime,
+    session_id: str,
+    lease: asyncio.Event,
+    tasks: list[asyncio.Task[object]],
+    close: Callable[[], Awaitable[None]],
+) -> None:
+    """Stop the stream's tasks and close what it holds, then release its lease, even under repeated cancellation."""
+
+    async def cleanup() -> None:
+        try:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            try:
+                await close()
+            finally:
+                try:
+                    await computer.detach_stream(session_id, lease)
+                finally:
+                    with suppress(RuntimeError, OSError):
+                        await websocket.close()
+
     try:
-        computer = _app_computer(websocket.app)
-        lease = await computer.attach_stream(session_id, generation)
-    except (HTTPException, ComputerControlError):
-        await websocket.close(code=1008)
+        await run_coroutine_until_complete(cleanup())
+    except Exception as error:
+        logger.warning("Worker computer stream cleanup failed", error_type=type(error).__name__)
+
+
+@router.websocket("/stream")
+async def stream(websocket: WebSocket, session_id: str, generation: str) -> None:
+    """Bridge only this worker's private display with per-message input checks."""
+    attached = await _attach_stream(websocket, session_id, generation)
+    if attached is None:
         return
+    computer, lease = attached
     tasks: list[asyncio.Task[object]] = []
     writer: asyncio.StreamWriter | None = None
+
+    async def close_display() -> None:
+        if writer is not None:
+            writer.close()
+            with suppress(OSError):
+                await writer.wait_closed()
+
     try:
         reader, writer = await asyncio.open_unix_connection(computer.display.socket_path)
         await websocket.accept(subprotocol="binary" if "binary" in websocket.scope.get("subprotocols", []) else None)
@@ -138,26 +191,81 @@ async def stream(websocket: WebSocket, session_id: str, generation: str) -> None
     except Exception as error:
         logger.warning("Worker computer stream failed", error_type=type(error).__name__)
     finally:
+        await _end_stream(websocket, computer, session_id, lease, tasks, close_display)
 
-        async def cleanup() -> None:
-            try:
-                for task in tasks:
-                    task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-            finally:
-                try:
-                    if writer is not None:
-                        writer.close()
-                        with suppress(OSError):
-                            await writer.wait_closed()
-                finally:
-                    try:
-                        await computer.detach_stream(session_id, lease)
-                    finally:
-                        with suppress(RuntimeError, OSError):
-                            await websocket.close()
 
+async def _forward_commands(websocket: WebSocket, receive: Callable[[str], None]) -> None:
+    while True:
+        message = await websocket.receive()
+        if message["type"] == "websocket.disconnect":
+            return
+        text = message.get("text")
+        if not isinstance(text, str):
+            raise WebSocketDisconnect(code=1003)
+        receive(text)
+
+
+async def _serve_agent_browser(websocket: WebSocket) -> None:
+    """Give an admitted worker service its own CDP session on the agent's page; it acts only under the control lease.
+
+    Opening it starts a stopped Computer, as creating a Computer session does; in a worker without a Computer, or one
+    whose display cannot start, the handshake is refused.
+    """
+    try:
+        computer = _app_computer(websocket.app)
+        # Starting takes the lock an agent's browser call holds, so a running Computer is not started again.
+        if computer.status()["state"] != "ready":
+            await computer.ensure_started()
+    except (HTTPException, OSError, RuntimeError, TimeoutError, ExceptionGroup):
+        await websocket.close(code=1008)
+        return
+    # Playwright loads only once a service reaches the agent's browser, which already runs it.
+    from mindroom.worker_computer.agent_browser import AgentBrowserBridge  # noqa: PLC0415
+
+    bridge = AgentBrowserBridge(computer, websocket.send_text)
+    tasks: list[asyncio.Task[None]] = []
+
+    async def cleanup() -> None:
+        try:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await bridge.close()
+        finally:
+            with suppress(RuntimeError, OSError):
+                await websocket.close()
+
+    try:
+        await websocket.accept()
+        tasks = [
+            asyncio.create_task(_forward_commands(websocket, bridge.receive), name="service"),
+            asyncio.create_task(bridge.follow(), name="page"),
+            asyncio.create_task(bridge.send(), name="answers"),
+        ]
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
+    except (WebSocketDisconnect, OSError):
+        pass
+    except Exception as error:
+        logger.warning("Agent browser bridge failed", error_type=type(error).__name__)
+    finally:
         try:
             await run_coroutine_until_complete(cleanup())
         except Exception as error:
-            logger.warning("Worker computer stream cleanup failed", error_type=type(error).__name__)
+            logger.warning("Agent browser bridge cleanup failed", error_type=type(error).__name__)
+
+
+@router.websocket("/agent-browser/{plugin}/{name}")
+async def agent_browser(websocket: WebSocket, plugin: str, name: str) -> None:
+    """Bridge the agent's browser page to the running instance of this service, which presents its own secret."""
+    instance = worker_services(websocket.app).instance(plugin, name)
+    supplied = websocket.headers.get("x-mindroom-service-secret", "").encode()
+    if (
+        instance is None
+        or instance.process.returncode is not None
+        or not secrets.compare_digest(supplied, instance.secret.encode())
+    ):
+        await websocket.close(code=1008)
+        return
+    await _serve_agent_browser(websocket)

@@ -30,12 +30,6 @@ def native_json(text: str) -> Any:  # noqa: ANN401 - native page evaluation retu
     return None if result == "undefined" else json.loads(result)
 
 
-def shell_stdout(result: str) -> str:
-    """Remove the shell tool's cwd display header before parsing stdout values."""
-    assert result.startswith("[cwd: "), result
-    return result.split("\n", 1)[1]
-
-
 def native_tabs(text: str) -> list[dict[str, Any]]:
     """Read current native tab indices; they are intentionally not stable targets."""
     return [

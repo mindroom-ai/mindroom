@@ -7,17 +7,19 @@ through ``LockedTurns``, which knows neither, so the dependency between them run
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, replace
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from mindroom import reply_lifecycle as rl
 from mindroom.ai_runtime import bind_mid_turn_conversation_context
-from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.background_tasks import create_background_task
 from mindroom.config.resolution import memory_backend
+from mindroom.constants import CONTINUED_RUNS_METADATA_KEY
 from mindroom.contacts.turns import contact_room
+from mindroom.conversation_resolver import read_fresh_thread_history
 from mindroom.conversation_state_writer import session_started_on_creation
 from mindroom.delivery_gateway import ResponseIdentity
 from mindroom.entity_resolution import current_internal_sender_ids
@@ -41,16 +43,17 @@ from mindroom.reply_scope import current_span, release_decision, suppress_decisi
 from mindroom.reply_turn.request import (
     correlation_id_for_request,
     reply_authorization_entity_names,
+    requester_remains_authorized,
 )
 from mindroom.response_attempt import ResponseAttemptDeps, ResponseAttemptRequest, ResponseAttemptRunner, SpanAttempt
 from mindroom.response_lifecycle import ResponseLifecycle, ResponseLifecycleDeps
-from mindroom.response_turn import ResponsePausedForApproval, skip_unapproved_attempt
+from mindroom.response_turn import ResponsePausedForApproval
 from mindroom.streaming import PausePresentationError, StreamingDeliveryError
 from mindroom.thread_summary.schedule import thread_summary_message_count_hint
 from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping, Sequence
     from datetime import datetime
 
     import nio
@@ -63,6 +66,7 @@ if TYPE_CHECKING:
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.event_journal.approval_store import ApprovalStore
     from mindroom.history.types import HistoryScope
+    from mindroom.hooks import TurnOutcome
     from mindroom.judgment.state import JudgmentMessage
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
     from mindroom.knowledge.utils import KnowledgeAccessSupport
@@ -103,6 +107,16 @@ def existing_event_id(request: ResponseRequest) -> str | None:
 DECLINED = FinalDeliveryOutcome(ending=Suppressed(Suppression.PARTICIPATION_DECLINED))
 
 
+def participation_silence(participation: ParticipationGate) -> FinalDeliveryOutcome:
+    """Return how a turn its participation gate kept quiet ended: declined by its decision, or failed by its check."""
+    if participation.is_declined:
+        return DECLINED
+    if participation.publication_failed:
+        # The turn chose to answer and showed nothing yet, so it ends interrupted and its sources retry.
+        return FinalDeliveryOutcome(ending=Cancelled("interrupted"))
+    return FinalDeliveryOutcome(ending=Suppressed(Suppression.PARTICIPATION_FAILED))
+
+
 @dataclass(frozen=True)
 class ReplyTurnDeps:
     """The collaborators every owner of a reply turn shares: the response runner, its locked turns, and its approvals."""
@@ -134,6 +148,17 @@ class LockedTurns:
     """Settle one locked reply turn and build what its settlement runs, for every owner of a reply turn."""
 
     deps: ReplyTurnDeps
+    # Each turn whose run is inside its bracket here (None), or settled here leaving its end to its approval (how the
+    # run ended). The approval's end takes the entry, so a run whose entry was taken while live ends nothing.
+    _turn_ends: dict[str, TurnOutcome | None] = field(default_factory=dict, init=False, repr=False)
+
+    def take_turn_end(self, turn_id: str) -> TurnOutcome | None:
+        """Take a turn's end for its ended approval; return how the turn's run ended if it settled here.
+
+        Leaving a room ends an approval while its run may still be live; taking the end keeps that run from ending the
+        turn again.
+        """
+        return self._turn_ends.pop(turn_id, None)
 
     def client(self) -> nio.AsyncClient:
         """Return the current Matrix client required for response coordination."""
@@ -166,10 +191,11 @@ class LockedTurns:
             membership_turn_id=request.response_envelope.source_event_id,
             queue_memory_persistence=queue_memory_persistence,
             queue_skill_review=queue_skill_review,
+            # A reply that continues runs a restart cut short reports their usage too: undated, so budgets recount.
             notify_response_finished=self.response_finished_notifier(
                 request.sources.logical_source_event_ids,
                 request.user_id,
-                request.requested_at,
+                None if CONTINUED_RUNS_METADATA_KEY in (request.matrix_run_metadata or {}) else request.requested_at,
             ),
             persist_response_event_id=persist_response_event_id,
         )
@@ -259,19 +285,15 @@ class LockedTurns:
     ) -> bool:
         """Recheck one requester after serialized lifecycle admission."""
         requester_id = request.response_envelope.requester_id
-        entity_names = reply_authorization_entity_names(
-            self.deps.runtime.config,
-            self.deps.agent_name,
-            reply_entity_names,
-        )
-        if is_sender_allowed_for_entity_replies_in_room(
+        config = self.deps.runtime.config
+        if requester_remains_authorized(
             requester_id,
-            entity_names,
-            self.deps.runtime.config,
             request.room_id,
-            self.deps.runtime_paths,
-            self.deps.runtime.agent_reply_memberships,
-            require_resolved_membership=True,
+            owner_entity_name=self.deps.agent_name,
+            config=config,
+            runtime_paths=self.deps.runtime_paths,
+            membership_index=self.deps.runtime.agent_reply_memberships,
+            reply_entity_names=reply_entity_names,
         ):
             return True
         self.deps.logger.info(
@@ -279,7 +301,7 @@ class LockedTurns:
             source_event_id=request.response_envelope.source_event_id,
             requester_id=requester_id,
             room_id=request.room_id,
-            entity_names=entity_names,
+            entity_names=reply_authorization_entity_names(config, self.deps.agent_name, reply_entity_names),
         )
         return False
 
@@ -310,16 +332,17 @@ class LockedTurns:
         exclude_event_id: str | None = None,
     ) -> ResponseRequest:
         """Refresh model-facing thread history once this turn owns the lifecycle lock."""
-        if request.thread_id is None:
-            return request
-
+        has_cross_room_prefix = any(
+            message.room_id not in (None, request.room_id) for message in request.thread_history
+        )
         try:
-            refreshed_history = await self.deps.resolver.fetch_thread_history(
-                request.room_id,
-                request.thread_id,
+            refreshed_history = await read_fresh_thread_history(
+                self.deps.resolver,
+                request.response_envelope.target,
+                requester_id=request.response_envelope.requester_id,
             )
         except Exception as exc:
-            if request.requires_model_history_refresh:
+            if request.requires_model_history_refresh or has_cross_room_prefix:
                 raise
             self.deps.logger.warning(
                 "Failed to refresh thread history after lock; continuing with existing history",
@@ -328,6 +351,8 @@ class LockedTurns:
                 error=str(exc),
             )
             return replace(request, requires_model_history_refresh=True)
+        if refreshed_history is None:
+            return request
         if exclude_event_id is not None:
             filtered_history = [message for message in refreshed_history if message.event_id != exclude_event_id]
             if len(filtered_history) != len(refreshed_history):
@@ -434,10 +459,10 @@ class LockedTurns:
         except Exception as error:
             if current_task_is_process_shutdown():
                 raise
-            if skip_unapproved_attempt(participation, reason="run_failed_before_decision") is not None:
-                # A failure before the participation decision stays quiet: it declines the turn.
+            if participation is not None and participation.decline("run_failed_before_decision"):
+                # A failure before the participation decision stays quiet.
                 self.deps.logger.exception("Response skipped before participation", error=str(error))
-                return DECLINED
+                return participation_silence(participation)
             self._log_delivery_failure(response_kind=response_kind, error=error)
             if isinstance(error, PausePresentationError):
                 # The run paused, but its reply could not show the pause: no approval exists for it.
@@ -464,47 +489,80 @@ class LockedTurns:
     ) -> None:
         """Run generation and settle its terminal lifecycle exactly once: the one place a locked turn's ending is decided.
 
+        The turn's start and its pause or end bracket this run; a turn an approval owns ends when that approval ends.
         ``reply_session`` names the stored session the reply writes; when one of its writes creates that session's
         row, ``session:started`` fires once the attempt settles, before the lifecycle's finalization.
         """
         cancelled: asyncio.CancelledError | None = None
-        async with session_started_on_creation(
-            reply_session,
-            correlation_id=lifecycle.identity.correlation_id,
+        resumed = (claimed := current_span()) is not None and claimed.span.kind is rl.SpanKind.APPROVAL_RESUME
+        async with (
+            self._live_turn(request.turn_id),
+            lifecycle.turn(approval_owns_end=partial(self._approval_owns_turn, request)),
         ):
-            try:
-                outcome = await self._attempt_outcome(
-                    request,
+            async with session_started_on_creation(
+                reply_session,
+                correlation_id=lifecycle.identity.correlation_id,
+            ):
+                try:
+                    await lifecycle.start_turn(resumed=resumed)
+                    outcome = await self._attempt_outcome(
+                        request,
+                        target=target,
+                        response_function=response_function,
+                        approval_suspension_handler=approval_suspension_handler,
+                        participation=participation,
+                        response_kind=lifecycle.identity.response_kind,
+                    )
+                except asyncio.CancelledError as error:
+                    if current_task_is_process_shutdown():
+                        raise
+                    # The turn still settles as cancelled; the cancellation then propagates.
+                    cancelled = error
+                    outcome = FinalDeliveryOutcome(ending=Cancelled(classify_cancel_source(error)))
+            handle = current_span()
+            if handle is not None and not handle.exited:
+                outcome = await self._end_span_after_outcome(
+                    handle,
+                    outcome,
                     target=target,
-                    response_function=response_function,
-                    approval_suspension_handler=approval_suspension_handler,
-                    participation=participation,
-                    response_kind=lifecycle.identity.response_kind,
+                    delivery_started=progress.delivery_started,
+                    contact_turn=request.contact is not None,
                 )
-            except asyncio.CancelledError as error:
-                if current_task_is_process_shutdown():
-                    raise
-                # The turn still settles as cancelled; the cancellation then propagates.
-                cancelled = error
-                outcome = FinalDeliveryOutcome(ending=Cancelled(classify_cancel_source(error)))
-        handle = current_span()
-        if handle is not None and not handle.exited:
-            outcome = await self._end_span_after_outcome(
-                handle,
+            progress.ending = outcome.ending
+            await self._finalize_locked_outcome(
+                lifecycle,
                 outcome,
-                target=target,
-                delivery_started=progress.delivery_started,
-                contact_turn=request.contact is not None,
+                post_response_outcome=build_post_response_outcome(outcome),
+                post_response_deps=post_response_deps,
             )
-        progress.ending = outcome.ending
-        await self._finalize_locked_outcome(
-            lifecycle,
-            outcome,
-            post_response_outcome=build_post_response_outcome(outcome),
-            post_response_deps=post_response_deps,
+            if cancelled is not None:
+                raise cancelled
+
+    @asynccontextmanager
+    async def _live_turn(self, turn_id: str) -> AsyncIterator[None]:
+        """Keep the turn's end open for its approval to take while its run is live here."""
+        self._turn_ends[turn_id] = None
+        try:
+            yield
+        finally:
+            if turn_id in self._turn_ends and self._turn_ends[turn_id] is None:
+                del self._turn_ends[turn_id]
+
+    async def _approval_owns_turn(self, request: ResponseRequest, end: TurnOutcome) -> bool:
+        """Return whether an approval of this turn, paused, resumed, or waited for in place, owns the turn's end.
+
+        A run starts only once no approval owns its source, or resumes the approval that does, so any approval of its
+        source is its turn's. The run leaves that approval how it ended, which an error that completed its reply hides
+        from the reply's state; an approval that ended while the run was live already took the end.
+        """
+        continuation = await self.deps.approval_store.approval_continuation_for_source(
+            request.response_envelope.source_event_id,
         )
-        if cancelled is not None:
-            raise cancelled
+        if request.turn_id not in self._turn_ends:
+            return True
+        if continuation is not None:
+            self._turn_ends[request.turn_id] = end
+        return continuation is not None
 
     async def _end_span_after_outcome(
         self,
@@ -549,6 +607,7 @@ class LockedTurns:
                 response_envelope=request.response_envelope,
                 sources=request.sources,
                 correlation_id=correlation_id_for_request(request),
+                turn_id=request.turn_id,
                 participating_agent_names=request.participating_agent_names or (self.deps.agent_name,),
                 contact_turn=request.contact is not None,
             ),

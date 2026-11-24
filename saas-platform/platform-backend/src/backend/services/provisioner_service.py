@@ -56,6 +56,7 @@ from backend.config import (
     logger,
 )
 from backend.deps import ensure_supabase
+from backend.entitlements import parse_timestamp
 from backend.k8s import (
     INSTANCES_NAMESPACE,
     check_deployment_exists,
@@ -515,23 +516,41 @@ def _included_ai_budget_usd(tier: str) -> int:
     return plan.included_ai_budget_usd if plan else 0
 
 
-def openrouter_key_matches_plan(instance_row: Mapping[str, Any], tier: str) -> bool:
-    """Return whether an instance holds exactly the platform-paid OpenRouter key its tier includes.
+def allowed_openrouter_limit_usd(
+    tier: str, subscription: Mapping[str, Any] | None, *, now: datetime | None = None
+) -> int:
+    """Return the monthly OpenRouter limit an instance's key may have.
+
+    OpenRouter resets key usage on the first of each UTC calendar month, not when a billing period starts, so the
+    usage of a trial that converted to paid still counts in the month the trial ended. That month the key gets twice
+    the plan budget, so the paid period starts with a full budget whatever the trial spent.
+    """
+    budget = _included_ai_budget_usd(tier)
+    if subscription is None or subscription.get("status") != "active":
+        return budget
+    trial_ends_at = parse_timestamp(subscription.get("trial_ends_at"))
+    now = (now or datetime.now(UTC)).astimezone(UTC)
+    if trial_ends_at is not None and (trial_ends_at.year, trial_ends_at.month) == (now.year, now.month):
+        return 2 * budget
+    return budget
+
+
+def openrouter_key_matches_plan(instance_row: Mapping[str, Any], limit_usd: int) -> bool:
+    """Return whether an instance holds exactly the platform-paid OpenRouter key with the allowed limit.
 
     A tier without an included AI budget may retain a key with a zero limit.
     """
-    budget = _included_ai_budget_usd(tier)
-    if budget <= 0 and _stored_openrouter_key_hash(instance_row) is None:
+    if limit_usd <= 0 and _stored_openrouter_key_hash(instance_row) is None:
         return True
-    return _matching_openrouter_metadata(instance_row, budget)
+    return _matching_openrouter_metadata(instance_row, limit_usd)
 
 
-def openrouter_key_exceeds_plan(instance_row: Mapping[str, Any], tier: str) -> bool:
-    """Return whether an instance holds a platform-paid key with a larger budget than its tier includes."""
+def openrouter_key_exceeds_plan(instance_row: Mapping[str, Any], limit_usd: int) -> bool:
+    """Return whether an instance holds a platform-paid key with a larger limit than allowed."""
     if _stored_openrouter_key_hash(instance_row) is None:
         return False
     limit = instance_row.get("openrouter_key_limit_usd")
-    return limit is None or int(limit) > _included_ai_budget_usd(tier)
+    return limit is None or int(limit) > limit_usd
 
 
 async def set_instance_openrouter_key_disabled(instance_row: Mapping[str, Any], *, disabled: bool) -> None:
@@ -556,9 +575,8 @@ async def set_instance_openrouter_key_disabled(instance_row: Mapping[str, Any], 
         logger.info("OpenRouter key %s for instance %s no longer exists", key_hash, instance_row.get("instance_id"))
 
 
-async def set_instance_openrouter_key_limit(sb: Any, instance_row: Mapping[str, Any], tier: str) -> None:
-    """Apply the plan budget to the stored key, preserving its usage and identity."""
-    limit = _included_ai_budget_usd(tier)
+async def set_instance_openrouter_key_limit(sb: Any, instance_row: Mapping[str, Any], limit: int) -> None:
+    """Apply the allowed limit to the stored key, preserving its usage and identity."""
     await anyio.to_thread.run_sync(
         partial(
             set_openrouter_key_limit,
@@ -596,6 +614,14 @@ async def _delete_resources_outside_release(instance_id: str | int) -> None:
             raise RuntimeError(msg)
 
 
+def _subscription_row(sb: Any, subscription_id: Any) -> dict[str, Any] | None:
+    """Return the subscription fields the allowed OpenRouter limit depends on."""
+    if not subscription_id:
+        return None
+    rows = sb.table("subscriptions").select("status,trial_ends_at").eq("id", subscription_id).limit(1).execute().data
+    return rows[0] if rows else None
+
+
 def _persist_openrouter_key_metadata(sb: Any, instance_id: str, created_key: CreatedOpenRouterKey) -> bool:
     """Persist non-secret metadata of a created key unless the instance records a key already; return whether it did."""
     recorded = update_instance(
@@ -629,6 +655,7 @@ async def _provision_openrouter_key(
     tier: str,
     existing_instance_row: Mapping[str, Any] | None,
     namespace: str,
+    subscription: Mapping[str, Any] | None = None,
 ) -> tuple[str, CreatedOpenRouterKey | None]:
     """Return the OpenRouter key value this tenant instance should receive, and the key if it was just created.
 
@@ -636,11 +663,11 @@ async def _provision_openrouter_key(
     A created key is recorded before its Secret is published, so a run that loses the record to another run never
     publishes its key; the key is discarded when it cannot be recorded or its publication fails.
     """
-    monthly_limit_usd = _included_ai_budget_usd(tier)
+    monthly_limit_usd = allowed_openrouter_limit_usd(tier, subscription)
     if _stored_openrouter_key_hash(existing_instance_row) is not None:
         try:
             if not _matching_openrouter_metadata(existing_instance_row, monthly_limit_usd):
-                await set_instance_openrouter_key_limit(sb, existing_instance_row, tier)
+                await set_instance_openrouter_key_limit(sb, existing_instance_row, monthly_limit_usd)
             existing_key = await _existing_instance_secret_value(instance_id, namespace, "openrouter_key")
         except OpenRouterKeyNotFoundError:
             pass
@@ -861,6 +888,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             tier=tier,
             existing_instance_row=existing_instance_row,
             namespace=namespace,
+            subscription=_subscription_row(sb, subscription_id),
         )
         # User BYOK credentials live in tenant storage; hosted budgets use only a scoped OpenRouter key.
         # Tenant workloads are untrusted, so every value here must be scoped to this instance,

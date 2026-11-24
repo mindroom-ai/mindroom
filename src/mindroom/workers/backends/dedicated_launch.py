@@ -26,7 +26,7 @@ from mindroom.runtime_env_policy import (
 from mindroom.tool_system.worker_routing import WORKER_SHARED_CREDENTIALS_DIRNAME
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,12 +88,16 @@ def dedicated_worker_startup_manifest_hash(
     runtime_paths: RuntimePaths,
     *,
     tool_validation_snapshot: Mapping[str, object],
+    eager_setup_plugins: Sequence[str] | None = None,
+    sandbox_mount: Mapping[str, object] | None = None,
 ) -> str:
     """Return the content hash of the startup manifest a dedicated worker launched now would boot from."""
     return startup_manifest_sha256(
         runtime_paths,
         tool_validation_snapshot=tool_validation_snapshot,
         public_runtime=True,
+        eager_setup_plugins=eager_setup_plugins,
+        sandbox_mount=sandbox_mount,
     )
 
 
@@ -102,6 +106,8 @@ def write_dedicated_worker_startup_manifest(
     runtime_paths: RuntimePaths,
     *,
     tool_validation_snapshot: Mapping[str, object],
+    eager_setup_plugins: Sequence[str] | None = None,
+    sandbox_mount: Mapping[str, object] | None = None,
 ) -> str:
     """Write a dedicated worker's startup manifest into its state root and return the manifest's content hash."""
     write_startup_manifest(
@@ -109,5 +115,12 @@ def write_dedicated_worker_startup_manifest(
         runtime_paths,
         tool_validation_snapshot=tool_validation_snapshot,
         public_runtime=True,
+        eager_setup_plugins=eager_setup_plugins,
+        sandbox_mount=sandbox_mount,
     )
-    return dedicated_worker_startup_manifest_hash(runtime_paths, tool_validation_snapshot=tool_validation_snapshot)
+    return dedicated_worker_startup_manifest_hash(
+        runtime_paths,
+        tool_validation_snapshot=tool_validation_snapshot,
+        eager_setup_plugins=eager_setup_plugins,
+        sandbox_mount=sandbox_mount,
+    )

@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, cast
 
 from mindroom.llm.events import ToolProgress
-from mindroom.llm.messages import Message
+from mindroom.llm.messages import MEDIA_FOLLOW_UP_TEXT, Message
 from mindroom.llm.runs import FailingTool, ToolExecution
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
@@ -40,7 +40,10 @@ _FAILING_TOOL_ERROR_TEXT = (
     "Tool {name} failed in {failures} requests of this turn with no success in between, so this call was not executed. "
     "Its last error: {error}\nDon't call {name} again in this turn. Tell the user what failed instead."
 )
-MEDIA_FOLLOW_UP_TEXT = "The tool call above generated the attached media."
+# A success without text is stored with this, since providers show an empty result in their own way: Anthropic adds a
+# note, OpenRouter's Claude route shows ``...``, and most others show nothing. Storing it, rather than adding it when a
+# request is built, leaves earlier results, and the thinking and caches built on them, as they were sent.
+NO_OUTPUT_TEXT = "The tool call succeeded with no text output."
 # The user reads this at the end of a reply whose run the loop ended because the model kept calling a failing tool.
 _FAILING_TOOL_STOP_TEXT = (
     "Stopped: tool {name} failed in {failures} requests with no success in between. Its last error: {error}"
@@ -402,19 +405,26 @@ async def _run_call(
     emit((call, tool_result_message(execution, media=outcome)))
 
 
+def tool_result_content(result: str | None, *, is_error: bool | None) -> str | None:
+    """Return the content a tool message stores for a call's result: a success without text says so."""
+    return result if result or is_error else NO_OUTPUT_TEXT
+
+
 def tool_result_message(execution: ToolExecution, media: ToolValue | None = None) -> Message:
     """Return the tool message that answers ``execution`` with its recorded result.
 
     ``media`` is the tool value whose media the message carries when the call succeeded; a failed call carries none.
+    A success without text says so (``tool_result_content``).
     """
     images = audio = videos = files = None
     if media is not None and not execution.is_error:
-        images, audio, videos, files = (
-            list(items) or None for items in (media.images, media.audios, media.videos, media.files)
-        )
+        images = list(media.images) or None
+        audio = list(media.audios) or None
+        videos = list(media.videos) or None
+        files = list(media.files) or None
     return Message(
         role="tool",
-        content=execution.result,
+        content=tool_result_content(execution.result, is_error=execution.is_error),
         tool_call_id=execution.tool_call_id,
         tool_name=execution.tool_name,
         tool_args=execution.tool_args,
@@ -447,14 +457,9 @@ def media_follow_up(results: Sequence[Message]) -> Message | None:
     )
 
 
-def is_media_follow_up(message: Message) -> bool:
-    """Return whether a stored message is a media follow-up the loop wrote, which no person said."""
-    return message.role == "user" and message.content == MEDIA_FOLLOW_UP_TEXT
-
-
 __all__ = [
     "MAX_CONSECUTIVE_TOOL_FAILURES",
-    "MEDIA_FOLLOW_UP_TEXT",
+    "NO_OUTPUT_TEXT",
     "PlannedCall",
     "PreparedTools",
     "RefusedCall",
@@ -466,11 +471,11 @@ __all__ = [
     "failed_answer",
     "failing_tool_stop_text",
     "ignored_refusal",
-    "is_media_follow_up",
     "media_follow_up",
     "offered_toolkits",
     "plan_tool_batch",
     "sorted_specs",
+    "tool_result_content",
     "tool_result_message",
     "toolkit_instructions",
 ]

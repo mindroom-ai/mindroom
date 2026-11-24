@@ -18,8 +18,8 @@ from uuid import uuid4
 
 from mindroom.agent_run_context import append_knowledge_availability_enrichment
 from mindroom.ai_run_metadata import build_prepared_history_metadata_content, with_prior_usage
+from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.config.resolution import entity_timezone
-from mindroom.constants import is_silent_schedule_no_report_response
 from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.execution_preparation import (
     ThreadHistoryRenderLimits,
@@ -55,11 +55,13 @@ from mindroom.response_turn import (
     is_empty_reply,
     pause_without_approval_error,
     paused_attempt_from_response,
+    publish_error_run_metadata,
     replays_as_turn,
     stream_response_turn,
     stream_with_llm_request_log_context,
 )
 from mindroom.run_storage import bind_turn_session, scope_run_storage
+from mindroom.shell.background_scope import ShellBackgroundScope, bind_shell_background_scope
 from mindroom.teams.attempt import TeamAttempt
 from mindroom.teams.leader import LeaderRun
 from mindroom.teams.members import (
@@ -73,11 +75,11 @@ from mindroom.teams.presentation import (
     TeamStreamPresentation,
     format_team_header,
 )
-from mindroom.teams.resume import TeamResume, continued_team_pause, drive_team_delegations
+from mindroom.teams.resume import TeamResume, continued_team_pause, drive_team_delegations, settle_quiet_team_answer
 from mindroom.teams.runtime import leader_tool_specs, team_usage
 from mindroom.tool_jobs.notices import append_turn_start_job_note
 from mindroom.tool_jobs.settings import background_tool_jobs_enabled
-from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.tool_system.context_bound_streams import closing_async_stream, context_bound_async_stream
 from mindroom.tool_system.events import FailedReply, StructuredStreamChunk
 from mindroom.turn_model import ModelScope, TurnModel, resolve_turn_model
 
@@ -293,13 +295,27 @@ def run_prepared_team(
         compaction_lifecycle=None,
         turn_recorder=None,
     )
-    return leader.start(
-        prepared.run_input(MediaInputs()),
-        run_id=str(uuid4()),
-        user_id=user_id,
-        metadata=prepared.run_metadata,
-        records=None,
-    )
+    scope = ShellBackgroundScope()
+
+    async def events() -> AsyncIterator[TeamRunEvent]:
+        try:
+            stream = context_bound_async_stream(
+                context_factory=lambda: bind_shell_background_scope(scope),
+                stream_factory=lambda: leader.start(
+                    prepared.run_input(MediaInputs()),
+                    run_id=str(uuid4()),
+                    user_id=user_id,
+                    metadata=prepared.run_metadata,
+                    records=None,
+                ),
+            )
+            async with closing_async_stream(stream):
+                async for event in stream:
+                    yield event
+        finally:
+            await run_coroutine_until_complete(scope.close())
+
+    return events()
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +419,8 @@ class _TeamTurn:
         self,
         run: TurnRunState,
         continuation_state: TurnContinuationRunState,
+        *,
+        on_model_resolved: Callable[[str], None] | None = None,
     ) -> tuple[TeamAttempt, AsyncIterator[TeamRunEvent]]:
         """Build the attempt's team and prepared input, and return its state with the run's event stream."""
         members = self.members_for_attempt(continuation_state)
@@ -419,6 +437,9 @@ class _TeamTurn:
             ),
             None,
         )
+        # Heard before the team is built, so a failure from here on names this model.
+        if on_model_resolved is not None:
+            on_model_resolved(runtime_model.model_name)
         built = build_team_spec(
             members=members,
             mode=self.spec.mode,
@@ -523,9 +544,16 @@ class _TeamTurn:
         self,
         run: TurnRunState,
         continuation_state: TurnContinuationRunState,
+        *,
+        on_model_resolved: Callable[[str], None] | None = None,
     ) -> AsyncGenerator[TeamStreamChunk | AttemptResolved]:
         """Stream one team attempt as its document grows, ending with its ``AttemptResolved`` sentinel."""
-        attempt, events = await self.start_attempt(run, continuation_state)
+        attempt, events = await self.start_attempt(
+            run,
+            continuation_state,
+            on_model_resolved=on_model_resolved,
+        )
+        prior_usage = tuple(run.prior_usage.values())
         shown: str | None = None
         try:
             async with closing_async_stream(events):
@@ -541,7 +569,7 @@ class _TeamTurn:
             yield AttemptResolved(
                 HandledAttempt(
                     FailedReply(self.error_text(error), error),
-                    build_run_metadata=self.run_metadata_builder(attempt, RunStatus.error, run.prior_usage),
+                    build_run_metadata=self.run_metadata_builder(attempt, RunStatus.error, prior_usage),
                 ),
             )
             return
@@ -554,7 +582,7 @@ class _TeamTurn:
         record = attempt.terminal_record()
         if record.status is RunStatus.paused:
             paused = self.resolve_paused(attempt, record)
-            if paused.response_text:
+            if paused.response_text or shown is not None:
                 yield StructuredStreamChunk(
                     content=paused.response_text,
                     tool_trace=list(paused.tool_trace),
@@ -562,25 +590,30 @@ class _TeamTurn:
                 )
             yield AttemptResolved(paused)
             return
-        if self.silent_no_report(record):
-            # A quiet scheduled check that found nothing replies with the bare token, which delivery then suppresses,
-            # instead of a team document around it.
+        silent_answer = (
+            settle_quiet_team_answer(attempt.presentation, record, record.ended_member_runs)
+            if self.ctx.allow_no_report_response
+            else None
+        )
+        if silent_answer is not None:
+            # A quiet scheduled check that found nothing replies with the leader's bare answer, which delivery then
+            # suppresses, instead of a team document around it.
             # The document's trace stays, as the streamed reply keeps it.
-            shown = (record.handover_content or "").strip()
+            shown = silent_answer
             yield StructuredStreamChunk(content=shown, tool_trace=None)
         # The finished reply adds what no live chunk showed: a failed member run's reason, or the no-consensus note
         # when only members spoke.
         elif (chunk := attempt.chunk(finished=True)) is not None and chunk.content != shown:
             shown = chunk.content
             yield chunk
-        yield AttemptResolved(self.resolve_completed(attempt, record, run.prior_usage, shown=shown is not None))
-
-    def silent_no_report(self, record: TeamRunRecord) -> bool:
-        """Whether a quiet scheduled turn's leader answered with the no-report token while no member found anything."""
-        return (
-            self.ctx.allow_no_report_response
-            and is_silent_schedule_no_report_response(record.handover_content or "")
-            and not any((member.handover_content or "").strip() for member in record.ended_member_runs)
+        yield AttemptResolved(
+            self.resolve_completed(
+                attempt,
+                record,
+                prior_usage,
+                shown=shown is not None,
+                silent_answer=silent_answer,
+            ),
         )
 
     def run_metadata_builder(
@@ -612,7 +645,7 @@ class _TeamTurn:
         if paused is None:
             raise pause_without_approval_error(record, entity_label="team")
         return replace(
-            continued_team_pause(attempt.presentation, paused),
+            continued_team_pause(attempt.presentation, paused, quiet=self.ctx.allow_no_report_response),
             runtime_model_name=attempt.runtime_model_name,
             team_member_model_names=tuple(sorted(attempt.members.model_names.items())),
         )
@@ -624,24 +657,25 @@ class _TeamTurn:
         prior_usage: tuple[RunMetrics, ...],
         *,
         shown: bool,
+        silent_answer: str | None,
     ) -> CompletedAttempt:
         """Return the completed attempt: what its reply still has to show, what replays, and the turn's metadata.
 
         ``shown`` says whether the attempt's chunks showed a document; one that showed nothing ends with the
-        no-response line.
+        no-response line. ``silent_answer`` is the bare answer a quiet turn's team that reports nothing replies with.
         """
         tool_executions = run_tool_executions(record)
         header = format_team_header(attempt.members.display_names)
         # The text records the document the attempt's events built and its failed runs' reasons, in the configured
         # member order, without tool markers: the chunks show the trace. The "No team response generated." fallback is
-        # display chrome, not replayable assistant text. A quiet scheduled reply records the bare token.
+        # display chrome, not replayable assistant text.
         body_text = attempt.presentation.text_without_tool_markers(finished=True)
         has_visible_output = bool(body_text)
         is_empty = is_empty_reply(record)
         rendered = header + (body_text or NO_TEAM_RESPONSE)
         replayable_text = rendered if has_visible_output else ""
-        if self.silent_no_report(record):
-            replayable_text = (record.handover_content or "").strip()
+        if silent_answer is not None:
+            replayable_text = silent_answer
         logger.info(
             "team_response_preview",
             agents=attempt.members.display_names,
@@ -760,12 +794,13 @@ async def team_response_stream(
     turn = await asyncio.to_thread(_team_turn, spec, ctx)
     if isinstance(turn, FailedReply):
         # A turn whose members cannot run ran nothing to record; its message and this reply stay in the thread.
+        publish_error_run_metadata(sinks)
         yield turn
         return
 
     adapter = TurnAdapter[TeamStreamChunk](
         load_scope=turn.load_scope,
-        run_attempt=turn.run_attempt,
+        run_attempt=partial(turn.run_attempt, on_model_resolved=sinks.on_model_resolved),
         make_text_chunk=lambda text: text,
         user_message=ctx.prompt,
         unexpected_error_text=turn.error_text,

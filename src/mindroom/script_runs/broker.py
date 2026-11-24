@@ -5,14 +5,17 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
+from contextlib import nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from threading import Event
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.approval.tool_approval import (
     BackgroundScriptToolOrigin,
     ToolApprovalDecision,
     evaluate_tool_approval,
+    toolkit_approval_alias,
 )
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.failure_text import failure_text
@@ -25,6 +28,7 @@ from mindroom.script_runs.models import (
     ScriptRunRecord,
     ScriptToolGrant,
     script_worker_key_for_run,
+    utc_timestamp,
 )
 from mindroom.script_runs.policy import resolve_current_script_tool
 from mindroom.script_runs.store import (
@@ -40,10 +44,13 @@ from mindroom.tool_system.automation_approval import NEVER_PREAPPROVE_TOOLKITS, 
 from mindroom.tool_system.invocation import (
     DETACHED_SESSION_ID,
     CallResult,
+    ToolCall,
     ToolCallContext,
+    ToolNext,
     client_tool_result,
     run_tool_call,
 )
+from mindroom.tool_system.progress import structured_tool_result
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     tool_runtime_context,
@@ -62,6 +69,7 @@ from mindroom.tool_system.worker_routing import (
     build_agent_toolkit_worker_target,
     parse_tool_execution_identity_payload,
 )
+from mindroom.workflow_runs.faults import hold
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -78,10 +86,22 @@ __all__ = [
     "ScriptRuntimeWorkerAuthority",
     "ScriptToolBroker",
     "ScriptToolCallRequest",
+    "WorkflowAttemptRevokedError",
     "drain_script_tool_cleanup",
 ]
 
 _CALL_UNAVAILABLE = "Background script call is unavailable."
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkflowCall:
+    """Per-task broker context for a workflow attempt's call; absent for plain script calls."""
+
+    waits: Callable[[str | None], Awaitable[object]] | None = None
+    gate_only: bool = False
+
+
+_WORKFLOW_CALL: ContextVar[_WorkflowCall | None] = ContextVar("workflow_call", default=None)
 _OWNER_RUNTIME_UNAVAILABLE = "Background script owner runtime is temporarily unavailable."
 _INDETERMINATE_ERROR = {
     "kind": "indeterminate",
@@ -107,6 +127,10 @@ _RESULT_TOO_LARGE_ERROR = {
 
 class ScriptBrokerAuthenticationError(ValueError):
     """Raised when a gateway capability cannot be authenticated safely."""
+
+
+class WorkflowAttemptRevokedError(ScriptBrokerAuthenticationError):
+    """Raised for the verified capability of a workflow attempt that takes no more calls: its process is to exit."""
 
 
 class ScriptCallPreparationPendingError(RuntimeError):
@@ -228,6 +252,7 @@ class ScriptToolBroker:
     _tasks: dict[tuple[str, str], asyncio.Task[ScriptCallRecord]] = field(default_factory=dict, init=False)
     _preparing: dict[tuple[str, str], int] = field(default_factory=dict, init=False)
     _preparation_changed: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    # Plain script calls serialize per run; workflow attempts enforce concurrency in WorkflowEngine.
     _run_locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
     _cleanups: RetainedToolkitCleanups = field(
         default_factory=lambda: RetainedToolkitCleanups(failure_event="script_tool_cleanup_failed"),
@@ -257,11 +282,13 @@ class ScriptToolBroker:
         self,
         request: ScriptToolCallRequest,
         authorization: str | None,
+        authenticated: bool,
     ) -> ScriptCallClaim:
-        run = self.authenticate(request.run_id, authorization)
+        if not authenticated:
+            self._authenticate_plain(request.run_id, authorization)
         self._require_call_admission()
         return self.store.claim_call(
-            run_id=run.run_id,
+            run_id=request.run_id,
             call_id=request.call_id,
             grant=request.grant,
             arguments_digest=request.arguments_digest,
@@ -272,12 +299,13 @@ class ScriptToolBroker:
         request: ScriptToolCallRequest,
         *,
         authorization: str | None,
+        authenticated: bool = False,
     ) -> ScriptCallRecord:
         key = (request.run_id, request.call_id)
         self._preparing[key] = self._preparing.get(key, 0) + 1
         preparation_finished = False
         try:
-            claim = await asyncio.to_thread(self._claim_authenticated_call, request, authorization)
+            claim = await asyncio.to_thread(self._claim_authenticated_call, request, authorization, authenticated)
             call = claim.call
 
             if claim.created and not self._call_admission_open.is_set():
@@ -371,7 +399,16 @@ class ScriptToolBroker:
             run = None
         expected_hash = run.token_hash if run is not None else "0" * len(token_hash)
         matches = hmac.compare_digest(expected_hash, token_hash)
+        if run is not None and matches and not run.accepts_calls and run.workflow_run_id is not None:
+            raise WorkflowAttemptRevokedError(_CALL_UNAVAILABLE)
         if run is None or not matches or not run.accepts_calls or not self._live_authorization(run):
+            raise ScriptBrokerAuthenticationError(_CALL_UNAVAILABLE)
+        return run
+
+    def _authenticate_plain(self, run_id: str, authorization: str | None) -> ScriptRunRecord:
+        """Authenticate a plain script's call; a workflow attempt's calls enter only as its nodes, so each has one claim."""
+        run = self.authenticate(run_id, authorization)
+        if run.workflow_run_id is not None:
             raise ScriptBrokerAuthenticationError(_CALL_UNAVAILABLE)
         return run
 
@@ -409,6 +446,40 @@ class ScriptToolBroker:
             self._accept_prepared_call(request, authorization=authorization),
         )
 
+    async def execute_for_workflow(
+        self,
+        run: ScriptRunRecord,
+        *,
+        call_id: str,
+        grant: ScriptToolGrant,
+        arguments: dict[str, object],
+        waits: Callable[[str | None], Awaitable[object]] | None = None,
+        gate_only: bool = False,
+    ) -> ScriptCallRecord:
+        """Claim one call of the workflow attempt *run*, which its gateway authenticated, and await its receipt.
+
+        With *gate_only* the call takes every step before its tool, the owner's live grant, the hooks and the
+        operator's approval rule, and its tool is not called: a completed receipt says the call may be made.
+
+        The stored receipt holds the tool's whole result, whatever its size, so the node can be settled from it later.
+        *waits* is told `approval` when the call starts to wait for a person's decision, and None when it has one.
+        The attempt's calls execute side by side: its run's engine holds them to the run's limit.
+        """
+        request = ScriptToolCallRequest(run.run_id, call_id, grant, arguments)
+        # The call's task is created in here and keeps the context it is created in.
+        token = _WORKFLOW_CALL.set(_WorkflowCall(waits=waits, gate_only=gate_only))
+        try:
+            await run_coroutine_until_complete(
+                self._accept_prepared_call(request, authorization=None, authenticated=True),
+            )
+        finally:
+            _WORKFLOW_CALL.reset(token)
+        task = self._tasks.get((run.run_id, call_id))
+        if task is None:
+            return await asyncio.to_thread(self.get_call, run.run_id, call_id)
+        # The call stays the broker's: a caller that is cancelled must not stop a tool mid-effect.
+        return await asyncio.shield(task)
+
     async def get_authenticated(
         self,
         run_id: str,
@@ -416,7 +487,7 @@ class ScriptToolBroker:
         authorization: str | None,
     ) -> ScriptCallRecord:
         """Authenticate a receipt and settle approval debt discovered as orphaned."""
-        run = await asyncio.to_thread(self.authenticate, run_id, authorization)
+        run = await asyncio.to_thread(self._authenticate_plain, run_id, authorization)
         self._require_call_admission()
         receipt = await asyncio.to_thread(self.get_call, run_id, call_id)
         if receipt.state is ScriptCallState.INDETERMINATE:
@@ -446,8 +517,9 @@ class ScriptToolBroker:
             await self.cancel_run(run_id)
 
     async def _execute_claimed_call(self, call: ScriptCallRecord, arguments: dict[str, object]) -> ScriptCallRecord:
-        run_lock = self._run_locks.setdefault(call.run_id, asyncio.Lock())
-        async with run_lock:
+        # Plain script calls run one at a time; workflow attempts enforce concurrency in WorkflowEngine.
+        plain = _WORKFLOW_CALL.get() is None
+        async with self._run_locks.setdefault(call.run_id, asyncio.Lock()) if plain else nullcontext():
             try:
                 durable_run = await asyncio.to_thread(self.store.require_call_dispatch_allowed, call.run_id)
             except ScriptCapabilityError:
@@ -477,28 +549,39 @@ class ScriptToolBroker:
             # A failed connect raises before the call starts; the close finishes before its receipt is published.
             async with toolkit_call_lifetime(prepared.toolkit, self._cleanups):
                 execution_started = True
-                result = await self._run_prepared_execution(
-                    prepared,
-                    run=run,
-                    call=call,
-                    origin=origin,
-                    arguments=arguments,
-                )
+                # A workflow node's result goes to the workflow store whole, with the facts its tool reported.
+                structured = structured_tool_result() if run.workflow_run_id is not None else nullcontext()
+                with structured as metadata:
+                    result = await self._run_prepared_execution(
+                        prepared,
+                        run=run,
+                        call=call,
+                        origin=origin,
+                        arguments=arguments,
+                    )
+            if run.workflow_run_id is not None:
+                # The tool's effect happened and its receipt is not saved yet: where a crash test stops MindRoom.
+                await hold("before_receipt")
             if not result.succeeded:
                 error = {
                     "kind": "approval_denied" if result.status == "denied" else "tool_failure",
                     "message": sanitize_failure_text(result.failure_text),
                     "retryable": False,
                 }
+                if metadata and metadata.get("not_started"):
+                    # The call's own word that it never left for its tool: all that makes a workflow run it again.
+                    error["not_started"] = True
                 return await self._publish_async(
                     call,
                     state=ScriptCallState.FAILED,
                     error=error,
                 )
+            value = _strict_json_result(result.value)
             return await self._publish_async(
                 call,
                 state=ScriptCallState.COMPLETED,
-                result=_strict_json_result(result.value),
+                result=value,
+                metadata=metadata or None,
             )
         except asyncio.CancelledError:
             raise
@@ -575,7 +658,20 @@ class ScriptToolBroker:
                 user_id=run.owner_user_id,
                 call_id=call.call_id,
             )
-            return await run_tool_call(function, arguments, call_context, middleware=(policy,))
+
+            workflow_call = _WORKFLOW_CALL.get()
+            if workflow_call is None:
+                return await run_tool_call(function, arguments, call_context, middleware=(policy,))
+
+            async def mark_effect_started(tool_call: ToolCall, call_next: ToolNext) -> object:
+                if workflow_call.gate_only:
+                    # Past hooks and approval, which is all that was asked: the tool has no effect to start here.
+                    return None
+                # Past hooks and approval: from here a crash leaves the call's outcome unknown.
+                await asyncio.to_thread(self.store.mark_call_effect_started, run.run_id, call.call_id)
+                return await call_next(tool_call.arguments)
+
+            return await run_tool_call(function, arguments, call_context, middleware=(policy, mark_effect_started))
 
     async def _current_execution_decision(
         self,
@@ -611,7 +707,7 @@ class ScriptToolBroker:
         current_config = current_context.current_config
         if (
             not self._live_authorization(durable_run, config=current_config)
-            or call.grant not in durable_run.grants
+            or not durable_run.launch_allows(call.grant)
             or current_config != prepared.source_config
         ):
             raise _CurrentGrantRevokedError
@@ -629,11 +725,12 @@ class ScriptToolBroker:
     ) -> _PreparedExecution:
         context = self.runtime_resolver.resolve(run, correlation_id=correlation_id)
         source_config = context.current_config
-        if not self._live_authorization(run, config=source_config) or call.grant not in run.grants:
+        if not self._live_authorization(run, config=source_config) or not run.launch_allows(call.grant):
             raise _CurrentGrantRevokedError
         resolved = resolve_current_script_tool(
             context,
             call.grant,
+            workflow=run.workflow_run_id is not None,
             rejected_toolkit_cleanup=self._close_rejected_toolkit,
         )
         if resolved is None:
@@ -661,8 +758,9 @@ class ScriptToolBroker:
         state: ScriptCallState,
         result: object | None = None,
         error: object | None = None,
+        metadata: dict[str, object] | None = None,
     ) -> ScriptCallRecord:
-        return await asyncio.to_thread(self._publish, call, state=state, result=result, error=error)
+        return await asyncio.to_thread(self._publish, call, state=state, result=result, error=error, metadata=metadata)
 
     def _publish(
         self,
@@ -671,6 +769,7 @@ class ScriptToolBroker:
         state: ScriptCallState,
         result: object | None,
         error: object | None,
+        metadata: dict[str, object] | None,
     ) -> ScriptCallRecord:
         try:
             return self.store.publish_call_result(
@@ -679,12 +778,13 @@ class ScriptToolBroker:
                 state=state,
                 result=result,
                 error=error,
+                metadata=metadata,
             )
         except ScriptReceiptTooLargeError:
             return self._publish_or_indeterminate(call, state=ScriptCallState.FAILED, error=_RESULT_TOO_LARGE_ERROR)
         except BaseException:
             if state is ScriptCallState.INDETERMINATE:
-                return replace(call, state=state, result=result, error=error)
+                return _unstored(call)
             return self._publish_or_indeterminate(call, state=ScriptCallState.INDETERMINATE, error=_INDETERMINATE_ERROR)
 
     def _publish_or_indeterminate(
@@ -697,7 +797,13 @@ class ScriptToolBroker:
         try:
             return self.store.publish_call_result(run_id=call.run_id, call_id=call.call_id, state=state, error=error)
         except BaseException:
-            return replace(call, state=ScriptCallState.INDETERMINATE, error=_INDETERMINATE_ERROR)
+            return _unstored(call)
+
+
+def _unstored(call: ScriptCallRecord) -> ScriptCallRecord:
+    """Return what is known of a call whose receipt could not be stored: its tool may have been invoked."""
+    started = call.effect_started_at or utc_timestamp()
+    return replace(call, state=ScriptCallState.INDETERMINATE, error=_INDETERMINATE_ERROR, effect_started_at=started)
 
 
 async def drain_script_tool_cleanup(
@@ -764,6 +870,19 @@ def _validate_resolved_authority(
         raise ValueError(msg)
 
 
+async def _request_approval(runtime_resolver: ScriptRuntimeResolver, **request: Any) -> ToolApprovalDecision:  # noqa: ANN401
+    """Ask for the requester's decision on one call, and tell the workflow call that waits for it while it does."""
+    workflow_call = _WORKFLOW_CALL.get()
+    waits = None if workflow_call is None else workflow_call.waits
+    if waits is None:
+        return await runtime_resolver.request_approval(**request)
+    await waits("approval")
+    decision = await runtime_resolver.request_approval(**request)
+    if decision.approved:
+        await waits(None)
+    return decision
+
+
 def _build_background_approval_gate(
     *,
     runtime_resolver: ScriptRuntimeResolver,
@@ -789,9 +908,16 @@ def _build_background_approval_gate(
                 call.grant.function_name,
                 arguments,
                 run.agent_name,
+                toolkit_approval_alias(
+                    context.config,
+                    context.plugins.tools,
+                    call.grant.toolkit_name,
+                    call.grant.function_name,
+                ),
             )
             if policy_requires_approval:
-                decision = await runtime_resolver.request_approval(
+                decision = await _request_approval(
+                    runtime_resolver,
                     origin=origin,
                     context=context,
                     grant=call.grant,
@@ -819,14 +945,17 @@ async def _request_authored_confirmation(
     """Ask for a function-authored confirmation before the call's hooks and policy approval run."""
     if not required:
         return None
+    # The function asks whatever the rules say; its own rules only say how long the card stays open.
     _, timeout_seconds = await evaluate_tool_approval(
         approval_config,
         context.runtime_paths,
         call.grant.function_name,
         arguments,
         run.agent_name,
+        None,
     )
-    return await runtime_resolver.request_approval(
+    return await _request_approval(
+        runtime_resolver,
         origin=origin,
         context=context,
         grant=call.grant,
@@ -839,6 +968,9 @@ def _background_approval_config(
     context: ToolRuntimeContext,
     run: ScriptRunRecord,
 ) -> Config:
+    if run.workflow_run_id is not None:
+        # A workflow's calls answer to the operator's own default and rules, as its owner's calls do.
+        return context.current_config
     return build_automation_approval_config(
         context.current_config,
         function_owners=_launch_function_owners(run),

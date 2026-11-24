@@ -175,6 +175,7 @@ async def test_tag_thread_defaults_to_context_thread_id(repeat_room_id: bool) ->
         context.relations,
         context.room_id,
         "$ctx-thread:localhost",
+        allow_standalone_root=True,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -245,6 +246,7 @@ async def test_tag_thread_explicit_thread_id_overrides_same_room_context() -> No
         context.relations,
         context.room_id,
         "$explicit-event:localhost",
+        allow_standalone_root=True,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -287,6 +289,7 @@ async def test_untag_thread_defaults_to_context_thread_id(repeat_room_id: bool) 
         context.relations,
         context.room_id,
         "$ctx-thread:localhost",
+        allow_standalone_root=True,
     )
     mock_remove.assert_awaited_once_with(
         context.client,
@@ -385,6 +388,7 @@ async def test_untag_thread_explicit_thread_id_overrides_same_room_context() -> 
         context.relations,
         context.room_id,
         "$explicit-event:localhost",
+        allow_standalone_root=True,
     )
     mock_remove.assert_awaited_once_with(
         context.client,
@@ -427,6 +431,7 @@ async def test_list_thread_tags_defaults_to_context_thread_id() -> None:
         context.relations,
         context.room_id,
         "$ctx-thread:localhost",
+        allow_standalone_root=True,
     )
     mock_list.assert_awaited_once_with(
         context.client,
@@ -468,6 +473,7 @@ async def test_list_thread_tags_explicit_thread_id_overrides_same_room_context()
         context.relations,
         context.room_id,
         "$explicit-event:localhost",
+        allow_standalone_root=True,
     )
     mock_list.assert_awaited_once_with(
         context.client,
@@ -601,6 +607,7 @@ async def test_tag_thread_normalizes_explicit_thread_id_before_write() -> None:
         context.relations,
         context.room_id,
         "$reply-event:localhost",
+        allow_standalone_root=True,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -1656,5 +1663,29 @@ async def test_thread_tag_mutations_reject_resolved_before_matrix_io(method_name
     assert payload["status"] == "error"
     assert payload["action"] == method_name
     assert "thread lifecycle state" in payload["message"]
+    mock_set.assert_not_awaited()
+    mock_remove.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method_name", ["tag", "untag"])
+async def test_tag_thread_refuses_snoozed(method_name: str) -> None:
+    """The snoozed tag is lifecycle state owned by thread_snooze."""
+    tool = ThreadTagsTools()
+    context = _make_context(thread_id="$ctx-thread:localhost")
+
+    with (
+        patch("mindroom.custom_tools.thread_tags.set_thread_tag", new=AsyncMock()) as mock_set,
+        patch("mindroom.custom_tools.thread_tags.remove_thread_tag", new=AsyncMock()) as mock_remove,
+        tool_runtime_context(context),
+    ):
+        method = tool.tag_thread if method_name == "tag" else tool.untag_thread
+        payload = json.loads(await method("snoozed"))
+
+    assert payload["status"] == "error"
+    assert payload["message"] == (
+        "Tag 'snoozed' is thread lifecycle state and cannot be changed with thread_tags. "
+        "Use thread_snooze when that capability is explicitly configured."
+    )
     mock_set.assert_not_awaited()
     mock_remove.assert_not_awaited()

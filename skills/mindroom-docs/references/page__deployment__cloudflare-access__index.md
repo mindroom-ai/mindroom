@@ -56,12 +56,13 @@ Access applies the most specific path application, so every other path keeps the
 | `/livekit/jwt/*`, `/livekit/sfu/*` | MindRoom voice agents, which request call tokens and join LiveKit from the server, and the MatrixRTC authorization service, which calls LiveKit through its public `auth.livekitUrl` |
 | `/.well-known/matrix/server`, `/_matrix/federation/v1/openid/userinfo` | The MatrixRTC authorization service, which checks each caller's Matrix OpenID token with the caller's homeserver |
 | The MCP paths that the [route table](https://docs.mindroom.chat/deployment/mcp-gateway/#route-browser-and-machine-traffic) marks public or pass-through | MCP clients; with Cloudflare Managed OAuth, follow [External authorization](https://docs.mindroom.chat/deployment/mcp-gateway/#external-authorization) instead |
+| `/api/oauth/<provider_id>/client-metadata.json` | The authorization server of a remote MCP server that [uses a client ID metadata document](https://docs.mindroom.chat/mcp/#oauth-client-registration) |
 | `POST /api/slack/events` | Slack, whose [event requests](https://docs.mindroom.chat/tools/slack/#set-up-the-slack-app) MindRoom accepts only with a valid Slack signature |
 | `/_matrix/client/versions` (optional) | External uptime checks; it answers without a Matrix login, so a passing check shows that Cloudflare, the tunnel, and Tuwunel respond |
 
 Machine callers of runtime routes need their own Access application with a service token, as the [usage export](https://docs.mindroom.chat/usage/#usage-export-service) and [budget](https://docs.mindroom.chat/budgets/#budget-service) services expect, or a bypass that leaves authentication to the route, such as the signed requests of [external triggers](https://docs.mindroom.chat/external-triggers/) or the API keys of the [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/).
 Everything else stays behind Access, including `/authentication-recovery-probe` and `/connections`.
-Published reports under `/reports/public/` need no MindRoom login, so behind Access only the people Access admits can open them.
+Published reports under `/reports/public/` need no MindRoom login unless [`MINDROOM_PUBLISHED_REPORTS_ACCESS`](https://docs.mindroom.chat/connections-portal/#published-reports) is `signed_in`, so behind Access only the people Access admits can open them.
 An Access path application also covers every path below it, so the client chart [answers 404 below its public files](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#reverse-proxy-authentication-recovery), and the tunnel sends everything below `/.well-known/matrix/server` to Tuwunel, which answers 404.
 
 ## Service Worker

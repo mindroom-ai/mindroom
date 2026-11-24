@@ -753,8 +753,14 @@ class MatrixDeliveryWorker:
                 on_cancelled=on_cancelled,
             )
 
-    async def recover(self) -> RecoveryOutcome:
+    async def recover(
+        self,
+        worker_for: Callable[[str], Awaitable[MatrixDeliveryWorker]] | None = None,
+    ) -> RecoveryOutcome:
         """Reconcile every delivery whose Matrix outcome is unknown.
+
+        An outbox whose deliveries go out through several accounts names the worker of each delivery's account
+        with ``worker_for``; this worker then only walks the outbox.
 
         A delivery the homeserver already accepted is resent under the same
         transaction ID and collapses back to the same event, so recovery
@@ -804,7 +810,8 @@ class MatrixDeliveryWorker:
                     failed_deliveries.add((delivery.delivery_id, delivery.stage))
                     continue
                 try:
-                    outcome = await self._recover_one(
+                    worker = self if worker_for is None else await worker_for(delivery.delivery_id)
+                    outcome = await worker._recover_one(
                         delivery,
                         process_shutdown_requested=lambda: process_shutdown_requested,
                         on_cancelled=note_cancellation,
@@ -812,7 +819,7 @@ class MatrixDeliveryWorker:
                     if outcome is None:
                         failed_deliveries.add((delivery.delivery_id, delivery.stage))
                         continue
-                    sent = await self._finish_flush(outcome)
+                    sent = await worker._finish_flush(outcome)
                 except Exception:
                     logger.exception(
                         "matrix_delivery_recovery_failed",

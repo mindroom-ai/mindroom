@@ -12,6 +12,7 @@ import pytest
 from mindroom.config.main import Config
 from mindroom.constants import (
     COMPACTION_NOTICE_CONTENT_KEY,
+    COMPACTIONS_CONTENT_KEY,
     SKILL_REVIEW_NOTICE_CONTENT_KEY,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
@@ -617,6 +618,38 @@ class TestUnseenMessagesPartialReplies:
 
         assert [msg.body for msg in unseen] == ["The first half of an answer"]
         assert _get_unseen_event_ids_for_metadata(unseen, in_progress_event_ids=in_progress_event_ids) == ["e1"]
+
+    def test_reply_with_compactions_is_not_skipped_from_unseen_context(self) -> None:
+        """A reply that records its compactions is still a reply; the old separate notice is still skipped."""
+        config = _make_config()
+        runtime_paths = runtime_paths_for(config)
+        entries = [{"id": "c1", "phase": "pre_turn", "mode": "auto", "after_tool": 0, "status": "success"}]
+
+        unseen, _ = _get_unseen_messages(
+            [
+                _make_visible_message(
+                    event_id="e1",
+                    sender="@mindroom_other:localhost",
+                    body="Compacting...",
+                    content={COMPACTION_NOTICE_CONTENT_KEY: True},
+                ),
+                _make_visible_message(
+                    event_id="e2",
+                    sender="@mindroom_other:localhost",
+                    body="The answer after compacting",
+                    stream_status=STREAM_STATUS_COMPLETED,
+                    content={COMPACTIONS_CONTENT_KEY: entries},
+                ),
+            ],
+            "helper",
+            config,
+            runtime_paths,
+            seen_event_ids=set(),
+            current_event_id=None,
+            active_event_ids=set(),
+        )
+
+        assert [msg.event_id for msg in unseen] == ["e2"]
 
     def test_recent_streaming_reply_without_live_event_id_is_skipped_from_unseen_context(self) -> None:
         """After restart, stale self-streaming output should not be reconstructed from Matrix history."""

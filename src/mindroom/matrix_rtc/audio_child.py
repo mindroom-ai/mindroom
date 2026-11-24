@@ -80,6 +80,8 @@ class _AudioChild:
             self._bridge = self._bridge_factory(message["local_identity"], message["e2ee"])
         elif kind == "SetRoster":
             self._bridge.set_participant_identities(frozenset(message["identities"]))
+        elif kind == "VacateRoster":
+            self._bridge.vacate_roster()
         elif kind == "SetFrameKey":
             self._bridge.set_frame_key(message["identity"], decode_key(message["key"]), message["index"])
         elif kind == "Connect":
@@ -127,7 +129,9 @@ class _AudioChild:
             respond=self._respond,
             record_usage=self._record_usage,
             greeting_instructions=message.get("greeting_instructions"),
-            on_conversation_turn=lambda speaker, text: self._send({"type": "Turn", "speaker": speaker, "text": text}),
+            on_conversation_turn=lambda speaker, text, spoken_at: self._send(
+                {"type": "Turn", "speaker": speaker, "text": text, "spoken_at": spoken_at},
+            ),
             on_session_terminated=lambda retryable: self._send({"type": "Terminated", "retryable": retryable}),
             on_session_error=lambda error: self._send({"type": "SessionError", "message": error}),
         )

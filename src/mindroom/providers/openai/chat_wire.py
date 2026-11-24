@@ -9,13 +9,15 @@ one finished turn.
 from __future__ import annotations
 
 import inspect
+import json
+import time
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import cache
 from typing import TYPE_CHECKING, Any, Literal
 
-from mindroom.llm.messages import tool_result_view, with_joined_system
+from mindroom.llm.messages import PROMPT_UPDATE_KEY, tool_result_view, with_joined_system
 from mindroom.llm.provider import (
     STRUCTURED_OUTPUT_TOOL,
     ReasoningDelta,
@@ -27,7 +29,8 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import ThinkTagSplitter
-from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part
+from mindroom.providers.names import is_openrouter_gemini_model
+from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part, chat_video_part
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.tool_ids import chat_call_id, reformat_tool_call_ids
 from mindroom.providers.tool_policy import disable_tool_selection, disables_tools
@@ -38,7 +41,7 @@ if TYPE_CHECKING:
     from openai.types.chat import ChatCompletionChunk
     from pydantic import BaseModel
 
-    from mindroom.llm.messages import Message
+    from mindroom.llm.messages import Message, ToolResultView
     from mindroom.llm.provider import StreamEvent, ToolChoice, ToolSpec
     from mindroom.providers.openai.settings import ChatSettings
     from mindroom.token_counting.requests import RequestParts
@@ -54,6 +57,7 @@ __all__ = [
     "deepseek_request_thinks",
     "function_definition",
     "sdk_call_kwargs",
+    "wraps_openrouter_gemini_tool_results",
 ]
 
 # The two SDK endpoints the OpenAI family calls: ``chat.completions.create`` and ``responses.create``.
@@ -113,10 +117,82 @@ def chat_stop_reason(finish_reason: str | None) -> StopReason | None:
 
 # --- Requests -------------------------------------------------------------------------------------------------
 
+# The field each type of OpenRouter ``reasoning_details`` item holds its text in; ``data`` and ``signature`` are
+# ciphertext.
+_REASONING_DETAIL_TEXT = {"reasoning.text": "text", "reasoning.summary": "summary"}
 
-def _message_content(message: Message) -> str | list[Any] | None:
+
+def _gemini_tool_result_json(value: str | list[str], *, is_error: bool) -> str:
+    """Encode a tool result's text, or the texts of its several text parts, as a JSON object.
+
+    OpenRouter forwards a JSON object intact to Gemini ``functionResponse``.
+    """
+    return json.dumps({"error": value} if is_error else {"result": value}, ensure_ascii=False)
+
+
+def _wrap_gemini_tool_result(result: ToolResultView) -> str | list[Any]:
+    """Wrap a tool result's text in ``{"result": ...}`` or ``{"error": ...}`` for OpenRouter's Gemini adapter.
+
+    OpenRouter's Gemini translator extracts ``{...}`` substrings from plain-text tool content when ``JSON.parse``
+    fails, discarding all surrounding text. Sending a valid JSON object matches the native Gemini wire
+    (``providers/gemini/wire.py``) and keeps every character intact. A tool output that is already valid JSON is
+    wrapped too, as on that wire, so OpenRouter's JavaScript ``JSON.parse`` never rounds its integers beyond 53 bits
+    or drops its formatting and duplicate keys. When the content is a list of content parts, OpenRouter concatenates
+    text parts before parsing, so the text parts become one wrapped text part while non-text parts stay intact.
+    Several text parts are wrapped as the list of their texts, not joined, so the request log redacts each text
+    apart as it does the parts of an unwrapped result. One text part keeps all its fields; several keep only the
+    last authored ``cache_control``, because fields merged across parts could put one part's value beside another
+    part's ``name``, where the request log no longer redacts it as the secret its own ``name`` labels it.
+    """
+    content = result.content
+    if isinstance(content, str):
+        return _gemini_tool_result_json(content, is_error=result.is_error)
+    text_parts: list[Mapping[str, Any]] = []
+    other_parts: list[Any] = []
+    for part in content:
+        if isinstance(part, Mapping) and part.get("type") == "text" and isinstance(part.get("text"), str):
+            text_parts.append(part)
+        else:
+            other_parts.append(part)
+    if not text_parts:
+        return content
+    texts = [part["text"] for part in text_parts]
+    wrapped = _gemini_tool_result_json(texts[0] if len(texts) == 1 else texts, is_error=result.is_error)
+    if len(text_parts) == 1:
+        first: dict[str, Any] = {**text_parts[0], "text": wrapped}
+    else:
+        first = {"type": "text", "text": wrapped}
+        for part in text_parts:
+            if "cache_control" in part:
+                first["cache_control"] = part["cache_control"]
+    if not other_parts and len(first) == 2:
+        return wrapped
+    return [first, *other_parts]
+
+
+def wraps_openrouter_gemini_tool_results(wire: ChatWire, params: Mapping[str, Any], model_id: str) -> bool:
+    """Return whether OpenRouter routes this request's requested ``model`` through its Gemini converter.
+
+    The requested model is the one the SDK sends (``sdk_request_body``): an authored ``extra_body`` ``model``, even
+    a null or empty one, then a ``request_params`` one, then ``model_id``. Server-selected fallback entries in
+    OpenRouter's ``models`` list are not inspected.
+    """
+    if wire.route != "openrouter":
+        return False
+    extra_body = params.get("extra_body")
+    if isinstance(extra_body, Mapping) and "model" in extra_body:
+        effective_model = extra_body["model"]
+    else:
+        effective_model = params.get("model", model_id)
+    return isinstance(effective_model, str) and is_openrouter_gemini_model(effective_model)
+
+
+def _message_content(message: Message, *, wrap_gemini_tool_results: bool = False) -> str | list[Any] | None:
     """Return the content a Chat message carries; a tool result always has one, as the API requires."""
-    return tool_result_view(message).content if message.role == "tool" else message.content
+    if message.role != "tool":
+        return message.content
+    result = tool_result_view(message)
+    return _wrap_gemini_tool_result(result) if wrap_gemini_tool_results else result.content
 
 
 # The fields of a Chat tool call. A call another route stored may carry that route's replay state beside them, such as
@@ -128,10 +204,19 @@ def _chat_call(call: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in call.items() if key in _CALL_FIELDS}
 
 
-def _chat_message(message: Message, wire: ChatWire, provider: str) -> dict[str, Any]:
+def _chat_message(
+    message: Message,
+    wire: ChatWire,
+    provider: str,
+    *,
+    wrap_gemini_tool_results: bool = False,
+) -> dict[str, Any]:
+    if PROMPT_UPDATE_KEY in (message.provider_data or {}):
+        # Only a request to a route that takes one where it stands holds one (``pipeline.prompt_hold``).
+        return {"role": "system", "content": message.content}
     values: dict[str, Any] = {
         "role": wire.system_role if message.role == "system" else message.role,
-        "content": _message_content(message),
+        "content": _message_content(message, wrap_gemini_tool_results=wrap_gemini_tool_results),
         "tool_call_id": message.tool_call_id,
         "tool_calls": [_chat_call(call) for call in message.tool_calls or ()] or None,
     }
@@ -140,24 +225,68 @@ def _chat_message(message: Message, wire: ChatWire, provider: str) -> dict[str, 
     formatted = {key: value for key, value in values.items() if value is not None}
     images = [part for image in message.images or () if (part := chat_image_part(image, provider=provider)) is not None]
     audio = [part for clip in message.audio or () if (part := chat_audio_part(clip, provider=provider)) is not None]
+    videos = [part for video in message.videos or () if (part := chat_video_part(video, provider=provider)) is not None]
     files = [part for file in message.files or () if (part := chat_file_part(file, provider=provider)) is not None]
-    if images or audio or files:
+    if images or audio or videos or files:
         content = formatted.get("content")
         text = [{"type": "text", "text": content}] if isinstance(content, str) else list(content or [])
         # The text goes first, then each kind of media in the order it came, as on every wire.
-        formatted["content"] = [*text, *images, *audio, *files]
+        formatted["content"] = [*text, *images, *audio, *videos, *files]
     elif message.content is None and message.role != "tool":
         formatted["content"] = ""
     reasoning_details = (message.provider_data or {}).get("reasoning_details") if message.role == "assistant" else None
     if wire.route == "openrouter" and reasoning_details:
-        formatted["reasoning_details"] = reasoning_details
+        # LEGACY_COMPAT: OpenRouter reasoning details stored as the pieces their stream sent.
+        # Legacy format: an OpenRouter reply whose ``provider_data["reasoning_details"]`` holds one item per streamed
+        # piece, so a reasoning text or summary spans many consecutive items of one type and index.
+        # Last legacy release: v2026.11.389, which stored the pieces as every streaming release before it did, the
+        # Agno-based ones included (Agno 3.0.9 extends the list per delta); replacement: the first release after it
+        # stores each detail whole (``ChatStream.finish``).
+        # Handling: each request joins the pieces into whole details, as later releases store them; signatures and
+        # encrypted details pass unchanged.
+        # Coverage: tests/providers/test_openai_family_wire.py::test_a_reply_v2026_11_389_stored_sends_its_reasoning_details_whole
+        formatted["reasoning_details"] = _joined_reasoning_details(reasoning_details)
     return formatted
 
 
-def _chat_messages(messages: Sequence[Message], wire: ChatWire, provider: str) -> list[dict[str, Any]]:
+def _joined_reasoning_details(details: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Join OpenRouter's streamed reasoning detail pieces into whole details, as its unstreamed replies hold them.
+
+    A stream sends a text or summary as consecutive pieces of one type, index, and id, a text's signature in its last
+    piece, and an encrypted detail whole.
+    """
+    joined: list[dict[str, Any]] = []
+    for detail in details:
+        last = joined[-1] if joined else None
+        name = _REASONING_DETAIL_TEXT.get(detail.get("type", ""))
+        if (
+            name is None
+            or last is None
+            or any(last.get(key) != detail.get(key) for key in ("type", "index", "id"))
+            or last.get("signature") is not None
+        ):
+            joined.append(dict(detail))
+            continue
+        last[name] = (last.get(name) or "") + (detail.get(name) or "")
+        for key, value in detail.items():
+            if last.get(key) is None:
+                last[key] = value
+    return joined
+
+
+def _chat_messages(
+    messages: Sequence[Message],
+    wire: ChatWire,
+    provider: str,
+    *,
+    wrap_gemini_tool_results: bool = False,
+) -> list[dict[str, Any]]:
     """Return the request's messages: the system prompt joined, in the wire's ``system_role``, and foreign ids fitted."""
     canonical = reformat_tool_call_ids(with_joined_system(messages), "chat")
-    return [_chat_message(message, wire, provider) for message in canonical]
+    return [
+        _chat_message(message, wire, provider, wrap_gemini_tool_results=wrap_gemini_tool_results)
+        for message in canonical
+    ]
 
 
 def function_definition(tool: ToolSpec) -> dict[str, Any]:
@@ -371,19 +500,16 @@ def chat_request_kwargs(
     if output_tool:
         params["tool_choice"] = {"type": "function", "function": {"name": STRUCTURED_OUTPUT_TOOL}}
     _add_route_params(params, model_id=model_id, settings=settings, wire=wire, tool_choice=tool_choice)
+    wrap_gemini_tool_results = wraps_openrouter_gemini_tool_results(wire, params, model_id)
     params = {
         "model": model_id,
-        "messages": _chat_messages(messages, wire, provider),
+        "messages": _chat_messages(messages, wire, provider, wrap_gemini_tool_results=wrap_gemini_tool_results),
         **disable_tool_selection(params, tool_choice),
     }
     params["stream"] = True
     if wire.route not in _UNASKED_STREAM_USAGE_ROUTES:
         params["stream_options"] = {"include_usage": True}
     return sdk_call_kwargs(params, "chat")
-
-
-# The text fields of an OpenRouter ``reasoning_details`` item; its ``data`` and ``signature`` are ciphertext.
-_REASONING_DETAIL_TEXT_FIELDS = ("text", "summary")
 
 
 def chat_body_parts(body: Mapping[str, Any], messages: Sequence[Message], parts: RequestParts, *, static: bool) -> None:
@@ -408,7 +534,7 @@ def chat_body_parts(body: Mapping[str, Any], messages: Sequence[Message], parts:
         parts.text(formatted.get("reasoning_content"))
         details = formatted.get("reasoning_details") or ()
         for detail in details:
-            for name in _REASONING_DETAIL_TEXT_FIELDS:
+            for name in _REASONING_DETAIL_TEXT.values():
                 if isinstance(text := detail.get(name), str):
                     parts.text(text)
         if any(detail.get("data") for detail in details):
@@ -454,16 +580,6 @@ def _chunk_usage(chunk: ChatCompletionChunk, wire: ChatWire) -> Mapping[str, Any
     return None if chunk.usage is None else chunk.usage.model_dump()
 
 
-def _merge_provider_data(target: dict[str, Any], update: Mapping[str, Any]) -> None:
-    """Merge one delta's provider data: lists extend, everything else is replaced."""
-    for key, value in update.items():
-        existing = target.get(key)
-        if isinstance(existing, list) and isinstance(value, list):
-            existing.extend(value)
-        else:
-            target[key] = value
-
-
 def _completed_tool_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Store each call under the id its later requests send, so its result and approval receipt name that id.
 
@@ -491,6 +607,15 @@ def _reasoning_field(fields: Mapping[str, Any]) -> object:
     return fields.get("reasoning") if reasoning is None else reasoning
 
 
+def _thinking_text(thinking: object) -> str:
+    """Return the text of a typed ``thinking`` part: a string, or a list of ``text`` parts."""
+    if isinstance(thinking, str):
+        return thinking
+    if not isinstance(thinking, list):
+        return ""
+    return "".join(item["text"] for item in thinking if isinstance(item, Mapping) and isinstance(item.get("text"), str))
+
+
 @dataclass(slots=True)
 class ChatStream:
     """Fold streamed Chat Completions chunks into deltas and one finished turn.
@@ -505,6 +630,9 @@ class ChatStream:
     _reasoning: list[str] = field(default_factory=list)
     _calls: dict[int, dict[str, Any]] = field(default_factory=dict)
     _think: ThinkTagSplitter = field(default_factory=ThinkTagSplitter)
+    # When the call was sent or last sent text. OpenRouter sends a call's reasoning in one burst once the model has
+    # finished it, so its reasoning carries this as the thought's start; other routes stream reasoning as it is written.
+    _output_at: float = field(default_factory=time.monotonic)
 
     def add(self, chunk: ChatCompletionChunk) -> list[StreamEvent]:
         """Fold one chunk and return the events it carried: a partial report of usage it carried, then its deltas.
@@ -523,11 +651,28 @@ class ChatStream:
                 events.extend(self._add_reasoning(_extra(delta)))
         return events
 
-    def _add_content(self, chunk: ChatCompletionChunk, content: str | None) -> list[StreamEvent]:
+    def _add_content(self, chunk: ChatCompletionChunk, content: str | list[Any] | None) -> list[StreamEvent]:
         if content is None:
             return []
-        _merge_provider_data(self.parts.provider_data, _reply_metadata(chunk))
+        self.parts.provider_data.update(_reply_metadata(chunk))
+        if isinstance(content, list):
+            # Mistral's GLM models send content as typed parts: ``text`` and ``thinking`` (whose text is a part list).
+            return [event for part in content for event in self._add_content_part(part)]
+        if content:
+            # OpenRouter's reasoning chunks carry an empty content, which is no output.
+            self._output_at = time.monotonic()
         return self._add_text(self._think.add(content))
+
+    def _add_content_part(self, part: object) -> list[StreamEvent]:
+        """Fold one typed content part: a ``text`` part is reply text, a ``thinking`` part is reasoning."""
+        if not isinstance(part, Mapping):
+            return []
+        if part.get("type") == "text" and isinstance(text := part.get("text"), str) and text:
+            self._output_at = time.monotonic()
+            return self._add_text(self._think.add(text))
+        if part.get("type") == "thinking" and (reasoning := _thinking_text(part.get("thinking"))):
+            return self._add_reasoning({"reasoning": reasoning})
+        return []
 
     def _add_text(self, deltas: list[TextDelta | ReasoningDelta]) -> list[StreamEvent]:
         """Record the reply text and inline reasoning the think-tag splitter released."""
@@ -537,12 +682,13 @@ class ChatStream:
 
     def _add_reasoning(self, fields: Mapping[str, Any]) -> list[StreamEvent]:
         if self.wire.route == "openrouter" and (details := fields.get("reasoning_details")):
-            _merge_provider_data(self.parts.provider_data, {"reasoning_details": list(details)})
+            self.parts.provider_data.setdefault("reasoning_details", []).extend(details)
         reasoning = _reasoning_field(fields)
         if not isinstance(reasoning, str):
             return []
         self._reasoning.append(reasoning)
-        return [ReasoningDelta(reasoning)] if reasoning else []
+        started_at = self._output_at if self.wire.route == "openrouter" else None
+        return [ReasoningDelta(reasoning, started_at=started_at)] if reasoning else []
 
     def _add_call_delta(self, call: Any, position: int) -> None:  # noqa: ANN401 - SDK tool-call delta model
         """Fold one call delta into the call at its index; a server that sends no index places it by its position."""
@@ -573,6 +719,8 @@ class ChatStream:
         self.parts.content = "".join(self._content) or None
         # An empty reasoning field means the model reasoned to nothing, which a route replaying reasoning sends back.
         self.parts.reasoning = "".join(self._reasoning) if self._reasoning else None
+        if details := self.parts.provider_data.get("reasoning_details"):
+            self.parts.provider_data["reasoning_details"] = _joined_reasoning_details(details)
         calls = [self._calls[index] for index in sorted(self._calls)]
         self.parts.tool_calls = _completed_tool_calls(calls)
         return events

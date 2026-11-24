@@ -70,7 +70,10 @@ class MCPOAuthConfig(BaseModel):
     authorization_url: str | None = Field(default=None, description="Manual OAuth authorization endpoint")
     token_url: str | None = Field(default=None, description="Manual OAuth token endpoint")
     registration_url: str | None = Field(default=None, description="Dynamic client registration endpoint")
-    dynamic_client_registration: bool = Field(default=True, description="Whether dynamic registration may be used")
+    dynamic_client_registration: bool = Field(
+        default=True,
+        description="Whether a client may be obtained automatically, by dynamic registration or client ID metadata document",
+    )
     token_endpoint_auth_method: _MCPOAuthTokenEndpointAuthMethod = Field(
         default="none",
         description="OAuth token endpoint client authentication method",

@@ -12,6 +12,7 @@ from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.shared_directories.store import (
     is_shareable_agent,
     load_shared_directories,
+    pending_shared_directory_invitations,
     shared_directory_access,
     shared_directory_relative_path,
 )
@@ -28,7 +29,7 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.shared_directories.store import SharedDirectory
 
-_SHARE_READING_TOOLS = ("shell", "python", "file", "coding")
+_SHARE_READING_TOOLS = ("shell", "python", "filesystem")
 
 
 def agent_reads_shares_in_worker(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> bool:
@@ -98,6 +99,18 @@ def describe_agent_shared_directories(config: Config, runtime_paths: RuntimePath
     )
 
 
+def describe_agent_pending_invitations(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+) -> tuple[str, ...]:
+    """Name each invitation waiting for one agent by its owner and directory only, never by path."""
+    return tuple(
+        f"`{directory.owner}/{directory.name}`"
+        for directory, _invitation in pending_shared_directory_invitations(config, runtime_paths, agent_name)
+    )
+
+
 def _real_subdirectories(directory: Path) -> list[str]:
     with os.scandir(directory) as entries:
         return sorted(entry.name for entry in entries if entry.is_dir(follow_symlinks=False))
@@ -119,7 +132,7 @@ def _mounted_roots(root: Path) -> tuple[SharedDirectoryRoot, ...]:
 
 def _primary_tools_reach_shared_directories(runtime_paths: RuntimePaths) -> bool:
     """Return whether path tools in the primary process may use shared directories in this runtime."""
-    # Workers write shared directories, and file and coding list and search by path after checking it, so worker
+    # Workers write shared directories, and filesystem lists and searches by path after checking it, so worker
     # code could swap an entry for a link that a primary-process search would follow into primary-only storage.
     return not (worker_backend_kind(runtime_paths).dedicated or sandbox_proxy_config(runtime_paths).proxy_url)
 

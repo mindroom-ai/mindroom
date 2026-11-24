@@ -20,8 +20,10 @@ from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.ai import TurnResult
 from mindroom.background_tasks import create_background_task, wait_for_background_tasks
 from mindroom.config.main import Config
+from mindroom.config.resolution import show_tool_calls
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
+    AGENT_AUTHORED_KEY,
     ORIGINAL_SENDER_KEY,
     SOURCE_KIND_KEY,
     STREAM_STATUS_COMPLETED,
@@ -31,6 +33,7 @@ from mindroom.constants import (
 )
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
 from mindroom.event_journal import ConversationCursor, EventKind, RefreshRequest
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookBindings, ToolBeforeCallContext, hook
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.listening import service as service_module
 from mindroom.listening import turn as turn_module
@@ -49,14 +52,21 @@ from mindroom.script_runs.policy import resolve_script_launch_grants
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.schema import quote_identifier
 from mindroom.tool_system.events import FailedReply
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from tests.access_schema_support import joined_members_response, with_responder_access
+from tests.access_schema_support import (
+    OBSERVER_USER_ID,
+    joined_members_response,
+    refresh_memberships,
+    with_responder_access,
+)
 from tests.authorization_helpers import isolated_membership_index, make_test_tool_runtime_context
 from tests.conftest import (
     bind_runtime_paths,
     install_model_providers,
     make_matrix_client_mock,
     make_relation_lookup,
+    publish_hook_plugin,
     test_runtime_paths,
 )
 from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call, usage
@@ -138,8 +148,10 @@ class _Bot:
         target: MessageTarget,
         *,
         user_id: str | None,
+        turn_id: str,
         active_model_name: str | None = None,
     ) -> ToolRuntimeContext:
+        plugins = config_plugins(self.config, self.runtime_paths)
         return make_test_tool_runtime_context(
             agent_name=self.agent_name,
             target=target,
@@ -147,10 +159,14 @@ class _Bot:
             client=self.client,
             config=self.config,
             runtime_paths=self.runtime_paths,
+            plugins=plugins,
             relations=make_relation_lookup(),
             conversation_reader=self.conversation_reader,
             transport_agent_name=self.agent_name,
             active_model_name=active_model_name,
+            turn_id=turn_id,
+            # The bot binds the hooks of the plugins a turn captured into its context.
+            hooks=HookBindings(registry=plugins.hooks),
         )
 
 
@@ -534,6 +550,39 @@ async def test_own_messages_not_heard(listening: _Listening) -> None:
     assert own not in listening.turns.contexts[0].prompt
 
 
+async def test_a_marked_message_from_a_person_is_not_heard(listening: _Listening) -> None:
+    """A message an agent wrote through a person's account carries the marker, and no listening agent hears it."""
+    await listening.service._poll_once(T0)
+    marked = {**text("Written by an agent"), AGENT_AUTHORED_KEY: True}
+    await admit(listening.journal, "$marked", room_id=ROOM, sender=ALICE, ts=_ms(10), content=marked)
+    await listening.service._poll_once(T0 + 100)
+
+    assert listening.turns.contexts == []
+
+
+async def test_a_marked_edit_from_a_person_is_not_heard(listening: _Listening) -> None:
+    """History keeps only an edit's replacement content, so the marker is read from there."""
+    await listening.service._poll_once(T0)
+    await admit(listening.journal, "$said", room_id=ROOM, sender=ALICE, ts=_ms(10), content=text("Hello"))
+    revision = edit("$said", "Written by an agent")
+    revision["m.new_content"] = {**cast("dict[str, object]", revision["m.new_content"]), AGENT_AUTHORED_KEY: True}
+    await admit(listening.journal, "$said-edit", room_id=ROOM, sender=ALICE, ts=_ms(11), content=revision)
+    await listening.service._poll_once(T0 + 100)
+
+    assert listening.turns.contexts == []
+
+
+async def test_a_marked_message_from_a_managed_sender_is_still_heard(listening: _Listening) -> None:
+    """An agent's own account already speaks only for that agent, so the marker takes nothing from its reply."""
+    helper = entity_ids(listening.config, listening.runtime_paths)["helper"].full_id
+    await listening.service._poll_once(T0)
+    marked = {**text("Written by an agent"), ACTING_REQUESTER_KEY: ALICE, AGENT_AUTHORED_KEY: True}
+    await admit(listening.journal, "$marked", room_id=ROOM, sender=helper, ts=_ms(10), content=marked)
+    await listening.service._poll_once(T0 + 100)
+
+    assert listening.turns.heard() == ["$marked"]
+
+
 @pytest.mark.parametrize("source_kind", [TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND])
 async def test_a_relayed_message_is_heard_as_its_original_sender(listening: _Listening, source_kind: str) -> None:
     """A message the router relays for a person is judged as that person, as a reply judges it, and shown as theirs."""
@@ -649,7 +698,7 @@ async def test_who_the_agent_hears_by_every_ingress_path(
         assert 'thread_id="$root"' in turn.prompt
 
 
-async def test_a_newcomer_the_agent_saw_join_is_heard_once_the_router_applies_the_join(listening: _Listening) -> None:
+async def test_a_newcomer_the_agent_saw_join_is_heard_once_the_observer_applies_the_join(listening: _Listening) -> None:
     """Bots sync on their own, so a newcomer's message keeps the marker, reported once, until membership has them."""
     config = with_responder_access(listening.config, "scribe", current_room_members=True)
     scribe = listening.bot.matrix_id.full_id
@@ -657,7 +706,7 @@ async def test_a_newcomer_the_agent_saw_join_is_heard_once_the_router_applies_th
     control.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[ROOM])
     control.joined_members.return_value = joined_members_response(ROOM, scribe)
     index = AgentReplyMembershipIndex(clock=lambda: 0.0)
-    await index.refresh(config, listening.runtime_paths, control)
+    await refresh_memberships(index, config, listening.runtime_paths, control)
     seen = nio.MatrixRoom(ROOM, scribe)
     seen.add_member(ALICE, None, None)
     listening.bot.client.rooms[ROOM] = seen
@@ -689,7 +738,7 @@ async def test_a_newcomer_the_agent_saw_join_is_heard_once_the_router_applies_th
         },
     )
     assert isinstance(join, nio.RoomMemberEvent)
-    index.apply_member_event(config, ROOM, join, control_user_id="@router:example.org")
+    index.apply_member_event(config, ROOM, join, control_user_id=OBSERVER_USER_ID)
     await service._poll_once(T0 + 120)
 
     assert listening.turns.heard() == ["$hello"]
@@ -1510,6 +1559,41 @@ async def test_silent_turn_reacts_and_remembers_only_through_its_allowlist(
     assert any("Alice prefers tea." in memory.get("memory", "") for memory in memories)
 
 
+async def test_a_silent_turn_s_calls_tell_their_hooks_that_no_reply_shows_them(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A silent turn posts no reply, so its calls read as hidden, though the agent shows tool calls in its replies."""
+    seen: list[tuple[str, bool, str | None]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        seen.append((ctx.tool_name, ctx.shown, ctx.chat_preview()))
+
+    config = _config(tmp_path, {"tools": ["react"]})
+    runtime_paths = test_runtime_paths(tmp_path)
+    assert show_tool_calls(config, "scribe")
+    publish_hook_plugin(config, runtime_paths, "call-mirror", [before])
+    bot = _bot(config, runtime_paths, journal_store.principal("agent@scribe"))
+    model = ScriptedModel([calls(tool_call("react", "call-1", event_id="$tea", emoji="👍")), answer("")])
+    install_model_providers(monkeypatch, {"default": model})
+    listen = config.agents["scribe"].listen
+    assert listen is not None
+
+    await run_silent_turn(
+        bot=cast("AgentBot", bot),
+        agent_name="scribe",
+        room_id=ROOM,
+        heard=[_heard_message("$tea")],
+        listen=listen,
+        config=config,
+        runtime_paths=runtime_paths,
+    )
+
+    assert seen == [("react", False, None)]
+
+
 async def test_a_silent_turns_calls_cannot_pick_a_file_for_their_result(
     tmp_path: Path,
     journal_store: EventJournalStore,
@@ -1593,6 +1677,42 @@ async def test_a_script_started_by_a_silent_turn_is_granted_only_listen_tools(
 
     # The agent's matrix_message, and the attachments it brings, stay out of reach.
     assert grants == [(ScriptToolGrant("react", "react"),)]
+
+
+async def test_each_silent_turn_runs_its_tools_under_a_turn_id_of_its_own(
+    tmp_path: Path,
+    journal_store: EventJournalStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two silent turns are two turns: the tool calls of each carry a turn ID the other's do not."""
+    config = _config(tmp_path)
+    runtime_paths = test_runtime_paths(tmp_path)
+    bot = _bot(config, runtime_paths, journal_store.principal("agent@scribe"))
+    turn_ids: list[str | None] = []
+
+    async def record_turn_id(*_args: object, **_kwargs: object) -> TurnResult:
+        context = get_tool_runtime_context()
+        assert context is not None
+        turn_ids.append(context.turn_id)
+        return TurnResult(text="")
+
+    monkeypatch.setattr(turn_module, "ai_response", record_turn_id)
+    listen = config.agents["scribe"].listen
+    assert listen is not None
+
+    for event_id in ("$a", "$b"):
+        await run_silent_turn(
+            bot=cast("AgentBot", bot),
+            agent_name="scribe",
+            room_id=ROOM,
+            heard=[_heard_message(event_id)],
+            listen=listen,
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+
+    assert len(turn_ids) == 2
+    assert len(set(turn_ids) - {None}) == 2
 
 
 async def test_usage_recorded_as_listening(

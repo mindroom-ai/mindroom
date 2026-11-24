@@ -9,7 +9,6 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validat
 from mindroom.config.legacy_fields import (
     RETIRED_AUTO_FLUSH_FIELDS,
     RETIRED_MEMORY_FIELDS,
-    RETIRED_MEMORY_FILE_FIELDS,
     drop_retired_fields,
 )
 from mindroom.config.models import EmbedderConfig, normalize_api_key_setting
@@ -45,7 +44,13 @@ def _validate_memory_search_includes(value: list[str]) -> list[str]:
     return normalized
 
 
+def _validate_memory_search_excludes(value: list[str]) -> list[str]:
+    """Validate exclude patterns stay inside the memory root."""
+    return [validate_safe_relative_pattern(pattern, field_name="memory.search.exclude") for pattern in value]
+
+
 _MemorySearchIncludes = Annotated[list[str], AfterValidator(_validate_memory_search_includes)]
+_MemorySearchExcludes = Annotated[list[str], AfterValidator(_validate_memory_search_excludes)]
 
 
 class MemorySearchConfig(BaseModel):
@@ -61,9 +66,20 @@ class MemorySearchConfig(BaseModel):
         default_factory=lambda: ["memory/**/*.md"],
         description="Root-relative glob patterns included in file-memory semantic search",
     )
+    exclude: _MemorySearchExcludes = Field(
+        default_factory=list,
+        description="Root-relative glob patterns left out of file-memory semantic search after include filtering",
+    )
     include_entrypoint: bool = Field(
         default=False,
         description="When true, include MEMORY.md in file-memory semantic search",
+    )
+    rerank: bool | None = Field(
+        default=None,
+        description=(
+            "When true, semantic file-memory searches rerank their hits with the root reranker, and recall keeps "
+            "only hits that score at least its threshold; unset reranks with an openai_decisions or typesafe reranker"
+        ),
     )
 
 
@@ -77,7 +93,12 @@ class AgentMemorySearchConfig(BaseModel):
         default=None,
         description="Per-agent included memory-search glob patterns",
     )
+    exclude: _MemorySearchExcludes | None = Field(
+        default=None,
+        description="Per-agent excluded memory-search glob patterns",
+    )
     include_entrypoint: bool | None = Field(default=None, description="Per-agent MEMORY.md indexing override")
+    rerank: bool | None = Field(default=None, description="Per-agent memory reranking override")
 
 
 class _MemoryEmbedderConfig(BaseModel):
@@ -139,29 +160,6 @@ class _MemoryLLMConfig(BaseModel):
     def _normalize_api_key(cls, value: dict[str, Any]) -> dict[str, Any]:
         """Trim ``api_key`` like model keys so a blank one counts as unset."""
         return normalize_api_key_setting(value, "memory.llm.config.api_key")
-
-
-class _MemoryFileConfig(BaseModel):
-    """File-backed memory configuration."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    @model_validator(mode="before")
-    @classmethod
-    def drop_retired_memory_file_fields(cls, data: object) -> object:
-        """Drop the retired fallback root older dashboards saved, before unknown keys are rejected."""
-        return drop_retired_fields(data, RETIRED_MEMORY_FILE_FIELDS)
-
-    max_entrypoint_lines: int = Field(
-        default=200,
-        ge=1,
-        description="Maximum number of lines to preload from MEMORY.md",
-    )
-    max_entrypoint_tokens: int = Field(
-        default=50000,
-        ge=1,
-        description="Maximum tokens, as the turn's model counts them, of whole lines to preload from MEMORY.md",
-    )
 
 
 class _MemoryAutoFlushBatchConfig(BaseModel):
@@ -304,7 +302,6 @@ class MemoryConfig(BaseModel):
         description="Embedder configuration for memory",
     )
     llm: _MemoryLLMConfig | None = Field(default=None, description="LLM configuration for memory")
-    file: _MemoryFileConfig = Field(default_factory=_MemoryFileConfig, description="File-backed memory configuration")
     search: MemorySearchConfig = Field(
         default_factory=MemorySearchConfig,
         description="Search behavior for file-backed memory",

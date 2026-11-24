@@ -2,11 +2,14 @@ import { Fragment, useMemo, useState } from "react";
 import {
   type ColumnDef,
   type ExpandedState,
+  columnFilteringFeature,
+  createExpandedRowModel,
+  createFilteredRowModel,
   flexRender,
-  getCoreRowModel,
-  getExpandedRowModel,
-  getFilteredRowModel,
-  useReactTable,
+  globalFilteringFeature,
+  rowExpandingFeature,
+  tableFeatures,
+  useTable,
 } from "@tanstack/react-table";
 import { ChevronDown, ChevronRight, Search } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -54,7 +57,15 @@ function searchTerms(agent: AgentConnections): string[] {
   ];
 }
 
-const columns: ColumnDef<AgentTableRow>[] = [
+const features = tableFeatures({
+  rowExpandingFeature,
+  columnFilteringFeature,
+  globalFilteringFeature,
+  expandedRowModel: createExpandedRowModel(),
+  filteredRowModel: createFilteredRowModel(),
+});
+
+const columns: ColumnDef<typeof features, AgentTableRow>[] = [
   {
     id: "agent",
     header: "Agent",
@@ -242,7 +253,8 @@ export function AgentTable({
         .map((agent) => ({ ...agent, mcp })),
     [agents, scope, mcp],
   );
-  const table = useReactTable({
+  const table = useTable({
+    features,
     data,
     columns,
     state: { expanded, globalFilter: search },
@@ -250,10 +262,8 @@ export function AgentTable({
     onGlobalFilterChange: setSearch,
     getRowId: (agent) => `connection:${agent.agent_name}`,
     getRowCanExpand: () => true,
-    autoResetPageIndex: false,
-    getCoreRowModel: getCoreRowModel(),
-    getExpandedRowModel: getExpandedRowModel(),
-    getFilteredRowModel: getFilteredRowModel(),
+    // Each agent's state arrives as new data; an opened agent stays open, since rows keep their ids.
+    autoResetExpanded: false,
     globalFilterFn: (row, _column, value: string) => {
       const needle = value.toLowerCase().trim();
       return searchTerms(row.original).some((name) =>
@@ -335,7 +345,7 @@ export function AgentTable({
                 <tr
                   className={`border-t transition-colors hover:bg-muted/30 ${STACKED.row} max-sm:px-0 max-sm:py-2 ${row.getIsExpanded() ? "bg-muted/30" : ""}`}
                 >
-                  {row.getVisibleCells().map((cell) => (
+                  {row.getAllCells().map((cell) => (
                     <td
                       key={cell.id}
                       data-label={

@@ -47,14 +47,30 @@ class IngressFacts:
     acting_requester_id: str | None = None
     hook_source: str | None = None
     message_received_depth: int = 0
-    # The earlier event a turn for this event also owns: a routed human message or a finalized reply.
+    # The person's events a steward's hidden route names: its responder answers the last one.
+    routed_event_ids: tuple[str, ...] = ()
+    # The earlier event this event's source answers for: the last routed message or a finalized reply.
     discovery_event_id: str | None = None
     sender_entity_name: str | None = None
     # The entity behind the run requester, if one is.
     requester_entity_name: str | None = None
+    # The names the agents and teams this event's pills mention can read as in its text.
+    mention_names: tuple[str, ...] = ()
+    # Whether this event's mentions name the owner account and no agent or team: it is aimed at nobody who answers.
+    aimed_at_owner: bool = False
     # Whether this is a contact room of the responder that refuses the sender: only the counterparty and the
     # responder's owner start an active contact's turns, and a removed contact's room starts none.
     contact_refused: bool = False
+
+    @property
+    def routed_event_id(self) -> str | None:
+        """Return the person's event a route's responder answers, or None for an event no steward routed."""
+        return self.routed_event_ids[-1] if self.routed_event_ids else None
+
+    @property
+    def discovery_event_ids(self) -> tuple[str, ...]:
+        """Return every earlier event a turn for this event also owns, so their edits and deletions find it."""
+        return self.routed_event_ids or tuple(filter(None, (self.discovery_event_id,)))
 
     @property
     def run_requester_id(self) -> str:
@@ -85,11 +101,24 @@ class IngressFacts:
         """Return whether a managed sender relayed a human's message."""
         return self.original_sender_is_human and self.source_kind in _USER_RELAY_SOURCE_KINDS
 
+    # LEGACY_COMPAT: visible router relay messages ("@agent could you help with this?") already in room history.
+    # Legacy format: an `m.room.message` the router account sent with the trusted-relay source kind and
+    # `com.mindroom.original_sender`, which mentions the agent the router chose and replies to the person's message.
+    # Last legacy release: every release before the router-free change ships, v2026.11.459 the newest when written,
+    # sends visible relays; replacement: unreleased, the room's steward sends a hidden `io.mindroom.route` event.
+    # Handling: every message of the router account still counts as routed, so the mentioned agent answers such a
+    # relay for its original sender, in reply to the relay, exactly as before.
+    # Coverage: tests/test_turns_focused.py::test_old_router_relay_event_still_answers_from_relay_context
+    @property
+    def _routed(self) -> bool:
+        """Return whether the room's steward routed this event to its responder."""
+        return bool(self.routed_event_ids) or self.sender_entity_name == ROUTER_AGENT_NAME
+
     @property
     def router_relay(self) -> bool:
-        """Return whether the router relayed a human's or a configured bot account's message."""
+        """Return whether a route relays a human's or a configured bot account's message."""
         return (
-            self.sender_entity_name == ROUTER_AGENT_NAME
+            self._routed
             and self.source_kind == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
             and (self.original_sender is not None)
         )
@@ -106,16 +135,22 @@ class IngressFacts:
             original_sender=self.original_sender,
             trusted_user_relay=self.trusted_user_relay,
             acts_for_requester=self.acts_for_requester,
+            routed=self._routed,
         )
 
 
-def is_router_voice_echo(facts: IngressFacts, content: object) -> bool:
-    """Return whether content is the router's display-only transcript of a human's or bot account's audio."""
-    return (
-        facts.sender_entity_name == ROUTER_AGENT_NAME
-        and facts.original_sender is not None
-        and is_visible_router_voice_echo_content(content)
-    )
+def is_voice_echo(facts: IngressFacts, content: object) -> bool:
+    """Return whether content is a managed account's display-only transcript of a human's or bot account's audio."""
+    # LEGACY_COMPAT: voice transcript echoes the router account posted, already in room history.
+    # Legacy format: an `m.room.message` of the router account with `com.mindroom.visible_router_voice_echo` true,
+    # the trusted-relay source kind and `com.mindroom.original_sender`; first a "transcribing" placeholder, then
+    # edited to the transcript or the fallback text.
+    # Last legacy release: every release before the router-free change ships, v2026.11.459 the newest when written,
+    # has the router post echoes; replacement: unreleased, the answering agent posts the transcript under the same
+    # content key.
+    # Handling: no router branch. Old and new echoes are read by this one rule, as display-only and never a turn.
+    # Coverage: tests/test_turns_focused.py::test_old_router_echo_is_not_a_turn.
+    return facts.original_sender is not None and is_visible_router_voice_echo_content(content)
 
 
 def command_for(facts: IngressFacts, command_text: str, source_count: int = 1) -> Command | None:
@@ -126,8 +161,9 @@ def command_for(facts: IngressFacts, command_text: str, source_count: int = 1) -
     conversation: an agent or a plugin can write it, yet it would run with a
     person's authority. ``command_text`` is ``dispatch_prompt_for_event`` of the
     event's logical content, so a finished reply's tool markers never hide a
-    command. A turn of several sources carries no command.
+    command. A turn of several sources carries no command, and neither does a
+    message aimed at the owner account alone: no agent runs it as its own.
     """
-    if source_count != 1 or facts.source_kind != MESSAGE_SOURCE_KIND:
+    if source_count != 1 or facts.source_kind != MESSAGE_SOURCE_KIND or facts.aimed_at_owner:
         return None
-    return command_parser.parse(command_text)
+    return command_parser.parse(command_text, facts.mention_names)

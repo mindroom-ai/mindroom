@@ -8,8 +8,10 @@ call ends, recoverable context is stored through the configured memory backend.
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -85,7 +87,11 @@ class CallTranscript:
     started_at: datetime
     reference_root: Path
     execution_identity: ToolExecutionIdentity | None
-    _spoken: list[tuple[str, str]] = field(default_factory=list, init=False)
+    id: str = field(default_factory=lambda: uuid4().hex, init=False)
+    """Names this call while it is read live; each media session of a call has its own transcript."""
+    _started_monotonic: float = field(default_factory=time.monotonic, init=False)
+    #: Spoken items in arrival order: speaker, text, seconds from the call start, and whether it continued a turn.
+    _spoken: list[tuple[str, str, float, bool]] = field(default_factory=list, init=False)
     _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _pending: list[str] = field(default_factory=list, init=False)
     _header_written: bool = field(default=False, init=False)
@@ -122,30 +128,59 @@ class CallTranscript:
             execution_identity=execution_identity,
         )
 
-    def record(self, speaker: str, text: str) -> None:
-        """Record one finalized transcript item (safe from sync callbacks).
+    def record(self, speaker: str, text: str, spoken_at: float) -> None:
+        """Record one finalized item whose speech started at Unix time ``spoken_at`` (safe from sync callbacks).
 
         Consecutive items from the same speaker extend one turn, and its line stays open in the file until the turn ends.
+        An item's start is held between the call's start and now.
         """
         text = " ".join(text.split())
         if not text:
             return
-        if self._open_speaker == speaker:
-            continuation = spoken_continuation(text)
-            self._spoken[-1] = (speaker, self._spoken[-1][1] + continuation)
-            self._pending.append(continuation)
+        continues = self._open_speaker == speaker
+        since_start = max(0.0, spoken_at - self.started_at.timestamp())
+        self._spoken.append((speaker, text, min(since_start, self.elapsed_seconds()), continues))
+        if continues:
+            self._pending.append(spoken_continuation(text))
         else:
             self._end_open_line()
-            self._spoken.append((speaker, text))
             stamp = datetime.now(tz=UTC).strftime("%H:%M:%S")
             self._pending.append(f"- `{stamp}` **{speaker}**: {text}")
             self._open_speaker = speaker
         self._schedule_flush()
 
+    def spoken_items(self) -> tuple[tuple[str, str, float], ...]:
+        """Return each finalized item so far in arrival order: its speaker, its text, and the Unix time it started."""
+        started_at = self.started_at.timestamp()
+        return tuple((speaker, text, started_at + since_start) for speaker, text, since_start, _ in self._spoken)
+
     @property
-    def spoken_turns(self) -> tuple[tuple[str, str], ...]:
-        """Return the finalized spoken turns recorded so far, oldest first."""
-        return tuple(self._spoken)
+    def spoken_turns(self) -> tuple[tuple[str, str, int], ...]:
+        """Return the finalized spoken turns so far in spoken order, each with its start in whole seconds.
+
+        Items are ordered by start first, so an item that continued its speaker's turn on arrival joins it only if
+        nobody else started speaking in between.
+        """
+        turns: list[tuple[str, str, int]] = []
+        for speaker, text, since_start, continues in sorted(self._spoken, key=lambda item: item[2]):
+            if continues and turns and turns[-1][0] == speaker:
+                turns[-1] = (speaker, turns[-1][1] + spoken_continuation(text), turns[-1][2])
+            else:
+                turns.append((speaker, text, math.floor(since_start)))
+        return tuple(turns)
+
+    def mark_call_active(self) -> None:
+        """Start the call's clock now, when the agent can hear the caller, so joining time is not part of the call.
+
+        Turns recorded before this were spoken before the clock started, so they stay at 0.
+        """
+        self.started_at = datetime.now(tz=UTC)
+        self._started_monotonic = time.monotonic()
+        self._spoken = [(speaker, text, 0.0, continues) for speaker, text, _, continues in self._spoken]
+
+    def elapsed_seconds(self) -> float:
+        """Return the seconds since the call started, on a clock that never goes back."""
+        return time.monotonic() - self._started_monotonic
 
     def record_tool_use(self, tool_names: list[str]) -> None:
         """Record one realtime tool-execution round without counting it as speech."""
@@ -214,8 +249,7 @@ class CallTranscript:
 
     async def finalize(self, *, config: Config, runtime_paths: RuntimePaths) -> None:
         """Flush remaining turns and store a memory reference for the call."""
-        ended_at = datetime.now(tz=UTC)
-        duration_minutes = max(1, round((ended_at - self.started_at).total_seconds() / 60))
+        duration_minutes = max(1, round(self.elapsed_seconds() / 60))
         self._end_open_line()
         try:
             await self._flush()
@@ -235,7 +269,7 @@ class CallTranscript:
         transcript_path = self.path.relative_to(self.reference_root).as_posix()
         summary = (
             f"Joined a voice call in {self.room_display_name} ({self.room_id}): "
-            f"{len(self._spoken)} spoken turns over ~{duration_minutes} min. "
+            f"{len(self.spoken_turns)} spoken turns over ~{duration_minutes} min. "
             f"Transcript: {transcript_path}"
         )
         try:

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock
 
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
@@ -386,13 +387,8 @@ async def test_scan_skips_duplicate_or_invalid_timestamp_items(
 
 
 @pytest.mark.asyncio
-async def test_scan_never_pokes_items_without_a_recorded_requester(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_scan_never_pokes_items_without_a_recorded_requester(tmp_path: Path) -> None:
     """Work nobody is recorded as writing may come from a human the assignee refuses, so it never pokes as internal work."""
-    warnings: list[str] = []
-    monkeypatch.setattr(todo_poke_module.logger, "warning", lambda event, **_context: warnings.append(event))
     todo_root = tmp_path / "todo"
     _write_thread(
         todo_root,
@@ -411,11 +407,13 @@ async def test_scan_never_pokes_items_without_a_recorded_requester(
     sent_requesters: list[str | None] = []
     deps, _queried_rooms, sent = _deps(todo_root, sent_requesters=sent_requesters)
 
-    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 1
+    with capture_logs() as logs:
+        assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 1
     assert sent_requesters == [None]
     assert sent[0][2] == "$thread"
     assert "Agent work" in sent[0][1]
     assert "Unrecorded work" not in sent[0][1]
+    warnings = [log["event"] for log in logs if log["log_level"] == "warning"]
     assert warnings == ["todo_poke_requester_unrecorded", "todo_poke_requester_unrecorded"]
 
 
@@ -491,26 +489,23 @@ async def _poke_history_with_thread_churn(
 
 
 @pytest.mark.asyncio
-async def test_scan_skips_refused_requesters_without_reducing_other_pokes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_scan_skips_refused_requesters_without_reducing_other_pokes(tmp_path: Path) -> None:
     """Work from a human who lost access or a bot account is never poked, is logged once, and costs no poke slots."""
-    warnings: list[str] = []
-    monkeypatch.setattr(todo_poke_module.logger, "warning", lambda event, **_context: warnings.append(event))
-    baseline, _baseline_bodies = await _poke_history_with_thread_churn(tmp_path / "baseline", [_item("internal")])
-    history, bodies = await _poke_history_with_thread_churn(
-        tmp_path / "refused",
-        [
-            _item("internal"),
-            _item("former", title="Former work", requester_id=_LOST_ACCESS),
-            _item("bridged", title="Bridged work", requester_id=_BOT_ACCOUNT),
-        ],
-    )
+    with capture_logs() as logs:
+        baseline, _baseline_bodies = await _poke_history_with_thread_churn(tmp_path / "baseline", [_item("internal")])
+        history, bodies = await _poke_history_with_thread_churn(
+            tmp_path / "refused",
+            [
+                _item("internal"),
+                _item("former", title="Former work", requester_id=_LOST_ACCESS),
+                _item("bridged", title="Bridged work", requester_id=_BOT_ACCOUNT),
+            ],
+        )
 
     assert len(baseline) > 1
     assert history == baseline
     assert not any("Former work" in body or "Bridged work" in body for body in bodies)
+    warnings = [log["event"] for log in logs if log["log_level"] == "warning"]
     assert warnings == ["todo_poke_requester_refused", "todo_poke_requester_refused"]
 
 
@@ -1267,10 +1262,7 @@ async def test_parse_invalid_source_still_prunes_poke_record(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_worker_warning_memory_suppresses_repeated_persistent_state_warnings(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_worker_warning_memory_suppresses_repeated_persistent_state_warnings(tmp_path: Path) -> None:
     """One worker warns once per persistent path and error across rereads and scan ticks."""
     todo_root = tmp_path / "todo"
     malformed_path = todo_root / "threads" / "a-malformed" / "todos.json"
@@ -1289,30 +1281,26 @@ async def test_worker_warning_memory_suppresses_repeated_persistent_state_warnin
     )
     deps, _queried_rooms, _sent = _deps(todo_root)
     seen_warning_keys: set[tuple[str, str]] = set()
-    warnings: list[str] = []
 
-    def capture_warning(event: str, **_context: object) -> None:
-        warnings.append(event)
-
-    monkeypatch.setattr(todo_poke_module.logger, "warning", capture_warning)
-
-    assert (
-        await scan_todo_pokes(
-            TodoPokePolicy(quiet_seconds=0),
-            deps,
-            seen_warning_keys=seen_warning_keys,
+    with capture_logs() as logs:
+        assert (
+            await scan_todo_pokes(
+                TodoPokePolicy(quiet_seconds=0),
+                deps,
+                seen_warning_keys=seen_warning_keys,
+            )
+            == 1
         )
-        == 1
-    )
-    assert (
-        await scan_todo_pokes(
-            TodoPokePolicy(quiet_seconds=0),
-            deps,
-            seen_warning_keys=seen_warning_keys,
+        assert (
+            await scan_todo_pokes(
+                TodoPokePolicy(quiet_seconds=0),
+                deps,
+                seen_warning_keys=seen_warning_keys,
+            )
+            == 0
         )
-        == 0
-    )
 
+    warnings = [log["event"] for log in logs if log["log_level"] == "warning"]
     assert warnings.count("todo_poke_item_skipped") == 1
     assert warnings.count("todo_poke_state_file_skipped") == 1
     assert warnings.count("todo_poke_assignee_skipped") == 1

@@ -114,6 +114,7 @@ def approval_continuation(**changes: Any) -> ApprovalContinuation:  # noqa: ANN4
         "final_delivery_id": sources.delivery_id,
         "calls": (),
         "state": "ready",
+        "turn_id": "turn-paused",
     }
     return ApprovalContinuation(**(defaults | changes))
 

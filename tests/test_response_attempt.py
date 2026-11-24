@@ -188,11 +188,7 @@ async def test_response_attempt_adds_the_reply_stop_button_for_online_user(
         ),
     )
 
-    is_user_online.assert_awaited_once_with(
-        runner.deps.client,
-        "@user:localhost",
-        room_id="!room:localhost",
-    )
+    is_user_online.assert_awaited_once_with(runner.deps.client, "@user:localhost")
     assert span.stop_buttons == ["$thinking"]
     runner.deps.logger.info.assert_any_call(
         "Stop button decision",

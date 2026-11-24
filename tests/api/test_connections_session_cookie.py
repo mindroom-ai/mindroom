@@ -16,13 +16,19 @@ NOW = 1000.0
 def test_issued_session_resolves_to_its_user() -> None:
     """A session this process issued names its user."""
     token = issue_connections_session(ALICE, now=NOW, dashboard=False)
-    assert read_connections_session(token, now=NOW) == (ALICE, False)
+    assert read_connections_session(token, now=NOW) == (ALICE, False, None)
 
 
 def test_session_keeps_the_dashboard_bit() -> None:
     """A session issued for the dashboard reads back as one."""
     token = issue_connections_session(ALICE, now=NOW, dashboard=True)
-    assert read_connections_session(token, now=NOW) == (ALICE, True)
+    assert read_connections_session(token, now=NOW) == (ALICE, True, None)
+
+
+def test_session_keeps_the_chat_origin_it_was_signed_in_from() -> None:
+    """A session remembers which MindRoom Chat signed it in, so the dashboard can send its user back there."""
+    token = issue_connections_session(ALICE, now=NOW, dashboard=False, chat_origin="https://chat.example.org")
+    assert read_connections_session(token, now=NOW) == (ALICE, False, "https://chat.example.org")
 
 
 def test_previous_format_cookie_reads_as_signed_out() -> None:
@@ -40,10 +46,18 @@ def test_session_expires_after_one_hour() -> None:
 
 
 def test_session_naming_another_user_is_rejected() -> None:
-    """Swapping the user, the expiry, or the dashboard bit in the payload breaks the signature."""
+    """Swapping the user, the expiry, the dashboard bit, or the Chat origin in the payload breaks the signature."""
     expires = int(NOW) + CONNECTIONS_SESSION_SECONDS
-    _payload, _, signature = issue_connections_session(ALICE, now=NOW, dashboard=False).rpartition(".")
-    for forged in (f"{expires}|0|@mallory:example.org", f"{int(NOW) + 10**9}|0|{ALICE}", f"{expires}|1|{ALICE}"):
+    chat = "https://chat.example.org"
+    token = issue_connections_session(ALICE, now=NOW, dashboard=False, chat_origin=chat)
+    _payload, _, signature = token.rpartition(".")
+    assert read_connections_session(token, now=NOW) == (ALICE, False, chat)
+    for forged in (
+        f"{expires}|0|{chat}|@mallory:example.org",
+        f"{int(NOW) + 10**9}|0|{chat}|{ALICE}",
+        f"{expires}|1|{chat}|{ALICE}",
+        f"{expires}|0|https://evil.example.org|{ALICE}",
+    ):
         payload = forged.encode().hex()
         assert read_connections_session(f"{payload}.{signature}", now=NOW) is None
 

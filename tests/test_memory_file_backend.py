@@ -3,28 +3,36 @@
 
 from __future__ import annotations
 
+import asyncio
+import math
 import os
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
-import tiktoken
+from pydantic import TypeAdapter
 
+import mindroom.knowledge.rerank as rerank_module
+import mindroom.memory._file_backend as file_backend_module
 import mindroom.memory._semantic_file_search as semantic_file_search
 import mindroom.memory.functions as memory_functions
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
-from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeRerankerConfig, RerankerConfig
 from mindroom.config.main import Config
+from mindroom.config.memory import AgentMemorySearchConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.knowledge.availability import KnowledgeAvailability
 from mindroom.knowledge.file_memory_knowledge import resolve_file_memory_knowledge
 from mindroom.knowledge.read_protocol import DISTANCE_KEY, SearchHit
 from mindroom.knowledge.utils import KnowledgeBaseAccessResolution
 from mindroom.knowledge.vector_store import KnowledgeCollection, StoredRow
-from mindroom.llm.provider import ModelIdentity, TokenCounter
 from mindroom.memory import ConversationRef, MemoryPromptParts
 from mindroom.memory import add_agent_memory as public_add_agent_memory
 from mindroom.memory import build_memory_prompt_parts as public_build_memory_prompt_parts
@@ -36,11 +44,10 @@ from mindroom.memory import store_conversation_memory as public_store_conversati
 from mindroom.memory import update_agent_memory as public_update_agent_memory
 from mindroom.memory._file_backend import FileMemoryBackend
 from mindroom.memory._shared import MemoryNotFoundError
+from mindroom.prompt_templates import render_prompt_template
 from mindroom.prompts import PROMPT_DEFAULTS
 from mindroom.timing import timing_scope
-from mindroom.token_counting import families
-from mindroom.token_counting.counts import count
-from mindroom.token_counting.families import counter_for_model, load_o200k
+from mindroom.token_counting.families import load_o200k
 from mindroom.tool_system.runtime_context import current_execution_identity, detached_tool_scope
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
@@ -51,13 +58,11 @@ from mindroom.tool_system.worker_routing import (
 )
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 from tests.fakes.knowledge import install_recording_refresh_scheduler
-from tests.fakes.token_counter import fake_token_counter
 from tests.knowledge_test_support import collection_meta
 from tests.memory_test_support import MockTeamConfig
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-    from pathlib import Path
+    from collections.abc import Callable, Sequence
 
     from tests.fakes.knowledge import RecordingRefreshScheduler
 
@@ -177,7 +182,6 @@ async def build_memory_prompt_parts(
         config,
         runtime_paths_for(config),
         current_execution_identity(),
-        counter=fake_token_counter(),
     )
 
 
@@ -702,7 +706,6 @@ async def test_user_scoped_worker_prompt_reads_daily_memory(
     config: Config,
 ) -> None:
     config.agents["general"].worker_scope = "user"
-    config.memory.file.max_entrypoint_lines = 0
 
     alice_identity = _identity("alice")
 
@@ -913,12 +916,444 @@ async def test_prompt_parts_carry_degradation_notice_with_keyword_matches(
             "general",
             config,
             runtime_paths_for(config),
-            counter=fake_token_counter(),
         )
 
     assert "Semantic memory search is unavailable this turn" in prompt_parts.transient_turn_context
     assert "semantic memory search failed (RuntimeError)" in prompt_parts.transient_turn_context
     assert "Keyword fallback memory" in prompt_parts.transient_turn_context
+
+
+_GARDEN_QUERY = "garden shed roof copper"
+# Keyword scores 1.0, 0.75, 0.5 and 0.25 for the query: score-gap selection would keep only the first.
+_GARDEN_MEMORIES = ("garden shed roof copper", "garden shed roof", "garden shed", "garden")
+
+
+def _injected(prompt_parts: MemoryPromptParts, candidates: Sequence[str]) -> list[str]:
+    """Return the candidate memories the per-turn context injects, in its order."""
+    lines = [line.removeprefix("- ") for line in prompt_parts.transient_turn_context.splitlines()]
+    return [line for line in lines if line in candidates]
+
+
+def _semantic_index(monkeypatch: pytest.MonkeyPatch, scored: Sequence[tuple[str, float]] | None) -> list[int]:
+    """Serve the agent's semantic file-memory index from `scored` (memory, cosine) pairs; None keeps it cold.
+
+    Returns the limit of each index search.
+    """
+    limits: list[int] = []
+
+    class FakeKnowledge:
+        async def asearch(self, _query: str, limit: int) -> list[SearchHit]:
+            limits.append(limit)
+            return [
+                SearchHit(content=memory, meta_data={"source_path": "memory/notes.md", DISTANCE_KEY: 1.0 - score})
+                for memory, score in (scored or [])[:limit]
+            ]
+
+    async def resolve_access(*_args: object, **_kwargs: object) -> object:
+        if scored is None:
+            return SimpleNamespace(knowledge=None, availability=KnowledgeAvailability.INITIALIZING, last_error=None)
+        return SimpleNamespace(knowledge=FakeKnowledge(), availability=KnowledgeAvailability.READY)
+
+    monkeypatch.setattr(semantic_file_search, "list_knowledge_files", lambda *_args: [Path("memory/notes.md")])
+    monkeypatch.setattr(semantic_file_search, "resolve_knowledge_base_access_async", resolve_access)
+    return limits
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("global_mode", "agent_mode"), [("keyword", None), ("semantic", "keyword")])
+async def test_keyword_recall_searches_three_and_injects_them_all(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    global_mode: str,
+    agent_mode: str | None,
+) -> None:
+    """Keyword file memory, set globally or for the agent, keeps the top-3 recall without score-gap selection."""
+    config.memory.search.mode = global_mode
+    if agent_mode is not None:
+        config.agents["general"].memory_search = AgentMemorySearchConfig(mode=agent_mode)
+    for memory in _GARDEN_MEMORIES:
+        await add_agent_memory(memory, "general", config)
+    index_limits = _semantic_index(monkeypatch, [("unused semantic hit", 0.9)])
+
+    prompt_parts = await build_memory_prompt_parts(_GARDEN_QUERY, "general", config)
+
+    assert index_limits == []
+    assert _injected(prompt_parts, _GARDEN_MEMORIES) == list(_GARDEN_MEMORIES[:3])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("global_mode", "agent_mode"), [("semantic", None), ("keyword", "semantic")])
+async def test_per_turn_recall_uses_gap_selection(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    global_mode: str,
+    agent_mode: str | None,
+) -> None:
+    """Semantic file memory, set globally or for the agent, over-fetches and keeps the hits close to the best one."""
+    config.memory.search.mode = global_mode
+    if agent_mode is not None:
+        config.agents["general"].memory_search = AgentMemorySearchConfig(mode=agent_mode)
+    scored = [("The shed is painted green", 0.90), ("The shed roof is copper", 0.87), ("Pixel eats kibble", 0.60)]
+    index_limits = _semantic_index(monkeypatch, scored)
+
+    prompt_parts = await build_memory_prompt_parts("Tell me about the shed", "general", config)
+
+    assert index_limits == [20]
+    assert _injected(prompt_parts, [memory for memory, _score in scored]) == [memory for memory, _ in scored[:2]]
+
+
+@pytest.mark.asyncio
+async def test_cold_index_keyword_fallback_keeps_top_three(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """While the semantic index is cold, the keyword fallback injects its top 3, even a hit over the token budget."""
+    config.memory.search.mode = "semantic"
+    long_memory = f"{_GARDEN_MEMORIES[0]} {' '.join(['notes'] * 900)}"
+    memories = (long_memory, *_GARDEN_MEMORIES[1:])
+    for memory in memories:
+        await add_agent_memory(memory, "general", config)
+    _semantic_index(monkeypatch, None)
+
+    prompt_parts = await build_memory_prompt_parts(_GARDEN_QUERY, "general", config)
+
+    assert _injected(prompt_parts, memories) == list(memories[:3])
+
+
+@pytest.mark.asyncio
+async def test_team_keyword_hit_cannot_suppress_semantic_hits(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Team keyword hits follow the gap-selected semantic hits, scored on their own scale, without displacing them."""
+    config.memory.search.mode = "semantic"
+    config.teams = {"shared_team": MockTeamConfig(agents=["general", "calculator"])}
+    team_memory = "Team note about the garden shed"
+    await store_conversation_memory(team_memory, ["general", "calculator"], "session-team", config)
+    scored = [("The shed is painted green", 0.80), ("The shed roof is copper", 0.78), ("Pixel eats kibble", 0.60)]
+    _semantic_index(monkeypatch, scored)
+
+    prompt_parts = await build_memory_prompt_parts(team_memory, "general", config)
+
+    candidates = [team_memory, *(memory for memory, _score in scored)]
+    assert _injected(prompt_parts, candidates) == [scored[0][0], scored[1][0], team_memory]
+
+
+@pytest.mark.asyncio
+async def test_team_keyword_hits_share_the_recall_token_budget(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A team keyword hit that does not fit the budget the semantic hits left is dropped; smaller ones still follow."""
+    load_o200k()
+    config.memory.search.mode = "semantic"
+    config.teams = {"shared_team": MockTeamConfig(agents=["general", "calculator"])}
+    team_memories = (
+        f"Team garden shed plan {' '.join(['notes'] * 300)}",
+        "Team garden shed key",
+        "Team garden shed lock",
+    )
+    for number, memory in enumerate(team_memories):
+        await store_conversation_memory(memory, ["general", "calculator"], f"session-team-{number}", config)
+    scored = [(f"The garden shed is green {' '.join(['paint'] * 600)}", 0.80)]
+    _semantic_index(monkeypatch, scored)
+
+    prompt_parts = await build_memory_prompt_parts("garden shed", "general", config)
+
+    injected = _injected(prompt_parts, [scored[0][0], *team_memories])
+    assert injected[0] == scored[0][0]
+    assert team_memories[0] not in injected
+    assert sorted(injected[1:]) == sorted(team_memories[1:])
+
+
+def test_each_added_hit_is_charged_against_the_recall_budget() -> None:
+    """Two hits of more than half the budget each: only the first fits."""
+    load_o200k()
+    half = {"memory": " ".join(["paint"] * 500)}
+    assert file_backend_module._add_within_recall_budget([], [half, half]) == [half]
+
+
+class _StubReranker:
+    """Returns fixed ``scores``, after ``delay`` seconds; ``failing`` raises instead."""
+
+    def __init__(self, scores: Sequence[float] = (), *, delay: float = 0.0, failing: bool = False) -> None:
+        self.scores = list(scores)
+        self.delay = delay
+        self.failing = failing
+        self.documents: list[list[str]] = []
+
+    async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
+        del query
+        self.documents.append(list(documents))
+        await asyncio.sleep(self.delay)
+        if self.failing:
+            msg = "rerank service down"
+            raise RuntimeError(msg)
+        return self.scores
+
+
+def _configure_reranker(
+    monkeypatch: pytest.MonkeyPatch,
+    config: Config,
+    settings: dict[str, object] | None,
+    reranker: _StubReranker,
+) -> None:
+    """Configure the root reranker as a config file would set it, served by ``reranker`` whatever the settings."""
+    config.reranker = None if settings is None else TypeAdapter(RerankerConfig).validate_python(settings)
+    monkeypatch.setattr(file_backend_module, "configured_reranker", lambda _config, _runtime_paths: reranker)
+
+
+#: A reranker with the default 0.5 threshold.
+_COHERE: dict[str, object] = {"provider": "cohere", "model": "rerank-v3.5"}
+# Hybrid scores the 0.05 gap keeps both of.
+_SHED_MEMORIES = [("The shed is painted green", 0.90), ("The shed roof is copper", 0.89)]
+_SHED_TEXTS = [memory for memory, _score in _SHED_MEMORIES]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("global_rerank", "agent_rerank", "reranked"),
+    [(True, None, True), (False, True, True), (True, False, False), (False, None, False)],
+)
+async def test_recall_uses_reranker_when_enabled(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    global_rerank: bool,
+    agent_rerank: bool | None,
+    reranked: bool,
+) -> None:
+    """With `rerank` set, globally or for the agent, recall keeps the hits the reranker scores at its threshold."""
+    config.memory.search.mode = "semantic"
+    config.memory.search.rerank = global_rerank
+    config.agents["general"].memory_search = AgentMemorySearchConfig(rerank=agent_rerank)
+    reranker = _StubReranker([0.9, 0.4])
+    _configure_reranker(monkeypatch, config, _COHERE, reranker)
+    index_limits = _semantic_index(monkeypatch, _SHED_MEMORIES)
+
+    prompt_parts = await build_memory_prompt_parts("Tell me about the shed", "general", config)
+
+    assert index_limits == [20]
+    assert reranker.documents == ([_SHED_TEXTS] if reranked else [])
+    assert _injected(prompt_parts, _SHED_TEXTS) == (_SHED_TEXTS[:1] if reranked else _SHED_TEXTS)
+
+
+_OTHER_RERANKERS = [
+    _COHERE,
+    {"provider": "vertex_ai", "model": "semantic-ranker-default@latest"},
+    {"provider": "sentence_transformers", "model": "BAAI/bge-reranker-v2-m3"},
+    None,
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("settings", "reranked"),
+    [({"provider": "typesafe"}, True), ({"provider": "openai_decisions"}, True)]
+    + [(settings, False) for settings in _OTHER_RERANKERS],
+)
+async def test_recall_reranks_by_default_only_for_a_passing_provider(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    settings: dict[str, object] | None,
+    reranked: bool,
+) -> None:
+    """With `rerank` unset, a judgment reranker reranks recall and keeps the hits it scores at least 0.3.
+
+    Any other reranker, or none, leaves recall to the hybrid selection.
+    """
+    config.memory.search.mode = "semantic"
+    reranker = _StubReranker([0.9, 0.2])
+    _configure_reranker(monkeypatch, config, settings, reranker)
+    _semantic_index(monkeypatch, _SHED_MEMORIES)
+
+    prompt_parts = await build_memory_prompt_parts("Tell me about the shed", "general", config)
+
+    assert reranker.documents == ([_SHED_TEXTS] if reranked else [])
+    assert _injected(prompt_parts, _SHED_TEXTS) == (_SHED_TEXTS[:1] if reranked else _SHED_TEXTS)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("global_rerank", "agent_rerank", "provider", "reranked"),
+    [
+        (False, None, "typesafe", False),
+        (None, False, "openai_decisions", False),
+        (False, True, "typesafe", True),
+        (None, True, "cohere", True),
+    ],
+)
+async def test_explicit_rerank_setting_overrides_the_provider_default(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    global_rerank: bool | None,
+    agent_rerank: bool | None,
+    provider: str,
+    reranked: bool,
+) -> None:
+    """An explicit `rerank`, globally or for the agent, wins over the default the reranker's provider gives."""
+    config.memory.search.mode = "semantic"
+    config.memory.search.rerank = global_rerank
+    config.agents["general"].memory_search = AgentMemorySearchConfig(rerank=agent_rerank)
+    reranker = _StubReranker([0.9, 0.2])
+    _configure_reranker(monkeypatch, config, _COHERE if provider == "cohere" else {"provider": provider}, reranker)
+    _semantic_index(monkeypatch, _SHED_MEMORIES)
+
+    await build_memory_prompt_parts("Tell me about the shed", "general", config)
+
+    assert bool(reranker.documents) == reranked
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("threshold", "kept"),
+    [(None, 2), (0.8, 1)],
+)
+async def test_judgment_reranker_recall_threshold(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    threshold: float | None,
+    kept: int,
+) -> None:
+    """A judgment reranker's recall threshold is 0.3 when unset, and an explicitly set threshold is honored."""
+    config.memory.search.mode = "semantic"
+    config.memory.search.rerank = True
+    settings: dict[str, object] = {"provider": "typesafe"}
+    if threshold is not None:
+        settings["threshold"] = threshold
+    _configure_reranker(monkeypatch, config, settings, _StubReranker([0.9, 0.35]))
+    _semantic_index(monkeypatch, _SHED_MEMORIES)
+
+    prompt_parts = await build_memory_prompt_parts("Tell me about the shed", "general", config)
+
+    assert _injected(prompt_parts, _SHED_TEXTS) == _SHED_TEXTS[:kept]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reranker", [_StubReranker(failing=True), _StubReranker([0.9, 0.4], delay=1.0)])
+async def test_recall_reranker_failure_matches_hybrid_recall(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    reranker: _StubReranker,
+) -> None:
+    """A reranker that raises or passes the recall deadline gives exactly the recall it would without reranking."""
+    config.memory.search.mode = "semantic"
+    _semantic_index(monkeypatch, _SHED_MEMORIES)
+    hybrid = await build_memory_prompt_parts("Tell me about the shed", "general", config)
+    config.memory.search.rerank = True
+    _configure_reranker(monkeypatch, config, _COHERE, reranker)
+    monkeypatch.setattr(file_backend_module, "_RECALL_RERANK_DEADLINE_SECONDS", 0.05)
+
+    reranked = await build_memory_prompt_parts("Tell me about the shed", "general", config)
+
+    assert reranker.documents
+    assert reranked == hybrid
+    assert _injected(reranked, _SHED_TEXTS) == _SHED_TEXTS
+
+
+@pytest.mark.asyncio
+async def test_a_stuck_reranker_build_holds_up_no_recall(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A build that outlasts the deadline, such as a first sentence-transformers install, holds up no recall.
+
+    It runs on the reranker's own thread, so the default executor, here one worker, still serves team memory; a second
+    recall while it runs starts no second build. Both recalls give the hybrid recall within the deadline.
+    """
+    config.memory.search.mode = "semantic"
+    config.teams = {"shared_team": MockTeamConfig(agents=["general", "calculator"])}
+    team_memory = "Team note about the shed"
+    await store_conversation_memory(team_memory, ["general", "calculator"], "session-team", config)
+    _semantic_index(monkeypatch, _SHED_MEMORIES)
+    hybrid = await build_memory_prompt_parts(team_memory, "general", config)
+    assert team_memory in _injected(hybrid, [team_memory])
+    config.memory.search.rerank = True
+    config.reranker = KnowledgeRerankerConfig(provider="sentence_transformers", model="local-model")
+    release = threading.Event()
+    builds: list[str] = []
+
+    def stuck_build(reranker_config: KnowledgeRerankerConfig, _runtime_paths: object) -> _StubReranker:
+        builds.append(reranker_config.model)
+        release.wait(timeout=10)
+        return _StubReranker([0.9, 0.4])
+
+    monkeypatch.setattr(rerank_module, "_create_reranker", stuck_build)
+    monkeypatch.setattr(file_backend_module, "_RECALL_RERANK_DEADLINE_SECONDS", 0.05)
+    asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(1))
+    try:
+        for _turn in range(2):
+            started = time.monotonic()
+            reranked = await build_memory_prompt_parts(team_memory, "general", config)
+            assert time.monotonic() - started < 2
+            assert reranked == hybrid
+    finally:
+        release.set()
+
+    assert builds == ["local-model"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "scores",
+    [[0.9], [0.9, 0.4, 0.3], [math.nan, 0.4], [math.inf, 0.4], [1.5, 0.4], [0.9, -0.2]],
+)
+async def test_recall_keeps_hybrid_recall_for_invalid_reranker_scores(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    scores: list[float],
+) -> None:
+    """A wrong score count, NaN, +inf or a finite score outside [0, 1] gives exactly the hybrid recall."""
+    config.memory.search.mode = "semantic"
+    _semantic_index(monkeypatch, _SHED_MEMORIES)
+    hybrid = await build_memory_prompt_parts("Tell me about the shed", "general", config)
+    config.memory.search.rerank = True
+    _configure_reranker(monkeypatch, config, _COHERE, _StubReranker(scores))
+
+    assert await build_memory_prompt_parts("Tell me about the shed", "general", config) == hybrid
+
+
+@pytest.mark.asyncio
+async def test_recall_injects_nothing_when_every_hit_is_below_the_threshold(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The configured threshold, not the 0.5 default, decides; with every hit below it no memory block is added."""
+    config.memory.search.mode = "semantic"
+    config.memory.search.rerank = True
+    _semantic_index(monkeypatch, _SHED_MEMORIES)
+    _configure_reranker(monkeypatch, config, {**_COHERE, "threshold": 0.95}, _StubReranker([0.9, 0.4]))
+
+    prompt_parts = await build_memory_prompt_parts("Tell me about the shed", "general", config)
+
+    assert prompt_parts.transient_turn_context == ""
+
+
+@pytest.mark.asyncio
+async def test_memory_search_reranks_twenty_candidates(config: Config, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An asked-for memory search with reranking fetches 20 candidates and returns the best `limit` by its scores."""
+    config.memory.search.mode = "semantic"
+    config.memory.search.rerank = True
+    _configure_reranker(monkeypatch, config, _COHERE, _StubReranker([0.1, 0.3, 0.9]))
+    scored = [("The shed is painted green", 0.9), ("The shed roof is copper", 0.8), ("Pixel eats kibble", 0.7)]
+    index_limits = _semantic_index(monkeypatch, scored)
+
+    results = await search_agent_memories("shed", "general", config, limit=2)
+
+    assert index_limits == [20]
+    assert [(result["memory"], result["score"]) for result in results] == [
+        ("Pixel eats kibble", 0.9),
+        ("The shed roof is copper", 0.3),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing", [False, True])
+async def test_reranked_memory_search_above_twenty_returns_its_whole_limit(
+    config: Config,
+    monkeypatch: pytest.MonkeyPatch,
+    failing: bool,
+) -> None:
+    """A default-reranked search for more than 20 fetches its `limit`, reranked or, when reranking fails, hybrid."""
+    config.memory.search.mode = "semantic"
+    scored = [(f"Shed note {index}", 0.9 - index / 100) for index in range(30)]
+    reranker = _StubReranker([index / 100 for index in range(30)], failing=failing)
+    _configure_reranker(monkeypatch, config, {"provider": "typesafe"}, reranker)
+    index_limits = _semantic_index(monkeypatch, scored)
+
+    results = await search_agent_memories("shed", "general", config, limit=30)
+
+    memories = [memory for memory, _score in scored]
+    assert index_limits == [30]
+    assert reranker.documents == [memories]
+    assert [result["memory"] for result in results] == (memories if failing else memories[::-1])
 
 
 @pytest.mark.asyncio
@@ -1308,8 +1743,6 @@ async def test_file_backend_prompt_preserves_curated_entrypoint_lines_with_struc
     storage_path: Path,
     config: Config,
 ) -> None:
-    config.memory.file.max_entrypoint_lines = 10
-
     workspace = agent_workspace_root_path(storage_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)
     (workspace / "MEMORY.md").write_text("# Memory\n\nCurated fact.\n- [id=m1] Structured fact.\n", encoding="utf-8")
@@ -1319,70 +1752,45 @@ async def test_file_backend_prompt_preserves_curated_entrypoint_lines_with_struc
     assert "- [id=m1] Structured fact." in prompt_parts.session_preamble
 
 
-@pytest.mark.asyncio
-async def test_file_backend_prompt_respects_max_entrypoint_lines(storage_path: Path, config: Config) -> None:
-    config.memory.file.max_entrypoint_lines = 2
-
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "MEMORY.md").write_text(
-        "# Memory\nCurated fact.\n- [id=m1] Structured fact.\nTrailing fact.\n",
-        encoding="utf-8",
+def _cut_marker(memory_path: Path, max_chars: int) -> str:
+    return render_prompt_template(
+        PROMPT_DEFAULTS["PRELOAD_FILE_CUT_MARKER_TEMPLATE"],
+        path=memory_path,
+        max_chars=max_chars,
     )
 
-    prompt_parts = await build_memory_prompt_parts("What should I remember?", "general", config)
-    assert "# Memory\nCurated fact." in prompt_parts.session_preamble
-    assert "Structured fact." not in prompt_parts.session_preamble
-    assert "Trailing fact." not in prompt_parts.session_preamble
-
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cap", ["lines", "tokens"])
-async def test_file_backend_capped_entrypoint_withholds_the_oldest_entries(
+async def test_file_backend_entrypoint_over_its_limit_keeps_its_first_whole_lines(
     storage_path: Path,
     config: Config,
-    cap: str,
 ) -> None:
-    """add_memory appends, so a capped preload keeps the curated head and the newest entries, not the oldest."""
-    if cap == "lines":
-        config.memory.file.max_entrypoint_lines = 3
-    else:
-        config.memory.file.max_entrypoint_tokens = 15
-
+    """MEMORY.md keeps the first lines that fit, each counted with its newline, then a marker naming the file."""
+    config.defaults.max_preload_file_chars = len("# Memory\nCurated fact.\n")
     workspace = agent_workspace_root_path(storage_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "MEMORY.md").write_text(
-        "# Memory\nCurated fact.\n- [id=m1] Oldest entry.\n- [id=m2] Middle entry.\n- [id=m3] Newest entry.\n",
-        encoding="utf-8",
-    )
+    memory_path = workspace / "MEMORY.md"
+    memory_path.write_text("# Memory\nCurated fact.\n- [id=m1] Oldest entry.\n- [id=m2] Newest entry.\n", "utf-8")
 
     prompt_parts = await build_memory_prompt_parts("What should I remember?", "general", config)
 
-    assert "# Memory\nCurated fact.\n- [id=m3] Newest entry." in prompt_parts.session_preamble
+    marker = _cut_marker(memory_path, config.defaults.max_preload_file_chars)
+    assert prompt_parts.session_preamble.endswith(f"\n# Memory\nCurated fact.\n{marker}")
     assert "Oldest entry." not in prompt_parts.session_preamble
-    assert "Middle entry." not in prompt_parts.session_preamble
-    assert "[Memory entrypoint truncated - showing 3 of 5 lines" in prompt_parts.session_preamble
 
 
 @pytest.mark.asyncio
-async def test_file_backend_oversized_oldest_entry_does_not_withhold_newer_entries(
+async def test_file_backend_entrypoint_cuts_a_first_line_longer_than_its_limit(
     storage_path: Path,
     config: Config,
 ) -> None:
-    """An oldest entry too long for the token cap is withheld alone, not with every newer entry."""
-    config.memory.file.max_entrypoint_tokens = 15
-
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "MEMORY.md").write_text(
-        f"# Memory\nCurated fact.\n- [id=m1] {'Long oldest entry. ' * 5}\n- [id=m2] Newest entry.\n",
-        encoding="utf-8",
-    )
+    """A first line longer than the limit keeps its first characters, never nothing."""
+    config.defaults.max_preload_file_chars = 10
+    memory_path = _memory_file(storage_path, "y" * 400 + "\nshort\n")
 
     prompt_parts = await build_memory_prompt_parts("What should I remember?", "general", config)
 
-    assert "# Memory\nCurated fact.\n- [id=m2] Newest entry." in prompt_parts.session_preamble
-    assert "Long oldest entry." not in prompt_parts.session_preamble
+    assert prompt_parts.session_preamble.endswith(f"\n{'y' * 10}\n{_cut_marker(memory_path, 10)}")
 
 
 @pytest.mark.asyncio
@@ -1404,7 +1812,7 @@ async def test_file_backend_entrypoint_preamble_announces_automatic_preload(
 
     assert "is inlined below automatically every turn" in prompt_parts.session_preamble
     assert str(memory_path) in prompt_parts.session_preamble
-    assert "truncated" not in prompt_parts.session_preamble
+    assert "prompt limit" not in prompt_parts.session_preamble
 
 
 @pytest.mark.asyncio
@@ -1428,212 +1836,209 @@ async def test_file_backend_conversation_keeps_its_entrypoint_after_a_memory_is_
             runtime_paths_for(config),
             current_execution_identity(),
             conversation=conversation,
-            counter=fake_token_counter(),
         )
         return prompt_parts.session_preamble
 
-    first = await preamble(ConversationRef("thread", (None, None)))
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    other_thread = replace(thread, snapshot=storage_path / "snapshots" / "other-thread.json")
+    first = await preamble(thread)
     await add_agent_memory("Added fact.", "general", config)
 
-    assert await preamble(ConversationRef("thread", (None, None))) == first
+    assert await preamble(thread) == first
     assert "Added fact." not in first
-    assert "Added fact." in await preamble(ConversationRef("other-thread", (None, None)))
+    assert "Added fact." in await preamble(other_thread)
     assert PROMPT_DEFAULTS["FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE"] in first
     fresh = await preamble(None)
     assert "Added fact." in fresh
     assert PROMPT_DEFAULTS["FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE"] not in fresh
 
     (workspace / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
-    assert "Curated fact." not in await preamble(ConversationRef("thread", (None, None)))
+    assert "Curated fact." not in await preamble(thread)
 
     # A prompt override applies through hot reload, so an edited header loads again.
     config.prompts["FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE"] = "Edited header for `{memory_path}`."
-    assert (await preamble(ConversationRef("thread", (None, None)))).startswith("Edited header")
+    assert (await preamble(thread)).startswith("Edited header")
 
 
-@pytest.mark.asyncio
-async def test_file_backend_entrypoint_preamble_reports_truncated_lines(
-    storage_path: Path,
-    config: Config,
-) -> None:
-    """A capped MEMORY.md preload must say how much was withheld and where to read it."""
-    config.memory.file.max_entrypoint_lines = 2
-
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    memory_path = workspace / "MEMORY.md"
-    memory_path.write_text("# Memory\nCurated fact.\nThird fact.\nFourth fact.\n", encoding="utf-8")
-
-    prompt_parts = await build_memory_prompt_parts(
+async def _conversation_preamble(config: Config, conversation: ConversationRef | None) -> str:
+    prompt_parts = await public_build_memory_prompt_parts(
         "What should I remember?",
         "general",
         config,
+        runtime_paths_for(config),
+        current_execution_identity(),
+        conversation=conversation,
     )
-
-    assert "[Memory entrypoint truncated - showing 2 of 4 lines" in prompt_parts.session_preamble
-    assert "memory.file.max_entrypoint_lines=2" in prompt_parts.session_preamble
-    assert str(memory_path) in prompt_parts.session_preamble
+    return prompt_parts.session_preamble
 
 
-@pytest.mark.asyncio
-async def test_file_backend_entrypoint_reports_truncation_when_preloaded_head_is_blank(
-    storage_path: Path,
-    config: Config,
-) -> None:
-    """Truncation must be reported even when the preloaded lines carry no text."""
-    config.memory.file.max_entrypoint_lines = 2
-
+def _memory_file(storage_path: Path, text: str) -> Path:
     workspace = agent_workspace_root_path(storage_path, "general")
     workspace.mkdir(parents=True, exist_ok=True)
     memory_path = workspace / "MEMORY.md"
-    memory_path.write_text("\n\n# Memory\nCurated fact.\nThird fact.\n", encoding="utf-8")
+    memory_path.write_text(text, encoding="utf-8")
+    return memory_path
 
-    prompt_parts = await build_memory_prompt_parts(
-        "What should I remember?",
-        "general",
-        config,
+
+_ENTRIES = "# Memory\n- [id=m1] Fact one.\n- [id=m2] Fact two.\n- [id=m3] Fact three.\n"
+# The characters of the first three lines of _ENTRIES, each with its newline.
+_THREE_ENTRY_LINES = len("# Memory\n- [id=m1] Fact one.\n- [id=m2] Fact two.\n")
+
+
+@pytest.mark.asyncio
+async def test_file_backend_conversation_keeps_its_entrypoint_after_lines_are_inserted(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Curating MEMORY.md inserts lines at its top or mid-file, which must leave an uncapped copy as sent."""
+    memory_path = _memory_file(storage_path, _ENTRIES)
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    first = await _conversation_preamble(config, thread)
+
+    memory_path.write_text(
+        _ENTRIES.replace("# Memory\n", "# Memory\nNewest note.\n").replace("Fact two.\n", "Fact two.\nMid note.\n"),
+        encoding="utf-8",
     )
+    assert await _conversation_preamble(config, thread) == first
+    assert "Mid note." in await _conversation_preamble(config, None)
 
-    assert "[Memory entrypoint truncated - showing 2 of 5 lines" in prompt_parts.session_preamble
-    assert str(memory_path) in prompt_parts.session_preamble
-
-
-@pytest.mark.asyncio
-async def test_file_backend_entrypoint_token_cap_keeps_whole_lines(
-    storage_path: Path,
-    config: Config,
-) -> None:
-    """A few very long lines must not slip past the line cap: the token cap bounds the preload size."""
-    config.memory.file.max_entrypoint_tokens = 250
-
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    memory_path = workspace / "MEMORY.md"
-    lines = [f"fact {index} " + "x" * 392 for index in range(10)]
-    memory_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-    prompt_parts = await build_memory_prompt_parts("What should I remember?", "general", config)
-
-    assert lines[1] in prompt_parts.session_preamble
-    assert lines[2] not in prompt_parts.session_preamble
-    assert "[Memory entrypoint truncated - showing 2 of 10 lines" in prompt_parts.session_preamble
-    assert "memory.file.max_entrypoint_tokens=250" in prompt_parts.session_preamble
-    assert str(memory_path) in prompt_parts.session_preamble
-
-
-def _fact_lines(storage_path: Path, config: Config, count_lines: int) -> list[str]:
-    """Write a MEMORY.md of ``count_lines`` 41-character facts under a 100-token cap, and return its lines."""
-    config.memory.file.max_entrypoint_lines = 500
-    config.memory.file.max_entrypoint_tokens = 100
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    lines = [f"fact {index:02} " + "z" * 32 for index in range(count_lines)]
-    (workspace / "MEMORY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return lines
-
-
-async def _preloaded(lines: list[str], config: Config, counter: TokenCounter) -> list[str]:
-    parts = await public_build_memory_prompt_parts("x", "general", config, runtime_paths_for(config), counter=counter)
-    return [line for line in lines if line in parts.session_preamble]
-
-
-def _line_tokens(counter: TokenCounter, lines: list[str]) -> int:
-    return sum(count(counter, f"{line}\n", upper_bound=True) for line in lines)
+    # Deleting a line the copy shows loads the file again.
+    memory_path.write_text(memory_path.read_text(encoding="utf-8").replace("- [id=m3] Fact three.\n", ""), "utf-8")
+    assert "Fact three." not in await _conversation_preamble(config, thread)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "identity",
-    [ModelIdentity(id="gpt-4o", provider="openai"), ModelIdentity(id="claude-opus-5-5", provider="anthropic")],
-    ids=["own-tokenizer", "family-estimate"],
-)
-async def test_file_backend_entrypoint_fills_the_token_cap_as_the_model_counts_it(
+async def test_file_backend_capped_conversation_keeps_its_entrypoint_after_memories_are_added(
     storage_path: Path,
     config: Config,
-    identity: ModelIdentity,
 ) -> None:
-    """The preload keeps as many whole lines as fit the cap, each counted with its newline, and the text fits it."""
-    load_o200k()
-    lines = _fact_lines(storage_path, config, 40)
-    counter = counter_for_model(identity, local_encoder=identity.provider == "openai")
+    """Lines appended past the cut leave the preamble byte-identical, kept copy or not; an edited kept line does not."""
+    config.defaults.max_preload_file_chars = _THREE_ENTRY_LINES
+    memory_path = _memory_file(storage_path, _ENTRIES)
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    first = await _conversation_preamble(config, thread)
+    first_fresh = await _conversation_preamble(config, None)
+    assert _cut_marker(memory_path, _THREE_ENTRY_LINES) in first
 
-    kept = await _preloaded(lines, config, counter)
+    await add_agent_memory("Added fact.", "general", config)
+    await add_agent_memory("Another added fact.", "general", config)
+    assert await _conversation_preamble(config, thread) == first
+    assert await _conversation_preamble(config, None) == first_fresh
+    assert "Added fact." not in first_fresh
 
-    assert count(counter, "\n".join(kept)) <= _line_tokens(counter, kept) <= 100
-    assert _line_tokens(counter, lines[: len(kept) + 1]) > 100
+    memory_path.write_text(memory_path.read_text(encoding="utf-8").replace("Fact two.", "Fact 2."), "utf-8")
+    edited = await _conversation_preamble(config, thread)
+    assert "Fact 2." in edited
+    assert "Fact two." not in edited
 
 
 @pytest.mark.asyncio
-async def test_file_backend_entrypoint_fits_the_cap_before_the_vocabulary_loads(
+async def test_file_backend_capped_conversation_reloads_its_entrypoint_after_a_line_is_inserted(
     storage_path: Path,
     config: Config,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Before o200k_base loads, each line counts its UTF-8 bytes, which no model's tokenizer exceeds.
+    """A capped copy keeps only lines added at its end, so a line inserted inside its head loads it again."""
+    config.defaults.max_preload_file_chars = _THREE_ENTRY_LINES
+    memory_path = _memory_file(storage_path, _ENTRIES)
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    assert "prompt limit" in await _conversation_preamble(config, thread)
 
-    A quarter token per character would put the file at 420 tokens, under the 500-token cap.
-    """
-    lines = _fact_lines(storage_path, config, 40)
-    config.memory.file.max_entrypoint_tokens = 500
-    release = threading.Event()
-    real_get_encoding = tiktoken.get_encoding
-
-    def slow_get_encoding(name: str) -> tiktoken.Encoding:
-        release.wait()
-        return real_get_encoding(name)
-
-    monkeypatch.setitem(families._encoders, "o200k_base", families._Encoder())
-    monkeypatch.setattr(tiktoken, "get_encoding", slow_get_encoding)
-    counter = counter_for_model(ModelIdentity(id="claude-opus-5-5", provider="anthropic"))
-    try:
-        kept = await _preloaded(lines, config, counter)
-    finally:
-        release.set()
-
-    def utf8_bytes(chosen: list[str]) -> int:
-        return sum(len(f"{line}\n".encode()) for line in chosen)
-
-    assert utf8_bytes(kept) <= 500 < utf8_bytes(lines[: len(kept) + 1])
+    memory_path.write_text(_ENTRIES.replace("Fact one.\n", "Fact one.\nInserted.\n"), encoding="utf-8")
+    assert "Inserted." in await _conversation_preamble(config, thread)
 
 
 @pytest.mark.asyncio
-async def test_file_backend_entrypoint_over_the_cap_keeps_the_head_and_the_newest_entries(
+async def test_file_backend_conversation_reloads_its_entrypoint_when_its_framing_prompts_change(
     storage_path: Path,
     config: Config,
 ) -> None:
-    """A file over the cap keeps its curated head, then the newest entries that fit."""
-    config.memory.file.max_entrypoint_tokens = 120
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    entries = [f"- [id=m{index:02}] Entry {index:02} " + "w" * 24 for index in range(20)]
-    (workspace / "MEMORY.md").write_text("# Memory\nCurated fact.\n" + "\n".join(entries) + "\n", encoding="utf-8")
+    """A header or kept-copy notice override that only adds a line must reach the conversation."""
+    memory_path = _memory_file(storage_path, _ENTRIES)
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    await _conversation_preamble(config, thread)
 
-    counter = TokenCounter(estimate=lambda text: len(text) // 2)
-    counted = await public_build_memory_prompt_parts("x", "general", config, runtime_paths_for(config), counter=counter)
-
-    kept = [entry for entry in entries if entry in counted.session_preamble]
-    assert "# Memory\nCurated fact." in counted.session_preamble
-    assert 0 < len(kept) < len(entries)
-    assert kept == entries[len(entries) - len(kept) :]
-    assert _line_tokens(counter, ["# Memory", "Curated fact.", *kept]) <= 120
+    for name in ("FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE", "FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE"):
+        memory_path.write_text(f"# Memory\nNote above {name}.\n" + _ENTRIES.removeprefix("# Memory\n"), "utf-8")
+        config.prompts[name] = f"{PROMPT_DEFAULTS[name]}\nAdded to {name}."
+        assert f"Added to {name}." in await _conversation_preamble(config, thread)
 
 
 @pytest.mark.asyncio
-async def test_file_backend_entrypoint_token_cap_reports_an_oversized_first_line(
+async def test_file_backend_conversation_reloads_its_entrypoint_when_its_limit_or_marker_changes(
     storage_path: Path,
     config: Config,
 ) -> None:
-    """A first line larger than the token cap is withheld and still reported, never silently cut."""
-    config.memory.file.max_entrypoint_tokens = 10
+    """A new limit or marker override that keeps the same lines still changes the marker the copy shows."""
+    config.defaults.max_preload_file_chars = _THREE_ENTRY_LINES
+    memory_path = _memory_file(storage_path, _ENTRIES)
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    await _conversation_preamble(config, thread)
 
-    workspace = agent_workspace_root_path(storage_path, "general")
-    workspace.mkdir(parents=True, exist_ok=True)
-    (workspace / "MEMORY.md").write_text("y" * 400 + "\nshort\n", encoding="utf-8")
+    config.defaults.max_preload_file_chars = _THREE_ENTRY_LINES + 1
+    assert _cut_marker(memory_path, _THREE_ENTRY_LINES + 1) in await _conversation_preamble(config, thread)
+    config.prompts["PRELOAD_FILE_CUT_MARKER_TEMPLATE"] = "Cut `{path}` at {max_chars}."
+    assert f"Cut `{memory_path}` at {_THREE_ENTRY_LINES + 1}." in await _conversation_preamble(config, thread)
 
-    prompt_parts = await build_memory_prompt_parts("What should I remember?", "general", config)
 
-    assert "y" * 400 not in prompt_parts.session_preamble
-    assert "[Memory entrypoint truncated - showing 0 of 2 lines" in prompt_parts.session_preamble
+@pytest.mark.asyncio
+async def test_file_backend_cut_conversation_reloads_its_entrypoint_once_the_file_fits(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A copy that was cut drops its condense marker once the file fits, though the kept lines are unchanged."""
+    config.defaults.max_preload_file_chars = _THREE_ENTRY_LINES
+    memory_path = _memory_file(storage_path, _ENTRIES)
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    assert "prompt limit" in await _conversation_preamble(config, thread)
+
+    memory_path.write_text(_ENTRIES.replace("- [id=m3] Fact three.\n", ""), encoding="utf-8")
+    fitted = await _conversation_preamble(config, thread)
+    assert "Fact two." in fitted
+    assert "prompt limit" not in fitted
+
+
+@pytest.mark.asyncio
+async def test_file_backend_conversation_reloads_its_entrypoint_when_a_line_break_changes(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """Only a line feed ends a line, so turning a carriage return into one is an edit, not an inserted line."""
+    memory_path = _memory_file(storage_path, "# Memory\nx\ra\n")
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    await _conversation_preamble(config, thread)
+
+    memory_path.write_text("# Memory\nx\na\n", encoding="utf-8")
+    assert (await _conversation_preamble(config, thread)).endswith("\nx\na")
+
+
+@pytest.mark.asyncio
+async def test_file_backend_conversation_clears_its_entrypoint_once_memory_is_emptied(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """A copy kept from a cut file keeps its marker, which an emptied file must clear."""
+    config.defaults.max_preload_file_chars = 5
+    memory_path = _memory_file(storage_path, "A fact longer than the limit.\n")
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    assert "prompt limit" in await _conversation_preamble(config, thread)
+
+    memory_path.write_text("", encoding="utf-8")
+    assert await _conversation_preamble(config, thread) == ""
+
+
+@pytest.mark.asyncio
+async def test_file_backend_conversation_keeps_its_entrypoint_whose_first_line_is_indented(
+    storage_path: Path,
+    config: Config,
+) -> None:
+    """The preload trims the file's first line, which must not read as an edit once a line is inserted above it."""
+    memory_path = _memory_file(storage_path, "  - [id=m1] Indented fact.\nSecond fact.\n")
+    thread = ConversationRef((None, None), storage_path / "snapshots" / "thread.json")
+    first = await _conversation_preamble(config, thread)
+    assert "\n- [id=m1] Indented fact." in first
+
+    memory_path.write_text("Newest note.\n" + memory_path.read_text(encoding="utf-8"), encoding="utf-8")
+    assert await _conversation_preamble(config, thread) == first
 
 
 @pytest.mark.asyncio

@@ -50,7 +50,7 @@ class _SsoCallbackServer(HTTPServer):
 class _SsoCallbackHandler(BaseHTTPRequestHandler):
     """Accept exactly one Matrix login token on the generated callback path."""
 
-    server: _SsoCallbackServer
+    server: _SsoCallbackServer  # ty: ignore[incompatible-mutable-override]  # socketserver assigns the serving server
 
     def do_GET(self) -> None:
         callback = urlsplit(self.path)

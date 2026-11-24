@@ -7,7 +7,7 @@ from typing import Literal, NamedTuple, NoReturn
 
 import httpx
 
-from mindroom.constants import RuntimePaths, read_secret_file, runtime_env_path, runtime_matrix_ssl_verify
+from mindroom.constants import RuntimePaths, runtime_matrix_ssl_verify, secret_from_env_or_file
 from mindroom.matrix.client_session import matrix_startup_error
 from mindroom.matrix.identity import parse_current_matrix_user_id
 from mindroom.runtime_env_policy import (
@@ -36,24 +36,15 @@ class _ConfiguredToken(NamedTuple):
 
 
 def _appservice_token_from_env(runtime_paths: RuntimePaths) -> _ConfiguredToken | None:
-    token = (runtime_paths.env_value(MATRIX_APPSERVICE_TOKEN_ENV) or "").strip()
-    file_path = runtime_env_path(runtime_paths, MATRIX_APPSERVICE_TOKEN_FILE_ENV)
-    if token and file_path is not None:
-        msg = f"Set only one of {MATRIX_APPSERVICE_TOKEN_ENV} or {MATRIX_APPSERVICE_TOKEN_FILE_ENV}"
-        raise matrix_startup_error(msg, permanent=True)
-    if token:
-        return _ConfiguredToken(token, MATRIX_APPSERVICE_TOKEN_ENV)
-    if file_path is None:
-        return None
     try:
-        file_token = read_secret_file(file_path)
-    except OSError as exc:
-        msg = f"{MATRIX_APPSERVICE_TOKEN_FILE_ENV} is not readable: {file_path}"
-        raise matrix_startup_error(msg, permanent=True) from exc
-    if not file_token:
-        msg = f"{MATRIX_APPSERVICE_TOKEN_FILE_ENV} points to an empty file: {file_path}"
-        raise matrix_startup_error(msg, permanent=True)
-    return _ConfiguredToken(file_token, MATRIX_APPSERVICE_TOKEN_FILE_ENV)
+        token = secret_from_env_or_file(runtime_paths, MATRIX_APPSERVICE_TOKEN_ENV, MATRIX_APPSERVICE_TOKEN_FILE_ENV)
+    except ValueError as exc:
+        raise matrix_startup_error(str(exc), permanent=True) from exc
+    if token is None:
+        return None
+    # Both set is refused above, so a token found while the file variable is set came from the file.
+    from_file = runtime_paths.env_value(MATRIX_APPSERVICE_TOKEN_FILE_ENV) is not None
+    return _ConfiguredToken(token, MATRIX_APPSERVICE_TOKEN_FILE_ENV if from_file else MATRIX_APPSERVICE_TOKEN_ENV)
 
 
 def resolve_managed_account_auth(runtime_paths: RuntimePaths) -> ManagedAccountAuth:
