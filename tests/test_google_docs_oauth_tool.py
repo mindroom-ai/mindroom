@@ -508,6 +508,17 @@ def test_google_docs_config_flags_control_registered_functions(tmp_path: Path) -
     assert set(tool.functions) == {"google_docs_format_document", "google_docs_get_document"}
 
 
+def test_google_docs_format_operation_is_disabled_by_default(tmp_path: Path) -> None:
+    tool = GoogleDocsTools(
+        runtime_paths=_runtime_paths(tmp_path),
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        worker_target=None,
+        creds=_valid_credentials(),
+    )
+
+    assert "google_docs_format_document" not in tool.functions
+
+
 def test_google_docs_agent_config_accepts_inline_operation_flags() -> None:
     config = Config(
         agents={
