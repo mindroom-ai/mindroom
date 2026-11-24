@@ -14,6 +14,7 @@ __all__ = [
     "BACKGROUND_JOBS_CONTINUED_NOTICE",
     "BACKGROUND_JOBS_ENDED_NOTICE",
     "BACKGROUND_JOBS_FOLLOW_UP_PROMPT",
+    "BACKGROUND_JOBS_SILENT_FOLLOW_UP_PROMPT",
     "CODEX_DEFAULT_INSTRUCTIONS",
     "COMPACTION_SUMMARY_PROMPT",
     "CROSS_ROOM_THREAD_FORK_CONTEXT_TEMPLATE",
@@ -279,6 +280,11 @@ BACKGROUND_JOBS_FOLLOW_UP_PROMPT = (
     "[RUNTIME UPDATE, NOT A USER MESSAGE] Background jobs you started earlier in this conversation have ended; this "
     'turn\'s background jobs context lists them. Call job(action="collect") once to read their results, then tell the '
     "user what happened, as a reply to the request that started them."
+)
+BACKGROUND_JOBS_SILENT_FOLLOW_UP_PROMPT = (
+    "[RUNTIME UPDATE, NOT A USER MESSAGE] Background jobs a silent scheduled run started earlier in this conversation "
+    'have ended; this turn\'s background jobs context lists them. Call job(action="collect") once to read their '
+    "results; report findings or failures if any, otherwise follow the silent delivery instructions."
 )
 INLINE_MEDIA_FALLBACK_PROMPT = (
     "The model or provider adapter could not accept some inline attachments for this request. "

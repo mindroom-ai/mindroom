@@ -954,11 +954,11 @@ class ResponseRunner:
         """Decide under the conversation lock whether a follow-up still has jobs to report.
 
         A reply may have collected them, and the reply to a message of their requester that already waits here reports
-        them in its start note, so the follow-up gives way to that message.
+        them in its start note, so a non-silent follow-up gives way to that message.
         """
         key = request.follow_up_key
         assert key is not None
-        waiting = self.lifecycle_coordinator.has_waiting_messages_from(
+        waiting = not key.silent and self.lifecycle_coordinator.has_waiting_messages_from(
             request.response_envelope.target,
             key.requester_id,
         )
@@ -974,7 +974,8 @@ class ResponseRunner:
 
     def _job_follow_up_request(self, key: ConversationKey, follow_up_id: str) -> ResponseRequest:
         """Build the turn that reports a conversation's ended jobs in a new reply; its start note lists the jobs."""
-        prompt = self.deps.runtime.config.get_prompt("BACKGROUND_JOBS_FOLLOW_UP_PROMPT")
+        prompt_name = "BACKGROUND_JOBS_SILENT_FOLLOW_UP_PROMPT" if key.silent else "BACKGROUND_JOBS_FOLLOW_UP_PROMPT"
+        prompt = self.deps.runtime.config.get_prompt(prompt_name)
         requester_entity_name = entity_identity_registry(
             self.deps.runtime.config,
             self.deps.runtime_paths,
