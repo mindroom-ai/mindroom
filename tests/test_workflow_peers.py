@@ -1413,6 +1413,17 @@ async def test_workflow_peers_refuses_caller_outside_bound_run(stack: WorkflowSt
         finally:
             config.agents["watcher"].tools = original_tools
 
+        # Removing the agent from config mid-run refuses peer execution directly in _authorize_execution.
+        async with child_run_context(child_a, config=config, runtime_paths=paths):
+            removed_agent = config.agents.pop("watcher")
+            try:
+                with pytest.raises(JobAccessError, match="no longer authorized"):
+                    stack.coordinator._authorize_execution(owner_a, job_tool)
+            finally:
+                config.agents["watcher"] = removed_agent
+        with pytest.raises(ValueError, match="non-empty"):
+            WorkflowPeerTools(run_id="", node_key="@0")
+
 
 @pytest.mark.asyncio
 async def test_workflow_peers_approval_gates_and_withholding(stack: WorkflowStack) -> None:

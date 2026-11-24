@@ -148,7 +148,7 @@ The script defines `def main(args):` and returns the final report, a string or a
   Prefer short waits in a bounded loop (e.g. 10 to 30 s per wait for a fixed number of rounds) over one long wait.
   Messages to a peer that has not started yet are held until it reads. The script joins in with send(to, text),
   inbox(wait_seconds=0), state.get(key, default=None) and state.set(key, value); agents read and write the same state.
-  set_shared_state(key, value) and state.set(key, value) take any JSON value (dict, list, primitive; not a JSON string)
+  set_shared_state(key, value) and state.set(key, value) take any JSON value (pass the value directly; don't json.dumps it)
   with last-write-wins semantics, so pick one writer per key. get_shared_state(key) returns {key, found, value}
   (or {key: value, ...} when key is omitted), whereas script state.get(key, default=None) returns the value directly.
 

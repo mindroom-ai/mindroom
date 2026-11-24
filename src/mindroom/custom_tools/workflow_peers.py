@@ -26,17 +26,15 @@ def _bind(
     op: str = "",
     args: object = None,
     *,
-    bound_run_id: str | None = None,
-    bound_node_key: str | None = None,
+    bound_run_id: str,
+    bound_node_key: str,
 ) -> tuple[WorkflowEngine, str, WorkflowNode, NodeRef, str]:
     """Resolve engine, run, node, ref, and deterministic op_id strictly from the child agent's own binding."""
     obs, ctx = running_child_run(), get_tool_runtime_context()
     if not obs or not obs.child.workflow_run_id or not obs.child.workflow_node_key or not ctx or not ctx.orchestrator:
         msg = "workflow_peers tools can only be called by an agent inside a workflow run."
         raise WorkflowRunStoreError(msg)
-    if bound_run_id is not None and (
-        obs.child.workflow_run_id != bound_run_id or obs.child.workflow_node_key != bound_node_key
-    ):
+    if obs.child.workflow_run_id != bound_run_id or obs.child.workflow_node_key != bound_node_key:
         msg = "workflow_peers tools can only be called by the bound workflow node."
         raise WorkflowRunStoreError(msg)
     engine, run_id, key = ctx.orchestrator.workflow_engine, obs.child.workflow_run_id, obs.child.workflow_node_key
@@ -63,7 +61,10 @@ class WorkflowPeerTools(Toolkit):
             return cls(run_id=obs.child.workflow_run_id, node_key=obs.child.workflow_node_key)
         return None
 
-    def __init__(self, *, run_id: str | None = None, node_key: str | None = None) -> None:
+    def __init__(self, *, run_id: str, node_key: str) -> None:
+        if not run_id or not node_key:
+            msg = "WorkflowPeerTools requires a non-empty run_id and node_key."
+            raise ValueError(msg)
         self._run_id = run_id
         self._node_key = node_key
         tools = [
@@ -79,7 +80,7 @@ class WorkflowPeerTools(Toolkit):
             "read_peer_messages(wait_seconds=0) (returns only unread mail and advances your cursor; prefer short "
             "waits of 10 to 30 s in a bounded loop) to talk with peers by name ('*' for all live peers, "
             "'script' for the script), list_peers() to inspect peers, get_shared_state()/set_shared_state() "
-            "for shared JSON values (not JSON strings; last write wins, so pick one writer per key), "
+            "for shared JSON values (pass the value directly; don't json.dumps it; last write wins, so pick one writer per key), "
             "and ask_user(question, options=None) to ask the requester."
         )
         super().__init__(name="workflow_peers", tools=tools, instructions=instructions)
@@ -87,15 +88,11 @@ class WorkflowPeerTools(Toolkit):
     def matches_caller(self, owner: ToolExecutionIdentity) -> bool:
         """Return whether *owner* is the live workflow child bound to this toolkit."""
         obs = running_child_run()
-        if (
-            obs is None
-            or not obs.child.workflow_run_id
-            or not obs.child.workflow_node_key
-            or child_execution_identity(obs.child) != owner
-        ):
-            return False
-        return self._run_id is None or (
-            obs.child.workflow_run_id == self._run_id and obs.child.workflow_node_key == self._node_key
+        return (
+            obs is not None
+            and obs.child.workflow_run_id == self._run_id
+            and obs.child.workflow_node_key == self._node_key
+            and child_execution_identity(obs.child) == owner
         )
 
     def _bound(self, op: str = "", args: object = None) -> tuple[WorkflowEngine, str, WorkflowNode, NodeRef, str]:
@@ -131,7 +128,7 @@ class WorkflowPeerTools(Toolkit):
         return json.dumps(val if key is None else {"key": key, **val})
 
     async def set_shared_state(self, key: str, value: Any) -> str:  # noqa: ANN401 - arbitrary JSON value
-        """Write any JSON value (dict, list, or primitive, not a JSON string; up to 1 MiB) under `key`. Last write wins, so pick one writer per key."""
+        """Write any JSON value (dict, list, or primitive; pass the value directly, don't json.dumps it; up to 1 MiB) under `key`. Last write wins, so pick one writer per key."""
         engine, run_id, _, ref, op_id = self._bound("set_shared_state", {"key": key, "value": value})
         call = partial(set_state, engine.store, run_id, op_id=op_id, key=key, value=value, updated_by=ref.name)
         return json.dumps(await asyncio.to_thread(call))

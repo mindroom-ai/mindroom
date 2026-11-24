@@ -369,7 +369,7 @@ class ToolJobRuntimeCoordinator:
         edges = active_delegation_edges(owner)
         if isinstance(tool.toolkit, WorkflowPeerTools):
             # Runtime-attached to a workflow child; authorize by its bound run and node instead of config tools.
-            allowed = tool.toolkit.matches_caller(owner)
+            allowed = owner.agent_name in config.agents and tool.toolkit.matches_caller(owner)
         else:
             allowed = locally_allowed(
                 config,

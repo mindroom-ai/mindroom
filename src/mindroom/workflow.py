@@ -695,7 +695,7 @@ class state:  # noqa: N801 - public SDK namespace matching the spec (`state.get`
 
     @staticmethod
     def set(key: str, value: object) -> None:
-        """Store any JSON value (dict, list, or primitive, not a JSON string) under *key* in shared state; last write wins, so pick one writer per key."""
+        """Store any JSON value (pass the value directly; don't json.dumps it) under *key* in shared state; last write wins, so pick one writer per key."""
         _current_lane()
         json.dumps(value, allow_nan=False)
         _call("state", {"op": "set", "key": str(key), "value": value})
