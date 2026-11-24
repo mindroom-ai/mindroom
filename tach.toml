@@ -2658,6 +2658,7 @@ expose = [
     "all_state",
     "get_state",
     "get_state_entry",
+    "has_unread",
     "list_peers",
     "message_edges",
     "peer_op_id",

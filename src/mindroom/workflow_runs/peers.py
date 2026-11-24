@@ -210,6 +210,24 @@ def read_call(
         return messages, None
 
 
+def has_unread(store: WorkflowRunStore, run_id: str, *, reader: NodeRef, names: Collection[str]) -> bool:
+    """Return whether *reader* has any unread, non-withdrawn message waiting in *run_id*."""
+    reader_key, reader_gen = reader.cursor_key
+    name_set = frozenset(names)
+    with store.read_connection() as connection:
+        row = connection.execute(
+            "SELECT seq FROM workflow_cursors WHERE run_id = ? AND reader_key = ? AND reader_generation = ?",
+            (run_id, reader_key, reader_gen),
+        ).fetchone()
+        cursor = 0 if row is None else int(row["seq"])
+        self_keys = _self_keys(connection, run_id, reader)
+        rows = connection.execute(
+            "SELECT sender_key, recipient_name FROM workflow_messages WHERE run_id = ? AND seq > ? AND withdrawn = 0",
+            (run_id, cursor),
+        ).fetchall()
+    return any(r["recipient_name"] in name_set and r["sender_key"] not in self_keys for r in rows)
+
+
 def read(
     store: WorkflowRunStore,
     run_id: str,

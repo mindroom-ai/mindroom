@@ -730,3 +730,50 @@ async def test_prune_removes_peer_tables(stack: WorkflowStack) -> None:
         assert conn.execute("SELECT COUNT(*) FROM workflow_cursors").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM workflow_state").fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM workflow_peer_calls").fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_woken_peer_waiting_for_slot_or_unread_message_is_not_deadlock(stack: WorkflowStack) -> None:
+    """Ping-pong between two peers at max_concurrent=1 never falsely triggers deadlock when the reader starts first."""
+    set_run(stack.store, stack.run_id, max_concurrent=1)
+    both_submitted = asyncio.Event()
+    got_backend: list[dict[str, Any]] = []
+    got_frontend: list[dict[str, Any]] = []
+
+    def _handle(req: ModelRequest) -> list[ScriptStep]:
+        prompt = _user_texts(req)[0]
+        outs = _tool_outputs(req)
+        if prompt == "frontend":
+            if len(outs) == 0:
+                return [Await(both_submitted.wait), *calls(tool_call("read_peer_messages", "f1", wait_seconds=600))]
+            got_frontend.append(outs[0])
+            if len(outs) == 1:
+                return calls(tool_call("send_peer_message", "f2", to="backend", text="ack"))
+            return answer("fe-done")
+        if len(outs) == 0:
+            return calls(tool_call("send_peer_message", "b1", to="frontend", text="proposal"))
+        if len(outs) == 1:
+            return calls(tool_call("read_peer_messages", "b2", wait_seconds=600))
+        got_backend.append(outs[1])
+        return answer("be-done")
+
+    _route_agents(stack, _handle)
+    # Submit frontend FIRST (holds the sole slot), then backend (queued); once frontend waits, backend sends and
+    # immediately waits before frontend finishes reacquiring the slot.
+    r_fe = await stack.submit("/0:p0@0", "agent", {"prompt": "frontend", "name": "frontend"}, meta={"name": "frontend"})
+    r_be = await stack.submit("/0:p1@0", "agent", {"prompt": "backend", "name": "backend"}, meta={"name": "backend"})
+    assert (r_fe.state, r_be.state) == ("running", "queued")
+    both_submitted.set()
+
+    fe_done, be_done = await asyncio.wait_for(
+        asyncio.gather(
+            stack.result("/0:p0@0", "agent", {"prompt": "frontend", "name": "frontend"}, meta={"name": "frontend"}),
+            stack.result("/0:p1@0", "agent", {"prompt": "backend", "name": "backend"}, meta={"name": "backend"}),
+        ),
+        timeout=SETTLE_TIMEOUT_SECONDS,
+    )
+    assert (fe_done, be_done) == ("fe-done", "be-done")
+    assert [m["text"] for m in got_frontend[0]["messages"]] == ["proposal"]
+    assert "note" not in got_frontend[0]
+    assert [m["text"] for m in got_backend[0]["messages"]] == ["ack"]
+    assert "note" not in got_backend[0]

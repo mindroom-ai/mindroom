@@ -71,6 +71,7 @@ from mindroom.workflow_runs.peers import (
     PeerTooLargeError,
     PeerUnreachableError,
     get_state_entry,
+    has_unread,
     read_call,
     record_deadlock,
     withdraw_unread,
@@ -265,6 +266,8 @@ class _PeerWaiter:
     """One active wait for peer messages, marked `deadlocked` when no sender can act."""
 
     key: str
+    reader: NodeRef
+    names: tuple[str, ...]
     deadlocked: bool = False
 
 
@@ -1680,6 +1683,16 @@ class WorkflowEngine:
             if attempt_id and (current := self._runnable.get(attempt_id)) is not None:
                 self._settled_at[attempt_id] = current[0]
 
+    def _all_live_waiting_on_peer(self, run_id: str, waiters: set[_PeerWaiter]) -> bool:
+        if (places := self._places.get(run_id)) is not None and places.resuming:
+            return False
+        waiter_keys = {waiter.key for waiter in waiters}
+        live = [node for node in self.store.nodes(run_id, light=True) if node.state in LIVE_NODE_STATES]
+        return bool(live) and all(
+            node.key in waiter_keys and node.state is WorkflowNodeState.WAITING and node.waiting_on == "peer"
+            for node in live
+        )
+
     def _is_deadlocked(self, run_id: str) -> bool:
         """Return whether every live call of *run_id* waits on peer and no script lane can still act."""
         waiters = self._peer_waiters.get(run_id)
@@ -1687,17 +1700,17 @@ class WorkflowEngine:
             return False
         with suppress(WorkflowRunNotFoundError):
             run = self.store.get_run(run_id)
-            if run.state in TERMINAL_RUN_STATES:
-                return False
             attempt_id = run.script_run_id or ""
-            if attempt_id in self._settled_at:
-                return False
             report = self._runnable.get(attempt_id)
-            if report is not None and report[1] > 0:
+            if (
+                run.state in TERMINAL_RUN_STATES
+                or attempt_id in self._settled_at
+                or (report is not None and report[1] > 0)
+                or not self._all_live_waiting_on_peer(run_id, waiters)
+            ):
                 return False
-            live = [node for node in self.store.nodes(run_id, light=True) if node.state in LIVE_NODE_STATES]
-            return bool(live) and all(
-                node.state is WorkflowNodeState.WAITING and node.waiting_on == "peer" for node in live
+            return not any(
+                has_unread(self.store, run_id, reader=waiter.reader, names=waiter.names) for waiter in waiters
             )
         return False
 
@@ -1711,13 +1724,33 @@ class WorkflowEngine:
 
     def _needs_runnable_refresh(self, run: WorkflowRun) -> bool:
         """Return whether *run* has peer waiters blocked solely on a stale runnable counter after a settle."""
-        attempt_id = run.script_run_id or ""
-        if attempt_id not in self._settled_at or not self._peer_waiters.get(run.run_id):
-            return False
-        live = [node for node in self.store.nodes(run.run_id, light=True) if node.state in LIVE_NODE_STATES]
-        return bool(live) and all(
-            node.state is WorkflowNodeState.WAITING and node.waiting_on == "peer" for node in live
+        waiters = self._peer_waiters.get(run.run_id)
+        return bool(
+            waiters
+            and (run.script_run_id or "") in self._settled_at
+            and self._all_live_waiting_on_peer(run.run_id, waiters),
         )
+
+    def _discard_peer_waiter(self, run_id: str, waiter: _PeerWaiter) -> None:
+        if (waiters := self._peer_waiters.get(run_id)) is not None:
+            waiters.discard(waiter)
+            if not waiters:
+                self._peer_waiters.pop(run_id, None)
+
+    async def _set_peer_node_state(
+        self,
+        run_id: str,
+        key: str,
+        generation: int,
+        *,
+        state: WorkflowNodeState,
+        waiting_on: str | None,
+    ) -> None:
+        with suppress(WorkflowRunNotFoundError, SupersededAttemptError):
+            current = self.store.get_run(run_id)
+            if current.state not in TERMINAL_RUN_STATES:
+                stamp = partial(self.store.update_node, run_id, key, generation, current.epoch)
+                await asyncio.to_thread(partial(stamp, state=state, waiting_on=waiting_on))
 
     async def _poll_peer_wait(
         self,
@@ -1771,7 +1804,7 @@ class WorkflowEngine:
         key = reader.key if node_key is None else node_key
         generation = reader.generation if node_generation is None else node_generation
         deadline = asyncio.get_running_loop().time() + wait_seconds
-        waiter, released, cancelled = _PeerWaiter(key=key), False, False
+        waiter, released, cancelled = _PeerWaiter(key=key, reader=reader, names=tuple(names)), False, False
         condition = self._condition(run_id)
         try:
             async with condition:
@@ -1789,23 +1822,33 @@ class WorkflowEngine:
                 self._peer_waiters.setdefault(run_id, set()).add(waiter)
                 self._check_deadlock(run_id)
                 condition.notify_all()
-                return await self._poll_peer_wait(condition, run_id, waiter, read_fn, op_id, deadline)
+                result = await self._poll_peer_wait(condition, run_id, waiter, read_fn, op_id, deadline)
+                self._discard_peer_waiter(run_id, waiter)
+                if released:
+                    await self._set_peer_node_state(
+                        run_id,
+                        key,
+                        generation,
+                        state=WorkflowNodeState.QUEUED,
+                        waiting_on=None,
+                    )
+                    condition.notify_all()
+                return result
         except asyncio.CancelledError:
             cancelled = True
             raise
         finally:
-            if (waiters := self._peer_waiters.get(run_id)) is not None:
-                waiters.discard(waiter)
-                if not waiters:
-                    self._peer_waiters.pop(run_id, None)
+            self._discard_peer_waiter(run_id, waiter)
             if released and not cancelled:
                 await self._reacquire_place(run_id, key)
                 async with condition:
-                    with suppress(WorkflowRunNotFoundError, SupersededAttemptError):
-                        current = self.store.get_run(run_id)
-                        if current.state not in TERMINAL_RUN_STATES:
-                            stamp = partial(self.store.update_node, run_id, key, generation, current.epoch)
-                            await asyncio.to_thread(partial(stamp, state=WorkflowNodeState.RUNNING, waiting_on=None))
+                    await self._set_peer_node_state(
+                        run_id,
+                        key,
+                        generation,
+                        state=WorkflowNodeState.RUNNING,
+                        waiting_on=None,
+                    )
                     condition.notify_all()
 
     async def _wait_inbox(
