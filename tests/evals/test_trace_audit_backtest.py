@@ -14,21 +14,26 @@ from evals.trace_audit.judge import (
     BlindedCandidateScore,
     BlindedJudgeResponse,
     JudgeCase,
+    build_judge_cases,
+    centered_skill_update_excerpts,
     deterministic_arm_order,
     evaluate_blinded_cases,
 )
 from evals.trace_audit.run import BacktestOptions, run_backtest, run_cli, split_sessions_chronologically
+from evals.trace_audit.workspace import prepare_isolated_runtime
 from mindroom.agent_loop.helper import HelperResult
 from mindroom.budgets.pricing import model_prices
 from mindroom.config.main import load_config
+from mindroom.config.personal_agents import PersonalAgentRosterEntry
 from mindroom.constants import resolve_runtime_paths
+from mindroom.contacts.store import ContactBook, ContactParty, ContactRecord, ContactSide
 from mindroom.history.types import HistoryScope
 from mindroom.llm.messages import Message, model_provenance
 from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, StreamEvent, TurnCompleted, UsageReported
 from mindroom.llm.usage import HelperUsage, MessageMetrics, RunMetrics, TokenCounts
 from mindroom.session_storage.schema import TableNames, create_log_schema, quote_identifier
-from mindroom.skill_learning.reviewer import ReviewOutcome
-from mindroom.trace_audit.models import AuditFinding, AuditJudgeFn, EvidenceCard, FailureCluster
+from mindroom.skill_learning.audit_reviewer import ReviewOutcome
+from mindroom.trace_audit.models import AuditFinding, AuditJudgeFn, EvidenceCard, FailureCluster, FindingRecord
 from mindroom.trace_audit.source import load_audited_sessions
 
 if TYPE_CHECKING:
@@ -903,12 +908,14 @@ async def test_backtest_isolation_symlinks_config_copy_roster_label_and_cutoff_l
     )
 
     assert (out_iso.stat().st_mode & 0o777) == 0o700
-    assert (out_iso / "_runtime" / "config.yaml").is_file()
+    assert ((out_iso / "_runtime").stat().st_mode & 0o777) == 0o700
+    assert ((out_iso / "scratch_skills").stat().st_mode & 0o777) == 0o700
+    assert not (out_iso / "_runtime" / "config.yaml").exists()
     roster_dst = out_iso / "_runtime" / "tracking" / "personal_agents.json"
     assert roster_dst.read_text(encoding="utf-8") == '{"entries": [], "created": []}'
     assert cfg_path.read_text(encoding="utf-8") == cfg_text
     assert seen_debug == [(False, None)]
-    assert seen_config_paths == [(out_iso / "_runtime" / "config.yaml").resolve()]
+    assert seen_config_paths == [cfg_path.resolve()]
     assert (out_iso / "scratch_skills" / "skills" / "good-skill" / "SKILL.md").is_file()
     assert not (out_iso / "scratch_skills" / "skills" / "good-skill" / "secret_link.txt").exists()
     assert not (out_iso / "scratch_skills" / "skills" / "evil-link").exists()
@@ -918,3 +925,383 @@ async def test_backtest_isolation_symlinks_config_copy_roster_label_and_cutoff_l
     report = (out_iso / "report.md").read_text(encoding="utf-8")
     assert "**Dataset:** `cohort-alpha`" in report
     assert "secret_agent_name" not in report
+
+
+def test_workspace_split_include_config_read_only_and_existing_out_dir_perms(tmp_path: Path) -> None:
+    """Split `!include` configs load in memory without mutating source, and existing out_dir keeps its permissions."""
+    cfg_dir = tmp_path / "split_cfg"
+    cfg_dir.mkdir()
+    models_yaml = cfg_dir / "models.yaml"
+    agents_yaml = cfg_dir / "agents.yaml"
+    cfg_path = cfg_dir / "config.yaml"
+    models_yaml.write_text(
+        "audit_m:\n  provider: openai\n  id: gpt-audit\njudge_m:\n  provider: anthropic\n  id: claude-judge\n",
+        encoding="utf-8",
+    )
+    agents_yaml.write_text(
+        "harry:\n  display_name: Harry\n  model: audit_m\n  rooms: []\n",
+        encoding="utf-8",
+    )
+    cfg_text = (
+        "models: !include models.yaml\n"
+        "agents: !include agents.yaml\n"
+        "debug:\n"
+        "  log_llm_requests: true\n"
+        "  llm_request_log_dir: /tmp/must-stay-disabled\n"
+        "router:\n"
+        "  model: audit_m\n"
+    )
+    cfg_path.write_text(cfg_text, encoding="utf-8")
+
+    # Lock config directory read-only to prove zero writes to source or config_path.parent.
+    for file_path in (models_yaml, agents_yaml, cfg_path):
+        file_path.chmod(0o444)
+    cfg_dir.chmod(0o555)
+
+    existing_out = tmp_path / "existing_out"
+    existing_out.mkdir()
+    existing_out.chmod(0o755)
+    try:
+        config, runtime_paths = prepare_isolated_runtime(out_dir=existing_out, config_path=cfg_path)
+    finally:
+        cfg_dir.chmod(0o755)
+        for file_path in (models_yaml, agents_yaml, cfg_path):
+            file_path.chmod(0o644)
+
+    assert "harry" in config.agents
+    assert set(config.models) == {"audit_m", "judge_m"}
+    assert config.debug.log_llm_requests is False
+    assert config.debug.llm_request_log_dir is None
+    assert runtime_paths.storage_root == (existing_out / "_runtime").resolve()
+    assert (existing_out.stat().st_mode & 0o777) == 0o755
+    assert ((existing_out / "_runtime").stat().st_mode & 0o777) == 0o700
+    assert ((existing_out / "scratch_skills").stat().st_mode & 0o777) == 0o700
+    assert cfg_path.read_text(encoding="utf-8") == cfg_text
+
+    # A legacy config needing access migration also loads in memory without mutating the source file.
+    legacy_dir = tmp_path / "legacy_cfg"
+    legacy_dir.mkdir()
+    legacy_cfg = legacy_dir / "config.yaml"
+    legacy_text = (
+        "models:\n"
+        "  audit_m:\n"
+        "    provider: openai\n"
+        "    id: gpt-audit\n"
+        "router:\n"
+        "  model: audit_m\n"
+        "agents:\n"
+        "  harry:\n"
+        "    display_name: Harry\n"
+        "    model: audit_m\n"
+        "    rooms: []\n"
+        "authorization:\n"
+        "  global_users: []\n"
+    )
+    legacy_cfg.write_text(legacy_text, encoding="utf-8")
+    legacy_cfg.chmod(0o444)
+    legacy_dir.chmod(0o555)
+    try:
+        legacy_loaded, _ = prepare_isolated_runtime(out_dir=tmp_path / "legacy_out", config_path=legacy_cfg)
+    finally:
+        legacy_dir.chmod(0o755)
+        legacy_cfg.chmod(0o644)
+    assert "harry" in legacy_loaded.agents
+    assert legacy_cfg.read_text(encoding="utf-8") == legacy_text
+
+
+@pytest.mark.asyncio
+async def test_backtest_rejects_same_resolved_model_aliases_and_levels(tmp_path: Path) -> None:
+    """Distinct model keys or @level suffixes resolving to the same (provider, id) are rejected unless allowed."""
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        "models:\n"
+        "  alias_a:\n"
+        "    provider: openai\n"
+        "    id: gpt-4o\n"
+        "  alias_b:\n"
+        "    provider: openai\n"
+        "    id: gpt-4o\n"
+        "  sonnet:\n"
+        "    provider: anthropic\n"
+        "    id: claude-sonnet-4-5\n"
+        "router:\n"
+        "  model: alias_a\n"
+        "agents:\n"
+        "  harry:\n"
+        "    display_name: Harry\n"
+        "    model: alias_a\n"
+        "    rooms: []\n",
+        encoding="utf-8",
+    )
+    db_path = tmp_path / "harry.db"
+    _seed_v8_db(db_path, "harry", sessions=[], runs=[])
+
+    for audit_m, judge_m in (
+        ("alias_a", "alias_b"),
+        ("alias_a@low", "alias_b@high"),
+        ("sonnet@low", "sonnet@high"),
+    ):
+        with pytest.raises(ValueError, match=r"same model|must differ"):
+            await run_backtest(
+                BacktestOptions(
+                    db_path=db_path,
+                    config_path=cfg_path,
+                    agent_name="harry",
+                    out_dir=tmp_path / f"out_{audit_m}_{judge_m}",
+                    audit_model=audit_m,
+                    judge_model=judge_m,
+                    allow_same_model=False,
+                    dry_run=False,
+                ),
+            )
+
+    # Passing allow_same_model=True permits aliases pointing to the same underlying model.
+    allowed_out = tmp_path / "out_allowed"
+    art = await run_backtest(
+        BacktestOptions(
+            db_path=db_path,
+            config_path=cfg_path,
+            agent_name="harry",
+            out_dir=allowed_out,
+            audit_model="alias_a",
+            judge_model="alias_b",
+            allow_same_model=True,
+            dry_run=False,
+        ),
+        audit_judge_factory=lambda _sink: AsyncMock(),
+        blinded_complete_fn=AsyncMock(),
+    )
+    assert art["mode"] == "full"
+
+
+@pytest.mark.asyncio
+async def test_blinded_judge_centers_updated_long_skill_around_appended_hunk(tmp_path: Path) -> None:
+    """Updated long skills (>4,000 chars) pass hunk-centered excerpts so appended rules reach the blinded judge."""
+    frontmatter = "---\nname: long-skill\ndescription: Long workflow guide\n---\n"
+    filler = "".join(f"Step {i:03d}: " + ("general background guidance " * 3) + "\n" for i in range(80))
+    appended_rule = "Step 999: Always verify command flags with uv run pytest --tb=short.\n"
+    original = frontmatter + filler
+    proposed = original + appended_rule
+    assert len(original) > 5_000
+
+    finding = FindingRecord(
+        cluster_key="tool|scope|run_shell_command|pytest|nonzero_exit|validate_input",
+        scope_key="scope",
+        session_id=f"{ROOM_A}:$h1",
+        run_id="h_long",
+        created_at=NOW,
+        verdict="actionable",
+        teachable=True,
+        category="tool_misuse",
+        remedy="validate_input",
+        tool_name="run_shell_command",
+        operation="pytest",
+        kind="nonzero_exit",
+        diagnostic_family="exit_1",
+        root_cause="Ran bare pytest instead of uv run pytest.",
+        proposed_rule="Use uv run pytest --tb=short.",
+    )
+    diffs = [
+        {
+            "skill_name": "long-skill",
+            "action": "updated",
+            "cluster_key": finding.cluster_key,
+            "tool_name": "run_shell_command",
+            "operation": "pytest",
+            "category": "tool_misuse",
+            "remedy": "validate_input",
+        },
+    ]
+    cases = build_judge_cases(
+        [finding],
+        {},
+        diffs=diffs,
+        initial_skills={"long-skill": original},
+        frozen_skills={"long-skill": proposed},
+        seed=23,
+    )
+    assert len(cases) == 1
+    case = cases[0]
+    assert len(case.proposed_patch) <= 4_000
+    assert len(case.original_or_noop) <= 4_000
+    assert case.proposed_patch != case.original_or_noop
+    assert "uv run pytest --tb=short" in case.proposed_patch
+    assert "uv run pytest --tb=short" not in case.original_or_noop
+    assert "name: long-skill" in case.proposed_patch
+    assert "name: long-skill" in case.original_or_noop
+    assert "@@" not in case.proposed_patch
+
+    prompts_seen: list[str] = []
+
+    async def fake_complete(prompt: str, _inst: Sequence[str]) -> HelperResult[BlindedJudgeResponse]:
+        prompts_seen.append(prompt)
+        return _score_by_markers(
+            prompt,
+            direct="uv run pytest --tb=short",
+            partial="Long workflow guide",
+            inp=1_000,
+            out=100,
+        )
+
+    cfg_path = _write_config(tmp_path / "config.yaml")
+    runtime_paths = resolve_runtime_paths(config_path=cfg_path, storage_path=tmp_path)
+    config = load_config(runtime_paths)
+    summary = await evaluate_blinded_cases(
+        cases,
+        config=config,
+        runtime_paths=runtime_paths,
+        judge_model="judge_m",
+        cache_path=tmp_path / "judge_cache.json",
+        seed=23,
+        prices=model_prices(config),
+        complete_fn=fake_complete,
+    )
+    assert len(prompts_seen) == 1
+    assert "uv run pytest --tb=short" in prompts_seen[0]
+    assert summary["direct_hit_rate"] == pytest.approx(1.0)
+    assert summary["baseline_direct_hit_rate"] == pytest.approx(0.0)
+
+    # Single-line >4,000-char append fallback also surfaces the appended text within <=4,000 chars.
+    single_orig = "A" * 5_000
+    single_prop = single_orig + " UNIQUE_APPENDED_RULE"
+    orig_ex, prop_ex = centered_skill_update_excerpts(single_orig, single_prop, limit=4_000)
+    assert len(orig_ex) <= 4_000
+    assert len(prop_ex) <= 4_000
+    assert "UNIQUE_APPENDED_RULE" in prop_ex
+    assert "UNIQUE_APPENDED_RULE" not in orig_ex
+
+
+@pytest.mark.asyncio
+async def test_backtest_excludes_contact_room_sessions(tmp_path: Path) -> None:
+    """Backtest wires contact_session_check into window loading, train audit, and holdout audit."""
+    cfg_dir = tmp_path / "deploy"
+    tracking = cfg_dir / "mindroom_data" / "tracking"
+    tracking.mkdir(parents=True)
+    cfg_path = cfg_dir / "config.yaml"
+    cfg_path.write_text(
+        "models:\n"
+        "  audit_m:\n"
+        "    provider: openai\n"
+        "    id: gpt-audit\n"
+        "  judge_m:\n"
+        "    provider: anthropic\n"
+        "    id: claude-judge\n"
+        "router:\n"
+        "  model: audit_m\n"
+        "personal_agents:\n"
+        "  mind:\n"
+        "    agent:\n"
+        "      display_name: '{user_display_name} Mind'\n"
+        "      model: audit_m\n"
+        "      rooms: []\n",
+        encoding="utf-8",
+    )
+    roster_entry = PersonalAgentRosterEntry(
+        template="mind",
+        user_id="@alice:example.com",
+        username="alice",
+        agent_name="mind_alice",
+        matrix_username=None,
+        user_display_name="Alice",
+        source_room_id=ROOM_A,
+    )
+    (tracking / "personal_agents.json").write_text(
+        json.dumps({"entries": [roster_entry.model_dump(mode="json")], "created": []}),
+        encoding="utf-8",
+    )
+    contact_room = "!contact_room:example.com"
+    book = ContactBook(
+        contacts=[
+            ContactRecord(
+                id="c1",
+                status="active",
+                requester=ContactParty(kind="agent", id="mind_alice", owner="@alice:example.com"),
+                target=ContactParty(kind="person", id="@bob:example.com", owner="@bob:example.com"),
+                reason="Collab",
+                requester_side=ContactSide(),
+                target_side=ContactSide(),
+                origin_room_id=ROOM_A,
+                origin_thread_id="$origin",
+                room_id=contact_room,
+            ),
+        ],
+    )
+    (tracking / "contacts.json").write_text(book.model_dump_json(), encoding="utf-8")
+
+    db_path = tmp_path / "mind_alice.db"
+    s_own_train = f"{ROOM_A}:$own_t1"
+    s_own_hold = f"{ROOM_A}:$own_h1"
+    s_contact_train = f"{contact_room}:$ct_t1"
+    s_contact_hold = f"{contact_room}:$ct_h1"
+    _seed_v8_db(
+        db_path,
+        "mind_alice",
+        sessions=[
+            (s_own_train, NOW - 25 * DAY, NOW - 25 * DAY),
+            (s_contact_train, NOW - 24 * DAY, NOW - 24 * DAY),
+            (s_own_hold, NOW - 2 * DAY, NOW),
+            (s_contact_hold, NOW - 1 * DAY, NOW),
+        ],
+        runs=[
+            {"run_id": "own_t1", "session_id": s_own_train, "seq": 1, "created_at": NOW - 25 * DAY},
+            {"run_id": "ct_t1", "session_id": s_contact_train, "seq": 1, "created_at": NOW - 24 * DAY},
+            {"run_id": "own_h1", "session_id": s_own_hold, "seq": 1, "created_at": NOW - 2 * DAY},
+            {"run_id": "ct_h1", "session_id": s_contact_hold, "seq": 1, "created_at": NOW - 1 * DAY},
+        ],
+        tools=[
+            (rid, i, _fail_tool("pytest a.py", f"{rid}_{i}"))
+            for rid in ("own_t1", "ct_t1", "own_h1", "ct_h1")
+            for i in (0, 1)
+        ],
+        usage_rows=[
+            (s_own_train, "sl_own", _usage_row("OpenAI", "gpt-audit", 1_000, 100)),
+            (s_contact_train, "sl_contact", _usage_row("OpenAI", "gpt-audit", 9_000, 900)),
+        ],
+    )
+
+    audited_sessions: list[str] = []
+
+    def audit_factory(_sink: Callable[[HelperUsage], object]) -> AuditJudgeFn:
+        async def _audit(card: EvidenceCard) -> AuditFinding:
+            audited_sessions.append(card.session_id)
+            return AuditFinding(
+                verdict="actionable",
+                teachable=True,
+                category="tool_misuse",
+                remedy="validate_input",
+                root_cause="Bad args.",
+                proposed_rule="Check args.",
+            )
+
+        return _audit
+
+    art = await run_backtest(
+        BacktestOptions(
+            db_path=db_path,
+            config_path=cfg_path,
+            agent_name="mind_alice",
+            out_dir=tmp_path / "contact_out",
+            audit_model="audit_m",
+            judge_model="judge_m",
+            min_cluster_sessions=1,
+            dry_run=False,
+        ),
+        audit_judge_factory=audit_factory,
+        learner_fn=AsyncMock(
+            return_value=ReviewOutcome(
+                changed_skills={},
+                model_name="audit_m",
+                provider="openai",
+                model_id="gpt-audit",
+                input_tokens=0,
+                output_tokens=0,
+                model_requests=0,
+                tool_calls=0,
+            ),
+        ),
+        blinded_complete_fn=AsyncMock(),
+    )
+    assert art["stage1"]["total_sessions"] == 2
+    assert art["baseline_a"]["review_count"] == 1
+    assert set(audited_sessions) == {s_own_train, s_own_hold}
+    assert all(contact_room not in sid for sid in audited_sessions)

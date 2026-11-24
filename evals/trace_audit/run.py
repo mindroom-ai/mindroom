@@ -30,7 +30,10 @@ from evals.trace_audit.workspace import (
     read_skills_snapshot,
 )
 from mindroom.budgets.pricing import model_prices
-from mindroom.skill_learning.reviewer import ReviewOutcome, review_audit_cluster
+from mindroom.config.models import split_model_reference
+from mindroom.contacts.turns import contact_session_check
+from mindroom.providers.identity import model_identity
+from mindroom.skill_learning.audit_reviewer import ReviewOutcome, review_audit_cluster
 from mindroom.skill_learning.tools import ReviewProgress
 from mindroom.trace_audit.auditor import make_llm_audit_judge
 from mindroom.trace_audit.models import (
@@ -94,18 +97,13 @@ class BacktestOptions:
 
     def config_summary(self) -> dict[str, Any]:
         """Return JSON-serializable summary metadata for ``artifacts.json``."""
-        raw = asdict(self)
-        excluded = {
-            "db_path",
-            "config_path",
-            "agent_name",
-            "out_dir",
+        excluded = {"db_path", "config_path", "agent_name", "out_dir"} | {
             "skills_dir",
             "roster_path",
             "allow_same_model",
             "dry_run",
         }
-        return {"agent": self.agent_name, **{k: v for k, v in raw.items() if k not in excluded}}
+        return {"agent": self.agent_name, **{k: v for k, v in asdict(self).items() if k not in excluded}}
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +144,7 @@ async def _run_train_phase(
     train_judge: AuditJudgeFn,
     learner_fn: LearnerFn,
     learner_cost: CostAccumulator,
+    contact_check: Callable[[str], bool],
 ) -> _TrainResult:
     scratch = options.out_dir / "scratch_skills" / "skills"
     initial_skills = prepare_scratch_skills(options.skills_dir, scratch)
@@ -202,6 +201,7 @@ async def _run_train_phase(
             judge_fn=train_judge,
             now=tick_now,
             allowed_room_id=options.room_id,
+            contact_session_check=contact_check,
             settings=_audit_settings(
                 options,
                 max_audits=rem,
@@ -231,6 +231,7 @@ async def _run_holdout_split(
     holdout_now: float,
     budget: int,
     judge_fn: AuditJudgeFn,
+    contact_check: Callable[[str], bool],
 ) -> tuple[FindingRecord, ...]:
     if not target_sids or budget <= 0:
         return ()
@@ -245,6 +246,7 @@ async def _run_holdout_split(
         now=holdout_now,
         allowed_room_id=options.room_id,
         excluded_sessions=all_sids - target_sids,
+        contact_session_check=contact_check,
         settings=_audit_settings(options, max_audits=budget, clean_cap=min(2, budget)),
         nominate_fn=None,
         since_ts=math.nextafter(split.cutoff, math.inf),
@@ -270,9 +272,24 @@ def _validate_options(options: BacktestOptions, *, has_audit_factory: bool, has_
         not options.allow_same_model
         and options.audit_model
         and options.judge_model
-        and options.audit_model == options.judge_model
+        and split_model_reference(options.audit_model)[0] == split_model_reference(options.judge_model)[0]
     ):
         msg = "--audit-model and --judge-model must differ unless --allow-same-model is passed."
+        raise ValueError(msg)
+
+
+def _validate_resolved_models(options: BacktestOptions, config: Config) -> None:
+    if options.dry_run or options.allow_same_model or not options.audit_model or not options.judge_model:
+        return
+    audit_base, _ = split_model_reference(options.audit_model)
+    judge_base, _ = split_model_reference(options.judge_model)
+    audit_cfg, judge_cfg = config.models.get(audit_base), config.models.get(judge_base)
+    if audit_cfg is not None and judge_cfg is not None and model_identity(audit_cfg) == model_identity(judge_cfg):
+        ident = model_identity(audit_cfg)
+        msg = (
+            f"--audit-model ({options.audit_model}) and --judge-model ({options.judge_model}) "
+            f"resolve to the same model ({ident.provider}/{ident.id}); pass --allow-same-model to override."
+        )
         raise ValueError(msg)
 
 
@@ -294,7 +311,9 @@ async def run_backtest(
         config_path=options.config_path,
         roster_path=options.roster_path,
     )
+    _validate_resolved_models(options, config)
     prices = model_prices(config)
+    contact_check = contact_session_check(config, runtime_paths, options.agent_name)
 
     base = evaluate_window_baselines(
         db_path=options.db_path,
@@ -305,6 +324,7 @@ async def run_backtest(
         review_interval=options.review_interval,
         min_idle_seconds=_MIN_IDLE_SECONDS,
         allowed_room_id=options.room_id,
+        contact_session_check=contact_check,
     )
     window_sessions, split, stage1_now, base_a = base.sessions, base.split, base.stage1_now, base.baseline_a
     artifacts = build_base_artifacts(
@@ -338,6 +358,7 @@ async def run_backtest(
             train_judge=_make_judge(train_cost),
             learner_fn=learner_fn or review_audit_cluster,
             learner_cost=learner_cost,
+            contact_check=contact_check,
         )
         holdout_cards: dict[str, EvidenceCard] = {}
         raw_holdout = _make_judge(holdout_cost)
@@ -356,6 +377,7 @@ async def run_backtest(
             holdout_now=stage1_now,
             budget=options.max_audits_holdout,
             judge_fn=_holdout_judge,
+            contact_check=contact_check,
         )
         continuing = await _run_holdout_split(
             options,
@@ -366,6 +388,7 @@ async def run_backtest(
             holdout_now=stage1_now,
             budget=max(0, options.max_audits_holdout - len(unseen)),
             judge_fn=_holdout_judge,
+            contact_check=contact_check,
         )
         judge_summary = await evaluate_blinded_cases(
             build_judge_cases(
@@ -454,7 +477,11 @@ async def run_cli(argv: Sequence[str]) -> dict[str, Any]:
         parser.error("intervals/cluster thresholds must be >= 1 and audit budgets >= 0")
     if not a.dry_run and (not a.audit_model or not a.judge_model):
         parser.error("full mode requires both --audit-model and --judge-model (or pass --dry-run)")
-    if not a.dry_run and a.audit_model == a.judge_model and not a.allow_same_model:
+    if (
+        not a.dry_run
+        and split_model_reference(a.audit_model)[0] == split_model_reference(a.judge_model)[0]
+        and not a.allow_same_model
+    ):
         parser.error("--audit-model and --judge-model must differ unless --allow-same-model is passed")
     return await run_backtest(BacktestOptions(**vars(a)))
 

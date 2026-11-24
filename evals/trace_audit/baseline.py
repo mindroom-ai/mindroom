@@ -23,12 +23,12 @@ from mindroom.usage.legacy_usage_storage import current_provider_name
 from mindroom.usage.storage import stored_token_counts
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from collections.abc import Set as AbstractSet
     from pathlib import Path
 
     from mindroom.llm.usage import HelperUsage
-    from mindroom.skill_learning.reviewer import ReviewOutcome
+    from mindroom.skill_learning.audit_reviewer import ReviewOutcome
     from mindroom.trace_audit.models import AuditedSession
 
 _CHUNK_SIZE = 500
@@ -218,9 +218,12 @@ def compute_baseline_a(
     since_ts: float | None = None,
     until_ts: float | None = None,
     allowed_room_id: str | None = None,
+    contact_session_check: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
     """Compute observed Baseline A metrics from ``kind='skill_learning'`` usage rows."""
     rows = load_usage_rows(db_path, storage_name, kind="skill_learning", since_ts=since_ts, until_ts=until_ts)
+    if contact_session_check is not None:
+        rows = [r for r in rows if not contact_session_check(str(r["session_id"]))]
     if allowed_room_id is not None:
         known = {s.session_id for s in sessions}
         rows = [r for r in rows if r["session_id"] in known or session_in_room(str(r["session_id"]), allowed_room_id)]
@@ -410,6 +413,7 @@ def evaluate_window_baselines(
     review_interval: int,
     min_idle_seconds: int = 600,
     allowed_room_id: str | None = None,
+    contact_session_check: Callable[[str], bool] | None = None,
 ) -> WindowBaselines:
     """Load the evaluation window strictly read-only and compute chronological split, Stage 1, and Baselines A & B."""
     snapshot_now = latest_run_timestamp(db_path, agent_name)
@@ -421,6 +425,7 @@ def evaluate_window_baselines(
             since_ts=window_start,
             until_ts=snapshot_now,
             allowed_room_id=allowed_room_id,
+            contact_session_check=contact_session_check,
         )
         if snapshot_now > 0
         else []
@@ -438,6 +443,7 @@ def evaluate_window_baselines(
         since_ts=split.window_start if split.snapshot_now > 0 else None,
         until_ts=split.snapshot_now if split.snapshot_now > 0 else None,
         allowed_room_id=allowed_room_id,
+        contact_session_check=contact_session_check,
     )
     base_b = compute_baseline_b(
         db_path,

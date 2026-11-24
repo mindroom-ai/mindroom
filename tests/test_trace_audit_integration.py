@@ -39,7 +39,7 @@ from mindroom.response_runner import ResponseRunner
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.session_storage.agent_storage import agent_session_database_path, create_session_storage
 from mindroom.session_storage.types import ConversationSession
-from mindroom.skill_learning.reviewer import (
+from mindroom.skill_learning.audit_reviewer import (
     AUDIT_REVIEW_MAX_INPUT_TOKENS,
     AUDIT_REVIEW_MAX_TOOL_CALLS,
     review_audit_cluster,
@@ -436,8 +436,11 @@ async def test_runner_executes_builtin_run_under_lock_and_rejects_plugin_run(tmp
 
 
 @pytest.mark.asyncio
-async def test_runner_builtin_run_quiet_and_failure_releases_lock(tmp_path: Path) -> None:
-    """Empty Done.notice stays quiet; failing built-in Run releases the instance lock and posts a failure notice."""
+async def test_runner_builtin_run_quiet_sanitized_failure_and_timeout_release_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Empty notice stays quiet; passive failure/timeout release the lock and post sanitized notices only."""
     config, paths = _config_and_paths(tmp_path, automations=[TraceAuditAutomation(cron="* * * * *")])
     bot = _Bot()
 
@@ -445,8 +448,12 @@ async def test_runner_builtin_run_quiet_and_failure_releases_lock(tmp_path: Path
         return Done(notice="")
 
     async def _boom() -> Done | None:
-        msg = "audit boom"
+        msg = "provider body secret_token_xyz audit boom"
         raise RuntimeError(msg)
+
+    async def _hang() -> Done | None:
+        await asyncio.Event().wait()
+        return None
 
     current = AutomationDefinition("trace_audit", lambda _c: Run(execute=_quiet), requires_file_memory=False)
     runner = AutomationRunner(
@@ -463,10 +470,21 @@ async def test_runner_builtin_run_quiet_and_failure_releases_lock(tmp_path: Path
     assert ("mind", None) not in runner._active
 
     current = AutomationDefinition("trace_audit", lambda _c: Run(execute=_boom), requires_file_memory=False)
-    await _tick(runner, t0 + timedelta(minutes=2))
+    with structlog.testing.capture_logs() as logs:
+        await _tick(runner, t0 + timedelta(minutes=2))
     assert ("mind", None) not in runner._active
     assert len(bot.sent) == 1
-    assert "audit boom" in bot.sent[0]["body"]
+    assert bot.sent[0]["body"] == "⚠️ The trace_audit automation could not run (RuntimeError); see backend logs."
+    assert "secret_token_xyz" not in bot.sent[0]["body"]
+    assert "audit boom" not in bot.sent[0]["body"]
+    assert any("secret_token_xyz" in str(entry.get("error", "")) for entry in logs)
+
+    monkeypatch.setattr("mindroom.automations.runner._PASSIVE_RUN_TIMEOUT_SECONDS", 0.05)
+    current = AutomationDefinition("trace_audit", lambda _c: Run(execute=_hang), requires_file_memory=False)
+    await _tick(runner, t0 + timedelta(minutes=3))
+    assert ("mind", None) not in runner._active
+    assert len(bot.sent) == 2
+    assert bot.sent[1]["body"] == "⚠️ The trace_audit automation could not run (TimeoutError); see backend logs."
 
 
 def test_trace_audit_missing_db_and_model_resolution_precedence(tmp_path: Path) -> None:

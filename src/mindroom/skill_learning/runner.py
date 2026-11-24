@@ -29,8 +29,9 @@ from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.runtime_resolution import resolve_agent_execution, resolve_agent_runtime
 from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.skill_learning.audit_reviewer import review_audit_cluster
 from mindroom.skill_learning.library import archive_unused_skills
-from mindroom.skill_learning.reviewer import review_audit_cluster, review_conversation
+from mindroom.skill_learning.reviewer import review_conversation
 from mindroom.skill_learning.tools import ReviewFile, ReviewProgress, library_turn
 from mindroom.skill_learning.transcript import count_model_replies
 from mindroom.tool_system.skills import agent_workspace_skills_root
@@ -43,8 +44,8 @@ if TYPE_CHECKING:
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.skill_learning.audit_reviewer import ReviewOutcome
     from mindroom.skill_learning.capture import CapturedRequest
-    from mindroom.skill_learning.reviewer import ReviewOutcome
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.trace_audit.models import FailureCluster
 

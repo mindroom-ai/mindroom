@@ -210,11 +210,14 @@ async def complete_tool_free_structured[T: BaseModel](
 async def audit_evidence_card(card: EvidenceCard, *, judge_fn: AuditJudgeFn) -> AuditFinding:
     """Evaluate one bounded EvidenceCard through ``judge_fn`` and redact finding prose."""
     finding = await judge_fn(card)
+    target_skill = sanitize_target_skill(finding.target_skill)
+    if target_skill not in card.loaded_skills:
+        target_skill = None
     return finding.model_copy(
         update={
             "root_cause": _redact_clip(finding.root_cause, MAX_ROOT_CAUSE_CHARS),
             "proposed_rule": _redact_clip(finding.proposed_rule, MAX_PROPOSED_RULE_CHARS),
-            "target_skill": sanitize_target_skill(finding.target_skill),
+            "target_skill": target_skill,
         },
     )
 

@@ -65,6 +65,7 @@ logger = get_logger(__name__)
 
 _RUN_FALLBACK = timedelta(hours=1)
 _MAX_SLEEP_SECONDS = 60.0
+_PASSIVE_RUN_TIMEOUT_SECONDS = 600.0
 # Every thread an automation starts carries this tag, so its runs can be found and filtered.
 _AUTOMATION_THREAD_TAG = "automation"
 
@@ -448,7 +449,7 @@ class AutomationRunner:
     async def _run_passive(self, bot: AgentBot, chain: _Chain, step: Run) -> None:
         """Await a built-in automation's passive ``Run`` step on the main loop and post any non-empty notice."""
         try:
-            done = await step.execute()
+            done = await asyncio.wait_for(step.execute(), timeout=_PASSIVE_RUN_TIMEOUT_SECONDS)
         except Exception as exc:
             logger.warning(
                 "Automation run failed",
@@ -457,7 +458,12 @@ class AutomationRunner:
                 requester=chain.requester_id,
                 error=str(exc),
             )
-            await self._notify(bot, chain, None, f"⚠️ The {chain.settings.name} automation could not run: {exc}")
+            await self._notify(
+                bot,
+                chain,
+                None,
+                f"⚠️ The {chain.settings.name} automation could not run ({type(exc).__name__}); see backend logs.",
+            )
             return
         if isinstance(done, Done):
             if done.on_loop is not None:

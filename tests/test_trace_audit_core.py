@@ -1093,3 +1093,291 @@ async def test_pipeline_default_window_room_switch_no_starvation_and_latest_sess
     assert p3.actionable_clusters == ()
     assert p3.promoted_clusters == ()
     assert nominated == []
+
+
+@pytest.mark.asyncio
+async def test_shell_operation_allowlist_strips_private_executables(tmp_path: Path) -> None:
+    """Allowlisted POSIX/dev binaries emit operations while private/custom script names map to empty string."""
+    for cmd, expected_op in (
+        ("pytest tests/", "pytest"),
+        ("uv run pytest", "uv"),
+        ("git -C /repo push origin main", "git:push"),
+        ("[ -f missing ]", "["),
+        ("[[ -d missing ]]", "[["),
+        ("docker compose up", "docker"),
+        ("sqlite3 db.sqlite .tables", "sqlite3"),
+        ("./client-orchid-release --prod", ""),
+        ("/opt/internal/acme-deploy-script --force", ""),
+        ("FOO=1 ./private-helper-bin arg", ""),
+        ("my_custom_cli do-thing", ""),
+    ):
+        out = classify_tool_execution(_tool(args={"command": cmd}, result="Exit code 1\nStderr:\nfailed"))
+        assert (out.kind, out.is_failure, out.operation) == ("nonzero_exit", True, expected_op), cmd
+
+    db_path = tmp_path / "private_bin.db"
+    _seed_v8_db(
+        db_path,
+        "agent",
+        sessions=[
+            {"session_id": "!roomA:example.com:$p1", "created_at": NOW - 3000, "updated_at": NOW - 3000},
+            {"session_id": "!roomA:example.com:$p2", "created_at": NOW - 2000, "updated_at": NOW - 2000},
+        ],
+        runs=[
+            {"run_id": "r_p1", "session_id": "!roomA:example.com:$p1", "seq": 1, "created_at": NOW - 3000},
+            {"run_id": "r_p2", "session_id": "!roomA:example.com:$p2", "seq": 1, "created_at": NOW - 2000},
+        ],
+        tools=[
+            (
+                "r_p1",
+                0,
+                {
+                    "tool_call_id": "t1",
+                    "tool_name": "run_shell_command",
+                    "tool_args": {"command": "./client-orchid-release --prod"},
+                    "result": "Exit code 1\nStderr:\nboom",
+                },
+            ),
+            (
+                "r_p1",
+                1,
+                {
+                    "tool_call_id": "t2",
+                    "tool_name": "run_shell_command",
+                    "tool_args": {"command": "./client-orchid-release --prod"},
+                    "result": "Exit code 1\nStderr:\nboom",
+                },
+            ),
+            (
+                "r_p2",
+                0,
+                {
+                    "tool_call_id": "t3",
+                    "tool_name": "run_shell_command",
+                    "tool_args": {"command": "./client-orchid-release --staging"},
+                    "result": "Exit code 1\nStderr:\nboom",
+                },
+            ),
+            (
+                "r_p2",
+                1,
+                {
+                    "tool_call_id": "t4",
+                    "tool_name": "run_shell_command",
+                    "tool_args": {"command": "./client-orchid-release --staging"},
+                    "result": "Exit code 1\nStderr:\nboom",
+                },
+            ),
+        ],
+    )
+    state_path = tmp_path / "state.json"
+
+    async def judge(_card: EvidenceCard) -> AuditFinding:
+        return AuditFinding(
+            verdict="actionable",
+            teachable=True,
+            category="tool_misuse",
+            remedy="validate_input",
+            root_cause="Invoked release script with wrong flag.",
+            proposed_rule="Check required flags before running release commands.",
+        )
+
+    res = await run_audit_pass(
+        db_path=db_path,
+        storage_name="agent",
+        state_path=state_path,
+        scope_key="agent:agent",
+        judge_fn=judge,
+        now=NOW,
+        settings=TraceAuditSettings(min_cluster_sessions=2, sample_rate=0.0),
+    )
+    assert len(res.actionable_clusters) == 1
+    assert res.actionable_clusters[0].operation == ""
+    assert "client-orchid-release" not in res.actionable_clusters[0].cluster_key
+    assert "client-orchid-release" not in state_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_audit_evidence_card_drops_unloaded_target_skill_before_clustering(tmp_path: Path) -> None:
+    """Invented target_skill values not in card.loaded_skills are coerced to None before clustering."""
+    run_loaded = _run(
+        "r_loaded",
+        error="Run failed",
+        tools=(_tool("get_skill_instructions", ord_idx=0, args={"skill_name": "python-testing"}, result="ok"),),
+    )
+    sess = _session((run_loaded,))
+    card = build_evidence_card(detect_session_incidents(sess, now=NOW, sample_rate=0.0)[0], sess)
+    assert card.loaded_skills == ("python-testing",)
+
+    async def judge_loaded(_card: EvidenceCard) -> AuditFinding:
+        return AuditFinding(
+            verdict="actionable",
+            teachable=True,
+            category="skill_bug",
+            remedy="fix_skill",
+            root_cause="Skill step outdated.",
+            proposed_rule="Update the loaded skill step.",
+            target_skill="python-testing",
+        )
+
+    async def judge_invented(_card: EvidenceCard) -> AuditFinding:
+        return AuditFinding(
+            verdict="actionable",
+            teachable=True,
+            category="skill_bug",
+            remedy="fix_skill",
+            root_cause="Skill step outdated.",
+            proposed_rule="Update the loaded skill step.",
+            target_skill="invented-slug",
+        )
+
+    assert (await audit_evidence_card(card, judge_fn=judge_loaded)).target_skill == "python-testing"
+    assert (await audit_evidence_card(card, judge_fn=judge_invented)).target_skill is None
+
+    # In the pipeline, two sessions whose judge invents different skill slugs still merge into one cluster.
+    db_path = tmp_path / "skills.db"
+    _seed_v8_db(
+        db_path,
+        "agent",
+        sessions=[
+            {"session_id": "!roomA:example.com:$k1", "created_at": NOW - 3000, "updated_at": NOW - 3000},
+            {"session_id": "!roomA:example.com:$k2", "created_at": NOW - 2000, "updated_at": NOW - 2000},
+        ],
+        runs=[
+            {
+                "run_id": "r_k1",
+                "session_id": "!roomA:example.com:$k1",
+                "seq": 1,
+                "created_at": NOW - 3000,
+                "status": "ERROR",
+                "error": "boom",
+            },
+            {
+                "run_id": "r_k2",
+                "session_id": "!roomA:example.com:$k2",
+                "seq": 1,
+                "created_at": NOW - 2000,
+                "status": "ERROR",
+                "error": "boom",
+            },
+        ],
+    )
+    slugs = iter(("invented-alpha", "invented-beta"))
+
+    async def judge_split(_card: EvidenceCard) -> AuditFinding:
+        return AuditFinding(
+            verdict="actionable",
+            teachable=True,
+            category="verification_gap",
+            remedy="verify_outcome",
+            root_cause="Skipped final check.",
+            proposed_rule="Verify outputs before reporting done.",
+            target_skill=next(slugs),
+        )
+
+    res = await run_audit_pass(
+        db_path=db_path,
+        storage_name="agent",
+        state_path=tmp_path / "state.json",
+        scope_key="agent:agent",
+        judge_fn=judge_split,
+        now=NOW,
+        settings=TraceAuditSettings(min_cluster_sessions=2, sample_rate=0.0),
+    )
+    assert len(res.actionable_clusters) == 1
+    cluster = res.actionable_clusters[0]
+    assert cluster.target_skill is None
+    assert "invented-alpha" not in cluster.cluster_key
+    assert "invented-beta" not in cluster.cluster_key
+
+
+@pytest.mark.asyncio
+async def test_pipeline_per_card_audit_error_defers_only_failed_card(tmp_path: Path) -> None:
+    """One failing audit card preserves sibling findings and defers only its own session cursor for retry."""
+    db_path = tmp_path / "resilient.db"
+    s1, s2, s3 = "!roomA:example.com:$s1", "!roomA:example.com:$s2", "!roomA:example.com:$s3"
+    _seed_v8_db(
+        db_path,
+        "agent",
+        sessions=[
+            {"session_id": s1, "created_at": NOW - 4000, "updated_at": NOW - 4000},
+            {"session_id": s2, "created_at": NOW - 3000, "updated_at": NOW - 3000},
+            {"session_id": s3, "created_at": NOW - 2000, "updated_at": NOW - 2000},
+        ],
+        runs=[
+            {
+                "run_id": "r_ok_1",
+                "session_id": s1,
+                "seq": 1,
+                "created_at": NOW - 4000,
+                "status": "ERROR",
+                "error": "fail",
+            },
+            {"run_id": "r_bad_pre", "session_id": s2, "seq": 1, "created_at": NOW - 3500},
+            {
+                "run_id": "r_bad",
+                "session_id": s2,
+                "seq": 2,
+                "created_at": NOW - 3000,
+                "status": "ERROR",
+                "error": "fail",
+            },
+            {
+                "run_id": "r_ok_2",
+                "session_id": s3,
+                "seq": 1,
+                "created_at": NOW - 2000,
+                "status": "ERROR",
+                "error": "fail",
+            },
+        ],
+    )
+    state_path = tmp_path / "state.json"
+    calls: list[str] = []
+    fail_once = {"r_bad"}
+
+    async def flaky_judge(card: EvidenceCard) -> AuditFinding:
+        calls.append(card.run_id)
+        if card.run_id in fail_once:
+            fail_once.remove(card.run_id)
+            msg = "transient provider 502"
+            raise RuntimeError(msg)
+        return AuditFinding(
+            verdict="actionable",
+            teachable=True,
+            category="verification_gap",
+            remedy="verify_outcome",
+            root_cause="Missing check.",
+            proposed_rule="Check output.",
+        )
+
+    p1 = await run_audit_pass(
+        db_path=db_path,
+        storage_name="agent",
+        state_path=state_path,
+        scope_key="agent:agent",
+        judge_fn=flaky_judge,
+        now=NOW,
+        settings=TraceAuditSettings(min_cluster_sessions=2, sample_rate=0.0, audit_concurrency=3),
+    )
+    assert p1.incidents_audited == 2
+    assert {f.run_id for f in p1.findings} == {"r_ok_1", "r_ok_2"}
+    assert len(p1.actionable_clusters) == 1
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved["session_cursors"][s1] == 1
+    assert saved["session_cursors"][s2] == 1  # Deferred before r_bad (seq 2).
+    assert saved["session_cursors"][s3] == 1
+
+    calls.clear()
+    p2 = await run_audit_pass(
+        db_path=db_path,
+        storage_name="agent",
+        state_path=state_path,
+        scope_key="agent:agent",
+        judge_fn=flaky_judge,
+        now=NOW + 60,
+        settings=TraceAuditSettings(min_cluster_sessions=2, sample_rate=0.0),
+    )
+    assert calls == ["r_bad"]
+    assert p2.incidents_audited == 1
+    saved2 = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved2["session_cursors"][s2] == 2

@@ -196,16 +196,30 @@ async def _audit_selected(
     friction_cap = max(0, cfg.max_audits_per_run - len(selected_clean))
     selected = [*friction[:friction_cap], *selected_clean]
     deferred_min_seq: dict[str, int] = {}
-    for inc, _ in friction[friction_cap:]:
+
+    def _defer(inc: Incident) -> None:
         prev = deferred_min_seq.get(inc.session_id)
         if prev is None or inc.run_seq < prev:
             deferred_min_seq[inc.session_id] = inc.run_seq
 
+    for inc, _ in friction[friction_cap:]:
+        _defer(inc)
+
     sem = asyncio.Semaphore(max(1, cfg.audit_concurrency))
 
-    async def _audit_one(inc: Incident, session: AuditedSession) -> FindingRecord:
-        async with sem:
-            finding = await audit_evidence_card(build_evidence_card(inc, session), judge_fn=judge_fn)
+    async def _audit_one(inc: Incident, session: AuditedSession) -> FindingRecord | None:
+        try:
+            async with sem:
+                finding = await audit_evidence_card(build_evidence_card(inc, session), judge_fn=judge_fn)
+        except Exception as exc:
+            logger.warning(
+                "trace_audit_card_failed",
+                session_id=inc.session_id,
+                run_id=inc.run_id,
+                error=str(exc),
+            )
+            _defer(inc)
+            return None
         sig = (
             max(Counter(f.signature for f in inc.failures).items(), key=lambda kv: kv[1])[0]
             if inc.failures
@@ -233,8 +247,12 @@ async def _audit_selected(
             target_skill=finding.target_skill,
         )
 
-    records = list(await asyncio.gather(*(_audit_one(inc, session) for inc, session in selected)))
-    return records, deferred_min_seq, len(selected_clean)
+    raw_records = await asyncio.gather(*(_audit_one(inc, session) for inc, session in selected))
+    records = [record for record in raw_records if record is not None]
+    clean_audited = sum(
+        1 for (inc, _), record in zip(selected, raw_records, strict=True) if inc.is_clean_sample and record is not None
+    )
+    return records, deferred_min_seq, clean_audited
 
 
 async def _promote_clusters(

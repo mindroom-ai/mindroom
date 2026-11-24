@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import random
@@ -116,6 +117,104 @@ def _match_diff(finding: FindingRecord, diffs: Sequence[dict[str, Any]]) -> dict
     return next((d for pred in ranks for d in diffs if pred(d)), diffs[0])
 
 
+def _frontmatter_end(lines: Sequence[str]) -> int:
+    if not lines or lines[0].strip() != "---":
+        return 0
+    for idx in range(1, len(lines)):
+        if lines[idx].strip() == "---":
+            return idx + 1
+    return 0
+
+
+def _centered_char_window(text: str, diff_lo: int, diff_hi: int, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    if diff_hi - diff_lo >= limit:
+        return text[diff_lo : diff_lo + limit]
+    pad = (limit - (diff_hi - diff_lo)) // 2
+    lo = max(0, diff_lo - pad)
+    hi = min(len(text), lo + limit)
+    lo = max(0, hi - limit)
+    return text[lo:hi]
+
+
+def _expand_line_window(lines: Sequence[str], lo: int, hi: int, *, min_lo: int, budget: int) -> tuple[int, int]:
+    size = sum(len(ln) for ln in lines[lo:hi])
+    while lo > min_lo or hi < len(lines):
+        grew = False
+        if lo > min_lo and size + len(lines[lo - 1]) <= budget:
+            lo -= 1
+            size += len(lines[lo])
+            grew = True
+        if hi < len(lines) and size + len(lines[hi]) <= budget:
+            size += len(lines[hi])
+            hi += 1
+            grew = True
+        if not grew:
+            break
+    return lo, hi
+
+
+def _line_window_excerpt(lines: Sequence[str], lo: int, hi: int, limit: int) -> str:
+    fm_end = _frontmatter_end(lines)
+    header = "".join(lines[:fm_end]) + "...\n" if fm_end and lo >= fm_end else ""
+    core_len = sum(len(ln) for ln in lines[lo:hi])
+    if header and len(header) <= 400 and len(header) + core_len <= limit:
+        win_lo, win_hi = _expand_line_window(lines, lo, hi, min_lo=fm_end, budget=limit - len(header))
+        return "".join(lines[:win_hi]) if win_lo == fm_end else header + "".join(lines[win_lo:win_hi])
+    win_lo, win_hi = _expand_line_window(lines, lo, hi, min_lo=0, budget=limit)
+    return "".join(lines[win_lo:win_hi])
+
+
+def centered_skill_update_excerpts(
+    original: str,
+    proposed: str,
+    *,
+    limit: int = _MAX_TEXT_CHARS,
+) -> tuple[str, str]:
+    """Return bounded ``(original_excerpt, proposed_excerpt)`` centered on the changed hunk without diff markers."""
+    if len(original) <= limit and len(proposed) <= limit:
+        return original, proposed
+    orig_lines = original.splitlines(keepends=True)
+    prop_lines = proposed.splitlines(keepends=True)
+    opcodes = [op for op in difflib.SequenceMatcher(None, orig_lines, prop_lines).get_opcodes() if op[0] != "equal"]
+    if not opcodes:
+        return original[:limit], proposed[:limit]
+    orig_lo, orig_hi = opcodes[0][1], opcodes[-1][2]
+    prop_lo, prop_hi = opcodes[0][3], opcodes[-1][4]
+    if (
+        sum(len(ln) for ln in orig_lines[orig_lo:orig_hi]) > limit
+        or sum(len(ln) for ln in prop_lines[prop_lo:prop_hi]) > limit
+    ):
+        _, orig_lo, orig_hi, prop_lo, prop_hi = max(
+            opcodes,
+            key=lambda op: (
+                sum(len(ln) for ln in prop_lines[op[3] : op[4]]) + sum(len(ln) for ln in orig_lines[op[1] : op[2]])
+            ),
+        )
+    orig_core = "".join(orig_lines[orig_lo:orig_hi])
+    prop_core = "".join(prop_lines[prop_lo:prop_hi])
+    if len(orig_core) > limit or len(prop_core) > limit:
+        prefix = 0
+        min_len = min(len(orig_core), len(prop_core))
+        while prefix < min_len and orig_core[prefix] == prop_core[prefix]:
+            prefix += 1
+        suffix = 0
+        while (
+            suffix < min_len - prefix
+            and orig_core[len(orig_core) - 1 - suffix] == prop_core[len(prop_core) - 1 - suffix]
+        ):
+            suffix += 1
+        return (
+            _centered_char_window(orig_core, prefix, len(orig_core) - suffix, limit),
+            _centered_char_window(prop_core, prefix, len(prop_core) - suffix, limit),
+        )
+    return (
+        _line_window_excerpt(orig_lines, orig_lo, orig_hi, limit),
+        _line_window_excerpt(prop_lines, prop_lo, prop_hi, limit),
+    )
+
+
 def build_judge_cases(
     holdout_findings: Sequence[FindingRecord],
     holdout_cards: Mapping[str, EvidenceCard],
@@ -133,9 +232,16 @@ def build_judge_cases(
     for f in holdout_findings:
         if f.verdict not in _ACTIONABLE or not f.teachable:
             continue
-        skill = _match_diff(f, diffs)["skill_name"]
+        matched = _match_diff(f, diffs)
+        skill = matched["skill_name"]
         if not (proposed := frozen_skills.get(skill)):
             continue
+        original = initial_skills.get(skill)
+        if matched.get("action") == "updated" and original is not None:
+            original_arm, proposed_arm = centered_skill_update_excerpts(original, proposed)
+        else:
+            original_arm = original if original is not None else DEFAULT_NOOP_GUIDANCE
+            proposed_arm = proposed
         excluded = touched | {skill} | ({f.target_skill} if f.target_skill else set())
         pool = [text for name, text in sorted(initial_skills.items()) if name not in excluded]
         digest = hashlib.sha256(f"placebo:{seed}:{f.run_id}".encode()).digest()
@@ -153,8 +259,8 @@ def build_judge_cases(
                 cluster_key=f.cluster_key,
                 matched_skill=skill,
                 failure_text="\n".join(failure_parts),
-                proposed_patch=proposed,
-                original_or_noop=initial_skills.get(skill, DEFAULT_NOOP_GUIDANCE),
+                proposed_patch=proposed_arm,
+                original_or_noop=original_arm,
                 placebo_unrelated_skill=placebo,
             ),
         )

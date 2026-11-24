@@ -61,6 +61,13 @@ _READER_TOOLS = frozenset(
 _BENIGN_EXIT_1_BINS = frozenset(
     {"grep", "rg", "ag", "ack", "diff", "cmp", "test", "[", "[[", "pgrep", "which", "command"},
 )
+_ALLOWED_SHELL_BINS = (
+    _BENIGN_EXIT_1_BINS
+    | {"git", "python", "python3", "pytest", "uv", "npm", "npx", "bun", "cargo", "rustc", "go", "node"}
+    | {"ssh", "scp", "rsync", "gh", "curl", "wget", "ls", "cat", "head", "tail", "sed", "awk", "find"}
+    | {"cp", "mv", "rm", "mkdir", "chmod", "chown", "docker", "nix", "jq", "timeout", "make", "just"}
+    | {"sqlite3", "tar", "systemctl", "sh", "bash", "zsh"}
+)
 _BENIGN_GIT_SUBS = frozenset({"diff", "grep"})
 _GIT_VALUE_FLAGS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"})
 _PREAMBLE_BINS = frozenset({"cd", "set", "export", "unset", "umask"})
@@ -175,7 +182,7 @@ def _extract_operation(tool_name: str, tool_args: dict[str, Any]) -> str:
         binary = seg[0].rsplit("/", 1)[-1] if seg else ""
         if binary == "git":
             return f"git:{sub}" if (sub := _git_subcommand(seg)) else "git"
-        return binary if _IDENT_RE.match(binary) else ""
+        return binary if binary in _ALLOWED_SHELL_BINS else ""
     for key in ("action", "operation", "method"):
         val = tool_args.get(key)
         if isinstance(val, str) and _IDENT_RE.match(val.lower()):

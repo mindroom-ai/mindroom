@@ -1012,6 +1012,7 @@ visibility = [
     "mindroom.matrix_rtc.call_tools",
     "mindroom.memory.auto_flush",
     "mindroom.delegation.execution",
+    "mindroom.skill_learning.audit_reviewer",
     "mindroom.skill_learning.reviewer",
     "mindroom.skill_learning.runner",
     "mindroom.knowledge_graph.clients",
@@ -1047,6 +1048,7 @@ visibility = [
     "mindroom.topic_generator",
     "mindroom.thread_summary",
     "mindroom.voice.handler",
+    "mindroom.skill_learning.audit_reviewer",
     "mindroom.skill_learning.reviewer",
     "mindroom.matrix_rtc.call_tools",
     "mindroom.knowledge_graph.clients",
@@ -10381,6 +10383,7 @@ depends_on = [
     "mindroom.tool_system.plugins",
 ]
 visibility = [
+    "mindroom.skill_learning.audit_reviewer",
     "mindroom.skill_learning.reviewer",
     "mindroom.skill_learning.runner",
 ]
@@ -10402,6 +10405,20 @@ depends_on = [
     "mindroom.tool_system.tool_schema",
     "mindroom.turn_model",
 ]
+visibility = ["mindroom.skill_learning.audit_reviewer", "mindroom.skill_learning.runner"]
+
+[[modules]]
+path = "mindroom.skill_learning.audit_reviewer"
+depends_on = [
+    "mindroom.agent_loop",
+    "mindroom.helper_usage",
+    "mindroom.llm",
+    "mindroom.providers.registry",
+    "mindroom.session_storage.agent_storage",
+    "mindroom.skill_learning.reviewer",
+    "mindroom.skill_learning.tools",
+    "mindroom.turn_model",
+]
 visibility = ["mindroom.skill_learning.runner"]
 
 [[modules]]
@@ -10412,6 +10429,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.matrix.client_delivery",
     "mindroom.runtime_resolution",
+    "mindroom.skill_learning.audit_reviewer",
     "mindroom.skill_learning.library",
     "mindroom.skill_learning.reviewer",
     "mindroom.skill_learning.tools",

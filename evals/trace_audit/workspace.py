@@ -1,19 +1,19 @@
-"""Isolated scratch workspace, config/roster copy, and symlink-safe skills helpers for trace-audit backtests."""
+"""Isolated scratch workspace, config/roster loading, and symlink-safe skills helpers for trace-audit backtests."""
 
 from __future__ import annotations
 
 import shutil
-from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from mindroom.config.main import load_config
+from mindroom.config.legacy_access import migrate_access_config_data
+from mindroom.config.main import Config
+from mindroom.config.yaml_includes import load_yaml_config_source_with_digests
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.skills import SKILL_FILENAME, parse_skill_markdown
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
 
@@ -44,12 +44,15 @@ def prepare_scratch_skills(skills_dir: Path | None, scratch: Path) -> dict[str, 
     """Reset ``scratch`` safely, copy ``skills_dir`` without following symlinks, and return initial skill text."""
     if skills_dir is not None:
         ensure_disjoint_skills_dir(skills_dir, scratch)
+    scratch.parent.mkdir(parents=True, exist_ok=True)
+    scratch.parent.chmod(0o700)
     if scratch.exists():
         shutil.rmtree(scratch)
     if skills_dir is not None and skills_dir.exists():
         copy_dir_no_symlinks(skills_dir, scratch)
     else:
         scratch.mkdir(parents=True, exist_ok=True)
+    scratch.chmod(0o700)
     return read_skills_snapshot(scratch)
 
 
@@ -72,44 +75,54 @@ def read_skills_snapshot(skills_root: Path) -> dict[str, str]:
     return snapshot
 
 
+def _copy_private_tracking_file(src: Path, dst: Path) -> None:
+    if src.is_file() and not src.is_symlink():
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        dst.chmod(0o600)
+
+
 def prepare_isolated_runtime(
     *,
     out_dir: Path,
     config_path: Path,
     roster_path: Path | None = None,
 ) -> tuple[Config, RuntimePaths]:
-    """Create 0700 output/scratch storage, copy config & roster, and disable LLM request logging."""
+    """Create private scratch dirs, load config in memory (supporting ``!include``), and disable request logging."""
+    existed = out_dir.exists()
     out_dir.mkdir(parents=True, exist_ok=True)
-    out_dir.chmod(0o700)
+    if not existed:
+        out_dir.chmod(0o700)
+
     scratch_storage = out_dir / "_runtime"
     scratch_storage.mkdir(parents=True, exist_ok=True)
+    scratch_storage.chmod(0o700)
 
-    scratch_config = scratch_storage / "config.yaml"
-    shutil.copy2(config_path, scratch_config)
-    scratch_config.chmod(0o600)
+    scratch_skills = out_dir / "scratch_skills"
+    scratch_skills.mkdir(parents=True, exist_ok=True)
+    scratch_skills.chmod(0o700)
 
-    roster_src = (
-        roster_path
-        if roster_path is not None
-        else config_path.parent / "mindroom_data" / "tracking" / "personal_agents.json"
-    )
+    default_tracking = config_path.parent / "mindroom_data" / "tracking"
+    roster_src = roster_path if roster_path is not None else default_tracking / "personal_agents.json"
     if roster_path is not None and not roster_src.is_file():
         msg = f"--roster-path not found: {roster_src}"
         raise ValueError(msg)
-    if roster_src.is_file() and not roster_src.is_symlink():
-        roster_dst = scratch_storage / "tracking" / "personal_agents.json"
-        roster_dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(roster_src, roster_dst)
-        roster_dst.chmod(0o600)
+    tracking_dst = scratch_storage / "tracking"
+    _copy_private_tracking_file(roster_src, tracking_dst / "personal_agents.json")
+    for contacts_src in (roster_src.parent / "contacts.json", default_tracking / "contacts.json"):
+        if contacts_src.is_file() and not contacts_src.is_symlink():
+            _copy_private_tracking_file(contacts_src, tracking_dst / "contacts.json")
+            break
 
-    source_paths = resolve_runtime_paths(config_path=config_path, storage_path=scratch_storage)
-    scratch_paths = resolve_runtime_paths(config_path=scratch_config, storage_path=scratch_storage)
-    runtime_paths = replace(
-        scratch_paths,
-        env_path=source_paths.env_path,
-        env_file_values=source_paths.env_file_values,
+    runtime_paths = resolve_runtime_paths(config_path=config_path, storage_path=scratch_storage)
+    data, source_digests, uses_includes = load_yaml_config_source_with_digests(config_path)
+    migrated = migrate_access_config_data(data)
+    loaded = Config.validate_with_runtime(
+        migrated.data,
+        runtime_paths,
+        tolerate_plugin_load_errors=True,
     )
-    loaded = load_config(runtime_paths, tolerate_plugin_load_errors=True)
+    loaded.record_source_metadata(config_path, source_digests, uses_includes=uses_includes)
     isolated = loaded.model_copy(
         update={
             "debug": loaded.debug.model_copy(
